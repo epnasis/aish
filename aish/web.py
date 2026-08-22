@@ -1567,6 +1567,31 @@ ANONYMOUS_READ_FORM = (
 )
 
 
+# A DRIVEN page that is asking for a password. The read path has said this
+# since #236; the driving path said nothing at all, so a portal that had signed
+# him out arrived as an ordinary page and the model went looking for a door.
+# Measured on linkedin.com: it pressed "Sign in", then "Continue with Google",
+# then "Continue as Sage" — signing his LinkedIn into the wrong identity — and
+# he stopped the task. A page cannot be driven until somebody signs in, and the
+# only somebody is him.
+BROWSE_SIGNED_OUT_NOTE = (
+    "[aish: {host} is asking for a password — nobody is signed in here, so "
+    "nothing on this page is the user's account. aish cannot sign in for them: "
+    "there is no sign-in saved for this site, and aish never types a password "
+    "or presses a 'continue with Google/Apple/Facebook' button. Do NOT try "
+    "other buttons on this page. Tell them to run /browser {host}, sign in "
+    "themselves, and ask again — and if they want aish to be able to do it "
+    "next time, to tick 'Remember this' while they type the password.]\n"
+)
+
+BROWSE_SIGNED_OUT_STALE = (
+    "[aish: {host} is asking for a password. The sign-in the user saved was "
+    "not accepted, so aish will not try it again — {why}. Tell them to run "
+    "/browser {host} and sign in themselves; that also replaces the saved "
+    "sign-in. Do NOT try other buttons on this page.]\n"
+)
+
+
 def _renew_session(url: str) -> "browser.SignInResult | None":
     """Sign in again at this URL's origin, or None when nothing is stored.
 
@@ -2117,7 +2142,38 @@ def _browse(
         return f"ERROR: cannot browse {url} — {exc}"
     except Exception as exc:  # noqa: BLE001 — a nav failure reports, never crashes
         return f"ERROR: could not open {url}: {type(exc).__name__}: {exc}"
-    return _present_snapshot(snapshot, topic=topic, cut=cut, view=view)
+    note = ""
+    if snapshot.signin:
+        # Renewal belongs on the OPEN and not on every act: a mid-flow act that
+        # renewed would navigate away from wherever the act just landed, and
+        # the model can always re-open. One attempt, bounded the same way the
+        # read path bounds it — the re-open cannot itself renew.
+        note, snapshot = _renew_driving(url, snapshot, topic=topic, view=view)
+    return note + _present_snapshot(snapshot, topic=topic, cut=cut, view=view)
+
+
+def _renew_driving(url, snapshot, *, topic, view):
+    """(note, snapshot) after one attempt to sign back in on the driving path.
+
+    Returns the ORIGINAL snapshot when nothing could be done, because a signed-
+    out page is still a page: the model has to be able to say which one it was
+    looking at when it reports that it could not get in."""
+    host = browser.host_of(url)
+    outcome = _renew_session(url)
+    if outcome is None:
+        return BROWSE_SIGNED_OUT_NOTE.format(host=host), snapshot
+    if not outcome.ok:
+        why = (
+            RENEWAL_SECOND_FACTOR.format(host=host)
+            if outcome.second_factor
+            else outcome.why
+        )
+        return BROWSE_SIGNED_OUT_STALE.format(host=host, why=why), snapshot
+    try:
+        again = browser.browse_open(url, topic=topic or "", key=_key(view))
+    except Exception:  # noqa: BLE001 — keep the page we have
+        return RENEWED_SESSION_NOTE.format(host=host), snapshot
+    return RENEWED_SESSION_NOTE.format(host=host), again
 
 
 def browse_act(

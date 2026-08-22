@@ -13,6 +13,7 @@ from aish import ratelimit as ratelimit_module
 from aish import rule_compiler as rule_compiler_module
 from aish import rules as rules_module
 from aish import secrets as secrets_module
+from aish import signin as signin_module
 from aish import skills as skills_module
 from aish import tool_plugins as tool_plugins_module
 
@@ -87,6 +88,17 @@ def no_real_secrets(tmp_path_factory, monkeypatch):
         secrets_module,
         "NAMES_INDEX",
         tmp_path_factory.mktemp("secret-names") / "secret-names.txt",
+    )
+    # The SAME guard, one store over (#280). Site sign-ins are scrubbed on the
+    # same terms as named secrets, so the scrub asks `signin.origins()` on every
+    # tool result — and that reads a real file in the developer's state dir,
+    # which is how this fixture's own pinning test started shelling out to
+    # `security` for their live LinkedIn password. An empty store answers "no
+    # sign-ins", costs nothing, and reaches nothing.
+    monkeypatch.setattr(
+        signin_module,
+        "STATE",
+        tmp_path_factory.mktemp("signins") / "signins.json",
     )
     secrets_module._invalidate()  # the cache outlives a test; the patch does not
     yield

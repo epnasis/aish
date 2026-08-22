@@ -369,6 +369,20 @@ The form coming back is the site refusing the credential, and it is the **only**
 
 **A second factor is not a failure**, and telling them apart matters: the password was almost certainly right, so recording it as stale would burn a good credential and send him back to a full sign-in. It ends as a hand-off — the note names `/browser <host>`, and the push says the site wants a code.
 
+### The DRIVING path needs this too, and shipping without it made things worse
+
+The first live run found the gap in one session (linkedin.com, 2026-08-22). Renewal was wired into `_browser_read` — the READ path — and the model drives pages through **browse**. `Snapshot` did not even carry whether the page was asking for a password, so a portal that had signed him out arrived as an ordinary page with a couple of odd buttons on it.
+
+What the model then did is the failure this whole subsystem keeps relearning: **a system with no verb guesses.** It pressed *Sign in* on an empty form, then *Continue with Google*, then *Kontynuuj jako Sage* — two clicks from binding his LinkedIn to an identity that is not his — and he stopped the task himself with *"not google account geez"*.
+
+Three things follow, and all three are in:
+
+- `Snapshot.signin`, from the same live-DOM password test the read path uses.
+- `_renew_driving` on the **open**, not on every act: an act that renewed would navigate away from wherever the act just landed, and the model can always re-open. Bounded the same way the read path bounds it.
+- **The note is an instruction, because a fallback message is an instruction.** When there is nothing stored it says so, names `/browser <host>`, tells the model not to try other buttons, and says how to make it work next time. Saying nothing is what produced the guessing.
+
+**And signing in THROUGH somebody else joined the irreversible list.** *Continue with Google / Sign in with Apple / Kontynuuj jako <name>* is account control, it is not undone by clicking again, and aish does not choose who he is. The generic verbs match only alongside a provider name, so an ordinary *Continue* on a checkout is untouched — and *Continue as guest* is explicitly excluded, because that one is a checkout and blocking it would cost real work. `TestADrivenPageThatIsAskingForAPassword`.
+
 ### Capture: at the hand sign-in he already does
 
 No "add a password" screen. The password editor in the remote view grows one checkbox, default off, shown only on a password field. **Flipping it is what lets aish hold the value at all** — the remote-view input path retains nothing by default, and this is the one bounded exception, dropped when the view ends and never logged or traced.
