@@ -2268,6 +2268,53 @@ class TestFillingAFormAsOneAct:
         assert not did
         assert "needs approval of its own" in out.ledger[0]
 
+    def test_a_stopped_batch_that_set_a_date_says_the_picker_may_be_half_set(
+        self, monkeypatch
+    ):
+        """Re-running a fill is one fill; re-running a DATE is not. A range
+        picker takes the first press as the start and the second as the end, so
+        a retry composed as though nothing had happened sets the wrong half of
+        somebody's trip."""
+
+        picked = []
+
+        async def pick(page, control, value, before):
+            picked.append(value)
+            return f"{control.address!r} ← {value!r}"
+
+        monkeypatch.setattr(browser, "_pick_date", pick)
+        out, _did, _ = self._drive(
+            monkeypatch,
+            passes=[
+                [{"n": 1, "kind": "field", "name": "Wylot"}],
+                [{"n": 2, "kind": "button", "name": "Zapłać"}],
+            ],
+            steps=[
+                {"target": "Wylot", "do": "date", "value": "2026-09-07"},
+                {"target": "Powrót", "do": "date", "value": "2026-09-14"},
+            ],
+        )
+        assert picked == ["2026-09-07"]
+        assert "picker may be holding half a range" in "\n".join(out.ledger)
+
+    def test_a_stopped_fill_carries_no_such_warning(self, monkeypatch):
+        """Typing IS idempotent — `_type` overwrites — so the warning must not
+        appear where it would only add doubt to a retry that is perfectly
+        safe."""
+        out, _did, _ = self._drive(
+            monkeypatch,
+            passes=[
+                [self.FIELD],
+                [dict(self.FIELD, detail="currently: Paryż")],
+                [{"n": 9, "kind": "button", "name": "Zapłać"}],
+            ],
+            steps=[
+                {"target": "Dokąd", "do": "fill", "value": "Paryż"},
+                {"target": "Zapłać", "do": "click"},
+            ],
+        )
+        assert "half a range" not in "\n".join(out.ledger)
+
     def test_navigating_mid_batch_stops_it(self, monkeypatch):
         """The remaining steps were composed against a document that no longer
         exists."""
