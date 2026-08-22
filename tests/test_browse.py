@@ -1526,3 +1526,74 @@ class TestPickingADateFromACalendar:
     def test_the_month_arrow_is_looked_for_inside_the_picker_only(self):
         assert "box.querySelectorAll" in browse.CALENDAR_JS
         assert "submits" in browse.CALENDAR_JS
+
+
+class TestARowIsWhatTellsTwoIdenticalButtonsApart:
+    """#251, at the step where the choice is actually made. Twenty flights are
+    twenty buttons that all say "Wybierz", and an ordinal is `click element 7`
+    wearing a label — the very defect naming controls was meant to end."""
+
+    def _results(self):
+        return browse.controls_from([
+            {"n": 1, "kind": "button", "name": "Wybierz",
+             "row": ["07:45 – 09:10", "LO123", "1 przesiadka", "640 PLN"]},
+            {"n": 2, "kind": "button", "name": "Wybierz",
+             "row": ["11:20 – 12:45", "LO125", "bezpośredni", "720 PLN"]},
+        ])
+
+    def test_the_label_stays_the_prefix_and_the_row_follows_it(self):
+        """The label is what the control DOES; a digest without it reads like a
+        fact about the page rather than a button."""
+        first, second = self._results()
+        assert first.address.startswith("Wybierz — ")
+        assert "07:45" in first.address
+        assert second.address.startswith("Wybierz — ")
+
+    def test_the_row_is_on_the_line_the_model_reads(self):
+        assert "— in: 07:45 – 09:10 | LO123" in self._results()[0].line()
+
+    def test_a_row_can_be_asked_for_by_anything_that_identifies_it(self):
+        rows = self._results()
+        for asked, expected in (("640", 1), ("LO125", 2), ("bezpośredni", 2)):
+            assert browse.resolve(rows, asked).control.n == expected, asked
+
+    def test_a_bare_number_falls_through_to_the_row_instead_of_dead_ending(self):
+        """On a results page the distinguishing thing about a row is very often
+        a number — a price, a flight number, a time — so "640" is far more
+        likely to mean that row than a control that no longer exists."""
+        assert browse.resolve(self._results(), "640").control.n == 1
+
+    def test_an_ordinal_is_the_fallback_not_the_default(self):
+        plain = browse.controls_from([
+            {"n": 1, "kind": "button", "name": "Wybierz", "detail": "a"},
+            {"n": 2, "kind": "button", "name": "Wybierz", "detail": "b"},
+        ])
+        assert [c.address for c in plain] == ["Wybierz #1", "Wybierz #2"]
+
+    def test_a_long_row_is_cut_with_the_cut_counted(self):
+        """A results row can be a paragraph. A silent cut reads like a row that
+        had nothing more in it."""
+        control = browse.controls_from([{
+            "n": 1, "kind": "button", "name": "Wybierz",
+            "row": [f"szczegół numer {i} tego lotu" for i in range(12)],
+        }])[0]
+        said = control.row_note()
+        assert len(said) <= browse.ROW_MAX_CHARS + 20
+        assert "more" in said
+
+    def test_the_row_is_found_from_tree_shape_not_from_class_names(self):
+        """So a <table> of <tr>, a flex list of <div>s and a grid of <li> tiles
+        all work by one rule — and an injected ad row is simply a child nobody's
+        control lives in."""
+        source = browse.CONTROLS_JS
+        assert "root.contains(el)" in source
+        assert "row.parentElement !== root" in source
+        assert "new Set(rows).size !== rows.length" in source
+
+    def test_a_line_every_row_carries_cannot_tell_them_apart(self):
+        assert "shared.get(line) === texts.length" in browse.CONTROLS_JS
+
+    def test_narrowing_a_page_searches_the_rows_too(self):
+        """On a list of twenty identical buttons, the only thing the model can
+        name is what the row says."""
+        assert "c.row || []).join(' ').toLowerCase().indexOf(needle)" in browse.CONTROLS_JS

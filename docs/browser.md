@@ -241,6 +241,28 @@ Every booking search stands behind two date fields, and they are not fields: the
 
 **Known gaps, stated rather than discovered:** a picker with no ARIA and no `data-*` (a `div.day` with a React listener) is detected as "opened but no cells found" and stops rather than guessing; a range widget that commits neither end until both are picked will read back empty on the first step, which surfaces as *unreadable* rather than as a false stop; and readback verifies the DISPLAYED value, while what is submitted is usually hidden state — they almost always agree, but readback is evidence, not proof.
 
+
+
+### A results row is what tells two identical buttons apart
+
+Twenty flights are twenty buttons that all say "Wybierz". Ordinals made them addressable (`'Wybierz #7'`) and left them unreviewable — `click element 7` wearing a label, which is the exact defect naming controls existed to end, reappearing at the step where the choice is actually made.
+
+**The digest is a DIFFERENCE, and both halves of computing it are content-blind.** The ROW is found from tree shape: take the lowest ancestor holding every control in a same-label group, and each control's row is the child of that ancestor containing it. No class names, no "looks like a card" — so a `<table>` of `<tr>`, a flex list of `<div>`s and a grid of `<li>` tiles all work by one rule, and an injected ad row is simply a child none of the group's controls lives in. The DIGEST is then what makes a row different from its siblings: a line every row carries ("Wybierz", "Bagaż podręczny wliczony", "Cena od") cannot tell them apart, so exactly those are dropped. It is the same primitive as the page delta, pointed sideways — aish reports *change* by difference and now reports *identity* by difference too.
+
+**Line-level, never word-level.** `640 PLN` and `720 PLN` differ as lines, so both keep their unit; a token-level subtraction would strip `PLN` as boilerplate and hand the model bare numbers.
+
+**The label stays the prefix.** `'Wybierz — 07:45 – 09:10'`: the label is what the control DOES, and a digest without it reads as a fact about the page rather than a button. What follows is what tells this row from the next, so the model asks for it the way a person would say it. **The ordinal is now the fallback, not the default** — it appears only when nothing distinguishes the rows.
+
+**A row is asked for by anything that identifies it.** `resolve` searches the row alongside the address, so `"640 PLN"`, `"LO125"` and `"18:05"` all land. One consequence worth naming: a purely numeric ask no longer dead-ends on "there is no control 640" — on a results page the distinguishing thing about a row is very often a number, so it falls through to the row match before refusing.
+
+**Narrowing searches rows too.** `match` decides which controls the cap buys (#270), and on a list of twenty identical buttons the only nameable thing is what the row says — so the needle is tested against the row as well as the name and href.
+
+**Length is bounded twice and silent nowhere.** `ROW_LINES_MAX` bounds what the PAGE spends collecting (twenty rows are twenty `innerText` reads); `ROW_MAX_CHARS` bounds what the MODEL is charged on the control line, and what it leaves out is counted (`+3 more`), because a silent cut reads like a row that had nothing more in it. The full row is reachable two ways that already exist: narrow to it with `match`, or read the page whole with `action="read"`.
+
+**The row rides the approval card**, which is the point of the whole thing: on a results page the difference between the flight the owner wanted and the one beside it is the price and the time, and a card he cannot check against what he asked for is a card he taps through.
+
+`TestARowIsWhatTellsTwoIdenticalButtonsApart` pins the addressing, the difference rule, the fallbacks and the cap; `scripts/verify_browse.py` drives a real three-row results list in Chrome.
+
 `TestPickingADateFromACalendar` pins the date reading, the month stems, the cell ladder and the arrow vocabulary; `scripts/verify_browse.py` drives three real picker shapes in Chrome — labelled cells, bare cells with a heading, and a month walk — plus a disabled date and a submit-shaped arrow, both refused.
 
 ## The browse gate — two questions, not one

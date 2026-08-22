@@ -53,6 +53,19 @@ from typing import Any
 # looking for and the budget is spent on that first.
 MAX_CONTROLS = 100
 
+# How much of a repeated row aish reads and how much of it it shows. The first
+# bounds what the PAGE can spend on this — twenty rows of a shopping list are
+# twenty innerText reads — and the second bounds what the MODEL is charged for
+# it. Neither is ever silent: what the display cap leaves out is counted, and
+# what the model wants in full it narrows to (`match`) or reads whole.
+ROW_LINES_MAX = 12
+ROW_MAX_CHARS = 150
+
+# The distinguishing fragment that goes in the ADDRESS, so a results row is
+# asked for by something a person would say — 'Wybierz — 07:45', not '#7'.
+# Short, because it has to be typed back exactly.
+ROW_KEY_CHARS = 44
+
 # Text long enough to be a paragraph is not a control's NAME. A whole article
 # inside a clickable div would otherwise arrive as one enormous label.
 NAME_MAX_CHARS = 120
@@ -109,6 +122,10 @@ class Control:
     detail: str = ""
     mutating: bool = False
     disabled: bool = False
+    # What tells this control's row apart from the rows around it, one line per
+    # difference. Empty unless the control is one of several saying the same
+    # thing inside a repeated structure — see `digestRows` in CONTROLS_JS.
+    row: list[str] = field(default_factory=list)
     # An entry in a list the page opened (`role=option`), which is the only
     # thing a batch step may press sight-unseen. See `plan_batch`.
     option: bool = False
@@ -122,11 +139,33 @@ class Control:
     # `address_controls` is where it is worked out. Empty only until then.
     address: str = ""
 
+    def row_note(self) -> str:
+        """The row this control sits in, bounded — and saying what it left out.
+
+        A results row can be a paragraph. The cap is what keeps twenty of them
+        from costing more than the page they are on, and the count is what
+        stops a cut from reading like a row that had nothing more in it: the
+        model narrows (`match`) or reads the page whole to see the rest."""
+        if not self.row:
+            return ""
+        shown: list[str] = []
+        spent = 0
+        for line in self.row:
+            if spent + len(line) > ROW_MAX_CHARS and shown:
+                break
+            shown.append(line)
+            spent += len(line) + 3
+        left = len(self.row) - len(shown)
+        said = " | ".join(shown)[:ROW_MAX_CHARS]
+        return said + (f" | +{left} more" if left else "")
+
     def line(self) -> str:
         """One line, as the model reads it."""
         bits = f"{self.kind} {(self.address or self.name)!r}"
         if self.detail:
             bits += f" → {self.detail}"
+        if said := self.row_note():
+            bits += f" — in: {said}"
         if self.disabled:
             bits += "  (disabled)"
         if self.mutating:
@@ -703,7 +742,7 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
     return '';
   };
 
-  const emit = (el, tagOn, kind, name, href) => {
+  const emit = (el, tagOn, kind, name, href, row) => {
     // Offset by what earlier FRAMES already numbered, so one page has one
     // numbering however many documents it is made of.
     const n = opts.offset + out.length;
@@ -720,6 +759,8 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
       // Is this an entry in a list the page opened, rather than furniture that
       // happened to appear at the same moment? A batch's `fill` may press only
       // these — a cookie banner rendering mid-step is also "new".
+      // What tells this control's row apart from its neighbours. See digestRows.
+      row: row || [],
       option: ['option', 'treeitem'].indexOf(
         (el.getAttribute('role') || '').toLowerCase()) >= 0,
       // A form submit is gated whatever it is called: the nondescript "Dalej"
@@ -772,6 +813,73 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
   };
   walk(document);
 
+  // WHAT MAKES THIS ROW DIFFERENT FROM ITS NEIGHBOURS (#251).
+  //
+  // Twenty flights are twenty buttons that all say "Wybierz", and an ordinal
+  // is `click element 7` wearing a label — the very defect naming controls was
+  // meant to end, reappearing at the step where the choice is actually made.
+  //
+  // Both halves are deterministic and content-blind. The ROW is found from
+  // tree shape: take the lowest ancestor holding every control in the group,
+  // and each control's row is the child of that ancestor containing it. No
+  // class-name guessing, so a <table> of <tr>, a flex list of <div>s and a
+  // grid of <li> tiles all work by the same rule — and an injected ad row is
+  // simply a child nobody's control lives in. The DIGEST is a difference: a
+  // line every row carries ("Wybierz", "Bagaż wliczony", "Cena od") cannot
+  // tell them apart, so drop exactly those and keep the rest. Line-level and
+  // never word-level: `640 PLN` and `720 PLN` differ as lines, so both keep
+  // their unit instead of having it stripped as boilerplate.
+  const linesOf = (el) => ((el.innerText || el.textContent || '')
+    .split('\n')
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter(Boolean));
+
+  const digestRows = (all) => {
+    const groups = new Map();
+    for (const c of all) {
+      const key = (c.name || '').toLowerCase();
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const els = group.map((c) => c.el);
+      let root = els[0].parentElement;
+      while (root && !els.every((el) => root.contains(el))) root = root.parentElement;
+      if (!root) continue;
+      const rows = [];
+      for (const el of els) {
+        let row = el;
+        while (row && row.parentElement !== root) row = row.parentElement;
+        if (!row) break;
+        rows.push(row);
+      }
+      // One row each, or this is not a repeated structure and there is no
+      // honest digest to take — the ordinals stand.
+      if (rows.length !== els.length) continue;
+      if (new Set(rows).size !== rows.length) continue;
+      const texts = rows.map(linesOf);
+      const shared = new Map();
+      for (const lines of texts) {
+        for (const line of new Set(lines)) {
+          shared.set(line, (shared.get(line) || 0) + 1);
+        }
+      }
+      for (let i = 0; i < group.length; i += 1) {
+        const distinct = [];
+        for (const line of texts[i]) {
+          if (shared.get(line) === texts.length) continue;
+          if (distinct.indexOf(line) >= 0) continue;
+          distinct.push(line.slice(0, opts.nameMax));
+          if (distinct.length >= opts.rowLines) break;
+        }
+        group[i].row = distinct;
+      }
+    }
+  };
+  digestRows(found);
+
   // The budget, spent on what was asked for first. Matching is a plain
   // case-insensitive substring over the name and the href — deliberately not
   // fuzzy, for the reason `match_option` is not: this decides which controls
@@ -779,7 +887,11 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
   // wrong row is worse than one that finds nothing and says so.
   const needle = (opts.match || '').toLowerCase();
   const hit = (c) => (c.name || '').toLowerCase().indexOf(needle) >= 0
-                     || (c.href || '').toLowerCase().indexOf(needle) >= 0;
+                     || (c.href || '').toLowerCase().indexOf(needle) >= 0
+                     // The row is what a results page is narrowed BY: on a list
+                     // of twenty identical "Wybierz" buttons, the only thing
+                     // the model can name is what the row says.
+                     || (c.row || []).join(' ').toLowerCase().indexOf(needle) >= 0;
   const wanted = needle ? found.filter(hit) : [];
   const rest = needle ? found.filter((c) => !hit(c)) : found;
   // Never a hard filter: the chrome the model needs to get anywhere — the
@@ -788,7 +900,7 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
   // one dead end for another.
   const room = Math.max(0, opts.max - opts.offset);
   const take = wanted.concat(rest).slice(0, room);
-  for (const c of take) emit(c.el, c.tagOn, c.kind, c.name, c.href);
+  for (const c of take) emit(c.el, c.tagOn, c.kind, c.name, c.href, c.row || []);
   return {
     controls: out,
     matched: matched,
@@ -1007,6 +1119,7 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                 disabled=bool(raw.get("disabled")),
                 submits=bool(raw.get("submits")),
                 option=bool(raw.get("option")),
+                row=[str(line) for line in (raw.get("row") or [])][:ROW_LINES_MAX],
             )
         )
     return address_controls(controls)
@@ -1047,11 +1160,33 @@ def address_controls(controls: list[Control]) -> list[Control]:
     for members in groups.values():
         if len(members) < 2:
             continue
-        if len({(c.kind, c.detail) for c in members}) == 1:
+        if len({(c.kind, c.detail) for c in members}) == 1 and not any(
+            c.row for c in members
+        ):
             continue  # one control, several nodes: any of them does the job
+        keys = [_row_key(c) for c in members]
+        # The LABEL stays the prefix — it is what the control DOES, and a row
+        # digest without it reads like a fact about the page rather than a
+        # button. What follows it is what tells this row from the next one, so
+        # the model asks for 'Wybierz — 07:45' the way a person would say it.
+        # An ordinal is the fallback for when nothing distinguishes them, not
+        # the default.
+        if all(keys) and len(set(keys)) == len(keys):
+            for control, key in zip(members, keys, strict=True):
+                control.address = f"{control.address} — {key}"
+            continue
         for ordinal, control in enumerate(members, start=1):
             control.address = f"{control.address} #{ordinal}"
     return controls
+
+
+def _row_key(control: Control) -> str:
+    """The shortest thing that tells this control's row from its neighbours."""
+    for line in control.row:
+        said = line.strip()
+        if said:
+            return said[:ROW_KEY_CHARS].strip()
+    return ""
 
 
 @dataclass
@@ -1098,16 +1233,26 @@ def resolve(controls: list[Control], target: Any) -> Resolution:
         for control in controls:
             if control.n == int(digits):
                 return Resolution(control=control)
-        return Resolution(
-            problem=f"there is no control {asked!r} on this page any more"
-        )
+        # NOT a dead end: on a results page the distinguishing thing about a row
+        # is very often a number — a price, a flight number, a time — so a bare
+        # "640" is far more likely to mean that row than a control that no
+        # longer exists. Fall through to the row match rather than refusing.
 
-    loose = [c for c in controls if wanted and wanted in fold(c.address)]
+    # The row is what a repeated control is actually told apart by, so it is
+    # searched with the address and not instead of it.
+    loose = [
+        c for c in controls
+        if wanted and wanted in fold(" ".join([c.address, *c.row]))
+    ]
     settled = _one_of(loose)
     if settled is not None:
         return Resolution(control=settled)
     if loose:
         return Resolution(problem=_ambiguous(asked, loose))
+    if digits.isdigit():
+        return Resolution(
+            problem=f"there is no control {asked!r} on this page any more"
+        )
     return Resolution(
         problem=f"no control on this page is called {asked!r}. This page has: "
         f"{_addresses(controls)}."
@@ -1191,6 +1336,8 @@ class Batch:
                 lines.append(f"tick {said!r}")
             else:
                 lines.append(f"{said!r} ← {_shown(step.value)}")
+            if control is not None and (row := control.row_note()):
+                lines[-1] += f"  ({row})"
         return f"fill in this form on {host} and send it:\n  " + "\n  ".join(lines)
 
 
