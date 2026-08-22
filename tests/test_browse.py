@@ -2131,3 +2131,74 @@ class TestTheGrantIsWhereTheConsentLives:
         fresh = Agent(model="fake", approve=lambda _c: True, client_chat=lambda **kw: {})
         fresh.restore_browse_grants(["eon.pl"])
         assert "eon.pl" in fresh._approved_browsing
+
+
+class TestAGridThatIsPartlyMute:
+    """A picker is very often a MIXTURE: the day cells state their date and the
+    furniture around them — weekday headers, the row that holds them, a
+    decorative duplicate — carries a number and nothing else (#273).
+
+    Counting furniture as unreadable days made a perfectly legible picker
+    refuse itself, and it refused BEFORE the month walk. qatarairways.com opens
+    on the current month, so asking for a date two months out reached "this
+    picker's days say only their number (92 of them)" while 84 other cells were
+    saying `5 August 2026` and the arrow to November sat beside them."""
+
+    def _grid(self, month="August"):
+        real = [
+            browse.Cell(tag=i, text=str(i), label=f"{i} {month} 2026")
+            for i in range(1, 29)
+        ]
+        furniture = [browse.Cell(tag=100 + i, text=str(i)) for i in range(1, 8)]
+        return real + furniture
+
+    def test_furniture_does_not_make_a_legible_picker_illegible(self):
+        pick = browse.pick_day(self._grid(), browse.Day(7, 8, 2026))
+        assert pick.problem == ""
+        assert pick.tag == 7
+
+    def test_a_date_not_on_screen_is_a_month_to_walk_to_not_a_question(self):
+        """The refusal that fired here is what stopped the walk from starting."""
+        pick = browse.pick_day(self._grid(), browse.Day(8, 11, 2026))
+        assert "not in the month" in pick.problem
+        assert "say only their number" not in pick.problem
+
+    def test_a_wholly_mute_grid_is_still_a_question(self):
+        """The invariant this must not weaken: a range picker shows two months
+        and both have a 7, so a grid that says nothing is a coin flip."""
+        mute = [browse.Cell(tag=i, text=str(i)) for i in range(1, 29)]
+        pick = browse.pick_day(mute, browse.Day(7, 8, 2026))
+        assert "say only their number" in pick.problem
+        assert pick.tag is None
+
+
+class TestWhichMonthsAreOnShow:
+    """The heading is asked first and is usually enough. `ngb-datepicker` labels
+    itself "Travel Dates" and puts the months in sub-headings it never
+    associates with the grid — so the walk had nothing to steer by and refused
+    rather than guess. The CELLS already know: each states its own full date,
+    which is what makes it pressable at all (#273)."""
+
+    def test_the_heading_is_believed_when_it_says_a_month(self):
+        cells = [browse.Cell(tag=1, text="1", label="1 August 2026")]
+        assert browse.months_on_show(cells, "wrzesień 2026") == [(2026, 9)]
+
+    def test_a_useless_heading_falls_through_to_the_cells(self):
+        cells = [
+            browse.Cell(tag=1, text="5", label="5 August 2026"),
+            browse.Cell(tag=2, text="5", label="5 September 2026"),
+        ]
+        assert browse.months_on_show(cells, "Travel Dates") == [(2026, 8), (2026, 9)]
+
+    def test_a_range_picker_reports_a_SPAN_not_one_month(self):
+        """"Is November after what is on screen" has to mean after the LAST of
+        them, or a two-month picker oscillates between its own two months."""
+        cells = [
+            browse.Cell(tag=1, text="5", label="5 December 2026"),
+            browse.Cell(tag=2, text="5", label="5 January 2027"),
+        ]
+        assert browse.months_on_show(cells) == [(2026, 12), (2027, 1)]
+
+    def test_a_grid_that_says_nothing_anywhere_reports_nothing(self):
+        cells = [browse.Cell(tag=1, text="5"), browse.Cell(tag=2, text="6")]
+        assert browse.months_on_show(cells, "Travel Dates") == []

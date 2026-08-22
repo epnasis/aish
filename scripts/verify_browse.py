@@ -583,6 +583,135 @@ def check_icons(page) -> None:
     ))
 
 
+# The shape qatarairways.com is, and the three things it broke (#273). Every
+# part of this is taken from that page:
+#
+#   * the whole booking widget lives in an OPEN SHADOW ROOT, so `document`
+#     queries and `document.activeElement` both stop at the host;
+#   * the cookie wall arrives on a TIMER, after browse_open has already looked
+#     for one, and then eats every click for the rest of the session;
+#   * the picker is a two-month grid whose own label says "Travel Dates" while
+#     the day cells state their full date, and it opens on the wrong month.
+SHADOW = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Rezerwacja (atrapa)</title>
+<style>
+  #wall { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 99; }
+  #wall.gone { display: none; }
+</style></head>
+<body>
+  <div id="widget"></div>
+  <div id="wall" hidden><button id="accept">Accept all</button></div>
+  <script>
+    // The consent wall is NOT here when the page loads. It arrives the way a
+    // real consent SDK does — asynchronously, after the first look.
+    setTimeout(() => { document.getElementById('wall').hidden = false; }, 1500);
+    document.getElementById('accept').onclick = () => {
+      document.getElementById('wall').classList.add('gone');
+    };
+
+    const host = document.getElementById('widget');
+    const root = host.attachShadow({mode: 'open'});
+    root.innerHTML = `
+      <label for="dokad">Dokad</label>
+      <input id="dokad" role="combobox" autocomplete="off">
+      <ul id="podpowiedzi"></ul>
+      <label for="wylot">Data wylotu</label>
+      <input id="wylot" role="combobox" readonly aria-controls="kalendarz">
+      <div id="kalendarz" role="grid" aria-label="Travel Dates" hidden>
+        <div class="ngb-dp-weekdays" role="row">
+          <div class="ngb-dp-weekday" role="columnheader">Pon</div>
+          <div class="ngb-dp-weekday" role="columnheader">Wto</div>
+        </div>
+        <div id="dni"></div>
+        <button id="poprzedni" type="button">Previous month</button>
+        <button id="nastepny" type="button">Next month</button>
+      </div>
+      <button id="szukaj">Szukaj</button>`;
+
+    let month = 9;  // opens on September; the test asks for November
+    const MONTHS = {9: 'September', 10: 'October', 11: 'November'};
+    const draw = () => {
+      const box = root.getElementById('dni');
+      box.innerHTML = '';
+      for (let d = 1; d <= 28; d += 1) {
+        const cell = document.createElement('div');
+        cell.className = 'ngb-dp-day';
+        cell.setAttribute('role', 'gridcell');
+        cell.setAttribute('aria-label', d + ' ' + MONTHS[month] + ' 2026');
+        cell.textContent = String(d);
+        cell.onclick = () => {
+          root.getElementById('wylot').value =
+            d + ' ' + MONTHS[month].slice(0, 3) + ' 2026';
+          root.getElementById('kalendarz').hidden = true;
+        };
+        box.appendChild(cell);
+      }
+    };
+    draw();
+    root.getElementById('wylot').onclick = () => {
+      root.getElementById('kalendarz').hidden = false;
+    };
+    root.getElementById('nastepny').onclick = () => {
+      if (month < 11) { month += 1; draw(); }
+    };
+    root.getElementById('poprzedni').onclick = () => {
+      if (month > 9) { month -= 1; draw(); }
+    };
+    root.getElementById('dokad').addEventListener('input', (e) => {
+      const list = root.getElementById('podpowiedzi');
+      list.innerHTML = '';
+      if (!e.target.value) return;
+      for (const place of ['Malediwy (MLE)', 'Tamale (TML)']) {
+        if (!place.toLowerCase().includes(e.target.value.toLowerCase())) continue;
+        const item = document.createElement('li');
+        item.setAttribute('role', 'option');
+        item.textContent = place;
+        item.onclick = () => { e.target.value = place; list.innerHTML = ''; };
+        list.appendChild(item);
+      }
+    });
+  </script>
+</body></html>
+"""
+
+
+def check_shadow(url: str) -> None:
+    """A whole booking form inside a shadow root, behind a late consent wall."""
+    page = browser.browse_open(url + "shadow.html")
+    print(f"\nopened {page.url}: {len(page.controls)} controls")
+
+    # 1. The label lives in the shadow root with the control. Looking for it in
+    #    the document found nothing, and a labelled field came back named after
+    #    its generated id.
+    named(page, "Dokad")
+    named(page, "Data wylotu")
+    print("shadow-rooted labels → fields are named, not 'mat-input-6'")
+
+    # 2. The wall arrives AFTER browse_open looked. Every click lands on it
+    #    until something looks again — which is why this is one act, not two.
+    filled = browser.browse_fill([
+        {"target": "Dokad", "do": "fill", "value": "MLE"},
+        {"target": "Data wylotu", "do": "date", "value": "2026-11-08"},
+    ])
+    assert not filled.problem, filled.problem
+    print("late consent wall →", filled.ledger[0])
+    assert "Malediwy (MLE)" in filled.ledger[0], filled.ledger[0]
+
+    # 3. The picker opens on September and says only "Travel Dates"; the cells
+    #    say the month. Two hops to November, and the readback proves it.
+    assert "8 Nov 2026" in filled.ledger[1], filled.ledger[1]
+    assert "walking 2 month(s)" in filled.ledger[1], filled.ledger[1]
+    print("mute heading, dated cells →", filled.ledger[1])
+
+    # The keyboard rung is what makes a covered control reachable at all, and
+    # it was being discarded: focus inside a shadow root reports the HOST as
+    # active, so aish concluded focus had not landed on a field it had just
+    # focused.
+    typed = browser.browse_act("Dokad", "type", text="Tam")
+    assert not typed.problem, typed.problem
+    print("typing into a shadow-rooted field →", named(typed, "Dokad").line())
+
+
 def check_batch(url: str) -> None:
     """A whole form in one act, on a real combobox (#251)."""
     browser.browse_open(url + "hard.html")
@@ -873,6 +1002,7 @@ def main() -> int:
     Path(root, "faktura.pdf").write_bytes(PDF)
     Path(root, "ratings.html").write_text(long_list_html(), encoding="utf-8")
     Path(root, "podsumowanie.html").write_text(KASA, encoding="utf-8")
+    Path(root, "shadow.html").write_text(SHADOW, encoding="utf-8")
     port = serve(root)
     url = f"http://127.0.0.1:{port}/"
 
@@ -880,6 +1010,7 @@ def main() -> int:
     check_portal(url)
     check_hard(url)
     check_batch(url)
+    check_shadow(url)
     check_long_list(url)
     check_calendar(url)
     check_rows(url)
