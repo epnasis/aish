@@ -1357,11 +1357,17 @@ def plan_batch(controls: list[Control], asked: list[Any]) -> Batch:
 
     **At most ONE step may need approval, and it must be LAST.** The rule is
     not card hygiene, it is abort semantics: with the only committing step at
-    the end, a batch that dies at step 7 of 20 has changed nothing the owner
-    would mind — typed text is not sent, and `_type` overwrites, so re-running
-    is idempotent. A mutating step in the middle turns every partial failure
-    into a half-committed form, which is a state neither the owner nor the
-    model can reason about.
+    the end, a batch that dies at step 7 of 20 has sent nothing. A mutating
+    step in the middle turns every partial failure into a half-committed form,
+    which is a state neither the owner nor the model can reason about.
+
+    **Re-running is cheap but NOT always idempotent, and the difference is the
+    date verb.** Typing is: `_type` overwrites, so the same fill twice is one
+    fill. Pressing a day cell is not — a range picker takes the first press as
+    the START of a range and the second as its END, so a retried batch does not
+    begin again, it continues. A stopped batch that had already set a date says
+    so rather than letting the model compose its retry against a widget state
+    nothing told it about.
 
     A password field refuses the WHOLE batch and never draws a card, exactly as
     a single action does. There is no yes that makes it a good idea."""

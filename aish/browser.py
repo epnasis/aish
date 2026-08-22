@@ -3007,6 +3007,7 @@ def browse_fill(
         if expect_epoch is not None and session.epoch != expect_epoch:
             raise BrowserUnavailable(PAGE_TAKEN)
         ledger: list[str] = []
+        dated = False   # a day cell was pressed: see `_stop`
         last = len(steps) - 1
         started_at = str(page.url or "")
         for index, step in enumerate(steps):
@@ -3022,30 +3023,35 @@ def browse_fill(
             if control is None:
                 return await _stop(
                     owner, session, ledger, index, len(steps),
-                    f"{found.problem}",
+                    f"{found.problem}", dated=dated,
                 )
             if control.kind == browse_mod.PASSWORD:
                 return await _stop(
                     owner, session, ledger, index, len(steps),
                     "it is a password field, and aish never types passwords",
+                    dated=dated,
                 )
             if control.mutating and not (index == last and mutating):
                 return await _stop(
                     owner, session, ledger, index, len(steps),
                     f"{control.address!r} needs approval of its own and this "
                     "batch was not approved for it — the page changed under it",
+                    dated=dated,
                 )
             session.epoch += 1
             try:
                 said = await _run_step(page, control, verb, value, live)
             except _StepFailed as exc:
-                return await _stop(owner, session, ledger, index, len(steps), str(exc))
+                return await _stop(
+                    owner, session, ledger, index, len(steps), str(exc), dated=dated
+                )
             except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
                 return await _stop(
                     owner, session, ledger, index, len(steps),
-                    f"could not {verb} it ({type(exc).__name__})",
+                    f"could not {verb} it ({type(exc).__name__})", dated=dated,
                 )
             ledger.append(f"{index + 1}. {said}")
+            dated = dated or verb == "date"
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
             except Exception:  # noqa: BLE001 — nothing navigated, which is common
@@ -3058,7 +3064,7 @@ def browse_fill(
                     owner, session, ledger, index + 1, len(steps),
                     "the page navigated, so the rest of the batch was composed "
                     "against a page you are no longer on",
-                    after=True,
+                    after=True, dated=dated,
                 )
         # The last step of a form-fill is usually the press that sends it, so
         # this is the read that lands on a results page still being fetched.
@@ -3318,6 +3324,7 @@ async def _stop(
     why: str,
     *,
     after: bool = False,
+    dated: bool = False,
 ) -> browse_mod.Snapshot:
     """End a batch part-way and say exactly where it got to.
 
@@ -3331,6 +3338,16 @@ async def _stop(
         ledger.append(
             f"steps {step + 1}–{total} were not attempted, and any approved "
             "press in them was NOT made"
+        )
+    if dated:
+        # Re-running a fill is one fill; re-running a DATE is not. A range
+        # picker takes the first press as the start and the second as the end,
+        # so a retry composed as though nothing had happened silently sets the
+        # wrong half of somebody's trip.
+        ledger.append(
+            "a date was already set before this stopped, so the picker may be "
+            "holding half a range — check what the date fields hold before "
+            "setting them again, and clear them if they are wrong"
         )
     session.epoch += 1
     snapshot = await _snapshot(
