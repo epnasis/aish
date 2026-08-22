@@ -2882,6 +2882,7 @@ async def _snapshot(
         matching=matching,
         unreachable=unreached,
         epoch=session.epoch,
+        signin=await _has_password_field(page),
         problem=problem,
         notice=notice,
         downloads=await _save_downloads(owner, browse_page=page),

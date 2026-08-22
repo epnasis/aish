@@ -1825,6 +1825,27 @@ class TestConsequencesWithNoYesButton:
         ):
             assert browse.irreversible(ordinary) == "", ordinary
 
+    def test_signing_in_through_somebody_else_is_refused(self):
+        """Measured on linkedin.com: asked to sign in with stored credentials
+        and having none, the model pressed Sign in, then 'Continue with
+        Google', then 'Kontynuuj jako Sage' — two clicks from binding his
+        LinkedIn to an identity that is not his. He stopped it himself."""
+        for button in (
+            "Continue with Google", "Zaloguj się przez Google",
+            "Sign in with Apple", "Kontynuuj jako Sage", "Continue as Pawel",
+            "Use another account", "Connect with LinkedIn",
+        ):
+            assert browse.irreversible(button) == "identity", button
+
+    def test_an_ordinary_continue_button_is_not_an_identity(self):
+        """The generic verbs match only WITH a provider, and 'continue as
+        guest' is a checkout — blocking it would cost real work."""
+        for button in (
+            "Continue", "Kontynuuj", "Dalej", "Sign in", "Zaloguj się",
+            "Continue as guest", "Kontynuuj jako gość", "Continue shopping",
+        ):
+            assert browse.irreversible(button) == "", button
+
     def test_a_bare_noun_is_never_enough(self):
         """A contact match needs a change VERB and the thing changed in one
         label — a bare 'e-mail' is half the nav bars on the Polish web."""
@@ -1900,3 +1921,72 @@ class TestConsequencesWithNoYesButton:
             {"target": "Szukaj", "do": "click"},
         ]}) is None
         assert len(asked) == 1  # the ordinary batch card, unchanged
+
+
+class TestADrivenPageThatIsAskingForAPassword:
+    """The gap the linkedin.com session found (#280 follow-up). Auto sign-in
+    was wired into the READ path only, and the model drives pages through
+    BROWSE — so a portal that had signed him out arrived as an ordinary page
+    with a couple of odd buttons, and the model went looking for a door."""
+
+    def _driven(self, monkeypatch, *, signin_flag=True, renewal=None, opened=None):
+        opens = []
+
+        def browse_open(url, *, topic="", key=""):
+            opens.append(url)
+            snap = snapshot(url=url, text="Sign in to continue", controls=[])
+            snap.signin = signin_flag if len(opens) == 1 else False
+            return snap
+
+        monkeypatch.setattr(web_module.browser, "browse_open", browse_open)
+        monkeypatch.setattr(web_module, "_require_public", lambda _u: None)
+        monkeypatch.setattr(web_module, "_renew_session", lambda _u: renewal)
+        return opens
+
+    def test_with_nothing_stored_it_says_so_and_forbids_trying_doors(
+        self, monkeypatch
+    ):
+        opens = self._driven(monkeypatch, renewal=None)
+        out = web_module.browse("https://linkedin.com/feed")
+        assert len(opens) == 1  # no renewal attempted, nothing to attempt
+        assert "asking for a password" in out
+        assert "/browser linkedin.com" in out
+        assert "Do NOT try other buttons" in out
+        assert "continue with Google" in out
+        assert "Remember this" in out  # how to make it work next time
+
+    def test_a_stored_sign_in_is_used_and_the_page_re_read(self, monkeypatch):
+        from aish import browser as browser_module
+
+        opens = self._driven(
+            monkeypatch, renewal=browser_module.SignInResult(ok=True)
+        )
+        out = web_module.browse("https://eon.pl/mojeon")
+        assert len(opens) == 2  # signed in, then opened again
+        assert "signed in again as the user" in out
+
+    def test_a_second_factor_ends_as_a_hand_off_not_a_failure(self, monkeypatch):
+        from aish import browser as browser_module
+
+        self._driven(
+            monkeypatch,
+            renewal=browser_module.SignInResult(second_factor=True),
+        )
+        out = web_module.browse("https://eon.pl/mojeon")
+        assert "one-time code" in out and "/browser eon.pl" in out
+
+    def test_a_stale_credential_says_it_will_not_be_tried_again(self, monkeypatch):
+        from aish import browser as browser_module
+
+        self._driven(
+            monkeypatch,
+            renewal=browser_module.SignInResult(stale=True, why="rejected"),
+        )
+        out = web_module.browse("https://eon.pl/mojeon")
+        assert "not accepted" in out and "will not try it again" in out
+
+    def test_an_ordinary_page_is_completely_unaffected(self, monkeypatch):
+        opens = self._driven(monkeypatch, signin_flag=False, renewal=None)
+        out = web_module.browse("https://eon.pl/faktury")
+        assert len(opens) == 1
+        assert "asking for a password" not in out

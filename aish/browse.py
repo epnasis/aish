@@ -166,6 +166,32 @@ _CREDENTIAL_PHRASES = (
 # page is nearly always a row and not an account. Blanket destruction is a
 # REVERSIBILITY problem (a trash that empties later, #177), not a consequence
 # class, and it wants that mechanism rather than this one.
+# Signing in THROUGH somebody else. Measured on linkedin.com 2026-08-22: asked
+# to sign in with stored credentials and having none, the model pressed "Sign
+# in", then "Continue with Google", then "Kontynuuj jako Sage" — two clicks
+# from binding the owner's LinkedIn to an identity that is not his, and he
+# stopped it himself. It is account control, it is not undone by clicking
+# again, and there is no yes for it: aish does not choose who he is. The
+# generic verbs ("continue", "kontynuuj") are matched only WITH a provider
+# name, so an ordinary "Continue" button on a checkout is untouched.
+_IDP_PROVIDERS = (
+    "google", "apple", "facebook", "microsoft", "github", "linkedin",
+    "twitter", " x ", "amazon", "okta", "auth0", "saml", "sso",
+)
+_IDP_VERBS = (
+    "continue with", "sign in with", "sign up with", "log in with",
+    "login with", "zaloguj sie przez", "zaloguj przez", "zaloguj sie z",
+    "kontynuuj z", "kontynuuj przez", "polacz z", "connect with",
+)
+_IDP_ALONE = (
+    "kontynuuj jako", "continue as", "single sign-on", "use another account",
+    "uzyj innego konta",
+)
+# "Continue as <name>" is an account chooser; "Continue as guest" is a checkout
+# and blocking it would cost real work. The exception is the narrow one, not a
+# general softening of the rule.
+_NOT_AN_IDENTITY = ("guest", "gosc", "goscia", "anonim", "visitor")
+
 _CLOSE_ACCOUNT_PHRASES = (
     "usun konto", "usuniecie konta", "skasuj konto", "zamknij konto",
     "likwidacja konta", "zlikwiduj konto", "delete account", "close account",
@@ -179,6 +205,7 @@ IRREVERSIBLE = {
     "payout": "change where money is sent from your account",
     "credential": "change a password or PIN on your account",
     "account": "close or delete your account",
+    "identity": "sign you in through Google, Apple or another provider",
 }
 
 
@@ -197,6 +224,11 @@ def irreversible(text: str) -> str:
         return ""
     if _has(folded, _CLOSE_ACCOUNT_PHRASES):
         return "account"
+    if not _has(folded, _NOT_AN_IDENTITY) and (
+        _has(folded, _IDP_ALONE)
+        or (_has(folded, _IDP_VERBS) and _has(folded, _IDP_PROVIDERS))
+    ):
+        return "identity"
     if _has(folded, _CREDENTIAL_PHRASES):
         return "credential"
     if _has(folded, _CONTACT_PHRASES):
@@ -372,7 +404,14 @@ class Snapshot:
     # nothing and is refused with a fresh list. An epoch handshake the model has
     # to echo would be one more thing a small model gets wrong for no gain.
     epoch: int = 0
-    # Set when the action could not be carried out at all (a stale index, a
+    # Is this page asking for a PASSWORD? The read path has carried this since
+    # #236; the driving path did not, so a portal that had signed the owner out
+    # arrived as an ordinary page with a couple of odd buttons on it and the
+    # model went looking for a door — measured on linkedin.com, where it
+    # pressed Sign in, then "Continue with Google", then "Continue as Sage",
+    # and was stopped by the owner. A page cannot be driven usefully until
+    # somebody signs in, and saying so is what stops the guessing.
+    signin: bool = False
     # disabled control). The page is still returned, because the model's next
     # move depends on seeing where it actually is.
     problem: str = ""
