@@ -298,6 +298,8 @@ CHECKS: tuple[tuple[str, str], ...] = (
     ("verify_refused", "an answer was held or noted by a verify check"),
     ("rule_abstained", "a rule nearly matched and abstained"),
     ("args_truncated", "arguments were cut by a cap"),
+    ("result_cut", "a result was cut with no way to read the rest"),
+    ("continuation_unread", "the rest of a cut result was offered and not read back"),
     ("args_malformed", "the model's arguments did not parse"),
     ("reasoning_truncated", "reasoning was cut by a cap"),
     ("result_stubbed", "a result was stubbed after the model had read it"),
@@ -535,6 +537,12 @@ def _did(turn: Turn) -> dict:
                 "output": step.get("output") or "",
                 "decision": step.get("decision"),
                 "verdict_by": step.get("verdict_by"),
+                # What this call had to cut, and whether it left a way back.
+                # Recorded for every truncator (contract §3.4); `read`
+                # is which cached output a paging call actually read, which is
+                # what makes "offered" and "used" joinable (#274).
+                "truncation": step.get("truncation") or {},
+                "read": step.get("continuation") or "",
                 "gates": gates,
                 "refused": [g for g in gates if _refused(g)],
                 "completed": True,
@@ -561,6 +569,8 @@ def _did(turn: Turn) -> dict:
                 "output": "",
                 "decision": None,
                 "verdict_by": None,
+                "truncation": {},
+                "read": "",
                 "gates": per_call.pop(call, []),
                 "refused": [],
                 "completed": False,
@@ -781,7 +791,26 @@ def notes(doc: dict) -> dict:
     cause is a class nobody anticipated.
     """
     rows: list[dict] = []
+    # Which cached outputs were actually read back, so a cut can be told from a
+    # cut that was recovered. Collected across the whole turn first: the paging
+    # call comes AFTER the call it continues, and often several calls after.
+    paged = {call["read"] for call in doc["did"]["calls"] if call["read"]}
     for call in doc["did"]["calls"]:
+        cut = call["truncation"]
+        if cut and not cut.get("offered"):
+            # The #269 shape: a dead end. Distinguished from the one below
+            # because they are different incidents with different repairs —
+            # this one is a missing capability, that one is a choice.
+            _note(rows, "result_cut",
+                  f"{cut.get('omitted', 0)} characters of {call['name']}'s result were cut "
+                  f"by {cut.get('truncator') or 'a cap'} and no continuation was offered",
+                  section="flow", call=call["call"])
+        elif cut and cut.get("continuation") not in paged:
+            _note(rows, "continuation_unread",
+                  f"{cut.get('omitted', 0)} characters of {call['name']}'s result were cut "
+                  f"by {cut.get('truncator') or 'a cap'}; a continuation was offered and "
+                  "nothing read it back in this turn",
+                  section="flow", call=call["call"])
         if not call["completed"]:
             _note(rows, "call_incomplete",
                   f"{call['name']} was proposed but no result was recorded",
@@ -1355,6 +1384,19 @@ def _call_lines(call: dict) -> list[str]:
                 f"     {BOLD}… {call['args_truncated']} argument characters cut by "
                 f"{call['cap_source'] or 'a cap'}{RESET}"
             )
+    if cut := call["truncation"]:
+        rest = (
+            f'read_tool_output(continuation="{cut.get("continuation")}")'
+            if cut.get("offered")
+            else f"{BOLD}no continuation offered{RESET}"
+        )
+        lines.append(
+            f"     {BOLD}… {cut.get('omitted', 0)} result characters cut{RESET} by "
+            f"{cut.get('truncator') or 'a cap'} "
+            f"{DIM}({cut.get('cap_source') or 'cap unknown'}){RESET} — {rest}"
+        )
+    if call["read"]:
+        lines.append(f"     {DIM}read back from cache: {call['read']}{RESET}")
     detail = f"     {status}, {call['secs']:.1f}s"
     if call["verdict_by"]:
         detail += f", verdict by {call['verdict_by']}"

@@ -1281,7 +1281,9 @@ class TestTheRestOfThePageIsRecoverable:
             return "deadbeef"
 
         page = numbered_page(1, 250)
-        out = web_module._present_snapshot(snapshot(text=page), stash=stash)
+        out = web_module._present_snapshot(
+            snapshot(text=page), cut=web_module.PageCut(stash)
+        )
         assert seen["text"] == page, "the stash must get the WHOLE page, not the cut one"
         assert seen["shown"] == web_module.PAGE_MAX_CHARS
         assert 'read_tool_output(continuation="deadbeef", page=2)' in out
@@ -1289,7 +1291,8 @@ class TestTheRestOfThePageIsRecoverable:
     def test_a_page_that_fits_is_never_stashed(self):
         called = []
         out = web_module._present_snapshot(
-            snapshot(text="short page"), stash=lambda t, s: called.append(t) or "k"
+            snapshot(text="short page"),
+            cut=web_module.PageCut(lambda t, s: called.append(t) or "k"),
         )
         assert called == []
         assert web_module.CUT_MARKER not in out
@@ -1301,7 +1304,7 @@ class TestTheRestOfThePageIsRecoverable:
             raise OSError("read-only filesystem")
 
         out = web_module._present_snapshot(
-            snapshot(text=numbered_page(1, 250)), stash=broken
+            snapshot(text=numbered_page(1, 250)), cut=web_module.PageCut(broken)
         )
         assert web_module.CUT_MARKER in out
         assert "read_tool_output" not in out
@@ -1313,7 +1316,7 @@ class TestTheRestOfThePageIsRecoverable:
         the text."""
         out = web_module._present_snapshot(
             snapshot(text=numbered_page(1, 250), controls=[control(n=0, name="Menu")]),
-            stash=lambda _t, _s: "deadbeef",
+            cut=web_module.PageCut(lambda _t, _s: "deadbeef"),
         )
         assert "button 'Menu'" in out
 
