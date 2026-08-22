@@ -253,4 +253,46 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
     !/if \(!metas\.length\) return false;/.test(mirrorBody));
 }
 
+// ---- 8. WHEN a chat last spoke is the SERVER's fact (#275) ----------------
+// The dot that made this section exist: every restart of aish-web put two
+// chats on the rail with unread dots and a "just now" stamp — always two,
+// always chats already read, none of which had said anything. Two, because
+// that is how many chats the client WARMS on reconnect so a tap paints
+// instantly. Warming published a roster row for each, and a roster row was the
+// only evidence this side had of when a chat last spoke, so it read every row
+// it received as an answer that had just landed.
+//
+// The server no longer publishes for a load, and states the stamp on the rows
+// it does publish. What is pinned here is that the client BELIEVES it —
+// otherwise the same guess is one refactor away from coming back.
+{
+  const w = badgeWorld();
+  const s = w.sandbox;
+  const anHourAgo = (Date.now() - 3600 * SEC) / SEC;
+  s.seenAt = { "read.jsonl": Date.now() - 30 * 60 * SEC }; // read half an hour ago
+  s.setAttentionRows([]);
+
+  s.noteAttention({ name: "read.jsonl", state: "idle", out: anHourAgo });
+  ok("a row saying it last spoke before your last look raises no dot",
+    counted(w).length === 0);
+  ok("…and it keeps the server's stamp, not the moment the row arrived",
+    s.attentionRows[0].out === anHourAgo);
+
+  s.noteAttention({ name: "read.jsonl", state: "idle", out: nowSec() });
+  ok("a row saying it spoke just now is unread, exactly as before",
+    counted(w).join() === "read.jsonl");
+
+  // The fallback is not a leftover: it is the whole of #203 against a server
+  // too old to state the fact, and against a chat that has never spoken.
+  s.noteAttention({ name: "old-server.jsonl", state: "idle" });
+  ok("a server that states nothing still gets the finished-in-the-background case right",
+    counted(w).includes("old-server.jsonl"));
+
+  const src = appSource();
+  const body = src.slice(src.indexOf("function noteAttention"),
+                         src.indexOf("\n// THE COUNT'S OWN ROWS"));
+  ok("the client prefers the stated stamp and only falls back to its own",
+    /Number\(pushed\.out\)/.test(body) && /spoke \|\| now/.test(body));
+}
+
 report("test_attention_badge.js");

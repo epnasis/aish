@@ -700,6 +700,16 @@ class SessionLog:
         self.path = path
         self._fh: TextIO | None = None
         self._pending_model: str | None = None
+        # When this chat last put something in the CONVERSATION, epoch seconds
+        # (#203 / #275). Held in memory so a LIVE session can be asked "when did
+        # you last say anything" without re-reading its log — the roster row
+        # needs that fact, and a chat that just did something has just changed
+        # its file, so a parse there is guaranteed to miss its own cache. Kept
+        # by the same predicate the listing uses (`_is_output`), applied to
+        # records on the way OUT rather than on the way back in, so the live
+        # answer and the parsed one cannot drift. 0.0 until the chat speaks;
+        # seeded from the parse when a session is opened cold.
+        self.output_at: float = 0.0
         # Serializes every write to the log file — and the shared write state
         # feeding it (_fh, _pending_model). Writers live on more than one
         # thread (the agent worker logs records while the event loop renames /
@@ -2224,6 +2234,8 @@ class SessionLog:
             "kind": kind,
             **fields,
         }
+        if SessionLog._is_output(record):
+            self.output_at = record_epoch(record) or self.output_at
         if self._fh is None:
             # Created on first record, not in __init__: a chat that never
             # gets a message must leave no file — empty session files crowd

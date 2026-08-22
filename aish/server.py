@@ -1666,6 +1666,14 @@ class Session:
     def name(self) -> str:
         return self.logref.log.path.name
 
+    @property
+    def output_at(self) -> float:
+        """When this chat last said something a person would read, epoch
+        seconds — 0.0 for a chat that never has. The log keeps it as it writes
+        (`SessionLog.output_at`), by the same predicate the listing parses with,
+        so the live row and the listed row state one fact and not two (#275)."""
+        return self.logref.log.output_at
+
     def state(self) -> str:
         if self.busy:
             return "waiting" if self.bridge.pending else "running"
@@ -1882,11 +1890,14 @@ class WebServer:
             with contextlib.suppress(Exception):
                 await client.ws.close()
 
-    def add_session(self, session: Session, *, default: bool) -> None:
+    def add_session(self, session: Session, *, default: bool, publish: bool = True) -> None:
         """`default` is keyword-only with NO default value (#178 P1-6): every
         call site must say whether this session becomes the bare-connection
         landing spot. The old `default=True` let handle_trigger silently
-        re-point the default at an overnight automated session."""
+        re-point the default at an overnight automated session.
+
+        `publish=False` says this session did not APPEAR, it was merely LOADED
+        (#275) — see `_cold_open`, the only caller that passes it."""
         self.sessions[session.name] = session
         # The ONE funnel every session-creation path goes through (new, cold
         # open, /trigger, the server's first session), which is why the hold
@@ -1894,7 +1905,8 @@ class WebServer:
         # a session appearing is published from here too (#204). Both run on
         # the loop thread; `on_hold` is hopped there by the Bridge.
         session.bridge.on_hold = lambda: self._announce_hold(session)
-        self._touch(session)
+        if publish:
+            self._touch(session)
         if default:
             self._default = session
 
@@ -3393,7 +3405,7 @@ class WebServer:
     # genuinely expensive — it casefolds every message of every chat — and it
     # belongs to the snapshot, which is where a query is answered anyway.
     def _roster_row(self, session: Session) -> dict:
-        return {
+        row: dict[str, Any] = {
             "name": session.name,
             "title": self._title(session),
             "snippet": self._snippet(session),
@@ -3401,6 +3413,20 @@ class WebServer:
             "origin": session.origin,
             "cwd": self._row_cwd(session.agent.cwd),
         }
+        # WHEN this chat last spoke (#275), which is what unread is decided by.
+        # The client used to mint that stamp itself from the moment a row
+        # ARRIVED — the only fact it had — so every row it received said "this
+        # chat just said something", and a row published for any other reason
+        # (a rename, a chat merely being loaded) raised a dot for output that
+        # did not exist. Not a log parse, despite being a log-derived fact: the
+        # session holds it in memory, updated as it writes (see
+        # `SessionLog.output_at`), which is the objection the row's other
+        # timestamps were excluded for. Safe to diff on, unlike a clock: it
+        # changes only when the chat actually says something, so a row that
+        # republishes for it republishes with news.
+        if session.output_at:
+            row["out"] = session.output_at
+        return row
 
     def _touch(self, session: Session, notice: str = "") -> None:
         """Publish this session's row if anything a client can see changed.
@@ -3609,7 +3635,18 @@ class WebServer:
                 session.bridge.record(event)
         else:
             session.bridge.record({"type": "history", "messages": history})
-        self.add_session(session, default=False)
+        # Loading a chat is not a transition and must announce nothing (#275).
+        # Every client already has this row — from its hello pager or its list —
+        # and the only thing that changes here is liveness "" → "idle", which
+        # renders identically. Publishing it anyway is how merely WARMING two
+        # chats after a restart put two unread dots on the rail: the roster
+        # cache is empty in a fresh process, so the first row for every chat
+        # diffed as new, and a client reading a row as news is a client that
+        # cannot tell a load from an answer. Nothing is seeded into `_roster`
+        # either — it holds what has been BROADCAST, and the next real
+        # transition (a task starting, moments later for a resumed session)
+        # publishes normally.
+        self.add_session(session, default=False, publish=False)
         return session
 
     @staticmethod
@@ -5292,6 +5329,7 @@ def create_app(
         custom_title: str | None = None
         title_auto = False
         override_chat = None
+        output_ts: int | None = None
         if model_override and path is None:
             if provider == "claude-max":
                 raise backends.BackendError(
@@ -5306,7 +5344,12 @@ def create_app(
             parsed = SessionLog._parse(path)
             history, recorded_spec = parsed.messages, parsed.model
             custom_title, origin, title_auto = parsed.title, parsed.origin, parsed.title_auto
+            output_ts = parsed.output_ts
         log = SessionLog(path) if path is not None else SessionLog.new(state_dir)
+        # Carry the chat's last-spoke stamp into memory from the parse that just
+        # happened, so a reopened chat's roster row states the same fact the
+        # listing does instead of starting at "never spoke" (#275).
+        log.output_at = float(output_ts or 0)
         logref = LogRef(log)
         bridge = Bridge(get_loop, session=log.path.name)
 
