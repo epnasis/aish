@@ -750,6 +750,29 @@ WATCH_SETTLED_MS = 5_000
 WATCH_MAX_CAPTURES = 3
 
 
+def page_is_done(
+    *, quiet_ms: float, ready: bool, still_for: float = WATCH_SETTLED_MS
+) -> bool:
+    """Has this page finished changing?
+
+    ONE definition, for both things that need to know (#251). The owner's
+    screen and the model's read ask exactly this question and would drift apart
+    the moment each answered it for itself — the view would call a page
+    finished while a read was still waiting on it, and only one of them could
+    be right.
+
+    What differs between them is not the question but the BAR: how long a page
+    must have been continuously still before stillness is believed. The view
+    can afford a high one, because waiting costs it nothing but polls, and it
+    already has a picture on screen. An ordinary read cannot — most pages it
+    reads finished long ago, and paying seconds on each of them would be paid
+    on every read of the day. So the bar is the parameter, and the rule is not.
+
+    `ready` is load-bearing and not decoration: a document still parsing is not
+    a finished page however still it looks."""
+    return bool(ready and quiet_ms >= still_for)
+
+
 def watch_step(
     *,
     moved: bool,
@@ -791,36 +814,68 @@ def watch_step(
         return "capture" if quiet_ms >= WATCH_QUIET_MS else "wait"
     # Nothing has changed since the picture they are looking at. Letting go asks
     # a HARDER question than "is it quiet?" — see WATCH_SETTLED_MS.
-    return "stop" if ready and quiet_ms >= WATCH_SETTLED_MS else "wait"
+    return "stop" if page_is_done(quiet_ms=quiet_ms, ready=ready) else "wait"
 
 
-async def _settle(page: Any) -> None:
-    """Wait until the page stops changing, or SETTLE_MAX_MS, whichever first.
+# How many unanswered probes a read waits through before it stops asking. The
+# view reads silence as "capture anyway, never miss a frame"; a READ has the
+# opposite fallback, because the page that will not run `_WATCH_JS` is the page
+# with no scripting — server-rendered, already whole, and never about to spin.
+# A couple of polls covers the case that is really a page mid-navigation.
+SETTLE_UNKNOWN_TRIES = 3
 
-    Three signals, cheapest first: the network going quiet, the document
-    reporting `complete`, and finally the DOM itself going still — which is the
-    one that catches a page whose skeleton has loaded but whose content is
-    still being written in. Every wait is bounded: a page that never settles
-    (a live ticker, a spinner) must still produce a frame."""
+
+async def _settle(
+    page: Any,
+    *,
+    still_for: float = SETTLE_QUIET_MS,
+    timeout_ms: float = SETTLE_MAX_MS,
+) -> None:
+    """Wait until the page stops changing, or `timeout_ms`, whichever first.
+
+    Network idle first, because it is the cheapest signal and settles the
+    common case on its own. Then the SAME probe the owner's screen watches
+    through (`_activity`), polled, and the same `page_is_done` — a read used to
+    answer this question for itself with a one-shot MutationObserver, which is
+    two definitions of "finished" in one file and only one of them could be
+    right.
+
+    **Looking once is what a spinner defeats**, and that is why this became a
+    loop. Quiescence stands in for "finished", and a spinner is precisely where
+    those part company: the page is stating that it is unfinished while its DOM
+    sits perfectly still and the animation runs in CSS. The probe adds the
+    signal a single look cannot have — a RESPONSE ARRIVING — and the loop adds
+    the one no signal can replace: asking again, because arrival is late.
+
+    `still_for` is the bar, and the caller sets it because the caller knows what
+    it just did. A read of a page that finished long ago must not pay seconds
+    for the possibility that it did not; a read that follows pressing *Szukaj*
+    must."""
     try:
-        await page.wait_for_load_state("networkidle", timeout=SETTLE_MAX_MS)
+        await page.wait_for_load_state("networkidle", timeout=timeout_ms)
     except Exception:  # noqa: BLE001 — a chatty page never goes idle; carry on
         pass
-    try:
-        await page.wait_for_function(
-            """() => new Promise(done => {
-                 if (document.readyState !== 'complete') return done(false);
-                 let mutations = 0;
-                 const observer = new MutationObserver(() => { mutations++; });
-                 observer.observe(document.documentElement,
-                   { childList: true, subtree: true, characterData: true });
-                 setTimeout(() => { observer.disconnect(); done(mutations === 0); },
-                   QUIET);
-               })""".replace("QUIET", str(SETTLE_QUIET_MS)),
-            timeout=SETTLE_MAX_MS,
-        )
-    except Exception:  # noqa: BLE001 — bounded: an unsettleable page is still shown
-        pass
+    waited = 0.0
+    unknown = 0
+    while waited < timeout_ms:
+        state = await _activity(page)
+        if state is None:
+            unknown += 1
+            if unknown >= SETTLE_UNKNOWN_TRIES:
+                return
+        else:
+            unknown = 0
+            if page_is_done(
+                quiet_ms=float(state.get("quiet") or 0),
+                ready=bool(state.get("ready")),
+                still_for=still_for,
+            ):
+                return
+        try:
+            await page.wait_for_timeout(WATCH_POLL_MS)
+        except Exception:  # noqa: BLE001 — a page torn down mid-wait is settled
+            return
+        waited += WATCH_POLL_MS
 
 
 async def _activity(page: Any) -> dict | None:
@@ -2290,7 +2345,13 @@ PAGE_TAKEN = (
 )
 
 
-async def _settled_text(page: Any, *, tries: int = 3) -> str:
+async def _settled_text(
+    page: Any,
+    *,
+    tries: int = 3,
+    still_for: float = SETTLE_QUIET_MS,
+    timeout_ms: float = SETTLE_MAX_MS,
+) -> str:
     """The page's text, once it stops saying it is still fetching it.
 
     A page mid-load HAS text — "Wczytywanie danych", a spinner's label, a
@@ -2307,7 +2368,7 @@ async def _settled_text(page: Any, *, tries: int = 3) -> str:
     invoices". Twice, on two of five properties, and a second run twenty minutes
     later found them all. A page that has not said anything is the case the
     loading-word test cannot see; the mutation observer inside `_settle` can."""
-    await _settle(page)
+    await _settle(page, still_for=still_for, timeout_ms=timeout_ms)
     text = await _body_text(page)
     for _ in range(tries - 1):
         if text and not browse_mod.still_loading(text):
@@ -2423,10 +2484,23 @@ async def _snapshot(
     notice: str = "",
     asked: str = "",
     match: str = "",
+    started_work: bool = False,
 ) -> browse_mod.Snapshot:
-    """The page as the model receives it: what it says, and what it can press."""
+    """The page as the model receives it: what it says, and what it can press.
+
+    `started_work` is the caller saying it just did something that may have set
+    the page going — pressed *Szukaj*, sent a form. It buys the patient bar in
+    `_settle`: a read of a page that finished long ago must not pay seconds for
+    the possibility that it did not, and a read that follows a search must."""
     page = session.page
-    text = await _without_option_floods(page, await _settled_text(page))
+    text = await _without_option_floods(
+        page,
+        await _settled_text(
+            page,
+            still_for=WATCH_SETTLED_MS if started_work else SETTLE_QUIET_MS,
+            timeout_ms=WATCH_MAX_MS if started_work else SETTLE_MAX_MS,
+        ),
+    )
     raw, matched, unreached, matching = await _enumerate(page, match)
     controls = browse_mod.controls_from(raw)
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
@@ -2760,8 +2834,13 @@ def browse_act(
             # again without navigating to it — a `goto` to the same URL resets
             # an SPA's state, so "let me look properly" must not be a round trip
             # through the address bar.
+            #
+            # It is also the model's way to say GIVE IT A MOMENT. A read that
+            # came back mid-spinner has exactly one honest next move, and it
+            # must not be to keep re-reading until the loop detector stops the
+            # task — so this one waits for a finished page.
             session.epoch += 1
-            return await shot(owner, session)
+            return await shot(owner, session, started_work=True)
         if action not in ("click", "type", "choose"):
             return await shot(owner, session, problem=f"unknown action {action!r}")
         # Narrowed the same way the listing the model read was, or the act
@@ -2870,7 +2949,10 @@ def browse_act(
             pass
         await _dismiss_consent(page)
         page = await _adopt_new_tab(owner, key, page, before)
-        snapshot = await shot(owner, session, notice=notice)
+        # An action is exactly the moment a page is most likely to be BUSY
+        # rather than finished — this is the read that lands on the results
+        # page a search is still fetching.
+        snapshot = await shot(owner, session, notice=notice, started_work=True)
         if expect_download and not snapshot.downloads:
             # Said HERE rather than at the gate, because it is only true here:
             # the press that works says nothing, and the press that produced no
@@ -2978,7 +3060,9 @@ def browse_fill(
                     "against a page you are no longer on",
                     after=True,
                 )
-        snapshot = await _snapshot(owner, session, match=topic)
+        # The last step of a form-fill is usually the press that sends it, so
+        # this is the read that lands on a results page still being fetched.
+        snapshot = await _snapshot(owner, session, match=topic, started_work=True)
         snapshot.ledger = ledger
         return snapshot
 
