@@ -778,7 +778,7 @@ def main() -> int:
     check_calendar(url)
     check_rows(url)
 
-    browser.browse_close()
+    browser.browse_close()  # the keyless session this script drove
     browser.shutdown()
     print("\nOK — real Chrome, real DOM, real clicks")
     return 0
