@@ -7,6 +7,7 @@ no network; the only real commands executed are harmless touch/ls in tmp dirs.
 import asyncio
 import base64
 import contextlib
+import datetime
 import json
 import os
 import pathlib
@@ -3011,6 +3012,102 @@ class TestPeek:
             peek = recv_until(ws, "peek")
             assert peek["gone"] is True
             assert peek["name"] == "session-19990101-000000-000000.jsonl"
+
+
+class TestWarmingIsNotNews:
+    """Loading a chat is not a transition (#275).
+
+    Every restart put two chats on the rail with unread dots and a "just now"
+    stamp, for chats the owner had already read and that had said nothing since.
+    The two chats were the ones the client WARMS on reconnect so a tap paints
+    instantly — and warming cold-opens them, which registered them, which
+    published a roster row apiece. The roster cache is empty in a fresh process,
+    so those first rows always diffed as new; the client, whose only evidence
+    of when a chat last spoke was when the row arrived, read each of them as an
+    answer it had not seen.
+
+    Both halves are pinned here: a load announces nothing, and a row that IS
+    published states when the chat last spoke rather than leaving the client to
+    infer it from the delivery."""
+
+    @staticmethod
+    def _write_session(state_dir, stamp, spoke_at):
+        """A chat whose last word was said at `spoke_at` (a datetime)."""
+        state_dir.mkdir(parents=True, exist_ok=True)
+        path = state_dir / f"session-20200101-{stamp:06d}-000000.jsonl"
+        when = spoke_at.isoformat(timespec="seconds")
+        path.write_text(
+            json.dumps({"ts": when, "kind": "message", "role": "user",
+                        "content": "warmed chat topic"}) + "\n"
+            + json.dumps({"ts": when, "kind": "message", "role": "assistant",
+                          "content": "an answer you already read"}) + "\n",
+            encoding="utf-8",
+        )
+        return path.name
+
+    def test_warming_a_chat_announces_nothing(self, app_env):
+        an_hour_ago = datetime.datetime.now() - datetime.timedelta(hours=1)
+        name = self._write_session(app_env["state_dir"], 11, an_hour_ago)
+        client, _ = make_client(app_env, [model_says("hi there")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "peek", "path": name})
+            # A real transition right behind it bounds the drain: everything
+            # before the task's own row is everything the warm produced.
+            ws.send_json({"type": "task", "text": "meanwhile, over here"})
+            announced, warmed = [], False
+            for _ in range(300):
+                event = ws.receive_json()
+                if event["type"] == "session_changed":
+                    announced.append(event["row"]["name"])
+                elif event["type"] == "peek":
+                    warmed = True
+                elif event["type"] == "done":
+                    break
+            assert warmed, "the warm itself must still answer"
+            assert name not in announced, "warming a chat announced it as news"
+            assert hello["session"] in announced, "a real transition still travels"
+
+    def test_a_warmed_chat_still_announces_its_next_transition(self, app_env):
+        # Nothing is seeded into the roster cache by the load, so the first
+        # thing that REALLY happens to a warmed chat is not diffed away.
+        an_hour_ago = datetime.datetime.now() - datetime.timedelta(hours=1)
+        name = self._write_session(app_env["state_dir"], 12, an_hour_ago)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "peek", "path": name})
+            recv_until(ws, "peek")
+            ws.send_json({"type": "rename_session", "name": name, "title": "Renamed"})
+            row = recv_until_row(ws, name, "idle")["row"]
+            assert row["title"] == "Renamed"
+
+    def test_a_published_row_says_when_the_chat_last_spoke(self, app_env):
+        an_hour_ago = datetime.datetime.now() - datetime.timedelta(hours=1)
+        name = self._write_session(app_env["state_dir"], 13, an_hour_ago)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "peek", "path": name})
+            recv_until(ws, "peek")
+            ws.send_json({"type": "rename_session", "name": name, "title": "Renamed"})
+            row = recv_until_row(ws, name, "idle")["row"]
+            # Read back from the chat's own log, not from this moment: a rename
+            # is not something the chat said, and a row that claimed otherwise
+            # is what the client used to mark unread.
+            assert row["out"] == pytest.approx(an_hour_ago.timestamp(), abs=2)
+
+    def test_the_stamp_moves_when_the_chat_actually_speaks(self, app_env):
+        client, _ = make_client(app_env, [model_says("the answer")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            asked = time.time()
+            ws.send_json({"type": "task", "text": "ask something"})
+            row = recv_until_row(ws, name, "idle")["row"]
+            spoke = row["out"]
+            assert spoke >= int(asked), "the answer must move the stamp"
+            # …and a rename after it republishes the row without moving it.
+            ws.send_json({"type": "rename_session", "name": name, "title": "Named"})
+            after = recv_until_row(ws, name, "idle")["row"]
+            assert after["title"] == "Named"
+            assert after["out"] == spoke, "a rename is not something the chat said"
 
 
 class TestRename:

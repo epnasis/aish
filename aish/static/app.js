@@ -14233,7 +14233,19 @@ function noteAttention(pushed, at) {
   // a background turn's answer would show no dot until the next one arrived
   // (#203). A `running` push says only that work started: `ts` moves, `out`
   // does not — the same distinction the stamps exist to draw.
-  const stamps = pushed.state === "running" ? { ts: now } : { ts: now, out: now };
+  //
+  // WHEN it last spoke is the SERVER's fact when the row states it (#275).
+  // This used to be inferred from the row's arrival, which is not the same
+  // question and is only accidentally the same answer: it is right for the
+  // case above and wrong for every other reason a row gets published — a
+  // rename on another device, a chat being loaded — each of which announced
+  // output that never happened and raised a dot for it. Kept as the fallback,
+  // because a server too old to send `out` still needs the #203 case to work,
+  // and because a row that has never spoken sends nothing to prefer.
+  const spoke = Number(pushed.out) || 0;
+  const stamps = pushed.state === "running"
+    ? { ts: now }
+    : { ts: now, out: spoke || now };
   // Empty is "no opinion", not "it is empty now": a row whose derivation had
   // nothing to say must not blank a preview or a title this device can still
   // show. Every field the server DOES have an opinion about wins.
