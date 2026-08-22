@@ -305,14 +305,25 @@ def landed_elsewhere(asked: str, got: str) -> bool:
     return bare(asked) != bare(got)
 
 
+# The one method HTTP itself calls SAFE. Everything else a form can be sent
+# with, and the absence of any statement at all, is treated as a commit.
+QUERY_METHOD = "get"
+
+
 def is_mutating(
-    name: str, kind: str, *, submits: bool = False, navigates: bool = False
+    name: str,
+    kind: str,
+    *,
+    submits: bool = False,
+    navigates: bool = False,
+    method: str = "",
 ) -> bool:
     """Would pressing this change something the owner would mind?
 
-    Word-matched on the control's NAME, plus every form submit. Both halves
-    matter: a button called "Zapłać" is obvious, and a nondescript "Dalej" that
-    posts a form is the one that quietly does something.
+    Word-matched on the control's NAME, plus every form submit that COMMITS
+    anything. Both halves matter: a button called "Zapłać" is obvious, and a
+    nondescript "Dalej" that posts a form is the one that quietly does
+    something.
 
     **A plain navigation is never mutating, whatever it is called.** An `<a>`
     with a real http href is a GET to another page — precisely what `read_url`
@@ -321,14 +332,29 @@ def is_mutating(
     was flag the link named "Faktury i płatności" because it contains the word
     for *payment*. What makes it safe is that it navigates, not that it is an
     anchor: an `<a href="#">` is a JavaScript control wearing a link's clothes,
-    and it is word-matched like the button it is."""
+    and it is word-matched like the button it is.
+
+    **A GET form submit IS that navigation, and gating it was an
+    inconsistency.** It is a link with the query typed into it: aish follows
+    `?from=WAW&to=CDG` as an anchor without asking, then asked permission to
+    press the button that builds the same URL. Nothing about a search changes
+    state, so the card fired on nothing — and a card that fires on nothing is a
+    SAFETY cost, not an inconvenience: it trains the owner to tap through, and
+    the tap he learns is the one waiting on the purchase. The gate is worth
+    exactly as much as its false-positive rate is low.
+
+    Narrowed by HTTP's own definition of safe rather than by a guess, and only
+    on an EXPLICIT `method="get"`. A form nobody wrote a method on is not a
+    statement that it is safe — on an SPA it usually means JavaScript intercepts
+    and posts — so absence stays gated. The word list still runs either way: a
+    GET form whose button says "Usuń" is caught by its name."""
     if kind in (FIELD, PASSWORD):
         # Typing changes nothing until something is pressed. Gating the keystroke
         # would ask twice for one act and train the owner to tap through.
         return False
     if navigates:
         return False
-    if submits:
+    if submits and method.strip().lower() != QUERY_METHOD:
         return True
     lowered = f" {name.lower()} "
     return any(word in lowered for word in _MUTATING_WORDS)
@@ -767,10 +793,24 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
       // that posts the form is the dangerous one, not the obvious "Zapłać".
       submits: !!(el.form && (type_(el) === 'submit' || el.tagName === 'BUTTON'
                               && (el.type || 'submit') === 'submit')),
+      // …but not every submit COMMITS anything. Reported raw and judged in
+      // Python: the RAW attribute, because `form.method` reflects the spec
+      // default and would report a form nobody wrote a method on as a GET,
+      // which is the one case that must stay ambiguous.
+      method: methodOf(el),
     });
   };
 
   const type_ = (el) => ((el.getAttribute && el.getAttribute('type')) || '').toLowerCase();
+
+  // How this control would send its form, as the page WROTE it. A button's own
+  // formmethod wins, exactly as the browser resolves it.
+  const methodOf = (el) => {
+    const own = el.getAttribute && el.getAttribute('formmethod');
+    if (own) return own;
+    const form = el.form;
+    return (form && form.getAttribute && form.getAttribute('method')) || '';
+  };
 
   const walk = (root) => {
     for (const el of root.querySelectorAll('*')) {
@@ -1115,6 +1155,7 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                     kind,
                     submits=bool(raw.get("submits")),
                     navigates=bool(raw.get("href")),
+                    method=str(raw.get("method") or ""),
                 ),
                 disabled=bool(raw.get("disabled")),
                 submits=bool(raw.get("submits")),

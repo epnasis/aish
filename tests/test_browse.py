@@ -1738,3 +1738,51 @@ class TestTwoChatsDoNotShareOnePageView:
         out = web_module._present_snapshot(again, acted=True, view=qatar)
         assert "Malé" in out
         assert "Your ratings" not in out
+
+
+class TestASearchIsNotACommit:
+    """Gating every form submit asked the owner's permission to run a SEARCH,
+    and the argument against it was already three lines above the rule: a plain
+    navigation is never mutating. A GET submit IS that navigation — a link with
+    the query typed into it — so aish followed `?from=WAW&to=CDG` as an anchor
+    without asking and then asked before pressing the button that builds it."""
+
+    def test_a_get_search_rides_the_host_grant(self):
+        assert not browse.is_mutating("Szukaj", browse.BUTTON, submits=True, method="get")
+
+    def test_a_post_form_still_asks(self):
+        assert browse.is_mutating("Dalej", browse.BUTTON, submits=True, method="post")
+
+    def test_a_form_with_no_method_is_not_a_statement_that_it_is_safe(self):
+        """Absence usually means the author never decided — and on an SPA that
+        means JavaScript intercepts and posts. Ambiguity stays gated."""
+        assert browse.is_mutating("Dalej", browse.BUTTON, submits=True, method="")
+
+    def test_the_word_list_still_runs_on_a_get_form(self):
+        """Narrowing the submit rule must not unlock a destructive button."""
+        assert browse.is_mutating("Usuń", browse.BUTTON, submits=True, method="GET")
+        assert browse.is_mutating("Zapłać", browse.BUTTON, submits=True, method="get")
+
+    def test_the_method_is_read_as_the_page_wrote_it(self):
+        """`form.method` reflects the spec default and would report a form
+        nobody wrote a method on as a GET — the one case that must stay
+        ambiguous. So the RAW attribute, and the button's own formmethod first,
+        exactly as the browser resolves it."""
+        assert "getAttribute('formmethod')" in browse.CONTROLS_JS
+        assert "form.getAttribute('method')" in browse.CONTROLS_JS
+        assert "el.form.method" not in browse.CONTROLS_JS
+
+    def test_a_search_button_is_not_carded_end_to_end(self):
+        snap = snapshot(controls=browse.controls_from([
+            {"n": 1, "kind": "button", "name": "Szukaj", "submits": True,
+             "method": "get"},
+        ]))
+        asked = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+        )
+        agent._browse_view.remember(snap)
+        agent._approved_browsing.add("eon.pl")
+        assert agent._browse_gate("browse_act", {"target": "Szukaj"}) is None
+        assert asked == []
