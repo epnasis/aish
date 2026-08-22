@@ -140,6 +140,14 @@ HARD = """<!doctype html>
   </div>
   <button id="open-dialog">Otwórz okno</button>
 
+  <!-- The spinner: pressing Szukaj shows a CSS donut and fetches. The DOM sits
+       perfectly still for two seconds while the page is plainly unfinished,
+       which is exactly where quiescence stops standing in for "finished". -->
+  <section id="szukaj-wolno">
+    <button id="szukaj-btn" type="button">Szukaj wolno</button>
+    <div id="wyniki-wolne"></div>
+  </section>
+
   <!-- A results list: three rows whose buttons all say the same thing, and
        whose boilerplate is identical. The only thing telling them apart is
        what each row says. -->
@@ -209,6 +217,16 @@ HARD = """<!doctype html>
     </form>
   </section>
   <script>
+    document.getElementById('szukaj-btn').onclick = () => {
+      const box = document.getElementById('wyniki-wolne');
+      box.innerHTML = '<div class="spinner" aria-label="Wczytywanie"></div>';
+      // Nothing touches the DOM for two seconds. A single look lands here.
+      setTimeout(() => {
+        fetch(location.href).then(() => {
+          box.innerHTML = '<p>Znaleziono 3 połączenia</p>';
+        });
+      }, 2000);
+    };
     const MIESIACE = ['stycznia','lutego','marca','kwietnia','maja','czerwca',
       'lipca','sierpnia','września','października','listopada','grudnia'];
     const wylotGrid = document.getElementById('kal-wylot');
@@ -630,6 +648,17 @@ def check_rows(url: str) -> None:
     print("asked for by price →", cheapest.control.address)
 
 
+def check_spinner(url: str) -> None:
+    """A page that finishes after its DOM has gone quiet (#251)."""
+    browser.browse_open(url + "hard.html")
+    after = browser.browse_act("Szukaj wolno", "click")
+    assert "Znaleziono 3 połączenia" in after.text, (
+        "the read landed mid-spinner: " + after.text[-200:]
+    )
+    print("late-arriving results waited for →",
+          [ln for ln in after.text.splitlines() if "Znaleziono" in ln])
+
+
 def check_hard(url: str) -> None:
     """Every way a control can be listed and unpressable."""
     page = browser.browse_open(url + "hard.html")
@@ -777,6 +806,7 @@ def main() -> int:
     check_long_list(url)
     check_calendar(url)
     check_rows(url)
+    check_spinner(url)
 
     browser.browse_close()  # the keyless session this script drove
     browser.shutdown()

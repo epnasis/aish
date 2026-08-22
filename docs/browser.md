@@ -243,6 +243,22 @@ Every booking search stands behind two date fields, and they are not fields: the
 
 
 
+### One definition of a finished page, two channels over it
+
+The owner's screen and the model's read ask the same question — *has this page finished changing?* — and used to answer it separately: a watcher polling an activity probe on one side, a one-shot MutationObserver inside `_settle` on the other. Two definitions in one file, and only one of them could be right.
+
+**`page_is_done(quiet_ms, ready, still_for)` is now the only one.** `watch_step`'s letting-go branch IS that call, and `_settle` polls until it returns true, so the view cannot decide a page has finished while a read is still waiting on it. `ready` is load-bearing rather than decoration: a document still parsing is not a finished page however still it looks.
+
+**What differs between the channels is the BAR, not the rule.** How long stillness must last before it is believed is a parameter, and it is a parameter because the two have opposite economics. Waiting costs the view only polls — it already has a picture on screen — so it can hold out for `WATCH_SETTLED_MS` and correct the frame if anything else lands. A read must return something, and most pages it reads finished long ago, so paying seconds on each of them would be paid on every read of the day. Ordinary reads keep `SETTLE_QUIET_MS`; the caller raises the bar when it knows it just did something.
+
+**`started_work` is that knowledge, and it is the caller's because only the caller has it.** A press is exactly the moment a page is most likely to be BUSY rather than finished, so `browse_act` after an action, the last read of a `browse_fill` (whose final step is usually the press that sends the form), and `action="read"` all take the patient bar. `action="read"` doubles as the model's way to say *give it a moment*: a read that came back mid-spinner has one honest next move, and it must not be to keep re-reading until the loop detector stops the task.
+
+**Looking once is what a spinner defeats.** Quiescence stands in for "finished", and a spinner is precisely where those part company — the page is stating that it is unfinished while its DOM sits perfectly still and the animation runs in CSS. The probe adds the signal a single look cannot have (a RESPONSE ARRIVING, which is also the only signal for a lazily loaded image, since it changes an existing `src` and adds no node), and the loop adds the one no signal can replace: asking again, because arrival is late.
+
+**Silence means opposite things to the two channels, deliberately.** A page that will not run the probe is *cannot tell*, never *nothing happened*. The view resolves that by capturing anyway — never miss a frame. A read resolves it the other way after `SETTLE_UNKNOWN_TRIES`: the page that will not run scripting is server-rendered, already whole, and never about to spin, and stalling on it would be a regression paid by every such page.
+
+`TestOneDefinitionOfAFinishedPage` pins that both channels decide with one rule and that the bar is the only difference; `TestLookingOnceIsWhatASpinnerDefeats` pins the loop and the unknown fallback; `scripts/verify_browse.py` presses a button whose results arrive two seconds after the DOM goes still, and the text it asserts on cannot exist before then.
+
 ### A results row is what tells two identical buttons apart
 
 Twenty flights are twenty buttons that all say "Wybierz". Ordinals made them addressable (`'Wybierz #7'`) and left them unreviewable — `click element 7` wearing a label, which is the exact defect naming controls existed to end, reappearing at the step where the choice is actually made.

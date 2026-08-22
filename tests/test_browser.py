@@ -5,6 +5,7 @@ and conftest's `no_real_browser` makes any escape from that fail loudly.
 """
 
 import asyncio
+import pathlib
 import time
 import urllib.error
 
@@ -2067,7 +2068,8 @@ class TestTheThingApprovedIsTheThingPressed:
         page = FakePage()
         owner = _owner_on(page)
 
-        async def snapshot(_owner, _session, *, problem="", notice="", asked="", match=""):
+        async def snapshot(_owner, _session, *, problem="", notice="", asked="",
+                           match="", started_work=False):
             snaps.append(problem or notice)
             return browse_mod.Snapshot(
                 url=page.url, title="", text="", problem=problem, notice=notice
@@ -2173,7 +2175,8 @@ class TestFillingAFormAsOneAct:
         page = FakePage()
         owner = _owner_on(page)
 
-        async def snapshot(_owner, _session, *, problem="", notice="", asked="", match=""):
+        async def snapshot(_owner, _session, *, problem="", notice="", asked="",
+                           match="", started_work=False):
             snaps["problem"] = problem
             return browse_mod.Snapshot(url="https://lot.com/", title="", text="",
                                        problem=problem)
@@ -2580,3 +2583,107 @@ class TestAChatGetsItsOwnTab:
             time.monotonic() - browser.BROWSE_MAX_IDLE - 1
         )
         assert owner.held() is False, "every chat idle collects it"
+
+
+class TestOneDefinitionOfAFinishedPage:
+    """#251. The owner's screen and the model's read ask the same question —
+    "has this page finished?" — and used to answer it separately: a watcher
+    polling an activity probe on one side, a one-shot MutationObserver inside
+    `_settle` on the other. Two definitions in one file, and only one of them
+    could be right."""
+
+    def test_both_channels_decide_with_the_same_rule(self):
+        """`watch_step`'s letting-go branch IS `page_is_done`, so the view
+        cannot call a page finished while a read is still waiting on it."""
+        for quiet, ready in ((10_000, True), (100, True), (10_000, False)):
+            verdict = browser.watch_step(
+                moved=False, quiet_ms=quiet, ready=ready, elapsed_ms=1_000,
+                since_capture_ms=5_000, captured=0,
+            )
+            done = browser.page_is_done(quiet_ms=quiet, ready=ready)
+            assert (verdict == "stop") is done, (quiet, ready)
+
+    def test_a_document_still_parsing_is_not_a_finished_page(self):
+        """`ready` is load-bearing, not decoration: however still it looks."""
+        assert not browser.page_is_done(quiet_ms=60_000, ready=False)
+
+    def test_the_bar_is_the_parameter_and_the_rule_is_not(self):
+        """What differs between the two channels is how long stillness must
+        last before it is believed — the view can afford seconds because
+        waiting costs it only polls; a read of a page that finished long ago
+        cannot pay that on every read of the day."""
+        assert browser.page_is_done(quiet_ms=400, ready=True, still_for=350)
+        assert not browser.page_is_done(quiet_ms=400, ready=True, still_for=5_000)
+
+    def test_a_read_after_an_action_waits_for_a_finished_page(self):
+        """A press is exactly the moment a page is most likely to be BUSY
+        rather than finished — this is the read that lands on the results page
+        a search is still fetching."""
+        source = pathlib.Path(browser.__file__).read_text()
+        for site in (
+            'snapshot = await shot(owner, session, notice=notice, started_work=True)',
+            'snapshot = await _snapshot(owner, session, match=topic, started_work=True)',
+            'return await shot(owner, session, started_work=True)',
+        ):
+            assert site in source, site
+
+
+class TestLookingOnceIsWhatASpinnerDefeats:
+    """Quiescence stands in for "finished", and a spinner is precisely where
+    those part company: the page states it is unfinished while its DOM sits
+    perfectly still and the animation runs in CSS."""
+
+    def _page(self, states):
+        rounds = iter(states)
+
+        class FakePage:
+            waited = 0
+
+            async def wait_for_load_state(self, *a, **k):
+                pass
+
+            async def evaluate(self, *a, **k):
+                state = next(rounds, None)
+                if state is None:
+                    raise RuntimeError("no more")
+                return state
+
+            async def wait_for_timeout(self, ms):
+                FakePage.waited += ms
+
+        return FakePage()
+
+    def test_it_keeps_asking_while_the_page_is_still_arriving(self):
+        """Every arrival resets the bar, so a page that loads in stages is
+        followed rather than snapshotted mid-way."""
+        page = self._page([
+            {"gen": 1, "quiet": 100, "ready": True},
+            {"gen": 2, "quiet": 100, "ready": True},
+            {"gen": 3, "quiet": 400, "ready": True},
+        ])
+        asyncio.new_event_loop().run_until_complete(
+            browser._settle(page, still_for=350, timeout_ms=5_000)
+        )
+        assert type(page).waited >= browser.WATCH_POLL_MS * 2
+
+    def test_a_page_that_will_not_answer_is_not_waited_on_forever(self):
+        """"Cannot tell" is the page with no scripting — server-rendered,
+        already whole, and never about to spin. The VIEW reads silence as
+        "capture anyway"; a read has the opposite fallback."""
+        class Silent:
+            waited = 0
+
+            async def wait_for_load_state(self, *a, **k):
+                pass
+
+            async def evaluate(self, *a, **k):
+                raise RuntimeError("no scripting")
+
+            async def wait_for_timeout(self, ms):
+                Silent.waited += ms
+
+        page = Silent()
+        asyncio.new_event_loop().run_until_complete(
+            browser._settle(page, timeout_ms=60_000)
+        )
+        assert Silent.waited <= browser.WATCH_POLL_MS * browser.SETTLE_UNKNOWN_TRIES
