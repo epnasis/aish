@@ -2343,9 +2343,9 @@ class TestAPageAnotherChatTookIsNotActedOn:
 
     def _blank(self, monkeypatch):
         """A page with no controls, so the act reaches its ordinary refusal."""
-        async def snapshot(owner, page, match="", **kw):
+        async def snapshot(owner, session, match="", **kw):
             return browser.browse_mod.Snapshot(
-                url=page.url, title="", text="", **kw
+                url=session.page.url, title="", text="", **kw
             )
 
         async def nothing(page, match=""):
