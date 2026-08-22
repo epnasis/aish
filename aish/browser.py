@@ -684,6 +684,115 @@ SETTLE_QUIET_MS = 350
 # arrives late is worth less than a picture that arrives now and is corrected.
 FIRST_FRAME_MS = 450
 
+# --------------------------------------------- watching a page that is not done
+#
+# `_settle` asks "has the DOM stopped changing?" as a stand-in for "is the page
+# finished?", and a SPINNER is exactly where those two part company: the page is
+# stating that it is unfinished, while its DOM sits perfectly still and the
+# animation runs in CSS. The strongest evidence a page is NOT ready reads to a
+# quiescence test as the strongest evidence that it is. One correction was then
+# spent on the spinner and nobody looked again, so the owner tapped the page to
+# force another frame — which is the whole reason this exists.
+#
+# The fix is not a better guess at when a page is done. It is to stop guessing
+# and keep LOOKING, cheaply, for a bounded while. So the two halves that used to
+# be fused into one expensive operation are split:
+#
+#   the probe    ~5 ms, nothing over the wire   "did anything actually happen?"
+#   the capture  ~200 ms, ~40 KB                the picture itself
+#
+# The probe reports ACTIVITY rather than a verdict; `watch_step` turns activity
+# into a decision. Nothing here has to recognise a spinner, which is the part no
+# heuristic does reliably — aish's text-based `browse.still_loading` catches one
+# with a label and misses a bare CSS donut, which is most of them.
+#
+# Installed lazily BY the probe rather than through `add_init_script`, so it
+# self-heals across a navigation (a new document has no `window.__aish_watch`)
+# and works on a view that was already open when this shipped.
+_WATCH_JS = """() => {
+  let w = window.__aish_watch;
+  if (!w) {
+    w = window.__aish_watch = { gen: 0, at: Date.now() };
+    const bump = () => { w.gen++; w.at = Date.now(); };
+    // The same three signals `_settle` calls movement, so "quiet" means one
+    // thing in this file and not two.
+    new MutationObserver(bump).observe(document.documentElement,
+      { childList: true, subtree: true, characterData: true });
+    // And the one `_settle` cannot have, because it only ever looked once: a
+    // RESPONSE ARRIVING. This is the edge a spinner turns off on, and it is the
+    // only signal for a lazily loaded image, which changes an existing `src`
+    // rather than adding any node at all — the scroll half of the same bug.
+    try {
+      new PerformanceObserver(bump).observe({ type: 'resource', buffered: false });
+    } catch (e) { /* an engine without it simply watches the DOM alone */ }
+  }
+  return { gen: w.gen, quiet: Date.now() - w.at,
+           ready: document.readyState === 'complete' };
+}"""
+
+# The bounds. A page that never goes quiet must cost a KNOWN amount.
+WATCH_POLL_MS = 350       # how often to ask; the ask is ~5 ms of work
+WATCH_QUIET_MS = 350      # the same stillness `_settle` calls settled
+WATCH_MIN_GAP_MS = 1_000  # never capture faster than this
+WATCH_MAX_MS = 15_000     # a load slower than this is not an interaction any more
+# How long a page must be CONTINUOUSLY still before the watcher believes nothing
+# else is coming. Letting go the moment a page is quiet was the first version of
+# this and it reintroduced the exact bug: a spinner's contents landed three
+# seconds after the frame, by which time the watcher had already quit at its
+# first quiet poll. Verified against real Chrome — the whole premise here is
+# that arrival is LATE, so stillness now says nothing about stillness later.
+# Every arrival resets it, so a page that loads in stages is followed to the
+# ceiling; a page that is genuinely done costs a dozen probes and no bytes.
+WATCH_SETTLED_MS = 5_000
+# What bounds an animated page (#223): a carousel or a ticker mutates forever, so
+# the cap — on CAPTURES, not on sends, or identical bytes would loop for free —
+# is the difference between a few extra frames and an open-ended stream.
+WATCH_MAX_CAPTURES = 3
+
+
+def watch_step(
+    *,
+    moved: bool,
+    quiet_ms: float,
+    ready: bool,
+    elapsed_ms: float,
+    since_capture_ms: float,
+    captured: int,
+    unknown: bool = False,
+) -> str:
+    """Should the watcher capture again, keep waiting, or let go?
+
+    `"wait"`, `"capture"`, `"last"` (capture, then stop) or `"stop"`. Pure, so
+    the whole policy is testable with no browser and no clock — which matters
+    more here than usual, because every case it decides is a case that only
+    shows up on a real site at a real speed.
+
+    `moved` is relative to the frame the owner is LOOKING AT, not to the last
+    poll: that is the only comparison that answers "is the picture on their
+    screen still true?", and it is why a frame carries the generation it was
+    captured at."""
+    if captured >= WATCH_MAX_CAPTURES:
+        return "stop"
+    if elapsed_ms >= WATCH_MAX_MS:
+        # Out of time. One last look if the page is still moving, so what stays
+        # on screen is the freshest thing there was.
+        if (moved or unknown) and since_capture_ms >= WATCH_MIN_GAP_MS:
+            return "last"
+        return "stop"
+    if unknown:
+        # The page would not answer — mid-navigation, or an error document with
+        # no scripting. "Cannot tell" must never be read as "nothing happened",
+        # so fall back to what the code did before there was a probe: capture.
+        return "capture" if since_capture_ms >= WATCH_MIN_GAP_MS else "wait"
+    if moved:
+        if since_capture_ms < WATCH_MIN_GAP_MS:
+            return "wait"
+        # Capture once it holds still, so the frame is not caught mid-paint.
+        return "capture" if quiet_ms >= WATCH_QUIET_MS else "wait"
+    # Nothing has changed since the picture they are looking at. Letting go asks
+    # a HARDER question than "is it quiet?" — see WATCH_SETTLED_MS.
+    return "stop" if ready and quiet_ms >= WATCH_SETTLED_MS else "wait"
+
 
 async def _settle(page: Any) -> None:
     """Wait until the page stops changing, or SETTLE_MAX_MS, whichever first.
@@ -712,6 +821,19 @@ async def _settle(page: Any) -> None:
         )
     except Exception:  # noqa: BLE001 — bounded: an unsettleable page is still shown
         pass
+
+
+async def _activity(page: Any) -> dict | None:
+    """Read the page's activity counters, installing them if they are not there.
+
+    None means the page would not answer — mid-navigation, a document with no
+    scripting, a view being torn down. That is *cannot tell*, and it is never to
+    be read as *nothing happened*: see `watch_step`."""
+    try:
+        state = await page.evaluate(_WATCH_JS)
+    except Exception:  # noqa: BLE001 — a page that will not answer is not an error
+        return None
+    return state if isinstance(state, dict) else None
 
 
 async def _body_text(page: Any) -> str:
@@ -1249,6 +1371,18 @@ class _Owner:
         await self._close()
 
 
+def _no_browser_yet() -> bool:
+    """Is there no browser thread at all?
+
+    `_submit` STARTS one, which is right for a read and wrong for a watcher: a
+    poll that launches the thing it is watching would mean the view's own
+    housekeeping could bring Chrome up on a machine nobody asked it to. The
+    honest answer to "what is the page doing" when there is no page is nothing.
+    """
+    with _OWNER_LOCK:
+        return _OWNER is None or not _OWNER.is_alive()
+
+
 def _submit(job: Callable[[_Owner], Any], timeout: float) -> Any:
     """Run `job` (an async callable taking the owner) on the browser loop and
     wait for it. Callers block; the WORK overlaps."""
@@ -1684,6 +1818,11 @@ class Frame:
     focus: dict | None = None  # the field the page has focused, if any
     nav: int = 0     # documents loaded so far; a change means "reset the zoom"
     signin: str = ""  # a host a password was just submitted to
+    # The page's activity generation AT CAPTURE, so the watcher can ask "has
+    # anything happened since this picture?" rather than "since I last looked".
+    # Paired with `nav` because a navigation resets the counter to zero, which
+    # is a change that would otherwise read as no change at all.
+    gen: int = -1
 
 
 async def _frame(
@@ -1706,6 +1845,11 @@ async def _frame(
     else:
         await page.wait_for_timeout(FIRST_FRAME_MS)
     size = page.viewport_size or {"width": VIEW_WIDTH, "height": VIEW_HEIGHT}
+    # BEFORE the screenshot, deliberately. A mutation landing between the two is
+    # then counted as "not in the picture", which costs a redundant capture that
+    # the byte-compare throws away; reading it after would count that mutation as
+    # already shown and lose the frame. Err toward the wasted compare.
+    gen = await _activity(page)
     frame = Frame(
         jpeg=await page.screenshot(type="jpeg", quality=VIEW_JPEG_QUALITY),
         url=page.url or "",
@@ -1714,6 +1858,7 @@ async def _frame(
         height=size["height"],
         focus=await _focus_info(page, click),
         nav=owner.navigations,
+        gen=-1 if gen is None else int(gen.get("gen", -1)),
     )
     # Recorded per NAVIGATION, not per frame: a frame is sent for every tap,
     # scroll and keystroke, and rewriting the file on each of those would spend
@@ -1847,11 +1992,47 @@ async def _open_view(
     return frame
 
 
+def view_activity(timeout: float = 10.0) -> dict | None:
+    """How active the open view is RIGHT NOW — cheap enough to poll.
+
+    A few milliseconds and not one byte over the wire, which is the whole point:
+    it lets the server ask often and capture rarely. Carries `nav` so the caller
+    can tell a reset counter (a navigation) from a still one.
+
+    None when there is no view or the page will not answer."""
+
+    if _no_browser_yet():
+        return None
+
+    async def job(owner: _Owner) -> dict | None:
+        page = owner.view
+        if page is None:
+            return None
+        state = await _activity(page)
+        if state is None:
+            return None
+        state["nav"] = owner.navigations
+        owner.view_touched = time.monotonic()
+        return state
+
+    try:
+        return _submit(job, timeout)
+    except Exception:  # noqa: BLE001 — a probe that fails is a probe that cannot tell
+        return None
+
+
 def view_settled_frame(timeout: float = 30.0) -> Frame | None:
     """Capture again once the page has gone quiet, or None if there is no view.
 
-    The FOLLOW-UP to a fast frame. Its job is to be right rather than prompt;
-    the caller only forwards it if it actually differs from what was shown."""
+    The WATCHER's capture. Its job is to be right rather than prompt; the caller
+    only forwards it if it actually differs from what was shown. It still
+    settles even though the watcher asks for it only once the probe has said the
+    page is quiet, because the probe cannot answer DURING a navigation — and
+    that is exactly when an unsettled capture would return a white rectangle and
+    present it as the page."""
+
+    if _no_browser_yet():
+        return None
 
     async def job(owner: _Owner) -> Frame | None:
         if owner.view is None:

@@ -1356,6 +1356,172 @@ class TestFramesWaitForThePageToSettle:
         assert source.count("except") >= 2   # every wait degrades, none raises
 
 
+class TestTheWatcherKeepsLookingAfterTheFirstCorrection:
+    """One correction fixed the common case and missed the two that cost the
+    owner most: a SPINNER, whose DOM is perfectly still while the page is
+    plainly unfinished, and a SCROLL, whose lazily loaded images arrived with no
+    correction scheduled at all. Both left him tapping the page to force a
+    frame. The policy is pure so every one of these cases — each of which only
+    shows up on a real site at a real speed — is decidable with no browser."""
+
+    def _step(self, **over):
+        args = dict(
+            moved=False, quiet_ms=9_999, ready=True, elapsed_ms=1_000,
+            since_capture_ms=9_999, captured=0,
+        )
+        args.update(over)
+        return browser.watch_step(**args)
+
+    def test_a_finished_page_is_let_go_of(self):
+        """Nothing moved, the page is complete and still: stop looking. This is
+        the ordinary case and it must cost ONE probe, not a capture — which is
+        the inversion of #223, where every interaction paid for a second full
+        capture and then threw it away when the bytes matched."""
+        assert self._step() == "stop"
+
+    def test_a_spinner_is_not_mistaken_for_a_finished_page(self):
+        """The case the settle test cannot see. `ready` is true and the DOM has
+        been still for a second — the page is a CSS donut going round — so the
+        old predicate called this done. It is only let go of once nothing has
+        CHANGED since the frame on screen; here something has."""
+        assert self._step(moved=True, quiet_ms=9_999) == "capture"
+
+    def test_a_page_still_being_written_into_is_waited_for(self):
+        """Moved, but not yet still: capturing now would photograph a half-drawn
+        page and spend the capture budget doing it."""
+        assert self._step(moved=True, quiet_ms=10) == "wait"
+
+    def test_an_unfinished_page_is_not_let_go_of_while_it_is_quiet(self):
+        """A skeleton pauses between arriving and being filled in. Stillness
+        alone is not done — `readyState` has to agree, or the watcher would quit
+        in the gap that the whole feature exists to cover."""
+        assert self._step(ready=False) == "wait"
+
+    def test_a_momentarily_quiet_page_is_not_taken_for_a_finished_one(self):
+        """The bug the first version of this shipped with, caught against real
+        Chrome. Letting go the instant a page went still meant the watcher quit
+        ~2.6s after a spinner appeared and the contents landed at 3s — the exact
+        failure it was built to fix. Stillness NOW says nothing about stillness
+        later, because the whole premise here is that arrival is late."""
+        assert self._step(quiet_ms=400) == "wait"
+        assert self._step(quiet_ms=browser.WATCH_SETTLED_MS) == "stop"
+        assert browser.WATCH_SETTLED_MS > browser.WATCH_QUIET_MS
+
+    def test_captures_are_rate_limited(self):
+        """A page can change continuously; the owner's phone should not receive
+        continuously. Movement inside the gap waits rather than capturing."""
+        assert self._step(moved=True, since_capture_ms=50) == "wait"
+
+    def test_an_animated_page_costs_a_bounded_number_of_frames(self):
+        """What answers #223. A carousel never stops moving, so the cap is what
+        stands between a few extra frames and an open-ended stream — and it caps
+        CAPTURES, not sends, or identical bytes would loop for free."""
+        assert self._step(moved=True, captured=browser.WATCH_MAX_CAPTURES) == "stop"
+
+    def test_the_watch_ends_even_if_the_page_never_does(self):
+        """A ticker is not an interaction. Past the ceiling the watcher takes one
+        last look, so the freshest picture is what stays on screen, and lets go."""
+        assert self._step(moved=True, elapsed_ms=browser.WATCH_MAX_MS) == "last"
+        assert self._step(moved=False, elapsed_ms=browser.WATCH_MAX_MS) == "stop"
+
+    def test_a_page_that_will_not_answer_is_captured_rather_than_assumed_done(self):
+        """"Cannot tell" must never be read as "nothing happened". A page
+        mid-navigation cannot run the probe, and that is exactly the moment a
+        frame is most likely to be wrong — so it falls back to what the code did
+        before there was a probe, and captures."""
+        assert self._step(unknown=True, moved=False) == "capture"
+        assert self._step(unknown=True, since_capture_ms=50) == "wait"
+
+    def test_the_probe_watches_the_network_as_well_as_the_dom(self):
+        """A lazily loaded image changes an existing `src` and adds no node at
+        all, so a DOM-only watcher is blind to the entire scroll half of this
+        bug. A completed response is the signal that catches it — and the same
+        one that fires when a spinner's contents arrive."""
+        assert "PerformanceObserver" in browser._WATCH_JS
+        assert "MutationObserver" in browser._WATCH_JS
+
+    def test_the_probe_reinstalls_itself_after_a_navigation(self):
+        """It is installed by the probe rather than by `add_init_script`, so a
+        new document — which has no `window.__aish_watch` — gets counters again
+        instead of silently reporting a page that never changes."""
+        assert "let w = window.__aish_watch;" in browser._WATCH_JS
+        assert "if (!w)" in browser._WATCH_JS
+
+    def test_a_frame_carries_the_generation_it_was_captured_at(self):
+        """"Has anything happened since the picture they are LOOKING AT?" is the
+        only comparison that answers whether the screen is still true. Comparing
+        against the last poll instead would absorb whatever arrived between the
+        capture and the first probe — which is the narrow window this whole
+        feature is about."""
+        import asyncio
+
+        class Page:
+            url = "https://x.pl/"
+            viewport_size = {"width": 1280, "height": 2134}
+            main_frame = None
+            frames = ()
+
+            async def evaluate(self, js):
+                if "__aish_watch" in js:
+                    return {"gen": 41, "quiet": 800, "ready": True}
+                return None
+
+            async def screenshot(self, **k):
+                return b"\xff\xd8"
+
+            async def title(self):
+                return "T"
+
+            async def wait_for_timeout(self, ms):
+                pass
+
+        owner = browser._Owner()
+        owner.view = Page()
+        owner.navigations = 2
+        frame = asyncio.new_event_loop().run_until_complete(
+            browser._frame(owner, settle=False)
+        )
+        assert (frame.nav, frame.gen) == (2, 41)
+
+    def test_a_page_that_will_not_run_the_probe_still_yields_a_frame(self):
+        """The generation is a convenience for the watcher, never a condition of
+        the picture. A page with no scripting must still be shown."""
+        import asyncio
+
+        class Mute:
+            url = "https://x.pl/"
+            viewport_size = {"width": 1280, "height": 2134}
+            main_frame = None
+            frames = ()
+
+            async def evaluate(self, js):
+                raise RuntimeError("Execution context was destroyed")
+
+            async def screenshot(self, **k):
+                return b"\xff\xd8"
+
+            async def title(self):
+                return "T"
+
+            async def wait_for_timeout(self, ms):
+                pass
+
+        owner = browser._Owner()
+        owner.view = Mute()
+        frame = asyncio.new_event_loop().run_until_complete(
+            browser._frame(owner, settle=False)
+        )
+        assert frame.jpeg == b"\xff\xd8" and frame.gen == -1
+
+    def test_watching_never_starts_a_browser(self):
+        """A poll that launched the thing it is polling would bring Chrome up on
+        a machine nobody asked. With no browser thread there is no page, and the
+        honest answer about what it is doing is nothing."""
+        assert browser._no_browser_yet() is True
+        assert browser.view_activity() is None
+        assert browser.view_settled_frame() is None
+
+
 class TestSelectsAndNativePickers:
     """Chrome draws a <select> with NATIVE UI, which `page.screenshot` cannot
     capture — so a tapped select produced a frame that looked completely inert.

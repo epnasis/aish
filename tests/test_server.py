@@ -7958,6 +7958,156 @@ class TestBrowserView:
         monkeypatch.setattr(browser_module, "view_open", view_open)
         monkeypatch.setattr(browser_module, "view_act", view_act)
         monkeypatch.setattr(browser_module, "view_close", view_close)
+        # Every interaction now leaves a watcher looking for late arrivals. The
+        # default here is a page that has finished, so these tests see exactly
+        # the one frame they are about; the watcher's own cases are below.
+        monkeypatch.setattr(
+            browser_module, "view_activity",
+            lambda: {"gen": -1, "nav": 0, "quiet": 9_999, "ready": True},
+        )
+
+    def _fast_watch(self, monkeypatch):
+        """Real policy, compressed clock. The bounds are what make the watcher
+        safe on a live site and slow in a suite; the DECISIONS are what these
+        tests are about."""
+        from aish import browser as browser_module
+
+        monkeypatch.setattr(browser_module, "WATCH_POLL_MS", 5)
+        monkeypatch.setattr(browser_module, "WATCH_MIN_GAP_MS", 0)
+
+    def test_a_page_that_finishes_after_its_frame_is_sent_again(self, app_env, monkeypatch):
+        """The SPINNER. Its DOM is perfectly still and `readyState` is complete,
+        so the settle test called it finished and the one correction was spent
+        on a picture of a spinner. The owner then had to tap the page to force
+        another frame — which is the bug this exists to end."""
+        from aish import browser as browser_module
+
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        self._fast_watch(monkeypatch)
+        monkeypatch.setattr(
+            browser_module, "view_activity",
+            lambda: {"gen": 7, "nav": 0, "quiet": 9_999, "ready": True},
+        )
+        monkeypatch.setattr(
+            browser_module, "view_settled_frame",
+            lambda: browser_module.Frame(
+                jpeg=b"\xff\xd8loaded", url="https://x.pl/after",
+                title="After", gen=7,
+            ),
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "click", "x": 5, "y": 5})
+            first = recv_until(ws, "browser_view")
+            second = recv_until(ws, "browser_view")
+        assert base64.b64decode(first["jpeg"]) == b"\xff\xd8jpeg"
+        assert base64.b64decode(second["jpeg"]) == b"\xff\xd8loaded"
+
+    def test_a_scroll_is_watched_too(self, app_env, monkeypatch):
+        """The other half of the same bug, and the one that was a plain
+        omission: the correction fired for taps and navigations and not for
+        scrolls, so lazily loaded images below the fold arrived to nobody."""
+        from aish import browser as browser_module
+
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        self._fast_watch(monkeypatch)
+        monkeypatch.setattr(
+            browser_module, "view_activity",
+            lambda: {"gen": 3, "nav": 0, "quiet": 9_999, "ready": True},
+        )
+        monkeypatch.setattr(
+            browser_module, "view_settled_frame",
+            lambda: browser_module.Frame(
+                jpeg=b"\xff\xd8images", url="https://x.pl/after", title="After", gen=3,
+            ),
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "scroll", "dy": 900})
+            recv_until(ws, "browser_view")
+            assert base64.b64decode(recv_until(ws, "browser_view")["jpeg"]) == (
+                b"\xff\xd8images"
+            )
+
+    def test_a_finished_page_is_never_captured_a_second_time(self, app_env, monkeypatch):
+        """The #223 inversion, and the reason this is cheaper than what it
+        replaces. The old correction paid for a full second capture on EVERY
+        interaction and then discarded it when the bytes matched; the probe
+        costs milliseconds and no bytes, so a static page now pays once."""
+        from aish import browser as browser_module
+
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        self._fast_watch(monkeypatch)
+        captures = []
+        monkeypatch.setattr(
+            browser_module, "view_settled_frame",
+            lambda: captures.append(1) or browser_module.Frame(jpeg=b"\xff\xd8x", url="", title=""),
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "click", "x": 5, "y": 5})
+            recv_until(ws, "browser_view")
+            # A second interaction round-trips, so every poll the first one was
+            # going to make has already happened by the time this returns.
+            ws.send_json({"type": "browser_view", "action": "click", "x": 6, "y": 6})
+            recv_until(ws, "browser_view")
+        assert captures == []
+
+    def test_acting_again_supersedes_the_watcher(self, app_env, monkeypatch):
+        """Whatever the old page was about to become, they have moved on — and a
+        frame captured for the PREVIOUS action would land on top of the new one,
+        which on a page they have just navigated away from is worse than stale.
+
+        Drives the real interleaving rather than a decision function: the
+        capture is held open until the next action has been handled, so the
+        thing under test is a watcher that is genuinely mid-flight."""
+        import threading
+        import time
+
+        from aish import browser as browser_module
+
+        gate = threading.Event()
+        capturing = threading.Event()
+
+        def view_act(action, **kwargs):
+            return browser_module.Frame(
+                jpeg=f"frame-{action}".encode(), url="https://x.pl/", title=action,
+            )
+
+        def view_settled_frame():
+            capturing.set()
+            gate.wait(5)
+            return browser_module.Frame(jpeg=b"stale", url="", title="", gen=99)
+
+        monkeypatch.setattr(browser_module, "view_act", view_act)
+        monkeypatch.setattr(browser_module, "view_settled_frame", view_settled_frame)
+        monkeypatch.setattr(
+            browser_module, "view_activity",
+            lambda: {"gen": 99, "nav": 0, "quiet": 9_999, "ready": True},
+        )
+        self._fast_watch(monkeypatch)
+        client, _ = make_client(app_env, [])
+        server = client.app.state.server
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "click", "x": 5, "y": 5})
+            first = recv_until(ws, "browser_view")
+            assert capturing.wait(5)          # the watcher is mid-capture
+            superseded = server._view_watch
+            ws.send_json({"type": "browser_view", "action": "goto", "url": "https://y.pl"})
+            second = recv_until(ws, "browser_view")
+            gate.set()                        # the held capture completes — too late
+            for _ in range(500):
+                if superseded.done():
+                    break
+                time.sleep(0.01)
+            assert superseded.cancelled(), "the superseded watcher went on watching"
+            ws.send_json({"type": "browser_view", "action": "refresh"})
+            third = recv_until(ws, "browser_view")
+        seen = [base64.b64decode(e["jpeg"]) for e in (first, second, third)]
+        assert seen == [b"frame-click", b"frame-goto", b"frame-refresh"]
 
     def test_detail_sharpens_one_rectangle_and_echoes_its_token(
         self, app_env, monkeypatch

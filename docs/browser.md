@@ -604,13 +604,40 @@ It deliberately does **not settle**. The page has not been touched; this is the 
 
 **It also ends an identity split that was never comfortable.** allegro.pl answers ANY mobile identity with 403 and zero text, so reads had to stay desktop while the view went mobile — meaning a session the owner created as a phone would later be read as a desktop, which is precisely the mismatch bot-scoring exists to catch. One identity again. `TestTheViewIsDesktopSoOneFrameCarriesMore`.
 
-## A frame arrives fast, then corrects itself once
+## A frame arrives fast, then keeps watching
 
 The owner proved this with paired screenshots: a partly-rendered page, then the finished one, with **no navigation between them** — only another frame. The picture had been wrong, not the page, and it made everything else look broken (it is also what made the passkey problem look worse than it was: the password step HAD arrived, in a frame he was never shown).
 
 A fixed `SETTLE_MS` cannot fix that, because "loaded" is a property of the page rather than a duration. `_settle` waits on three signals, cheapest first — network idle, `readyState === 'complete'`, then a DOM-quiescence window, which is the one that catches a page whose skeleton has loaded while its content is still being written in. Every wait is bounded by `SETTLE_MAX_MS`: a page that never settles — a ticker, a spinner — must still produce a frame.
 
-**But settling BEFORE showing anything was its own bug.** It made every interaction feel dead — "the impression is that I'm waiting way longer… a strange sense that there's nothing happening" — and it still missed late repaints, because a page that changed after the capture never got another one, so the owner had to tap again to see the finished page. The owner's own prescription is the design: *"it's fine to show two screenshots… needs to be just once."* So an interaction returns a quick frame (`FIRST_FRAME_MS`), and the server then captures once more when the page settles and forwards it **only if it differs**. `TestFramesWaitForThePageToSettle`.
+**But settling BEFORE showing anything was its own bug.** It made every interaction feel dead — "the impression is that I'm waiting way longer… a strange sense that there's nothing happening" — and it still missed late repaints, because a page that changed after the capture never got another one, so the owner had to tap again to see the finished page. The owner's own prescription is the design: *"it's fine to show two screenshots… needs to be just once."* So an interaction returns a quick frame (`FIRST_FRAME_MS`), and the server captures again and forwards it **only if it differs**. `TestFramesWaitForThePageToSettle`.
+
+### One correction was still one bounded question standing in for an open-ended one
+
+The owner kept having to tap the page to force a fresh frame, and the two cases where he did were both cases the single correction could not cover.
+
+**A spinner is where quiescence and doneness part company.** `_settle` asks *"has the DOM stopped changing?"* as a stand-in for *"is the page finished?"* A spinner sits perfectly still in the DOM, reports `readyState === 'complete'`, and animates in CSS — so the strongest statement a page can make that it is NOT ready reads to a quiescence test as the strongest evidence that it is. The correction was spent photographing the spinner, and nothing looked again.
+
+**A scroll got no correction at all.** The correction fired for `open, goto, click, fill, choose, back, refresh` and not for `scroll`, so a lazily loaded image below the fold arrived to nobody. It is also invisible to a DOM-only watcher even in principle: lazy loading assigns an existing `<img>` a new `src` and adds no node.
+
+Naming a spinner is a dead end — aish already has a text-based `browse.still_loading` on the model's read path, and it catches one with a label while missing a bare CSS donut, which is most of them. **So stop guessing when a page is done and keep looking, cheaply, for a bounded while.** The two halves that were fused into one expensive operation are split:
+
+| | cost | answers |
+|---|---|---|
+| the probe (`view_activity`) | ~5 ms, nothing over the wire | did anything actually happen? |
+| the capture (`view_settled_frame`) | ~200 ms, ~40 KB | the picture itself |
+
+`_WATCH_JS` is the probe: a generation counter bumped by a MutationObserver **and** by a `PerformanceObserver` on completed resources — the network half is what catches both a spinner's contents arriving and a lazily loaded image. It installs itself lazily on first read rather than through `add_init_script`, so it self-heals across a navigation and works on a view that was already open when this shipped.
+
+**The comparison is against the frame on screen, not the last poll.** A `Frame` carries the generation it was captured at, paired with `nav` because a navigation resets the counter to zero — a change that would otherwise read as no change. Comparing against the previous poll would absorb whatever arrived between the capture and the first probe, which is the exact window this feature exists for. The generation is read BEFORE the screenshot, deliberately: a mutation landing between the two then costs a redundant capture the byte-compare discards, where reading it after would count that mutation as already shown and lose the frame.
+
+`watch_step` is the whole policy and it is **pure** — `"wait"`, `"capture"`, `"last"` or `"stop"` from primitives, no browser and no clock. That matters more than usual here, because every case it decides is one that only appears on a real site at a real speed. *Cannot tell* (a page mid-navigation cannot run the probe) falls back to capturing, because it must never be read as *nothing happened*.
+
+**Letting go asks a harder question than "is it quiet?", and the first version of this got it wrong.** Stopping the moment the page went still shipped, passed its unit tests, and reintroduced the exact bug when driven against real Chrome: the watcher quit at its first quiet poll ~2.6 s after the spinner appeared, and the contents landed at 3 s. Stillness NOW says nothing about stillness later — the premise of the whole feature is that arrival is late. So the page must be complete AND continuously still for `WATCH_SETTLED_MS`, which every arrival resets, so a page loading in stages is followed to the ceiling. A finished page costs a dozen probes and no bytes. This is the case that only a real browser could have shown; the unit test that now pins it was written from the failure, not before it.
+
+**This makes #223 cheaper rather than worse.** The old correction paid for a full second capture on EVERY interaction and then threw it away when the bytes matched; a finished page now pays one capture instead of two. What bounds the animated page the issue is about is the cap — `WATCH_MAX_CAPTURES` captures, `WATCH_MIN_GAP_MS` apart, inside `WATCH_MAX_MS` — and it counts CAPTURES, not sends, or identical bytes would loop for free. A carousel costs a few extra frames, not a stream.
+
+The watcher is one task, globally, because there is one view; a new interaction **supersedes** it, since a frame captured for the previous action would land on top of the new one. `detail` is exempt — a sharpening is not an interaction, and cancelling on it would stop the watch every time he pinched a still-loading page. Polling never STARTS a browser (`_no_browser_yet`): a poll that launched the thing it polls would bring Chrome up on a machine nobody asked. `TestTheWatcherKeepsLookingAfterTheFirstCorrection`, and the server half in `TestBrowserView` — including the superseded-mid-capture interleaving, which is driven rather than asserted about.
 
 ## The sheet is full height, so it met the two edges of the screen (#226)
 
