@@ -5,12 +5,37 @@ and conftest's `no_real_browser` makes any escape from that fail loudly.
 """
 
 import asyncio
+import time
 import urllib.error
 
 import pytest
 
 from aish import browser
 from aish import web as web_module
+
+
+def _run(coro):
+    """Drive one owner-loop coroutine to completion."""
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def _resolved(value):
+    async def done(*a, **kw):
+        return value
+
+    return done()
+
+
+def _owner_on(page, *, epoch=0):
+    """An owner whose one keyless chat is already on `page`.
+
+    A browse session is a dict entry now, not a slot: every chat gets its own
+    tab (#272), and a caller with no chat shares the "" key."""
+    owner = browser._Owner()
+    session = browser._Session(page)
+    session.epoch = epoch
+    owner.browse_pages[""] = session
+    return owner
 
 
 def run_job(owner):
@@ -1874,11 +1899,9 @@ class TestTheThingApprovedIsTheThingPressed:
                 pass
 
         page = FakePage()
-        owner = type(
-            "O", (), {"view": None, "browse_page": page, "browse_epoch": 0}
-        )()
+        owner = _owner_on(page)
 
-        async def snapshot(_owner, _page, *, problem="", notice="", asked="", match=""):
+        async def snapshot(_owner, _session, *, problem="", notice="", asked="", match=""):
             snaps.append(problem or notice)
             return browse_mod.Snapshot(
                 url=page.url, title="", text="", problem=problem, notice=notice
@@ -1892,7 +1915,9 @@ class TestTheThingApprovedIsTheThingPressed:
         monkeypatch.setattr(browser, "_reachable_now", lambda t: _done(""))
         monkeypatch.setattr(browser, "_centre", lambda t: _done(None))
         monkeypatch.setattr(browser, "_dismiss_consent", lambda p: _done(None))
-        monkeypatch.setattr(browser, "_adopt_new_tab", lambda o, p, b: _done(p))
+        monkeypatch.setattr(
+            browser, "_adopt_new_tab", lambda o, k, p, b: _done(p)
+        )
 
         async def press(_page, target, *, mutating, href):
             pressed.append((target, mutating, href))
@@ -1980,9 +2005,9 @@ class TestFillingAFormAsOneAct:
                 pass
 
         page = FakePage()
-        owner = type("O", (), {"view": None, "browse_page": page, "browse_epoch": 0})()
+        owner = _owner_on(page)
 
-        async def snapshot(_owner, _page, *, problem="", notice="", asked="", match=""):
+        async def snapshot(_owner, _session, *, problem="", notice="", asked="", match=""):
             snaps["problem"] = problem
             return browse_mod.Snapshot(url="https://lot.com/", title="", text="",
                                        problem=problem)
@@ -2164,9 +2189,7 @@ class TestAPageAnotherChatTookIsNotActedOn:
         monkeypatch.setattr(browser, "_snapshot", snapshot)
 
     def _owner(self, monkeypatch, *, epoch):
-        owner = browser._Owner()
-        owner.browse_page = self._page()
-        owner.browse_epoch = epoch
+        owner = _owner_on(self._page(), epoch=epoch)
         monkeypatch.setattr(browser, "_submit", run_job(owner))
         return owner
 
@@ -2212,7 +2235,9 @@ class TestAPageAnotherChatTookIsNotActedOn:
         with pytest.raises(browser.BrowserUnavailable):
             browser.browse_act("To", "click", expect_epoch=4)
         assert looked == [], "the page was enumerated before the fence ran"
-        assert owner.browse_epoch == 9, "a refused act must not count as a document"
+        assert owner.browse_pages[""].epoch == 9, (
+            "a refused act must not count as a document"
+        )
 
     def test_a_chat_still_on_its_own_page_acts_normally(self, monkeypatch):
         """The fence must not cost the ordinary case anything — one chat
@@ -2229,3 +2254,161 @@ class TestAPageAnotherChatTookIsNotActedOn:
         self._blank(monkeypatch)
         snap = browser.browse_act("Nieznany", "click")
         assert "no controls listed" in snap.problem
+
+
+class TestAChatGetsItsOwnTab:
+    """Slice 2 of #272: the page stops being shared at all.
+
+    Slice 1 stopped a chat ACTING on another chat's page. It could not stop the
+    page being taken — `browse(url)` still navigated the one document, so the
+    loser was told to reopen and the two chats took turns. Now each chat opens
+    its own tab and neither notices the other."""
+
+    def _pages(self, monkeypatch):
+        opened = []
+
+        class Page:
+            def __init__(self):
+                self.url = ""
+                self.closed = False
+                opened.append(self)
+
+            def is_closed(self):
+                return self.closed
+
+            async def close(self):
+                self.closed = True
+
+        class Context:
+            async def new_page(self):
+                return Page()
+
+        owner = browser._Owner()
+        monkeypatch.setattr(
+            type(owner), "context", lambda self, **kw: _resolved(Context())
+        )
+        return owner, opened
+
+    def test_two_chats_get_two_pages(self, monkeypatch):
+        owner, opened = self._pages(monkeypatch)
+        a = _run(browser._session(owner, "chat-a", opening=True))
+        b = _run(browser._session(owner, "chat-b", opening=True))
+        assert a.page is not b.page
+        assert len(opened) == 2
+        assert set(owner.browse_pages) == {"chat-a", "chat-b"}
+
+    def test_a_chat_keeps_its_own_page_between_calls(self, monkeypatch):
+        owner, opened = self._pages(monkeypatch)
+        first = _run(browser._session(owner, "chat-a", opening=True))
+        again = _run(browser._session(owner, "chat-a", opening=False))
+        assert again is first
+        assert len(opened) == 1
+
+    def test_each_chat_counts_its_own_documents(self, monkeypatch):
+        """The epoch is per session now. Shared, every other chat's act would
+        look to this one like the page had changed under it — the slice 1
+        fence would fire constantly and correctly-refuse nothing."""
+        owner, _ = self._pages(monkeypatch)
+        a = _run(browser._session(owner, "chat-a", opening=True))
+        b = _run(browser._session(owner, "chat-b", opening=True))
+        a.epoch += 5
+        assert b.epoch == 0
+
+    def test_a_keyless_caller_shares_one_tab(self, monkeypatch):
+        """The CLI and verify_browse.py have no chat. They get the single
+        session this used to be for everybody, not a tab per call."""
+        owner, opened = self._pages(monkeypatch)
+        _run(browser._session(owner, "", opening=True))
+        _run(browser._session(owner, "", opening=False))
+        assert len(opened) == 1
+
+    def test_a_dead_page_is_reopened_for_the_same_chat(self, monkeypatch):
+        owner, opened = self._pages(monkeypatch)
+        first = _run(browser._session(owner, "chat-a", opening=True))
+        first.page.closed = True
+        again = _run(browser._session(owner, "chat-a", opening=True))
+        assert again is not first
+        assert len(opened) == 2
+
+    def test_a_dead_page_is_not_silently_reopened_for_an_act(self, monkeypatch):
+        """An index from the old document means nothing on a fresh one."""
+        owner, _ = self._pages(monkeypatch)
+        session = _run(browser._session(owner, "chat-a", opening=True))
+        session.page.closed = True
+        with pytest.raises(browser.BrowserUnavailable, match="nothing is open"):
+            _run(browser._session(owner, "chat-a", opening=False))
+
+    def test_the_tab_count_is_bounded(self, monkeypatch):
+        """A tab per chat is the point; a tab per chat the owner ever opened is
+        not. This box runs a HA VM and Colima under a 16 GB roof."""
+        owner, opened = self._pages(monkeypatch)
+        for i in range(browser.MAX_BROWSE_PAGES + 3):
+            _run(browser._session(owner, f"chat-{i}", opening=True))
+        assert len(owner.browse_pages) == browser.MAX_BROWSE_PAGES
+        assert sum(p.closed for p in opened) == 3
+
+    def test_the_least_recently_used_chat_is_the_one_evicted(self, monkeypatch):
+        owner, _ = self._pages(monkeypatch)
+        for i in range(browser.MAX_BROWSE_PAGES):
+            _run(browser._session(owner, f"chat-{i}", opening=True))
+        owner.browse_pages["chat-0"].touched = time.monotonic() - 1
+        for session in owner.browse_pages.values():
+            session.touched = max(session.touched, time.monotonic())
+        owner.browse_pages["chat-0"].touched = time.monotonic() - 60
+        _run(browser._session(owner, "newcomer", opening=True))
+        assert "chat-0" not in owner.browse_pages
+        assert "newcomer" in owner.browse_pages
+
+    def test_an_evicted_chat_is_told_to_reopen(self, monkeypatch):
+        owner, _ = self._pages(monkeypatch)
+        _run(browser._session(owner, "loser", opening=True))
+        owner.browse_pages["loser"].touched = time.monotonic() - 60
+        for i in range(browser.MAX_BROWSE_PAGES):
+            _run(browser._session(owner, f"chat-{i}", opening=True))
+        with pytest.raises(browser.BrowserUnavailable, match="nothing is open"):
+            _run(browser._session(owner, "loser", opening=False))
+
+    def test_closing_one_chat_leaves_the_others_alone(self, monkeypatch):
+        owner, _ = self._pages(monkeypatch)
+        a = _run(browser._session(owner, "chat-a", opening=True))
+        b = _run(browser._session(owner, "chat-b", opening=True))
+        _run(browser._drop(owner, "chat-a"))
+        assert a.page.closed is True
+        assert b.page.closed is False
+        assert set(owner.browse_pages) == {"chat-b"}
+
+    def test_a_download_goes_to_the_chat_whose_page_took_it(self, monkeypatch):
+        """One listener on the CONTEXT, several chats. A snapshot used to drain
+        everything that was not a read's page, which with two tabs open would
+        have handed one chat's invoice to whichever snapshotted next."""
+        owner, _ = self._pages(monkeypatch)
+        a = _run(browser._session(owner, "chat-a", opening=True))
+        b = _run(browser._session(owner, "chat-b", opening=True))
+        owner.downloads = [(a.page, "faktura-a"), (b.page, "faktura-b")]
+        assert owner.take_downloads(browse_page=a.page) == ["faktura-a"]
+        assert owner.take_downloads(browse_page=b.page) == ["faktura-b"]
+
+    def test_an_ephemeral_popup_still_counts_for_the_chat_that_opened_it(
+        self, monkeypatch
+    ):
+        """The target=_blank download tab Chrome closes the instant the
+        transfer starts belongs to no chat and no read (#246). It must still
+        arrive — just not in a stranger's chat."""
+        owner, _ = self._pages(monkeypatch)
+        a = _run(browser._session(owner, "chat-a", opening=True))
+        popup = object()
+        owner.downloads = [(popup, "faktura")]
+        assert owner.take_downloads(browse_page=a.page) == ["faktura"]
+
+    def test_the_browser_is_held_while_any_chat_is_mid_flow(self, monkeypatch):
+        owner, _ = self._pages(monkeypatch)
+        _run(browser._session(owner, "reading", opening=True))
+        _run(browser._session(owner, "idle", opening=True))
+        owner.browse_pages["idle"].touched = (
+            time.monotonic() - browser.BROWSE_MAX_IDLE - 1
+        )
+        assert owner.held() is True, "one live chat holds the browser"
+        owner.browse_pages["reading"].touched = (
+            time.monotonic() - browser.BROWSE_MAX_IDLE - 1
+        )
+        assert owner.held() is False, "every chat idle collects it"

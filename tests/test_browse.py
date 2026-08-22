@@ -9,6 +9,7 @@ verified against real Chrome by `scripts/verify_browse.py`.
 import os
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -490,8 +491,10 @@ class TestTheSessionOutlivesTheOwnerReading:
 
     def owner(self, *, page=None, touched=0.0):
         owner = browser._Owner()
-        owner.browse_page = page
-        owner.browse_touched = touched
+        if page is not None:
+            session = browser._Session(page)
+            session.touched = touched
+            owner.browse_pages[""] = session
         return owner
 
     def open_page(self, closed=False):
@@ -522,14 +525,23 @@ class TestTheSessionOutlivesTheOwnerReading:
         assert owner.held() is True
 
     def test_a_reaped_session_stops_reading_as_open(self):
-        """`browse_is_open` answers from a module-level snapshot that used to
-        survive the reaper, so it said yes for a page that no longer existed."""
+        """A module-level snapshot used to survive the reaper, so aish said a
+        session was open for a page that no longer existed (#248). There is no
+        such global any more (#272) — the reaper drops every chat's page, and
+        the next act is told to reopen rather than handed a dead one."""
         import asyncio
 
-        browser._LAST_SNAPSHOT = snapshot()
-        assert browser.browse_is_open() is True
-        asyncio.run(browser._Owner()._close())
-        assert browser.browse_is_open() is False
+        owner = self.owner(page=self.open_page(), touched=time.monotonic())
+        assert owner.held() is True
+        asyncio.run(owner._close())
+        assert owner.browse_pages == {}
+        assert owner.held() is False
+
+        async def act():
+            return await browser._session(owner, "", opening=False)
+
+        with pytest.raises(browser.BrowserUnavailable, match="nothing is open"):
+            asyncio.run(act())
 
 
 class TestChoosingWithoutReadingTheList:

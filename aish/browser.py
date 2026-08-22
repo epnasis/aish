@@ -86,6 +86,16 @@ VIEW_MAX_IDLE = 15 * 60.0
 # part-way through a task, and this is a human reading a paragraph.
 BROWSE_MAX_IDLE = 10 * 60.0
 
+# How many chats may hold a browse tab at once (#272). Every chat gets its own
+# page — that is the fix — but a chat costs one tap to start, so the count
+# needs a ceiling that is not the number of chats the owner has ever opened.
+# Six is judged against the same 16 GB roof as the idle timers: enough that the
+# owner driving two or three flows in parallel never notices it, small enough
+# that a forgotten tab cannot accumulate into a second Chrome's worth of
+# memory. Over the line, the least recently touched page is closed and its chat
+# is told `NOTHING_OPEN` — the answer the reaper has always given.
+MAX_BROWSE_PAGES = 6
+
 # Off the visible desktop. The window is REAL — that is the whole reason this
 # works where headless does not — it simply is not parked where the owner is
 # looking. A login window is launched on-screen instead (`_LOGIN_ARGS`).
@@ -963,6 +973,29 @@ async def _dismiss_consent(page: Any) -> None:
             continue
 
 
+class _Session:
+    """ONE CHAT's browse page, and what is true about it.
+
+    `epoch` counts documents THIS session has driven — it is what a chat
+    carries between calls so an act cannot land on a page that changed under
+    it (#272). Per-session rather than per-owner now that every chat has its
+    own page: a counter shared across chats would make every other chat's act
+    look like a page change to this one."""
+
+    def __init__(self, page: Any) -> None:
+        self.page = page
+        self.epoch = 0
+        self.touched = time.monotonic()
+
+    def live(self, now: float) -> bool:
+        if now - self.touched > BROWSE_MAX_IDLE:
+            return False
+        try:
+            return not self.page.is_closed()
+        except Exception:  # noqa: BLE001 — a page that cannot answer is gone
+            return False
+
+
 class _Owner:
     """The one thread that touches Playwright — and now an event LOOP, not a
     job queue.
@@ -1014,14 +1047,21 @@ class _Owner:
         self.pending_signin = ""   # host a password was submitted to
         self.pending_nav = -1      # the navigation count when that happened
         self.last_url = ""         # where the view was, so it can be reopened
-        # The page the MODEL is driving (#237). A second page on the same
-        # context, never the view's: the view is the owner's hands at a phone
-        # viewport, and the two must not fight over one page. Held on the owner
-        # because a browse session is exactly the thing that has to outlive a
-        # single job — click, read, click again, all on the same document.
-        self.browse_page: Any = None
-        self.browse_epoch = 0
-        self.browse_touched = 0.0
+        # The pages the MODEL is driving (#237, #272), ONE PER CHAT. Each is a
+        # page on the same context, never the view's: the view is the owner's
+        # hands at a phone viewport, and the two must not fight over one page.
+        # Held on the owner because a browse session is exactly the thing that
+        # has to outlive a single job — click, read, click again, all on the
+        # same document.
+        #
+        # Keyed by chat, and that is the whole of #272's second half. One slot
+        # meant a second chat's `browse(url)` did not open its own page, it
+        # NAVIGATED the page the first chat was standing on — measured on
+        # 2026-08-22, where a chat searching for flights spent 225 seconds
+        # typing into another chat's IMDb ratings page. A tab costs memory; a
+        # chat silently driving another chat's session costs the owner's
+        # account.
+        self.browse_pages: dict[str, _Session] = {}
         # Downloads that arrived, as (page, download). Stashed by a SYNC event
         # handler and saved afterwards inside the job: registering an async
         # handler would need its own task, and wrapping every click in
@@ -1043,18 +1083,31 @@ class _Owner:
         """Record what this page downloads. Registered for EVERY page."""
         page.on("download", lambda download: self.downloads.append((page, download)))
 
-    def take_downloads(self, *, read_page: Any = None) -> list[Any]:
+    def take_downloads(
+        self, *, read_page: Any = None, browse_page: Any = None
+    ) -> list[Any]:
         """Drain the downloads belonging to one caller.
 
-        A read takes its own page's; the browse session takes everything that is
-        not some read's page, which is what makes an ephemeral popup count."""
+        A read takes its own page's. A browse session takes its own page's plus
+        anything belonging to no read and to no OTHER chat — which is what
+        keeps the ephemeral popup counting (the `target=_blank` download tab
+        Chrome closes the instant the transfer starts) without handing it to
+        whichever chat happened to snapshot next."""
+        others = {
+            session.page
+            for session in self.browse_pages.values()
+            if session.page is not browse_page
+        }
         keep: list[tuple[Any, Any]] = []
         mine: list[Any] = []
         for page, download in self.downloads:
-            if page is read_page or (read_page is None and page not in self.read_pages):
-                mine.append(download)
+            if read_page is not None:
+                claim = page is read_page
             else:
-                keep.append((page, download))
+                claim = page is browse_page or (
+                    page not in self.read_pages and page not in others
+                )
+            (mine if claim else keep).append(download if claim else (page, download))
         self.downloads = keep
         return mine
 
@@ -1092,13 +1145,9 @@ class _Owner:
         now = time.monotonic()
         if self.view is not None and now - self.view_touched <= VIEW_MAX_IDLE:
             return True
-        page = self.browse_page
-        if page is not None and now - self.browse_touched <= BROWSE_MAX_IDLE:
-            try:
-                return not page.is_closed()
-            except Exception:  # noqa: BLE001 — a page that cannot answer is gone
-                return False
-        return False
+        return any(
+            session.live(now) for session in list(self.browse_pages.values())
+        )
 
     async def _open(
         self,
@@ -1182,12 +1231,10 @@ class _Owner:
             return self._cold
 
     async def _close(self) -> None:
-        global _LAST_SNAPSHOT
         self.view = None  # a closed context has no page left to drive
-        self.browse_page = None
-        # The snapshot is what `browse_is_open` answers from, and a page that no
-        # longer exists must not read as an open session (#248).
-        _LAST_SNAPSHOT = None
+        # Every chat's page dies with the context. Each will be told
+        # NOTHING_OPEN and can reopen — see `_session`.
+        self.browse_pages = {}
         for name in ("_context", "_cold"):
             context = getattr(self, name)
             if context is None:
@@ -2023,11 +2070,11 @@ def view_act(action: str, **kwargs: Any) -> Frame:
 
 # --------------------------------------------------- the model's own session
 
-# The last snapshot handed to the model, module-level so the APPROVAL GATE can
-# name the control before it runs — "click 'Zapłać' on eon.pl" is the review the
-# owner needs, and "click element 7" is not. Written on the owner thread, read
-# from the agent's; a stale read costs a less specific card, never a wrong act.
-_LAST_SNAPSHOT: browse_mod.Snapshot | None = None
+# There is no module-level "current snapshot" here, and there must not be one
+# again. It existed so the approval gate could name the control before the act
+# ran — but a global is one page for every chat, and that is precisely how a
+# chat about flights came to draw the card `drive www.imdb.com … AS YOU`
+# (#272). The picture belongs to the chat: `web.BrowseView`, held by the Agent.
 
 # aish types the owner's credentials NOWHERE, and a model-driven session is the
 # last place that could start. A page asking for one is handed back to him.
@@ -2089,9 +2136,11 @@ async def _settled_text(page: Any, *, tries: int = 3) -> str:
     return text
 
 
-async def _save_downloads(owner: _Owner, *, read_page: Any = None) -> list[str]:
+async def _save_downloads(
+    owner: _Owner, *, read_page: Any = None, browse_page: Any = None
+) -> list[str]:
     """Write whatever this caller downloaded, and say where it went."""
-    pending = owner.take_downloads(read_page=read_page)
+    pending = owner.take_downloads(read_page=read_page, browse_page=browse_page)
     if not pending:
         return []
     directory = downloads_dir()
@@ -2187,7 +2236,7 @@ async def _find(page: Any, n: int) -> tuple[Any, bool]:
 
 async def _snapshot(
     owner: _Owner,
-    page: Any,
+    session: _Session,
     *,
     problem: str = "",
     notice: str = "",
@@ -2195,7 +2244,7 @@ async def _snapshot(
     match: str = "",
 ) -> browse_mod.Snapshot:
     """The page as the model receives it: what it says, and what it can press."""
-    global _LAST_SNAPSHOT
+    page = session.page
     text = await _without_option_floods(page, await _settled_text(page))
     raw, matched, unreached, matching = await _enumerate(page, match)
     controls = browse_mod.controls_from(raw)
@@ -2211,39 +2260,80 @@ async def _snapshot(
         narrowed=match or "",
         matching=matching,
         unreachable=unreached,
-        epoch=owner.browse_epoch,
+        epoch=session.epoch,
         problem=problem,
         notice=notice,
-        downloads=await _save_downloads(owner),
+        downloads=await _save_downloads(owner, browse_page=page),
         asked=asked if browse_mod.landed_elsewhere(asked, str(page.url or "")) else "",
     )
-    _LAST_SNAPSHOT = snapshot
-    owner.browse_touched = time.monotonic()
+    session.touched = time.monotonic()
     return snapshot
 
 
-async def _browse_page(owner: _Owner, *, opening: bool) -> Any:
+async def _session(owner: _Owner, key: str, *, opening: bool) -> _Session:
+    """THIS CHAT's browse session, opening one if it may.
+
+    The key is the chat. A chat that has none — the CLI, `verify_browse.py` —
+    passes `""` and shares one session with every other keyless caller, which
+    is exactly the single-session behaviour this used to have for everybody."""
     if owner.view is not None:
         # The owner's hands outrank the model's. Reusing his page would steal the
         # login he is mid-way through, and his viewport would silently change
         # what the model reads (the same reasoning as `read`).
         raise BrowserUnavailable(DRIVEN_BY_HAND)
-    page = owner.browse_page
-    if page is not None and not page.is_closed():
-        return page
+    session = owner.browse_pages.get(key)
+    if session is not None:
+        try:
+            closed = session.page.is_closed()
+        except Exception:  # noqa: BLE001 — a page that cannot answer is gone
+            closed = True
+        if not closed:
+            return session
+        del owner.browse_pages[key]
     if not opening:
         # The idle reaper can collect the context between turns. Nothing about
         # that is the model's fault or the owner's business — but an index from
         # the old document means nothing on a fresh one, so this is a refusal
         # with instructions rather than a silent reopen at a guessed URL.
         raise BrowserUnavailable(NOTHING_OPEN)
+    await _evict_stale(owner)
     context = await owner.context()
-    page = await context.new_page()
-    owner.browse_page = page
-    return page
+    session = _Session(await context.new_page())
+    owner.browse_pages[key] = session
+    return session
 
 
-async def _adopt_new_tab(owner: _Owner, page: Any, before: list[Any]) -> Any:
+async def _evict_stale(owner: _Owner) -> None:
+    """Keep the number of open tabs bounded before adding another.
+
+    A tab per chat is the point, but a chat is cheap to start and this box runs
+    a Home Assistant VM and Colima under a 16 GB roof. Dead and idle sessions
+    go first; if every session is live, the least recently touched is closed —
+    and the chat that owned it gets `NOTHING_OPEN` on its next act, which is
+    the same answer the idle reaper has always given."""
+    now = time.monotonic()
+    for key, session in list(owner.browse_pages.items()):
+        if not session.live(now):
+            await _drop(owner, key)
+    while len(owner.browse_pages) >= MAX_BROWSE_PAGES:
+        oldest = min(owner.browse_pages, key=lambda k: owner.browse_pages[k].touched)
+        await _drop(owner, oldest)
+
+
+async def _drop(owner: _Owner, key: str) -> None:
+    """Close one chat's page and forget it. Never raises: a page that will not
+    close is still a page this session no longer owns."""
+    session = owner.browse_pages.pop(key, None)
+    if session is None:
+        return
+    with contextlib.suppress(Exception):
+        if not session.page.is_closed():
+            await session.page.close()
+
+
+async def _adopt_new_tab(
+    owner: _Owner, key: str, page: Any, before: list[Any]
+) -> Any:
     """A control that opened a new tab moves the session to it.
 
     Otherwise the model presses "Pobierz e-fakturę", the document opens beside
@@ -2260,12 +2350,14 @@ async def _adopt_new_tab(owner: _Owner, page: Any, before: list[Any]) -> Any:
         await fresh.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
     except Exception:  # noqa: BLE001 — a tab that never settles is still the tab
         pass
-    owner.browse_page = fresh
+    session = owner.browse_pages.get(key)
+    if session is not None:
+        session.page = fresh
     return fresh
 
 
 def browse_open(
-    url: str, *, topic: str = "", timeout: float = 120.0
+    url: str, *, key: str = "", topic: str = "", timeout: float = 120.0
 ) -> browse_mod.Snapshot:
     """Open `url` in the model's session and describe what is there.
 
@@ -2278,11 +2370,12 @@ def browse_open(
         url = "https://" + url
 
     async def job(owner: _Owner) -> browse_mod.Snapshot:
-        page = await _browse_page(owner, opening=True)
-        owner.browse_epoch += 1
+        session = await _session(owner, key, opening=True)
+        page = session.page
+        session.epoch += 1
         await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         await _dismiss_consent(page)
-        return await _snapshot(owner, page, asked=url, match=topic)
+        return await _snapshot(owner, session, asked=url, match=topic)
 
     return _submit(job, timeout)
 
@@ -2441,6 +2534,7 @@ def browse_act(
     topic: str = "",
     expect_download: bool = False,
     expect_epoch: int | None = None,
+    key: str = "",
     timeout: float = 120.0,
 ) -> browse_mod.Snapshot:
     """Do one thing to the control the model NAMED, and hand back the page.
@@ -2467,11 +2561,12 @@ def browse_act(
         raise BrowserUnavailable(reason)
 
     async def job(owner: _Owner) -> browse_mod.Snapshot:
-        page = await _browse_page(owner, opening=False)
+        session = await _session(owner, key, opening=False)
+        page = session.page
         # Before anything is read or pressed, and INSIDE the owner loop: the
         # gate ran in the caller's thread, and another chat can navigate this
         # page in the gap between the card and here.
-        if expect_epoch is not None and owner.browse_epoch != expect_epoch:
+        if expect_epoch is not None and session.epoch != expect_epoch:
             raise BrowserUnavailable(PAGE_TAKEN)
         # Bound once so every ending below — refusal, stuck, stale name, or the
         # act itself — describes the page the same way. An error path that
@@ -2484,10 +2579,10 @@ def browse_act(
             # again without navigating to it — a `goto` to the same URL resets
             # an SPA's state, so "let me look properly" must not be a round trip
             # through the address bar.
-            owner.browse_epoch += 1
-            return await shot(owner, page)
+            session.epoch += 1
+            return await shot(owner, session)
         if action not in ("click", "type", "choose"):
-            return await shot(owner, page, problem=f"unknown action {action!r}")
+            return await shot(owner, session, problem=f"unknown action {action!r}")
         # Narrowed the same way the listing the model read was, or the act
         # would go looking for the control on an UNNARROWED page and not find
         # the very one the narrowing existed to reach (#270). Falling back to
@@ -2497,10 +2592,10 @@ def browse_act(
         live = browse_mod.controls_from(raw)
         found = browse_mod.resolve(live, address)
         if found.control is None:
-            owner.browse_epoch += 1
+            session.epoch += 1
             return await shot(
                 owner,
-                page,
+                session,
                 problem=f"{found.problem} Here is the page as it is now.",
             )
         control = found.control
@@ -2508,10 +2603,10 @@ def browse_act(
         if control.kind == browse_mod.PASSWORD or (control.mutating and not mutating):
             # The page moved between the card and the press. Whatever the owner
             # said yes to, it was not this.
-            owner.browse_epoch += 1
+            session.epoch += 1
             return await shot(
                 owner,
-                page,
+                session,
                 problem=(
                     f"{control.address!r} is not the control that was approved "
                     "— the page changed under it and it now needs approval of "
@@ -2529,10 +2624,10 @@ def browse_act(
         if target is None:
             # The document changed under the numbering — an SPA re-render, a
             # redirect, a timed refresh. Re-describing beats guessing.
-            owner.browse_epoch += 1
+            session.epoch += 1
             return await shot(
                 owner,
-                page,
+                session,
                 problem=(
                     f"{control.address!r} is not on this page any more — it "
                     "changed since you last saw it. Here it is as it is now; "
@@ -2541,10 +2636,10 @@ def browse_act(
             )
         gone = await _reachable_now(target)
         if gone:
-            owner.browse_epoch += 1
+            session.epoch += 1
             return await shot(
                 owner,
-                page,
+                session,
                 problem=(
                     f"{control.address!r} is still on the page but cannot be "
                     f"pressed now ({gone}) — the menu or panel holding it has "
@@ -2554,7 +2649,7 @@ def browse_act(
             )
         await _centre(target)
         before = list(page.context.pages)
-        owner.browse_epoch += 1
+        session.epoch += 1
         notice = ""
         try:
             if action == "click":
@@ -2566,11 +2661,11 @@ def browse_act(
             else:
                 notice = await _choose(target, value)
         except Refused as exc:
-            return await shot(owner, page, problem=str(exc))
+            return await shot(owner, session, problem=str(exc))
         except Stuck:
             return await shot(
                 owner,
-                page,
+                session,
                 problem=(
                     f"aish could not {action} {control.address!r} — it is on "
                     "the page and would not take the action, by click, by "
@@ -2582,7 +2677,7 @@ def browse_act(
         except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
             return await shot(
                 owner,
-                page,
+                session,
                 problem=(
                     f"could not {action} {control.address!r}: "
                     f"{type(exc).__name__}"
@@ -2593,8 +2688,8 @@ def browse_act(
         except Exception:  # noqa: BLE001 — nothing navigated, which is common
             pass
         await _dismiss_consent(page)
-        page = await _adopt_new_tab(owner, page, before)
-        snapshot = await shot(owner, page, notice=notice)
+        page = await _adopt_new_tab(owner, key, page, before)
+        snapshot = await shot(owner, session, notice=notice)
         if expect_download and not snapshot.downloads:
             # Said HERE rather than at the gate, because it is only true here:
             # the press that works says nothing, and the press that produced no
@@ -2613,6 +2708,7 @@ def browse_fill(
     mutating: bool = False,
     topic: str = "",
     expect_epoch: int | None = None,
+    key: str = "",
     timeout: float = 240.0,
 ) -> browse_mod.Snapshot:
     """Fill in a form — several controls, then at most one press — as ONE act.
@@ -2640,11 +2736,12 @@ def browse_fill(
         raise BrowserUnavailable(reason)
 
     async def job(owner: _Owner) -> browse_mod.Snapshot:
-        page = await _browse_page(owner, opening=False)
+        session = await _session(owner, key, opening=False)
+        page = session.page
         # Before anything is read or pressed, and INSIDE the owner loop: the
         # gate ran in the caller's thread, and another chat can navigate this
         # page in the gap between the card and here.
-        if expect_epoch is not None and owner.browse_epoch != expect_epoch:
+        if expect_epoch is not None and session.epoch != expect_epoch:
             raise BrowserUnavailable(PAGE_TAKEN)
         ledger: list[str] = []
         last = len(steps) - 1
@@ -2661,28 +2758,28 @@ def browse_fill(
             control = found.control
             if control is None:
                 return await _stop(
-                    owner, page, ledger, index, len(steps),
+                    owner, session, ledger, index, len(steps),
                     f"{found.problem}",
                 )
             if control.kind == browse_mod.PASSWORD:
                 return await _stop(
-                    owner, page, ledger, index, len(steps),
+                    owner, session, ledger, index, len(steps),
                     "it is a password field, and aish never types passwords",
                 )
             if control.mutating and not (index == last and mutating):
                 return await _stop(
-                    owner, page, ledger, index, len(steps),
+                    owner, session, ledger, index, len(steps),
                     f"{control.address!r} needs approval of its own and this "
                     "batch was not approved for it — the page changed under it",
                 )
-            owner.browse_epoch += 1
+            session.epoch += 1
             try:
                 said = await _run_step(page, control, verb, value, live)
             except _StepFailed as exc:
-                return await _stop(owner, page, ledger, index, len(steps), str(exc))
+                return await _stop(owner, session, ledger, index, len(steps), str(exc))
             except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
                 return await _stop(
-                    owner, page, ledger, index, len(steps),
+                    owner, session, ledger, index, len(steps),
                     f"could not {verb} it ({type(exc).__name__})",
                 )
             ledger.append(f"{index + 1}. {said}")
@@ -2695,12 +2792,12 @@ def browse_fill(
                 # longer exists. The delta machinery sends the whole page on a
                 # URL change, which is the right reply to standing somewhere new.
                 return await _stop(
-                    owner, page, ledger, index + 1, len(steps),
+                    owner, session, ledger, index + 1, len(steps),
                     "the page navigated, so the rest of the batch was composed "
                     "against a page you are no longer on",
                     after=True,
                 )
-        snapshot = await _snapshot(owner, page, match=topic)
+        snapshot = await _snapshot(owner, session, match=topic)
         snapshot.ledger = ledger
         return snapshot
 
@@ -2949,7 +3046,7 @@ def _readback(controls: list, control: Any, value: str, *, kind: str = "typed") 
 
 async def _stop(
     owner: _Owner,
-    page: Any,
+    session: _Session,
     ledger: list[str],
     done: int,
     total: int,
@@ -2970,10 +3067,10 @@ async def _stop(
             f"steps {step + 1}–{total} were not attempted, and any approved "
             "press in them was NOT made"
         )
-    owner.browse_epoch += 1
+    session.epoch += 1
     snapshot = await _snapshot(
         owner,
-        page,
+        session,
         problem=(
             f"the batch stopped at step {step} of {total} — {why}. Here is the "
             "page as it is now; carry on from what the steps below report."
@@ -2983,29 +3080,14 @@ async def _stop(
     return snapshot
 
 
-def browse_close() -> None:
-    """End the model's session. The context and the profile stay."""
+def browse_close(key: str = "") -> None:
+    """End ONE CHAT's session. The context and the profile stay."""
 
     async def job(owner: _Owner) -> None:
-        global _LAST_SNAPSHOT
-        page, owner.browse_page = owner.browse_page, None
-        _LAST_SNAPSHOT = None
-        if page is not None and not page.is_closed():
-            with contextlib.suppress(Exception):
-                await page.close()
+        await _drop(owner, key)
 
     with contextlib.suppress(Exception):
         _submit(job, 30.0)
-
-
-def browse_current() -> browse_mod.Snapshot | None:
-    """The last page the model was shown — what the approval gate reads to name
-    the control it is asking about."""
-    return _LAST_SNAPSHOT
-
-
-def browse_is_open() -> bool:
-    return _LAST_SNAPSHOT is not None
 
 
 def view_close() -> list[str]:

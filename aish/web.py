@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable
 from html.parser import HTMLParser
 from typing import Any
@@ -1790,6 +1791,11 @@ class BrowseView:
     open one, not handed whatever document happens to be loaded."""
 
     def __init__(self) -> None:
+        # This chat's name for its own browser tab (#272, slice 2). The view is
+        # already the chat's identity for the PICTURE of the page, so it is the
+        # honest place to keep the identity of the page itself — one thing to
+        # pass down, and it cannot go out of step with what the gate reads.
+        self.key = uuid.uuid4().hex
         self.shown: Any = None
         self.runs = 0
         # The document this chat's `shown` belongs to, as the browser counted
@@ -1810,8 +1816,15 @@ class BrowseView:
 
 # For callers with no chat behind them — the CLI, a test, a plugin. Same
 # reasoning as `Stash`: `web` has to keep working with no agent, and a missing
-# one degrades to the old single-view behaviour rather than raising.
+# one degrades to the old single-view behaviour rather than raising. Its key is
+# "" on purpose: every keyless caller shares one tab, which is exactly the
+# single-session browser this used to be for everybody.
 _DEFAULT_VIEW = BrowseView()
+_DEFAULT_VIEW.key = ""
+
+
+def _key(view: "BrowseView | None") -> str:
+    return view.key if view is not None else ""
 
 
 def forget_shown_page() -> None:
@@ -2032,7 +2045,9 @@ def _browse(
     except BlockedURLError as exc:
         return f"ERROR: {exc} — browse only reaches public internet hosts."
     try:
-        snapshot = browser.browse_open(url, topic=topic or "")
+        snapshot = browser.browse_open(
+            url, topic=topic or "", key=_key(view)
+        )
     except browser.BrowserUnavailable as exc:
         return f"ERROR: cannot browse {url} — {exc}"
     except Exception as exc:  # noqa: BLE001 — a nav failure reports, never crashes
@@ -2096,6 +2111,7 @@ def _browse_act(
             str(target), action, text=text, value=value, submit=submit,
             href=href, mutating=mutating, topic=topic or "",
             expect_download=expect_download, expect_epoch=seen.epoch,
+            key=_key(view),
         )
     except browser.BrowserUnavailable as exc:
         return f"ERROR: {exc}"
@@ -2143,6 +2159,7 @@ def _browse_fill(
             mutating=browse_mod.batch_is_mutating(plan),
             topic=topic or "",
             expect_epoch=seen.epoch,
+            key=_key(view),
         )
     except browser.BrowserUnavailable as exc:
         return f"ERROR: {exc}"
