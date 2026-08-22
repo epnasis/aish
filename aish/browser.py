@@ -1495,7 +1495,15 @@ def _submit(job: Callable[[_Owner], Any], timeout: float) -> Any:
 #      to recent.json in cleartext, outside every scrubbing path there is.
 
 SIGNIN_FORM_JS = """
-() => {
+(expected) => {
+  // The origin is checked HERE, against the origin the credential was saved
+  // for, and in the SAME step that tags the fields. Doing it in Python before
+  // this call left a gap: the page could navigate in between, and the tags
+  // would land on whatever arrived — while the same-origin form check would
+  // compare the attacker's page to the attacker's form and pass.
+  if (location.origin !== expected) {
+    return {ok: false, why: 'the page moved to ' + location.origin};
+  }
   const vis = (el) => {
     if (!el || el.disabled) return false;
     const r = el.getBoundingClientRect();
@@ -1516,6 +1524,12 @@ SIGNIN_FORM_JS = """
   let target;
   try { target = new URL(form.action, document.baseURI).origin; }
   catch (e) { return {ok: false, why: 'the form has no readable destination'}; }
+  // Against EXPECTED, not against location.origin: comparing the live page to
+  // its own form answers "did this page send it to itself", which is the wrong
+  // question once the page may not be the one the credential belongs to.
+  if (target !== expected) {
+    return {ok: false, why: 'the form sends to ' + target};
+  }
   const TEXTY = ['text', 'email', 'tel', 'number', ''];
   const ident = [...form.querySelectorAll('input')].filter(
     (el) => TEXTY.includes((el.getAttribute('type') || '').toLowerCase()) && vis(el)
@@ -1533,6 +1547,29 @@ SIGNIN_FORM_JS = """
     ok: true, posts_to: target, page_origin: location.origin,
     identifier: !!ident, submit: !!submit,
   };
+}
+"""
+
+# Read again immediately before the press. The tag survives a SAME-DOCUMENT
+# change, so a page that rewrites `form.action` after it was checked would be
+# submitted to the new destination with the credential already typed into it.
+# This is the same fence `browse_act` keeps for an approved control: the thing
+# that was checked has to be the thing that happens.
+SIGNIN_STILL_OURS_JS = """
+(expected) => {
+  if (location.origin !== expected) return 'the page moved to ' + location.origin;
+  const secret = document.querySelector('[data-aish-signin="password"]');
+  if (!secret) return 'the password field is gone';
+  const form = secret.form;
+  if (!form) return 'the password field left its form';
+  if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') {
+    return 'the form stopped being a POST';
+  }
+  let target;
+  try { target = new URL(form.action, document.baseURI).origin; }
+  catch (e) { return 'the form has no readable destination'; }
+  if (target !== expected) return 'the form now sends to ' + target;
+  return '';
 }
 """
 
@@ -1567,28 +1604,25 @@ class SignInResult:
 
 async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) -> SignInResult:
     """Fill and submit the recorded login form on an already-open page."""
+    refused = (
+        f"aish only ever types a credential at {record.origin}, the exact origin "
+        "it was saved for"
+    )
     live = signin_mod.origin_of(page.url or "")
     if live != record.origin:
+        # A cheap early out. It is NOT the fence — the fence is inside the
+        # evaluate below, which checks and tags in one step.
         return SignInResult(
-            why=(
-                f"the sign-in page redirected to {live or 'somewhere else'}, which is "
-                f"not {record.origin} — aish only ever types a credential at the exact "
-                "origin it was saved for"
-            ),
+            why=f"the sign-in page went to {live or 'somewhere else'} — {refused}",
             url=page.url or "",
         )
     try:
-        found = await page.evaluate(SIGNIN_FORM_JS)
+        found = await page.evaluate(SIGNIN_FORM_JS, record.origin)
     except Exception as exc:  # noqa: BLE001 — a page that will not answer
         return SignInResult(why=f"could not read the sign-in form ({exc})", url=page.url)
     if not found.get("ok"):
-        return SignInResult(why=str(found.get("why", "no usable sign-in form")), url=page.url)
-    if found.get("posts_to") != found.get("page_origin"):
         return SignInResult(
-            why=(
-                f"that form sends to {found.get('posts_to')}, not to {record.origin} — "
-                "aish will not hand a credential to a third party"
-            ),
+            why=f"{found.get('why', 'no usable sign-in form')} — {refused}",
             url=page.url,
         )
     if not found.get("identifier"):
@@ -1606,6 +1640,21 @@ async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) ->
         await element.click(timeout=ACT_TIMEOUT_MS)
         await page.keyboard.press("ControlOrMeta+a")
         await page.keyboard.type(value, delay=12)
+
+    # Nothing has been SENT yet — typing commits nothing. So the last thing
+    # before the press is to ask the live page whether it is still the page
+    # that was checked. A refusal here costs an unsent form; not asking costs
+    # the credential.
+    try:
+        changed = await page.evaluate(SIGNIN_STILL_OURS_JS, record.origin)
+    except Exception as exc:  # noqa: BLE001
+        changed = f"the page stopped answering ({exc})"
+    if changed:
+        return SignInResult(
+            why=f"{changed} while the form was being filled — {refused}, and "
+            "nothing was sent",
+            url=page.url,
+        )
 
     submit = await page.query_selector("[data-aish-signin='submit']")
     if submit is not None:

