@@ -1579,8 +1579,7 @@ def _submit(job: Callable[[_Owner], Any], timeout: float) -> Any:
 #      password in the query string, and `remember_page` then writes that URL
 #      to recent.json in cleartext, outside every scrubbing path there is.
 
-SIGNIN_FORM_JS = """
-(expected) => {
+SIGNIN_FORM_JS = "(expected) => {" + browse_mod.DEEP_JS + """
   // The origin is checked HERE, against the origin the credential was saved
   // for, and in the SAME step that tags the fields. Doing it in Python before
   // this call left a gap: the page could navigate in between, and the tags
@@ -1595,7 +1594,11 @@ SIGNIN_FORM_JS = """
       checkOpacity: true, checkVisibilityCSS: true,
     }) !== false;
   };
-  const pw = [...document.querySelectorAll('input[type=password]')].filter(vis);
+  // Through shadow roots, like `_has_password_field` already is: a login form
+  // inside a web component used to read as "no password field on the page",
+  // which fails closed — aish refuses to fill a credential it could have
+  // filled — but is still a page the owner cannot sign into (#273).
+  const pw = deepAll('input[type=password]').filter(vis);
   if (pw.length === 0) return {ok: false, why: 'no password field on the page'};
   if (pw.length > 1) return {ok: false, why: 'more than one password field'};
   const secret = pw[0];
@@ -1626,7 +1629,13 @@ SIGNIN_FORM_JS = """
            !scope.querySelector('button, input[type=submit]')) {
       scope = scope.parentElement;
     }
-    scope = scope || document.body;
+    // The field's OWN root, never the document body. Inside a shadow root the
+    // walk above runs out at the root — a ShadowRoot is not an Element, so
+    // `parentElement` is null well before `document.body` — and falling back
+    // to the body is precisely the page-wide search the comment above
+    // forbids: it would tag the newsletter box as the identifier and type the
+    // owner's username into it.
+    scope = scope || secret.getRootNode();
   }
   const TEXTY = ['text', 'email', 'tel', 'number', ''];
   const ident = [...scope.querySelectorAll('input')].filter(
@@ -1660,10 +1669,14 @@ SIGNIN_FORM_JS = """
 # submitted to the new destination with the credential already typed into it.
 # This is the same fence `browse_act` keeps for an approved control: the thing
 # that was checked has to be the thing that happens.
-SIGNIN_STILL_OURS_JS = """
-(expected) => {
+SIGNIN_STILL_OURS_JS = "(expected) => {" + browse_mod.DEEP_JS + """
   if (location.origin !== expected) return 'the page moved to ' + location.origin;
-  const secret = document.querySelector('[data-aish-signin="password"]');
+  // The SAME reach as the pass that wrote this tag. A writer that can see
+  // into a shadow root and a reader that cannot is how the calendar came to
+  // lose the field it had itself tagged (#273) — here it would have been
+  // worse than useless: aish would tag the password field and then refuse to
+  // type into it, reporting that the field was gone.
+  const secret = deepOne('[data-aish-signin="password"]');
   if (!secret) return 'the password field is gone';
   const form = secret.form;
   if (form) {
@@ -1681,14 +1694,14 @@ SIGNIN_STILL_OURS_JS = """
 
 # A second factor is not a failure, and telling them apart is the difference
 # between "sign in again" and "burn the one attempt on a good password".
-SECOND_FACTOR_JS = """
-() => [...document.querySelectorAll('input')].some((el) => {
+SECOND_FACTOR_JS = "() => {" + browse_mod.DEEP_JS + """
+  return deepAll('input').some((el) => {
   const auto = (el.getAttribute('autocomplete') || '').toLowerCase();
   const mode = (el.getAttribute('inputmode') || '').toLowerCase();
   const len = parseInt(el.getAttribute('maxlength') || '0', 10);
   return auto === 'one-time-code' || (mode === 'numeric' && len > 0 && len <= 8);
-})
-"""
+  });
+}"""
 
 
 # Methods that can carry a credential in a body. A GET cannot, and blocking

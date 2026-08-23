@@ -611,6 +611,10 @@ SHADOW = """<!doctype html>
 </style></head>
 <body>
   <div id="widget"></div>
+  <!-- The newsletter box the sign-in scope must never pick: it is the only
+       text input in the DOCUMENT, so a scope that falls back to document.body
+       tags it as the identifier and types the owner's username into it. -->
+  <form id="newsletter"><input id="newsletter-email" type="email"></form>
   <div id="wall" hidden><button id="accept">Accept all</button></div>
   <script>
     // The consent wall is NOT here when the page loads. It arrives the way a
@@ -637,7 +641,12 @@ SHADOW = """<!doctype html>
         <button id="poprzedni" type="button">Previous month</button>
         <button id="nastepny" type="button">Next month</button>
       </div>
-      <button id="szukaj">Szukaj</button>`;
+      <button id="szukaj">Szukaj</button>
+      <form id="logowanie" method="post" action="/zaloguj">
+        <input id="login" type="text">
+        <input id="haslo" type="password">
+        <button id="wejdz" type="submit">Zaloguj</button>
+      </form>`;
 
     let month = 9;  // opens on September; the test asks for November
     const MONTHS = {9: 'September', 10: 'October', 11: 'November'};
@@ -721,6 +730,49 @@ def check_shadow(url: str) -> None:
     typed = browser.browse_act("Dokad", "type", text="Tam")
     assert not typed.problem, typed.problem
     print("typing into a shadow-rooted field →", named(typed, "Dokad").line())
+
+    # 4. The sign-in reader and its re-check must have the SAME reach. A writer
+    #    that sees into a shadow root and a reader that does not is how the
+    #    calendar lost the field it had itself tagged — here it would tag the
+    #    password field and then refuse to type, saying the field was gone.
+    origin = url.rstrip("/")
+
+    def on_page(job):
+        """Evaluate on the keyless chat's own page, on the owner loop."""
+        async def run(owner):
+            return await job(owner.browse_pages[""].page)
+
+        return browser._submit(run, 30.0)
+
+    found = on_page(lambda page: page.evaluate(browser.SIGNIN_FORM_JS, origin))
+    assert found.get("ok"), f"the login form inside a shadow root was not read: {found}"
+    assert found.get("identifier"), found
+    assert found.get("submit"), found
+    print("shadow-rooted login form → read, tagged:", found)
+
+    which = on_page(lambda page: page.evaluate("""() => {
+      const out = [];
+      const descend = (where) => {
+        for (const el of where.querySelectorAll('[data-aish-signin]')) {
+          out.push(el.getAttribute('data-aish-signin') + ':' + el.id);
+        }
+        for (const el of where.querySelectorAll('*')) {
+          if (el.shadowRoot) descend(el.shadowRoot);
+        }
+      };
+      descend(document);
+      return out;
+    }"""))
+    assert "identifier:login" in which, (
+        "the identifier must be the one INSIDE the component, never the "
+        f"page's newsletter box: {which}"
+    )
+    assert not any("newsletter" in tag for tag in which), which
+    print("identifier scope stayed in its own root →", which)
+
+    still = on_page(lambda page: page.evaluate(browser.SIGNIN_STILL_OURS_JS, origin))
+    assert still == "", f"the re-check lost the field the reader tagged: {still!r}"
+    print("re-check agrees with the reader → still ours")
 
 
 def check_batch(url: str) -> None:

@@ -2367,3 +2367,120 @@ class TestWhatRealPickersActuallyLookLike:
         a cell from the month aish had just left — "two elements, one number,
         silently", the defect CONTROLS_JS already records for data-aish-n."""
         assert "removeAttribute('data-aish-cell')" in browse.CALENDAR_JS
+
+
+class TestEveryPageReaderLooksThroughShadowRoots:
+    """The boundary is handled ONCE, and no new snippet may forget it (#273).
+
+    Three of the four defects that made qatarairways.com unusable were the same
+    mistake in different places: `document.querySelector`, `document
+    .activeElement` and `Node.contains` all stop at a shadow boundary, and a
+    growing share of the web puts its whole application inside one. Enumeration
+    walked shadow roots; the calendar reader, the label lookup and the focus
+    test did not.
+
+    That mixture is worse than being wrong everywhere. Consistently blind would
+    have been noticed years ago; visible-then-invisible reads as "this page has
+    no date cells" on a page whose cells aish had itself just tagged. So this
+    is a list, not a rule of thumb: a snippet either looks through boundaries
+    or is named here with the reason it need not."""
+
+    # Snippets that are document-scoped ON PURPOSE. The reason is the point —
+    # an entry with a bad reason is how this test stops meaning anything.
+    ALLOWED = {
+        "_IMAGES_JS": "reads <meta> only, and <head> is never in a shadow root",
+        "_MAIN_JS": "the page's own <main>, a budget choice about the top level",
+        "_WATCH_JS": "installs one observer on the document, not a lookup",
+        "CENTRE_JS": "scrolls the element it is given",
+        "OPTIONS_JS": "reads options off the <select> it is given",
+        "_ACTIVATION_JS": "reads the control it is given, plus location",
+        "_COVERED_JS": "walks el's own host chain — see the `chain` set",
+        "_DEEP_ACTIVE_JS": "IS the descent, for focus",
+        "NAME_JS": "closest('label') — a label is in its control's own root",
+    }
+
+    def _snippets(self):
+        from aish import browser as browser_module
+
+        found = {}
+        for module in (browse, browser_module):
+            for name in dir(module):
+                if name.endswith("_JS") and isinstance(getattr(module, name), str):
+                    found[name] = getattr(module, name)
+        return found
+
+    def test_the_inventory_is_not_empty(self):
+        """A rename that empties the sweep must fail loudly, not pass."""
+        found = self._snippets()
+        assert len(found) >= 15, sorted(found)
+        for name in ("CONTROLS_JS", "CALENDAR_JS", "FLOOD_JS", "SIGNIN_FORM_JS"):
+            assert name in found
+
+    def test_every_lookup_crosses_the_boundary_or_says_why_not(self):
+        import re
+
+        blind = {
+            # `querySelectorAll?` would mean "querySelectorAl" + optional "l"
+            # and never match the SINGULAR call — which is how the first sweep
+            # for this missed several. The guard's own probe test caught it.
+            "document.querySelector": r"document\.querySelector(All)?\(",
+            "document.getElementById": r"document\.getElementById\(",
+            "document.activeElement": r"document\.activeElement",
+            "elementFromPoint": r"document\.elements?FromPoint\(",
+            "closest()": r"\.closest\(",
+            "contains()": r"\.contains\(",
+        }
+        offenders = {}
+        for name, js in self._snippets().items():
+            if name in self.ALLOWED:
+                continue
+            # Either it descends itself, or it walks hosts by hand.
+            if "shadowRoot" in js or "getRootNode" in js:
+                continue
+            hits = [what for what, pat in blind.items() if re.search(pat, js)]
+            if hits:
+                offenders[name] = hits
+        assert not offenders, (
+            "these read the page but stop at a shadow boundary — use DEEP_JS's "
+            f"deepAll/deepOne/deepById, or name it in ALLOWED with why: {offenders}"
+        )
+
+    def test_the_allow_list_has_no_stale_entries(self):
+        """A snippet that has been deleted or fixed must leave the list, or the
+        next one to take its name inherits an exemption nobody meant to give."""
+        found = self._snippets()
+        gone = sorted(set(self.ALLOWED) - set(found))
+        assert not gone, f"named in ALLOWED but no longer exists: {gone}"
+
+    def test_the_sweep_actually_catches_one(self, monkeypatch):
+        """A guard that cannot fail is decoration. This plants exactly the
+        mistake #273 was — a lookup that stops at the boundary — and the sweep
+        has to find it."""
+        monkeypatch.setattr(
+            browse, "REGRESSION_PROBE_JS",
+            "() => document.querySelector('input[type=password]')",
+            raising=False,
+        )
+        with pytest.raises(AssertionError, match="stop at a shadow boundary"):
+            self.test_every_lookup_crosses_the_boundary_or_says_why_not()
+
+    def test_a_planted_snippet_that_descends_is_left_alone(self, monkeypatch):
+        monkeypatch.setattr(
+            browse, "REGRESSION_PROBE_JS",
+            "() => { for (const e of document.querySelectorAll('*')) "
+            "if (e.shadowRoot) {} }",
+            raising=False,
+        )
+        self.test_every_lookup_crosses_the_boundary_or_says_why_not()
+
+    def test_the_helper_is_shared_not_copied(self):
+        """It lives outside REACH_JS because the snippets that needed it most
+        were the ones that did not include REACH_JS. A helper only the
+        already-correct code can reach fixes nothing."""
+        from aish import browser as browser_module
+
+        assert "deepAll" in browse.DEEP_JS
+        assert browse.REACH_JS.startswith(browse.DEEP_JS)
+        for js in (browse.FLOOD_JS, browser_module.SIGNIN_FORM_JS,
+                   browser_module.SECOND_FACTOR_JS):
+            assert browse.DEEP_JS in js, "copied instead of shared"
