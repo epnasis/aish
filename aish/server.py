@@ -2428,13 +2428,6 @@ class WebServer:
             await self._browser(client, str(message.get("arg", "")).strip())
         elif kind == "browser_view":
             await self._browser_view(client, message)
-        elif kind == "browser_login":
-            hosts = browser.record_logins(
-                [str(h) for h in (message.get("hosts") or [])]
-            )
-            await client.ws.send_json(
-                {"type": "browser_view", "action": "recorded", "hosts": hosts}
-            )
         elif kind == "files":
             await self._send_files(client, str(message.get("query", "")))
         elif kind == "stop":
@@ -5660,7 +5653,6 @@ def create_app(
             # transcript it just replayed (#267).
             agent.restore_opened_links(SessionLog.calls_that_ran(path))
             agent.restore_browse_grants(SessionLog.browse_grants(path))
-            agent.restore_login_grants(SessionLog.login_grants(path))
             # Resume with the model this session last used (the drawer shows
             # it); fall back to the startup model when it can't be built.
             if (

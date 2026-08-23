@@ -1490,6 +1490,13 @@ def _browser_read(
     _remember_title(url, page.title)
     if host:
         BROWSER_HOSTS.add(host)
+        # The one writer of the routing hint on this path, and it writes what
+        # the page SAID rather than what anybody claimed: a rendered page that
+        # is not asking for a password is a signed-in page.
+        if page.signin:
+            browser.note_signed_out(url)
+        else:
+            browser.note_signed_in(url)
     return (text, page.images, page.declared, page.signin, renewal), ""
 
 
@@ -1677,12 +1684,17 @@ def _read_url(
     # then the read went out anonymously — the gate and the read disagreeing
     # about what the read was.
     #
-    # `is_logged_in` was consulted on this path already, for PERMISSION only.
-    # It is also the strongest routing signal aish has, and the owner supplied it
-    # with his own hands. It costs a ~2s Chrome launch on a public page of a
-    # signed-in host, which is the price of the gate not lying; the context stays
-    # warm, so it is paid once per idle period and not per read.
-    login_host = browser.is_logged_in(url)
+    # The routing HINT: hosts aish has watched a sign-in succeed at. It is not
+    # a claim about his accounts and nothing gates on it — a wrong entry costs
+    # one wasted Chrome launch and the very next read corrects it. Its
+    # predecessor was a list he asserted, and it was wrong in both directions:
+    # sites he had merely browsed past cost a launch and a card forever, while
+    # sites he really was signed into were missing, so a read of one fetched
+    # the logged-out page and handed it back as his account.
+    #
+    # What replaces the missing half is BELOW, in the fetch: a page that asks
+    # for a password says so, and that is the escalation. Look at the page.
+    login_host = browser.host_of(url) if browser.host_of(url) in browser.seen_signed_in() else ""
     anonymous_why = ""
     if browser.host_of(url) in BROWSER_HOSTS or login_host:
         rendered, why = _browser_read(url)
@@ -1787,14 +1799,36 @@ def _read_url(
                 return f"ERROR: {url} — {WALLED}"
         return f"ERROR: {url} returned no readable text{_blocked_note(url)}"
 
-    if login_host:
+    if login_form and not anonymous_why:
+        # THE PAGE SAID SO. A login wall is not an error — it is 200 with a full
+        # page of text — so nothing else on this path escalates for it, and for
+        # a year that meant the one class of page the persistent profile exists
+        # to read was the one class it never got used for unless a list happened
+        # to name the host. The page asking for a password is the signal, and it
+        # needs no list: it is true for a site aish has never seen, and false
+        # for one wrongly recorded.
+        rendered, why = _browser_read(url)
+        if rendered is not None:
+            host = browser.host_of(url)
+            if rendered[3]:
+                # Still asking for a password AS HIM: he really is signed out.
+                # Demote the hint so it cannot rot into the thing it replaced.
+                browser.note_signed_out(url)
+            else:
+                browser.note_signed_in(url)
+            return _present_rendered(
+                url, rendered, topic=topic, login_host=host, cut=cut
+            )
+        anonymous_why = why
+
+    if login_host or login_form:
         # This read was made as a STRANGER at a site the owner has an account
         # at, and nothing in the page itself says so. Saying it here is what
         # stops the model reporting a logged-out page as the account — or, as it
         # did on 2026-08-18, reporting the account as unreachable and asking him
         # to upload the invoices by hand.
         return ANONYMOUS_READ_NOTE.format(
-            host=login_host,
+            host=login_host or browser.host_of(url),
             why=anonymous_why or "the browser was not used",
             form=ANONYMOUS_READ_FORM if login_form else "",
         ) + _present(url, text, images, declared, topic=topic, cut=cut)

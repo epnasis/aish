@@ -234,10 +234,6 @@ class ClaudeMaxAgent:
         # whose `_approved_browsing` decides.
         self.inner.restore_browse_grants(hosts)
 
-    def restore_login_grants(self, hosts: list[str]) -> None:
-        # And the smaller grant with it — same object, same reason.
-        self.inner.restore_login_grants(hosts)
-
     @staticmethod
     def _load_sdk():
         try:

@@ -1051,7 +1051,7 @@ LOGIN_READ_NO_APPROVER = (
 
 # DRIVING a site the owner is signed into (#237). A read carries his session;
 # driving carries his session AND presses things with it, so the gate is a
-# strictly bigger question than `_login_gate`'s and gets its own answers.
+# strictly bigger question than a read's and gets its own answers.
 #
 # The grant is per host per task, matching every other grant here (L4): a flow
 # that clicks through twenty pages of one portal asks once, because a card per
@@ -1694,7 +1694,6 @@ class Agent:
         # Signed-in hosts vouched for on a login card this session (#221).
         # Session-scoped like every other grant (L4): a yes given in the chat
         # you leave must not follow you into the one you land in.
-        self._approved_logins: set[str] = set()
         self._approved_browsing: set[str] = set()
         # Form-fills the owner has already said yes to, by their CARD TEXT —
         # which names the host, every value and the committing press, so two
@@ -5102,13 +5101,6 @@ class Agent:
         # _dispatch sequentially — the parallel thunks would bypass the gate.
         # Same for a read that would use a signed-in session (#221): the
         # parallel path has no gate at all, so a gated read must leave it.
-        login_host = self._login_host(name, args)
-        if (
-            login_host
-            and login_host not in self._approved_logins
-            and not self._browse_grant_covers(str(args.get("url", "")))
-        ):
-            return True
         # An e-mailed link is gated too, and the parallel thunks have no gate
         # at all (#279).
         if (url := self._mail_link_url(name, args)) and (
@@ -5330,69 +5322,6 @@ class Agent:
         if decision is None or decision is False:
             return _gate_outcome(MAIL_LINK_DENIED, decision="denied")
         self._approved_mail_links.add(url)
-        return None
-
-    def _login_host(self, name: str, args: dict) -> str:
-        """The signed-in host this call would read as the owner, or "".
-
-        Only read_url: it is the one tool that escalates to the persistent
-        browser, and so the one that can carry a live session. The image and
-        document readers fetch bytes through the anonymous opener."""
-        if name != "read_url":
-            return ""
-        return browser.is_logged_in(str(args.get("url", "")))
-
-    def _login_gate(self, name: str, args: dict) -> str | None:
-        """Approval gate for reading a site the owner is signed into (#221):
-        None = proceed, else the refusal text for the model.
-
-        Unlike _egress_gate this applies to EVERY origin, the attended session
-        included. The reason the owner's presence normally settles a read —
-        they can see what it is — is exactly what does not hold here: the risk
-        is not the host, it is that their session goes with it, and the model
-        proposing the URL may be acting on text it read on a page."""
-        host = self._login_host(name, args)
-        if not host:
-            return None
-        if host in self._approved_logins:
-            return None
-        if self._browse_grant_covers(str(args.get("url", ""))):
-            # Driving a site AS HIM already includes reading it as him — the
-            # browse grant opens its pages and hands their text back. So the
-            # grants NEST rather than multiply: a second card, for strictly
-            # less than what he just approved for the same site, reads as aish
-            # asking the same question twice, and the difference it is asking
-            # about (which tool fetches the page) is one he has no way to see.
-            return None
-        if self.approve_tool is None:
-            return _gate_outcome(
-                LOGIN_READ_NO_APPROVER.format(host=host), decision="blocked"
-            )
-        preview = (
-            f"read {host} using your signed-in browser session — the page will "
-            "be fetched as you, and may contain private account data"
-        )
-        decision = self.approve_tool(name, args, preview)
-        if isinstance(decision, Denied):
-            self._arm_stop_gate(decision.comment)
-            return _gate_outcome(
-                _with_feedback(LOGIN_READ_DENIED.format(host=host), decision.comment),
-                decision="denied",
-            )
-        if isinstance(decision, Approved):
-            return _gate_outcome(
-                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
-                decision="held",
-            )
-        if decision is None or decision is False:
-            return _gate_outcome(LOGIN_READ_DENIED.format(host=host), decision="denied")
-        # Vouched for the rest of this session, matching _egress_gate: a task
-        # that reads five pages of one portal asks once, not five times. Logged
-        # for the same reason the driving grant is: a chat outlives the agent
-        # holding its grants, and every ship rebuilds that agent underneath it.
-        self._approved_logins.add(host)
-        if self.state_log is not None:
-            self.state_log({"kind": "login_grant", "host": host})
         return None
 
     def _browse_grant_covers(self, url: str) -> bool:
@@ -6379,11 +6308,6 @@ class Agent:
         SESSION grant (L4) rather than a machine-wide one."""
         self._approved_browsing.update(hosts)
 
-    def restore_login_grants(self, hosts: list[str]) -> None:
-        """Re-arm the signed-in reads this chat already allowed, exactly as
-        `restore_browse_grants` does for the bigger grant."""
-        self._approved_logins.update(hosts)
-
     def restore_opened_links(self, calls: list[tuple[dict, int]]) -> None:
         """Refill the ledger from a reopened chat's own log (#267).
 
@@ -6789,11 +6713,13 @@ class Agent:
             refusal = self._egress_gate(name, args)
             if refusal is not None:
                 return refusal
-            # …and a read of a site the owner is SIGNED INTO holds in every
-            # session, attended or not (#221).
-            refusal = self._login_gate(name, args)
-            if refusal is not None:
-                return refusal
+            # A read of a site he is signed into used to hold for a card
+            # here (#221). It does not any more: whether the read carries his
+            # session is now decided by looking at the page rather than by a
+            # list, and the CONSENT was given at the sign-in itself — with his
+            # hands, on the site, knowing exactly what he was doing. Re-asking
+            # afterwards was a worse version of a decision he had already made,
+            # in the channel he has said he does not read.
             label, thunk = self._read_only_call(name, args)
             self._note(label)
             self.status.start(name)

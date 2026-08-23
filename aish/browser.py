@@ -393,8 +393,11 @@ def search_profile_dir() -> Path:
     return state_dir() / "browser" / "search-profile"
 
 
-def logins_file() -> Path:
-    return state_dir() / "browser" / "logins.txt"
+def seen_file() -> Path:
+    """Where the observed-sign-in hint lives. A new NAME on purpose: the file
+    it replaces held assertions, this one holds observations, and reusing the
+    name would have let the old meaning survive the change."""
+    return state_dir() / "browser" / "signed-in-seen.txt"
 
 
 def search_logins_file() -> Path:
@@ -570,64 +573,103 @@ def host_of(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
-def logged_in_hosts() -> set[str]:
-    """Hosts the owner signed into at a window aish opened for them.
+def seen_signed_in() -> set[str]:
+    """Hosts aish has WATCHED a sign-in succeed at.
 
-    Recorded from what they NAVIGATED to during a login session, not from the
-    cookie jar: a jar is mostly third-party trackers, and "domains I logged
-    into" is a claim only the owner's own navigation can support."""
+    Not a claim anybody makes — a record of something observed, and the
+    difference is the whole point. Its predecessor, `logins.txt`, was a list
+    the owner asserted, and it was wrong in both directions at once: it held
+    `netflix.com`, `airbnb.com` and a typo'd `imbd.com` he had merely browsed
+    past, each costing a Chrome launch and an approval card on every later
+    read, while sites he really was signed into were missing — so a read of
+    one fetched the logged-out page and handed it back as his account.
+
+    Three separate incidents are recorded above of that list being written
+    wrongly (on visit, on close, and as a whole browsing history under one
+    batch yes), and they share one cause: **a human fact was being guessed at
+    by a heuristic, then stored as though it had been established.** So the
+    store stays and the WRITER changes. Every entry here traces to an event
+    aish saw happen: a rendered page that stopped asking for a password, a
+    credential replay that worked, a sign-in typed in the remote view.
+
+    It is a HINT and never an authority. Nothing gates on it and no claim to
+    the owner rests on it; a wrong entry costs one wasted Chrome launch, never
+    a false statement about his accounts. The live page is the truth."""
     try:
-        raw = logins_file().read_text(encoding="utf-8")
+        raw = seen_file().read_text(encoding="utf-8")
     except OSError:
         return set()
     return {line.strip() for line in raw.splitlines() if line.strip()}
 
 
-def is_logged_in(url: str) -> str:
-    """The recorded login host this URL belongs to, or "".
+def note_signed_in(url: str) -> None:
+    """Remember that a page at this host came back SIGNED IN.
 
-    Suffix match, so a login at `allegro.pl` also covers `allegro.pl` subdomains
-    without this module needing a public-suffix list to find the registrable
-    domain (getting that wrong in the lenient direction would gate too little,
-    which is the direction that matters)."""
+    The only writer. Called from the read path when a render produced a page
+    that is not asking for a password, and from the view when a sign-in was
+    watched happening."""
     host = host_of(url)
     if not host:
-        return ""
-    for known in logged_in_hosts():
-        if host == known or host.endswith("." + known):
-            return known
-    return ""
+        return
+    known = seen_signed_in()
+    if host in known:
+        return
+    try:
+        path = seen_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(sorted(known | {host})) + "\n", encoding="utf-8")
+    except OSError:  # bookkeeping — a read must not fail because a hint did not save
+        pass
+
+
+def note_signed_out(url: str) -> None:
+    """Drop a host that has just proved it is NOT signed in.
+
+    The hint demotes itself, which is what keeps it from rotting into the thing
+    it replaced. A page that came back asking for a password is proof."""
+    host = host_of(url)
+    known = seen_signed_in()
+    if not host or host not in known:
+        return
+    try:
+        seen_file().write_text(
+            "\n".join(sorted(known - {host})) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 def _remember_logins(hosts: set[str], *, cold: bool = False) -> None:
     if not hosts:
         return
-    path = search_logins_file() if cold else logins_file()
-    known = search_logged_in_hosts() if cold else logged_in_hosts()
+    path = search_logins_file() if cold else seen_file()
+    known = search_logged_in_hosts() if cold else seen_signed_in()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(sorted(known | hosts)) + "\n", encoding="utf-8")
 
 
 def forget_login(host: str) -> bool:
-    """Drop a host from the login record. Does NOT clear its cookies — the
-    owner's session is theirs to end, at the site, in a window.
+    """Forget what aish has observed about a site.
 
-    It DOES stop routing the host through his profile, and that half was
-    missing (#283). The record has two jobs — it arms `_login_gate`, and it
-    routes the read into the signed-in browser — and forgetting only ever undid
-    the first. A host that had already needed the browser stayed in
-    `BROWSER_HOSTS`, so it kept being read in the cookie-carrying profile with
-    the approval card now gone: forgetting a site removed the CARD and left the
-    CAPABILITY, which is exactly backwards. Anyone clearing a polluted record
-    would have walked straight into it."""
+    Drops the observed-sign-in hint and stops routing the host through his
+    profile (#283 — forgetting used to remove the approval card and leave the
+    capability, which is exactly backwards).
+
+    It does NOT clear cookies: the session is his to end, at the site. Nor does
+    it stop aish noticing next time. That is the point of a hint rather than a
+    record — if he is still signed in, the very next read will see it and the
+    entry comes back, because the page is the truth and this file is only a
+    memory of what the page last said."""
     host = host_of("https://" + host) or host.strip().lower()
-    known = logged_in_hosts()
-    if host not in known:
-        return False
-    logins_file().write_text("\n".join(sorted(known - {host})) + "\n", encoding="utf-8")
-    # Per-process: this is the running server's routing table, not a file.
-    BROWSER_HOSTS.discard(host)
-    return True
+    known = seen_signed_in()
+    forgot = host in known
+    if forgot:
+        seen_file().write_text("\n".join(sorted(known - {host})) + "\n", encoding="utf-8")
+    # Per-process: the running server's routing table, not a file.
+    if host in BROWSER_HOSTS:
+        BROWSER_HOSTS.discard(host)
+        forgot = True
+    return forgot
 
 
 # ------------------------------------------------------- the owner thread
@@ -1271,6 +1313,8 @@ class _Owner:
         # This — not the browsing history — is what `view_close` may ask him
         # about. See `_note_visit`.
         self.password_hosts: set[str] = set()
+        # Hosts this view WATCHED a sign-in complete at. Recorded, not asked.
+        self.signed_in_here: set[str] = set()
         self.pending_nav = -1      # the navigation count when that happened
         self.last_url = ""         # where the view was, so it can be reopened
         # The pages the MODEL is driving (#237, #272), ONE PER CHAT. Each is a
@@ -2193,12 +2237,16 @@ def command(arg: str) -> str:
 
     if not arg:
         reason = unavailable_reason()
-        hosts = sorted(logged_in_hosts())
+        hosts = sorted(seen_signed_in())
         lines = [
             f"profile: {profile_dir()}",
             f"status:  {reason or 'ready'}",
             f"stealth: {'on' if stealth() else 'off'}",
-            "signed in: " + (", ".join(hosts) if hosts else "(nothing yet)"),
+            # Deliberately worded as an OBSERVATION and not a claim about his
+            # accounts. aish knows what the page last said; it does not know
+            # whether he is signed in right now, and the file it reads is a
+            # hint that the next read will correct either way.
+            "last seen signed in: " + (", ".join(hosts) if hosts else "(nothing yet)"),
             *_signin_lines(),
             "",
             "/browser <url>       open a real window there so you can sign in",
@@ -2858,10 +2906,11 @@ def view_act(action: str, **kwargs: Any) -> Frame:
             and not frame.asks_password
         ):
             frame.signin = owner.pending_signin
-            # Asked NOW, about this one site, at the moment it happened. So it
-            # is no longer a leftover for the close-time sweep to ask about
-            # again — the same question twice is the complaint that started
-            # this.
+            # OBSERVED, not asked. A password went in, the page moved, and it
+            # has stopped asking for one — that is a sign-in, and there is
+            # nothing left for a human to confirm about it.
+            note_signed_in(page.url)
+            owner.signed_in_here.add(owner.pending_signin)
             owner.password_hosts.discard(owner.pending_signin)
             owner.pending_signin = ""
             frame.saved = _save_held_credential(owner)
@@ -4125,51 +4174,28 @@ def browse_close(key: str = "") -> None:
 
 
 def view_close() -> list[str]:
-    """End the view and hand back the hosts that ASKED HIM FOR A PASSWORD —
-    without recording them.
+    """End the view. Returns the hosts it watched a sign-in happen at.
 
-    Whether a login happened is the owner's fact to state, not one aish may
-    infer. But the question has to be about the sites where signing in was even
-    possible: a page that never showed a password box is not a candidate, and
-    asking about the whole browsing history is how `logins.txt` filled up with
-    sites he had merely read.
+    Nothing is ASKED any more, and that is the change. Whether he is signed in
+    stopped being a fact anybody asserts the moment aish started reading it off
+    the page: a page that has stopped asking for a password, after one went in,
+    is a sign-in — observed, not claimed. Three versions of the question were
+    wrong before this (inferred from a visit, inferred from a close, and then
+    offered as the whole browsing history under one batch yes), and the fourth
+    version of a question nobody can answer reliably is not the fix.
 
-    A host is dropped once it is already recorded, and once aish has SEEN the
-    sign-in happen (`frame.signin` asked at the time, naming that one site), so
-    the close-time question is only ever the leftovers — most often nothing at
-    all, which is the right number of questions for a session spent reading."""
+    The list comes back only so the caller can say what it saw."""
 
     async def job(owner: _Owner) -> list[str]:
-        known = logged_in_hosts()
-        visited = sorted(owner.password_hosts - known)
+        watched = sorted(owner.signed_in_here)
         owner.view = None
         owner.view_hosts = set()
         owner.password_hosts = set()
+        owner.signed_in_here = set()
         await owner.close_now()  # next read relaunches off-screen at full size
-        return visited
+        return watched
 
     return _submit(job, 60.0)
-
-
-def record_logins(hosts: list[str]) -> list[str]:
-    """Mark hosts as signed in, because the owner said so.
-
-    Takes whatever the client sends — a bare host, a full URL, blank — since
-    this arrives over a WebSocket. Prefixing a scheme onto a value that already
-    had one silently recorded a host called "https"."""
-    clean: set[str] = set()
-    for raw in hosts:
-        text = str(raw or "").strip()
-        if not text:
-            continue
-        host = host_of(text if "//" in text else "https://" + text)
-        if host:
-            clean.add(host)
-    # WHICH record depends on which profile was being driven, and the view is
-    # already closed by the time the owner confirms — so the answer is the one
-    # the owner thread kept, never one re-derived from the hosts.
-    _remember_logins(clean, cold=_view_was_cold())
-    return sorted(clean)
 
 
 def _view_was_cold() -> bool:
