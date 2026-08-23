@@ -645,22 +645,29 @@ NO_FILE_YET = (
 # Shared verbatim by the enumeration and by the act-time preflight, so the two
 # can never disagree about what is pressable — the tag outlives the reachability
 # (a menu closes while the model thinks) and the preflight is what catches that.
-REACH_JS = """
-  // Look through shadow roots, not just past them.
-  //
-  // `document.querySelector` and `getElementById` stop at every shadow
-  // boundary, and a growing share of the web puts its whole application inside
-  // one — qatarairways.com's booking widget is an Angular app under
-  // <app-nbx-explore>, so the date field aish had itself just tagged could not
-  // be found again by the tag it wrote (#273). Enumeration walks shadow roots
-  // and the calendar reader did not, which is the worst way for a boundary to
-  // be handled: consistently invisible would have been noticed years ago,
-  // whereas visible-then-invisible reads as "this page has no date cells".
-  // `descend`, not `walk`: CONTROLS_JS has its own walk, and
-  // TestHidingAControlNeverRoutesAroundItsCard proves that walk tags nothing
-  // by slicing this source between two literals naming it. Any earlier
-  // occurrence of those literals — a second helper, or even a comment quoting
-  // them — silently moves the slice, and the proof then reads the wrong code.
+# Look through shadow roots, not just past them. ONE definition, for every
+# snippet in aish that reads a page.
+#
+# `document.querySelector`, `getElementById`, `activeElement`, `closest` and
+# `contains` all stop at a shadow boundary, and a growing share of the web puts
+# its whole application inside one — qatarairways.com's booking widget is an
+# Angular app under `<app-nbx-explore>`. Enumeration walked shadow roots and
+# the calendar reader, the label lookup and the focus test did not (#273),
+# which is the worst way for a boundary to be handled: consistently blind would
+# have been noticed years ago, whereas visible-then-invisible reads as "this
+# page has no date cells" on a page whose cells aish had itself just tagged.
+#
+# It is a shared constant rather than a local of `REACH_JS` because the
+# snippets that needed it most were the ones that did NOT include `REACH_JS` —
+# the sign-in form reader, the 2FA probe, the option-flood stripper. A helper
+# only the already-correct code can reach fixes nothing.
+#
+# `descend`, not `walk`: CONTROLS_JS has its own walk, and
+# TestHidingAControlNeverRoutesAroundItsCard proves that walk tags nothing by
+# slicing its source between two literals naming it. Any earlier occurrence of
+# those literals — a second helper, or even a comment quoting them — silently
+# moves the slice, and the proof then reads the wrong code.
+DEEP_JS = """
   const deepAll = (selector, root) => {
     const out = [];
     const descend = (where) => {
@@ -676,7 +683,9 @@ REACH_JS = """
   const deepById = (id) => {
     try { return deepOne('[id="' + CSS.escape(id) + '"]'); } catch (e) { return null; }
   };
+"""
 
+REACH_JS = DEEP_JS + """
   const styleCache = new Map();
   const styleOf = (el) => {
     let s = styleCache.get(el);
@@ -1442,9 +1451,12 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
 # on a real portal that is most of the read budget spent on one control the model
 # has not even reached yet. The options come back as one contiguous block, in
 # document order, exactly as they appear in the text.
-FLOOD_JS = """(opts) => {
+FLOOD_JS = "(opts) => {" + DEEP_JS + """
   const out = [];
-  for (const sel of document.querySelectorAll('select')) {
+  // A 250-option picker inside a shadow root floods the page text exactly as
+  // one in the document does — #245's measurement was 84% of the page — and
+  // the stripper could not see it.
+  for (const sel of deepAll('select')) {
     const list = Array.from(sel.options || []);
     if (list.length <= opts.inlineChoices) continue;
     out.push({
