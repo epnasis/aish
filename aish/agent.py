@@ -961,6 +961,14 @@ _HOST_TOKEN_RE = re.compile(
     r"(?i)(?:https?://([^\s/\"'<>]+)|\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})\b)"
 )
 
+# An ADDRESS, not merely a host: a scheme, or a domain with a path/query/
+# fragment hanging off it. `site:fly4free.pl weekend` names a host and is not
+# an address; `attacker.example/?d=<iban>` is one.
+_ADDRESS_TOKEN_RE = re.compile(
+    r"(?i)(?:https?://[^\s\"'<>]+"
+    r"|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}[/?#][^\s\"'<>]*)"
+)
+
 # One PDF, fetched or local. Generous — a scanned manual is routinely tens of
 # megabytes and the conversion is bounded by page count, not file size.
 PDF_MAX_BYTES = 50 * 1024 * 1024
@@ -1224,6 +1232,36 @@ def _hosts_in_text(text: str) -> set[str]:
         if token:
             hosts.add(token)
     return hosts
+
+
+def _addresses_in_text(text: str) -> list[str]:
+    """URL-shaped tokens in text: a host with a path, query or fragment
+    attached, or anything with an http(s) scheme.
+
+    Narrower than `_HOST_TOKEN_RE` on purpose. That one answers "which hosts
+    were named", which is what provenance is about; this one answers "is there
+    an ADDRESS here" — a place plus the thing stapled to it — which is the only
+    part of a search query that could be smuggling anything."""
+    return _ADDRESS_TOKEN_RE.findall(text or "")
+
+
+def _address_carries_payload(url: str) -> bool:
+    """Does this address carry DATA, beyond the bare place it points at?
+
+    A query, a fragment, userinfo, a path past `PLAIN_PATH_MAX` or a host label
+    past `HOST_LABEL_MAX` are the five places data can be stapled to a URL."""
+    try:
+        # A scheme-less token is still an address; without the `//` urlsplit
+        # would read the host as the start of the path.
+        parts = urllib.parse.urlsplit(url if "//" in url else f"//{url}", scheme="https")
+    except ValueError:
+        return True  # unparseable → fail closed, as the host branch does
+    if parts.query or parts.fragment or parts.username or parts.password:
+        return True
+    if len(parts.path.strip("/")) > PLAIN_PATH_MAX:
+        return True
+    host = (parts.hostname or "").lower()
+    return any(len(label) > HOST_LABEL_MAX for label in host.split("."))
 
 
 def format_secs(seconds: float) -> str:
@@ -5151,8 +5189,8 @@ class Agent:
             if not host:
                 return [url.strip() or "(no url)"]  # unparseable → fail closed
             hosts = {host}
-        else:  # web_search: the query itself is the outbound payload; gate on
-            # any host/URL it names (a host-free query names no novel host).
+        else:  # web_search: the query goes to the SEARCH ENGINE and to nothing
+            # else, so a host it names is at most a signal, never a recipient.
             hosts = _hosts_in_text(str(args.get("query", "")))
         known = self._owner_hosts | self._approved_hosts
         novel = sorted(h for h in hosts if h not in known)
@@ -5173,22 +5211,23 @@ class Agent:
         was not composed, it was followed, which is the one case that
         distinguishes ordinary reading from smuggling."""
         if name == "web_search":
-            # The query IS the outbound payload, and `hosts` above only found
-            # anything because the query named a host — the exfil shape.
-            return True
+            # **A search query NAMES a host; it never reaches one.** The query
+            # is handed to the search engine and to nobody else, so `site:` —
+            # which restricts the index, the opposite of a destination — and a
+            # bare domain, which is just a search term, deliver nothing
+            # anywhere. Carding them put a false sentence on the card ("wants
+            # to send something to fly4free.pl") in front of the most ordinary
+            # research move there is. What is still worth one look is an
+            # address the model COMPOSED with data stapled to it: no real
+            # search has that shape, and the answer costs nothing to give.
+            return any(
+                _address_carries_payload(addr)
+                for addr in _addresses_in_text(str(args.get("query", "")))
+            )
         url = str(args.get("url") or args.get("source") or "")
         if self._url_was_offered(url):
             return False
-        try:
-            parts = urllib.parse.urlsplit(url)
-        except ValueError:
-            return True  # unparseable → fail closed, as the host branch does
-        if parts.query or parts.fragment or parts.username or parts.password:
-            return True
-        if len(parts.path.strip("/")) > PLAIN_PATH_MAX:
-            return True
-        host = (parts.hostname or "").lower()
-        return any(len(label) > HOST_LABEL_MAX for label in host.split("."))
+        return _address_carries_payload(url)
 
     def _url_was_offered(self, url: str) -> bool:
         """Did this exact URL come back in a tool result in this task?
@@ -5220,13 +5259,25 @@ class Agent:
         shown = ", ".join(novel)
         if self.approve_tool is None:
             return _gate_outcome(EGRESS_NO_APPROVER.format(host=shown), decision="blocked")
-        preview = (
-            f"this turn has read the open web, and now wants to send something "
-            f"to {shown} — a host you did not mention"
-            if self.origin == "user"
-            else f"automated session wants to reach {shown} — a host not "
-            "mentioned by the owner in this conversation"
-        )
+        # A search is not a visit, and the card has to say which one this is —
+        # asking him to approve something that is not about to happen is how a
+        # card stops meaning anything.
+        if name == "web_search":
+            preview = (
+                f"this turn has read the open web, and now wants to put an "
+                f"address it composed — {shown} — into a web search"
+                if self.origin == "user"
+                else f"automated session wants to search for {shown} — a host "
+                "not mentioned by the owner in this conversation"
+            )
+        else:
+            preview = (
+                f"this turn has read the open web, and now wants to send something "
+                f"to {shown} — a host you did not mention"
+                if self.origin == "user"
+                else f"automated session wants to reach {shown} — a host not "
+                "mentioned by the owner in this conversation"
+            )
         decision = self.approve_tool(name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)

