@@ -1062,30 +1062,19 @@ EGRESS_NO_APPROVER = (
 # instead — changing anything asks first — is what makes the assumption he
 # already makes when he taps Approve a true one instead of a smuggled one.
 SITE_GRANT = (
-    "browse {host} signed in as you — aish can read your private pages there; "
-    "changing anything asks first."
+    "act on {host} signed in as you — aish will press things inside your "
+    "account; anything that spends, ends or deletes asks again by name."
 )
 
 # The grant is per site and lasts the session, matching every other grant here
 # (L4): a flow that clicks through twenty pages of one portal asks once,
 # because a card per click is a card nobody reads.
-LOGIN_READ_DENIED = (
-    "USER DENIED browsing {host} as them — nothing was read. Do not retry it "
-    "with any tool: read_url and browse are the SAME permission here. Read a "
-    "public source instead, or ask the user."
-)
 
-LOGIN_READ_NO_APPROVER = (
-    "NOT EXECUTED: {host} is a site the owner is signed into, and an automated "
-    "session may not read it as them with no approver available. Use a public "
-    "source, or finish and report."
-)
 
 BROWSE_DENIED = (
-    "USER DENIED browsing {host} as them — nothing was opened and nothing was "
-    "clicked. Do not retry it with any tool: read_url and browse are the SAME "
-    "permission here. Read a public source, or ask the user to do this part "
-    "themselves."
+    "USER DENIED acting on {host} as them — nothing was pressed. Do not retry "
+    "it with any tool. Reading the site is still allowed; report what the page "
+    "says, or ask the user to do the step themselves."
 )
 
 BROWSE_NO_APPROVER = (
@@ -5459,15 +5448,28 @@ class Agent:
         """Approval gate for driving a page (#237): None = proceed, else the
         refusal text.
 
-        Two questions, not one. **May aish drive this host at all** — asked once
-        per host per task, because a card per click is a card nobody reads. And
-        **may it press THIS control** — asked every time for the ones that spend
-        money, end a contract or throw something away, and named, so the card
-        says `click "Zapłać"` rather than `click element 7`. A password field is
-        refused outright and never draws a card at all."""
+        Two questions, not one. **May aish use this site as him at all** —
+        asked once per site, because a card per click is a card nobody reads.
+        And **may it press THIS control** — asked every time for the ones that
+        spend money, end a contract or throw something away, and named, so the
+        card says `click "Zapłać"` rather than `click element 7`. A password
+        field is refused outright and never draws a card at all.
+
+        **The first question is asked at the first PRESS, not at the open**,
+        and that is not a nicety. Opening a page and reading it is what
+        `read_url` does, and reading his account was made free — so the same
+        page, fetched the other way, asked. The model chooses the tool, which
+        made the card bypassable for exactly the half it was covering and left
+        the owner with a card for a read and silence for the identical read one
+        tool over. Whichever way a page is READ is now free; the card is spent
+        on the thing `read_url` cannot do, which is press something."""
         if name not in BROWSE_TOOLS:
             return None
         host = self._browse_host(name, args)
+        # Opening a page, and re-reading the one already open, are reads.
+        reading = name == "browse" or (
+            name == "browse_act" and str(args.get("action", "")) == "read"
+        )
         if name == "browse_fill":
             return self._browse_batch_gate(args, host)
         if name == "browse_act":
@@ -5493,7 +5495,7 @@ class Agent:
                     ),
                     decision="blocked",
                 )
-        if not host:
+        if not host or reading:
             return None
         if self.approve_tool is None:
             return _gate_outcome(
