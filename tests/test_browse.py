@@ -261,24 +261,25 @@ class TestBrowseGate:
         agent._browse_view.remember(snap)
         return agent, asked
 
-    def test_driving_a_host_asks_once_per_task(self, monkeypatch):
+    def test_using_a_site_asks_once_per_task(self, monkeypatch):
         agent, asked = self._agent(monkeypatch, lambda *a: True)
         args = {"url": "https://eon.pl/mojeon"}
         assert agent._browse_gate("browse", args) is None
         assert agent._browse_gate("browse", {"url": "https://eon.pl/faktury"}) is None
         assert len(asked) == 1
-        assert "drive eon.pl" in asked[0]
+        assert "browse eon.pl" in asked[0]
 
     def test_the_card_says_it_acts_as_the_owner(self, monkeypatch):
         agent, asked = self._agent(monkeypatch, lambda *a: True)
         agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"})
-        assert "AS YOU" in asked[0]
+        assert "signed in as you" in asked[0]
 
-    def test_denying_the_host_stops_the_flow(self, monkeypatch):
+    def test_denying_the_site_stops_the_flow(self, monkeypatch):
         agent, _ = self._agent(monkeypatch, lambda *a: False)
         out = agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"})
-        assert "USER DENIED driving eon.pl" in out
-        assert "eon.pl" not in agent._approved_browsing
+        assert "USER DENIED browsing eon.pl" in out
+        assert "read_url and browse are the SAME permission" in out
+        assert "eon.pl" not in agent._approved_sites
 
     def test_a_denial_with_a_comment_arms_the_stop_gate(self, monkeypatch):
         agent, _ = self._agent(monkeypatch, lambda *a: Denied("not in my account"))
@@ -306,14 +307,14 @@ class TestBrowseGate:
         card per click is a card nobody reads."""
         snap = snapshot(controls=[control(n=3, name="Przełącz lokal")])
         agent, asked = self._agent(monkeypatch, lambda *a: True, snap)
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         assert agent._browse_gate("browse_act", {"target": 3}) is None
         assert asked == []
 
     def test_a_mutating_click_asks_again_and_names_the_control(self, monkeypatch):
         snap = snapshot(controls=[control(n=5, name="Zapłać")])
         agent, asked = self._agent(monkeypatch, lambda *a: True, snap)
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         assert agent._browse_gate("browse_act", {"target": 5}) is None
         assert len(asked) == 1
         assert "click button 'Zapłać' on eon.pl" in asked[0]
@@ -321,7 +322,7 @@ class TestBrowseGate:
     def test_denying_a_mutating_click_says_nothing_changed(self, monkeypatch):
         snap = snapshot(controls=[control(n=5, name="Zapłać")])
         agent, _ = self._agent(monkeypatch, lambda *a: False, snap)
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         out = agent._browse_gate("browse_act", {"target": 5})
         assert "was NOT clicked and nothing on the page changed" in out
         assert "another control that does the same thing" in out
@@ -331,7 +332,7 @@ class TestBrowseGate:
         and a card offering one would teach the owner there is."""
         snap = snapshot(controls=[control(n=1, kind=browse.PASSWORD, name="Hasło")])
         agent, asked = self._agent(monkeypatch, lambda *a: True, snap)
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         out = agent._browse_gate("browse_act", {"target": 1, "action": "type"})
         assert "aish never types passwords" in out
         assert "/browser eon.pl" in out
@@ -343,7 +344,7 @@ class TestBrowseGate:
         button by reading its label; the card has to carry the same words."""
         snap = snapshot(controls=[control(n=5, name="Zapłać")])
         agent, asked = self._agent(monkeypatch, lambda *a: True, snap)
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         assert agent._browse_gate("browse_act", {"target": "Zapłać"}) is None
         assert "click button 'Zapłać' on eon.pl" in asked[0]
 
@@ -1190,7 +1191,7 @@ class TestFillingAFormIsOneAct:
             client_chat=lambda **kw: {}, approve_tool=approve_tool,
         )
         agent._browse_view.remember(snap)
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         args = {"steps": [{"target": "Skąd", "value": "WAW"}]}
         assert agent._browse_gate("browse_fill", args) is None
         assert asked == []
@@ -1206,7 +1207,7 @@ class TestFillingAFormIsOneAct:
             approve_tool=lambda n, a, p: asked.append(p) or True,
         )
         agent._browse_view.remember(snap)
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         assert agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "WAW"},
             {"target": "Szukaj", "do": "click"},
@@ -1228,7 +1229,7 @@ class TestFillingAFormIsOneAct:
             client_chat=lambda **kw: {}, approve_tool=approve_tool,
         )
         agent._browse_view.remember(snap)
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         assert agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "WAW"},
             {"target": "Zapłać", "do": "click"},
@@ -1244,7 +1245,7 @@ class TestFillingAFormIsOneAct:
             approve_tool=lambda n, a, p: asked.append(p) or True,
         )
         agent._browse_view.remember(snap)
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         out = agent._browse_gate("browse_fill", {"steps": [
             {"target": "Szukaj", "do": "click"}, {"target": "Skąd", "value": "x"},
         ]})
@@ -1691,7 +1692,7 @@ class TestTwoChatsDoNotShareOnePageView:
 
         assert qatar._browse_gate("browse_act", {"target": "To"}) is None
         assert len(flights) == 1
-        assert "drive qatarairways.com" in flights[0]
+        assert "browse qatarairways.com" in flights[0]
         assert "imdb" not in flights[0]
 
     def test_the_other_chat_s_control_is_never_resolvable(self, monkeypatch):
@@ -1804,7 +1805,7 @@ class TestASearchIsNotACommit:
             approve_tool=lambda n, a, p: asked.append(p) or True,
         )
         agent._browse_view.remember(snap)
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         assert agent._browse_gate("browse_act", {"target": "Szukaj"}) is None
         assert asked == []
 
@@ -1827,7 +1828,7 @@ class TestConsequencesWithNoYesButton:
             client_chat=lambda **kw: {}, approve_tool=approve_tool,
         )
         agent._browse_view.remember(snap)
-        agent._approved_browsing.add("eon.pl")  # the driving grant is not the point
+        agent._approved_sites.add("eon.pl")  # the driving grant is not the point
         return agent, asked
 
     def test_the_labels_it_reads_and_the_ones_it_leaves_alone(self):
@@ -2031,7 +2032,7 @@ class TestTheGrantIsWhereTheConsentLives:
         )
         agent._browse_view.remember(snap)
         if granted:
-            agent._approved_browsing.add("eon.pl")
+            agent._approved_sites.add("eon.pl")
         return agent, asked
 
     def test_the_card_says_what_riding_it_means(self):
@@ -2040,7 +2041,8 @@ class TestTheGrantIsWhereTheConsentLives:
         covers is said on the card that grants it."""
         agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
         agent._browse_gate("browse", {"url": "https://eon.pl/x"})
-        assert "fill in forms AS YOU without asking again" in asked[0]
+        assert "signed in as you" in asked[0]
+        assert "changing anything asks first" in asked[0]
 
     def test_the_card_stays_one_sentence(self):
         """Said on a phone, where four sentences is a card he scrolls past to
@@ -2137,7 +2139,7 @@ class TestTheGrantIsWhereTheConsentLives:
         a card naming the same company. `is_logged_in` has always read the
         boundary this way; exact set membership did not."""
         agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
-        agent._approved_browsing.add("linkedin.com")
+        agent._approved_sites.add("linkedin.com")
         assert agent._browse_gate(
             "browse", {"url": "https://pl.linkedin.com/in/kasia"}
         ) is None
@@ -2147,20 +2149,20 @@ class TestTheGrantIsWhereTheConsentLives:
         """Downward only: he was shown the narrower name, so that is what he
         agreed to. And the boundary is a dot, not a suffix of letters."""
         agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
-        agent._approved_browsing.add("pl.linkedin.com")
-        assert not agent._browse_granted("www.linkedin.com")
-        assert not agent._browse_granted("evil-pl.linkedin.com.attacker.test")
-        agent._approved_browsing.add("linkedin.com")
-        assert not agent._browse_granted("evillinkedin.com")
+        agent._approved_sites.add("pl.linkedin.com")
+        assert not agent._site_granted("www.linkedin.com")
+        assert not agent._site_granted("evil-pl.linkedin.com.attacker.test")
+        agent._approved_sites.add("linkedin.com")
+        assert not agent._site_granted("evillinkedin.com")
 
     def test_the_grant_survives_the_agent_being_rebuilt(self):
         """What the owner experienced as being re-asked per task was the agent
         being rebuilt under him — every aish-web restart, which is every ship."""
         agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
-        assert "_approved_browsing" not in agent_module.Agent._reset_task_state.__doc__ or True
+        assert "_approved_sites" not in agent_module.Agent._reset_task_state.__doc__ or True
         fresh = Agent(model="fake", approve=lambda _c: True, client_chat=lambda **kw: {})
-        fresh.restore_browse_grants(["eon.pl"])
-        assert "eon.pl" in fresh._approved_browsing
+        fresh.restore_site_grants(["eon.pl"])
+        assert "eon.pl" in fresh._approved_sites
 
 
 class TestAGridThatIsPartlyMute:
@@ -2290,7 +2292,7 @@ class TestTheCardSaysWhatIsAboutToBeSent:
             approve_tool=lambda n, a, p: asked.append(p) or True,
         )
         agent._browse_view.remember(snapshot(controls=controls))
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         monkeypatch.setattr(browser, "browse_fields", lambda **kw: controls)
         assert agent._browse_gate("browse_act", {"target": "Zapłać"}) is None
         assert "this form currently holds:" in asked[0]
@@ -2306,7 +2308,7 @@ class TestTheCardSaysWhatIsAboutToBeSent:
             approve_tool=lambda n, a, p: asked.append(p) or True,
         )
         agent._browse_view.remember(snapshot(controls=controls))
-        agent._approved_browsing.add("eon.pl")
+        agent._approved_sites.add("eon.pl")
         # The live read fails — no page, a torn-down browser, a busy loop.
         monkeypatch.setattr(browser, "browse_fields", lambda **kw: [])
         agent._browse_gate("browse_act", {"target": "Zapłać"})

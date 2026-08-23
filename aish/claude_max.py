@@ -228,15 +228,11 @@ class ClaudeMaxAgent:
         # whose verify pass reads it.
         self.inner.restore_opened_links(calls)
 
-    def restore_browse_grants(self, hosts: list[str]) -> None:
+    def restore_site_grants(self, hosts: list[str]) -> None:
         # Same reason as restore_opened_links: the gate runs on the inner agent
         # because _locked_dispatch routes through it, so that is the object
-        # whose `_approved_browsing` decides.
-        self.inner.restore_browse_grants(hosts)
-
-    def restore_login_grants(self, hosts: list[str]) -> None:
-        # And the smaller grant with it — same object, same reason.
-        self.inner.restore_login_grants(hosts)
+        # whose `_approved_sites` decides.
+        self.inner.restore_site_grants(hosts)
 
     @staticmethod
     def _load_sdk():
