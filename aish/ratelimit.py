@@ -339,7 +339,7 @@ def wait(delay: float, stop: threading.Event, note: Callable[[str], None] | None
             # The wait is the longest thing a task does without producing a
             # step, so a chat that goes quiet for half a minute says why while
             # it is happening rather than afterwards.
-            note(f"rate-limited — retrying in {left:.0f}s")
+            note(f"Rate-limited — retrying in {left:.0f}s")
         if stop.wait(min(WAIT_TICK_S, left)):
             return True
     return stop.is_set()
@@ -721,7 +721,11 @@ class Governor:
                             "gave up rather than queue any longer — nothing was sent"
                         )
                     if on_wait is not None and wait_for:
-                        on_wait(f"waiting on the {key} rate limit — about {wait_for:.0f}s")
+                        # The provider, not `provider:model`: the model name is
+                        # the governor's bookkeeping, and the user is waiting on
+                        # a quota they think of by provider.
+                        provider = key.split(":", 1)[0]
+                        on_wait(f"Waiting on the {provider} rate limit — about {wait_for:.0f}s")
                     self._cond.wait(min(WAIT_TICK_S, max(0.01, deadline - now)))
             finally:
                 self._waiting.discard(ticket)
