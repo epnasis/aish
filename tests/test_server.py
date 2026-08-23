@@ -8306,47 +8306,23 @@ class TestBrowserView:
         for log in Path(app_env["state_dir"]).glob("session-*.jsonl"):
             assert "hunter2-secret" not in log.read_text()
 
-    def test_close_OFFERS_the_hosts_it_saw_without_recording_them(
+    def test_closing_reports_what_it_WATCHED_and_asks_nothing(
         self, app_env, monkeypatch
     ):
-        """Visiting is not signing in. Closing used to write every visited host
-        to logins.txt, so merely browsing to allegro.pl claimed an account
-        there — and then every read of the site this feature exists for wanted
-        approval. Whether a login happened is the owner's fact to state."""
-        from aish import browser as browser_module
-
+        """Nothing is asked any more. Whether he is signed in stopped being a
+        fact anybody asserts the moment aish started reading it off the page.
+        Three versions of the question were wrong before it went — inferred
+        from a visit, inferred from a close, then offered as the whole browsing
+        history under one batch yes — and the close now REPORTS an observation
+        instead of asking for a claim."""
         calls = []
         self._fake_view(monkeypatch, calls)
-        recorded = []
-        monkeypatch.setattr(
-            browser_module, "record_logins", lambda hosts: recorded.extend(hosts) or hosts
-        )
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "browser_view", "action": "close"})
             event = recv_until(ws, "browser_view")
             assert event["action"] == "closed"
             assert event["hosts"] == ["x.pl"]
-            assert recorded == []          # offered, not written
-
-    def test_a_login_is_recorded_only_when_the_owner_says_so(self, app_env, monkeypatch):
-        """Its own message, not a view action: recording ARMS the approval
-        gate, so it goes through act() and carries a receipt. A request that
-        vanished would leave the owner believing reads of their account will
-        ask when they will not."""
-        from aish import browser as browser_module
-
-        recorded = []
-        monkeypatch.setattr(
-            browser_module, "record_logins", lambda hosts: recorded.extend(hosts) or hosts
-        )
-        client, _ = make_client(app_env, [])
-        with client, connected(client) as (ws, _, _):
-            ws.send_json({"type": "browser_login", "hosts": ["x.pl"], "rid": "r1"})
-            event = recv_until(ws, "browser_view")
-            assert event["action"] == "recorded"
-            assert recorded == ["x.pl"]
-            assert recv_until(ws, "ack")["rid"] == "r1"
 
     def test_a_failed_navigation_is_reported_not_painted_white(
         self, app_env, monkeypatch

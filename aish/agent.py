@@ -950,7 +950,7 @@ EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image", "read_pdf", "r
 # failure #198 names explicitly. These two bounds are what "plain" means: past
 # them, a path or a hostname label is a place to hide a payload rather than an
 # address anybody typed.
-PLAIN_PATH_MAX = 120
+PLAIN_PATH_MAX = 60
 HOST_LABEL_MAX = 40
 
 # URL or bare-domain-looking tokens in owner text. Deliberately generous
@@ -5144,10 +5144,6 @@ class Agent:
         # _dispatch sequentially — the parallel thunks would bypass the gate.
         # Same for a read that would use a signed-in session (#221): the
         # parallel path has no gate at all, so a gated read must leave it.
-        if self._login_host(name, args) and not self._site_granted(
-            browser.host_of(str(args.get("url", "")))
-        ):
-            return True
         # An e-mailed link is gated too, and the parallel thunks have no gate
         # at all (#279).
         if (url := self._mail_link_url(name, args)) and (
@@ -5199,13 +5195,32 @@ class Agent:
             hosts = _hosts_in_text(str(args.get("query", "")))
         known = self._owner_hosts | self._approved_hosts
         novel = sorted(h for h in hosts if h not in known)
-        if novel and attended and not self._carries_payload(name, args):
-            # A tainted attended turn gates the calls that CARRY something, not
-            # the ones that merely go somewhere. Reading an unfamiliar page is
-            # what research is; a triggered session keeps the stricter rule,
-            # since nobody is going to see the answer either way.
+        if not attended:
+            # A triggered session keeps the strict rule: every novel host,
+            # payload or not, since nobody is going to see the answer either
+            # way.
+            return novel or None
+
+        # A tainted ATTENDED turn. Reading an unfamiliar page is what research
+        # IS, so what gets gated is the call that CARRIES something — and that
+        # question is now asked of every host, not only unfamiliar ones.
+        if self._url_was_offered(str(args.get("url") or args.get("source") or "")):
+            # A link that came back in a result, verbatim. Sound against
+            # exfiltration for a reason worth stating: the attacker would have
+            # to WRITE the finished URL into the page, and he cannot, because
+            # the thing he is trying to steal is the thing he does not know.
             return None
-        return novel or None
+        if self._carries_payload(name, args):
+            # Naming a host is not vouching for unlimited data going to it —
+            # he may have pasted a link somebody sent him — and this test used
+            # to be SKIPPED entirely for a host already in provenance, which
+            # made any host he had ever mentioned an open sink.
+            #
+            # `or None`: a search whose query names NO host has nothing to
+            # carry data to, and an empty list would gate it with no host to
+            # put on the card.
+            return novel or sorted(hosts) or None
+        return None
 
     def _carries_payload(self, name: str, args: dict) -> bool:
         """Would this outbound call take DATA with it, beyond an address?
@@ -5275,13 +5290,22 @@ class Agent:
                 else f"automated session wants to search for {shown} — a host "
                 "not mentioned by the owner in this conversation"
             )
-        else:
+        elif self.origin != "user":
             preview = (
-                f"this turn has read the open web, and now wants to send something "
-                f"to {shown} — a host you did not mention"
-                if self.origin == "user"
-                else f"automated session wants to reach {shown} — a host not "
+                f"automated session wants to reach {shown} — a host not "
                 "mentioned by the owner in this conversation"
+            )
+        elif any(h not in (self._owner_hosts | self._approved_hosts) for h in novel):
+            preview = (
+                f"this turn has read the open web, and now wants to send "
+                f"something to {shown} — a host you did not mention"
+            )
+        else:
+            # He named it, so saying he did not would be false. What is being
+            # asked about is the PAYLOAD, not the host.
+            preview = (
+                f"this turn has read the open web, and now wants to send data "
+                f"to {shown} in the address itself — not just read a page there"
             )
         decision = self.approve_tool(name, args, preview)
         if isinstance(decision, Denied):
@@ -5356,60 +5380,6 @@ class Agent:
         if decision is None or decision is False:
             return _gate_outcome(MAIL_LINK_DENIED, decision="denied")
         self._approved_mail_links.add(url)
-        return None
-
-    def _login_host(self, name: str, args: dict) -> str:
-        """The signed-in host this call would read as the owner, or "".
-
-        Only read_url: it is the one tool that escalates to the persistent
-        browser, and so the one that can carry a live session. The image and
-        document readers fetch bytes through the anonymous opener."""
-        if name != "read_url":
-            return ""
-        return browser.is_logged_in(str(args.get("url", "")))
-
-    def _login_gate(self, name: str, args: dict) -> str | None:
-        """Approval gate for reading a site the owner is signed into (#221):
-        None = proceed, else the refusal text for the model.
-
-        Unlike _egress_gate this applies to EVERY origin, the attended session
-        included. The reason the owner's presence normally settles a read —
-        they can see what it is — is exactly what does not hold here: the risk
-        is not the host, it is that their session goes with it, and the model
-        proposing the URL may be acting on text it read on a page.
-
-        Same grant as `browse` (#287) — `read_url` and `browse` are one
-        permission, described by implementation rather than by what they do to
-        him — so this draws the SAME card, and approving it here lets the
-        browser open the site too. The site it grants is the URL's own host,
-        not the login record's key: signing into `google.com` must not hand
-        over `mail.google.com` because a Cloud blog post was read."""
-        host = self._login_host(name, args)
-        if not host:
-            return None
-        url = str(args.get("url", ""))
-        site = browser.host_of(url) or host
-        if self._site_granted(browser.host_of(url)):
-            return None
-        if self.approve_tool is None:
-            return _gate_outcome(
-                LOGIN_READ_NO_APPROVER.format(host=site), decision="blocked"
-            )
-        decision = self.approve_tool(name, args, SITE_GRANT.format(host=site))
-        if isinstance(decision, Denied):
-            self._arm_stop_gate(decision.comment)
-            return _gate_outcome(
-                _with_feedback(LOGIN_READ_DENIED.format(host=site), decision.comment),
-                decision="denied",
-            )
-        if isinstance(decision, Approved):
-            return _gate_outcome(
-                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
-                decision="held",
-            )
-        if decision is None or decision is False:
-            return _gate_outcome(LOGIN_READ_DENIED.format(host=site), decision="denied")
-        self._grant_site(site)
         return None
 
     def _grant_site(self, host: str) -> None:
@@ -6803,11 +6773,12 @@ class Agent:
             refusal = self._egress_gate(name, args)
             if refusal is not None:
                 return refusal
-            # …and a read of a site the owner is SIGNED INTO holds in every
-            # session, attended or not (#221).
-            refusal = self._login_gate(name, args)
-            if refusal is not None:
-                return refusal
+            # A read of a site he is signed into used to hold for the site
+            # card here. It does not any more: whether the read carries his
+            # session is decided by looking at the PAGE rather than by a list,
+            # and the list was wrong in both directions. The card survives
+            # where it always asked the better question — on DRIVING, which
+            # presses things with his session rather than only reading.
             label, thunk = self._read_only_call(name, args)
             self._note(label)
             self.status.start(name)

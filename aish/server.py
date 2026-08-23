@@ -2428,13 +2428,6 @@ class WebServer:
             await self._browser(client, str(message.get("arg", "")).strip())
         elif kind == "browser_view":
             await self._browser_view(client, message)
-        elif kind == "browser_login":
-            hosts = browser.record_logins(
-                [str(h) for h in (message.get("hosts") or [])]
-            )
-            await client.ws.send_json(
-                {"type": "browser_view", "action": "recorded", "hosts": hosts}
-            )
         elif kind == "files":
             await self._send_files(client, str(message.get("query", "")))
         elif kind == "stop":

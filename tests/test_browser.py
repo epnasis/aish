@@ -76,41 +76,74 @@ class TestProfileLocation:
         assert browser.profile_dir() == state / "browser" / "profile"
         assert ".config" not in str(browser.profile_dir())
 
-    def test_logins_file_sits_beside_the_profile(self, state):
-        assert browser.logins_file() == state / "browser" / "logins.txt"
+    def test_the_signed_in_hint_sits_beside_the_profile(self, state):
+        assert browser.seen_file() == state / "browser" / "signed-in-seen.txt"
 
 
-class TestLoginRecord:
+class TestTheHintIsWrittenByObservation:
+    """What replaced `logins.txt`.
+
+    That file was a list the OWNER asserted, and it was wrong in both
+    directions at once: it held sites he had merely browsed past — measured,
+    `netflix.com`, `airbnb.com` and a typo'd `imbd.com` — each costing a Chrome
+    launch and an approval card on every later read, while sites he really was
+    signed into were missing, so a read of one fetched the logged-out page and
+    handed it back as his account.
+
+    Three separate incidents are on record of that list being written wrongly.
+    They share one cause: a human fact guessed at by a heuristic, then stored as
+    though it had been established. So the store stayed and the WRITER changed."""
+
     def test_host_of_strips_www_and_lowercases(self):
         assert browser.host_of("https://WWW.Allegro.PL/oferta/1") == "allegro.pl"
         assert browser.host_of("not a url") == ""
 
-    def test_a_recorded_login_matches_its_subdomains(self, state):
-        browser._remember_logins({"allegro.pl"})
-        assert browser.is_logged_in("https://allegro.pl/oferta/1") == "allegro.pl"
-        assert browser.is_logged_in("https://www.allegro.pl/x") == "allegro.pl"
-        assert browser.is_logged_in("https://moje.allegro.pl/x") == "allegro.pl"
+    def test_a_page_that_came_back_signed_in_is_remembered(self, state):
+        browser.note_signed_in("https://allegro.pl/moje")
+        assert browser.seen_signed_in() == {"allegro.pl"}
 
-    def test_a_lookalike_host_is_not_a_match(self, state):
-        """Suffix match must be on a DOT boundary: `evilallegro.pl` is not
-        `allegro.pl`, and treating it as one would hand a session away."""
-        browser._remember_logins({"allegro.pl"})
-        assert browser.is_logged_in("https://evilallegro.pl/x") == ""
-        assert browser.is_logged_in("https://allegro.pl.evil.com/x") == ""
+    def test_a_page_that_asks_for_a_password_demotes_itself(self, state):
+        """The hint corrects itself, which is what stops it rotting into the
+        thing it replaced. A page asking for a password is proof."""
+        browser.note_signed_in("https://allegro.pl/moje")
+        browser.note_signed_out("https://allegro.pl/login")
+        assert browser.seen_signed_in() == set()
 
-    def test_unknown_host_is_not_logged_in(self, state):
-        assert browser.is_logged_in("https://example.com") == ""
+    def test_it_is_exact_and_not_a_suffix_match(self, state):
+        """Its predecessor matched subdomains, because a claim about an ACCOUNT
+        reasonably covers a whole site. An observation covers only the page it
+        was made on — and being wrong here costs a wasted launch, never a
+        wrong claim, so there is nothing to be lenient for."""
+        browser.note_signed_in("https://allegro.pl/x")
+        assert "moje.allegro.pl" not in browser.seen_signed_in()
+        assert "evilallegro.pl" not in browser.seen_signed_in()
 
-    def test_forget_drops_one_host_and_keeps_the_rest(self, state):
-        browser._remember_logins({"allegro.pl", "x-kom.pl"})
+    def test_nothing_is_written_for_an_unreadable_address(self, state):
+        browser.note_signed_in("not a url")
+        assert browser.seen_signed_in() == set()
+
+    def test_forget_drops_the_hint_and_the_routing(self, state):
+        browser.note_signed_in("https://allegro.pl/x")
+        browser.note_signed_in("https://x-kom.pl/x")
+        browser.BROWSER_HOSTS.add("allegro.pl")
         assert browser.forget_login("allegro.pl") is True
-        assert browser.logged_in_hosts() == {"x-kom.pl"}
+        assert browser.seen_signed_in() == {"x-kom.pl"}
+        assert "allegro.pl" not in browser.BROWSER_HOSTS
         assert browser.forget_login("allegro.pl") is False
+
+    def test_forgetting_does_not_stop_aish_noticing_next_time(self, state):
+        """The point of a hint rather than a record: if he is still signed in,
+        the very next read sees it and the entry comes back. The page is the
+        truth and this file is only a memory of what the page last said."""
+        browser.note_signed_in("https://allegro.pl/x")
+        browser.forget_login("allegro.pl")
+        browser.note_signed_in("https://allegro.pl/x")
+        assert browser.seen_signed_in() == {"allegro.pl"}
 
 
 class TestCommand:
     def test_status_names_the_profile_and_the_logins(self, state):
-        browser._remember_logins({"allegro.pl"})
+        browser.note_signed_in("https://allegro.pl/")
         out = browser.command("")
         assert str(browser.profile_dir()) in out
         assert "allegro.pl" in out
@@ -119,7 +152,7 @@ class TestCommand:
         assert "(nothing yet)" in browser.command("")
 
     def test_forget_reports_what_it_did(self, state):
-        browser._remember_logins({"allegro.pl"})
+        browser.note_signed_in("https://allegro.pl/")
         assert "no longer treated as signed in" in browser.command("forget allegro.pl")
 
     def test_a_url_records_what_the_owner_visited(self, state, monkeypatch):
@@ -137,18 +170,15 @@ class TestVisitingIsNotSigningIn:
         owner = browser._Owner()
         browser._note_visit(owner, "https://allegro.pl/oferta/x")
         assert owner.view_hosts == {"allegro.pl"}
-        assert browser.logged_in_hosts() == set()   # nothing written
+        assert browser.seen_signed_in() == set()   # nothing written
 
-    def test_the_owner_saying_so_records_it(self, state):
-        assert browser.record_logins(["allegro.pl"]) == ["allegro.pl"]
-        assert browser.is_logged_in("https://allegro.pl/moje") == "allegro.pl"
-
-    def test_recording_normalises_what_the_client_sends(self, state):
-        assert browser.record_logins(["https://www.X-KOM.pl/"]) == ["x-kom.pl"]
-
-    def test_junk_is_dropped_rather_than_recorded(self, state):
-        assert browser.record_logins(["", "   "]) == []
-        assert browser.logged_in_hosts() == set()
+    def test_nor_does_a_page_that_merely_asked_for_a_password(self, state):
+        """Being SHOWN a login form is not signing in. It is what made the
+        close-time question a question at all, and the question is gone: only a
+        password going in and the page then no longer asking counts."""
+        owner = browser._Owner()
+        owner.password_hosts.add("allegro.pl")
+        assert browser.seen_signed_in() == set()
 
 
 class TestReadUrlEscalation:
@@ -890,7 +920,7 @@ class TestASignedInHostIsReadAsTheOwner:
         """The exact shape of session-20260818-174527: eon.pl signed in, the
         owner approves a card saying the read carries his session, and the fetch
         would hand back the login screen with HTTP 200."""
-        browser._remember_logins({"eon.pl"})
+        browser.note_signed_in("https://eon.pl/")
         fetched = self._no_fetch(monkeypatch)
         monkeypatch.setattr(
             browser,
@@ -914,7 +944,7 @@ class TestASignedInHostIsReadAsTheOwner:
         """The cost fence. Routing on the login record means a ~2s Chrome launch,
         so it must apply to signed-in hosts ONLY — every other read stays on the
         0.3s path it was on."""
-        browser._remember_logins({"eon.pl"})
+        browser.note_signed_in("https://eon.pl/")
         launched = []
         monkeypatch.setattr(
             web_module, "_fetch", lambda url: ("<html><body>news</body></html>", "text/html")
@@ -923,8 +953,15 @@ class TestASignedInHostIsReadAsTheOwner:
         assert "news" in web_module.read_url("https://example.com/article")
         assert launched == []
 
-    def test_a_subdomain_of_a_signed_in_host_routes_too(self, state, monkeypatch):
-        browser._remember_logins({"eon.pl"})
+    def test_a_subdomain_is_reached_by_the_PAGE_not_by_the_hint(
+        self, state, monkeypatch
+    ):
+        """The hint is exact, where its predecessor matched subdomains — a
+        claim about an ACCOUNT reasonably covers a whole site, an observation
+        covers the page it was made on. Nothing is lost: the fetch of the
+        subdomain meets the login wall, and THAT is the escalation. One extra
+        fetch, and the answer is the same."""
+        browser.note_signed_in("https://eon.pl/")
         fetched = self._no_fetch(monkeypatch)
         monkeypatch.setattr(
             browser,
@@ -934,7 +971,8 @@ class TestASignedInHostIsReadAsTheOwner:
             ),
         )
         assert "dashboard" in web_module.read_url("https://moje.eon.pl/faktury")
-        assert fetched == []
+        assert fetched == ["https://moje.eon.pl/faktury"]
+        assert "moje.eon.pl" in browser.seen_signed_in()
 
     def test_an_expired_session_says_so_instead_of_serving_the_login_page(
         self, state, monkeypatch
@@ -942,7 +980,7 @@ class TestASignedInHostIsReadAsTheOwner:
         """The browser DID render it, as the owner, and the site asked for a
         password anyway. That is a lapsed session, and it is the one thing the
         model cannot work out for itself — the page is a valid 200 either way."""
-        browser._remember_logins({"eon.pl"})
+        browser.note_signed_in("https://eon.pl/")
         self._no_fetch(monkeypatch)
         monkeypatch.setattr(
             browser,
@@ -968,7 +1006,7 @@ class TestASignedInHostIsReadAsTheOwner:
     ):
         """aish's own statement about WHO made the read must not sit under a
         banner declaring everything below it to be page data."""
-        browser._remember_logins({"eon.pl"})
+        browser.note_signed_in("https://eon.pl/")
         self._no_fetch(monkeypatch)
         monkeypatch.setattr(
             browser,
@@ -983,7 +1021,7 @@ class TestASignedInHostIsReadAsTheOwner:
     def test_a_working_signed_in_read_says_nothing_extra(self, state, monkeypatch):
         """No false alarms: the note exists for the case that went wrong, and a
         page that came back as the owner must read exactly as it did before."""
-        browser._remember_logins({"eon.pl"})
+        browser.note_signed_in("https://eon.pl/")
         self._no_fetch(monkeypatch)
         monkeypatch.setattr(
             browser,
@@ -999,7 +1037,7 @@ class TestASignedInHostIsReadAsTheOwner:
         """Falling back to the fetch is right — plenty of a signed-in host is
         public. Falling back SILENTLY is the bug: the model then reports a
         stranger's view of the site as the owner's account."""
-        browser._remember_logins({"eon.pl"})
+        browser.note_signed_in("https://eon.pl/")
         monkeypatch.setattr(
             web_module,
             "_fetch",
@@ -1021,7 +1059,7 @@ class TestASignedInHostIsReadAsTheOwner:
     ):
         """Anonymous AND walled: the page carries no account content at all, so
         the model must not mine it for one."""
-        browser._remember_logins({"eon.pl"})
+        browser.note_signed_in("https://eon.pl/")
         monkeypatch.setattr(
             web_module, "_fetch", lambda url: (self.LOGIN_HTML, "text/html")
         )
@@ -1038,7 +1076,7 @@ class TestASignedInHostIsReadAsTheOwner:
     def test_the_browser_is_launched_at_most_once_per_read(self, state, monkeypatch):
         """The pre-fetch route and the failure routes are the same escalation. A
         signed-in host that 403s used to reach `_browser_read` twice."""
-        browser._remember_logins({"eon.pl"})
+        browser.note_signed_in("https://eon.pl/")
         launches = []
 
         def once(url, **kw):
@@ -1823,22 +1861,22 @@ class TestSigningInTheSearchProfile:
     ):
         """The load-bearing separation.
 
-        `logins.txt` is not a note; it is what `is_logged_in` answers from and
-        therefore what makes `_login_gate` fire. If a sign-in in the search
-        browser landed there, signing THAT profile into Google would start
-        gating the owner's own reads of Google — a profile nobody read with
-        changing what another profile is allowed to do."""
+        The owner's record is what ROUTES a read into his cookie-carrying
+        profile. If a sign-in made in the search browser landed there, signing
+        THAT profile into Google would start sending the owner's own reads of
+        Google through a session he never established — a profile nobody reads
+        with changing how another profile is read."""
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
         browser._remember_logins({"google.com"}, cold=True)
         assert browser.search_logged_in_hosts() == {"google.com"}
-        assert browser.logged_in_hosts() == set()
-        assert browser.is_logged_in("https://www.google.com/search?q=x") == ""
+        assert browser.seen_signed_in() == set()
+        assert "google.com" not in browser.seen_signed_in()
 
     def test_the_owners_sign_ins_do_not_make_the_search_browser_look_signed_in(
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
-        browser._remember_logins({"allegro.pl"})
+        browser.note_signed_in("https://allegro.pl/")
         assert browser.search_logged_in_hosts() == set()
 
     def test_a_cold_view_is_recorded_against_the_cold_profile(
@@ -1849,17 +1887,17 @@ class TestSigningInTheSearchProfile:
         thread kept."""
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
         monkeypatch.setattr(browser, "_view_was_cold", lambda: True)
-        browser.record_logins(["accounts.google.com"])
+        browser._remember_logins({"accounts.google.com"}, cold=True)
         assert browser.search_logged_in_hosts() == {"accounts.google.com"}
-        assert browser.logged_in_hosts() == set()
+        assert browser.seen_signed_in() == set()
 
     def test_a_warm_view_is_recorded_against_the_owners_profile(
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
         monkeypatch.setattr(browser, "_view_was_cold", lambda: False)
-        browser.record_logins(["eon.pl"])
-        assert browser.logged_in_hosts() == {"eon.pl"}
+        browser._remember_logins({"eon.pl"}, cold=False)
+        assert browser.seen_signed_in() == {"eon.pl"}
         assert browser.search_logged_in_hosts() == set()
 
     def test_the_view_opens_the_profile_it_was_asked_for(self, monkeypatch):
@@ -2736,172 +2774,3 @@ class TestLookingOnceIsWhatASpinnerDefeats:
         assert Silent.waited <= browser.WATCH_POLL_MS * browser.SETTLE_UNKNOWN_TRIES
 
 
-class TestOnlyASiteThatAskedForAPasswordIsACandidate:
-    """Closing the view used to offer the whole browsing history in one batch
-    under a single yes. Measured on the owner's own `logins.txt` after one
-    session: netflix.com, airbnb.com, imdb.com and a typo'd imbd.com recorded
-    as accounts, each then costing a Chrome launch and an approval card on
-    every later read. The over-recording mistake in a third costume."""
-
-    class FakeOwner:
-        def __init__(self):
-            self.view_hosts = set()
-            self.password_hosts = set()
-            self.pending_signin = ""
-
-    def test_browsing_history_is_not_a_candidate(self, monkeypatch):
-        owner = self.FakeOwner()
-        for url in ("https://netflix.com/browse", "https://imdb.com/title/x",
-                    "https://airbnb.com/rooms/1"):
-            browser._note_visit(owner, url)
-        # Everywhere it has BEEN, which the recents list wants…
-        assert owner.view_hosts == {"netflix.com", "imdb.com", "airbnb.com"}
-        # …and nowhere it was asked to sign in, which is what gets offered.
-        assert owner.password_hosts == set()
-
-    def test_a_host_already_recorded_is_not_asked_about_again(self, monkeypatch):
-        monkeypatch.setattr(browser, "logged_in_hosts", lambda: {"eon.pl"})
-        owner = self.FakeOwner()
-        owner.password_hosts = {"eon.pl", "linkedin.com"}
-        assert sorted(owner.password_hosts - browser.logged_in_hosts()) == [
-            "linkedin.com"
-        ]
-
-    def test_a_sign_in_aish_watched_happen_is_not_a_leftover(self):
-        """It was asked about at the moment it happened, naming that one site.
-        Asking again at close is the same question twice."""
-        owner = self.FakeOwner()
-        owner.password_hosts = {"eon.pl", "linkedin.com"}
-        owner.pending_signin = "eon.pl"
-        owner.password_hosts.discard(owner.pending_signin)
-        assert owner.password_hosts == {"linkedin.com"}
-
-    def test_a_session_spent_reading_asks_nothing(self):
-        owner = self.FakeOwner()
-        for url in ("https://allegro.pl/x", "https://google.com/search?q=y"):
-            browser._note_visit(owner, url)
-        assert sorted(owner.password_hosts) == []
-
-
-class TestForgettingTakesTheRoutingToo:
-    """#283. The login record has two jobs — it arms the approval card, and it
-    routes the read into the cookie-carrying profile — and forgetting only ever
-    undid the first. So a forgotten host kept being read AS HIM, with the card
-    now gone: less protection than before he forgot it."""
-
-    def test_forgetting_stops_the_host_being_routed_through_his_profile(
-        self, tmp_path, monkeypatch
-    ):
-        monkeypatch.setattr(browser, "state_dir", lambda: tmp_path)
-        browser.logins_file().parent.mkdir(parents=True, exist_ok=True)
-        browser.logins_file().write_text("eon.pl\n", encoding="utf-8")
-        browser.BROWSER_HOSTS.add("eon.pl")
-
-        assert browser.forget_login("eon.pl") is True
-        assert browser.logged_in_hosts() == set()
-        assert "eon.pl" not in browser.BROWSER_HOSTS
-
-    def test_the_cookies_are_deliberately_untouched(self, tmp_path, monkeypatch):
-        """His session is his to end, at the site. Clearing the jar to tidy a
-        record would trade the feature for the workaround — the same fence
-        `_shed_reputation` keeps when it drops reputation cookies BY NAME."""
-        cleared = []
-        monkeypatch.setattr(browser, "state_dir", lambda: tmp_path)
-        browser.logins_file().parent.mkdir(parents=True, exist_ok=True)
-        browser.logins_file().write_text("eon.pl\n", encoding="utf-8")
-        monkeypatch.setattr(
-            browser, "shutdown", lambda: cleared.append("closed"),
-        )
-        browser.forget_login("eon.pl")
-        assert cleared == []  # nothing reached the browser at all
-
-    def test_forgetting_a_host_that_was_never_recorded_changes_nothing(
-        self, tmp_path, monkeypatch
-    ):
-        monkeypatch.setattr(browser, "state_dir", lambda: tmp_path)
-        browser.logins_file().parent.mkdir(parents=True, exist_ok=True)
-        browser.logins_file().write_text("eon.pl\n", encoding="utf-8")
-        browser.BROWSER_HOSTS.add("allegro.pl")
-        assert browser.forget_login("allegro.pl") is False
-        # Still routed: it is in BROWSER_HOSTS because it needed the browser
-        # for a bot wall, which is a different fact and not his to forget.
-        assert "allegro.pl" in browser.BROWSER_HOSTS
-class TestAPressBelowTheRealClickSaysWhatItSaw:
-    """Every rung below a real click used to assert its own outcome, and the
-    two rungs asserted OPPOSITE things — both without looking (#273).
-
-    The keyboard rung claimed success: on qatarairways.com, Enter on a date
-    field that never opened its picker came back as "aish pressed it with the
-    keyboard". The dispatch rung hedged unconditionally — "the page may not
-    have registered it as a real press" — on presses that plainly had. Neither
-    is a fact; the control is now read before and after."""
-
-    def _target(self, states):
-        """A control whose readback walks through `states` on each evaluate."""
-        seen = iter(states)
-
-        class Target:
-            async def evaluate(self, js, *a):
-                value = next(seen)
-                if value is None:
-                    raise RuntimeError("this element will not answer")
-                return value
-
-        return Target()
-
-    def _page(self):
-        class Page:
-            async def wait_for_timeout(self, ms):
-                return None
-
-        return Page()
-
-    def _took(self, states):
-        """states[0] is what was read BEFORE the press; the rest is what the
-        control answers afterwards."""
-        page, target = self._page(), self._target(states[1:])
-        return asyncio.new_event_loop().run_until_complete(
-            browser._took(page, target, states[0])
-        )
-
-    def test_a_control_that_moved_carries_no_caveat(self):
-        said = self._took(["aria-expanded=false|at=x", "aria-expanded=true|at=x"])
-        assert said == ""
-
-    def test_a_control_that_did_not_move_says_so_plainly(self):
-        said = self._took(["aria-expanded=false|at=x", "aria-expanded=false|at=x"])
-        assert "nothing about that control or the address changed" in said
-        assert "may not have been registered" in said
-
-    def test_a_control_that_cannot_be_read_is_a_THIRD_answer(self):
-        """Unreadable and unchanged are different facts, and folding them
-        together is how a press that was never checked reads as a press that
-        was checked and found wanting — the same distinction `_readback` draws
-        between an empty field and an unreadable one."""
-        said = self._took(["aria-expanded=false|at=x", None])
-        assert "could not check" in said
-        assert "may not have been registered" not in said
-
-    def test_a_button_that_reports_itself_counts(self):
-        """The commonest proof of all: "Wyślij" becoming "Wysłano". Found by
-        the real-Chrome check, which pressed a button whose only reaction was
-        its own words and got back a hedge."""
-        said = self._took(["says=Wyślij zgłoszenie|at=x", "says=Wysłano zgłoszenie|at=x"])
-        assert said == ""
-
-    def test_navigating_counts_as_the_page_taking_it(self):
-        said = self._took(["class=btn|at=https://a/", "class=btn|at=https://b/"])
-        assert said == ""
-
-    def test_the_fingerprint_is_only_things_this_press_is_answerable_for(self):
-        """A node count or a mutation observer detects more and means less: a
-        live page with an animation or an ad slot mutates every second, so
-        'something changed' would read as success everywhere. A false 'it
-        worked' is the direction that makes the model report a form as sent."""
-        js = browser._ACTIVATION_JS
-        assert "location.href" in js
-        assert "isConnected" in js
-        assert "aria-expanded" in js
-        assert "textContent" in js
-        for noise in ("MutationObserver", "getElementsByTagName", "body.innerHTML"):
-            assert noise not in js, f"{noise} is page noise, not this control's doing"

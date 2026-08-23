@@ -4040,237 +4040,85 @@ class TestReadonlyPluginParallel:
         assert any('"text": "two"' in r for r in results)
 
 
-class TestLoginGate:
-    """#221: reading a site the owner is SIGNED INTO holds for approval, in
-    every session including the attended one.
+class TestReadingHisAccountIsFreeAndDrivingIsNot:
+    """What replaced the read-time card (2026-08-23).
 
-    The distinction from TestEgressGate is the point. That gate asks "is this
-    host one the owner named?" and only in a triggered session, because an
-    attended owner can see the host for themselves. This one asks "does this
-    read carry the owner's live session?" — and their watching does not settle
-    it, since the URL may have come from text on a page rather than from them.
-    """
+    Its question was *does this read carry your live session?*, and it was
+    answered from a hand-maintained list that was wrong in both directions —
+    sites he had merely browsed past cost a launch and a card forever, while
+    sites he really was signed into were missing, so a read of one fetched the
+    logged-out page and handed it back as his account. The answer is now read
+    off the PAGE, and the consent was given at the sign-in itself.
 
-    def _signed_into(self, monkeypatch, *hosts):
+    The SITE grant survives where it always asked the better question: driving
+    presses things with his session rather than only reading it."""
+
+    def _stub(self, monkeypatch):
         import aish.agent as agent_module
 
-        monkeypatch.setattr(
-            agent_module.browser,
-            "is_logged_in",
-            lambda url: next((h for h in hosts if h in url), ""),
-        )
         fetched: list[str] = []
         monkeypatch.setattr(
             agent_module.web, "read_url",
-            lambda url, topic=None, **_kw: (fetched.append(url), f"page at {url}")[1],
+            lambda url, topic=None, **_kw: (fetched.append(url), "his account")[1],
         )
         return fetched
 
-    def test_signed_in_host_denied_never_reads(self, monkeypatch):
-        from aish.agent import LOGIN_READ_DENIED
-
-        fetched = self._signed_into(monkeypatch, "allegro.pl")
-        asked = []
-
-        def approve_tool(name, args, preview=None):
-            asked.append(preview)
-            return False
-
+    def test_reading_a_site_he_is_signed_into_asks_nothing(self, monkeypatch):
+        fetched = self._stub(monkeypatch)
+        asked: list = []
         agent, _ = make_agent(
             [
-                model_says(tool_calls=[
-                    tool_call("read_url", url="https://allegro.pl/moje-konto")
-                ]),
-                model_says("did not read it"),
-            ],
-            approve_tool=approve_tool,
-        )
-        agent.run_task("what did I order")
-        assert fetched == []
-        assert tool_messages(agent.messages)[0]["content"] == LOGIN_READ_DENIED.format(
-            host="allegro.pl"
-        )
-        assert asked and "browse allegro.pl signed in as you" in asked[0]
-
-    def test_approved_read_proceeds_and_asks_once_per_session(self, monkeypatch):
-        """A task that reads five pages of one portal asks once, matching the
-        egress gate — a per-page prompt would make the feature unusable."""
-        fetched = self._signed_into(monkeypatch, "allegro.pl")
-        asked = []
-
-        def approve_tool(name, args, preview=None):
-            asked.append(preview)
-            return True
-
-        agent, _ = make_agent(
-            [
-                model_says(tool_calls=[
-                    tool_call("read_url", url="https://allegro.pl/a")
-                ]),
-                model_says(tool_calls=[
-                    tool_call("read_url", url="https://allegro.pl/b")
-                ]),
-                model_says("read both"),
-            ],
-            approve_tool=approve_tool,
-        )
-        agent.run_task("check my orders")
-        assert fetched == ["https://allegro.pl/a", "https://allegro.pl/b"]
-        assert len(asked) == 1
-
-    def test_a_public_host_is_never_gated(self, monkeypatch):
-        """The gate is about the SESSION, not the site: reading a page nobody
-        is signed into must stay exactly as frictionless as it was."""
-        fetched = self._signed_into(monkeypatch, "allegro.pl")
-        asked = []
-
-        agent, _ = make_agent(
-            [
-                model_says(tool_calls=[
-                    tool_call("read_url", url="https://example.com/x")
-                ]),
-                model_says("read it"),
+                model_says(tool_calls=[tool_call("read_url", url="https://eon.pl/faktury")]),
+                model_says("here they are"),
             ],
             approve_tool=lambda *a, **k: asked.append(a) or True,
         )
-        agent.run_task("read that page")
-        assert fetched == ["https://example.com/x"]
+        agent.run_task("get my eon.pl invoices")
+        assert fetched == ["https://eon.pl/faktury"]
         assert asked == []
 
-    def test_no_approver_blocks_rather_than_reads(self, monkeypatch):
-        """With nobody to ask, the gate must fail CLOSED. Both shipped
-        surfaces wire an approver (cli.make_tool_approver, the server's card),
-        so this is the floor under any construction that does not."""
-        from aish.agent import LOGIN_READ_NO_APPROVER
-
-        fetched = self._signed_into(monkeypatch, "allegro.pl")
+    def test_a_host_nobody_recorded_is_read_the_same_way(self, monkeypatch):
+        """The complaint that started this: behaviour must not depend on
+        whether a list happens to name the site."""
+        fetched = self._stub(monkeypatch)
+        asked: list = []
         agent, _ = make_agent(
             [
                 model_says(tool_calls=[
-                    tool_call("read_url", url="https://allegro.pl/moje-konto")
+                    tool_call("read_url", url="https://never-recorded.test/me")
                 ]),
-                model_says("could not"),
+                model_says("read"),
             ],
-            approve_tool=None,
+            approve_tool=lambda *a, **k: asked.append(a) or True,
         )
-        agent.run_task("check my orders")
-        assert fetched == []
-        assert LOGIN_READ_NO_APPROVER.format(host="allegro.pl") in tool_messages(
-            agent.messages
-        )[0]["content"]
-
-    def test_an_unattended_session_never_reads_a_signed_in_host(self, monkeypatch):
-        """Belt and braces with the egress gate, which refuses this one first
-        on the host being un-named. Asserted on the OUTCOME rather than the
-        message so it keeps holding whichever gate gets there."""
-        fetched = self._signed_into(monkeypatch, "allegro.pl")
-        agent, _ = make_agent(
-            [
-                model_says(tool_calls=[
-                    tool_call("read_url", url="https://allegro.pl/moje-konto")
-                ]),
-                model_says("could not"),
-            ],
-            origin="email",
-            approve_tool=None,
-        )
-        agent.run_task("check my orders")
-        assert fetched == []
-
-    def test_a_gated_read_leaves_the_parallel_path(self, monkeypatch):
-        """The parallel read path has NO gate — a gated call that stayed on it
-        would bypass approval entirely. `_read_needs_prompt` is the seam that
-        routes it back to _dispatch, so it is pinned directly."""
-        self._signed_into(monkeypatch, "allegro.pl")
-        agent, _ = make_agent([model_says("hi")])
-        assert agent._read_needs_prompt("read_url", {"url": "https://allegro.pl/a"})
-        assert not agent._read_needs_prompt("read_url", {"url": "https://example.com/a"})
-        agent._approved_sites.add("allegro.pl")
-        assert not agent._read_needs_prompt("read_url", {"url": "https://allegro.pl/a"})
-
-    def test_browse_and_read_url_are_one_permission(self, monkeypatch):
-        """He approved browsing linkedin.com as him, and 47 seconds later was
-        asked whether aish could READ linkedin.com as him. Two tools, one
-        question — and the difference between them (which one fetches the
-        page) is one he has no way to see and nothing to do about."""
-        fetched = self._signed_into(monkeypatch, "linkedin.com")
-        asked = []
-        agent, _ = make_agent(
-            [
-                model_says(tool_calls=[
-                    tool_call("read_url", url="https://www.linkedin.com/in/arcea")
-                ]),
-                model_says("read it"),
-            ],
-            approve_tool=lambda n, a, p=None: asked.append(p) or True,
-        )
-        agent._approved_sites.add("linkedin.com")
-        agent.run_task("what did Roman post")
+        agent.run_task("read never-recorded.test/me")
+        assert fetched == ["https://never-recorded.test/me"]
         assert asked == []
-        assert fetched == ["https://www.linkedin.com/in/arcea"]
-        assert not agent._read_needs_prompt(
-            "read_url", {"url": "https://www.linkedin.com/in/arcea"}
+
+    def test_driving_still_asks_once_per_site(self):
+        from aish import browse as browse_mod
+
+        asked: list = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or True,
         )
-
-    def test_a_grant_on_one_site_does_not_cover_another(self, monkeypatch):
-        """Suffix match, both ways round: subdomains of the granted site ride
-        it, a site that merely ends with the same letters does not."""
-        self._signed_into(monkeypatch, "linkedin.com", "allegro.pl")
-        agent, _ = make_agent([model_says("hi")])
-        agent._approved_sites.add("linkedin.com")
-        assert agent._site_granted("pl.linkedin.com")
-        assert not agent._site_granted("evillinkedin.com")
-        assert agent._read_needs_prompt("read_url", {"url": "https://allegro.pl/a"})
-
-    def test_a_read_yes_lets_the_browser_open_the_site_too(self, monkeypatch):
-        """The merge runs both ways ON PURPOSE (#287). Clicking to navigate,
-        expand or search is how a modern site is READ, and it is what he means
-        when he approves browsing; the acts that CHANGE something — a name
-        that says it pays, buys, books, deletes, sends or signs, a page
-        showing checkout structure, a password field — keep their own card or
-        their own refusal, which is where that question actually belongs."""
-        self._signed_into(monkeypatch, "linkedin.com")
-        asked = []
-        agent, _ = make_agent(
-            [model_says("hi")],
-            approve_tool=lambda n, a, p=None: asked.append(p) or True,
+        agent._browse_view.remember(
+            browse_mod.Snapshot(url="https://eon.pl/x", title="", text="t", controls=[])
         )
-        assert agent._login_gate("read_url", {"url": "https://www.linkedin.com/in/x"}) is None
-        assert len(asked) == 1 and "browse linkedin.com signed in as you" in asked[0]
-        assert agent._browse_gate("browse", {"url": "https://linkedin.com/feed"}) is None
-        assert len(asked) == 1  # the browser rides the yes he already gave
+        assert agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"}) is None
+        assert agent._browse_gate("browse", {"url": "https://eon.pl/faktury"}) is None
+        assert len(asked) == 1
+        assert "eon.pl" in asked[0]
 
-    def test_the_grant_survives_the_agent_being_rebuilt(self, monkeypatch):
-        """Every ship restarts aish-web and rebuilds the agent under an open
-        chat, so a yes given a minute ago became another card. The driving
-        grant is replayed from the chat's own log (#251); this one was not."""
-        self._signed_into(monkeypatch, "allegro.pl")
-        logged = []
-        agent, _ = make_agent(
-            [
-                model_says(tool_calls=[
-                    tool_call("read_url", url="https://allegro.pl/moje")
-                ]),
-                model_says("read it"),
-            ],
-            approve_tool=lambda n, a, p=None: True,
-            state_log=logged.append,
+    def test_the_driving_grant_covers_the_whole_site_downward(self):
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda *a, **k: True,
         )
-        agent.run_task("what did I order")
-        assert {"kind": "site_grant", "host": "allegro.pl"} in logged
-        fresh, _ = make_agent([])
-        fresh.restore_site_grants(["allegro.pl"])
-        assert not fresh._read_needs_prompt("read_url", {"url": "https://allegro.pl/x"})
-
-    def test_only_read_url_can_carry_a_session(self, monkeypatch):
-        """show_image / read_pdf fetch bytes through the anonymous opener, so
-        they cannot read as the owner and must not draw a card that claims
-        they do."""
-        self._signed_into(monkeypatch, "allegro.pl")
-        agent, _ = make_agent([model_says("hi")])
-        assert agent._login_host("read_url", {"url": "https://allegro.pl/a"})
-        assert agent._login_host("show_image", {"source": "https://allegro.pl/p.jpg"}) == ""
-
+        agent._grant_site("linkedin.com")
+        assert agent._site_granted("pl.linkedin.com") is True
+        assert agent._site_granted("evil-linkedin.com") is False
 
 class TestEgressGate:
     """#178 P0-2: in a NON-user (triggered) session, web_search/read_url to a
@@ -9434,7 +9282,7 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         agent.run_task("read https://shop.example/list and price the offer")
         assert asked == []
 
-    def test_a_host_the_owner_named_is_never_novel_in_an_attended_session(self, monkeypatch):
+    def test_a_host_the_owner_named_is_read_freely(self, monkeypatch):
         """Owner provenance used to be recorded only in triggered sessions,
         because the gate returned before consulting it. Left that way, every
         host he typed himself would come back novel the moment the fence went
@@ -9444,15 +9292,51 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         agent, _ = make_agent(
             [
                 model_says(tool_calls=[tool_call("read_url", url="https://eon.pl/mojeon")]),
-                model_says(tool_calls=[
-                    tool_call("read_url", url="https://eon.pl/faktury?id=7&sort=date")
-                ]),
+                model_says(tool_calls=[tool_call("read_url", url="https://eon.pl/faktury")]),
                 model_says("here are the invoices"),
             ],
             approve_tool=lambda *a, **k: asked.append(a) or True,
         )
         agent.run_task("get my invoices from eon.pl")
         assert asked == []
+
+    def test_naming_a_host_does_not_make_it_an_open_sink(self, monkeypatch):
+        """The payload test used to be SKIPPED for any host already in
+        provenance, so naming a site once let an unlimited amount of his data
+        travel to it inside the address."""
+        fetched = self._stub_web(monkeypatch)
+        asked: list = []
+
+        def approve_tool(name, args, preview=None):
+            asked.append(preview)
+            return False
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://eon.pl/mojeon")]),
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://eon.pl/x?leak=" + "A" * 400)
+                ]),
+                model_says("stopped"),
+            ],
+            approve_tool=approve_tool,
+        )
+        agent.run_task("get my invoices from eon.pl")
+        assert fetched == ["https://eon.pl/mojeon"]  # the payload never left
+        assert asked and "did not mention" not in asked[0]
+
+    def test_a_composed_address_to_an_unknown_host_is_bounded(self):
+        """What replaced a 120-character path budget. A link that was actually
+        offered is excused earlier, so what reaches here is an address the
+        model composed."""
+        agent, _ = make_agent([], approve_tool=lambda *a, **k: True)
+        agent._tainted = True
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://x.test/" + "B" * 110}
+        ) == ["x.test"]
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://x.test/about"}
+        ) is None
 
     def test_taint_belongs_to_the_task_that_acquired_it(self, monkeypatch):
         self._stub_web(monkeypatch)

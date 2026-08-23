@@ -12285,32 +12285,19 @@ function onBrowserView(event) {
   if (event.action === "closed") {
     bvOpen = false;
     closeSheets();
+    // Nothing is ASKED. Whether he is signed in stopped being a fact anybody
+    // asserts the moment aish started reading it off the page: a page that has
+    // stopped asking for a password, after one went in, is a sign-in — and
+    // that is what the server hands back here. Three versions of this question
+    // were wrong before it went (inferred from a visit, inferred from a close,
+    // then offered as the whole browsing history under one batch yes), and a
+    // fourth version of a question nobody can answer reliably was not the fix.
     const hosts = event.hosts || [];
-    if (!hosts.length) { showToast("browser closed"); return; }
-    // ASK — but only about sites that PUT A PASSWORD BOX in front of him, and
-    // the server decides which those are. Closing the sheet used to offer the
-    // whole browsing history in one batch under a single yes, which is how
-    // netflix.com, airbnb.com and a typo'd imbd.com ended up recorded as
-    // accounts. Whether a login happened is his fact to state; where one was
-    // even possible is not.
-    askConfirm({
-      title: hosts.length > 1 ? "Did you sign in?" : `Did you sign in to ${hosts[0]}?`,
-      body:
-        `${hosts.length > 1 ? hosts.join(", ") + " asked" : "It asked"} for a ` +
-        "password while you were there. If you signed in, aish will read " +
-        `${hosts.length > 1 ? "those sites" : "it"} as you — and will ask you ` +
-        "first, every time. If you did not, choose Just looking.",
-      verb: "I signed in",
-      cancelVerb: "Just looking",
-      // act(), not a bare send: this ARMS the approval gate, and a request
-      // that vanished would leave the owner believing reads of their account
-      // will ask when they will not. The frame messages below are different —
-      // a lost one just fails to repaint, and the spinner says so.
-      action: () => act(
-        { type: "browser_login", hosts },
-        { label: "recording the sign-in" },
-      ),
-    });
+    showToast(
+      hosts.length
+        ? `browser closed \u2014 signed in to ${hosts.join(", ")}`
+        : "browser closed",
+    );
     return;
   }
   bvOpen = true;    // a frame means a browser is running on the Mac
@@ -12342,7 +12329,6 @@ function onBrowserView(event) {
   // A password went into this host and the page then moved — which is what a
   // successful sign-in looks like from out here. Ask NOW, naming the site,
   // rather than at the end of the session where two logins are one question.
-  if (event.signin) bvAskSignin(event.signin);
   // Saved, not asked: the checkbox was the question and he already answered
   // it. This is the receipt, with the one-tap way back out.
   if (event.saved) bvSavedSignin(event.saved);
@@ -12405,21 +12391,6 @@ function bvOpenEditor(focus) {
   bvPaint(false);
 }
 
-function bvAskSignin(host) {
-  askConfirm({
-    title: `Signed in to ${host}?`,
-    body:
-      `If you just signed in, aish can use that sign-in when it reads ${host} ` +
-      "— and it will ask you before every one of those reads. If that was not " +
-      "a sign-in, choose Not a sign-in.",
-    verb: "Remember it",
-    cancelVerb: "Not a sign-in",
-    action: () => act(
-      { type: "browser_login", hosts: [host] },
-      { label: "recording the sign-in" },
-    ),
-  });
-}
 
 /** Receipt for a stored sign-in. NOT a question — the checkbox was the
  * question and he already answered it.
