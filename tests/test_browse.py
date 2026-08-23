@@ -2131,3 +2131,83 @@ class TestTheGrantIsWhereTheConsentLives:
         fresh = Agent(model="fake", approve=lambda _c: True, client_chat=lambda **kw: {})
         fresh.restore_browse_grants(["eon.pl"])
         assert "eon.pl" in fresh._approved_browsing
+
+
+class TestTheCardSaysWhatIsAboutToBeSent:
+    """#251. The card named what was about to be PRESSED and never what was
+    about to be SENT — and that is the half that can have gone stale, because
+    filling a form needs no approval, so values are set in one call and
+    submitted in another with a page free to reset a date in between."""
+
+    def _form(self):
+        return browse.controls_from([
+            {"n": 1, "kind": "field", "name": "Skąd", "detail": "currently: WAW",
+             "form": "0:0"},
+            {"n": 2, "kind": "field", "name": "Dokąd", "form": "0:0"},
+            {"n": 3, "kind": "password", "name": "Hasło", "form": "0:0"},
+            {"n": 4, "kind": "check", "name": "Regulamin", "detail": "checked",
+             "form": "0:0"},
+            {"n": 5, "kind": "field", "name": "Szukaj w pomocy",
+             "detail": "currently: x", "form": "0:9"},
+            {"n": 6, "kind": "button", "name": "Zapłać", "submits": True,
+             "form": "0:0"},
+        ])
+
+    def test_it_reads_the_form_the_button_would_send(self):
+        controls = self._form()
+        held = dict(browse.form_values(controls, controls[-1]))
+        assert held["Skąd"] == "WAW"
+        assert "Szukaj w pomocy" not in held  # a different form on the same page
+
+    def test_an_empty_field_says_so_rather_than_being_left_out(self):
+        """A field the owner expected to be filled and is not is exactly what
+        he needs the card to show him."""
+        controls = self._form()
+        assert dict(browse.form_values(controls, controls[-1]))["Dokąd"] == "(empty)"
+
+    def test_a_password_is_named_but_never_read_back(self):
+        controls = self._form()
+        assert dict(browse.form_values(controls, controls[-1]))["Hasło"] == browse.NOT_TYPED
+
+    def test_a_control_in_no_form_has_nothing_to_report(self):
+        loose = browse.controls_from([{"n": 1, "kind": "button", "name": "Zapłać"}])
+        assert browse.form_values(loose, loose[0]) == []
+
+    def test_a_long_form_is_cut_with_the_cut_counted(self):
+        many = browse.controls_from(
+            [{"n": i, "kind": "field", "name": f"Pole {i}", "form": "0:0"}
+             for i in range(20)]
+            + [{"n": 99, "kind": "button", "name": "Zapłać", "form": "0:0"}]
+        )
+        note = browse.form_note(browse.form_values(many, many[-1]))
+        assert "and 8 more field(s)" in note
+
+    def test_the_card_carries_it(self, monkeypatch):
+        controls = self._form()
+        asked = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+        )
+        agent._browse_view.remember(snapshot(controls=controls))
+        agent._approved_browsing.add("eon.pl")
+        monkeypatch.setattr(browser, "browse_fields", lambda **kw: controls)
+        assert agent._browse_gate("browse_act", {"target": "Zapłać"}) is None
+        assert "this form currently holds:" in asked[0]
+        assert "Skąd: WAW" in asked[0]
+
+    def test_a_stale_reading_is_never_presented_as_a_current_one(self, monkeypatch):
+        """A value read a minute ago and shown as current is the failure this
+        exists to prevent, so it must not be able to happen silently."""
+        controls = self._form()
+        asked = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+        )
+        agent._browse_view.remember(snapshot(controls=controls))
+        agent._approved_browsing.add("eon.pl")
+        # The live read fails — no page, a torn-down browser, a busy loop.
+        monkeypatch.setattr(browser, "browse_fields", lambda **kw: [])
+        agent._browse_gate("browse_act", {"target": "Zapłać"})
+        assert "when aish last looked" in asked[0]
