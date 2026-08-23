@@ -4104,10 +4104,19 @@ class TestReadingHisAccountIsFreeAndDrivingIsNot:
             approve_tool=lambda name, args, preview=None: asked.append(preview) or True,
         )
         agent._browse_view.remember(
-            browse_mod.Snapshot(url="https://eon.pl/x", title="", text="t", controls=[])
+            browse_mod.Snapshot(
+                url="https://eon.pl/x", title="", text="t",
+                controls=browse_mod.controls_from(
+                    [{"n": 0, "kind": "button", "name": "Faktury"}]
+                ),
+            )
         )
+        # Opening and reading are free by any route; the card is spent on the
+        # first PRESS, which is what read_url cannot do.
         assert agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"}) is None
-        assert agent._browse_gate("browse", {"url": "https://eon.pl/faktury"}) is None
+        assert asked == []
+        assert agent._browse_gate("browse_act", {"target": "Faktury"}) is None
+        assert agent._browse_gate("browse_act", {"target": "Faktury"}) is None
         assert len(asked) == 1
         assert "eon.pl" in asked[0]
 

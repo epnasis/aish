@@ -242,10 +242,18 @@ class TestDownloads:
 
 
 class TestBrowseGate:
-    """Who may drive, and what they may press.
+    """Who may act, and what they may press.
 
-    Two questions, not one: may aish drive this host at all (once per host per
-    task), and may it press THIS control (every time, by name)."""
+    Two questions, not one: may aish use this site as him at all (once per
+    site), and may it press THIS control (every time, by name).
+
+    **The first is asked at the first PRESS, not at the open.** Opening a page
+    and reading it is what `read_url` does, and reading his account is free —
+    so the same page fetched the other way used to ask, which the model could
+    sidestep by choosing the other tool. Reading is free whichever way it is
+    done; the card is spent on what `read_url` cannot do."""
+
+    PRESSABLE = (control(n=0, name="Przełącz lokal"),)
 
     def _agent(self, monkeypatch, approve, snap=None):
         asked = []
@@ -258,47 +266,63 @@ class TestBrowseGate:
             model="fake", approve=lambda _c: True,
             client_chat=lambda **kw: {}, approve_tool=approve_tool,
         )
-        agent._browse_view.remember(snap)
+        agent._browse_view.remember(
+            snap if snap is not None else snapshot(controls=self.PRESSABLE)
+        )
         return agent, asked
 
-    def test_using_a_site_asks_once_per_task(self, monkeypatch):
+    def _press(self, agent, target="Przełącz lokal"):
+        return agent._browse_gate("browse_act", {"target": target, "action": "click"})
+
+    def test_opening_and_reading_a_page_asks_nothing(self, monkeypatch):
         agent, asked = self._agent(monkeypatch, lambda *a: True)
-        args = {"url": "https://eon.pl/mojeon"}
-        assert agent._browse_gate("browse", args) is None
-        assert agent._browse_gate("browse", {"url": "https://eon.pl/faktury"}) is None
+        assert agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"}) is None
+        assert agent._browse_gate(
+            "browse_act", {"target": "Przełącz lokal", "action": "read"}
+        ) is None
+        assert asked == []
+
+    def test_pressing_asks_once_per_site(self, monkeypatch):
+        agent, asked = self._agent(monkeypatch, lambda *a: True)
+        assert self._press(agent) is None
+        assert self._press(agent) is None
         assert len(asked) == 1
-        assert "browse eon.pl" in asked[0]
+        assert "act on eon.pl" in asked[0]
 
     def test_the_card_says_it_acts_as_the_owner(self, monkeypatch):
         agent, asked = self._agent(monkeypatch, lambda *a: True)
-        agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"})
+        self._press(agent)
         assert "signed in as you" in asked[0]
 
     def test_denying_the_site_stops_the_flow(self, monkeypatch):
         agent, _ = self._agent(monkeypatch, lambda *a: False)
-        out = agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"})
-        assert "USER DENIED browsing eon.pl" in out
-        assert "read_url and browse are the SAME permission" in out
+        out = self._press(agent)
+        assert "USER DENIED acting on eon.pl" in out
+        assert "Reading the site is still allowed" in out
         assert "eon.pl" not in agent._approved_sites
 
     def test_a_denial_with_a_comment_arms_the_stop_gate(self, monkeypatch):
         agent, _ = self._agent(monkeypatch, lambda *a: Denied("not in my account"))
-        out = agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"})
+        out = self._press(agent)
         assert "not in my account" in out
         assert agent._pending_comment_response
 
     def test_an_approval_with_a_comment_holds_the_action(self, monkeypatch):
         """Approve + comment = continue but ADJUST: the original is never run."""
         agent, _ = self._agent(monkeypatch, lambda *a: Approved("use the other one"))
-        out = agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"})
+        out = self._press(agent)
         assert "use the other one" in out
 
-    def test_no_approver_fails_closed(self, monkeypatch):
+    def test_no_approver_fails_closed_on_a_PRESS_and_not_on_a_read(self):
+        """Unattended, aish may still READ his account — that is free by any
+        route now — but it may not press anything inside it."""
         agent = Agent(
             model="fake", approve=lambda _c: True,
             client_chat=lambda **kw: {}, approve_tool=None,
         )
-        out = agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"})
+        agent._browse_view.remember(snapshot(controls=self.PRESSABLE))
+        assert agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"}) is None
+        out = self._press(agent)
         assert out.startswith("NOT EXECUTED")
         assert "no approver" in out
 
@@ -357,7 +381,8 @@ class TestBrowseGate:
         assert label == "→ browse: click button 'Zapłać'"
 
     def test_acting_with_nothing_open_says_what_to_do(self, monkeypatch):
-        agent, _ = self._agent(monkeypatch, lambda *a: True, None)
+        agent, _ = self._agent(monkeypatch, lambda *a: True, snapshot())
+        agent._browse_view.remember(None)
         out = agent._browse_gate("browse_act", {"target": 1})
         assert "Call browse(url) first" in out
 
@@ -1697,7 +1722,7 @@ class TestTwoChatsDoNotShareOnePageView:
 
         assert qatar._browse_gate("browse_act", {"target": "To"}) is None
         assert len(flights) == 1
-        assert "browse qatarairways.com" in flights[0]
+        assert "act on qatarairways.com" in flights[0]
         assert "imdb" not in flights[0]
 
     def test_the_other_chat_s_control_is_never_resolvable(self, monkeypatch):
@@ -2045,16 +2070,16 @@ class TestTheGrantIsWhereTheConsentLives:
         card tapped blind records a consent he never gave, so what the grant
         covers is said on the card that grants it."""
         agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
-        agent._browse_gate("browse", {"url": "https://eon.pl/x"})
+        agent._browse_gate("browse_act", {"target": "Przełącz lokal"})
         assert "signed in as you" in asked[0]
-        assert "changing anything asks first" in asked[0]
+        assert "asks again by name" in asked[0]
 
     def test_the_card_stays_one_sentence(self):
         """Said on a phone, where four sentences is a card he scrolls past to
         reach the buttons. The floor the grant does not cover draws its own
         card when it fires; promising it here only buys length."""
         agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
-        agent._browse_gate("browse", {"url": "https://eon.pl/x"})
+        agent._browse_gate("browse_act", {"target": "Przełącz lokal"})
         assert "\n" not in asked[0]
         assert ". " not in asked[0] and asked[0].endswith(".")
         assert len(asked[0]) < 180
