@@ -610,12 +610,23 @@ def _remember_logins(hosts: set[str], *, cold: bool = False) -> None:
 
 def forget_login(host: str) -> bool:
     """Drop a host from the login record. Does NOT clear its cookies — the
-    owner's session is theirs to end, at the site, in a window."""
+    owner's session is theirs to end, at the site, in a window.
+
+    It DOES stop routing the host through his profile, and that half was
+    missing (#283). The record has two jobs — it arms `_login_gate`, and it
+    routes the read into the signed-in browser — and forgetting only ever undid
+    the first. A host that had already needed the browser stayed in
+    `BROWSER_HOSTS`, so it kept being read in the cookie-carrying profile with
+    the approval card now gone: forgetting a site removed the CARD and left the
+    CAPABILITY, which is exactly backwards. Anyone clearing a polluted record
+    would have walked straight into it."""
     host = host_of("https://" + host) or host.strip().lower()
     known = logged_in_hosts()
     if host not in known:
         return False
     logins_file().write_text("\n".join(sorted(known - {host})) + "\n", encoding="utf-8")
+    # Per-process: this is the running server's routing table, not a file.
+    BROWSER_HOSTS.discard(host)
     return True
 
 

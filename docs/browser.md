@@ -447,7 +447,9 @@ The save receipt is a plain toast, not an Undo button. The way back already exis
 
 ### What `/browser` says, and what it refuses to claim
 
-`forget` now takes **all of it**: the login record and the saved sign-in. It cannot take the live session — that is his to end, at the site — so it says so rather than implying otherwise.
+`forget` now takes **all of it**: the login record, the saved sign-in, and — since #283 — the ROUTING. That last one was the half nobody noticed. The record has two jobs, arming `_login_gate` and routing the read into the cookie-carrying profile, and forgetting only ever undid the first: a host that had already needed the browser stayed in `BROWSER_HOSTS` and kept being read **as him, with the card now gone**. Forgetting a site removed the card and left the capability, which is exactly backwards, and anyone clearing a polluted record would have walked straight into it.
+
+It still cannot take the live session — that is his to end, at the site — so it says so rather than implying otherwise. Clearing the jar to tidy a record would trade the feature for the workaround, which is the same fence `_shed_reputation` keeps when it drops reputation cookies by name. And a host in `BROWSER_HOSTS` that was never in the record is left alone: it is there because it needed a real browser for a bot wall, which is a different fact and not his to forget. `TestForgettingTakesTheRoutingToo`.
 
 The listing reports what the store actually owns: when it was saved, how often it has been used, and whether it stopped working. It deliberately does **not** claim whether he is signed in right now. Cookie presence is not session validity — eon.pl expires server-side in about fifteen minutes — and actually proving it would cost a Chrome launch and a navigation *per row* on a box that evicts Chrome for memory. A row that lies is the failure #236 was about; a row that says less is not.
 
