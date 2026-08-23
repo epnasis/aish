@@ -53,6 +53,16 @@ GEMINI_QUOTA_BODY = {
 }
 
 
+def informative_429(message="quota"):
+    """A refusal that NAMES the window it hit — the only kind the governor may
+    learn a ceiling from. `GEMINI_QUOTA_BODY` carries a per-minute quotaId and a
+    RetryInfo, so it is evidence about a RATE. A bare `status=429` is evidence
+    only that something was too much, and the governor now treats the two
+    differently (`TestAnAnonymousRefusalTeachesNothing`).
+    """
+    return FakeAPIError(message, status=429, body=GEMINI_QUOTA_BODY)
+
+
 class TestClassify:
     def test_429_is_a_rate_limit(self):
         failure = ratelimit.classify(FakeAPIError("boom", status=429))
@@ -456,7 +466,7 @@ class TestGovernorLimits:
         monkeypatch.setenv("AISH_RATE_LIMIT_GEMINI:FLASH", "rpm=99")
         assert ratelimit.Governor().limits("gemini:flash").rpm == 99
 
-    def test_a_429_teaches_the_ceiling(self):
+    def test_a_429_that_names_its_quota_teaches_the_ceiling(self):
         """The limit is published, static and contended only by yourself, so it
         is corrected ONCE to just under the rate that produced the failure —
         never nudged, never re-probed upward at a full request's cost."""
@@ -464,7 +474,7 @@ class TestGovernorLimits:
         governor = ratelimit.Governor(clock=lambda: now[0])
         for _ in range(10):
             governor.reserve("gemini:flash", 1_000).settle(1_000)
-        governor.observe("gemini:flash", ratelimit.classify(FakeAPIError("q", status=429)))
+        governor.observe("gemini:flash", ratelimit.classify(informative_429("q")))
         limits = governor.limits("gemini:flash")
         assert limits.source == "observed"
         assert limits.rpm == 9  # 10 requests * 0.9
@@ -477,12 +487,12 @@ class TestGovernorLimits:
         governor = ratelimit.Governor(clock=lambda: now[0], wall=lambda: 1000.0)
         for _ in range(10):
             governor.reserve("g:m", 1_000).settle(1_000)
-        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        governor.observe("g:m", ratelimit.classify(informative_429("q")))
         tight = governor.limits("g:m").rpm
         now[0] = ratelimit.WINDOW_S + 1  # a fresh window, well under the ceiling
         for _ in range(3):
             governor.reserve("g:m", 10).settle(10)
-        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        governor.observe("g:m", ratelimit.classify(informative_429("q")))
         assert governor.limits("g:m").rpm <= tight
 
     def test_tightening_is_a_minimum_not_a_replacement(self):
@@ -494,7 +504,7 @@ class TestGovernorLimits:
         monkeypatch.setenv("AISH_RATE_LIMIT_G", "rpm=5")
         governor = ratelimit.Governor()
         governor.reserve("g:m", 10).settle(10)
-        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        governor.observe("g:m", ratelimit.classify(informative_429("q")))
         assert governor.limits("g:m").source == "env"
 
     def test_a_non_rate_failure_teaches_nothing(self):
@@ -709,7 +719,7 @@ class TestSpendBudget:
         key = f"{agent.provider}:{agent.model}"
         for _ in range(4):
             governor.reserve(key, 100_000).settle(100_000)
-        governor.observe(key, ratelimit.classify(FakeAPIError("q", status=429)))
+        governor.observe(key, ratelimit.classify(informative_429("q")))
         _, source = agent._history_budget()
         assert source.endswith(":observed")
 
@@ -749,7 +759,7 @@ class TestLimitsAreABeliefNotALaw:
         governor = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: wall[0])
         for _ in range(10):
             governor.reserve("g:m", 1_000).settle(1_000)
-        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        governor.observe("g:m", ratelimit.classify(informative_429("q")))
         return governor
 
     def test_the_belief_holds_while_the_refusal_is_fresh(self):
@@ -789,7 +799,7 @@ class TestLimitsAreABeliefNotALaw:
         governor = self.learned(wall)
         wall[0] += ratelimit.RELAX_AFTER_S * 4
         loose = governor.limits("g:m").rpm
-        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        governor.observe("g:m", ratelimit.classify(informative_429("q")))
         assert governor.limits("g:m").rpm < loose
 
     def test_a_stated_tier_never_drifts(self, monkeypatch):
@@ -798,7 +808,7 @@ class TestLimitsAreABeliefNotALaw:
         monkeypatch.setenv("AISH_RATE_LIMIT_G", "rpm=10,tpm=1000")
         wall = [1000.0]
         governor = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: wall[0])
-        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        governor.observe("g:m", ratelimit.classify(informative_429("q")))
         wall[0] += ratelimit.RELAX_AFTER_S * 10
         assert governor.limits("g:m").rpm == 10
         assert governor.limits("g:m").source == "env"
@@ -814,7 +824,7 @@ class TestLearnedLimitsSurviveRestart:
         first = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0, store=store)
         for _ in range(10):
             first.reserve("g:m", 1_000).settle(1_000)
-        first.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        first.observe("g:m", ratelimit.classify(informative_429("q")))
         learned = first.believed("g:m")
 
         second = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0, store=store)
@@ -828,7 +838,7 @@ class TestLearnedLimitsSurviveRestart:
         store = tmp_path / "rate-limits.json"
         first = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0, store=store)
         first.reserve("g:m", 1_000).settle(1_000)
-        first.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        first.observe("g:m", ratelimit.classify(informative_429("q")))
 
         later = ratelimit.Governor(
             clock=lambda: 0.0, wall=lambda: 1000.0 + ratelimit.RELAX_AFTER_S * 3, store=store
@@ -871,5 +881,141 @@ class TestLearnedLimitsSurviveRestart:
         monkeypatch.delenv("AISH_STATE_DIR", raising=False)
         governor = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1.0)
         governor.reserve("g:m", 1).settle(1)
-        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        governor.observe("g:m", ratelimit.classify(informative_429("q")))
         assert governor.believed("g:m").source == "observed"  # in memory only
+
+
+class TestAnAnonymousRefusalTeachesNothing:
+    """A 429 that names no window is evidence that SOMETHING was too much, and
+    nothing about which dimension or how much.
+
+    The first design learned a ceiling from every 429, snapping it to whatever
+    the last minute happened to contain. Measured on this owner's logs that was
+    the wrong trade by a wide margin: 21 rate-limit 429s across every session
+    ever recorded, all recovered on the FIRST 5s retry and none ever needing a
+    second — against 30 calls of ~55s each in one session (23% of all time spent
+    in model calls) spent waiting behind an inferred number that swung
+    987k → 511k → 1076k tokens/min inside 45 minutes.
+
+    So an anonymous refusal now buys a brief SPACING and no belief at all.
+    """
+
+    def _governor(self):
+        now = [0.0]
+        return ratelimit.Governor(clock=lambda: now[0], wall=lambda: now[0]), now
+
+    def anonymous(self):
+        """What Gemini actually sends: RESOURCE_EXHAUSTED with no quotaId, no
+        RetryInfo and no Retry-After. Every 429 in this owner's logs records
+        `scope=None, retry_after=None`."""
+        return ratelimit.classify(FakeAPIError("You exceeded your current quota", status=429))
+
+    def test_it_is_still_a_rate_limit_and_still_backed_off(self):
+        """The fork is about what may be BELIEVED, not about whether to wait.
+        Backing off is the part that has a 21-for-21 record."""
+        failure = self.anonymous()
+        assert failure.is_rate_limit and failure.retryable
+        assert not failure.names_a_quota
+        assert ratelimit.backoff_delay(failure, attempt=1) == 5.0
+
+    def test_a_refusal_that_names_its_window_is_told_apart(self):
+        assert ratelimit.classify(
+            FakeAPIError("q", status=429, body=GEMINI_QUOTA_BODY)).names_a_quota
+        assert ratelimit.classify(
+            FakeAPIError("q", status=429, headers={"Retry-After": "30"})).names_a_quota
+
+    def test_a_number_the_governor_invented_is_not_a_provider_hint(self):
+        """`RateLimited` carries a `retry_after_s` of aish's own. Reading that
+        back as the provider having stated a window would let the governor
+        teach itself its own guess."""
+        failure = ratelimit.classify(ratelimit.RateLimited("spent", retry_after_s=42))
+        assert failure.retry_after_s == 42
+        assert not failure.names_a_quota
+
+    def test_no_ceiling_is_learned_from_it(self):
+        governor, _ = self._governor()
+        governor.reserve("g:m", 100_000).settle(100_000)
+        governor.observe("g:m", self.anonymous())
+        believed = governor.believed("g:m")
+        assert believed.source == "none"
+        assert believed.tpm is None and believed.rpm is None
+
+    def test_but_the_key_is_paced_while_the_refusal_is_fresh(self):
+        """The hazard that survives without a number: many worker threads in one
+        process discovering the same limit at the same moment."""
+        governor, now = self._governor()
+        governor.observe("g:m", self.anonymous())
+        governor.reserve("g:m", 1).rejected()  # the call that drew the 429
+        with pytest.raises(ratelimit.RateLimited, match="waited"):
+            governor.reserve("g:m", 1, ceiling=0)
+        now[0] = ratelimit.COOLDOWN_SPACING_S
+        governor.reserve("g:m", 1, ceiling=0)  # spaced, not blocked
+
+    def test_the_pacing_expires_by_itself(self):
+        governor, now = self._governor()
+        governor.observe("g:m", self.anonymous())
+        governor.reserve("g:m", 1).rejected()
+        now[0] = ratelimit.COOLDOWN_S + 1
+        governor.reserve("g:m", 1, ceiling=0)
+        assert "g:m" not in governor._cooldown_until
+
+    def test_a_response_lifts_it_immediately(self):
+        """The only direct evidence the squeeze is over, and free: unlike a
+        probe it is a call the owner was making anyway."""
+        governor, _ = self._governor()
+        governor.observe("g:m", self.anonymous())
+        governor.reserve("g:m", 1).settle(12_000)
+        assert "g:m" not in governor._cooldown_until
+        governor.reserve("g:m", 1, ceiling=0)  # unthrottled again
+
+    def test_a_failure_that_reported_no_usage_does_not_lift_it(self):
+        """`settle(None)` is how `backends._settle_failure` closes a NON-rate
+        failure — a 500, a transport blip. Nothing came back, so it is not a
+        response, so it must not release the brake. `settle(0)` is the other
+        thing that looks like it: a real response whose provider reported no
+        usage. Truthiness cannot tell them apart; `is not None` can."""
+        governor, now = self._governor()
+        governor.observe("g:m", self.anonymous())
+        governor.reserve("g:m", 1).settle(None)
+        assert "g:m" in governor._cooldown_until
+        now[0] = ratelimit.COOLDOWN_SPACING_S  # past the spacing, not the cooldown
+        governor.reserve("g:m", 1, ceiling=0).settle(0)
+        assert "g:m" not in governor._cooldown_until
+
+    def test_a_refusal_does_not_lift_it(self):
+        """`rejected()` is the 429 path. Clearing the cooldown there would make
+        the brake release on exactly the evidence that set it."""
+        governor, _ = self._governor()
+        governor.observe("g:m", self.anonymous())
+        governor.reserve("g:m", 1).rejected()
+        assert "g:m" in governor._cooldown_until
+
+    def test_a_named_daily_quota_is_still_latched(self):
+        """The fork must not weaken the case it does not cover: an exhausted
+        quota names a day, so it is informative, so it still refuses fast."""
+        body = {"error": {"details": [{"violations": [{"quotaId": "RequestsPerDay"}]}]}}
+        governor, _ = self._governor()
+        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429, body=body)))
+        with pytest.raises(ratelimit.RateLimited, match="spent rather than busy"):
+            governor.reserve("g:m", 1)
+
+    def test_the_history_budget_never_moves_because_of_one(self):
+        """The second-order damage, and the reason this is not only about speed.
+
+        The history budget is sized at `tpm / SPEND_BUDGET_CALLS_PER_MINUTE`, so
+        a ceiling inferred from an anonymous refusal did not merely slow the
+        loop down — on 2026-08-23 at 21:13 it halved a live conversation, from
+        822k chars to 383k, and restored it 16 minutes later. A transient brake
+        must never size what the model is allowed to remember.
+        """
+        from tests.test_agent import Agent, model_says
+
+        governor = ratelimit.reset_governor()
+        agent = Agent(model="gemini-3.5-flash", approve=lambda _c: True,
+                      client_chat=lambda **kw: model_says("ok"))
+        agent.provider = "gemini"
+        before = agent._history_budget()
+        governor.reserve("gemini:gemini-3.5-flash", 300_000).settle(300_000)
+        governor.observe("gemini:gemini-3.5-flash", self.anonymous())
+        assert agent._history_budget() == before
+        assert "ratelimit" not in before[1]
