@@ -6244,7 +6244,7 @@ class _FakeLog:
     def __init__(self):
         self.records: list = []
 
-    def command(self, command, decision, intent=""):
+    def command(self, command, decision, intent="", preview=""):
         self.records.append((command, decision, intent))
 
 

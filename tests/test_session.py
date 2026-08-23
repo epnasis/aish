@@ -2493,3 +2493,45 @@ class TestModelErrorReplaysLikeItRendered:
         from aish.session import RENDERLESS_STEPS
 
         assert "model_error" not in RENDERLESS_STEPS
+
+
+class TestTheRecordSaysWhatHeWasAsked:
+    """The command string is what aish INTENDED; the preview is what the owner
+    was actually asked (#284).
+
+    Most of the time they agree, which is why this went unnoticed. #272 is the
+    case where they came apart: a chat about flights to the Maldives showed the
+    card `drive www.imdb.com in your signed-in browser — aish will open pages
+    and click on them AS YOU`, and the log recorded only the tool call. `aish
+    explain` could not have helped — it is a reader, so a preview that was
+    never written down is simply gone."""
+
+    def _records(self, tmp_path, **kwargs):
+        log = session_module.SessionLog(tmp_path / "s.jsonl")
+        log.command("tool browse_act(target='To')", "approved", **kwargs)
+        return [
+            json.loads(line)
+            for line in (tmp_path / "s.jsonl").read_text(encoding="utf-8").splitlines()
+            if '"command"' in line
+        ]
+
+    def test_the_sentence_on_the_card_is_kept(self, tmp_path):
+        card = "drive www.imdb.com in your signed-in browser — AS YOU"
+        [record] = self._records(tmp_path, preview=card)
+        assert record["preview"] == card
+        assert record["command"] == "tool browse_act(target='To')"
+
+    def test_a_decision_with_no_card_text_adds_no_field(self, tmp_path):
+        """Same terms as `intent`: omitted when empty, so a log written before
+        this replays byte-identically."""
+        [record] = self._records(tmp_path)
+        assert "preview" not in record
+
+    def test_the_intent_and_the_card_are_different_facts(self, tmp_path):
+        """What the model SAID it was doing, and what the owner was SHOWN, can
+        disagree — that disagreement is the artifact worth keeping."""
+        [record] = self._records(
+            tmp_path, intent="I'll type the destination", preview="drive imdb.com"
+        )
+        assert record["intent"] == "I'll type the destination"
+        assert record["preview"] == "drive imdb.com"

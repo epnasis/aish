@@ -162,3 +162,13 @@ Three details are load-bearing (`TestRedaction`):
 An AUTO title is re-derived and its stale records DELETED, because a model-written name is a summary of the conversation and can quote the very text being removed. A hand-typed title is the user's own words and is left alone.
 
 The model-context half of the same removal is in `docs/agent-core.md`.
+
+## The record says what he was ASKED, not only what aish meant to do (#284)
+
+A `kind:"command"` record carries the command string — what aish intended — and now the **preview**, the sentence the owner actually read on the card. Both, because they can disagree.
+
+They usually do not, which is why this went years unnoticed. #272 is the case where they came apart completely: a chat about flights to the Maldives drew the card *"drive www.imdb.com in your signed-in browser — aish will open pages and click on them AS YOU, and can see private account data"*, and the log recorded `tool browse_act(action='type', text='Maldives', target='To')`. Reading the log back there was no sign the owner had ever been asked about imdb.com, no sign a host grant was given, and no sign it attached to that chat. Reconstructing it took a code read and a clock comparison across two session logs.
+
+The audit trail exists to answer one question — **what did the owner agree to?** — and the command string is the half that agrees with the bug. `explain` cannot recover it either: it is a reader under the recorded-evidence-only law, so a preview that was never written down is gone.
+
+Omitted when empty, on the same terms as `intent`, so a log written before this replays byte-identically. `TestTheRecordSaysWhatHeWasAsked`.

@@ -1139,8 +1139,8 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         if said := intent():
             request["intent"] = said
 
-    def record(command: str, decision: str) -> None:
-        logref.command(command, decision, intent())
+    def record(command: str, decision: str, preview: str = "") -> None:
+        logref.command(command, decision, intent(), preview)
 
     def resolve(uid: str, decision: str, comment: str = "") -> None:
         event = {"type": "approval_resolved", "id": uid, "decision": decision}
@@ -1322,6 +1322,8 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         record(
             f"tool {name}({shown})",
             f"{decision} (feedback: {comment})" if comment else decision,
+            # What he was ASKED, not just what aish meant to do (#284).
+            preview or "",
         )
         resolve(request["id"], decision, comment)
         if approved:
