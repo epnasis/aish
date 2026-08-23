@@ -1530,12 +1530,17 @@ class TestPickingADateFromACalendar:
         assert pick.tag is None
         assert "would be a guess" in pick.problem
 
-    def test_the_same_date_shown_twice_is_refused(self):
+    def test_the_same_date_shown_twice_is_pressed_not_refused(self):
+        """Two cells agreeing on a full date is not the coin flip the refusal
+        was written for — that is a cell which does not say which MONTH it is.
+        wizzair.com keeps a second copy of every pane for its slide animation
+        (138 cells for two months of about 77), and a legible December date
+        refused itself."""
         cells = [
             browse.Cell(tag=1, text="7", label="7 września 2026"),
             browse.Cell(tag=2, text="7", label="7 września 2026"),
         ]
-        assert "showing it twice" in browse.pick_day(cells, browse.Day(7, 9, 2026)).problem
+        assert browse.pick_day(cells, browse.Day(7, 9, 2026)).tag == 1
 
     def test_a_date_that_cannot_be_chosen_is_not_pressed(self):
         cells = [browse.Cell(tag=1, text="7", label="7 września 2026", disabled=True)]
@@ -2313,3 +2318,52 @@ class TestTheCardSaysWhatIsAboutToBeSent:
         monkeypatch.setattr(browser, "browse_fields", lambda **kw: [])
         agent._browse_gate("browse_act", {"target": "Zapłać"})
         assert "when aish last looked" in asked[0]
+
+
+class TestWhatRealPickersActuallyLookLike:
+    """Measured, not imagined (#251). `scripts/probe_calendars.py` opens real
+    booking sites and prints what their pickers are made of — and every rule
+    below was wrong until it did, because the fixtures this repo wrote for
+    itself were tidier than the web."""
+
+    def test_a_month_arrow_is_called_things_no_guess_would_hold(self):
+        """wizzair.com's are "Later dates" and "calendar page forward". A list
+        guessing at "next month" matched none of them, and a date three months
+        out failed with the arrows plainly on screen."""
+        for said in ("Later dates", "calendar page forward"):
+            assert browse.month_step(said, forward=True), said
+        for said in ("Previous dates", "calendar page back"):
+            assert browse.month_step(said, forward=False), said
+
+    def test_the_vocabulary_is_still_closed(self):
+        """The fence that makes a widened list safe is that a name not on it
+        refuses rather than guesses."""
+        assert not browse.month_step("Next offer in this carousel", forward=True)
+        assert not browse.month_step("wrapper", forward=True)
+
+    def test_the_picker_and_the_page_name_a_control_the_same_way(self):
+        """One naming ladder, shared verbatim — the picker had a naive one of
+        its own, so icon-only arrows were named "" and dropped."""
+        assert "const nameOf" in browse.NAME_JS
+        assert browse.CONTROLS_JS.count("const nameOf") == 1
+        assert browse.CALENDAR_JS.count("const nameOf") == 1
+
+    def test_the_same_date_twice_is_not_an_ambiguity(self):
+        """A picker that keeps a second copy of every pane for its animation —
+        138 cells for two months of about 77 — is not asking a question."""
+        twice = [
+            browse.Cell(tag=1, text="15", label="15 December 2026"),
+            browse.Cell(tag=2, text="15", label="15 December 2026", onscreen=True),
+        ]
+        assert browse.pick_day(twice, browse.Day(15, 12, 2026)).tag == 2
+
+    def test_a_cell_below_the_fold_is_still_pressable(self):
+        """`onscreen` is a tie-break between duplicates, never a filter."""
+        only = [browse.Cell(tag=1, text="15", label="15 December 2026")]
+        assert browse.pick_day(only, browse.Day(15, 12, 2026)).tag == 1
+
+    def test_the_picker_clears_its_own_stale_tags(self):
+        """Every month hop re-stamps from 1, so without this one number matched
+        a cell from the month aish had just left — "two elements, one number,
+        silently", the defect CONTROLS_JS already records for data-aish-n."""
+        assert "removeAttribute('data-aish-cell')" in browse.CALENDAR_JS

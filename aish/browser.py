@@ -3760,7 +3760,8 @@ def browse_fill(
             except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
                 return await _stop(
                     owner, session, ledger, index, len(steps),
-                    f"could not {verb} it ({type(exc).__name__})", dated=dated,
+                    f"could not {verb} it ({type(exc).__name__}: {exc})",
+                    dated=dated,
                 )
             ledger.append(f"{index + 1}. {said}")
             dated = dated or verb == "date"
@@ -3803,6 +3804,7 @@ def _cells_of(grid: dict) -> list:
             label=str(raw.get("label") or ""),
             stamp=str(raw.get("stamp") or ""),
             disabled=bool(raw.get("disabled")),
+            onscreen=bool(raw.get("onscreen")),
         )
         for raw in (grid.get("cells") or [])
     ]
@@ -3853,6 +3855,25 @@ async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
         await _press(page, target, mutating=False, href="")
         await _settle(page)
         grid = await _read_calendar(page, control.n)
+    if not (grid.get("cells") or []) and control.kind == browse_mod.FIELD:
+        # NOT every date field is a picker. intercity.pl's asks for the date in
+        # words — "podaj datę w formacie cztery cyfry roku - dwie cyfry
+        # miesiąca…" — and is an ordinary text box: pressing it opens nothing,
+        # and refusing was aish declining to do the easiest thing on the page.
+        # Typed as ISO, then read back like any other value. The test is NO
+        # DAY CELLS rather than no container: on intercity the field's own
+        # wrapper matches a picker-ish selector, so "a grid was found" is true
+        # and empty.
+        box, _top = await _find(page, control.n)
+        if box is None:
+            raise _StepFailed(f"{control.address!r} left the page mid-batch")
+        await _type(page, box, text=value, submit=False)
+        await _settle(page)
+        raw, _, _, _, _ = await _enumerate(page)
+        said = _readback(
+            browse_mod.controls_from(raw), control, value, kind="typed"
+        )
+        return f"{said} (no picker opened; typed the date instead)"
     if not grid.get("found"):
         raise _StepFailed(
             f"pressing {control.address!r} opened no date picker aish can read"
