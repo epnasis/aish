@@ -949,8 +949,12 @@ EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image", "read_pdf", "r
 # of ordinary research — the "gating everything makes the system unusable"
 # failure #198 names explicitly. These two bounds are what "plain" means: past
 # them, a path or a hostname label is a place to hide a payload rather than an
-# address anybody typed.
-PLAIN_PATH_MAX = 120
+# address anybody typed. The path bound is deliberately tight: a link that was
+# actually offered is excused before this is consulted, so what remains is an
+# address the model COMPOSED, and a composed path with sixty characters in it
+# is not one anybody typed. It bounds a trickle rather than sealing it, and
+# saying so is better than implying otherwise.
+PLAIN_PATH_MAX = 60
 HOST_LABEL_MAX = 40
 
 # URL or bare-domain-looking tokens in owner text. Deliberately generous
@@ -5156,29 +5160,45 @@ class Agent:
             hosts = _hosts_in_text(str(args.get("query", "")))
         known = self._owner_hosts | self._approved_hosts
         novel = sorted(h for h in hosts if h not in known)
-        if novel and attended and not self._carries_payload(name, args):
-            # A tainted attended turn gates the calls that CARRY something, not
-            # the ones that merely go somewhere. Reading an unfamiliar page is
-            # what research is; a triggered session keeps the stricter rule,
-            # since nobody is going to see the answer either way.
+        if not attended:
+            # A triggered session keeps the strict rule: every novel host,
+            # payload or not, since nobody is going to see the answer either
+            # way.
+            return novel or None
+
+        # A tainted ATTENDED turn. Reading an unfamiliar page is what research
+        # IS, so what gets gated is the call that CARRIES something — and that
+        # question is now asked of every host, not only unfamiliar ones.
+        if self._url_was_offered(str(args.get("url") or args.get("source") or "")):
+            # A link that came back in a result, verbatim. Sound against
+            # exfiltration for a reason worth stating: the attacker would have
+            # to WRITE the finished URL into the page, and he cannot, because
+            # the thing he is trying to steal is the thing he does not know.
             return None
-        return novel or None
+        if self._carries_payload(name, args):
+            # Naming a host is not vouching for unlimited data going to it —
+            # he may have pasted a link somebody sent him — and this test used
+            # to be SKIPPED entirely for a host already in provenance, which
+            # made any host he had ever mentioned an open sink.
+            #
+            # `or None` matters: a search whose query names NO host has nothing
+            # to carry data to, and returning an empty list would gate it with
+            # no host to put on the card.
+            return novel or sorted(hosts) or None
+        return None
 
     def _carries_payload(self, name: str, args: dict) -> bool:
         """Would this outbound call take DATA with it, beyond an address?
 
         Exfiltration needs a channel, and on a read there are only two: the
         query the search engine is handed, or everything in a URL that is not
-        the bare address. A link the page offered aish itself is neither — it
-        was not composed, it was followed, which is the one case that
-        distinguishes ordinary reading from smuggling."""
+        the bare address. Whether the link was OFFERED is asked before this,
+        by the caller, because it is the one answer that excuses a payload."""
         if name == "web_search":
             # The query IS the outbound payload, and `hosts` above only found
             # anything because the query named a host — the exfil shape.
             return True
         url = str(args.get("url") or args.get("source") or "")
-        if self._url_was_offered(url):
-            return False
         try:
             parts = urllib.parse.urlsplit(url)
         except ValueError:
@@ -5220,13 +5240,23 @@ class Agent:
         shown = ", ".join(novel)
         if self.approve_tool is None:
             return _gate_outcome(EGRESS_NO_APPROVER.format(host=shown), decision="blocked")
-        preview = (
-            f"this turn has read the open web, and now wants to send something "
-            f"to {shown} — a host you did not mention"
-            if self.origin == "user"
-            else f"automated session wants to reach {shown} — a host not "
-            "mentioned by the owner in this conversation"
-        )
+        if self.origin != "user":
+            preview = (
+                f"automated session wants to reach {shown} — a host not "
+                "mentioned by the owner in this conversation"
+            )
+        elif any(h not in (self._owner_hosts | self._approved_hosts) for h in novel):
+            preview = (
+                f"this turn has read the open web, and now wants to send "
+                f"something to {shown} — a host you did not mention"
+            )
+        else:
+            # He named it, so saying he did not would be false. What is being
+            # asked about is the PAYLOAD, not the host.
+            preview = (
+                f"this turn has read the open web, and now wants to send data "
+                f"to {shown} in the address itself — not just read a page there"
+            )
         decision = self.approve_tool(name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)

@@ -9353,7 +9353,7 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         agent.run_task("read https://shop.example/list and price the offer")
         assert asked == []
 
-    def test_a_host_the_owner_named_is_never_novel_in_an_attended_session(self, monkeypatch):
+    def test_a_host_the_owner_named_is_read_freely(self, monkeypatch):
         """Owner provenance used to be recorded only in triggered sessions,
         because the gate returned before consulting it. Left that way, every
         host he typed himself would come back novel the moment the fence went
@@ -9363,15 +9363,55 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         agent, _ = make_agent(
             [
                 model_says(tool_calls=[tool_call("read_url", url="https://eon.pl/mojeon")]),
-                model_says(tool_calls=[
-                    tool_call("read_url", url="https://eon.pl/faktury?id=7&sort=date")
-                ]),
+                model_says(tool_calls=[tool_call("read_url", url="https://eon.pl/faktury")]),
                 model_says("here are the invoices"),
             ],
             approve_tool=lambda *a, **k: asked.append(a) or True,
         )
         agent.run_task("get my invoices from eon.pl")
         assert asked == []
+
+    def test_naming_a_host_does_not_make_it_an_open_sink(self, monkeypatch):
+        """The payload test used to be SKIPPED for any host already in
+        provenance, so naming a site once let an unlimited amount of his data
+        travel to it inside the address. Naming a host is not vouching for
+        that — he may have pasted a link somebody sent him."""
+        fetched = self._stub_web(monkeypatch)
+        asked: list = []
+
+        def approve_tool(name, args, preview=None):
+            asked.append(preview)
+            return False
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://eon.pl/mojeon")]),
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://eon.pl/x?leak=" + "A" * 400)
+                ]),
+                model_says("stopped"),
+            ],
+            approve_tool=approve_tool,
+        )
+        agent.run_task("get my invoices from eon.pl")
+        assert fetched == ["https://eon.pl/mojeon"]  # the payload never left
+        # …and the card does not claim he failed to mention a host he named.
+        assert asked and "did not mention" not in asked[0]
+        assert "in the address itself" in asked[0]
+
+    def test_a_composed_address_to_an_unknown_host_is_bounded(self, monkeypatch):
+        """What replaced a 120-character path budget. A link that was actually
+        offered is excused earlier, so what reaches here is an address the
+        model composed — and a composed path with sixty characters in it is
+        not one anybody typed."""
+        agent, _ = make_agent([], approve_tool=lambda *a, **k: True)
+        agent._tainted = True
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://x.test/" + "B" * 110}
+        ) == ["x.test"]
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://x.test/about"}
+        ) is None
 
     def test_taint_belongs_to_the_task_that_acquired_it(self, monkeypatch):
         self._stub_web(monkeypatch)
