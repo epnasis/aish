@@ -2040,9 +2040,17 @@ class TestTheGrantIsWhereTheConsentLives:
         covers is said on the card that grants it."""
         agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
         agent._browse_gate("browse", {"url": "https://eon.pl/x"})
-        assert "submit forms there without asking again" in asked[0]
-        assert "pays, buys, books, deletes, sends or signs" in asked[0]
-        assert "never types passwords" in asked[0]
+        assert "fill in forms AS YOU without asking again" in asked[0]
+
+    def test_the_card_stays_one_sentence(self):
+        """Said on a phone, where four sentences is a card he scrolls past to
+        reach the buttons. The floor the grant does not cover draws its own
+        card when it fires; promising it here only buys length."""
+        agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
+        agent._browse_gate("browse", {"url": "https://eon.pl/x"})
+        assert "\n" not in asked[0]
+        assert ". " not in asked[0] and asked[0].endswith(".")
+        assert len(asked[0]) < 180
 
     def test_a_plain_submit_rides_the_grant(self):
         snap = snapshot(controls=browse.controls_from(
@@ -2122,6 +2130,28 @@ class TestTheGrantIsWhereTheConsentLives:
         )[0]
         assert control.mutating is True
         assert control.worded is False
+
+    def test_a_country_subdomain_is_the_same_site(self):
+        """He approved driving linkedin.com, and six minutes later was asked
+        again for pl.linkedin.com — same site, same session, same profile, and
+        a card naming the same company. `is_logged_in` has always read the
+        boundary this way; exact set membership did not."""
+        agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
+        agent._approved_browsing.add("linkedin.com")
+        assert agent._browse_gate(
+            "browse", {"url": "https://pl.linkedin.com/in/kasia"}
+        ) is None
+        assert asked == []
+
+    def test_a_grant_never_widens_upward_or_sideways(self):
+        """Downward only: he was shown the narrower name, so that is what he
+        agreed to. And the boundary is a dot, not a suffix of letters."""
+        agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
+        agent._approved_browsing.add("pl.linkedin.com")
+        assert not agent._browse_granted("www.linkedin.com")
+        assert not agent._browse_granted("evil-pl.linkedin.com.attacker.test")
+        agent._approved_browsing.add("linkedin.com")
+        assert not agent._browse_granted("evillinkedin.com")
 
     def test_the_grant_survives_the_agent_being_rebuilt(self):
         """What the owner experienced as being re-asked per task was the agent
