@@ -3306,6 +3306,69 @@ async def _uncover(page: Any, target: Any) -> bool:
         return False
 
 
+# What is observably true about a control, for telling a press that WORKED
+# from one that only happened.
+#
+# Deliberately only things this press can be held responsible for: the
+# control's own state, whether it is still in the document, and the address.
+# A node count or a mutation observer would be a better detector and a worse
+# one — an animation, an ad slot or a polling widget mutates the page every
+# second on a live site, so "something changed" would read as success on every
+# page that moves by itself. A false "it worked" is the dangerous direction:
+# the model would report a form as sent.
+_ACTIVATION_JS = r"""(el) => {
+  const said = [];
+  for (const attr of ['aria-expanded', 'aria-pressed', 'aria-selected',
+                      'aria-checked', 'aria-hidden', 'class', 'hidden',
+                      'disabled', 'open']) {
+    said.push(attr + '=' + ((el.getAttribute && el.getAttribute(attr)) || ''));
+  }
+  if ('checked' in el) said.push('checked=' + el.checked);
+  if ('value' in el) said.push('value=' + el.value);
+  // Its OWN words. A button that reports itself — "Wyślij" becoming "Wysłano"
+  // — is the commonest proof a press was taken, and it is still this control's
+  // doing and not the page's: an animation elsewhere cannot rewrite it.
+  said.push('says=' + (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80));
+  said.push('connected=' + !!el.isConnected);
+  said.push('at=' + location.href);
+  return said.join('|');
+}"""
+
+
+async def _activation(target: Any) -> str | None:
+    try:
+        return str(await target.evaluate(_ACTIVATION_JS))
+    except Exception:  # noqa: BLE001 — a control that will not answer is unreadable
+        return None
+
+
+async def _took(page: Any, target: Any, before: str | None) -> str:
+    """The caveat a press that was not a real click has to carry, or "".
+
+    Every rung below the real click used to assert its own success — "aish
+    pressed it with the keyboard" — and on qatarairways.com Enter on a date
+    field that never opened its picker was reported exactly that way (#273).
+    The dispatch rung had the opposite fault: it hedged unconditionally, *"the
+    page may not have registered it as a real press"*, on presses that plainly
+    HAD registered.
+
+    Neither is a fact. This is: the control is read before and after, and what
+    comes back says which of the three things happened — it reacted, it did
+    not, or aish could not tell. Same posture as the date step's readback, and
+    the same reason: everything about the ladder is a heuristic, nothing about
+    the RESULT may be."""
+    await page.wait_for_timeout(SETTLE_MS)
+    after = await _activation(target)
+    if before is None or after is None:
+        return ", though aish could not check whether the page took it"
+    if before != after:
+        return ""
+    return (
+        ", and nothing about that control or the address changed afterwards, so "
+        "it may not have been registered — check the page before relying on it"
+    )
+
+
 async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
     """Press it, escalating cheaply. Returns a note about HOW, or raises Stuck.
 
@@ -3340,9 +3403,13 @@ async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
             await target.click(timeout=ACT_TIMEOUT_MS)
             return "something was covering it, so aish dismissed that and pressed it"
     if await _focus(target):
+        before = await _activation(target)
         with contextlib.suppress(Exception):
             await page.keyboard.press("Enter")
-            return "the click would not land, so aish pressed it with the keyboard"
+            return (
+                "the click would not land, so aish pressed it with the keyboard"
+                + await _took(page, target, before)
+            )
     if href:
         await page.goto(href, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         return (
@@ -3350,12 +3417,14 @@ async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
             f"declares for it ({href})"
         )
     if not mutating:
+        before = await _activation(target)
         with contextlib.suppress(Exception):
             await target.dispatch_event("click")
             return (
                 "the click would not land, so aish dispatched the event straight "
-                "to the control — the page may not have registered it as a real "
-                "press"
+                "to the control"
+                + (await _took(page, target, before)
+                   or ", which the page reacted to")
             )
     raise Stuck()
 
