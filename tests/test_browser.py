@@ -2774,3 +2774,64 @@ class TestLookingOnceIsWhatASpinnerDefeats:
         assert Silent.waited <= browser.WATCH_POLL_MS * browser.SETTLE_UNKNOWN_TRIES
 
 
+
+
+class TestWhatCountsAsEvidenceOfASession:
+    """The hint's writer, and the mistake it nearly repeated.
+
+    Recording every browser render as a sign-in treats the ABSENCE of a login
+    form as evidence of having gone through one. Most of the web has no login
+    form: allegro.pl rendered for a bot wall has none, and half of booking.com
+    is readable signed-out. That is the same error as the list it replaced —
+    a claim stored as though it had been established — one layer down."""
+
+    def _fetch_sees_a_wall(self, monkeypatch):
+        monkeypatch.setattr(
+            web_module, "_fetch",
+            lambda url: (
+                "<html><body><h1>Zaloguj sie</h1>"
+                + "<p>Wpisz haslo aby kontynuowac.</p>" * 40
+                + '<form><input type="password"></form></body></html>',
+                "text/html",
+            ),
+        )
+
+    def _renders(self, monkeypatch, text, *, signin=False):
+        monkeypatch.setattr(
+            browser, "read",
+            lambda url, **kw: browser.Page(
+                text=page_sized(text), title="", images=[], url=url, status=200,
+                signin=signin,
+            ),
+        )
+
+    def test_a_wall_anonymously_and_content_as_him_IS_evidence(
+        self, state, monkeypatch
+    ):
+        """The only positive signal: the same address met a password box as a
+        stranger and did not as him, so the one thing that changed is the
+        session."""
+        self._fetch_sees_a_wall(monkeypatch)
+        self._renders(monkeypatch, "your invoices")
+        assert "your invoices" in web_module.read_url("https://eon.pl/faktury")
+        assert browser.seen_signed_in() == {"eon.pl"}
+
+    def test_a_page_with_no_login_form_is_not_evidence(self, state, monkeypatch):
+        """The bug this class exists for. A bot wall escalates to the browser
+        and renders fine; that says nothing about a session."""
+        browser.BROWSER_HOSTS.add("allegro.pl")
+        self._renders(monkeypatch, "37,80 zl")
+        assert "37,80 zl" in web_module.read_url("https://allegro.pl/oferta/1")
+        assert browser.seen_signed_in() == set()
+
+    def test_a_rendered_page_still_asking_for_a_password_demotes(
+        self, state, monkeypatch
+    ):
+        """The negative signal IS sound, and it is the demotion that keeps the
+        hint from rotting: asking for a password as him is proof of no
+        session."""
+        browser.note_signed_in("https://eon.pl/")
+        browser.BROWSER_HOSTS.add("eon.pl")
+        self._renders(monkeypatch, "sign in to continue", signin=True)
+        web_module.read_url("https://eon.pl/faktury")
+        assert browser.seen_signed_in() == set()

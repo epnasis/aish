@@ -1490,13 +1490,15 @@ def _browser_read(
     _remember_title(url, page.title)
     if host:
         BROWSER_HOSTS.add(host)
-        # The one writer of the routing hint on this path, and it writes what
-        # the page SAID rather than what anybody claimed: a rendered page that
-        # is not asking for a password is a signed-in page.
+        # Only the DEMOTION happens here. A rendered page that asks for a
+        # password is proof there is no session; a rendered page that does NOT
+        # is proof of nothing at all — most of the web has no login form on it,
+        # and half of booking.com is readable signed-out. Recording every
+        # render as a sign-in was this file's own mistake repeated: absence of
+        # a door treated as evidence of having gone through one. The positive
+        # signal is written where it is actually earned — see `_escalate_to_him`.
         if page.signin:
             browser.note_signed_out(url)
-        else:
-            browser.note_signed_in(url)
     return (text, page.images, page.declared, page.signin, renewal), ""
 
 
@@ -1810,11 +1812,15 @@ def _read_url(
         rendered, why = _browser_read(url)
         if rendered is not None:
             host = browser.host_of(url)
-            if rendered[3]:
-                # Still asking for a password AS HIM: he really is signed out.
-                # Demote the hint so it cannot rot into the thing it replaced.
-                browser.note_signed_out(url)
-            else:
+            if not rendered[3]:
+                # THE DIFFERENCE IS THE EVIDENCE. An anonymous fetch of this
+                # exact address met a password box and the same address in his
+                # profile did not — the only thing that changed is the session,
+                # so there is one. Nothing else here is a positive signal: a
+                # page with no login form proves nothing, because most pages
+                # have none, and an avatar in the corner would be a vocabulary
+                # to maintain in every language his web is written in. A
+                # difference needs no vocabulary.
                 browser.note_signed_in(url)
             return _present_rendered(
                 url, rendered, topic=topic, login_host=host, cut=cut
