@@ -100,6 +100,8 @@ HARD = """<!doctype html>
   #agree { opacity: 0; position: absolute; width: 1px; height: 1px; }
   #wrap { position: relative; display: inline-block; }
   #sheet { position: absolute; inset: 0; background: transparent; }
+  #wrap2 { position: relative; display: inline-block; }
+  #sheet2 { position: absolute; inset: 0; background: transparent; }
   /* The account switcher, shaped like E.ON's: a scrollable list inside a FIXED
      header, showing four of its five entries. */
   #header { position: fixed; top: 0; right: 0; background: #ddd; }
@@ -128,6 +130,9 @@ HARD = """<!doctype html>
   <p><a id="pobierz" href="/faktura.pdf" target="_blank">Pobierz e-fakturę</a></p>
 
   <div id="wrap"><button id="covered">Wyślij zgłoszenie</button><div id="sheet"></div></div>
+  <!-- Covered AND inert: every rung reaches it and none of them does anything,
+       which is the case the notice used to describe as a press. -->
+  <div id="wrap2"><button id="deaf">Nic nie robi</button><div id="sheet2"></div></div>
 
   <div id="tall">przewijana treść</div>
   <button id="deep">Na samym dole</button>
@@ -951,12 +956,26 @@ def check_hard(url: str) -> None:
     assert "Wysłano zgłoszenie" in pressed.text, (pressed.problem, pressed.notice)
     assert took < 20, f"a covered control took {took:.0f}s — the ladder is not bounded"
     print(f"covered button → pressed in {took:.1f}s ({pressed.notice or 'plain click'})")
+    # The rung below a real click must report what it SAW, not what it hoped.
+    # This button changes its own text, so a press that took has visible proof.
+    assert "may not have been registered" not in pressed.notice, (
+        "the page plainly reacted — 'Wysłano zgłoszenie' is on it — so the "
+        f"notice must not hedge: {pressed.notice!r}"
+    )
+    assert "could not check" not in pressed.notice, pressed.notice
 
     # 7. The dialog that pins the page.
     deep = named(pressed, "Na samym dole")
     locked = browser.browse_act("Otwórz okno", "click")
     absent(locked, "Na samym dole")
     named(locked, "Numer rezerwacji")
+    deaf = browser.browse_act("Nic nie robi", "click")
+    assert "may not have been registered" in deaf.notice, (
+        "a control that swallows every rung must say so, not claim a press: "
+        f"{deaf.notice!r}"
+    )
+    print("a press nothing answered →", deaf.notice[-70:])
+
     print(f"dialog opened → [{deep.n}] 'Na samym dole' is now out of reach, "
           f"{locked.unreachable} closed away")
 

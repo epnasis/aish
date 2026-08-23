@@ -2781,3 +2781,84 @@ class TestOnlyASiteThatAskedForAPasswordIsACandidate:
         for url in ("https://allegro.pl/x", "https://google.com/search?q=y"):
             browser._note_visit(owner, url)
         assert sorted(owner.password_hosts) == []
+
+
+class TestAPressBelowTheRealClickSaysWhatItSaw:
+    """Every rung below a real click used to assert its own outcome, and the
+    two rungs asserted OPPOSITE things — both without looking (#273).
+
+    The keyboard rung claimed success: on qatarairways.com, Enter on a date
+    field that never opened its picker came back as "aish pressed it with the
+    keyboard". The dispatch rung hedged unconditionally — "the page may not
+    have registered it as a real press" — on presses that plainly had. Neither
+    is a fact; the control is now read before and after."""
+
+    def _target(self, states):
+        """A control whose readback walks through `states` on each evaluate."""
+        seen = iter(states)
+
+        class Target:
+            async def evaluate(self, js, *a):
+                value = next(seen)
+                if value is None:
+                    raise RuntimeError("this element will not answer")
+                return value
+
+        return Target()
+
+    def _page(self):
+        class Page:
+            async def wait_for_timeout(self, ms):
+                return None
+
+        return Page()
+
+    def _took(self, states):
+        """states[0] is what was read BEFORE the press; the rest is what the
+        control answers afterwards."""
+        page, target = self._page(), self._target(states[1:])
+        return asyncio.new_event_loop().run_until_complete(
+            browser._took(page, target, states[0])
+        )
+
+    def test_a_control_that_moved_carries_no_caveat(self):
+        said = self._took(["aria-expanded=false|at=x", "aria-expanded=true|at=x"])
+        assert said == ""
+
+    def test_a_control_that_did_not_move_says_so_plainly(self):
+        said = self._took(["aria-expanded=false|at=x", "aria-expanded=false|at=x"])
+        assert "nothing about that control or the address changed" in said
+        assert "may not have been registered" in said
+
+    def test_a_control_that_cannot_be_read_is_a_THIRD_answer(self):
+        """Unreadable and unchanged are different facts, and folding them
+        together is how a press that was never checked reads as a press that
+        was checked and found wanting — the same distinction `_readback` draws
+        between an empty field and an unreadable one."""
+        said = self._took(["aria-expanded=false|at=x", None])
+        assert "could not check" in said
+        assert "may not have been registered" not in said
+
+    def test_a_button_that_reports_itself_counts(self):
+        """The commonest proof of all: "Wyślij" becoming "Wysłano". Found by
+        the real-Chrome check, which pressed a button whose only reaction was
+        its own words and got back a hedge."""
+        said = self._took(["says=Wyślij zgłoszenie|at=x", "says=Wysłano zgłoszenie|at=x"])
+        assert said == ""
+
+    def test_navigating_counts_as_the_page_taking_it(self):
+        said = self._took(["class=btn|at=https://a/", "class=btn|at=https://b/"])
+        assert said == ""
+
+    def test_the_fingerprint_is_only_things_this_press_is_answerable_for(self):
+        """A node count or a mutation observer detects more and means less: a
+        live page with an animation or an ad slot mutates every second, so
+        'something changed' would read as success everywhere. A false 'it
+        worked' is the direction that makes the model report a form as sent."""
+        js = browser._ACTIVATION_JS
+        assert "location.href" in js
+        assert "isConnected" in js
+        assert "aria-expanded" in js
+        assert "textContent" in js
+        for noise in ("MutationObserver", "getElementsByTagName", "body.innerHTML"):
+            assert noise not in js, f"{noise} is page noise, not this control's doing"
