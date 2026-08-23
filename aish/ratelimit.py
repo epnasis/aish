@@ -121,6 +121,29 @@ class CallFailure:
             return True
         return (self.retry_after_s or 0) > LONG_WAIT_S
 
+    @property
+    def names_a_quota(self) -> bool:
+        """Whether this refusal said which ceiling it hit, or how long it lasts.
+
+        The dividing line between a refusal aish may LEARN a number from and one
+        it may only back off from. A 429 that names a window ("per minute", a
+        `Retry-After`) is evidence about a rate. A bare `RESOURCE_EXHAUSTED` —
+        which is every Gemini 429 in this owner's logs — is evidence that
+        SOMETHING was too much, and nothing about which dimension or how much.
+
+        `sent` is the first gate and the structural one: aish's own governor
+        refusal is a RATE_LIMIT carrying `scope=LONG` and a `retry_after_s` it
+        invented itself, so on the fields alone it is indistinguishable from a
+        provider naming a daily quota. Nothing left the machine, so the provider
+        said nothing, so there is nothing here to learn — and a governor that
+        could learn from its own guess would ratchet on its own output.
+        """
+        if self.kind != RATE_LIMIT or not self.sent:
+            return False
+        return bool(self.scope) or self.retry_after_source in (
+            "header", "header_ms", "header_date", "body"
+        )
+
     def record(self) -> dict:
         """The evidence half of a `model_error` trace record. Only fields that
         were actually established appear — an absent `status` means nobody
@@ -360,6 +383,28 @@ IMAGE_TOKENS = 1_400  # a flat stand-in: images are char-invisible and token-hug
 # ceiling is at or under it, never above.
 OBSERVED_MARGIN = 0.9
 
+# What an UNINFORMATIVE refusal buys instead of a learned ceiling: a brief
+# spell during which calls on the key are SPACED, and nothing is believed.
+#
+# The asymmetry that picks these numbers, measured rather than assumed. Across
+# every session log this owner has, 21 rate-limit 429s: all of them recovered on
+# the FIRST 5s retry, none ever needed a second. Against that, a ceiling
+# inferred from one of those refusals cost 30 calls of ~55s each in a single
+# session — 23% of all time spent in model calls — because the number it learned
+# was a snapshot of whatever the last minute happened to hold, and it swung
+# 987k → 511k → 1076k tokens/min inside 45 minutes.
+#
+# So the trade is stated deliberately: re-slamming a busy quota costs one 5s
+# retry, and throttling against a wrong guess costs 55s EVERY call. When aish
+# does not know which ceiling it hit, the cheap mistake is the right one.
+#
+# What survives is the part that needs no invented number. The hazard this
+# module was born from is a STAMPEDE — many worker threads in one process
+# discovering the same limit at the same moment, each burning a full request to
+# learn it. Spacing answers that directly, and expires by itself.
+COOLDOWN_S = 60.0
+COOLDOWN_SPACING_S = 2.0
+
 # Longest a caller will queue for headroom before being told to give up instead.
 # An unattended session gets a much shorter one (see `hooks`): it occupies a
 # bounded worker thread, and a chat nobody is watching must not park one for
@@ -540,10 +585,26 @@ class Reservation:
         self._closed = False
 
     def settle(self, actual: int | None) -> None:
+        """The call came back. Correct the estimate — and, because it came back
+        at all, lift any cooldown on the key.
+
+        A response is the only direct evidence that the squeeze is over, and it
+        is free: unlike a probe, it is a call the owner was making anyway. The
+        oscillation this permits (clear, slam, back off, clear) is accepted on
+        the arithmetic in `COOLDOWN_S` — the slam costs one 5s retry and the
+        alternative costs a minute of waiting per call, indefinitely, on a guess
+        nobody ever checks.
+        """
         with self._governor._lock:
             if not self._closed and actual:
                 self._entry[1] = float(actual)
             self._closed = True
+            if actual is not None:
+                # `is not None`, not truthiness: `settle(0)` is a SUCCESS whose
+                # provider reported no usage, while `settle(None)` is how
+                # `_settle_failure` closes a non-rate failure. Only the first is
+                # a response, and only a response says the squeeze is over.
+                self._governor._cooldown_until.pop(self.key, None)
             self._governor._cond.notify_all()
 
     def rejected(self) -> None:
@@ -599,6 +660,11 @@ class Governor:
         # Per key: when a quota that CANNOT be waited out inside a task frees up.
         # In monotonic seconds; None once it has passed.
         self._exhausted_until: dict[str, float] = {}
+        # Per key: until when calls are merely SPACED after an uninformative
+        # refusal. Monotonic, and deliberately not persisted — a transient
+        # brake that outlived the process it was set in would be a belief
+        # wearing a cooldown's clothes.
+        self._cooldown_until: dict[str, float] = {}
         self._next_ticket = 0
         self._waiting: set[int] = set()
 
@@ -620,19 +686,39 @@ class Governor:
             return self._limits[key]
 
     def observe(self, key: str, failure: CallFailure) -> None:
-        """Learn from a refusal. The only moment the world states the ceiling.
+        """Learn from a refusal — but only from one that said what it refused.
 
-        A 429 means the model of the world is wrong, so it is corrected ONCE, to
-        just under the rate that produced the failure — not nudged, and never
-        re-probed upward. TCP's additive increase is right when the limit is
-        unknown, dynamic and contended by strangers; here it is published,
-        static, per-model, and contended only by yourself, and every re-probe
-        costs a full request against the quota it is probing.
+        A 429 means the model of the world is wrong. What it does NOT say, on
+        most providers, is which part of the model was wrong. So the response
+        forks on `names_a_quota`:
+
+        - **It named a window or gave a hint.** Evidence about a rate. The
+          ceiling snaps to just under the rate that produced it — corrected
+          once, not nudged, and never re-probed upward. Every re-probe would
+          cost a full request against the quota it is probing.
+        - **It named nothing.** Evidence only that something was too much. aish
+          backs off in time (`backoff_delay`, which has recovered 21 of 21
+          real refusals on its first 5s step) and enters a `COOLDOWN_S` spell of
+          spacing. It believes NOTHING, because the only number available to
+          believe is "whatever the last minute happened to contain", and that is
+          a property of when the refusal landed rather than of the quota.
+
+        This fork replaced an earlier design that learned from every 429. The
+        original reasoning was that a limit is "published, static, per-model,
+        and contended only by yourself" — true of a private tier-1 key, and
+        false of the shared pay-as-you-go key actually in production here, whose
+        ceiling moves by the hour because it has neighbours. Inferring a hard
+        number from an anonymous refusal on such a key does not model the quota;
+        it models the traffic of strangers at one instant, then enforces it.
         """
         if not failure.is_rate_limit:
             return
         with self._lock:
             now = self._clock()
+            if not failure.exhausted and not failure.names_a_quota:
+                self._cooldown_until[key] = now + COOLDOWN_S
+                self._cond.notify_all()
+                return
             if failure.exhausted:
                 # Not a pause. Nothing sent between now and the reset can
                 # succeed, so later callers are refused immediately rather than
@@ -751,7 +837,40 @@ class Governor:
     def _headroom_wait(self, now: float, key: str, estimate: int) -> float | None:
         """None if the call fits right now; otherwise roughly how long until it
         might. Raises if it can never fit.
+
+        Two independent brakes, and the longer one wins: a transient cooldown
+        that knows no numbers, and a learned ceiling that does. They are kept
+        apart because only the second is a claim about the quota — collapsing
+        them would make a cooldown indistinguishable from a belief in the one
+        place a reader goes to ask which is in force.
         """
+        spacing = self._cooldown_wait(now, key)
+        ceiling = self._ceiling_wait(now, key, estimate)
+        if spacing is None:
+            return ceiling
+        return spacing if ceiling is None else max(spacing, ceiling)
+
+    def _cooldown_wait(self, now: float, key: str) -> float | None:
+        """How long until this key's next call may go out, while a refusal that
+        named nothing is still fresh. None once it has expired or been cleared.
+
+        Spacing rather than a rate: N threads that would otherwise discover the
+        same limit simultaneously are made to find out one at a time, which is
+        the whole of what the governor can honestly enforce without a number.
+        """
+        until = self._cooldown_until.get(key)
+        if until is None:
+            return None
+        if now >= until:
+            del self._cooldown_until[key]
+            return None
+        entries = self._window(key).entries
+        if not entries:
+            return None
+        left = entries[-1][0] + COOLDOWN_SPACING_S - now
+        return left if left > 0 else None
+
+    def _ceiling_wait(self, now: float, key: str, estimate: int) -> float | None:
         limits = self.limits(key)
         if limits.rpm is None and limits.tpm is None:
             return None  # no ceiling is known, so nothing is being enforced

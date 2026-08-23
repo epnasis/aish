@@ -185,8 +185,56 @@ theirs (`AISH_RATE_LIMIT_GEMINI=rpm=10,tpm=250000`, per provider or per `provide
 and a 429 corrects it either way. `Limits.source` (`none` | `env` | `observed`) travels
 with the numbers, mirroring `context_window`'s provenance discipline. `TestGovernorLimits`.
 
-A 429 means the model of the world is wrong, so the ceiling snaps to just under the rate
-that produced the failure. It snaps against the **effective** ceiling, not the stored one:
+### Only a refusal that names something may teach a number
+
+**A 429 says the model of the world is wrong. On most providers it does not say which
+part.** So `observe()` forks on `CallFailure.names_a_quota` — whether the refusal named a
+window (a `per minute` / `per day` quota id) or carried a real `Retry-After`:
+
+- **It named something.** Evidence about a *rate*. The ceiling snaps, as below.
+- **It named nothing.** Evidence only that *something* was too much. aish backs off in
+  time and enters a `COOLDOWN_S` spell of **spacing**, and believes nothing.
+
+The first design learned from every 429. The reasoning was that a limit is *"published,
+static, per-model, and contended only by yourself"* — true of a private tier-1 key, and
+false of the shared pay-as-you-go key actually in production here, whose ceiling moves by
+the hour because it has neighbours. Inferring a hard number from an anonymous refusal on
+such a key does not model the quota. It models the traffic of strangers at one instant,
+and then enforces it for as long as the belief survives.
+
+**The trade is measured, not assumed.** Across every session log this owner has: **21
+rate-limit 429s, all recovered on the first 5s retry, none ever needing a second.** Against
+that, a ceiling inferred from one of them cost **30 calls of ~55s each in a single session —
+23% of all time spent in model calls** — and the number it enforced swung
+987k → 511k → 1076k tokens/min inside 45 minutes, because it is a snapshot of whatever the
+last minute happened to contain rather than a property of the quota. The discriminator in
+the logs is output size: a 61s call returning 97 output tokens sat next to a 7s call
+returning 279. It was not the model working harder.
+
+So: **re-slamming a busy quota costs one 5s retry; throttling against a wrong guess costs
+55s on every call, indefinitely, on a number nobody ever checks.** When aish does not know
+which ceiling it hit, the cheap mistake is the right one. `settle()` therefore lifts a
+cooldown on the first response — the only direct evidence the squeeze is over, and free,
+because unlike a probe it is a call the owner was making anyway. The oscillation that
+permits (clear, slam, back off, clear) is accepted on that arithmetic.
+
+**What survives without a number.** The hazard this module was born from is a *stampede* —
+many worker threads in one process discovering the same limit simultaneously, each burning
+a full request to learn it. That needs no ceiling to answer, only order: during a cooldown
+calls on the key are spaced `COOLDOWN_SPACING_S` apart, so they find out one at a time. The
+cooldown is monotonic and deliberately **not persisted** — a transient brake that outlived
+its process would be a belief wearing a cooldown's clothes.
+
+**`sent` is the first gate, and the structural one.** aish's own `RateLimited` is a
+`RATE_LIMIT` carrying `scope=LONG` and a `retry_after_s` it invented, so on the fields alone
+it is indistinguishable from a provider naming a daily quota. Nothing left the machine, so
+the provider said nothing, so there is nothing to learn — a governor able to learn from its
+own guess would ratchet on its own output. `TestAnAnonymousRefusalTeachesNothing`.
+
+### When a refusal does name something
+
+The ceiling snaps to just under the rate that produced the failure, against the
+**effective** ceiling rather than the stored one:
 if the belief had already loosened to 1.5x and *that* is what got refused, the new evidence
 is about the loosened number, and tightening against a stale stored value would ratchet
 down forever without ever converging on what the server actually allows.
@@ -297,8 +345,14 @@ is a floor (`MIN_SPEND_BUDGET_TOKENS`) because below it trimming costs more than
 — the model loses the thread and re-fetches what was cut, which is more calls and more
 tokens than it saved.
 
-It engages **only when a limit is known**, so a key that never hits a quota behaves exactly
-as it did, and it only ever tightens — a generous quota is never read as permission to
+It engages **only when a limit is known** — and since a limit is now only ever known from a
+refusal that named one, an anonymous 429 can no longer move it. That is not a footnote: on
+2026-08-23 at 21:13 a ceiling inferred from an anonymous refusal did not merely slow the
+loop, it **halved a live conversation** from 822k chars to 383k and restored it sixteen
+minutes later. A transient brake must never size what the model is allowed to remember.
+
+So a key that never hits a *named* quota behaves exactly as it did, and the budget only
+ever tightens — a generous quota is never read as permission to
 exceed the model's actual window. `TestSpendBudget`.
 
 ## What this does not fix
@@ -324,5 +378,11 @@ Still open, tracked on #261:
   RESOURCE_EXHAUSTED.
 - **`curate` runs in a separate process** on the same key, so no in-process governor
   reaches it.
+- **Nothing is persisted in production.** `_path()` returns `None` unless `AISH_STATE_DIR`
+  is set, and `com.aish.web.plist` does not set it — so `rate-limits.json` in the state dir
+  is written by CLI runs and never read by the server, which re-learns from scratch on every
+  restart. The spent-quota latch does not survive a restart either, which is the exact gap
+  §5's "What survives a restart" claims to have closed. Fixing it is a launchd change on the
+  live host, not a code change, so it is listed rather than done here.
 
 Token accounting and reporting is #262 — `docs/token-accounting.md`.
