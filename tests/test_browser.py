@@ -2781,3 +2781,48 @@ class TestOnlyASiteThatAskedForAPasswordIsACandidate:
         for url in ("https://allegro.pl/x", "https://google.com/search?q=y"):
             browser._note_visit(owner, url)
         assert sorted(owner.password_hosts) == []
+
+
+class TestForgettingTakesTheRoutingToo:
+    """#283. The login record has two jobs — it arms the approval card, and it
+    routes the read into the cookie-carrying profile — and forgetting only ever
+    undid the first. So a forgotten host kept being read AS HIM, with the card
+    now gone: less protection than before he forgot it."""
+
+    def test_forgetting_stops_the_host_being_routed_through_his_profile(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(browser, "state_dir", lambda: tmp_path)
+        browser.logins_file().parent.mkdir(parents=True, exist_ok=True)
+        browser.logins_file().write_text("eon.pl\n", encoding="utf-8")
+        browser.BROWSER_HOSTS.add("eon.pl")
+
+        assert browser.forget_login("eon.pl") is True
+        assert browser.logged_in_hosts() == set()
+        assert "eon.pl" not in browser.BROWSER_HOSTS
+
+    def test_the_cookies_are_deliberately_untouched(self, tmp_path, monkeypatch):
+        """His session is his to end, at the site. Clearing the jar to tidy a
+        record would trade the feature for the workaround — the same fence
+        `_shed_reputation` keeps when it drops reputation cookies BY NAME."""
+        cleared = []
+        monkeypatch.setattr(browser, "state_dir", lambda: tmp_path)
+        browser.logins_file().parent.mkdir(parents=True, exist_ok=True)
+        browser.logins_file().write_text("eon.pl\n", encoding="utf-8")
+        monkeypatch.setattr(
+            browser, "shutdown", lambda: cleared.append("closed"),
+        )
+        browser.forget_login("eon.pl")
+        assert cleared == []  # nothing reached the browser at all
+
+    def test_forgetting_a_host_that_was_never_recorded_changes_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(browser, "state_dir", lambda: tmp_path)
+        browser.logins_file().parent.mkdir(parents=True, exist_ok=True)
+        browser.logins_file().write_text("eon.pl\n", encoding="utf-8")
+        browser.BROWSER_HOSTS.add("allegro.pl")
+        assert browser.forget_login("allegro.pl") is False
+        # Still routed: it is in BROWSER_HOSTS because it needed the browser
+        # for a bot wall, which is a different fact and not his to forget.
+        assert "allegro.pl" in browser.BROWSER_HOSTS
