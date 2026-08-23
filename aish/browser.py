@@ -4085,6 +4085,35 @@ async def _stop(
     return snapshot
 
 
+def browse_fields(*, key: str = "", timeout: float = 20.0) -> list:
+    """The controls on the live page, without the page — for a card that has to
+    say what a form currently HOLDS.
+
+    Deliberately a fresh read rather than the snapshot the gate already has.
+    The whole reason the card needs this is that filling needs no approval, so
+    values are set in one call and submitted in another, and a page is free to
+    reset a date in the gap; a card drawn from the last picture would show
+    exactly the stale values it exists to catch. No text, no settle — this is
+    an enumeration and nothing else, because it runs inside the gate with the
+    owner waiting.
+
+    Returns [] rather than raising: a card that cannot read the form is worse
+    without its button than with it, so the caller falls back to what it knows
+    and says which it is showing."""
+    if unavailable_reason():
+        return []
+
+    async def job(owner: _Owner) -> list:
+        session = await _session(owner, key, opening=False)
+        raw, _, _, _, _ = await _enumerate(session.page)
+        return browse_mod.controls_from(raw)
+
+    try:
+        return _submit(job, timeout)
+    except Exception:  # noqa: BLE001 — no page, no session, a torn-down browser
+        return []
+
+
 def browse_close(key: str = "") -> None:
     """End ONE CHAT's session. The context and the profile stay."""
 

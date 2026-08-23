@@ -5452,6 +5452,8 @@ class Agent:
         if said := control.row_note():
             what += f" ({said})"
         what += f" on {host}"
+        if held := self._form_note(control):
+            what += f"\n{held}"
         return self._browse_approval(
             name, args, what, BROWSE_ACTION_DENIED.format(what=what)
         )
@@ -5478,6 +5480,34 @@ class Agent:
         if self.state_log is not None:
             self.state_log({"kind": "browse_grant", "host": host})
         return None
+
+    def _form_note(self, control) -> str:
+        """What the form this press would send is HOLDING, for the card.
+
+        The card said what was about to be pressed and never what was about to
+        be SENT — and that is the half that can have gone stale, because
+        filling needs no approval and a page is free to reset a date between
+        the fill and the submit.
+
+        Read LIVE, falling back to the picture the gate already has, and the
+        card says which of the two it is showing: a value read a minute ago and
+        presented as current is the failure this exists to prevent, so it must
+        not be able to happen silently."""
+        if not getattr(control, "form", ""):
+            return ""
+        live = browser.browse_fields(key=self._browse_view.key)
+        if live:
+            fresh = browse.resolve(live, control.address).control
+            if fresh is not None:
+                return browse.form_note(browse.form_values(live, fresh))
+        shown = self._browse_view.shown
+        if shown is None:
+            return ""
+        note = browse.form_note(browse.form_values(shown.controls, control))
+        return note and note.replace(
+            "this form currently holds:",
+            "this form held, when aish last looked (it could not re-read it now):",
+        )
 
     def _needs_its_own_card(self, control) -> bool:
         """Does this control draw a card of its own, on top of the grant?
@@ -5536,6 +5566,15 @@ class Agent:
         ):
             return None
         what = plan.card(host)
+        committing = next(
+            (
+                step.control for step in reversed(plan.steps)
+                if step.control is not None and step.control.mutating
+            ),
+            None,
+        )
+        if committing is not None and (held := self._form_note(committing)):
+            what += f"\n{held}"
         if what in self._approved_batches:
             # The SAME form, the same values, the same committing press — this
             # is the retry of a batch that stopped part-way, and one of the

@@ -292,6 +292,10 @@ class Control:
     # difference. Empty unless the control is one of several saying the same
     # thing inside a repeated structure — see `digestRows` in CONTROLS_JS.
     row: list[str] = field(default_factory=list)
+    # Which form this control belongs to, "" for one that belongs to none. The
+    # identity is opaque and only ever compared: it exists so a card about to
+    # submit a form can say what that form holds.
+    form: str = ""
     # Did the NAME say this commits something? `mutating` is the union of that
     # and "submits a form"; the gate needs them apart, because only one of the
     # two is something the owner can sensibly grant a whole site at once.
@@ -1045,6 +1049,11 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
       // these — a cookie banner rendering mid-step is also "new".
       // What tells this control's row apart from its neighbours. See digestRows.
       row: row || [],
+      // WHICH form this control belongs to, so a card about to submit one can
+      // say what that form currently HOLDS. Prefixed by the frame's offset,
+      // because `document.forms` is per-document and two frames would
+      // otherwise both call their first form "0".
+      form: el.form ? (opts.offset + ':' + formIndex(el.form)) : '',
       // Is it inside something the page OPENED — a dialog, a listbox, a
       // calendar — rather than on the page proper? Only chrome words are
       // demoted by this, and never on something that submits.
@@ -1066,6 +1075,12 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
   const WIDGET = '[role=dialog], [role=alertdialog], [role=listbox], [role=menu],'
                + ' [class*=datepicker], [class*=date-picker], [class*=alendar],'
                + ' [class*=picker], [class*=dropdown], [class*=modal]';
+
+  const formIndex = (form) => {
+    const all = document.forms;
+    for (let i = 0; i < all.length; i += 1) if (all[i] === form) return i;
+    return -1;
+  };
 
   const type_ = (el) => ((el.getAttribute && el.getAttribute('type')) || '').toLowerCase();
 
@@ -1469,6 +1484,7 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                 disabled=bool(raw.get("disabled")),
                 submits=bool(raw.get("submits")),
                 option=bool(raw.get("option")),
+                form=str(raw.get("form") or ""),
                 row=[str(line) for line in (raw.get("row") or [])][:ROW_LINES_MAX],
             )
         )
@@ -2037,6 +2053,66 @@ def month_step(name: str, *, forward: bool) -> bool:
         "previous month", "poprzedni miesiac"
     )
     return any(folded.startswith(fold(phrase)) for phrase in phrases)
+
+
+# How much of a form a card shows, and how much of one value. A card nobody
+# can read is the failure this whole area keeps circling, so both are bounded —
+# and what is left out is counted, never dropped quietly.
+FORM_FIELDS_MAX = 12
+FORM_VALUE_CHARS = 48
+
+HELD = "currently: "
+NOT_TYPED = "(not typed by aish)"
+
+
+def form_values(controls: list[Control], target: Control) -> list[tuple[str, str]]:
+    """What the form this control would submit is HOLDING, field by field.
+
+    The card said what was about to be pressed and never what was about to be
+    SENT — which is the half the owner actually needs, and the half that can
+    have changed since anyone looked. Filling a form needs no approval, so the
+    values can be set in one call and submitted in another, with a page free to
+    reset a date in between; a card naming only the button cannot show that.
+
+    A password's value is never read back. That it is THERE is worth saying —
+    the owner is the only one who can have filled it — but aish types none and
+    reads none."""
+    if not target.form:
+        return []
+    held: list[tuple[str, str]] = []
+    for control in controls:
+        if control.form != target.form or control is target:
+            continue
+        if control.kind == PASSWORD:
+            held.append((control.name or control.address, NOT_TYPED))
+        elif control.kind == FIELD:
+            said = control.detail[len(HELD):] if control.detail.startswith(HELD) else ""
+            held.append((control.name or control.address, said or "(empty)"))
+        elif control.kind == CHECK:
+            held.append((control.name or control.address, control.detail or "unchecked"))
+        elif control.kind == CHOICE and "selected: " in control.detail:
+            held.append(
+                (control.name or control.address,
+                 control.detail.split("selected: ", 1)[1].strip("'"))
+            )
+    return held
+
+
+def form_note(held: list[tuple[str, str]]) -> str:
+    """The held values as the card shows them — one per line, bounded, and
+    saying what the bound left out."""
+    if not held:
+        return ""
+    lines = []
+    for name, value in held[:FORM_FIELDS_MAX]:
+        shown = value if len(value) <= FORM_VALUE_CHARS else (
+            f"{value[:FORM_VALUE_CHARS]}… (+{len(value) - FORM_VALUE_CHARS})"
+        )
+        lines.append(f"  {name}: {shown}")
+    left = len(held) - FORM_FIELDS_MAX
+    if left > 0:
+        lines.append(f"  and {left} more field(s)")
+    return "this form currently holds:\n" + "\n".join(lines)
 
 
 # How much of a change report is worth sending AS a change report. Past this the

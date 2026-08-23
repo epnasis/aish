@@ -159,9 +159,15 @@ HARD = """<!doctype html>
   <div id="okienko" role="dialog">
     <button id="kal-ok" type="button">Confirm</button>
   </div>
+  <!-- A form with values in it, and a button whose name always cards. The
+       card has to say what this form HOLDS, read live. -->
+  <form id="zamowienie" action="hard.html">
+    <label for="imie">Imię</label><input id="imie" value="Paweł">
+    <label for="miasto">Miasto</label><input id="miasto">
+    <button type="submit">Zapłać teraz</button>
+  </form>
   <form id="wyslij-nieznany" action="hard.html">
     <button type="submit">Dalej</button>
-    <button type="submit">Zapłać teraz</button>
   </form>
 
   <section id="szukaj-wolno">
@@ -869,6 +875,26 @@ def check_grant_scope(url: str) -> None:
     print("escalates on →", checkout.commit_evidence)
 
 
+def check_form_readback(url: str) -> None:
+    """The card says what is about to be SENT, not just what is pressed."""
+    page = browser.browse_open(url + "hard.html")
+    pays = next(c for c in page.controls if c.name == "Zapłać teraz")
+    held = dict(browse.form_values(page.controls, pays))
+    assert held.get("Imię") == "Paweł", held
+    assert held.get("Miasto") == "(empty)", held
+    assert "Szukaj połączeń" not in held, "a different form on the same page"
+    print("card would say →", browse.form_note(browse.form_values(page.controls, pays))
+          .replace("\n", " | "))
+
+    # And it is read LIVE: a value the page changed since aish last looked is
+    # exactly what this exists to catch.
+    browser.browse_act("Miasto", "type", text="Kraków")
+    fresh = browser.browse_fields()
+    again = next(c for c in fresh if c.name == "Zapłać teraz")
+    assert dict(browse.form_values(fresh, again)).get("Miasto") == "Kraków"
+    print("live re-read picked up →", "Miasto: Kraków")
+
+
 def check_hard(url: str) -> None:
     """Every way a control can be listed and unpressable."""
     page = browser.browse_open(url + "hard.html")
@@ -1036,6 +1062,7 @@ def main() -> int:
     check_spinner(url)
     check_submit_gating(url)
     check_grant_scope(url)
+    check_form_readback(url)
 
     browser.browse_close()  # the keyless session this script drove
     browser.shutdown()
