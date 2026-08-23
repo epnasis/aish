@@ -143,7 +143,9 @@ function check(name, fn) {
 
 const RESUME_TEXT =
   "[automatic resume] aish restarted while this task was still running, so the " +
-  "previous attempt was cut off part-way.";
+  "previous attempt was cut off part-way. Everything above is what had already " +
+  "happened. Do NOT repeat steps that already completed.\n\nCut off mid-step. " +
+  "These had STARTED and never reported a result:\n- read_url: https://x.test/a";
 
 check("a message the user typed still renders as a blue user bubble", () => {
   const s = makeSandbox();
@@ -165,7 +167,17 @@ check("the [automatic resume] note renders as a system row, not a user bubble", 
   const text = JSON.stringify(row.children.map((c) => c.children || []));
   assert(text.includes("Automatic resume"), "the row must say what it is");
   assert(!text.includes("[automatic resume]"), "the marker is the label, not body text");
-  assert(text.includes("aish restarted"), "the note itself is still readable");
+  assert(text.includes("aish restarted"), "the row must say what happened");
+});
+
+check("the resume row says what happened, not what the model was told", () => {
+  const s = makeSandbox();
+  s.handle({ type: "user", text: RESUME_TEXT, synthetic: "resume" });
+  const text = JSON.stringify(s.messagesEl.children[0].children.map((c) => c.children || []));
+  assert(!text.includes("read_url"), "no tool name reaches the row");
+  assert(!text.includes("Do NOT repeat"), "no model instructions reach the row");
+  assert(!text.includes("https://x.test/a"), "no raw in-flight URL reaches the row");
+  assert(text.includes("picked up where it left off"), "one line, in his language");
 });
 
 check("an automation's trigger prompt renders as a system row too", () => {

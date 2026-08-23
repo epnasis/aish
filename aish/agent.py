@@ -1089,18 +1089,17 @@ BROWSE_TOOLS = ("browse", "browse_act", "browse_fill")
 # the owner never named; under-tainting costs the fence. The asymmetry decides.
 UNTRUSTED_SOURCE_TOOLS = frozenset(EGRESS_TOOLS | set(BROWSE_TOOLS))
 
-# What the driving grant actually buys, said on the card that buys it. The
-# clauses are the floor it does NOT cover, and they are the reason the rest can
-# ride it — see `_grant_host`.
+# What the driving grant actually buys, said on the card that buys it — in ONE
+# sentence, because the card is read on a phone and four sentences of it is a
+# card he scrolls past to reach the buttons. It says only what saying yes
+# ALLOWS. The floor the grant does not cover (pays/buys/deletes/sends/signs,
+# checkout-shaped forms, passwords) is not promised here: each of those draws
+# its OWN card, or is refused outright, at the moment it fires — which is where
+# a promise about it is worth something, and where he is actually reading.
 BROWSE_GRANT = (
-    "drive {host} in your signed-in browser — aish will open pages and click "
-    "on them AS YOU, and can see private account data.\n"
-    "It may fill in and submit forms there without asking again — searches, "
-    "filters, dates.\n"
-    "It will still ask before anything that says it pays, buys, books, "
-    "deletes, sends or signs, and before any form on a page that looks like a "
-    "checkout.\n"
-    "It never types passwords."
+    "drive {host} in your signed-in browser — aish will open pages, click and "
+    "fill in forms AS YOU without asking again, and can see private account "
+    "data."
 )
 
 BROWSE_NO_PAGE = (
@@ -5100,7 +5099,11 @@ class Agent:
         # Same for a read that would use a signed-in session (#221): the
         # parallel path has no gate at all, so a gated read must leave it.
         login_host = self._login_host(name, args)
-        if login_host and login_host not in self._approved_logins:
+        if (
+            login_host
+            and login_host not in self._approved_logins
+            and not self._browse_grant_covers(str(args.get("url", "")))
+        ):
             return True
         # An e-mailed link is gated too, and the parallel thunks have no gate
         # at all (#279).
@@ -5323,6 +5326,14 @@ class Agent:
             return None
         if host in self._approved_logins:
             return None
+        if self._browse_grant_covers(str(args.get("url", ""))):
+            # Driving a site AS HIM already includes reading it as him — the
+            # browse grant opens its pages and hands their text back. So the
+            # grants NEST rather than multiply: a second card, for strictly
+            # less than what he just approved for the same site, reads as aish
+            # asking the same question twice, and the difference it is asking
+            # about (which tool fetches the page) is one he has no way to see.
+            return None
         if self.approve_tool is None:
             return _gate_outcome(
                 LOGIN_READ_NO_APPROVER.format(host=host), decision="blocked"
@@ -5346,9 +5357,44 @@ class Agent:
         if decision is None or decision is False:
             return _gate_outcome(LOGIN_READ_DENIED.format(host=host), decision="denied")
         # Vouched for the rest of this session, matching _egress_gate: a task
-        # that reads five pages of one portal asks once, not five times.
+        # that reads five pages of one portal asks once, not five times. Logged
+        # for the same reason the driving grant is: a chat outlives the agent
+        # holding its grants, and every ship rebuilds that agent underneath it.
         self._approved_logins.add(host)
+        if self.state_log is not None:
+            self.state_log({"kind": "login_grant", "host": host})
         return None
+
+    def _browse_grant_covers(self, url: str) -> bool:
+        """Is this URL inside a site the owner already let aish DRIVE?
+
+        Suffix match, like `browser.is_logged_in`: a grant on a site covers its
+        subdomains, and it must never read the other way — a read grant buys
+        nothing, since driving is the bigger question and keeps its own card."""
+        return self._browse_granted(browser.host_of(url))
+
+    def _browse_granted(self, host: str) -> bool:
+        """Has the owner already granted driving THIS host, or a site it sits
+        under?
+
+        Set membership was exact, and a country subdomain is a different
+        string: he approved driving `linkedin.com`, and six minutes later
+        approved driving `pl.linkedin.com` — the same site, the same session,
+        the same profile, a card that named the same company. `is_logged_in`
+        has always read the boundary this way, so the two halves of the browser
+        now agree about what "this site" means.
+
+        Downward only, and that asymmetry is the safe direction: a grant on
+        `linkedin.com` covers `pl.linkedin.com` because he said yes to the
+        whole site, while a grant on `pl.linkedin.com` covers nothing above it
+        — he was shown the narrower name and that is what he agreed to. Dot
+        boundary, so `evil-linkedin.com` is not inside `linkedin.com`."""
+        if not host:
+            return False
+        return any(
+            host == granted or host.endswith("." + granted)
+            for granted in self._approved_browsing
+        )
 
     def _browse_host(self, name: str, args: dict) -> str:
         """The host this browse call would drive, or "".
@@ -5467,7 +5513,7 @@ class Agent:
         to reclassify submits behind his back: a card tapped blind records a
         consent he never gave, so the win has to come from moving the decision,
         not from thinning it. So this card says what riding it means."""
-        if host in self._approved_browsing:
+        if self._browse_granted(host):
             return None
         refusal = self._browse_approval(
             name, args, BROWSE_GRANT.format(host=host), BROWSE_DENIED.format(host=host)
@@ -6263,6 +6309,11 @@ class Agent:
         Restored per chat, from that chat's own log, which is what keeps it a
         SESSION grant (L4) rather than a machine-wide one."""
         self._approved_browsing.update(hosts)
+
+    def restore_login_grants(self, hosts: list[str]) -> None:
+        """Re-arm the signed-in reads this chat already allowed, exactly as
+        `restore_browse_grants` does for the bigger grant."""
+        self._approved_logins.update(hosts)
 
     def restore_opened_links(self, calls: list[tuple[dict, int]]) -> None:
         """Refill the ledger from a reopened chat's own log (#267).

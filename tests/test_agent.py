@@ -4188,6 +4188,71 @@ class TestLoginGate:
         agent._approved_logins.add("allegro.pl")
         assert not agent._read_needs_prompt("read_url", {"url": "https://allegro.pl/a"})
 
+    def test_the_driving_grant_already_covers_reading_the_same_site(self, monkeypatch):
+        """He approved driving linkedin.com AS HIM, and 47 seconds later was
+        asked whether aish could READ linkedin.com as him. The grants nest —
+        driving a site opens its pages and hands back their text — so the
+        second card asked for strictly less than the first, about a difference
+        (which tool fetches the page) he has no way to see."""
+        fetched = self._signed_into(monkeypatch, "linkedin.com")
+        asked = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://www.linkedin.com/in/arcea")
+                ]),
+                model_says("read it"),
+            ],
+            approve_tool=lambda n, a, p=None: asked.append(p) or True,
+        )
+        agent._approved_browsing.add("linkedin.com")
+        agent.run_task("what did Roman post")
+        assert asked == []
+        assert fetched == ["https://www.linkedin.com/in/arcea"]
+        assert not agent._read_needs_prompt(
+            "read_url", {"url": "https://www.linkedin.com/in/arcea"}
+        )
+
+    def test_a_grant_on_one_site_does_not_cover_another(self, monkeypatch):
+        """Suffix match, both ways round: subdomains of the granted site ride
+        it, a site that merely ends with the same letters does not."""
+        self._signed_into(monkeypatch, "linkedin.com", "allegro.pl")
+        agent, _ = make_agent([model_says("hi")])
+        agent._approved_browsing.add("linkedin.com")
+        assert agent._browse_grant_covers("https://pl.linkedin.com/in/x")
+        assert not agent._browse_grant_covers("https://evillinkedin.com/in/x")
+        assert agent._read_needs_prompt("read_url", {"url": "https://allegro.pl/a"})
+
+    def test_a_read_grant_never_buys_driving(self, monkeypatch):
+        """The containment is one-directional. Driving is the bigger question
+        and keeps its own card, however many pages have been read."""
+        self._signed_into(monkeypatch, "linkedin.com")
+        agent, _ = make_agent([model_says("hi")])
+        agent._approved_logins.add("linkedin.com")
+        assert "linkedin.com" not in agent._approved_browsing
+
+    def test_the_grant_survives_the_agent_being_rebuilt(self, monkeypatch):
+        """Every ship restarts aish-web and rebuilds the agent under an open
+        chat, so a yes given a minute ago became another card. The driving
+        grant is replayed from the chat's own log (#251); this one was not."""
+        self._signed_into(monkeypatch, "allegro.pl")
+        logged = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://allegro.pl/moje")
+                ]),
+                model_says("read it"),
+            ],
+            approve_tool=lambda n, a, p=None: True,
+            state_log=logged.append,
+        )
+        agent.run_task("what did I order")
+        assert {"kind": "login_grant", "host": "allegro.pl"} in logged
+        fresh, _ = make_agent([])
+        fresh.restore_login_grants(["allegro.pl"])
+        assert not fresh._read_needs_prompt("read_url", {"url": "https://allegro.pl/x"})
+
     def test_only_read_url_can_carry_a_session(self, monkeypatch):
         """show_image / read_pdf fetch bytes through the anonymous opener, so
         they cannot read as the owner and must not draw a card that claims

@@ -974,10 +974,23 @@ class SessionLog:
         had been rebuilt underneath him. Same shape as `restore_state`: the log
         is the only place this fact survives the agent that recorded it, and it
         is restored to the SAME chat only, never across chats."""
+        return SessionLog._granted_hosts(path, "browse_grant")
+
+    @staticmethod
+    def login_grants(path: Path) -> list[str]:
+        """Hosts this chat has already agreed aish may READ as him.
+
+        The same fact as `browse_grants` about the smaller of the two grants,
+        and it survived the rebuild just as badly: every ship turned a yes he
+        had already given into another card, in a chat still on screen."""
+        return SessionLog._granted_hosts(path, "login_grant")
+
+    @staticmethod
+    def _granted_hosts(path: Path, kind: str) -> list[str]:
         hosts: list[str] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
-            if record is None or record.get("kind") != "browse_grant":
+            if record is None or record.get("kind") != kind:
                 continue
             host = record.get("host")
             if host and host not in hosts:

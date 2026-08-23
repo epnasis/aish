@@ -3939,9 +3939,14 @@ function addWorkspaceNote(change, path) {
 // the quiet system-note row (the workspace marker's visual language) instead of
 // a blue user bubble that would read as their own words.
 const SYNTHETIC_LABELS = { resume: "Automatic resume", trigger: "Triggered request" };
-// The label already says "automatic resume"; printing the marker again on the
-// line below it is noise.
-const SYNTHETIC_PREFIX_RE = /^\s*\[automatic resume\]\s*/i;
+// A RESUME ROW SAYS WHAT HAPPENED, NOT WHAT THE MODEL WAS TOLD. The note
+// itself is addressed to the model — do not repeat completed steps, here are
+// the tool calls that were cut off mid-flight — and it is a page of it, naming
+// tools and raw URLs, printed above the answer where he reads. None of it is
+// his to act on: he cannot approve, retry or undo any part of it. What he
+// needs is the one fact that explains why the transcript above looks half
+// finished. The note is still in the log, in full, for `aish explain`.
+const RESUME_ROW_TEXT = "aish restarted mid-task and picked up where it left off.";
 
 function addSystemMsg(kind, text) {
   const el = document.createElement("div");
@@ -3956,7 +3961,7 @@ function addSystemMsg(kind, text) {
   label.textContent = SYNTHETIC_LABELS[kind] || "System";
   const detail = document.createElement("div");
   detail.className = "sysnote-text";
-  detail.textContent = text.replace(SYNTHETIC_PREFIX_RE, "");
+  detail.textContent = kind === "resume" ? RESUME_ROW_TEXT : text;
   body.append(label, detail);
   el.append(ico, body);
   messagesEl.appendChild(el);
