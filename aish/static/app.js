@@ -12282,16 +12282,19 @@ function onBrowserView(event) {
     closeSheets();
     const hosts = event.hosts || [];
     if (!hosts.length) { showToast("browser closed"); return; }
-    // ASK. Closing the sheet used to mark every host visited as signed-in, so
-    // merely browsing to allegro.pl claimed an account there — and then every
-    // read of the site this feature exists for wanted approval. Whether a
-    // login happened is the owner's fact to state, and they are right here.
+    // ASK — but only about sites that PUT A PASSWORD BOX in front of him, and
+    // the server decides which those are. Closing the sheet used to offer the
+    // whole browsing history in one batch under a single yes, which is how
+    // netflix.com, airbnb.com and a typo'd imbd.com ended up recorded as
+    // accounts. Whether a login happened is his fact to state; where one was
+    // even possible is not.
     askConfirm({
-      title: "Did you sign in?",
+      title: hosts.length > 1 ? "Did you sign in?" : `Did you sign in to ${hosts[0]}?`,
       body:
-        `You visited ${hosts.join(", ")}. If you signed in, aish will read ` +
-        `${hosts.length > 1 ? "those sites" : "that site"} as you — and will ` +
-        "ask you first, every time. If you only looked around, choose Not now.",
+        `${hosts.length > 1 ? hosts.join(", ") + " asked" : "It asked"} for a ` +
+        "password while you were there. If you signed in, aish will read " +
+        `${hosts.length > 1 ? "those sites" : "it"} as you — and will ask you ` +
+        "first, every time. If you did not, choose Just looking.",
       verb: "I signed in",
       cancelVerb: "Just looking",
       // act(), not a bare send: this ARMS the approval gate, and a request

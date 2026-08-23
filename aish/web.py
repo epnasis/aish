@@ -1473,6 +1473,8 @@ def _browser_read(
                     if outcome.second_factor
                     else outcome.why
                 ),
+            ) if (outcome.second_factor or outcome.stale) else (
+                RENEWAL_HELD_NOTE.format(host=host, why=outcome.why)
             )
     if is_blank(text):
         return None, "the browser rendered an empty page"
@@ -1557,6 +1559,11 @@ RENEWAL_STOPPED_NOTE = (
     "get all the way in — {why}. What follows is the SIGNED-OUT page, not their "
     "account: nothing in it is their data.]\n"
 )
+RENEWAL_HELD_NOTE = (
+    "[aish: {host} asked for a password. The user has a sign-in saved here and "
+    "aish did NOT use it — {why}. Their saved sign-in is untouched and is not "
+    "the problem. What follows is the SIGNED-OUT page, not their account.]\n"
+)
 RENEWAL_SECOND_FACTOR = (
     "the site then asked for a one-time code, which only they can supply — tell "
     "them to open /browser {host}, finish the sign-in, and ask again"
@@ -1582,6 +1589,20 @@ BROWSE_SIGNED_OUT_NOTE = (
     "other buttons on this page. Tell them to run /browser {host}, sign in "
     "themselves, and ask again — and if they want aish to be able to do it "
     "next time, to tick 'Remember this' while they type the password.]\n"
+)
+
+# aish HELD the credential back — it never reached the site. Kept apart from
+# the stale note for the reason `notice` is kept apart from `problem`: they say
+# opposite things about the saved sign-in, and the stale wording ("was not
+# accepted") is a false statement about the site when aish is the one that
+# refused. Measured on linkedin.com, whose login page is a React app with no
+# form: the note told him his saved sign-in had been rejected by a site that
+# never saw it.
+BROWSE_SIGNIN_HELD = (
+    "[aish: {host} is asking for a password. The user HAS a sign-in saved here "
+    "and aish did not use it — {why}. The saved sign-in is untouched and is "
+    "not the problem. Tell them to run /browser {host} and sign in themselves. "
+    "Do NOT try other buttons on this page.]\n"
 )
 
 BROWSE_SIGNED_OUT_STALE = (
@@ -2172,12 +2193,17 @@ def _renew_driving(url, snapshot, *, topic, view):
     if outcome is None:
         return BROWSE_SIGNED_OUT_NOTE.format(host=host), snapshot
     if not outcome.ok:
-        why = (
-            RENEWAL_SECOND_FACTOR.format(host=host)
-            if outcome.second_factor
-            else outcome.why
-        )
-        return BROWSE_SIGNED_OUT_STALE.format(host=host, why=why), snapshot
+        if outcome.second_factor:
+            template, why = BROWSE_SIGNED_OUT_STALE, RENEWAL_SECOND_FACTOR.format(
+                host=host
+            )
+        elif outcome.stale:
+            template, why = BROWSE_SIGNED_OUT_STALE, outcome.why
+        else:
+            # aish held it back. Saying the site refused it would be a false
+            # statement in aish's own voice, above the untrusted banner.
+            template, why = BROWSE_SIGNIN_HELD, outcome.why
+        return template.format(host=host, why=why), snapshot
     try:
         again = browser.browse_open(url, topic=topic or "", key=_key(view))
     except Exception:  # noqa: BLE001 — keep the page we have

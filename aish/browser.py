@@ -610,12 +610,23 @@ def _remember_logins(hosts: set[str], *, cold: bool = False) -> None:
 
 def forget_login(host: str) -> bool:
     """Drop a host from the login record. Does NOT clear its cookies — the
-    owner's session is theirs to end, at the site, in a window."""
+    owner's session is theirs to end, at the site, in a window.
+
+    It DOES stop routing the host through his profile, and that half was
+    missing (#283). The record has two jobs — it arms `_login_gate`, and it
+    routes the read into the signed-in browser — and forgetting only ever undid
+    the first. A host that had already needed the browser stayed in
+    `BROWSER_HOSTS`, so it kept being read in the cookie-carrying profile with
+    the approval card now gone: forgetting a site removed the CARD and left the
+    CAPABILITY, which is exactly backwards. Anyone clearing a polluted record
+    would have walked straight into it."""
     host = host_of("https://" + host) or host.strip().lower()
     known = logged_in_hosts()
     if host not in known:
         return False
     logins_file().write_text("\n".join(sorted(known - {host})) + "\n", encoding="utf-8")
+    # Per-process: this is the running server's routing table, not a file.
+    BROWSER_HOSTS.discard(host)
     return True
 
 
@@ -1056,8 +1067,34 @@ async def _declared_data_async(page: Any) -> list[str]:
 # masked on the phone does not undo transmitting it. Refusal keys on
 # autocomplete too, because sites flip type=password to type=text for their own
 # reveal button and tapping that first would otherwise launder the value.
-_FOCUS_JS = """() => {
-  const a = document.activeElement;
+# What REALLY has focus, across shadow boundaries.
+#
+# `document.activeElement` stops at the shadow HOST: focus a field inside an
+# open shadow root and the document reports the custom element wrapping it, at
+# every level above it. Measured on qatarairways.com, whose booking widget is
+# an Angular app inside `<app-nbx-explore>` — focusing the destination box
+# leaves `document.activeElement` as APP-NBX-EXPLORE while the shadow root's
+# own `activeElement` is the input, focused, ready to type.
+#
+# Both halves of aish that ask "what has focus" got the wrapper. `_focus`
+# concluded focus had not landed and threw away the KEYBOARD rung of the press
+# ladder — the rung that exists for exactly the control a real click cannot
+# reach — so a field aish had successfully focused was reported as "would not
+# take the action, by click, by keyboard, or otherwise" (#273). The owner's
+# view asked the same question to decide whether to offer a keyboard, and a
+# custom element is not editable, so it offered none.
+_DEEP_ACTIVE_JS = """
+  const deepActive = () => {
+    let node = document.activeElement;
+    while (node && node.shadowRoot && node.shadowRoot.activeElement) {
+      node = node.shadowRoot.activeElement;
+    }
+    return node;
+  };
+"""
+
+_FOCUS_JS = """() => {""" + _DEEP_ACTIVE_JS + """
+  const a = deepActive();
   if (!a || a === document.body || a === document.documentElement) return null;
   const tag = a.tagName.toLowerCase();
   const type = (a.getAttribute('type') || 'text').toLowerCase();
@@ -1230,6 +1267,10 @@ class _Owner:
         # the remote-view input path retains nothing by default and this is the
         # one bounded exception, opened only by his own checkbox.
         self.pending_credential: dict = {}
+        # Hosts whose page ASKED FOR A PASSWORD while he was looking at it.
+        # This — not the browsing history — is what `view_close` may ask him
+        # about. See `_note_visit`.
+        self.password_hosts: set[str] = set()
         self.pending_nav = -1      # the navigation count when that happened
         self.last_url = ""         # where the view was, so it can be reopened
         # The pages the MODEL is driving (#237, #272), ONE PER CHAT. Each is a
@@ -1495,7 +1536,14 @@ def _submit(job: Callable[[_Owner], Any], timeout: float) -> Any:
 #      to recent.json in cleartext, outside every scrubbing path there is.
 
 SIGNIN_FORM_JS = """
-() => {
+(expected) => {
+  // The origin is checked HERE, against the origin the credential was saved
+  // for, and in the SAME step that tags the fields. Doing it in Python before
+  // this call left a gap: the page could navigate in between, and the tags
+  // would land on whatever arrived.
+  if (location.origin !== expected) {
+    return {ok: false, why: 'the page moved to ' + location.origin};
+  }
   const vis = (el) => {
     if (!el || el.disabled) return false;
     const r = el.getBoundingClientRect();
@@ -1507,32 +1555,83 @@ SIGNIN_FORM_JS = """
   if (pw.length === 0) return {ok: false, why: 'no password field on the page'};
   if (pw.length > 1) return {ok: false, why: 'more than one password field'};
   const secret = pw[0];
+  // A <form> is OPTIONAL, and requiring one is what broke this on the first
+  // real site it met: linkedin.com renders its login as a React app with no
+  // form element at all, which is the ordinary shape of a modern login page
+  // rather than an edge case. Where a form DOES exist its declared
+  // destination is still checked — it is a cheap early out — but the fence
+  // that actually holds is at the network layer, because a form can be
+  // submitted by JavaScript to anywhere regardless of its action.
   const form = secret.form;
-  if (!form) return {ok: false, why: 'the password field is not in a form'};
-  const method = (form.getAttribute('method') || 'get').toLowerCase();
-  if (method !== 'post') return {ok: false, why: 'the form is not a POST'};
-  // form.action resolves to the document URL when the attribute is absent,
-  // which is the ordinary same-origin case and correct.
-  let target;
-  try { target = new URL(form.action, document.baseURI).origin; }
-  catch (e) { return {ok: false, why: 'the form has no readable destination'}; }
+  let target = '';
+  if (form) {
+    if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') {
+      return {ok: false, why: 'the form is a GET, which would put the password in the URL'};
+    }
+    try { target = new URL(form.action, document.baseURI).origin; }
+    catch (e) { return {ok: false, why: 'the form has no readable destination'}; }
+    if (target !== expected) return {ok: false, why: 'the form sends to ' + target};
+  }
+  // Scope for the identifier: the form when there is one, otherwise the
+  // nearest ancestor that holds the password field and a button. Never the
+  // whole document — a page-wide search finds the newsletter box.
+  let scope = form;
+  if (!scope) {
+    scope = secret.parentElement;
+    while (scope && scope !== document.body &&
+           !scope.querySelector('button, input[type=submit]')) {
+      scope = scope.parentElement;
+    }
+    scope = scope || document.body;
+  }
   const TEXTY = ['text', 'email', 'tel', 'number', ''];
-  const ident = [...form.querySelectorAll('input')].filter(
+  const ident = [...scope.querySelectorAll('input')].filter(
     (el) => TEXTY.includes((el.getAttribute('type') || '').toLowerCase()) && vis(el)
   )[0];
   secret.setAttribute('data-aish-signin', 'password');
+  // The identifier is OPTIONAL. A "welcome back, <name>, enter your password"
+  // page has no e-mail field at all — which is exactly the page linkedin.com
+  // served — and refusing it would refuse the easiest sign-in there is.
   if (ident) ident.setAttribute('data-aish-signin', 'identifier');
-  const submit = [...form.querySelectorAll(
-    'button, input[type=submit]'
-  )].filter((el) => {
-    const t = (el.getAttribute('type') || '').toLowerCase();
-    return vis(el) && t !== 'button' && t !== 'reset';
-  })[0];
+  // Only a form's own submit button is ever pressed. With no form the submit
+  // is the ENTER key, deliberately: choosing a button by its words on a login
+  // page is how the model ended up pressing "Continue with Google".
+  let submit = null;
+  if (form) {
+    submit = [...form.querySelectorAll('button, input[type=submit]')].filter((el) => {
+      const t = (el.getAttribute('type') || '').toLowerCase();
+      return vis(el) && t !== 'button' && t !== 'reset';
+    })[0] || null;
+  }
   if (submit) submit.setAttribute('data-aish-signin', 'submit');
   return {
     ok: true, posts_to: target, page_origin: location.origin,
-    identifier: !!ident, submit: !!submit,
+    identifier: !!ident, submit: !!submit, form: !!form,
   };
+}
+"""
+
+# Read again immediately before the press. The tag survives a SAME-DOCUMENT
+# change, so a page that rewrites `form.action` after it was checked would be
+# submitted to the new destination with the credential already typed into it.
+# This is the same fence `browse_act` keeps for an approved control: the thing
+# that was checked has to be the thing that happens.
+SIGNIN_STILL_OURS_JS = """
+(expected) => {
+  if (location.origin !== expected) return 'the page moved to ' + location.origin;
+  const secret = document.querySelector('[data-aish-signin="password"]');
+  if (!secret) return 'the password field is gone';
+  const form = secret.form;
+  if (form) {
+    if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') {
+      return 'the form stopped being a POST';
+    }
+    let target;
+    try { target = new URL(form.action, document.baseURI).origin; }
+    catch (e) { return 'the form has no readable destination'; }
+    if (target !== expected) return 'the form now sends to ' + target;
+  }
+  return '';
 }
 """
 
@@ -1546,6 +1645,50 @@ SECOND_FACTOR_JS = """
   return auto === 'one-time-code' || (mode === 'numeric' && len > 0 && len <= 8);
 })
 """
+
+
+# Methods that can carry a credential in a body. A GET cannot, and blocking
+# cross-origin GETs during a sign-in would break the fonts and images the login
+# page needs to render.
+_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+
+class _OffOriginBlocked(Exception):
+    """The page tried to send a body somewhere else while signing in."""
+
+
+async def _fence_the_origin(page: Any, expected: str, blocked: list[str]) -> None:
+    """Refuse, at the network, to let this page POST anywhere but `expected`.
+
+    **This is the fence, and the DOM checks are only an early out.** A form's
+    `action` is a declaration, and a login page can submit by JavaScript to
+    whatever address it likes regardless of it — so checking the attribute
+    answers a question the page is not obliged to answer honestly. Most modern
+    login pages have no form at all (linkedin.com is a React app), which made
+    the static check simultaneously too weak and, when it was mandatory, strong
+    enough to refuse the ordinary case.
+
+    Blocking the REQUEST needs no guess about encoding: it does not go looking
+    for the password in a body that may be JSON, form-encoded or percent-
+    escaped. Anything with a body going to another origin is denied for the few
+    seconds the sign-in takes. A cross-origin analytics beacon losing one POST
+    in that window costs nothing."""
+
+    async def decide(route: Any) -> None:
+        request = route.request
+        try:
+            if request.method.upper() in _BODY_METHODS:
+                origin = signin_mod.origin_of(request.url)
+                if origin and origin != expected:
+                    blocked.append(request.url)
+                    await route.abort()
+                    return
+            await route.continue_()
+        except Exception:  # noqa: BLE001 — a dead route must not hang the page
+            with contextlib.suppress(Exception):
+                await route.continue_()
+
+    await page.route("**/*", decide)
 
 
 @dataclass
@@ -1567,46 +1710,64 @@ class SignInResult:
 
 async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) -> SignInResult:
     """Fill and submit the recorded login form on an already-open page."""
+    refused = (
+        f"aish only ever types a credential at {record.origin}, the exact origin "
+        "it was saved for"
+    )
     live = signin_mod.origin_of(page.url or "")
     if live != record.origin:
+        # A cheap early out. It is NOT the fence — the fence is inside the
+        # evaluate below, which checks and tags in one step.
         return SignInResult(
-            why=(
-                f"the sign-in page redirected to {live or 'somewhere else'}, which is "
-                f"not {record.origin} — aish only ever types a credential at the exact "
-                "origin it was saved for"
-            ),
+            why=f"the sign-in page went to {live or 'somewhere else'} — {refused}",
             url=page.url or "",
         )
     try:
-        found = await page.evaluate(SIGNIN_FORM_JS)
+        found = await page.evaluate(SIGNIN_FORM_JS, record.origin)
     except Exception as exc:  # noqa: BLE001 — a page that will not answer
         return SignInResult(why=f"could not read the sign-in form ({exc})", url=page.url)
     if not found.get("ok"):
-        return SignInResult(why=str(found.get("why", "no usable sign-in form")), url=page.url)
-    if found.get("posts_to") != found.get("page_origin"):
         return SignInResult(
-            why=(
-                f"that form sends to {found.get('posts_to')}, not to {record.origin} — "
-                "aish will not hand a credential to a third party"
-            ),
+            why=f"{found.get('why', 'no usable sign-in form')} — {refused}",
             url=page.url,
         )
-    if not found.get("identifier"):
-        return SignInResult(why="the form has no identifier field", url=page.url)
-
     # REAL keystrokes, for the reason `view_act` uses them: a site that listens
     # for key events (and a great many login forms do) sees nothing from fill().
-    for selector, value in (
-        ("[data-aish-signin='identifier']", identifier),
-        ("[data-aish-signin='password']", password),
-    ):
+    # The identifier is skipped when the page has no field for it — a "welcome
+    # back, enter your password" page is a sign-in, not a broken one.
+    steps = []
+    if found.get("identifier") and identifier:
+        steps.append(("[data-aish-signin='identifier']", identifier))
+    steps.append(("[data-aish-signin='password']", password))
+    for selector, value in steps:
         element = await page.query_selector(selector)
         if element is None:
-            return SignInResult(why="the sign-in form changed while filling it", url=page.url)
+            return SignInResult(
+                why=f"the sign-in page changed while it was being filled — {refused}",
+                url=page.url,
+            )
         await element.click(timeout=ACT_TIMEOUT_MS)
         await page.keyboard.press("ControlOrMeta+a")
         await page.keyboard.type(value, delay=12)
 
+    # Nothing has been SENT yet — typing commits nothing. So the last thing
+    # before the press is to ask the live page whether it is still the page
+    # that was checked. A refusal here costs an unsent form; not asking costs
+    # the credential.
+    try:
+        changed = await page.evaluate(SIGNIN_STILL_OURS_JS, record.origin)
+    except Exception as exc:  # noqa: BLE001
+        changed = f"the page stopped answering ({exc})"
+    if changed:
+        return SignInResult(
+            why=f"{changed} while the form was being filled — {refused}, and "
+            "nothing was sent",
+            url=page.url,
+        )
+
+    # Only a form's OWN submit button is ever pressed. With no form the submit
+    # is Enter — the universal gesture, and the one that cannot land on
+    # "Continue with Google", which is what choosing a button by its words did.
     submit = await page.query_selector("[data-aish-signin='submit']")
     if submit is not None:
         await submit.click(timeout=ACT_TIMEOUT_MS)
@@ -1750,11 +1911,28 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
         context = await owner.context()
         page = await context.new_page()
         owner.read_pages.add(page)
+        blocked: list[str] = []
         try:
             await page.goto(record.url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             await page.wait_for_timeout(SETTLE_MS)
             await _dismiss_consent(page)
-            return await _sign_in_on(page, record, identifier, password)
+            # Armed BEFORE anything is typed and left up through the submit and
+            # the settle, so a delayed exfiltration is caught too.
+            await _fence_the_origin(page, record.origin, blocked)
+            outcome = await _sign_in_on(page, record, identifier, password)
+            if blocked:
+                # Not a hypothetical: say it, and never report the sign-in as
+                # having worked when the page was caught doing this.
+                where = signin_mod.origin_of(blocked[0]) or blocked[0]
+                return SignInResult(
+                    why=(
+                        f"that page tried to send something to {where} while it "
+                        f"was being signed in — aish blocked it and stopped. "
+                        f"Sign in yourself at /browser {host_of(record.origin)}"
+                    ),
+                    url=outcome.url or page.url,
+                )
+            return outcome
         finally:
             owner.read_pages.discard(page)
             with contextlib.suppress(Exception):
@@ -2221,6 +2399,7 @@ class Frame:
     nav: int = 0     # documents loaded so far; a change means "reset the zoom"
     signin: str = ""  # a host a password was just submitted to
     saved: str = ""   # an origin whose sign-in was just stored (#280)
+    asks_password: bool = False  # is this page putting a password box in front of him?
     # The page's activity generation AT CAPTURE, so the watcher can ask "has
     # anything happened since this picture?" rather than "since I last looked".
     # Paired with `nav` because a navigation resets the counter to zero, which
@@ -2253,6 +2432,12 @@ async def _frame(
     # the byte-compare throws away; reading it after would count that mutation as
     # already shown and lose the frame. Err toward the wasted compare.
     gen = await _activity(page)
+    # Asked once per frame and reused: `view_act` needs it to tell a successful
+    # sign-in from a failed one, and `view_close` needs it to know which sites
+    # are even candidates for the question.
+    asks_for_a_password = await _has_password_field(page)
+    if asks_for_a_password and (host := host_of(page.url or "")):
+        owner.password_hosts.add(host)
     frame = Frame(
         jpeg=await page.screenshot(type="jpeg", quality=VIEW_JPEG_QUALITY),
         url=page.url or "",
@@ -2262,6 +2447,7 @@ async def _frame(
         focus=await _focus_info(page, click),
         nav=owner.navigations,
         gen=-1 if gen is None else int(gen.get("gen", -1)),
+        asks_password=asks_for_a_password,
     )
     # Recorded per NAVIGATION, not per frame: a frame is sent for every tap,
     # scroll and keystroke, and rewriting the file on each of those would spend
@@ -2281,8 +2467,20 @@ def _note_visit(owner: _Owner, url: str) -> None:
     whole feature exists for asked for approval — friction on the main path,
     and a claim about the owner's account that was simply untrue.
 
-    A login is a thing only the owner can confirm, so `view_close` hands these
-    back and the UI ASKS. Nothing here writes the record."""
+    A login is a thing only the owner can confirm, so `view_close` hands back
+    the ones that plausibly WERE one and the UI asks. Nothing here writes the
+    record.
+
+    What it hands back used to be this set — everything visited — and that was
+    the same over-recording mistake in a third costume. Closing a session in
+    which he had read eight sites asked him about eight sites in one batch with
+    a single yes, and the yes wrote all of them: measured, it put netflix.com,
+    airbnb.com, imdb.com and a typo'd imbd.com into `logins.txt`, each of which
+    then costs a Chrome launch and an approval card on every later read of it.
+    Friction on the main path, bought with a false claim about his accounts.
+
+    So this set stays what it is — where the view HAS BEEN, which the recents
+    list wants — and the question is asked from `password_hosts` instead."""
     host = host_of(url)
     if host:
         owner.view_hosts.add(host)
@@ -2657,9 +2855,14 @@ def view_act(action: str, **kwargs: Any) -> Frame:
         if (
             owner.pending_signin
             and owner.navigations > owner.pending_nav
-            and not await _has_password_field(page)
+            and not frame.asks_password
         ):
             frame.signin = owner.pending_signin
+            # Asked NOW, about this one site, at the moment it happened. So it
+            # is no longer a leftover for the close-time sweep to ask about
+            # again — the same question twice is the complaint that started
+            # this.
+            owner.password_hosts.discard(owner.pending_signin)
             owner.pending_signin = ""
             frame.saved = _save_held_credential(owner)
         if owner.notice:
@@ -3031,6 +3234,15 @@ async def _centre(target: Any) -> None:
         await target.evaluate(browse_mod.CENTRE_JS)
 
 
+# Focus, then ask whether it landed ON this element — piercing shadow roots,
+# because that is where it lands and not where the document says (#273).
+_FOCUS_LANDED_JS = "(el) => {" + _DEEP_ACTIVE_JS + """
+  el.focus();
+  const active = deepActive();
+  return active === el || (!!active && !!el.contains && el.contains(active));
+}"""
+
+
 async def _focus(target: Any) -> bool:
     """Focus it, and say whether focus actually landed.
 
@@ -3038,14 +3250,123 @@ async def _focus(target: Any) -> bool:
     take goes to the document, and on a page with a form that is a submit
     nobody asked for."""
     try:
-        return bool(
-            await target.evaluate(
-                "(el) => { el.focus(); return document.activeElement === el"
-                " || el.contains(document.activeElement); }"
-            )
-        )
+        return bool(await target.evaluate(_FOCUS_LANDED_JS))
     except Exception:  # noqa: BLE001 — an element that will not focus has not
         return False
+
+
+# What is sitting ON TOP of this control, or "" if nothing is.
+#
+# Shadow-aware in both directions: `elementFromPoint` returns the shadow HOST
+# for anything inside an open shadow root, and `Node.contains` does not cross a
+# shadow boundary either — so the naive "is the top element my ancestor" test
+# calls a control covered by its own host. The ancestor chain is walked through
+# hosts instead.
+_COVERED_JS = """(el) => {
+  const b = el.getBoundingClientRect();
+  if (!b.width || !b.height) return "";
+  const top = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+  if (!top) return "";
+  const chain = new Set();
+  let node = el;
+  while (node) {
+    chain.add(node);
+    const root = node.getRootNode && node.getRootNode();
+    node = node.parentElement || (root && root.host) || null;
+  }
+  if (chain.has(top) || el.contains(top)) return "";
+  return String(top.id || top.className || top.tagName || "").slice(0, 60);
+}"""
+
+
+async def _uncover(page: Any, target: Any) -> bool:
+    """Something is over this control. If it is a consent wall, take it down.
+
+    **The wall does not have to be there when the page opens.** OneTrust,
+    Cookiebot and their kind load asynchronously, so on qatarairways.com the
+    banner arrives AFTER `browse_open` has already looked for one and found
+    nothing — and from then on it eats every click on the page for the rest of
+    the session. Every press fell through to the keyboard, and pressing Enter
+    on a date field that never opened its picker is a press that reports
+    success and does nothing (#273).
+
+    Only ever consulted when a real click has already failed, because that is
+    the only evidence worth spending four seconds of selector probing on. A
+    page with nothing over it pays one `evaluate`."""
+    try:
+        covered = str(await target.evaluate(_COVERED_JS) or "")
+    except Exception:  # noqa: BLE001 — an element that will not answer is not coverable
+        return False
+    if not covered:
+        return False
+    await _dismiss_consent(page)
+    try:
+        return not await target.evaluate(_COVERED_JS)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# What is observably true about a control, for telling a press that WORKED
+# from one that only happened.
+#
+# Deliberately only things this press can be held responsible for: the
+# control's own state, whether it is still in the document, and the address.
+# A node count or a mutation observer would be a better detector and a worse
+# one — an animation, an ad slot or a polling widget mutates the page every
+# second on a live site, so "something changed" would read as success on every
+# page that moves by itself. A false "it worked" is the dangerous direction:
+# the model would report a form as sent.
+_ACTIVATION_JS = r"""(el) => {
+  const said = [];
+  for (const attr of ['aria-expanded', 'aria-pressed', 'aria-selected',
+                      'aria-checked', 'aria-hidden', 'class', 'hidden',
+                      'disabled', 'open']) {
+    said.push(attr + '=' + ((el.getAttribute && el.getAttribute(attr)) || ''));
+  }
+  if ('checked' in el) said.push('checked=' + el.checked);
+  if ('value' in el) said.push('value=' + el.value);
+  // Its OWN words. A button that reports itself — "Wyślij" becoming "Wysłano"
+  // — is the commonest proof a press was taken, and it is still this control's
+  // doing and not the page's: an animation elsewhere cannot rewrite it.
+  said.push('says=' + (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80));
+  said.push('connected=' + !!el.isConnected);
+  said.push('at=' + location.href);
+  return said.join('|');
+}"""
+
+
+async def _activation(target: Any) -> str | None:
+    try:
+        return str(await target.evaluate(_ACTIVATION_JS))
+    except Exception:  # noqa: BLE001 — a control that will not answer is unreadable
+        return None
+
+
+async def _took(page: Any, target: Any, before: str | None) -> str:
+    """The caveat a press that was not a real click has to carry, or "".
+
+    Every rung below the real click used to assert its own success — "aish
+    pressed it with the keyboard" — and on qatarairways.com Enter on a date
+    field that never opened its picker was reported exactly that way (#273).
+    The dispatch rung had the opposite fault: it hedged unconditionally, *"the
+    page may not have registered it as a real press"*, on presses that plainly
+    HAD registered.
+
+    Neither is a fact. This is: the control is read before and after, and what
+    comes back says which of the three things happened — it reacted, it did
+    not, or aish could not tell. Same posture as the date step's readback, and
+    the same reason: everything about the ladder is a heuristic, nothing about
+    the RESULT may be."""
+    await page.wait_for_timeout(SETTLE_MS)
+    after = await _activation(target)
+    if before is None or after is None:
+        return ", though aish could not check whether the page took it"
+    if before != after:
+        return ""
+    return (
+        ", and nothing about that control or the address changed afterwards, so "
+        "it may not have been registered — check the page before relying on it"
+    )
 
 
 async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
@@ -3075,10 +3396,20 @@ async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
     with contextlib.suppress(Exception):
         await target.click(timeout=ACT_TIMEOUT_MS)
         return ""
+    # A real click is worth trying TWICE if the reason it failed was something
+    # lying over the page that aish is allowed to remove.
+    if await _uncover(page, target):
+        with contextlib.suppress(Exception):
+            await target.click(timeout=ACT_TIMEOUT_MS)
+            return "something was covering it, so aish dismissed that and pressed it"
     if await _focus(target):
+        before = await _activation(target)
         with contextlib.suppress(Exception):
             await page.keyboard.press("Enter")
-            return "the click would not land, so aish pressed it with the keyboard"
+            return (
+                "the click would not land, so aish pressed it with the keyboard"
+                + await _took(page, target, before)
+            )
     if href:
         await page.goto(href, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         return (
@@ -3086,12 +3417,14 @@ async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
             f"declares for it ({href})"
         )
     if not mutating:
+        before = await _activation(target)
         with contextlib.suppress(Exception):
             await target.dispatch_event("click")
             return (
                 "the click would not land, so aish dispatched the event straight "
-                "to the control — the page may not have registered it as a real "
-                "press"
+                "to the control"
+                + (await _took(page, target, before)
+                   or ", which the page reacted to")
             )
     raise Stuck()
 
@@ -3110,9 +3443,16 @@ async def _type(page: Any, target: Any, *, text: str, submit: bool) -> str:
     try:
         await target.click(timeout=ACT_TIMEOUT_MS)
     except Exception:  # noqa: BLE001 — a field that will not click may still focus
-        if not await _focus(target):
-            raise Stuck() from None
-        note = "the field would not click, so aish focused it with the keyboard"
+        clicked = False
+        if await _uncover(page, target):
+            with contextlib.suppress(Exception):
+                await target.click(timeout=ACT_TIMEOUT_MS)
+                clicked = True
+                note = "something was covering it, so aish dismissed that first"
+        if not clicked:
+            if not await _focus(target):
+                raise Stuck() from None
+            note = "the field would not click, so aish focused it with the keyboard"
     await page.keyboard.press("ControlOrMeta+a")
     if text:
         await page.keyboard.type(text, delay=12)
@@ -3535,14 +3875,25 @@ async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
             return f"{said} (pressed {pick.label or wanted.day!r}{walked})"
         if "not in the month" not in pick.problem:
             raise _StepFailed(f"{control.address!r}: {pick.problem}")
-        shown_month, shown_year = browse_mod.read_month(heading)
-        if not shown_month:
+        # The heading first; failing that, the span the CELLS themselves state.
+        on_show = browse_mod.months_on_show(cells, heading)
+        if not on_show:
             raise _StepFailed(
                 f"{control.address!r}: that date is not on the picker's open "
                 "month, and the picker does not say which month it is showing, "
                 "so aish will not walk it blind"
             )
-        forward = (shown_year or 0, shown_month) < (wanted.year or shown_year or 0, wanted.month)
+        want = (wanted.year or on_show[-1][0], wanted.month)
+        forward = on_show[-1] < want
+        if not forward and want > on_show[0]:
+            # Inside the span already and still not found: the day is simply
+            # not offered (a sold-out date, a past date), and walking would
+            # leave the month that DOES contain it.
+            raise _StepFailed(
+                f"{control.address!r}: {value!r} is on a month the picker is "
+                "already showing, but that day cannot be chosen on this page"
+            )
+        shown_year, shown_month = on_show[0] if not forward else on_show[-1]
         arrow = next(
             (
                 one for one in (grid.get("nav") or [])
@@ -3774,15 +4125,26 @@ def browse_close(key: str = "") -> None:
 
 
 def view_close() -> list[str]:
-    """End the view and hand back the hosts visited — WITHOUT recording them.
+    """End the view and hand back the hosts that ASKED HIM FOR A PASSWORD —
+    without recording them.
 
     Whether a login happened is the owner's fact to state, not one aish may
-    infer from a URL having been open."""
+    infer. But the question has to be about the sites where signing in was even
+    possible: a page that never showed a password box is not a candidate, and
+    asking about the whole browsing history is how `logins.txt` filled up with
+    sites he had merely read.
+
+    A host is dropped once it is already recorded, and once aish has SEEN the
+    sign-in happen (`frame.signin` asked at the time, naming that one site), so
+    the close-time question is only ever the leftovers — most often nothing at
+    all, which is the right number of questions for a session spent reading."""
 
     async def job(owner: _Owner) -> list[str]:
-        visited = sorted(owner.view_hosts)
+        known = logged_in_hosts()
+        visited = sorted(owner.password_hosts - known)
         owner.view = None
         owner.view_hosts = set()
+        owner.password_hosts = set()
         await owner.close_now()  # next read relaunches off-screen at full size
         return visited
 

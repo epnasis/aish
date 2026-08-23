@@ -172,27 +172,52 @@ class TestTheReplayItself:
 
     class FakePage:
         def __init__(self, url, form, *, after=None, has_password_after=False,
-                     wants_code=False):
+                     wants_code=False, changed=""):
             self.url = url
             self._form = form
             self._after = after or {}
             self._has_password_after = has_password_after
             self._wants_code = wants_code
+            self._changed = changed
             self.typed: list[str] = []
             self.submitted = False
             self.evaluated = 0
 
-        async def evaluate(self, script):
+        async def evaluate(self, script, *args):
             from aish import browser
 
             if script is browser.SIGNIN_FORM_JS:
                 self.evaluated += 1
+                # The real JS decides this itself, against the expected origin
+                # it is handed. The fake honours the same contract.
+                expected = args[0] if args else None
+                where = self._form.get("page_origin")
+                if self._form.get("ok") and where != expected:
+                    return {"ok": False, "why": f"the page moved to {where}"}
+                # The real JS checks the destination only when a <form>
+                # exists; a formless login has none to declare.
+                target = self._form.get("posts_to")
+                if (
+                    self._form.get("ok")
+                    and self._form.get("form", True)
+                    and target != expected
+                ):
+                    return {"ok": False, "why": f"the form sends to {target}"}
                 return self._form
+            if script is browser.SIGNIN_STILL_OURS_JS:
+                return self._changed
             if script is browser.SECOND_FACTOR_JS:
                 return self._wants_code
             return None
 
         async def query_selector(self, selector):
+            # Only tags the enumeration actually SET can be found — a submit
+            # button on a formless page is never tagged, so Playwright would
+            # return None here and the code must fall through to Enter.
+            if "submit" in selector and not self._form.get("submit", True):
+                return None
+            if "identifier" in selector and not self._form.get("identifier", True):
+                return None
             return _FakeElement(self, selector)
 
         async def wait_for_load_state(self, *a, **kw):
@@ -250,14 +275,15 @@ class TestTheReplayItself:
         )
         result = self._run(page)
         assert not result.ok
-        assert "evil.test" in result.why and "third party" in result.why
+        assert "evil.test" in result.why
+        assert "the exact origin it was saved for" in result.why
         assert page.typed == []
 
     def test_a_redirect_to_another_origin_stops_before_the_form_is_read(self):
         page = self._page(url="https://accounts.google.com/x", form=self.OK_FORM)
         result = self._run(page)
         assert not result.ok and page.evaluated == 0 and page.typed == []
-        assert "only ever types a credential at the exact origin" in result.why
+        assert "the exact origin it was saved for" in result.why
 
     def test_a_get_form_is_refused(self):
         """A GET login puts the password in the query string, and the recents
@@ -314,3 +340,258 @@ def _fake_has_password(page):
         return page._has_password_after
 
     return check
+
+
+class TestACredentialIsOnlyEverTypedAtItsOwnOrigin:
+    """The question this subsystem lives or dies on. Every check below was a
+    real hole at some point in this design, and the last two were found by
+    asking it again after it shipped."""
+
+    def _run(self, page, origin="https://eon.pl"):
+        import asyncio
+
+        from aish import browser
+        from aish import signin as signin_mod
+
+        record = signin_mod.Record(
+            origin=origin, url=f"{origin}/login", saved="d"
+        )
+        original = browser._has_password_field
+        browser._has_password_field = _fake_has_password(page)
+        try:
+            return asyncio.run(
+                browser._sign_in_on(page, record, "him@x.pl", "hunter2hunter2")
+            )
+        finally:
+            browser._has_password_field = original
+
+    def _page(self, **kw):
+        return TestTheReplayItself.FakePage(**kw)
+
+    OK = {
+        "ok": True, "posts_to": "https://eon.pl", "page_origin": "https://eon.pl",
+        "identifier": True, "submit": True,
+    }
+
+    def test_the_page_moving_between_the_check_and_the_tagging_is_caught(self):
+        """The check used to run in Python against page.url, and the TAGGING
+        ran a round trip later. A page that navigated in between got its fields
+        tagged and filled — and the form check compared the attacker's page to
+        the attacker's own form, so it passed. The origin test now runs in the
+        same evaluate that tags."""
+        page = self._page(
+            url="https://eon.pl/login",
+            form={**self.OK, "page_origin": "https://evil.test",
+                  "posts_to": "https://evil.test"},
+        )
+        result = self._run(page)
+        assert not result.ok and page.typed == []
+        assert "evil.test" in result.why
+        assert "https://eon.pl, the exact origin it was saved for" in result.why
+
+    def test_the_form_rewriting_its_destination_mid_fill_is_caught(self):
+        """The tag survives a SAME-DOCUMENT change, so a page that rewrote
+        form.action after it was checked would be submitted to the new
+        destination with the credential already in it. Nothing is SENT by
+        typing, so refusing here costs an unsent form."""
+        page = self._page(
+            url="https://eon.pl/login", form=self.OK,
+            changed="the form now sends to https://evil.test",
+        )
+        result = self._run(page)
+        assert not result.ok and not page.submitted
+        assert "evil.test" in result.why and "nothing was sent" in result.why
+
+    def test_the_password_field_vanishing_mid_fill_is_caught(self):
+        page = self._page(
+            url="https://eon.pl/login", form=self.OK,
+            changed="the password field is gone",
+        )
+        assert not self._run(page).ok
+
+    def test_a_subdomain_is_not_the_origin(self):
+        page = self._page(
+            url="https://login.eon.pl/x",
+            form={**self.OK, "page_origin": "https://login.eon.pl",
+                  "posts_to": "https://login.eon.pl"},
+        )
+        assert not self._run(page).ok
+        assert page.typed == []
+
+    def test_http_is_not_https(self):
+        page = self._page(
+            url="http://eon.pl/login",
+            form={**self.OK, "page_origin": "http://eon.pl",
+                  "posts_to": "http://eon.pl"},
+        )
+        assert not self._run(page).ok and page.typed == []
+
+    def test_a_same_origin_page_posting_off_origin_is_caught(self):
+        """The original hole: page origin says nothing about where the form
+        SENDS, so any same-origin path that can render markup could carry
+        <form action=evil> and be handed the live password."""
+        page = self._page(
+            url="https://eon.pl/user-content/x",
+            form={**self.OK, "posts_to": "https://evil.test"},
+        )
+        result = self._run(page)
+        assert not result.ok and page.typed == []
+        assert "evil.test" in result.why
+
+    def test_the_good_case_still_signs_in(self):
+        page = self._page(url="https://eon.pl/login", form=self.OK)
+        result = self._run(page)
+        assert result.ok and page.typed == ["him@x.pl", "hunter2hunter2"]
+        assert page.submitted
+
+    def test_the_credential_is_fetched_for_the_recorded_origin_not_the_asked_url(
+        self, monkeypatch
+    ):
+        """The model chooses the URL that TRIGGERS a renewal; it never chooses
+        where the credential goes. sign_in navigates to the recorded login
+        page, and asks the store for the recorded origin."""
+        from aish import browser
+
+        signin.save("https://eon.pl/mojeon/Logowanie", "him", "pw", today="d")
+        asked: list = []
+        monkeypatch.setattr(
+            browser.signin_mod, "credential",
+            lambda origin: asked.append(origin) or ("him", "pw"),
+        )
+        monkeypatch.setattr(browser, "_submit", lambda job, timeout: browser.SignInResult(ok=True))
+        browser.sign_in("https://eon.pl/faktury?id=7")
+        assert asked == ["https://eon.pl"]
+
+    def test_a_url_with_no_stored_sign_in_never_reaches_the_store(self, monkeypatch):
+        from aish import browser
+
+        signin.save("https://eon.pl/login", "him", "pw", today="d")
+        assert browser.sign_in("https://linkedin.com/feed") is None
+
+
+class TestALoginPageWithNoFormAtAll:
+    """The shape the first real site turned out to have. linkedin.com renders
+    its login as a React app with no <form> element, and requiring one refused
+    the ordinary case — while the message told him his saved sign-in had been
+    rejected by a site that never saw it."""
+
+    def _page(self, **kw):
+        return TestTheReplayItself.FakePage(**kw)
+
+    def _run(self, page):
+        import asyncio
+
+        from aish import browser
+        from aish import signin as signin_mod
+
+        record = signin_mod.Record(
+            origin="https://www.linkedin.com",
+            url="https://www.linkedin.com/login", saved="d",
+        )
+        original = browser._has_password_field
+        browser._has_password_field = _fake_has_password(page)
+        try:
+            return asyncio.run(
+                browser._sign_in_on(page, record, "him@x.pl", "hunter2hunter2")
+            )
+        finally:
+            browser._has_password_field = original
+
+    FORMLESS = {
+        "ok": True, "posts_to": "", "page_origin": "https://www.linkedin.com",
+        "identifier": False, "submit": False, "form": False,
+    }
+
+    def test_a_formless_login_signs_in(self):
+        page = self._page(url="https://www.linkedin.com/login", form=self.FORMLESS)
+        result = self._run(page)
+        assert result.ok
+        # No identifier field on a "welcome back" page: only the password.
+        assert page.typed == ["hunter2hunter2"]
+
+    def test_with_no_form_the_submit_is_enter_never_a_button(self):
+        """Choosing a button by its words on a login page is how the model
+        pressed 'Continue with Google'."""
+        page = self._page(url="https://www.linkedin.com/login", form=self.FORMLESS)
+        self._run(page)
+        assert page.submitted is False  # nothing was clicked
+
+    def test_the_origin_is_still_checked_without_a_form(self):
+        page = self._page(
+            url="https://www.linkedin.com/login",
+            form={**self.FORMLESS, "page_origin": "https://evil.test"},
+        )
+        result = self._run(page)
+        assert not result.ok and page.typed == []
+
+    def test_holding_it_back_is_not_the_site_rejecting_it(self):
+        """`stale` is what stops a credential being spent again. A harness
+        refusal must never set it — the value is fine and the site never saw
+        it."""
+        page = self._page(
+            url="https://www.linkedin.com/login",
+            form={"ok": False, "why": "more than one password field"},
+        )
+        result = self._run(page)
+        assert not result.ok
+        assert result.stale is False
+
+
+class TestTheOriginFenceIsAtTheNetwork:
+    """A form's `action` is a declaration, and a login page can submit by
+    JavaScript to whatever address it likes regardless of it — so the DOM check
+    answers a question the page is not obliged to answer honestly. The fence
+    that holds refuses the REQUEST."""
+
+    class FakeRoute:
+        def __init__(self, url, method):
+            self.request = type("R", (), {"url": url, "method": method})()
+            self.aborted = False
+            self.continued = False
+
+        async def abort(self):
+            self.aborted = True
+
+        async def continue_(self):
+            self.continued = True
+
+    class FakePage:
+        def __init__(self):
+            self.handler = None
+
+        async def route(self, _pattern, handler):
+            self.handler = handler
+
+    def _decide(self, url, method="POST"):
+        import asyncio
+
+        from aish import browser
+
+        page, blocked = self.FakePage(), []
+        asyncio.run(browser._fence_the_origin(page, "https://eon.pl", blocked))
+        route = self.FakeRoute(url, method)
+        asyncio.run(page.handler(route))
+        return route, blocked
+
+    def test_a_post_to_another_origin_is_aborted(self):
+        route, blocked = self._decide("https://evil.test/collect")
+        assert route.aborted and not route.continued
+        assert blocked == ["https://evil.test/collect"]
+
+    def test_a_post_to_the_recorded_origin_goes_through(self):
+        route, blocked = self._decide("https://eon.pl/api/login")
+        assert route.continued and not route.aborted and blocked == []
+
+    def test_a_cross_origin_GET_is_not_blocked(self):
+        """Fonts, images and scripts are how the login page renders at all."""
+        route, blocked = self._decide("https://cdn.test/font.woff2", method="GET")
+        assert route.continued and blocked == []
+
+    def test_a_subdomain_is_another_origin(self):
+        route, _ = self._decide("https://api.eon.pl/login")
+        assert route.aborted
+
+    def test_every_body_method_counts(self):
+        for method in ("POST", "PUT", "PATCH", "put"):
+            route, _ = self._decide("https://evil.test/x", method=method)
+            assert route.aborted, method

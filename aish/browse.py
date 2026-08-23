@@ -646,6 +646,37 @@ NO_FILE_YET = (
 # can never disagree about what is pressable — the tag outlives the reachability
 # (a menu closes while the model thinks) and the preflight is what catches that.
 REACH_JS = """
+  // Look through shadow roots, not just past them.
+  //
+  // `document.querySelector` and `getElementById` stop at every shadow
+  // boundary, and a growing share of the web puts its whole application inside
+  // one — qatarairways.com's booking widget is an Angular app under
+  // <app-nbx-explore>, so the date field aish had itself just tagged could not
+  // be found again by the tag it wrote (#273). Enumeration walks shadow roots
+  // and the calendar reader did not, which is the worst way for a boundary to
+  // be handled: consistently invisible would have been noticed years ago,
+  // whereas visible-then-invisible reads as "this page has no date cells".
+  // `descend`, not `walk`: CONTROLS_JS has its own walk, and
+  // TestHidingAControlNeverRoutesAroundItsCard proves that walk tags nothing
+  // by slicing this source between two literals naming it. Any earlier
+  // occurrence of those literals — a second helper, or even a comment quoting
+  // them — silently moves the slice, and the proof then reads the wrong code.
+  const deepAll = (selector, root) => {
+    const out = [];
+    const descend = (where) => {
+      for (const el of where.querySelectorAll(selector)) out.push(el);
+      for (const el of where.querySelectorAll('*')) {
+        if (el.shadowRoot) descend(el.shadowRoot);
+      }
+    };
+    descend(root || document);
+    return out;
+  };
+  const deepOne = (selector, root) => deepAll(selector, root)[0] || null;
+  const deepById = (id) => {
+    try { return deepOne('[id="' + CSS.escape(id) + '"]'); } catch (e) { return null; }
+  };
+
   const styleCache = new Map();
   const styleOf = (el) => {
     let s = styleCache.get(el);
@@ -827,7 +858,12 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
   const labelElement = (el) => {
     if (el.id) {
       try {
-        const lab = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+        // The control's OWN root, not the document: a label for a control
+        // inside a shadow root lives in that shadow root, and looking in the
+        // document finds nothing — which is how a labelled passenger picker
+        // came back named 'mat-input-6' (#273).
+        const lab = el.getRootNode()
+          .querySelector('label[for="' + CSS.escape(el.id) + '"]');
         if (lab) return lab;
       } catch (e) { /* an id CSS cannot escape simply has no label */ }
     }
@@ -837,8 +873,13 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
   const labelFor = (el) => {
     const by = el.getAttribute && el.getAttribute('aria-labelledby');
     if (by) {
+      const root = el.getRootNode();
+      const byId = (id) => {
+        try { return root.querySelector('[id="' + CSS.escape(id) + '"]'); }
+        catch (e) { return null; }
+      };
       const parts = by.split(/\s+/)
-        .map((id) => document.getElementById(id))
+        .map(byId)
         .filter(Boolean)
         .map((n) => n.innerText || n.textContent || '');
       if (parts.length) return parts.join(' ');
@@ -1243,7 +1284,7 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
 # under the model while this happens.
 CALENDAR_JS = "(opts) => {" + REACH_JS + r"""
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-  const field = document.querySelector('[data-aish-n="' + opts.n + '"]');
+  const field = deepOne('[data-aish-n="' + opts.n + '"]');
 
   // Which container is this field's picker? Its own statement first — a page
   // that says aria-controls is telling you exactly, and guessing over the top
@@ -1254,7 +1295,7 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + r"""
     const id = el && el.getAttribute && el.getAttribute(attr);
     if (!id) return null;
     for (const one of id.split(/\s+/)) {
-      const found = document.getElementById(one);
+      const found = deepById(one);
       if (found && !unreachable(found)) return found;
     }
     return null;
@@ -1275,7 +1316,7 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + r"""
     }
   }
   if (!grid) {
-    for (const one of document.querySelectorAll(GRID)) {
+    for (const one of deepAll(GRID)) {
       if (!unreachable(one)) { grid = one; break; }
     }
   }
@@ -1849,6 +1890,30 @@ def read_date(text: str) -> Day | None:
     return None
 
 
+def months_on_show(cells: list[Cell], heading: str = "") -> list[tuple[int, int]]:
+    """The (year, month) pairs the open picker is actually displaying, sorted.
+
+    The heading is asked first and is usually enough. When it is not — an
+    `ngb-datepicker` labels itself "Travel Dates" and puts the months in
+    sub-headings it does not associate with the grid — the CELLS already know:
+    each one states its own full date, which is what makes them pressable at
+    all. Reading the span off them is the same fact from the same source, and
+    it is what decides whether the month wanted is forwards or backwards.
+
+    Deliberately a SPAN and not a single month: a range picker shows two at
+    once, and "is November after what is on screen" has to mean after the LAST
+    of them or the walk oscillates."""
+    month, year = read_month(heading)
+    if month and year:
+        return [(year, month)]
+    seen = set()
+    for cell in cells:
+        found = cell.day(heading)
+        if found and found.month and found.year:
+            seen.add((found.year, found.month))
+    return sorted(seen)
+
+
 def read_month(text: str) -> tuple[int | None, int | None]:
     """The month and year a picker's heading names — "wrzesień 2026", "September
     2026", "2026-09". A heading has no day, so `read_date` cannot read one."""
@@ -1909,11 +1974,24 @@ def pick_day(cells: list[Cell], wanted: Day, heading: str = "") -> Pick:
     about which month it is showing makes the two indistinguishable, and
     pressing one of them and reading the field afterwards is a coin flip whose
     result gets submitted. Unknown month is a QUESTION, exactly as an ambiguous
-    suggestion is."""
+    suggestion is.
+
+    **But only when the whole picker is mute.** A grid is very often a mixture:
+    the day cells state their date and the furniture around them — weekday
+    headers, the row that holds them, a decorative duplicate — carries a number
+    and nothing else. Counting those as unreadable days made a perfectly
+    legible picker refuse itself, and worse, it refused BEFORE the month walk:
+    qatarairways.com opens on the current month, so asking for a date two
+    months out reached "this picker's days say only their number (92 of them)"
+    when 84 other cells were saying `5 August 2026` and the arrow to November
+    was sitting right there (#273). If ANY cell resolved a month, the picker
+    can be read; the mute ones are furniture, and a date that is not on screen
+    is a month to walk to, not a question to ask."""
     if not cells:
         return Pick(problem="no day cells were found in the picker that opened")
     hits = []
     vague = 0
+    dated = 0
     for cell in cells:
         found = cell.day(heading)
         if found is None:
@@ -1921,9 +1999,10 @@ def pick_day(cells: list[Cell], wanted: Day, heading: str = "") -> Pick:
         if not found.month:
             vague += 1
             continue
+        dated += 1
         if found.matches(wanted):
             hits.append(cell)
-    if not hits and vague:
+    if not hits and vague and not dated:
         return Pick(
             problem=(
                 f"this picker's days say only their number ({vague} of them) and "
