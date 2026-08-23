@@ -2343,14 +2343,32 @@ class SessionLog:
             "rating", turn=turn, rating=rating, comment=comment[:RATING_COMMENT_CAP]
         )
 
-    def command(self, command: str, decision: str, intent: str = "") -> None:
+    def command(
+        self, command: str, decision: str, intent: str = "", preview: str = ""
+    ) -> None:
         """`intent` is what the model SAID it was doing when this decision was
         made (#252) — the same text the card showed. Recorded so a stated
         intent that does not match the action it rode on is a queryable
         artifact rather than something reconstructed by reading raw JSONL,
         which is exactly what the incident behind #252 cost. Omitted when
-        empty, so a session that predates it replays byte-identically."""
+        empty, so a session that predates it replays byte-identically.
+
+        `preview` is the SENTENCE the owner was shown on the card (#284). The
+        command string is what aish intended to do; the preview is what he was
+        actually ASKED. Most of the time they agree, which is why this went
+        years without being noticed — but #272 is the case where they came
+        apart completely: a chat about flights to the Maldives showed the card
+        `drive www.imdb.com in your signed-in browser — aish will open pages
+        and click on them AS YOU`, and the log recorded only
+        `tool browse_act(action='type', text='Maldives', target='To')`. Working
+        out what he had agreed to took a code read and a clock comparison
+        across two session logs, and `explain` could not have helped: it is a
+        reader, so a preview that was never written down is simply gone.
+
+        Omitted when empty, on the same terms as `intent`."""
         extra = {"intent": intent} if intent else {}
+        if preview:
+            extra["preview"] = preview
         self._record("command", command=command, decision=decision, **extra)
 
     def set_title(self, title: str, auto: bool = False) -> None:

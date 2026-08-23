@@ -256,8 +256,10 @@ class LogRef:
         if message.get("role") == "assistant" and (message.get("content") or "").strip():
             self.last_answer_id = written
 
-    def command(self, command: str, decision: str, intent: str = "") -> None:
-        self.log.command(command, decision, intent)
+    def command(
+        self, command: str, decision: str, intent: str = "", preview: str = ""
+    ) -> None:
+        self.log.command(command, decision, intent, preview)
 
     def set_title(self, title: str) -> None:
         self.log.set_title(title)
