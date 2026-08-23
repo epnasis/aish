@@ -963,9 +963,15 @@ class SessionLog:
                     trusted.append(trust_path)
         return cwd, trusted
 
+    # `browse_grant` and `login_grant` are what this record was called when
+    # using a site as the owner was two permissions instead of one (#287).
+    # Chats written then are still open, and a reader that only knew the new
+    # name would re-ask them for sites they had already allowed.
+    GRANT_KINDS = ("site_grant", "browse_grant", "login_grant")
+
     @staticmethod
-    def browse_grants(path: Path) -> list[str]:
-        """Hosts this chat has already agreed aish may drive, oldest first.
+    def site_grants(path: Path) -> list[str]:
+        """Sites this chat has already agreed aish may use as the owner.
 
         A chat gets a fresh agent every time it is reopened — on the web, every
         restart of aish-web, which is every ship — and the grant lived only in
@@ -974,23 +980,10 @@ class SessionLog:
         had been rebuilt underneath him. Same shape as `restore_state`: the log
         is the only place this fact survives the agent that recorded it, and it
         is restored to the SAME chat only, never across chats."""
-        return SessionLog._granted_hosts(path, "browse_grant")
-
-    @staticmethod
-    def login_grants(path: Path) -> list[str]:
-        """Hosts this chat has already agreed aish may READ as him.
-
-        The same fact as `browse_grants` about the smaller of the two grants,
-        and it survived the rebuild just as badly: every ship turned a yes he
-        had already given into another card, in a chat still on screen."""
-        return SessionLog._granted_hosts(path, "login_grant")
-
-    @staticmethod
-    def _granted_hosts(path: Path, kind: str) -> list[str]:
         hosts: list[str] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
-            if record is None or record.get("kind") != kind:
+            if record is None or record.get("kind") not in SessionLog.GRANT_KINDS:
                 continue
             host = record.get("host")
             if host and host not in hosts:

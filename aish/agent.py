@@ -225,18 +225,18 @@ Rules:
    that a site "blocks automated reading" in a turn where you read a page from
    it — telling the user a source failed when it succeeded is worse than the
    original failure, because it also throws away the answer you already had.
-   The browser keeps the user's own signed-in sessions, so reading a site
-   they are logged into asks them first — expect that prompt and never work
-   around it. Once they approve, that page IS read through their signed-in
-   browser: you never need a cookie, a token, or a manual download to see their
-   account. A line beginning "[aish:" ABOVE the untrusted-content banner is
-   from AISH, not from the page, and it is true — it tells you the session has
-   expired, or that the page was fetched anonymously because the browser could
-   not be used. You MUST relay what it says and then STOP. Say "your eon.pl
-   session has expired — run /browser https://eon.pl to sign in again, then ask
-   me again". You MUST NOT ask the user to copy, paste, screenshot or upload the
-   content by hand instead, and you MUST NOT report a sign-in page's contents as
-   their account.
+   The browser keeps the user's own signed-in sessions, so reading a site they are logged into
+   asks them first — expect that prompt and never work around it. Their yes covers the SITE, not
+   the tool: once they approve it, read_url and browse both work there for the rest of the
+   session, so never avoid browse for fear of a second prompt. Once they approve, that page IS
+   read through their signed-in browser: you never need a cookie, a token, or a manual download
+   to see their account. A line beginning "[aish:" ABOVE the untrusted-content banner is from
+   AISH, not from the page, and it is true — it tells you the session has expired, or that the
+   page was fetched anonymously because the browser could not be used. You MUST relay what it
+   says and then STOP. Say "your eon.pl session has expired — run /browser https://eon.pl to sign
+   in again, then ask me again". You MUST NOT ask the user to copy, paste, screenshot or upload
+   the content by hand instead, and you MUST NOT report a sign-in page's contents as their
+   account.
    WHEN THE THING YOU NEED IS A BUTTON, USE browse — NEVER GUESS ITS URL.
    read_url reads a page; browse opens it in the user's own signed-in browser
    and hands you a list of what can be pressed, BY NAME, and browse_act presses
@@ -349,10 +349,10 @@ Rules:
    you were shown as though it were the whole.
 7d. THE SOURCE THE USER NAMED IS THE SOURCE. When they name a site, a shop, a
    document or an account, you MUST get the answer FROM IT. If you cannot —
-   the page will not drive, the control does nothing, you are signed out — you
+   the page will not open, the control does nothing, you are signed out — you
    MUST say so plainly, name what blocked you, and STOP. You MUST NOT quietly
    answer from somewhere else. Example: asked for flights on lot.pl, the search
-   box would not open; say "I cannot drive the search on lot.pl — the
+   box would not open; say "I cannot use the search on lot.pl — the
    destination field does not respond. I can check Google Flights instead if
    you want" — and wait. You MUST NOT hand them another site's prices as if
    they were lot.pl's.{scratch_note}
@@ -949,11 +949,7 @@ EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image", "read_pdf", "r
 # of ordinary research — the "gating everything makes the system unusable"
 # failure #198 names explicitly. These two bounds are what "plain" means: past
 # them, a path or a hostname label is a place to hide a payload rather than an
-# address anybody typed. The path bound is deliberately tight: a link that was
-# actually offered is excused before this is consulted, so what remains is an
-# address the model COMPOSED, and a composed path with sixty characters in it
-# is not one anybody typed. It bounds a trickle rather than sealing it, and
-# saying so is better than implying otherwise.
+# address anybody typed.
 PLAIN_PATH_MAX = 60
 HOST_LABEL_MAX = 40
 
@@ -963,6 +959,14 @@ HOST_LABEL_MAX = 40
 # would nag about a host the owner plainly named.
 _HOST_TOKEN_RE = re.compile(
     r"(?i)(?:https?://([^\s/\"'<>]+)|\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})\b)"
+)
+
+# An ADDRESS, not merely a host: a scheme, or a domain with a path/query/
+# fragment hanging off it. `site:fly4free.pl weekend` names a host and is not
+# an address; `attacker.example/?d=<iban>` is one.
+_ADDRESS_TOKEN_RE = re.compile(
+    r"(?i)(?:https?://[^\s\"'<>]+"
+    r"|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}[/?#][^\s\"'<>]*)"
 )
 
 # One PDF, fetched or local. Generous — a scanned manual is routinely tens of
@@ -1032,15 +1036,43 @@ EGRESS_NO_APPROVER = (
     "the owner named, or finish and report."
 )
 
-# Reading a site the owner is SIGNED INTO (#221). The browser reader carries
-# their live session, so such a read is made as them and can return private
-# pages — order history, messages, an account balance. That is what the owner
-# asked for and it is genuinely useful; what it must never be is silent, since
-# the URL can come from an injected instruction on a page rather than from
-# them. So the host is named and the read waits for a yes.
+# Using a site the owner is SIGNED INTO (#221, #237). The browser carries his
+# live session, so the page comes back as HIM and can be private — order
+# history, messages, an account balance. That is what he asked for and it is
+# genuinely useful; what it must never be is silent, since the URL can come
+# from an injected instruction on a page rather than from him. So the site is
+# named and it waits for a yes.
+#
+# ONE QUESTION, NOT TWO, AND THE QUESTION IS "MAY AISH READ THIS SITE AS YOU"
+# (#287). It used to be asked twice — once for `read_url` (a fetch carrying his
+# session) and once for `browse` (the same session, with clicks) — on the
+# reasoning that clicking is the bigger act and deserves its own answer. He
+# rejected that, and the machine was on his side: a click that navigates or
+# expands, and a form that searches or filters, ride the grant precisely
+# BECAUSE they are how you read a modern site, while every control whose name
+# says it pays, buys, books, deletes, sends or signs draws its own card
+# regardless, a page showing checkout structure re-cards every submit, and
+# passwords and the irreversible list are refused with no yes at all. So the
+# two tools were never two permissions — they were one permission described by
+# implementation, and the split bought nothing but a second card.
+#
+# The words matter as much as the merge. The old card said aish "may fill in
+# and submit forms without asking again", which reads as a licence to CHANGE
+# things; what it actually buys is searches and filters. Stating the bound
+# instead — changing anything asks first — is what makes the assumption he
+# already makes when he taps Approve a true one instead of a smuggled one.
+SITE_GRANT = (
+    "browse {host} signed in as you — aish can read your private pages there; "
+    "changing anything asks first."
+)
+
+# The grant is per site and lasts the session, matching every other grant here
+# (L4): a flow that clicks through twenty pages of one portal asks once,
+# because a card per click is a card nobody reads.
 LOGIN_READ_DENIED = (
-    "USER DENIED reading {host} with their signed-in browser — nothing was "
-    "read. Do not retry it; read a public source instead, or ask the user."
+    "USER DENIED browsing {host} as them — nothing was read. Do not retry it "
+    "with any tool: read_url and browse are the SAME permission here. Read a "
+    "public source instead, or ask the user."
 )
 
 LOGIN_READ_NO_APPROVER = (
@@ -1049,25 +1081,17 @@ LOGIN_READ_NO_APPROVER = (
     "source, or finish and report."
 )
 
-# DRIVING a site the owner is signed into (#237). A read carries his session;
-# driving carries his session AND presses things with it, so the gate is a
-# strictly bigger question than a read's and gets its own answers.
-#
-# The grant is per host per task, matching every other grant here (L4): a flow
-# that clicks through twenty pages of one portal asks once, because a card per
-# click is a card nobody reads. What that grant does NOT cover is the small set
-# of controls that spend money, end a contract, or throw something away — those
-# ask again, by name, every time.
 BROWSE_DENIED = (
-    "USER DENIED driving {host} — nothing was clicked and the page was not "
-    "opened. Do not retry it. Read what you can with read_url, or ask the user "
-    "to do this part themselves."
+    "USER DENIED browsing {host} as them — nothing was opened and nothing was "
+    "clicked. Do not retry it with any tool: read_url and browse are the SAME "
+    "permission here. Read a public source, or ask the user to do this part "
+    "themselves."
 )
 
 BROWSE_NO_APPROVER = (
-    "NOT EXECUTED: driving {host} clicks through the owner's signed-in session, "
-    "and an automated session may not do that with no approver available. Read "
-    "what you can with read_url, or finish and report."
+    "NOT EXECUTED: opening {host} uses the owner's signed-in session, and an "
+    "automated session may not do that with no approver available. Read a "
+    "public source, or finish and report."
 )
 
 BROWSE_ACTION_DENIED = (
@@ -1092,19 +1116,6 @@ BROWSE_TOOLS = ("browse", "browse_act", "browse_fill")
 # tainting costs a rare card on a turn that ALSO wants to carry data to a host
 # the owner never named; under-tainting costs the fence. The asymmetry decides.
 UNTRUSTED_SOURCE_TOOLS = frozenset(EGRESS_TOOLS | set(BROWSE_TOOLS))
-
-# What the driving grant actually buys, said on the card that buys it — in ONE
-# sentence, because the card is read on a phone and four sentences of it is a
-# card he scrolls past to reach the buttons. It says only what saying yes
-# ALLOWS. The floor the grant does not cover (pays/buys/deletes/sends/signs,
-# checkout-shaped forms, passwords) is not promised here: each of those draws
-# its OWN card, or is refused outright, at the moment it fires — which is where
-# a promise about it is worth something, and where he is actually reading.
-BROWSE_GRANT = (
-    "drive {host} in your signed-in browser — aish will open pages, click and "
-    "fill in forms AS YOU without asking again, and can see private account "
-    "data."
-)
 
 BROWSE_NO_PAGE = (
     "NOT EXECUTED: nothing is open to act on. Call browse(url) first, then act "
@@ -1228,6 +1239,36 @@ def _hosts_in_text(text: str) -> set[str]:
         if token:
             hosts.add(token)
     return hosts
+
+
+def _addresses_in_text(text: str) -> list[str]:
+    """URL-shaped tokens in text: a host with a path, query or fragment
+    attached, or anything with an http(s) scheme.
+
+    Narrower than `_HOST_TOKEN_RE` on purpose. That one answers "which hosts
+    were named", which is what provenance is about; this one answers "is there
+    an ADDRESS here" — a place plus the thing stapled to it — which is the only
+    part of a search query that could be smuggling anything."""
+    return _ADDRESS_TOKEN_RE.findall(text or "")
+
+
+def _address_carries_payload(url: str) -> bool:
+    """Does this address carry DATA, beyond the bare place it points at?
+
+    A query, a fragment, userinfo, a path past `PLAIN_PATH_MAX` or a host label
+    past `HOST_LABEL_MAX` are the five places data can be stapled to a URL."""
+    try:
+        # A scheme-less token is still an address; without the `//` urlsplit
+        # would read the host as the start of the path.
+        parts = urllib.parse.urlsplit(url if "//" in url else f"//{url}", scheme="https")
+    except ValueError:
+        return True  # unparseable → fail closed, as the host branch does
+    if parts.query or parts.fragment or parts.username or parts.password:
+        return True
+    if len(parts.path.strip("/")) > PLAIN_PATH_MAX:
+        return True
+    host = (parts.hostname or "").lower()
+    return any(len(label) > HOST_LABEL_MAX for label in host.split("."))
 
 
 def format_secs(seconds: float) -> str:
@@ -1691,10 +1732,12 @@ class Agent:
         # Mail links vouched for on a card this task. Per LINK, never per host:
         # approving one tracking link must not approve the next one.
         self._approved_mail_links: set[str] = set()
-        # Signed-in hosts vouched for on a login card this session (#221).
-        # Session-scoped like every other grant (L4): a yes given in the chat
-        # you leave must not follow you into the one you land in.
-        self._approved_browsing: set[str] = set()
+        # Sites the owner has said aish may use AS HIM this session (#221,
+        # #237, #287). ONE set, because `read_url` and `browse` are one
+        # permission — see SITE_GRANT. Session-scoped like every other grant
+        # (L4): a yes given in the chat you leave must not follow you into the
+        # one you land in.
+        self._approved_sites: set[str] = set()
         # Form-fills the owner has already said yes to, by their CARD TEXT —
         # which names the host, every value and the committing press, so two
         # batches share an entry only when he would be shown the same words. A
@@ -1702,7 +1745,7 @@ class Agent:
         # any value asks again.
         self._approved_batches: set[str] = set()
         # THIS CHAT's view of the browsed page. Per-Agent for the same reason
-        # `_approved_browsing` is: the browser holds one page for the whole
+        # `_approved_sites` is: the browser holds one page for the whole
         # process, and while the view was a module global the gate could draw
         # a card naming ANOTHER chat's host and control (#272).
         self._browse_view = web.BrowseView()
@@ -5147,8 +5190,8 @@ class Agent:
             if not host:
                 return [url.strip() or "(no url)"]  # unparseable → fail closed
             hosts = {host}
-        else:  # web_search: the query itself is the outbound payload; gate on
-            # any host/URL it names (a host-free query names no novel host).
+        else:  # web_search: the query goes to the SEARCH ENGINE and to nothing
+            # else, so a host it names is at most a signal, never a recipient.
             hosts = _hosts_in_text(str(args.get("query", "")))
         known = self._owner_hosts | self._approved_hosts
         novel = sorted(h for h in hosts if h not in known)
@@ -5173,9 +5216,9 @@ class Agent:
             # to be SKIPPED entirely for a host already in provenance, which
             # made any host he had ever mentioned an open sink.
             #
-            # `or None` matters: a search whose query names NO host has nothing
-            # to carry data to, and returning an empty list would gate it with
-            # no host to put on the card.
+            # `or None`: a search whose query names NO host has nothing to
+            # carry data to, and an empty list would gate it with no host to
+            # put on the card.
             return novel or sorted(hosts) or None
         return None
 
@@ -5184,23 +5227,27 @@ class Agent:
 
         Exfiltration needs a channel, and on a read there are only two: the
         query the search engine is handed, or everything in a URL that is not
-        the bare address. Whether the link was OFFERED is asked before this,
-        by the caller, because it is the one answer that excuses a payload."""
+        the bare address. A link the page offered aish itself is neither — it
+        was not composed, it was followed, which is the one case that
+        distinguishes ordinary reading from smuggling."""
         if name == "web_search":
-            # The query IS the outbound payload, and `hosts` above only found
-            # anything because the query named a host — the exfil shape.
-            return True
+            # **A search query NAMES a host; it never reaches one.** The query
+            # is handed to the search engine and to nobody else, so `site:` —
+            # which restricts the index, the opposite of a destination — and a
+            # bare domain, which is just a search term, deliver nothing
+            # anywhere. Carding them put a false sentence on the card ("wants
+            # to send something to fly4free.pl") in front of the most ordinary
+            # research move there is. What is still worth one look is an
+            # address the model COMPOSED with data stapled to it: no real
+            # search has that shape, and the answer costs nothing to give.
+            return any(
+                _address_carries_payload(addr)
+                for addr in _addresses_in_text(str(args.get("query", "")))
+            )
         url = str(args.get("url") or args.get("source") or "")
-        try:
-            parts = urllib.parse.urlsplit(url)
-        except ValueError:
-            return True  # unparseable → fail closed, as the host branch does
-        if parts.query or parts.fragment or parts.username or parts.password:
-            return True
-        if len(parts.path.strip("/")) > PLAIN_PATH_MAX:
-            return True
-        host = (parts.hostname or "").lower()
-        return any(len(label) > HOST_LABEL_MAX for label in host.split("."))
+        if self._url_was_offered(url):
+            return False
+        return _address_carries_payload(url)
 
     def _url_was_offered(self, url: str) -> bool:
         """Did this exact URL come back in a tool result in this task?
@@ -5232,7 +5279,18 @@ class Agent:
         shown = ", ".join(novel)
         if self.approve_tool is None:
             return _gate_outcome(EGRESS_NO_APPROVER.format(host=shown), decision="blocked")
-        if self.origin != "user":
+        # A search is not a visit, and the card has to say which one this is —
+        # asking him to approve something that is not about to happen is how a
+        # card stops meaning anything.
+        if name == "web_search":
+            preview = (
+                f"this turn has read the open web, and now wants to put an "
+                f"address it composed — {shown} — into a web search"
+                if self.origin == "user"
+                else f"automated session wants to search for {shown} — a host "
+                "not mentioned by the owner in this conversation"
+            )
+        elif self.origin != "user":
             preview = (
                 f"automated session wants to reach {shown} — a host not "
                 "mentioned by the owner in this conversation"
@@ -5324,24 +5382,26 @@ class Agent:
         self._approved_mail_links.add(url)
         return None
 
-    def _browse_grant_covers(self, url: str) -> bool:
-        """Is this URL inside a site the owner already let aish DRIVE?
+    def _grant_site(self, host: str) -> None:
+        """Record a site grant, in memory and in the chat's log.
 
-        Suffix match, like `browser.is_logged_in`: a grant on a site covers its
-        subdomains, and it must never read the other way — a read grant buys
-        nothing, since driving is the bigger question and keeps its own card."""
-        return self._browse_granted(browser.host_of(url))
+        Logged because a chat outlives the agent holding its grants — every
+        ship rebuilds that agent underneath an open chat — and an in-memory
+        grant would turn a yes given a minute ago into another card."""
+        self._approved_sites.add(host)
+        if self.state_log is not None:
+            self.state_log({"kind": "site_grant", "host": host})
 
-    def _browse_granted(self, host: str) -> bool:
-        """Has the owner already granted driving THIS host, or a site it sits
-        under?
+    def _site_granted(self, host: str) -> bool:
+        """Has the owner already let aish use THIS site as him, or a site it
+        sits under?
 
         Set membership was exact, and a country subdomain is a different
-        string: he approved driving `linkedin.com`, and six minutes later
-        approved driving `pl.linkedin.com` — the same site, the same session,
-        the same profile, a card that named the same company. `is_logged_in`
-        has always read the boundary this way, so the two halves of the browser
-        now agree about what "this site" means.
+        string: he approved `linkedin.com`, and six minutes later was asked
+        about `pl.linkedin.com` — the same site, the same session, the same
+        profile, a card naming the same company. `is_logged_in` has always read
+        the boundary this way, so the halves of the browser now agree about
+        what "this site" means.
 
         Downward only, and that asymmetry is the safe direction: a grant on
         `linkedin.com` covers `pl.linkedin.com` because he said yes to the
@@ -5352,7 +5412,7 @@ class Agent:
             return False
         return any(
             host == granted or host.endswith("." + granted)
-            for granted in self._approved_browsing
+            for granted in self._approved_sites
         )
 
     def _browse_host(self, name: str, args: dict) -> str:
@@ -5473,17 +5533,17 @@ class Agent:
         already learned to tap through by the time it matters. The fix is not
         to reclassify submits behind his back: a card tapped blind records a
         consent he never gave, so the win has to come from moving the decision,
-        not from thinning it. So this card says what riding it means."""
-        if self._browse_granted(host):
+        not from thinning it. So this card says what riding it means — and
+        says it as READING, which is what he means when he approves it and
+        what the floor below makes true (#287)."""
+        if self._site_granted(host):
             return None
         refusal = self._browse_approval(
-            name, args, BROWSE_GRANT.format(host=host), BROWSE_DENIED.format(host=host)
+            name, args, SITE_GRANT.format(host=host), BROWSE_DENIED.format(host=host)
         )
         if refusal is not None:
             return refusal
-        self._approved_browsing.add(host)
-        if self.state_log is not None:
-            self.state_log({"kind": "browse_grant", "host": host})
+        self._grant_site(host)
         return None
 
     def _form_note(self, control) -> str:
@@ -6298,15 +6358,15 @@ class Agent:
         cutoff = time.time() - OPENED_LINK_TTL
         return frozenset(url for url, when in self._opened_links.items() if when >= cutoff)
 
-    def restore_browse_grants(self, hosts: list[str]) -> None:
-        """Re-arm the driving grants this chat already gave (#251).
+    def restore_site_grants(self, hosts: list[str]) -> None:
+        """Re-arm the site grants this chat already gave (#251).
 
-        The grant was never task-scoped — `_approved_browsing` is per Agent and
-        is deliberately NOT in `_reset_task_state` — so what the owner
-        experienced as being re-asked was the agent being rebuilt under him.
-        Restored per chat, from that chat's own log, which is what keeps it a
-        SESSION grant (L4) rather than a machine-wide one."""
-        self._approved_browsing.update(hosts)
+        The grant was never task-scoped — `_approved_sites` is per Agent and is
+        deliberately NOT in `_reset_task_state` — so what the owner experienced
+        as being re-asked was the agent being rebuilt under him. Restored per
+        chat, from that chat's own log, which is what keeps it a SESSION grant
+        (L4) rather than a machine-wide one."""
+        self._approved_sites.update(hosts)
 
     def restore_opened_links(self, calls: list[tuple[dict, int]]) -> None:
         """Refill the ledger from a reopened chat's own log (#267).
@@ -6713,13 +6773,12 @@ class Agent:
             refusal = self._egress_gate(name, args)
             if refusal is not None:
                 return refusal
-            # A read of a site he is signed into used to hold for a card
-            # here (#221). It does not any more: whether the read carries his
-            # session is now decided by looking at the page rather than by a
-            # list, and the CONSENT was given at the sign-in itself — with his
-            # hands, on the site, knowing exactly what he was doing. Re-asking
-            # afterwards was a worse version of a decision he had already made,
-            # in the channel he has said he does not read.
+            # A read of a site he is signed into used to hold for the site
+            # card here. It does not any more: whether the read carries his
+            # session is decided by looking at the PAGE rather than by a list,
+            # and the list was wrong in both directions. The card survives
+            # where it always asked the better question — on DRIVING, which
+            # presses things with his session rather than only reading.
             label, thunk = self._read_only_call(name, args)
             self._note(label)
             self.status.start(name)

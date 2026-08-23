@@ -5652,7 +5652,7 @@ def create_app(
             # not have the link rule demand a re-read of every page in the
             # transcript it just replayed (#267).
             agent.restore_opened_links(SessionLog.calls_that_ran(path))
-            agent.restore_browse_grants(SessionLog.browse_grants(path))
+            agent.restore_site_grants(SessionLog.site_grants(path))
             # Resume with the model this session last used (the drawer shows
             # it); fall back to the startup model when it can't be built.
             if (
