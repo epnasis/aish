@@ -808,52 +808,17 @@ REACH_JS = """
 # shown, because a yes/no/maybe select is better read than counted.
 CHOICE_INLINE_MAX = 8
 
-# Enumerate, tag, and describe. Runs in the page, walks open shadow roots the
-# same way `_LINKS_JS` does, and reports both what the cap left out and what the
-# page is currently hiding rather than quietly stopping.
-CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
-  const SEL = [
-    'a[href]', 'button', 'input', 'select', 'textarea', 'summary',
-    '[role=button]', '[role=link]', '[role=menuitem]', '[role=tab]',
-    '[role=checkbox]', '[role=switch]', '[role=combobox]', '[onclick]',
-    '[contenteditable]', '[contenteditable=true]',
-    // The suggestion a search box drops down. Without this the list a site
-    // opens under "Paris" is TEXT and nothing pressable, so the field can be
-    // typed into and never committed — which is the lot.pl destination box in
-    // the session that filed #251, unfinishable by any sequence of calls. A
-    // CLOSED list is `unreachable` and drops out on its own, so this adds the
-    // open one only.
-    '[role=option]', '[role=treeitem]',
-  ].join(', ');
-  const out = [];
-  // Every control that could be listed, in document order, BEFORE the budget
-  // is spent. Collected first so `opts.match` can decide which ones the budget
-  // buys: the cap used to run inside the walk, so a control past it was never
-  // tagged and could never be acted on afterwards — and on a 250-row list that
-  // put every row after the ninth permanently out of reach (#270).
-  const found = [];
-  let matched = 0;
-  let unreached = 0;
-  const seen = new Set();
-
-  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim().slice(0, opts.nameMax);
-
-  // Does this anchor actually GO anywhere? `el.href` resolves `href="#"` to the
-  // page's own absolute URL, so a plain "starts with http" test calls every
-  // JavaScript control a navigation — and real Chrome duly reported
-  // `<a href="#">Zapłać</a>` as a link to the current page, which would have
-  // walked it straight past the gate. Same document, fragment aside, is not
-  // going anywhere.
-  const goesElsewhere = (el) => {
-    const raw = el.getAttribute('href') || '';
-    if (!raw || raw.startsWith('#')) return false;
-    try {
-      const to = new URL(el.href, location.href);
-      const here = new URL(location.href);
-      to.hash = ''; here.hash = '';
-      return /^https?:$/i.test(to.protocol) && to.href !== here.href;
-    } catch (e) { return false; }
-  };
+# The words for a control that has none of its own, shared VERBATIM by the page
+# enumeration and by the picker reader — the same reason `REACH_JS` is shared:
+# two scripts that name the same element differently disagree about what is
+# there. Measured on wizzair.com, where the picker's own scan had a naive name
+# extraction of its own: the ‹ › month arrows are neither buttons nor links and
+# carry no text, so they were named "" and DROPPED, and a date three months out
+# failed with "aish cannot find its next-month arrow" while the arrows sat
+# plainly on screen.
+NAME_JS = r"""
+  const NAME_MAX = (opts && opts.nameMax) || 120;
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim().slice(0, NAME_MAX);
 
   const labelElement = (el) => {
     if (el.id) {
@@ -886,58 +851,6 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
     }
     const lab = labelElement(el);
     if (lab) return lab.innerText || lab.textContent || '';
-    return '';
-  };
-
-  // An icon-only button is not a nameless button — it is a button whose name is
-  // a picture, and a person reads it fine. Dropping it (the old rule: no words
-  // and nowhere to go, so skip) took the swap-airports arrow, the hamburger and
-  // every dialog's X off the list entirely, which on a booking form is half the
-  // controls that matter. So: ask the page what it calls its own picture,
-  // several ways, and describe it in words the model can ask for it by.
-  const GLYPHS = {
-    '×': 'close', '✕': 'close', '✖': 'close', '╳': 'close',
-    '☰': 'menu', '⋮': 'more', '⋯': 'more',
-    '⇄': 'swap', '⇆': 'swap', '↔': 'swap', '⟷': 'swap',
-    '←': 'back', '→': 'forward', '↑': 'up', '↓': 'down',
-    '▾': 'expand', '⌄': 'expand', '▴': 'collapse', '⌃': 'collapse',
-    '⚙': 'settings', '🔍': 'search', '＋': 'add', '+': 'add',
-    '−': 'remove', '–': 'remove', '☆': 'favourite', '★': 'favourite',
-  };
-  // 'icon-swap-airports' and 'swap_horiz' are both the page telling you what the
-  // picture is; they are just written for a stylesheet rather than for a person.
-  const words = (s) => clean((s || '')
-    .split(/[#\/]/).pop()
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/[_\-.]+/g, ' ')
-    .replace(/\b(icon|ico|fa|fas|far|glyph|svg|symbol|btn|button)\b/gi, ' ')
-    .toLowerCase());
-
-  const iconWords = (el) => {
-    const svg = el.querySelector && el.querySelector('svg');
-    if (svg) {
-      const t = svg.querySelector('title');
-      const said = clean((t && (t.textContent || '')) || svg.getAttribute('aria-label') || '');
-      if (said) return said;
-      const use = svg.querySelector('use');
-      const ref = use && (use.getAttribute('href') || use.getAttribute('xlink:href') || '');
-      if (ref) { const w = words(ref); if (w) return w; }
-    }
-    const img = el.querySelector && el.querySelector('img[alt]');
-    if (img) { const alt = clean(img.getAttribute('alt')); if (alt) return alt; }
-    for (const attr of ['data-icon', 'data-testid', 'data-test', 'name']) {
-      const w = words(el.getAttribute && el.getAttribute(attr));
-      if (w) return w;
-    }
-    const marked = (el.matches && el.matches('[class*=icon], [class*=ico-]')) ? el
-      : (el.querySelector && el.querySelector('[class*=icon], [class*=ico-]'));
-    if (marked) {
-      for (const token of (marked.getAttribute('class') || '').split(/\s+/)) {
-        if (!/icon|ico-/i.test(token)) continue;
-        const w = words(token);
-        if (w && w.length > 2) return w;
-      }
-    }
     return '';
   };
 
@@ -982,6 +895,105 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
     if (text && meaning) return text + ' (' + meaning + ')';
     if (text) return text;
     return meaning;
+  };
+
+// An icon-only button is not a nameless button — it is a button whose name is
+// a picture, and a person reads it fine. Dropping it (the old rule: no words
+// and nowhere to go, so skip) took the swap-airports arrow, the hamburger and
+// every dialog's X off the list entirely, which on a booking form is half the
+// controls that matter. So: ask the page what it calls its own picture,
+// several ways, and describe it in words the model can ask for it by.
+  const GLYPHS = {
+    '×': 'close', '✕': 'close', '✖': 'close', '╳': 'close',
+    '☰': 'menu', '⋮': 'more', '⋯': 'more',
+    '⇄': 'swap', '⇆': 'swap', '↔': 'swap', '⟷': 'swap',
+    '←': 'back', '→': 'forward', '↑': 'up', '↓': 'down',
+    '▾': 'expand', '⌄': 'expand', '▴': 'collapse', '⌃': 'collapse',
+    '⚙': 'settings', '🔍': 'search', '＋': 'add', '+': 'add',
+    '−': 'remove', '–': 'remove', '☆': 'favourite', '★': 'favourite',
+  };
+// 'icon-swap-airports' and 'swap_horiz' are both the page telling you what the
+// picture is; they are just written for a stylesheet rather than for a person.
+  const words = (s) => clean((s || '')
+    .split(/[#\/]/).pop()
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_\-.]+/g, ' ')
+    .replace(/\b(icon|ico|fa|fas|far|glyph|svg|symbol|btn|button)\b/gi, ' ')
+    .toLowerCase());
+
+  const iconWords = (el) => {
+    const svg = el.querySelector && el.querySelector('svg');
+    if (svg) {
+      const t = svg.querySelector('title');
+      const said = clean((t && (t.textContent || '')) || svg.getAttribute('aria-label') || '');
+      if (said) return said;
+      const use = svg.querySelector('use');
+      const ref = use && (use.getAttribute('href') || use.getAttribute('xlink:href') || '');
+      if (ref) { const w = words(ref); if (w) return w; }
+    }
+    const img = el.querySelector && el.querySelector('img[alt]');
+    if (img) { const alt = clean(img.getAttribute('alt')); if (alt) return alt; }
+    for (const attr of ['data-icon', 'data-testid', 'data-test', 'name']) {
+      const w = words(el.getAttribute && el.getAttribute(attr));
+      if (w) return w;
+    }
+    const marked = (el.matches && el.matches('[class*=icon], [class*=ico-]')) ? el
+      : (el.querySelector && el.querySelector('[class*=icon], [class*=ico-]'));
+    if (marked) {
+      for (const token of (marked.getAttribute('class') || '').split(/\s+/)) {
+        if (!/icon|ico-/i.test(token)) continue;
+        const w = words(token);
+        if (w && w.length > 2) return w;
+      }
+    }
+    return '';
+  };
+"""
+
+
+# Enumerate, tag, and describe. Runs in the page, walks open shadow roots the
+# same way `_LINKS_JS` does, and reports both what the cap left out and what the
+# page is currently hiding rather than quietly stopping.
+CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
+  const SEL = [
+    'a[href]', 'button', 'input', 'select', 'textarea', 'summary',
+    '[role=button]', '[role=link]', '[role=menuitem]', '[role=tab]',
+    '[role=checkbox]', '[role=switch]', '[role=combobox]', '[onclick]',
+    '[contenteditable]', '[contenteditable=true]',
+    // The suggestion a search box drops down. Without this the list a site
+    // opens under "Paris" is TEXT and nothing pressable, so the field can be
+    // typed into and never committed — which is the lot.pl destination box in
+    // the session that filed #251, unfinishable by any sequence of calls. A
+    // CLOSED list is `unreachable` and drops out on its own, so this adds the
+    // open one only.
+    '[role=option]', '[role=treeitem]',
+  ].join(', ');
+  const out = [];
+  // Every control that could be listed, in document order, BEFORE the budget
+  // is spent. Collected first so `opts.match` can decide which ones the budget
+  // buys: the cap used to run inside the walk, so a control past it was never
+  // tagged and could never be acted on afterwards — and on a 250-row list that
+  // put every row after the ninth permanently out of reach (#270).
+  const found = [];
+  let matched = 0;
+  let unreached = 0;
+  const seen = new Set();
+
+  // Does this anchor actually GO anywhere? `el.href` resolves `href="#"` to the
+  // page's own absolute URL, so a plain "starts with http" test calls every
+  // JavaScript control a navigation — and real Chrome duly reported
+  // `<a href="#">Zapłać</a>` as a link to the current page, which would have
+  // walked it straight past the gate. Same document, fragment aside, is not
+  // going anywhere.
+  const goesElsewhere = (el) => {
+    const raw = el.getAttribute('href') || '';
+    if (!raw || raw.startsWith('#')) return false;
+    try {
+      const to = new URL(el.href, location.href);
+      const here = new URL(location.href);
+      to.hash = ''; here.hash = '';
+      return /^https?:$/i.test(to.protocol) && to.href !== here.href;
+    } catch (e) { return false; }
   };
 
   const kindOf = (el, type) => {
@@ -1282,8 +1294,7 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
 # executor opens the picker, reads it here, and presses one cell. The cells are
 # stamped with their OWN attribute so nothing about the page's numbering moves
 # under the model while this happens.
-CALENDAR_JS = "(opts) => {" + REACH_JS + r"""
-  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+CALENDAR_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
   const field = deepOne('[data-aish-n="' + opts.n + '"]');
 
   // Which container is this field's picker? Its own statement first — a page
@@ -1337,6 +1348,17 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + r"""
     if (cap) heading = clean(cap.innerText || cap.textContent);
   }
 
+  // Clear LAST pass's tags before this one assigns any. Not doing it was the
+  // same defect `CONTROLS_JS` records for `data-aish-n` — "two elements, one
+  // number, silently" — and it bites here for the same reason: every month
+  // walk re-stamps from 1, so after one hop `[data-aish-cell="42"]` matched a
+  // cell from the month aish had just left as well as the one it wanted, and
+  // `.first` took the stale one. Measured on wizzair.com: the walk from August
+  // to December worked, the picker was showing the right day, and the press
+  // came back Stuck because it was aimed at a cell no longer on the page.
+  for (const stale of document.querySelectorAll('[data-aish-cell]')) {
+    stale.removeAttribute('data-aish-cell');
+  }
   const cells = [];
   let stamp = 0;
   for (const cell of grid.querySelectorAll('[role=gridcell], td, [class*=day]')) {
@@ -1359,6 +1381,16 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + r"""
       text: text,
       label: label,
       stamp: clean(stamped),
+      // wizzair.com keeps a second copy of every pane parked off to the side
+      // for its slide animation, and the copy is INERT: pressing it exhausted
+      // the whole click ladder and came back Stuck.
+      onscreen: (() => {
+        try {
+          const r = press.getBoundingClientRect();
+          return r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0
+                 && r.left < innerWidth && r.top < innerHeight;
+        } catch (e) { return false; }
+      })(),
       disabled: !!press.disabled
                || press.getAttribute('aria-disabled') === 'true'
                || cell.getAttribute('aria-disabled') === 'true'
@@ -1370,11 +1402,23 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + r"""
   // Month arrows, scoped to the picker. A page-level carousel's "next" must be
   // out of reach of a step that presses things with nobody looking.
   const box = grid.closest('[class*=datepicker], [class*=alendar], [role=dialog]') || grid;
+  // Deliberately WIDER than the page's own control selector, and safe because
+  // it is scoped to the picker: wizzair.com's ‹ › are neither buttons nor
+  // links nor role=button, so the old scan did not see them at all and a date
+  // three months out failed with "cannot find its next-month arrow" while the
+  // arrows sat plainly on screen. What keeps this narrow is the other end —
+  // `month_step`'s closed vocabulary, and the refusal to press anything that
+  // submits.
+  const NAVISH = 'button, a[href], [role=button], [onclick], [class*=arrow],'
+               + ' [class*=next], [class*=prev], [class*=chevron], [class*=nav]';
   const nav = [];
-  for (const one of box.querySelectorAll('button, a[href], [role=button]')) {
+  for (const one of box.querySelectorAll(NAVISH)) {
     if (unreachable(one)) continue;
-    const name = clean(one.getAttribute('aria-label') || one.getAttribute('title')
-                       || one.innerText || one.textContent || '');
+    // The SAME naming the page enumeration uses (NAME_JS), not a second one:
+    // an icon-only arrow has no text, and a naive read named it "" and dropped
+    // it. `nameOf` reads the svg's title, a <use> id, an img alt, a data-icon,
+    // an icon class token, or the glyph itself.
+    const name = nameOf(one);
     if (!name) continue;
     stamp += 1;
     one.setAttribute('data-aish-cell', String(stamp));
@@ -1938,6 +1982,10 @@ class Cell:
     label: str = ""
     stamp: str = ""  # data-date and friends: machine-written, so trusted first
     disabled: bool = False
+    # Where the owner could see it now. A TIE-BREAK between cells claiming the
+    # same date, never a filter — a cell below the fold is perfectly pressable
+    # and `_centre` scrolls to it.
+    onscreen: bool = False
 
     def day(self, heading: str = "") -> Day | None:
         """The date this cell IS, read from the most trustworthy thing it has.
@@ -2013,12 +2061,18 @@ def pick_day(cells: list[Cell], wanted: Day, heading: str = "") -> Pick:
     if not hits:
         return Pick(problem="that date is not in the month this picker is showing")
     if len(hits) > 1:
-        return Pick(
-            problem=(
-                f"{len(hits)} cells claim to be that date — the picker is "
-                "showing it twice, so pressing either would be a guess"
-            )
-        )
+        # NOT a coin flip, and conflating it with one was wrong. The dangerous
+        # ambiguity is a cell that does not say WHICH MONTH it is — two "7"s,
+        # one in each of the months on screen. These have already been matched
+        # on a FULL date, so every one of them asserts the same day: pressing
+        # any is right by its own label. Measured on wizzair.com, whose picker
+        # keeps a second copy of every pane for its slide animation — 138 cells
+        # for two months of about 77 — so a real, legible December date refused
+        # itself. Prefer the one ON SCREEN: the copy parked off to the side for
+        # the animation is INERT, and pressing it exhausted the whole click
+        # ladder and came back Stuck. Otherwise first in document order, and
+        # the readback catches a copy that turns out to be dead anyway.
+        hits = [c for c in hits if c.onscreen][:1] or hits[:1]
     chosen = hits[0]
     if chosen.disabled:
         return Pick(
@@ -2034,9 +2088,24 @@ MONTH_HOPS = 14
 # What the control that moves a picker forward is called. Deliberately a SHORT
 # closed list: this is a control aish presses with nobody looking, so a loose
 # match ("next" anywhere on the page) is how a carousel's arrow gets pressed.
-_FORWARD = ("next month", "nastepny miesiac", "nastepny", "next", "→", "›", "»", "▶")
-_BACKWARD = ("previous month", "poprzedni miesiac", "poprzedni", "previous", "prev",
-             "←", "‹", "«", "◀")
+# Extended from MEASUREMENT, not from imagination: `scripts/probe_calendars.py`
+# opens real pickers and prints what their arrows are actually called.
+# wizzair.com's are "Later dates" / "calendar page forward" and "Previous
+# dates" / "calendar page back" — none of which a list guessing at "next month"
+# would ever hold, and the walk to December failed with the arrows plainly on
+# screen. Still a CLOSED list matched on the WHOLE name: the fence that makes
+# this safe is that a name not on it refuses rather than guesses, and the next
+# site's phrasing is one probe run away.
+_FORWARD = (
+    "next month", "next", "next dates", "later", "later dates", "forward",
+    "calendar page forward", "nastepny miesiac", "nastepny", "pozniejsze daty",
+    "→", "›", "»", "▶",
+)
+_BACKWARD = (
+    "previous month", "previous", "prev", "previous dates", "earlier",
+    "earlier dates", "back", "calendar page back", "poprzedni miesiac",
+    "poprzedni", "wczesniejsze daty", "←", "‹", "«", "◀",
+)
 
 
 def month_step(name: str, *, forward: bool) -> bool:
