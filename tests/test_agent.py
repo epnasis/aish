@@ -4090,7 +4090,7 @@ class TestLoginGate:
         assert tool_messages(agent.messages)[0]["content"] == LOGIN_READ_DENIED.format(
             host="allegro.pl"
         )
-        assert asked and "signed-in browser session" in asked[0]
+        assert asked and "browse allegro.pl signed in as you" in asked[0]
 
     def test_approved_read_proceeds_and_asks_once_per_session(self, monkeypatch):
         """A task that reads five pages of one portal asks once, matching the
@@ -4185,15 +4185,14 @@ class TestLoginGate:
         agent, _ = make_agent([model_says("hi")])
         assert agent._read_needs_prompt("read_url", {"url": "https://allegro.pl/a"})
         assert not agent._read_needs_prompt("read_url", {"url": "https://example.com/a"})
-        agent._approved_logins.add("allegro.pl")
+        agent._approved_sites.add("allegro.pl")
         assert not agent._read_needs_prompt("read_url", {"url": "https://allegro.pl/a"})
 
-    def test_the_driving_grant_already_covers_reading_the_same_site(self, monkeypatch):
-        """He approved driving linkedin.com AS HIM, and 47 seconds later was
-        asked whether aish could READ linkedin.com as him. The grants nest —
-        driving a site opens its pages and hands back their text — so the
-        second card asked for strictly less than the first, about a difference
-        (which tool fetches the page) he has no way to see."""
+    def test_browse_and_read_url_are_one_permission(self, monkeypatch):
+        """He approved browsing linkedin.com as him, and 47 seconds later was
+        asked whether aish could READ linkedin.com as him. Two tools, one
+        question — and the difference between them (which one fetches the
+        page) is one he has no way to see and nothing to do about."""
         fetched = self._signed_into(monkeypatch, "linkedin.com")
         asked = []
         agent, _ = make_agent(
@@ -4205,7 +4204,7 @@ class TestLoginGate:
             ],
             approve_tool=lambda n, a, p=None: asked.append(p) or True,
         )
-        agent._approved_browsing.add("linkedin.com")
+        agent._approved_sites.add("linkedin.com")
         agent.run_task("what did Roman post")
         assert asked == []
         assert fetched == ["https://www.linkedin.com/in/arcea"]
@@ -4218,18 +4217,28 @@ class TestLoginGate:
         it, a site that merely ends with the same letters does not."""
         self._signed_into(monkeypatch, "linkedin.com", "allegro.pl")
         agent, _ = make_agent([model_says("hi")])
-        agent._approved_browsing.add("linkedin.com")
-        assert agent._browse_grant_covers("https://pl.linkedin.com/in/x")
-        assert not agent._browse_grant_covers("https://evillinkedin.com/in/x")
+        agent._approved_sites.add("linkedin.com")
+        assert agent._site_granted("pl.linkedin.com")
+        assert not agent._site_granted("evillinkedin.com")
         assert agent._read_needs_prompt("read_url", {"url": "https://allegro.pl/a"})
 
-    def test_a_read_grant_never_buys_driving(self, monkeypatch):
-        """The containment is one-directional. Driving is the bigger question
-        and keeps its own card, however many pages have been read."""
+    def test_a_read_yes_lets_the_browser_open_the_site_too(self, monkeypatch):
+        """The merge runs both ways ON PURPOSE (#287). Clicking to navigate,
+        expand or search is how a modern site is READ, and it is what he means
+        when he approves browsing; the acts that CHANGE something — a name
+        that says it pays, buys, books, deletes, sends or signs, a page
+        showing checkout structure, a password field — keep their own card or
+        their own refusal, which is where that question actually belongs."""
         self._signed_into(monkeypatch, "linkedin.com")
-        agent, _ = make_agent([model_says("hi")])
-        agent._approved_logins.add("linkedin.com")
-        assert "linkedin.com" not in agent._approved_browsing
+        asked = []
+        agent, _ = make_agent(
+            [model_says("hi")],
+            approve_tool=lambda n, a, p=None: asked.append(p) or True,
+        )
+        assert agent._login_gate("read_url", {"url": "https://www.linkedin.com/in/x"}) is None
+        assert len(asked) == 1 and "browse linkedin.com signed in as you" in asked[0]
+        assert agent._browse_gate("browse", {"url": "https://linkedin.com/feed"}) is None
+        assert len(asked) == 1  # the browser rides the yes he already gave
 
     def test_the_grant_survives_the_agent_being_rebuilt(self, monkeypatch):
         """Every ship restarts aish-web and rebuilds the agent under an open
@@ -4248,9 +4257,9 @@ class TestLoginGate:
             state_log=logged.append,
         )
         agent.run_task("what did I order")
-        assert {"kind": "login_grant", "host": "allegro.pl"} in logged
+        assert {"kind": "site_grant", "host": "allegro.pl"} in logged
         fresh, _ = make_agent([])
-        fresh.restore_login_grants(["allegro.pl"])
+        fresh.restore_site_grants(["allegro.pl"])
         assert not fresh._read_needs_prompt("read_url", {"url": "https://allegro.pl/x"})
 
     def test_only_read_url_can_carry_a_session(self, monkeypatch):
