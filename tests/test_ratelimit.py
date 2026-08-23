@@ -269,7 +269,7 @@ class TestInterruptibleWait:
 
         seen: list[str] = []
         ratelimit.wait(0.05, threading.Event(), seen.append)
-        assert seen and "retrying in" in seen[0]
+        assert seen and seen[0].startswith("Rate-limited — retrying in")
 
 
 class TestModelErrorRecord:
@@ -587,6 +587,27 @@ class TestGovernorAdmission:
         governor.reserve("g:m", 1).settle(1)
         with pytest.raises(ratelimit.Cancelled):
             governor.reserve("g:m", 1, should_stop=lambda: True)
+
+    def test_the_wait_names_the_provider_not_the_model(self):
+        """The user is waiting on a provider's quota. `provider:model` is the
+        governor's own bookkeeping and reads as noise in a status line."""
+
+        class Escape(Exception):
+            """Leaves the wait loop without spending a real tick sleeping."""
+
+        governor, _ = self._governed(rpm=1)
+        governor._limits["gemini:gemini-3.5-flash"] = ratelimit.Limits(rpm=1, source="env")
+        governor.reserve("gemini:gemini-3.5-flash", 1).settle(1)
+        seen = []
+
+        def note(message):
+            seen.append(message)
+            raise Escape
+
+        with pytest.raises(Escape):
+            governor.reserve("gemini:gemini-3.5-flash", 1, on_wait=note, ceiling=1)
+        assert seen[0].startswith("Waiting on the gemini rate limit — about")
+        assert "gemini-3.5-flash" not in seen[0]
 
     def test_a_governor_refusal_is_marked_as_never_sent(self):
         """"the provider refused" and "aish declined to ask" look identical in a
