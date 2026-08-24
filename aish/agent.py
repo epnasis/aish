@@ -1167,6 +1167,20 @@ BROWSE_NO_BANK_DETAILS = (
     "themselves."
 )
 
+# The second value refusal (#304), and it is stated the way it is because the
+# residual is real: a 13-19 digit run passes Luhn by chance about one time in
+# ten, so an order or reference number can be caught. The owner is told what
+# was seen and where — never the value — so a false positive is a step he
+# finishes himself rather than a dead end he cannot explain.
+BROWSE_NO_CARD_NUMBER = (
+    "NOT EXECUTED: the value in step {n} looks like a payment card number — "
+    "13-19 digits carrying a card's checksum — and aish never types one into "
+    "a form, on any site, however it is asked. Nothing in this batch was done "
+    "and no approval makes it acceptable. Tell the user exactly that, and that "
+    "they can run /browser {host} and finish it themselves — the same answer "
+    "whether or not that value really was a card."
+)
+
 # Origin-gated knowledge writes (#196). remember/forget_memory auto-approve, and
 # that is deliberate: capturing a fact must stay frictionless. The reasoning is
 # attended-only, though — unattended, the text proposing the write can be an
@@ -5524,13 +5538,21 @@ class Agent:
         refused when its CONTROL says it changes contact details, a payout
         address, a credential, or closes the account — a label, which the page
         writes and can therefore lie about. And a step is refused when its
-        VALUE is a bank account number, wherever it is being typed — which the
-        page cannot lie about, because it is what aish is about to send."""
+        VALUE is a bank account or payment card number, wherever it is being
+        typed — which the page cannot lie about, because it is what aish is
+        about to send."""
         for step in plan.steps:
             said = step.control.address if step.control is not None else step.target
             if step.do in ("fill", "date") and browse.types_a_bank_account(step.value):
                 return _gate_outcome(
                     BROWSE_NO_BANK_DETAILS.format(
+                        n=repr(said), host=host or "the site"
+                    ),
+                    decision="blocked",
+                )
+            if step.do in ("fill", "date") and browse.types_a_card_number(step.value):
+                return _gate_outcome(
+                    BROWSE_NO_CARD_NUMBER.format(
                         n=repr(said), host=host or "the site"
                     ),
                     decision="blocked",

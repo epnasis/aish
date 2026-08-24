@@ -265,6 +265,46 @@ def types_a_bank_account(value: str) -> bool:
     return bool(_IBAN_RE.fullmatch(stripped))
 
 
+# A payment card as a form takes one: 13-19 digits, however the field lets them
+# be spaced. ASCII only — `str.isdigit` is true of digits no keypad produces.
+_CARD_RE = re.compile(r"[0-9]{13,19}")
+
+
+def _checksums(digits: str) -> bool:
+    """Luhn: the check every issued card number carries, and an arbitrary run
+    of digits passes only one time in ten."""
+    total = 0
+    for i, char in enumerate(reversed(digits)):
+        digit = int(char)
+        if i % 2:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
+
+
+def types_a_card_number(value: str) -> bool:
+    """Is this value a payment card number?
+
+    The second value refusal, and it stands on the same ground as the first:
+    length and checksum are properties of what aish is about to SEND, so no
+    field name, placeholder or page language is consulted and none can lie its
+    way past. There is no task where aish typing his card number is the answer
+    — paying is card-on-file inside a flow he ran, or his own hands on the page
+    — so making it impossible also removes the temptation to teach aish to pay.
+
+    An order or reference number can pass Luhn by chance, and that refusal is
+    accepted rather than softened: it costs a step he finishes himself, in the
+    only direction where being wrong never costs money. The digits are read
+    and dropped — nothing downstream may keep them.
+    """
+    stripped = re.sub(r"[ -]", "", value or "")
+    if not _CARD_RE.fullmatch(stripped):
+        return False
+    return _checksums(stripped)
+
+
 # Words that are chrome as often as they are commitments. A date picker's
 # "Confirm" and a wizard's "Accept" are these; so is the button that ends a
 # purchase, which is why they are demoted only INSIDE a widget the page has
