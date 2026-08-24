@@ -1287,3 +1287,61 @@ class TestOnlyAStrongMatchMayBlockWork:
     )
     def test_the_rule_in_one_table(self, diag, arms):
         assert skills_module._gate_arms(diag) is arms
+
+
+def test_config_home_moves_the_whole_knowledge_layer(tmp_path, monkeypatch):
+    """AISH_CONFIG_HOME is one knob for all four directories (#254).
+
+    Read off fresh module specs, because the constants bind at import — which
+    is the contract the verify harness relies on when it sets the variable
+    before importing aish.
+    """
+    import importlib
+
+    monkeypatch.setenv("AISH_CONFIG_HOME", str(tmp_path / "elsewhere"))
+    fresh = {}
+    for name in ("aish.skills", "aish.rules", "aish.tool_plugins"):
+        spec = importlib.util.find_spec(name)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fresh[name] = module
+
+    assert fresh["aish.skills"].GLOBAL_SKILLS_DIR == tmp_path / "elsewhere" / "skills"
+    assert fresh["aish.skills"].GLOBAL_MEMORY_DIR == tmp_path / "elsewhere" / "memory"
+    assert fresh["aish.rules"].GLOBAL_RULES_DIR == tmp_path / "elsewhere" / "rules"
+    assert fresh["aish.tool_plugins"].GLOBAL_TOOLS_DIR == tmp_path / "elsewhere" / "tools"
+
+
+def test_suite_never_reaches_the_real_knowledge_store():
+    """Pin the conftest isolation, the way the notifier guard is pinned.
+
+    Rules, skills, memory and tools are READ at the top of every task and
+    WRITTEN by `remember` / `create_skill` / `import_skill`, so a suite that
+    reached them would both take its results from the developer's own corpus
+    and be one approved tool call away from editing it permanently (#254).
+    Asserted through the reader functions, not the constants, because the
+    readers are what the agent actually calls.
+    """
+    from pathlib import Path
+
+    from aish import rules as rules_module
+    from aish import tool_plugins as tool_plugins_module
+    from aish.paths import DEFAULT_CONFIG_HOME
+
+    isolated = Path(os.environ["AISH_CONFIG_HOME"])
+    reached = [
+        *skills_module.skill_dirs("/tmp"),
+        *skills_module.memory_dirs("/tmp"),
+        *tool_plugins_module.tool_dirs("/tmp"),
+        *rules_module.rule_dirs(),
+    ]
+    assert len(reached) == 4
+    for directory in reached:
+        assert directory.is_relative_to(isolated)
+        assert not directory.is_relative_to(DEFAULT_CONFIG_HOME)
+
+    # Nothing above is stubbed: write through the real API and see where it
+    # lands, since a write is the half of this that cannot be undone.
+    save_memory("a probe from the test suite", skills_module.GLOBAL_MEMORY_DIR, name="pin-probe")
+    assert (skills_module.GLOBAL_MEMORY_DIR / "pin-probe.md").exists()
+    assert not (DEFAULT_CONFIG_HOME / "memory" / "pin-probe.md").exists()

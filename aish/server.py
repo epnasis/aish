@@ -99,6 +99,7 @@ from .cli import (
 )
 from .documents import DocumentError, page_count, page_png
 from .embeddings import SemanticIndex
+from .paths import config_home
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
 from .seen import SeenLedger
@@ -5751,7 +5752,7 @@ def create_app(
 
 def main() -> int:
     config_path = Path(
-        os.environ.get("AISH_CONFIG", str(Path.home() / ".config" / "aish" / "config.toml"))
+        os.environ.get("AISH_CONFIG", str(config_home() / "config.toml"))
     )
     config = load_config(config_path)
     # Seed config.toml with the default folder-browser ignore list on first use,

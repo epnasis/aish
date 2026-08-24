@@ -1,6 +1,6 @@
 # Knowledge layer — skills, memory, retrieval, curation
 
-`skills.py`, `embeddings.py`, `curate.py`, `skill_import.py`.
+`skills.py`, `embeddings.py`, `curate.py`, `skill_import.py`, `paths.py`.
 
 **How to use this file.** The laws first — retrieval is the part of aish where a plausible-looking change silently degrades quality without failing anything, so the thresholds and floors below are calibrated numbers, not taste. Then the store, the three retrieval paths (index, pre-flight, deliberate recall), writing, and curation. The agent-side dispatch of these tools is in `docs/agent-core.md`.
 
@@ -29,6 +29,8 @@
 **Project scope is DISABLED by default** (#178 P0-1 interim): `./.aish/skills` and `./.aish/memory` are not discovered unless `skills.INCLUDE_PROJECT_DIRS` is set, which neither entry point does — a repository you clone must not be able to hand the model instructions. `TestProjectScopeDisabled` (skills) and `TestProjectScopeDisabledAgent` (end to end) both pin it, and no fixture flips the switch.
 
 **A skill is either** a flat `<name>.md` **or** an agentskills.io-compatible folder `<name>/SKILL.md` bundling `scripts/`, `references/`, `assets/` — the name defaults to the directory, frontmatter still wins, and `_dir_entries` scans subdirs for `SKILL.md` only for `kind == "skill"`, so memory stays flat. `read_skill`/`load_skill` append a `_bundled_note` naming the folder's files so the model reads and runs them through the normal gated tools. `TestFolderSkills`.
+
+**The whole tree moves on one knob: `AISH_CONFIG_HOME`** (`paths.config_home`, #254). Rules, skills, memory and plugin tools are four directories under `~/.config/aish/`, and they are one thing — the owner's own corpus, read at the top of every task and WRITTEN by `remember`, `create_skill` and `import_skill`. The verify harness gave itself its own state dir, allowlist, config file and cwd, and was therefore believed isolated while it read the owner's 24 live rules and pointed every knowledge write at his real store; a scripted step that reached an approval card was one click from a permanent, hand-editable artefact. One variable rather than one per directory, because four is four chances to isolate three of them and share the fourth, and the fourth is the one that writes. Resolved at IMPORT, like `AISH_STATE_DIR` at its call sites — set it before importing aish, or rebind the constants, which is what the suite's autouse `isolated_global_dirs` does. `test_suite_never_reaches_the_real_knowledge_store` pins the readers, not the constants, and proves nothing is stubbed by writing a memory through the real `save_memory` and checking where it landed.
 
 This is the substrate for the **skills-primary, tools-as-scalpel** model (epic #141): a tool is added later only for hot, shell-fragile, reliability-critical operations a documented skill snippet cannot do safely.
 

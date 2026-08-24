@@ -165,7 +165,7 @@ A trigger reads facts the **harness** gathered, never the acting model's account
 
 ## The file format
 
-One file per rule in `~/.config/aish/rules/`, global only — a rule is a policy about how aish behaves, not a property of a checkout, and a project-local rule file would be a policy anyone who hands you a repo can write. Worked examples ship in `examples/rules/`, and `TestShippedExamples` keeps them loadable.
+One file per rule in `~/.config/aish/rules/`, global only — a rule is a policy about how aish behaves, not a property of a checkout, and a project-local rule file would be a policy anyone who hands you a repo can write. Worked examples ship in `examples/rules/`, and `TestShippedExamples` keeps them loadable. `AISH_CONFIG_HOME` moves that directory with the rest of the config tree (#254, `docs/knowledge-layer.md`), which is what lets a verification run against a rule-free baseline rather than against whatever the owner's corpus happens to be that day — rules sit in front of everything, so a run that shares them cannot tell a broken feature from a rule refusing it.
 
 ```markdown
 ---
