@@ -1960,6 +1960,53 @@ class TestConsequencesWithNoYesButton:
         ):
             assert not browse.types_a_bank_account(ordinary), ordinary
 
+    def test_a_card_number_is_refused_however_the_field_is_labelled(self):
+        """#304. The field says "order number" and the value decides anyway —
+        that is the whole point of reading the value: no label, placeholder or
+        page language is consulted, so none of them can lie past it. No card is
+        drawn and no approver verdict can let it through, because the batch is
+        refused before anything is offered to anybody."""
+        for verdict in (True, False):
+            snap = snapshot(controls=[
+                control(n=1, kind=browse.FIELD, name="Numer zamówienia"),
+                control(n=2, name="Dalej", mutating=True, submits=True),
+            ])
+            agent, asked = self._agent(snap, approve=lambda *_a, v=verdict: v)
+            out = agent._browse_gate("browse_fill", {"steps": [
+                {"target": "Numer zamówienia", "value": "4111 1111 1111 1111"},
+                {"target": "Dalej", "do": "click"},
+            ]})
+            assert "NOT EXECUTED" in out and "card number" in out
+            assert asked == []
+            # It names WHAT it saw and WHERE, and never the value: a refusal
+            # that names nothing teaches nothing, and the digits must not
+            # survive the check in a message or a trace.
+            assert "Numer zamówienia" in out
+            for fragment in ("4111", "1111", "4111111111111111"):
+                assert fragment not in out, fragment
+
+    def test_spaces_and_dashes_are_the_same_value(self):
+        for written in (
+            "4111111111111111", "4111 1111 1111 1111", "4111-1111-1111-1111",
+            "4111 1111-1111 1111", "5555 5555 5555 4444",
+            "4777777777771", "4777777777777777775",  # the 13 and 19 edges
+        ):
+            assert browse.types_a_card_number(written), written
+
+    def test_what_the_card_check_leaves_alone(self):
+        """Narrow at both ends of the length, and the checksum is what keeps an
+        ordinary long number out. A reference number that passes Luhn by chance
+        IS refused — accepted, because being wrong here costs a step the user
+        finishes himself and can never cost money."""
+        for ordinary in (
+            "477777777772",          # 12 digits, Luhn-valid — too short
+            "47777777777777777774",  # 20 digits, Luhn-valid — too long
+            "4111111111111112",      # 16 digits, checksum fails
+            "PL61 1090 1014 0000 0712 1981 2874", "2026-08-22", "1234",
+            "pawel@wenda.email", "", "Warszawa", "4111 1111 1111 111X",
+        ):
+            assert not browse.types_a_card_number(ordinary), ordinary
+
     def test_an_ordinary_form_fill_is_completely_unaffected(self):
         snap = snapshot(controls=[
             control(n=1, kind=browse.FIELD, name="Skąd"),
