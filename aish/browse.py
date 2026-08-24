@@ -296,8 +296,14 @@ def types_a_card_number(value: str) -> bool:
 
     An order or reference number can pass Luhn by chance, and that refusal is
     accepted rather than softened: it costs a step he finishes himself, in the
-    only direction where being wrong never costs money. The digits are read
-    and dropped — nothing downstream may keep them.
+    only direction where being wrong never costs money.
+
+    What this function guarantees about the digits is narrow, and stating it
+    wider would be a claim the code cannot keep: the REFUSAL never carries
+    them. It cannot promise they are nowhere, because the model put them in
+    the call's own arguments and `_call_result` writes that record before
+    `_dispatch` reaches any gate — so a refused value is already in the trace,
+    by design, and that is where a reader looks for it.
     """
     stripped = re.sub(r"[ -]", "", value or "")
     if not _CARD_RE.fullmatch(stripped):
