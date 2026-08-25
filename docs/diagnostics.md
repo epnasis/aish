@@ -134,9 +134,11 @@ aish drives real pages the owner cannot see, so *"it said the portal had no invo
 | no `frame` key at all | nothing — a log written before frames existed, or a tool that never had a page |
 | `frame`, and the file resolves | the path |
 | `frame`, and the file is gone | the path, marked **purged** |
-| `frame_skipped` | why no picture was taken: `signin`, `hands`, `failed` |
+| `frame_skipped` | why no picture was taken: `password`, `unknown`, `hands`, `failed` |
 
-Two of those are why `frame_skipped` exists at all. *No picture because the page was a sign-in door* is the system working — a screenshot of a login form is exactly the artifact that must not exist — while *no picture because the capture failed* is worth investigating, and a blank cell would present them as the same thing.
+Those four are why `frame_skipped` exists at all, and they route to four different reactions. *A password box was on the page* is the system working — a screenshot of a login form is exactly the artifact that must not exist. *The page would not say whether there was one* is aish declining to photograph something it could not identify, which is the capture failing CLOSED. *The capture failed* is worth investigating. A blank cell would present all of them as the same thing.
+
+One thing the reader must not be led to over-read: `password` says what was seen, not what the page was. An email-first login's first step has no password box, so it is photographed like any other page — `docs/browser.md` carries that residual.
 
 The bytes are deliberately NOT in the evidence store, which is text-only by construction (`digest_of` hashes UTF-8, `put` writes with `write_text`), and `docs/browser.md` carries the rest of that argument. What matters here is that the governance property is identical either way: **the record only points at the bytes, and the bytes are purgeable on their own schedule.** `_frame_of` is where the resolution happens, and it stats a path rather than importing anything live — the reader's import fence is unchanged.
 
