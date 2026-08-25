@@ -29,6 +29,7 @@ import functools
 import hashlib
 import hmac
 import json
+import logging
 import os
 import queue
 import re
@@ -57,6 +58,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Respon
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
+from uvicorn.protocols.utils import ClientDisconnected
 
 from . import backends, browser, dir_ignore, explain, export, files, notify, tools
 from .agent import (
@@ -121,6 +123,17 @@ if TYPE_CHECKING:
     from .claude_max import ClaudeMaxAgent
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+log = logging.getLogger("aish.web")
+
+# A client going away, seen from both directions: starlette raises
+# WebSocketDisconnect on the RECEIVE side, uvicorn raises ClientDisconnected
+# (an OSError) out of the SEND side when a frame is written to a socket that is
+# already gone. Neither is an error — it is how every websocket ends — but the
+# send half had no handler at all, so a tab closed mid-replay logged a full
+# unhandled-ASGI traceback (#315). Deliberately NARROW: a serialization error
+# or a broken frame is a bug in what we are sending and must still surface.
+CLIENT_GONE = (WebSocketDisconnect, ClientDisconnected)
 
 
 def _static_rev() -> str:
@@ -2275,14 +2288,27 @@ class WebServer:
         # gone — many tabs/devices share the same token and drive by acting.
         client = Client(websocket)
         self.clients.add(client)
-        await self._attach(client)
         try:
+            # _attach is INSIDE the try/finally deliberately (#315). It replays
+            # the whole transcript down this socket, so it is the longest
+            # window in a connection's life for the client to leave — and while
+            # it sat outside, a raise there skipped `_detach` entirely, leaving
+            # a ghost in `session.viewers` with no sender task for the life of
+            # the process. That is not merely a leak: the viewer set is the
+            # test for "somebody is looking at this", so a ghost silences the
+            # held-approval and finished-task pushes (#163) and pins the
+            # session against idle eviction.
+            await self._attach(client)
             while True:
                 message = await websocket.receive_json()
                 if isinstance(message, dict):
                     await self._handle(client, message)
-        except WebSocketDisconnect:
-            pass
+        except CLIENT_GONE:
+            # The ordinary end of a websocket, from either direction. Logged at
+            # DEBUG rather than swallowed: one occurrence is a closed tab, but a
+            # FREQUENT one is a symptom of something else and has to stay
+            # visible somewhere.
+            log.debug("client %s left before the server finished sending", client.id)
         finally:
             self._detach(client)
 
@@ -2417,8 +2443,13 @@ class WebServer:
             while True:
                 event = await client.outbox.get()
                 await client.ws.send_json(event)
-        except Exception:  # noqa: BLE001 — a dead socket ends the loop; replay recovers
-            pass
+        except CLIENT_GONE:
+            pass  # a dead socket ends the loop; replay recovers on reconnect
+        except Exception:  # noqa: BLE001 — the loop still ends, but it says why
+            # NOT a disconnect. A serialization error or a broken frame is a bug
+            # in what we are sending, and swallowing it identically to a closing
+            # tab is how it stays invisible (#315).
+            log.exception("send loop failed for client %s", client.id)
 
     async def _handle(self, client: Client, message: dict) -> None:
         """Dispatch one client message, then RECEIPT it if it asked for one.
