@@ -94,6 +94,18 @@ class TestEvidenceStore:
         path.write_text("substituted")
         assert evidence.get(digest, tmp_path) is None
 
+    def test_undecodable_bytes_read_back_as_absent_rather_than_raising(self, tmp_path):
+        """The store is text-only by construction, not by enforcement: nothing
+        here can WRITE binary, and nothing here refuses to read it either. A
+        blob whose bytes are not UTF-8 must land on the same answer as a
+        truncated one — what is on disk is not what was recorded — because the
+        module's stated law is that unreadable bytes are reportable, not an
+        error, and this is a READER."""
+        digest = evidence.put("original", tmp_path)
+        path = next(p for p in evidence.store_dir(tmp_path).rglob("*") if p.is_file())
+        path.write_bytes(b"\xff\xd8\xff\xe0 not text at all")
+        assert evidence.get(digest, tmp_path) is None
+
     def test_no_state_dir_still_yields_a_reference(self, tmp_path):
         """A caller with nowhere to write must still record a digest, so the
         reader reports it as unresolvable rather than as never recorded."""

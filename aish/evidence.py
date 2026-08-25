@@ -86,13 +86,23 @@ def get(digest: str, state_dir: os.PathLike | str | None) -> str | None:
     The digest is re-verified on read. A blob that does not hash to its own
     name has been truncated or tampered with, and returning it would let a
     reader quote evidence that is not what was recorded.
+
+    `UnicodeDecodeError` is caught beside `OSError` because this store is
+    text-only by CONSTRUCTION and not by enforcement: `digest_of` hashes UTF-8
+    bytes and `put` writes with `write_text`, so nothing here can produce a
+    blob that `read_text` chokes on — but nothing here refuses one either. A
+    digest arriving from anywhere else (a hand-made file under the store, a
+    future writer, a state dir carried between machines) whose bytes are binary
+    would raise straight out of a READER whose stated law is that unreadable
+    bytes are reportable, not an error. Undecodable and truncated are the same
+    answer for the same reason: what is on disk is not what was recorded.
     """
     if state_dir is None or not digest:
         return None
     path = _blob_path(state_dir, digest)
     try:
         text = path.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return text if digest_of(text) == digest else None
 
