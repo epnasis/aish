@@ -1253,3 +1253,113 @@ class TestUsageOnTheReasoningRecord:
         agent.run_task("hi")
         (record,) = steps(log.path, "reasoning")
         assert "usage" not in record
+
+
+class TestTheEvidenceFrameOnTheRecord:
+    """#289 slice 1. aish drives pages the owner cannot see, so a frame is the
+    only way to check what one said. The record must be complete enough to be
+    worth trusting: a reference that RESOLVES, or an honest statement that the
+    bytes are gone.
+
+    The frame proves what happened. It prevents nothing, and nothing anywhere
+    is permitted or widened on the strength of it.
+    """
+
+    def _browsed(self, tmp_path, monkeypatch, outcome):
+        agent, _, log = make_logged_agent(
+            [
+                model_says(tool_calls=[tool_call("browse", url="https://eon.pl/x")]),
+                model_says("done"),
+            ],
+            tmp_path,
+        )
+        agent._approved_sites.add("eon.pl")
+        monkeypatch.setattr(agent_module.web, "browse", lambda *a, **kw: outcome)
+        agent.run_task("what does the portal say")
+        return log
+
+    def _stored(self, tmp_path):
+        path = tmp_path / "media" / "abc123-browse-eon-pl.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\xff\xd8\xff\xe0 a picture of the page")
+        return path
+
+    def test_the_tool_step_points_at_the_bytes_and_never_carries_them(
+        self, tmp_path, monkeypatch
+    ):
+        from aish import tools
+
+        picture = self._stored(tmp_path)
+        log = self._browsed(
+            tmp_path, monkeypatch, tools.ToolOutcome("the page", frame=str(picture))
+        )
+        (step,) = [s for s in steps(log.path, "tool") if s["name"] == "browse"]
+        assert step["frame"] == str(picture)
+        # Bulk bytes never enter the log — the record only POINTS at them, and
+        # that is what keeps them purgeable on their own schedule. None of the
+        # picture's own content is in the file, escaped or not.
+        written = log.path.read_text()
+        assert "a picture of the page" not in written
+        assert "\\ud8" not in written and "\\u00ff" not in written
+
+    def test_explain_points_at_a_frame_that_is_still_there(self, tmp_path, monkeypatch):
+        from aish import tools
+
+        picture = self._stored(tmp_path)
+        log = self._browsed(
+            tmp_path, monkeypatch, tools.ToolOutcome("the page", frame=str(picture))
+        )
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert str(picture) in out
+        assert "purged" not in out.split("browse")[-1]
+
+    def test_a_frame_the_store_evicted_reads_as_gone_not_as_never_taken(
+        self, tmp_path, monkeypatch
+    ):
+        """The media store is a bounded LRU cache, so a record outliving its
+        picture is the NORMAL end of a frame's life. It must never read as
+        though nothing was captured — those route to different repairs."""
+        from aish import tools
+
+        picture = self._stored(tmp_path)
+        log = self._browsed(
+            tmp_path, monkeypatch, tools.ToolOutcome("the page", frame=str(picture))
+        )
+        picture.unlink()
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert call["frame"] == str(picture)
+        assert call["frame_state"] == explain_mod.PURGED
+        assert "purged" in explain_mod.explain(log.path, root=tmp_path)
+
+    def test_a_page_nobody_could_picture_says_which_page_that_was(
+        self, tmp_path, monkeypatch
+    ):
+        from aish import browse as browse_mod
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path,
+            monkeypatch,
+            tools.ToolOutcome("a sign-in door", frame_skipped=browse_mod.NO_FRAME_SIGNIN),
+        )
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert call["frame"] == ""
+        assert call["frame_skipped"] == browse_mod.NO_FRAME_SIGNIN
+        assert "frame_state" not in call
+        assert browse_mod.NO_FRAME_SIGNIN in explain_mod.explain(log.path, root=tmp_path)
+
+    def test_a_call_that_recorded_nothing_claims_no_capture_was_considered(
+        self, tmp_path
+    ):
+        """A log written before frames existed, and every tool that has no
+        page. Absence of the key is the third state, and it must not be
+        manufactured into an empty one."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        lg = explain_mod.load(log.path)
+        for call in explain_mod.dossier(lg.turns[-1], lg, tmp_path)["did"]["calls"]:
+            assert "frame" not in call

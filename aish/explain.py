@@ -503,6 +503,34 @@ def _thought(turn: Turn, log: Log) -> dict:
     }
 
 
+def _frame_of(step: dict) -> dict:
+    """The evidence frame this tool step recorded, resolved (#289).
+
+    Nothing at all when the step recorded neither a frame nor a reason for
+    having none — that is a log written before frames existed, or a tool that
+    never had a page, and inventing a key for it would make a reader believe a
+    capture was attempted.
+
+    The bytes live in a bounded LRU store, so a reference outliving them is the
+    NORMAL end of a frame's life, not a fault. It is reported as `purged`, the
+    same word every other deleted-but-referenced blob gets, because "the
+    picture is gone" and "no picture was taken" route to different repairs and
+    only one of them is worth investigating."""
+    path = str(step.get("frame") or "")
+    if not path:
+        skipped = str(step.get("frame_skipped") or "")
+        return {"frame": "", "frame_skipped": skipped} if skipped else {}
+    try:
+        there = Path(path).is_file()
+    except OSError:  # a path this process cannot even stat is not a picture
+        there = False
+    return {
+        "frame": path,
+        "frame_state": RECORDED if there else PURGED,
+        "frame_skipped": "",
+    }
+
+
 def _did(turn: Turn) -> dict:
     """Every tool call: the arguments as emitted, the verdicts that governed it,
     and what came back. Joined by call id, never by position."""
@@ -543,6 +571,14 @@ def _did(turn: Turn) -> dict:
                 # what makes "offered" and "used" joinable (#274).
                 "truncation": step.get("truncation") or {},
                 "read": step.get("continuation") or "",
+                # The picture of the page this call read (#289), and whether
+                # the bytes it points at are still there. Three states, like
+                # every other reference in this file: no key at all means the
+                # writer recorded nothing (a log older than the frame, or a
+                # tool that has no page), RECORDED means the file resolved, and
+                # PURGED means the record outlived the picture — which is the
+                # ordinary end for a store that is a bounded LRU cache.
+                **_frame_of(step),
                 "gates": gates,
                 "refused": [g for g in gates if _refused(g)],
                 "completed": True,
@@ -572,6 +608,9 @@ def _did(turn: Turn) -> dict:
                 "truncation": {},
                 "read": "",
                 "gates": per_call.pop(call, []),
+                # A call that never completed never reached a page, so there is
+                # nothing to have pictured — and no key, rather than an empty
+                # one claiming a capture was considered.
                 "refused": [],
                 "completed": False,
             }
@@ -1397,6 +1436,17 @@ def _call_lines(call: dict) -> list[str]:
         )
     if call["read"]:
         lines.append(f"     {DIM}read back from cache: {call['read']}{RESET}")
+    if call.get("frame"):
+        gone = call.get("frame_state") != RECORDED
+        lines.append(
+            f"     {DIM}picture of the page: {call['frame']}"
+            + (f" {BOLD}(purged){RESET}{DIM}" if gone else "")
+            + RESET
+        )
+    elif call.get("frame_skipped"):
+        lines.append(
+            f"     {DIM}no picture of the page — {call['frame_skipped']}{RESET}"
+        )
     detail = f"     {status}, {call['secs']:.1f}s"
     if call["verdict_by"]:
         detail += f", verdict by {call['verdict_by']}"
