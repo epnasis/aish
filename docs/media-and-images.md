@@ -71,7 +71,7 @@ That is the shape of gap that produces confident nonsense rather than an error. 
 
 ## One boundary, three renderers
 
-`Agent.workspace_roots()` = `roots` + the directories the process owns (media store, scratch, tool-output cache, document store). Consumed by `/file` (`WebServer._workspace_roots`), the PDF exporter, the CLI's `term_image`, `read_file`'s prompt rule, and the approver's path scoping — see the workspace-boundary section of `docs/documents-and-pdf.md` for why the read side was added (#220).
+`Agent.workspace_roots()` = `roots` + the directories the process owns (media store, scratch, document store, transcripts, browser downloads) — but NOT the tool-output cache, which left the boundary in #317. Consumed by `/file` (`WebServer._workspace_roots`), the PDF exporter, the CLI's `term_image`, `read_file`'s prompt rule, and the approver's path scoping — see the workspace-boundary section of `docs/documents-and-pdf.md` for why the read side was added (#220).
 
 They disagreed before #188: the exporter trusted the scratch dir and `/file` did not, so a file the model wrote **where it is told to write throwaway files** printed fine in a PDF and 403'd in the chat with nothing saying why. `TestImageRoots`, `TestImageRootsAgreement`.
 

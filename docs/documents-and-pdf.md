@@ -99,7 +99,7 @@ every page of every document scrolled through would evict real media to hold it.
 
 ## The workspace boundary (#220)
 
-`Agent.workspace_roots()` — everywhere aish may **read** without asking: the session roots plus the directories the process owns (media store, scratch, tool-output cache, document store).
+`Agent.workspace_roots()` — everywhere aish may **read** without asking: the session roots plus the directories the process owns (media store, scratch, document store, transcripts, browser downloads). The tool-output cache is deliberately NOT among them (#317): it is read through `read_tool_output`, which carries the entry's provenance, and the file layer refuses it.
 
 This was the display-only boundary, consumed by nothing that reads. The read side was missing, and the asymmetry was absurd once seen: the scratch dir was auto-approved for **writing** and **deleting** but not for **reading**, so the model could create a file there unprompted, delete it unprompted, and then need a tap to grep the thing it had just written. Three of the four approvals in the motivating session were this.
 

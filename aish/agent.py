@@ -711,6 +711,18 @@ READ_DENIED = (
     "Do not retry; proceed without it or ask the user."
 )
 
+# The cache is not a card, it is a wrong door (#317). Leaving it to the ordinary
+# out-of-workspace prompt would put an approval tap in front of a path nobody
+# can read — a digest under a state directory — and a tap the owner does not
+# understand is a tap he gives. The refusal NAMES the working route, because a
+# block that hides the correct path is what manufactures the workaround.
+TOOL_OUTPUT_NOT_A_FILE = (
+    "NOT EXECUTED: {path} is inside aish's own tool-output cache, which is not "
+    "part of the workspace and is never read or written as a file. To continue "
+    "a result that was cut, call read_tool_output(continuation=\"<key>\") with "
+    "the key from that result's own truncation notice."
+)
+
 BLOCKED_RESULT = (
     "BLOCKED by the safety denylist ({reason}) — NOT executed, and it cannot "
     "be approved through you at all. If the user truly intends this, they must "
@@ -2054,10 +2066,21 @@ class Agent:
         # reasoning as the media store for the location: a continuation must
         # outlive the scratch dir, because a result truncated in one turn is
         # paged in a later one. Self-pruning LRU.
+        #
+        # It is aish's OWN cache and deliberately NOT a workspace root (#317 —
+        # see workspace_roots). With no state dir it gets a temp directory of
+        # its own rather than a subdirectory of the scratch workspace, because
+        # scratch IS a root: a store inside it would be reachable through
+        # read_file exactly as the state-dir one was.
         self.tool_output_dir = (
-            Path(state_dir) / "tool-output"
-            if state_dir is not None
-            else self.scratch_dir / "tool-output"
+            Path(tempfile.mkdtemp(prefix="aish-tool-output-")).resolve()
+            if state_dir is None
+            else Path(state_dir) / "tool-output"
+        )
+        self._cache_finalizer = (
+            weakref.finalize(self, shutil.rmtree, self.tool_output_dir, ignore_errors=True)
+            if state_dir is None
+            else None
         )
         # Text renditions of documents read with read_pdf (#219), keyed by the
         # SOURCE file's hash. Outside the scratch dir for the same reason as the
@@ -2092,15 +2115,18 @@ class Agent:
         self.messages: list[dict] = [{"role": "system", "content": content}]
 
     def close(self) -> None:
-        """Best-effort cleanup of an EPHEMERAL scratch workspace. Idempotent;
-        also runs automatically when the Agent is garbage-collected or the
-        interpreter exits (weakref.finalize).
+        """Best-effort cleanup of the EPHEMERAL scratch workspace and the
+        ephemeral continuation cache beside it. Idempotent; also runs
+        automatically when the Agent is garbage-collected or the interpreter
+        exits (weakref.finalize).
 
         A chat-scoped workspace is deliberately untouched: it outlives this
         object (#258), and evicting an agent must not delete the directory the
-        conversation still refers to."""
-        if self._scratch_finalizer is not None:
-            self._scratch_finalizer()
+        conversation still refers to. The state-dir cache is untouched for the
+        same reason — a result cut in one session is paged in the next."""
+        for finalizer in (self._scratch_finalizer, self._cache_finalizer):
+            if finalizer is not None:
+                finalizer()
 
     def cancel(self) -> None:
         """Stop the running task at the next boundary: mid-stream (the token
@@ -3686,9 +3712,22 @@ class Agent:
         """The workspace boundary: everywhere aish may READ without asking.
 
         The session roots plus the directories aish itself owns — the media
-        store (where show_image puts everything), the scratch workspace, and
-        the tool-output cache. Reading back what the process already wrote
-        unprompted grants nothing new, which is what makes the widening safe.
+        store (where show_image puts everything), the scratch workspace, the
+        document and transcript stores. Reading back what the process already
+        wrote unprompted grants nothing new, which is what makes the widening
+        safe.
+
+        The tool-output cache is the ONE store aish owns that is deliberately
+        NOT here (#317). Everything else in this list holds something the model
+        was told to go and look at; the cache holds tool output as the
+        producing tool made it — a fetched page BELOW the banner `web._present`
+        prepends afterwards — so a read of it through the file layer delivers
+        outside content bannerless, untainted and unattributed. That is the
+        #277 fence bypassed through a door nothing asks at. `read_tool_output`
+        is the purpose-built door and carries the entry's provenance (#314),
+        and no task needs read_file on a digest-named cache entry, so the store
+        leaves the boundary rather than the file layer growing a second
+        provenance path that would have to be kept in step with the first.
 
         ONE definition, consumed by everything that reads or displays: the web
         /file endpoint, the PDF exporter, the terminal's inline images,
@@ -3712,7 +3751,6 @@ class Agent:
             *self.roots,
             self.media_dir,
             self.scratch_dir,
-            self.tool_output_dir,
             self.documents_dir,
             # read_media NAMES the transcript file in its result and tells the
             # model to read it. Outside this list that instruction would cost
@@ -5415,7 +5453,13 @@ class Agent:
 
     def _read_needs_prompt(self, name: str, args: dict) -> bool:
         if name == "read_file":
-            return self._read_prompt_reason(str(args.get("path", ""))) is not None
+            path = str(args.get("path", ""))
+            # A cache read is refused in _dispatch, and the parallel thunks
+            # have no gate at all — so it has to leave this path first (#317).
+            return (
+                self._is_tool_output_cache(path)
+                or self._read_prompt_reason(path) is not None
+            )
         # Egress calls needing an approval card (#178 P0-2) must run through
         # _dispatch sequentially — the parallel thunks would bypass the gate.
         # Same for a read that would use a signed-in session (#221): the
@@ -6134,6 +6178,18 @@ class Agent:
         if files.is_outside_roots(path, self.cwd, self.workspace_roots()):
             return "outside"
         return None
+
+    def _is_tool_output_cache(self, path: str) -> bool:
+        """Does this path land inside aish's own continuation store (#317)?
+
+        Asked through `files.contains`, the one containment function (#309), so
+        a symlink into the store from a session root answers the same as the
+        store's own path. It is asked at all — rather than left to the
+        workspace boundary alone — because the boundary is only the SESSION's
+        roots plus aish's stores, and a session whose root happens to contain
+        the state directory would put the cache back inside it.
+        """
+        return files.contains(self.tool_output_dir, path, self.cwd)
 
     @staticmethod
     def _int_arg(args: dict, key: str, default: int) -> int:
@@ -7115,6 +7171,10 @@ class Agent:
 
         if name == "read_file":
             path = str(args.get("path", ""))
+            if self._is_tool_output_cache(path):
+                return _gate_outcome(
+                    TOOL_OUTPUT_NOT_A_FILE.format(path=path), decision="blocked"
+                )
             label, thunk = self._read_file_call(args)
             self._note(label)
             reason = self._read_prompt_reason(path)
@@ -7960,6 +8020,17 @@ class Agent:
         )
 
     def _dispatch_write(self, name: str, args: dict) -> str:
+        # Before the plan, because planning an edit reads the file. A write
+        # here is the sharper half of #317: the sidecar beside an entry is what
+        # says whether its bytes came from outside and whether addresses in
+        # them are the source's, so a model able to write one could label its
+        # own composed URLs as links a page offered — the laundering the key
+        # was kept provenance-free to prevent (#314).
+        if self._is_tool_output_cache(str(args.get("path", ""))):
+            return _gate_outcome(
+                TOOL_OUTPUT_NOT_A_FILE.format(path=str(args.get("path", ""))),
+                decision="blocked",
+            )
         if name == "write_file":
             plan = files.plan_write(
                 str(args.get("path", "")), str(args.get("content", "")), self.cwd
