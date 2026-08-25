@@ -564,6 +564,52 @@ With no approver it fails closed, like the login gate. The echo line is not deco
 
 Two fences worth keeping: browse is **not** in `READ_ONLY_TOOLS`, so it never rides the parallel read path — one page, one session, one action at a time, or two clicks land on one document in an order nobody chose. And `web.browse` keeps the same SSRF fence as `read_url`: a driven page is still a model-chosen URL, and this one can click.
 
+## The evidence frame: what the page looked like when the model read it (#289 slice 1)
+
+The oldest unmet ask in the backlog, in the owner's words: *"when you show something I can actually see it. Today I don't see it."*
+
+aish drives real pages he cannot see. When it reports what a page said, there is no way to check — and every browse fix this month came from a developer driving real Chrome by hand, because he cannot. So at snapshot time the page is photographed, the picture is stored outside the session log, and the trace step for that call points at it. Trace rows get thumbnails; replay gets them free (the row is a pure function of the step); `aish explain` prints the path.
+
+**What the frame claims is exactly this: a picture of the page at the moment the model was SHOWN it.** Not "what the model saw" — the model is handed text and a control list, never pixels — and not "the page during the call", because a page repaints after the shutter and a capture can fail. The narrow statement is checkable; the wide one is false the first time either happens.
+
+**A frame is a RECORD, and a record is detection, never protection.** Nothing in the browse gate, the act-time fence, the irreversible refusals or the host grant is loosened, widened or checked less carefully because a picture exists. #295 P2 is explicit that for anything irreversible the record is not a control, and this section is the place someone would be tempted to argue otherwise.
+
+### Where the bytes live, and why not the evidence store
+
+**The media store** (`browser.frames_dir()` = `state_dir()/media`, which is `Agent.media_dir` for any agent that has a state dir — every web session), not the evidence store beside it. The evidence store is text-only by construction — its address is the sha256 of UTF-8 bytes, it writes with `write_text` and reads with `read_text` — so a JPEG has no address there. The media store already solves every problem a frame has: raw bytes, content addressing (a flow that reads one page twice stores one file), a bounded LRU (`MEDIA_MAX_BYTES`, `MEDIA_MAX_FILES`), and it is already served to the web UI and, being `Agent.media_dir`, already inside `Agent.workspace_roots` — which is what lets a frame be SEEN rather than merely stored.
+
+The governance property #295 requires holds either way and is what actually matters: **bulk bytes never enter the log; the record only points at them, and the bytes are purgeable on their own schedule.** A frame that has been pruned is reportable, not an error, and never reads as though nothing was recorded: `aish explain` stats the path and says **purged**, and the trace row says the picture could not be loaded and the store may have cleared it — the weaker claim, because a browser cannot tell an evicted file from a stale token.
+
+`frames_dir()` resolves `AISH_STATE_DIR` itself because the capture happens on the browser thread, several layers below any agent; `aish-web` exports that variable from the value it hands the Agent (#290), so the two answers cannot drift. `TestTheEvidenceFrame` pins the agreement, because a frame stored anywhere else would 403 in the chat.
+
+The cost of sharing one store is real, is measured, and is a finding rather than a fix — see the capacity note in `docs/media-and-images.md`.
+
+### Four invariants, and one of them is not yet reachable
+
+- **Never while a human's hands are on the page.** `_session` already refuses a browse outright while `owner.view` is set, so nothing reaches the capture in that state today. The check is written where the capture is anyway, because that is where the rule belongs and because the later slices of #289 are the ones that put a viewer on a page the model is driving.
+- **Never a sign-in page.** `Snapshot.signin` is the password-field observation the snapshot already carries; it is now read ONCE and used twice — told to the model, and used to refuse the capture — so the two can never disagree about which page this was. A screenshot of a login form is precisely the artifact that must not exist.
+- **A failed capture costs the snapshot nothing.** Bounded by `FRAME_TIMEOUT_MS` and swallowed whole: the model still gets its page. The frame is an extra, never a dependency.
+- **Nothing aish writes is ever rendered inside the frame.** Structurally true — a frame is `page.screenshot` of the site's own document, and the row draws it as an `<img>`. Stated because the residual attack is the page painting *"aish says: enter your card here"* in pixels, and the answer to that is that nothing in aish's voice may ever be composited into one.
+
+**Absence says WHICH absence.** `Snapshot.frame_skipped` carries one of `browse.NO_FRAME_SIGNIN` / `NO_FRAME_HANDS` / `NO_FRAME_FAILED` — a closed vocabulary, because it is written into a trace record and read back by two renderers, and a free-text reason would drift between them. A page nobody pictured and a page nobody *could* picture route to different repairs (trace contract corollary 2). A step carrying neither a frame nor a reason is the third state: nothing was recorded, which is what a log written before this looks like.
+
+### It is one screenful, on the same loop, at snapshot time
+
+The page has already settled when `_snapshot` runs, so this is one more short job on a page that has stopped moving — not a new wait, not a thread, not a poll. Measured on this machine against a dense 60-tile shop page at 1440x820 — about the content area of the browse window (`--window-size=1440,900`) — at `device_scale_factor` 1, in Chrome:
+
+| quality | bytes | capture (median of five) |
+|---|---|---|
+| 40 | 60 KB | 36 ms |
+| 50 | 67 KB | 27 ms |
+| 60 | 73 KB | 27 ms |
+| 70 | 84 KB | 32 ms |
+
+and the **same page full-height is 311 KB**. So quality is nearly free and HEIGHT is what costs, which is why `FRAME_JPEG_QUALITY` is 50 (the remote view's number, for the same reason) and why a frame is the VIEWPORT rather than the whole document. That bound is also why the row must not imply otherwise: the frame shows what the page looked like where a person would start reading it, not everything the model read.
+
+The read context runs at `device_scale_factor` 1 — the remote view's crispness comes from `VIEW_SCALE` at launch, which is a *launch* argument on a persistent context and therefore not available here (that is the same structural fact #289's design is built around). Frames are 1x. `view_detail`'s clip-recapture is the answer if zoom ever needs more.
+
+`TestTheEvidenceFrame` pins the store, the two refusals, the failed capture, the single password observation and the store-location agreement; `TestTheFrameReferenceRidesTheResult` pins that the reference rides the `ToolOutcome` envelope beside a page cut and that a call which reached no page borrows no picture; `TestTheEvidenceFrameOnTheRecord` pins the trace step, the three states in `aish explain`, and that no bytes enter the log.
+
 ## The document at the end of the flow
 
 Driving the portal gets you to the invoice; it does not get you the invoice. The E.ON session ended holding real `…/ebokapi/GetDocument?objectId=…` URLs it could do nothing with, because `read_pdf` and `fetch_binary` go through the anonymous opener — the same identity gap #236 closed for reads, one tool over. So `accept_downloads` is now **True** (it was deliberately False), and a click that produces a file saves it under `~/.local/state/aish/browser/downloads`.

@@ -22,6 +22,21 @@ The store is `state_dir/media`, deliberately **not** the scratch workspace: a pi
 
 ---
 
+## A second producer, and what it costs the first (#289)
+
+`show_image` is no longer the only thing writing here. Every driven page is photographed at snapshot time and the JPEG goes into this store (`browser.frames_dir()` is literally `Agent.media_dir`); `docs/browser.md` says why the evidence store could not hold it. The store was the right home — content-addressed, bounded, already served, already inside `workspace_roots` — but the caps are now SHARED, and that is a real cost with real numbers.
+
+**Measured, not estimated.** A browse frame is the browse context's viewport (1440x820, `device_scale_factor` 1) at quality 50: **67 KB**, ~27 ms to capture. Against the caps:
+
+- **Bytes are not the constraint.** Five hundred frames is about 33 MB, against a `MEDIA_MAX_BYTES` ceiling of two hundred megabytes.
+- **The file count is.** `MEDIA_MAX_FILES` is 500, and frames are what fill it.
+
+One frame per snapshot, and a browse call takes one snapshot (a sign-in renewal re-opens the page, so that one takes two) — so a 30-step driving flow leaves about 30 files. Roughly **seventeen such flows fill the store**, and the prune is LRU by mtime — so what goes first is the OLDEST file, which after a browsing week is very plausibly a picture the owner asked for. He would see a broken image in an old chat and nothing would say why.
+
+**This is written down, not fixed.** Raising the cap silently would trade one invisible failure for a bigger directory nobody chose, and the real question — do frames deserve their own budget, or a shorter retention than a picture an answer displays? — is a decision about how long each KIND of picture is worth keeping, which is not a decision to make on the way past. Two things make it survivable in the meantime: the store is a **cache**, so an evicted `show_image` picture is restored by re-fetching it, and an evicted frame reads back as a picture that is gone rather than as though nothing was captured (`aish explain` calls it purged; the trace row, which cannot tell eviction from a stale token, says only that it could not be loaded).
+
+---
+
 ## `Agent._show_image`
 
 Orchestrates the above and returns a **ready-built markdown line** — aish composes it, so a caption containing a bracket or a newline cannot silently break the image parser. Every failure returns a sentence naming what went wrong, so the model learns **during** the turn rather than from the user reporting it afterwards. `TestShowImage`.
