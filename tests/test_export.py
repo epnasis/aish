@@ -1,5 +1,7 @@
 """Export (Markdown -> PDF) tests. Pure functions — no server, no network."""
 
+import email.message
+
 from aish import export
 
 
@@ -298,6 +300,8 @@ def test_youtube_shorts_shares_regex_with_watch_and_short_host():
 class _FakeResponse:
     def __init__(self, data: bytes) -> None:
         self._data = data
+        self.headers = email.message.Message()
+        self.headers["Content-Type"] = "image/png"
 
     def read(self, n: int) -> bytes:
         return self._data[:n]
@@ -315,7 +319,7 @@ def _no_network(monkeypatch):
     def boom(*args, **kwargs):  # pragma: no cover - reaching it IS the failure
         raise AssertionError("network fetch attempted for a blocked URL")
 
-    monkeypatch.setattr(export.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(export.web.urllib.request, "urlopen", boom)
     monkeypatch.setattr(export.web._opener, "open", boom)
 
 

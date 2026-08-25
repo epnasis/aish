@@ -37,6 +37,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import files
 from .paths import config_home
 from .tools import (
     STATUS_FAILED,
@@ -282,11 +283,10 @@ def resolve_executable(tool_dir: Path, executable: str) -> str | None:
         return shutil.which(executable)
     if os.path.isabs(executable):
         return None
-    candidate = (tool_dir / executable).resolve()
-    try:
-        candidate.relative_to(tool_dir.resolve())
-    except ValueError:
+    candidate = tool_dir / executable
+    if not files.contains(tool_dir, candidate):
         return None  # escapes the tool dir
+    candidate = files.resolved(candidate) or candidate
     if candidate.is_file() and os.access(candidate, os.X_OK):
         return str(candidate)
     return None

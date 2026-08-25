@@ -2420,9 +2420,7 @@ class Agent:
         self._sync_cwd_in_context()  # restored cwd shows in the system prompt too
         for path in trusted:
             resolved = Path(path).resolve()
-            if resolved.is_dir() and not any(
-                resolved.is_relative_to(root) for root in self.roots
-            ):
+            if resolved.is_dir() and not files.within_roots(self.roots, resolved):
                 self.roots.append(resolved)
 
     def resume_turns(self, last: int) -> None:
@@ -3640,13 +3638,10 @@ class Agent:
         roots mid-approval. Unlike add_root it never touches the conversation —
         it runs while a tool call is in flight, where an injected user message
         could break providers that require tool results to follow tool calls."""
-        path = Path(os.path.expanduser(target))
-        if not path.is_absolute():
-            path = Path(self.cwd) / path
-        path = path.resolve()
-        if not path.is_dir():
-            return f"ERROR: no such directory: {path}"
-        if any(path.is_relative_to(root) for root in self.roots):
+        path = files.resolved(target, self.cwd)
+        if path is None or not path.is_dir():
+            return f"ERROR: no such directory: {target}"
+        if files.within_roots(self.roots, path):
             return f"[{path} is already inside a session root]"
         self.roots.append(path)
         self._emit_workspace("trust", str(path))
@@ -5046,15 +5041,10 @@ class Agent:
                 return Path(), f"could not save the downloaded PDF ({exc})."
             return target, None
 
-        path = Path(os.path.expanduser(source))
-        if not path.is_absolute():
-            path = Path(self.cwd) / path
-        try:
-            path = path.resolve()
-        except OSError as exc:
-            return Path(), f"could not resolve {source!r} ({exc})."
-        roots = [Path(r).resolve() for r in self.workspace_roots()]
-        if not any(path.is_relative_to(root) for root in roots):
+        path = files.resolved(source, self.cwd)
+        if path is None:
+            return Path(), f"could not resolve {source!r}."
+        if not files.within_roots(self.workspace_roots(), path):
             return Path(), (
                 f"{path} is outside this session's directories. Ask the user to "
                 "/add-dir its folder."
@@ -5192,15 +5182,10 @@ class Agent:
         """A path already on this machine, confined to the directories images
         may be displayed from — storing one we could never serve would just move
         the silent failure to render time."""
-        path = Path(os.path.expanduser(source))
-        if not path.is_absolute():
-            path = Path(self.cwd) / path
-        try:
-            path = path.resolve()
-        except OSError as exc:
-            return b"", f"could not resolve {source!r} ({exc})."
-        roots = [Path(r).resolve() for r in self.workspace_roots()]
-        if not any(path.is_relative_to(root) for root in roots):
+        path = files.resolved(source, self.cwd)
+        if path is None:
+            return b"", f"could not resolve {source!r}."
+        if not files.within_roots(self.workspace_roots(), path):
             return b"", (
                 f"{path} is outside this session's directories, so it could not be "
                 "displayed even if stored. Ask the user to /add-dir its folder."
@@ -7588,11 +7573,8 @@ class Agent:
         approved `ln -s` first, so it is defence-in-depth rather than a door —
         recorded here so the next reader does not have to rediscover it.
         """
-        try:
-            target = plan.target.resolve()
-            if not any(target.is_relative_to(d.resolve()) for d in rules.rule_dirs()):
-                return None
-        except OSError:
+        target = files.resolved(plan.target)
+        if target is None or not files.within_roots(rules.rule_dirs(), target):
             return None
         if target.suffix != ".md":
             return None

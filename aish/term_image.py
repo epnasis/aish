@@ -18,6 +18,7 @@ import re
 import sys
 from pathlib import Path
 
+from . import files
 from .backends import IMAGE_SUFFIXES
 
 # Above this the base64 dump hurts more than the picture helps.
@@ -47,16 +48,14 @@ def local_image_paths(answer: str, roots) -> list[Path]:
     """Existing image files the answer references via ![alt](/abs/path),
     kept only when inside the session roots — the same scope the web UI's
     /file endpoint enforces."""
-    resolved_roots = [Path(r).resolve() for r in roots]
     found: list[Path] = []
     for target in IMAGE_MD_RE.findall(answer):
         if target.startswith(("http://", "https://")) or not target.startswith(("/", "~")):
             continue
-        path = Path(target).expanduser()
-        if path.suffix.lower() not in IMAGE_SUFFIXES:
+        if Path(target).suffix.lower() not in IMAGE_SUFFIXES:
             continue
-        path = path.resolve()
-        if not any(path.is_relative_to(r) for r in resolved_roots):
+        path = files.resolved(target)
+        if path is None or not files.within_roots(roots, path):
             continue
         if path.is_file() and path not in found:
             found.append(path)
