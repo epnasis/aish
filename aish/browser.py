@@ -2059,6 +2059,71 @@ async def _signin_frame(owner: _Owner, page: Any) -> tuple[str, str]:
     return await _evidence_frame(owner, page, label="sign-in")
 
 
+async def _press_the_button_again(
+    page: Any, record: Any, watch: _CredentialWatch, *, was: str
+) -> None:
+    """A submit that did not fire gets ONE fallback gesture (#320).
+
+    **This is not a second attempt at the credential — it is a second attempt
+    at the BUTTON, and the difference is the whole justification.** The next
+    reader will otherwise take it for a breach of *one attempt, never a retry*.
+    That rule exists because a wrong password tried twice ticks the site's
+    lockout counter; it is about the VALUE reaching the site. Here the fence
+    has watched every request this page made and NOTHING carrying the password
+    has left it, so the site has not seen the credential once, and this is the
+    first attempt at delivering it rather than the second. The value is already
+    typed; only the gesture is repeated.
+
+    The lead this exists for is in the owner's own session logs, on this exact
+    site: *"the click would not land, so aish pressed it with the keyboard, and
+    nothing about that control or the address changed afterwards, so it may not
+    have been registered."* Clicks not landing is documented eon.pl behaviour,
+    and `element.click()` had no fallback and no verification that anything was
+    sent.
+
+    Four conditions, and every one of them is a way of being sure a first
+    submission is not in flight — a double submission is the one thing this may
+    not risk:
+
+    1. **The submit was a CLICK.** With no form the submit already WAS Enter,
+       and pressing it again is a repeat with no new information. Enforced by
+       the caller, which only calls this when it pressed a button.
+    2. **Nothing carrying the password has been let through.** The route
+       handler records a send BEFORE `continue_` returns, so a request already
+       on the wire is already in `sent_to`; an empty list here is not a race.
+    3. **The page has not navigated.** A page that moved has acted on
+       something, whatever the fence did or did not see.
+    4. **It is still the page that was checked**, by the same fence the press
+       itself asked — the tagged field present, the origin and the form's
+       destination unchanged. A page that changed under us gets nothing.
+
+    Once, by construction: straight-line code with no loop and one caller.
+    """
+    if watch.was_tried or not watch.armed:
+        return
+    try:
+        if str(page.url or "") != was:
+            return
+        if await page.evaluate(SIGNIN_STILL_OURS_JS, record.origin):
+            return
+        field = await page.query_selector("[data-aish-signin='password']")
+        if field is None:
+            return
+        # Focus the FIELD, not the button: the button already has focus from
+        # the click that did not land, so Enter there would repeat the same
+        # gesture. Enter in the field is the other way a form is submitted, and
+        # it is the one that worked by hand.
+        await field.focus()
+        await page.keyboard.press("Enter")
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001 — an SPA sign-in never navigates
+            pass
+        await page.wait_for_timeout(SETTLE_MS)
+    except Exception:  # noqa: BLE001 — a fallback that failed leaves the ending alone
+        return
+
+
 async def _sign_in_on(
     page: Any, record: Any, identifier: str, password: str, watch: _CredentialWatch
 ) -> SignInResult:
@@ -2133,6 +2198,7 @@ async def _sign_in_on(
     # is Enter — the universal gesture, and the one that cannot land on
     # "Continue with Google", which is what choosing a button by its words did.
     submit = await page.query_selector("[data-aish-signin='submit']")
+    was = page.url
     if submit is not None:
         await submit.click(timeout=ACT_TIMEOUT_MS)
     else:
@@ -2142,6 +2208,9 @@ async def _sign_in_on(
     except Exception:  # noqa: BLE001 — an SPA sign-in never navigates
         pass
     await page.wait_for_timeout(SETTLE_MS)
+
+    if submit is not None:
+        await _press_the_button_again(page, record, watch, was=was)
 
     if await _has_password_field(page):
         # The form came back — and on its own that says nothing about the

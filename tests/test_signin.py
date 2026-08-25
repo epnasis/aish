@@ -239,7 +239,11 @@ class TestTheReplayItself:
             def __init__(self, page):
                 self.page = page
 
-            async def press(self, _key):
+            async def press(self, key):
+                if key == "Enter":
+                    self.page.enter_pressed = getattr(
+                        self.page, "enter_pressed", 0
+                    ) + 1
                 return None
 
             async def type(self, text, delay=0):
@@ -459,6 +463,141 @@ class TestNothingIsStaleUntilItWasSeenToLeave:
         assert result.second_factor and not result.stale
 
 
+class TestASubmitThatDidNotFireGetsOneRetryOfTheBUTTON:
+    """#320. `_sign_in_on` pressed the form's own submit with `element.click()`
+    and had no fallback and no verification that anything was sent. The owner's
+    own logs, on this exact site: *"the click would not land, so aish pressed
+    it with the keyboard, and nothing about that control or the address changed
+    afterwards, so it may not have been registered."*
+
+    This is NOT a second attempt at the credential — the fence has watched
+    every request the page made and nothing carrying the password has left it,
+    so the site has not seen it once. One attempt, never a retry, is about the
+    VALUE reaching the site; this repeats only the gesture."""
+
+    def _page(self, **kw):
+        page = TestTheReplayItself.FakePage(**kw)
+        page.enter_pressed = 0
+        page.focused = []
+        return page
+
+    def _run(self, page, watch):
+        return TestTheReplayItself()._run(page, watch=watch)
+
+    def _watch(self, **kw):
+        from aish import browser
+
+        return browser._CredentialWatch(**kw)
+
+    def test_a_click_that_sent_nothing_is_followed_by_ONE_enter(self):
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        self._run(page, self._watch(armed=True))
+        assert page.submitted is True        # the click happened
+        assert page.enter_pressed == 1       # and exactly one fallback
+        # In the FIELD, not on the button: the button already has focus from
+        # the click that did not land, so Enter there repeats the same gesture.
+        assert page.focused == ["[data-aish-signin='password']"]
+
+    def test_a_click_that_DID_send_gets_no_second_gesture(self):
+        """The guard against a double submission. A request already on the
+        wire is already in `sent_to` — the route handler records before
+        `continue_` returns — so an empty list here is not a race."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        result = self._run(page, self._watch(armed=True, sent_to=["https://eon.pl"]))
+        assert page.enter_pressed == 0
+        assert result.stale is True  # …and THAT is what a stale verdict is
+
+    def test_a_formless_login_gets_no_fallback_because_enter_WAS_the_submit(self):
+        """Pressing it again is a repeat with no new information."""
+        page = self._page(
+            url="https://www.linkedin.com/login",
+            form={"ok": True, "posts_to": "", "identifier": False,
+                  "submit": False, "form": False,
+                  "page_origin": "https://www.linkedin.com"},
+            has_password_after=True,
+        )
+        from aish import signin as signin_mod
+
+        record = signin_mod.Record(
+            origin="https://www.linkedin.com",
+            url="https://www.linkedin.com/login", saved="d",
+        )
+        TestTheReplayItself()._run(
+            page, record=record, watch=self._watch(armed=True)
+        )
+        assert page.enter_pressed == 1  # the SUBMIT itself, and nothing after it
+
+    def test_a_page_that_navigated_gets_no_second_gesture(self):
+        """A page that moved has acted on something, whatever the fence did or
+        did not see."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          after={"url": "https://eon.pl/mojeon/2fa"},
+                          has_password_after=True)
+        self._run(page, self._watch(armed=True))
+        assert page.enter_pressed == 0
+
+    def test_a_page_that_changed_under_us_gets_no_second_gesture(self):
+        """The same fence the press itself asked: the tagged field present, the
+        origin and the form's destination unchanged."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True,
+                          changed="the form now sends to https://evil.test")
+        # The press itself refuses first, so nothing is submitted at all…
+        result = self._run(page, self._watch(armed=True))
+        assert page.submitted is False and page.enter_pressed == 0
+        assert not result.stale and "evil.test" in result.why
+
+    def test_a_page_that_changed_AFTER_the_press_gets_no_second_gesture(self):
+        """The fallback asks its OWN question, at its own moment. The press
+        passing the fence says nothing about the page a settle later — which is
+        exactly why `SIGNIN_STILL_OURS_JS` exists in the first place."""
+        from aish import browser
+
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        inner = page.evaluate
+        seen = {"n": 0}
+
+        async def evaluate(script, *args):
+            if script is browser.SIGNIN_STILL_OURS_JS:
+                seen["n"] += 1
+                return "" if seen["n"] == 1 else "the password field is gone"
+            return await inner(script, *args)
+
+        page.evaluate = evaluate
+        self._run(page, self._watch(armed=True))
+        assert page.submitted is True and seen["n"] == 2
+        assert page.enter_pressed == 0
+
+    def test_an_unwatched_attempt_never_reaches_the_fallback(self):
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        self._run(page, self._watch(armed=False))
+        assert page.enter_pressed == 0 and page.typed == []
+
+    def test_the_fallback_never_costs_the_ending(self):
+        """A fallback that threw must leave the outcome exactly as it was."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+
+        async def wedged():
+            raise RuntimeError("Target page has been closed")
+
+        page.focus_raises = wedged
+        result = self._run(page, self._watch(armed=True))
+        # Nothing was sent, so the credential is still not called stale.
+        assert result.stale is False and "could not submit" in result.why
+
+
 class _FakeElement:
     def __init__(self, page, selector):
         self.page = page
@@ -467,6 +606,12 @@ class _FakeElement:
     async def click(self, **_kw):
         if "submit" in self.selector:
             self.page.submitted = True
+
+    async def focus(self):
+        raises = getattr(self.page, "focus_raises", None)
+        if raises is not None:
+            await raises()
+        getattr(self.page, "focused", []).append(self.selector)
 
 
 def _fake_has_password(page):

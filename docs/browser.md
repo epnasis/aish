@@ -553,6 +553,21 @@ No "add a password" screen. The password editor in the remote view grows one che
 
 **Nothing is written until the sign-in is seen to work, and the success test had to be fixed first.** It was `navigations > pending_nav`, unbounded in time and cleared only when it fires — so a failed login redirecting back to the form counts, and so does a reload, a Back, or him browsing somewhere else twenty minutes later. That was tolerable while it only *asked a human a question they could dismiss*; it is not tolerable now that it also decides whether a password is written. It now also requires that the page is no longer asking for one. Same shape as the `_note_visit` lesson: a heuristic that is fine as a question becomes a false statement as a record.
 
+### A submit that did not fire gets one retry of the BUTTON (#320)
+
+`_sign_in_on` pressed the form's own submit with `element.click()` and had **no fallback and no verification that anything was sent**. The lead is in the owner's own session logs, on this exact site: *"the click would not land, so aish pressed it with the keyboard, and nothing about that control or the address changed afterwards, so it may not have been registered."* Clicks not landing is documented eon.pl behaviour, and the record read `used: 0` — the replay had never once succeeded.
+
+**This is not a second attempt at the credential, and the code comment says so, because the next reader will otherwise take it for a breach of one-attempt.** That rule is about the VALUE reaching the site: a wrong password tried twice ticks the lockout counter. Here the fence has watched every request the page made and nothing carrying the password has left it, so the site has not seen the credential once — this is the *first* attempt at delivering it. The value is already typed; only the gesture is repeated.
+
+Four conditions, and each is a way of being sure a first submission is not in flight, because a double submission is the one thing this may not risk:
+
+1. **The submit was a CLICK.** With no form the submit already WAS Enter, and pressing it again repeats the same gesture with no new information. Enforced by the caller, which calls this only when it pressed a button.
+2. **Nothing carrying the password has been let through.** The route handler records a send *before* `continue_` returns, so a request already on the wire is already in `sent_to` — an empty list here is not a race.
+3. **The page has not navigated.** A page that moved has acted on something, whatever the fence did or did not see.
+4. **It is still the page that was checked** — `SIGNIN_STILL_OURS_JS` again, at its own moment. The press passing that fence says nothing about the page a settle later, which is why the fence exists at all.
+
+Enter is pressed in the FIELD, not on the button: the button already has focus from the click that did not land, so Enter there would be the same gesture a third time. Once by construction — straight-line code, no loop, one caller — and a fallback that throws leaves the ending exactly as it was. `TestASubmitThatDidNotFireGetsOneRetryOfTheBUTTON`.
+
 ### Every attempt is photographed (#320)
 
 The replay was **completely invisible**: it took no snapshot at any point, so when it failed there was nothing to look at. Two diagnoses were proposed off the page text alone — a reCAPTCHA badge, and a wrong stored identifier — and both were wrong, which is what an unobservable failure costs. `_signin_frame` takes one picture at the END of every attempt, success or failure, into the same media store the browse frame uses, and the store holds a path and never bytes.
