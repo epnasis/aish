@@ -4319,14 +4319,24 @@ class WebServer:
             )
             return
         await self._send_frame(client, result)
-        # Then KEEP LOOKING, briefly. Showing the quick frame and correcting it
-        # once was already better than waiting for quiet before showing
-        # anything, but one correction is still a single bounded question
-        # standing in for an open-ended one — and a page goes on arriving after
-        # it. Every interaction gets a watcher, scrolls included: a lazily
-        # loaded image is the same late arrival as a spinner's contents.
-        # Already on the loop here — guarding on self.loop meant the correction
-        # silently never ran when it was unset.
+        # An already-quiet page needs no correction (#223). `settled` is the
+        # frame's own observation at the shutter — the document complete, still
+        # for the watcher's own letting-go window, and nothing on the wire — so
+        # a watcher started here has, on that evidence, nothing left to find.
+        # What it costs is the narrow gap named in docs/browser.md: a repaint
+        # driven by a timer rather than by a response, landing before the first
+        # poll, which the watcher would not have let go over. Everything the
+        # probe cannot vouch for answers False, which is what shipped.
+        if getattr(result, "settled", False):
+            return
+        # Otherwise KEEP LOOKING, briefly. Showing the quick frame and
+        # correcting it once was already better than waiting for quiet before
+        # showing anything, but one correction is still a single bounded
+        # question standing in for an open-ended one — and a page goes on
+        # arriving after it. Every unfinished interaction gets a watcher,
+        # scrolls included: a lazily loaded image is the same late arrival as a
+        # spinner's contents. Already on the loop here — guarding on self.loop
+        # meant the correction silently never ran when it was unset.
         self._view_watch = asyncio.ensure_future(self._watch_view(client, result))
         return
 
