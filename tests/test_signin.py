@@ -1598,10 +1598,17 @@ class TestEverySignInAttemptIsPhotographed:
     def test_a_sign_in_that_WORKED_is_photographed(self, state, monkeypatch):
         import pathlib
 
+        from aish import browser
+
         result, page = self._drive(monkeypatch)
         assert result.ok and result.frame_skipped == ""
         assert pathlib.Path(result.frame).read_bytes() == self.JPEG
-        assert pathlib.Path(result.frame).parent.name == "media"
+        # The evidence-frame store, not the media store it shared until #318 —
+        # and a sign-in frame is the sharpest case for the move: this store
+        # holds pictures of LOGIN PAGES, which is not something the model may
+        # ever name to a tool that puts pictures in its own context.
+        assert pathlib.Path(result.frame).parent == browser.frames_dir()
+        assert pathlib.Path(result.frame).parent.name == "frames"
         assert page.shots and page.shots[0]["type"] == "jpeg"
 
     def test_a_sign_in_that_FAILED_is_photographed(self, state, monkeypatch):

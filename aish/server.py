@@ -4874,6 +4874,76 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             headers["Cache-Control"] = "private, max-age=31536000, immutable"
         return FileResponse(path, media_type=media_type, headers=headers)
 
+    async def handle_frame(self, request) -> FileResponse | JSONResponse:
+        """GET /frame?path=<abs> — a picture of a page aish drove (#289, #318).
+
+        Its own endpoint because the bytes have their own store. A frame used
+        to live in the media store and render through `/file`; #318 moved it
+        out, because that store is inside `Agent.workspace_roots` and being
+        inside it is what let the MODEL name a frame to `show_image` and put a
+        picture of a hostile page into its own context. Nothing about the
+        OWNER's side of that was the problem, and a record he cannot see is not
+        a record (#295 P6) — so the display keeps working through a door that
+        is authorised for exactly this and nothing else.
+
+        Scoped like `/file` in every respect that is about handing bytes off
+        the machine — token, absolute path, an image type, symlinks resolved
+        BEFORE containment — and different in the one that is about which
+        bytes: containment is asked against the frame stores rather than the
+        workspace boundary, so this endpoint cannot serve a project file.
+
+        The converse holds in the arrangement that matters and is worth stating
+        no more strongly than that: `/file` cannot reach a frame because the
+        store is outside the workspace boundary, EXCEPT where a session root
+        happens to contain the state directory, which puts every store aish
+        owns back inside it. That costs nothing here — both doors answer to the
+        same token and show the same owner a picture he is entitled to see —
+        and it is precisely why the MODEL's side does not rest on the boundary
+        either: `Agent._is_evidence_frame` asks about the store directly.
+        """
+        if not self._token_ok(request.query_params.get("token")):
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        raw = request.query_params.get("path", "").strip()
+        if not raw:
+            return JSONResponse({"error": "missing path"}, status_code=400)
+        if not Path(raw).expanduser().is_absolute():
+            return JSONResponse({"error": "path must be absolute"}, status_code=400)
+        media_type = IMAGE_TYPES.get(Path(raw).suffix.lower())
+        if media_type is None:
+            return JSONResponse({"error": "unsupported file type"}, status_code=415)
+        path = files.resolved(raw)
+        if path is None or not self._is_frame(path):
+            return JSONResponse({"error": "not an evidence frame"}, status_code=403)
+        if not path.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        # Content-addressed under a digest, so the bytes at a frame's path
+        # cannot change — the upload rule, for the same reason. What it CAN do
+        # is get evicted, and a cached copy of a picture the store has pruned is
+        # a record that still resolves rather than a stale one.
+        return FileResponse(
+            path,
+            media_type=media_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, max-age=31536000, immutable",
+            },
+        )
+
+    def _is_frame(self, path: Path) -> bool:
+        """Is this the picture of a page aish drove?
+
+        The frame store (#318), plus each open session's MEDIA store — which is
+        where frames landed until #318 and where the trace rows of every chat
+        already on disk still point. Serving one of those here grants nothing
+        `/file` does not already grant the same token-holding owner; what #318
+        changed is what the MODEL may read, and a fix that blanked the pictures
+        in his existing chats would be taking the record away to protect it.
+        New frames only ever land in the first.
+        """
+        stores = [browser.frames_dir()]
+        stores.extend(session.agent.media_dir for session in self.sessions.values())
+        return any(files.contains(store, path) for store in stores)
+
     # ---- a PDF, one page at a time (#218) --------------------------------
     #
     # An attached PDF previews like a photograph, because its PAGES are the
@@ -5008,7 +5078,15 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         if not Path(raw).expanduser().is_absolute():
             return JSONResponse({"error": "path must be absolute"}, status_code=400)
         path = files.resolved(raw)
-        if path is None or not files.within_roots(self._workspace_roots(), path):
+        # A frame is deliberately outside the workspace boundary since #318, so
+        # it fails the containment test that every other file passes — and the
+        # Save button has always been on the picture viewer that shows one. It
+        # is his record of a page aish drove, and it reaches him here through
+        # the same predicate `/frame` displays it by, so the two endpoints
+        # cannot come to disagree about what a frame is.
+        if path is None or not (
+            self._is_frame(path) or files.within_roots(self._workspace_roots(), path)
+        ):
             return JSONResponse({"error": "outside the trusted folders"}, status_code=403)
         suffix = path.suffix.lower()
         shown = suffix in IMAGE_TYPES or suffix == ".pdf"
@@ -5857,6 +5935,7 @@ def create_app(
             Route("/share", server.handle_share, methods=["POST"]),
             Route("/trigger", server.handle_trigger, methods=["POST"]),
             Route("/file", server.handle_file, methods=["GET"]),
+            Route("/frame", server.handle_frame, methods=["GET"]),
             Route("/pdf/info", server.handle_pdf_info, methods=["GET"]),
             Route("/pdf/page", server.handle_pdf_page, methods=["GET"]),
             Route("/download", server.handle_download, methods=["GET"]),

@@ -3108,15 +3108,17 @@ class TestTheEvidenceFrame:
 
         return FakePage(), taken
 
-    def test_a_frame_is_stored_in_the_media_store_and_pointed_at(self, state):
+    def test_a_frame_is_stored_in_its_own_store_and_pointed_at(self, state):
         page, taken = self._page()
         path, why = _run(browser._evidence_frame(browser._Owner(), page))
         assert why == ""
         assert pathlib.Path(path).read_bytes() == self.JPEG
-        # The media store, not a store of its own, and not the evidence store
-        # (whose address is the sha256 of UTF-8 text and which reads back with
-        # read_text). Bulk bytes never enter the log; the record points at them.
+        # Its own store (#318) — not the media store it shared until then, and
+        # not the evidence store (whose address is the sha256 of UTF-8 text and
+        # which reads back with read_text). Bulk bytes never enter the log; the
+        # record points at them.
         assert pathlib.Path(path).parent == browser.frames_dir()
+        assert pathlib.Path(path).parent.name == "frames"
         assert taken[0]["type"] == "jpeg"
 
     def test_the_same_page_twice_is_one_file(self, state):
@@ -3310,14 +3312,26 @@ class TestTheEvidenceFrame:
         assert snapshot.url == "https://eon.pl/mojeon"
         assert snapshot.frame_skipped == browser.browse_mod.NO_FRAME_FAILED
 
-    def test_frames_land_where_the_agent_displays_pictures_from(self, tmp_path,
-                                                                monkeypatch):
-        """The frame is only evidence if it can be SEEN, and what makes it
-        displayable is that it lands inside `Agent.workspace_roots`. The
-        browser resolves AISH_STATE_DIR itself (it runs several layers below
-        any agent) and aish-web exports it from the same value it hands the
-        Agent (#290) — this pins that the two answers agree, because a frame
-        stored anywhere else would 403 in the chat."""
+    def test_frames_land_outside_every_directory_the_model_may_read(
+        self, tmp_path, monkeypatch
+    ):
+        """This assertion was the opposite of itself until #318.
+
+        It read: a frame is only evidence if it can be SEEN, and what makes it
+        displayable is that it lands inside `Agent.workspace_roots` — so
+        `frames_dir()` IS `agent.media_dir`. The second half of that is what
+        made a picture of a driven page nameable to `show_image`, which since
+        #215 attaches the bytes to the conversation: a hostile page's pixels in
+        the model's own context, bannerless, unattributed and untainted.
+
+        So the store moved out, and being displayable is now the job of
+        `/frame` — an endpoint authorised for exactly these bytes — rather than
+        of a boundary that also governs what the model may read. The agreement
+        this test still pins is the one that made the old arrangement work at
+        all: `frames_dir()` resolves AISH_STATE_DIR itself, several layers
+        below any agent, and aish-web exports it from the value it hands the
+        Agent (#290), so `Agent._is_evidence_frame` can ask this function and
+        get the directory the capture really wrote to."""
         from aish.agent import Agent
 
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
@@ -3327,5 +3341,11 @@ class TestTheEvidenceFrame:
             client_chat=lambda **kw: {},
             state_dir=tmp_path,
         )
-        assert browser.frames_dir() == agent.media_dir
-        assert agent.media_dir in [pathlib.Path(r) for r in agent.workspace_roots()]
+        assert browser.frames_dir() != agent.media_dir
+        roots = [pathlib.Path(r) for r in agent.workspace_roots()]
+        assert browser.frames_dir() not in roots
+        # …while the store show_image writes to stays inside it: a picture the
+        # model ASKED for is what that boundary's justification covers.
+        assert agent.media_dir in roots
+        frame = browser.frames_dir() / "abc123-browse-eon-pl.jpg"
+        assert agent._is_evidence_frame(str(frame))

@@ -723,6 +723,23 @@ TOOL_OUTPUT_NOT_A_FILE = (
     "the key from that result's own truncation notice."
 )
 
+# #318's refusal, the same shape as the one above and for a stricter reason.
+# The frame store holds pictures of pages aish DROVE — outside content, written
+# unprompted, which is precisely what the workspace boundary's justification
+# ("reading back what the process already wrote grants nothing new") does not
+# cover. It is a RECORD, kept for the owner; the model neither reads one nor
+# authors one, so read and write are refused together rather than carded. A tap
+# is not a control here — nobody can tell one digest-named JPEG from another,
+# and a record whose integrity rests on a card he has said he will tap through
+# is not a record.
+EVIDENCE_FRAME_NOT_A_FILE = (
+    "NOT EXECUTED: {path} is inside aish's own evidence-frame store — pictures "
+    "of pages aish drove, kept so the user can see what a page looked like. "
+    "It is not part of the workspace, and a frame is never read into your "
+    "context or written by you: it is a record of what happened, not an input. "
+    "To find out what a page says, read or browse the page."
+)
+
 BLOCKED_RESULT = (
     "BLOCKED by the safety denylist ({reason}) — NOT executed, and it cannot "
     "be approved through you at all. If the user truly intends this, they must "
@@ -3713,21 +3730,41 @@ class Agent:
 
         The session roots plus the directories aish itself owns — the media
         store (where show_image puts everything), the scratch workspace, the
-        document and transcript stores. Reading back what the process already
-        wrote unprompted grants nothing new, which is what makes the widening
-        safe.
+        document and transcript stores. **Everything in this list holds
+        something the model ASKED for or was told to go and look at**, so
+        reading it back grants nothing it did not already have. That sentence
+        is the whole justification for the widening, and each store that has
+        ever left this list left it because the sentence had stopped being true
+        of that store.
 
-        The tool-output cache is the ONE store aish owns that is deliberately
-        NOT here (#317). Everything else in this list holds something the model
-        was told to go and look at; the cache holds tool output as the
+        The tool-output cache was the first (#317). It holds tool output as the
         producing tool made it — a fetched page BELOW the banner `web._present`
         prepends afterwards — so a read of it through the file layer delivers
-        outside content bannerless, untainted and unattributed. That is the
-        #277 fence bypassed through a door nothing asks at. `read_tool_output`
-        is the purpose-built door and carries the entry's provenance (#314),
-        and no task needs read_file on a digest-named cache entry, so the store
-        leaves the boundary rather than the file layer growing a second
-        provenance path that would have to be kept in step with the first.
+        outside content bannerless, untainted and unattributed: the #277 fence
+        bypassed through a door nothing asks at. `read_tool_output` is the
+        purpose-built door and carries the entry's provenance (#314), and no
+        task needs read_file on a digest-named cache entry.
+
+        The evidence-frame store was the second (#318), and it is the sharper
+        case because the media store still IS in this list. Frames were written
+        into the media store, which made them nameable to `show_image`: the
+        file came back through `_read_local_image`, was re-adopted by
+        `media.store`, and rode the result envelope into the conversation as
+        native image content that four backends base64 into the provider
+        request. A picture of a hostile page therefore entered model context
+        bannerless, unattributed and untainted — `_brings_outside_content` sees
+        a local path, finds no host, and does not raise taint. A frame is
+        written UNPROMPTED, from outside content, which is exactly what the
+        first paragraph says this boundary does not cover; a picture the model
+        asked for still is, so `show_image`'s own store stays. Both stores left
+        the boundary rather than the file layer growing a second provenance
+        path that would have to be kept in step with the first.
+
+        Leaving the list is necessary and not sufficient in either case: a
+        session root containing the state directory would put a store back
+        inside it, so `_is_tool_output_cache` and `_is_evidence_frame` ask
+        `files.contains` about the store DIRECTLY, on both the read and the
+        write path.
 
         ONE definition, consumed by everything that reads or displays: the web
         /file endpoint, the PDF exporter, the terminal's inline images,
@@ -5409,6 +5446,19 @@ class Agent:
         path = files.resolved(source, self.cwd)
         if path is None:
             return b"", f"could not resolve {source!r}."
+        # Asked BEFORE the boundary, and it is the line that closes #318. The
+        # boundary answers "outside — ask the user to /add-dir its folder",
+        # which is true of an ordinary file and is an instruction to reopen the
+        # hole when the file is an evidence frame: adding the state directory
+        # as a root would make every picture of every page aish has driven
+        # readable again. This one is refused wherever it sits.
+        if self._is_evidence_frame(str(path)):
+            return b"", (
+                f"{path} is a picture aish stored of a page it drove, kept as a "
+                "record for the user. It is not readable as image content and "
+                "there is no folder to add: the user already sees it on the "
+                "step it belongs to. To find out what that page says, read it."
+            )
         if not files.within_roots(self.workspace_roots(), path):
             return b"", (
                 f"{path} is outside this session's directories, so it could not be "
@@ -5458,6 +5508,7 @@ class Agent:
             # have no gate at all — so it has to leave this path first (#317).
             return (
                 self._is_tool_output_cache(path)
+                or self._is_evidence_frame(path)
                 or self._read_prompt_reason(path) is not None
             )
         # Egress calls needing an approval card (#178 P0-2) must run through
@@ -6190,6 +6241,23 @@ class Agent:
         the state directory would put the cache back inside it.
         """
         return files.contains(self.tool_output_dir, path, self.cwd)
+
+    def _is_evidence_frame(self, path: str) -> bool:
+        """Does this path land inside the evidence-frame store (#318)?
+
+        Asked exactly like `_is_tool_output_cache` and for the same two
+        reasons: `files.contains` is the one containment function (#309), so a
+        symlink from a session root into the store answers the same as the
+        store's own path; and the workspace boundary alone is not enough,
+        because a session whose root happens to contain the state directory
+        would put the store back inside it.
+
+        It asks `browser.frames_dir()` rather than deriving `state_dir/frames`
+        for itself. That function is where the capture writes, so asking it is
+        asking the store; a second derivation here would be a second answer,
+        and the one that drifted would be the one that decides.
+        """
+        return files.contains(browser.frames_dir(), path, self.cwd)
 
     @staticmethod
     def _int_arg(args: dict, key: str, default: int) -> int:
@@ -7175,6 +7243,10 @@ class Agent:
                 return _gate_outcome(
                     TOOL_OUTPUT_NOT_A_FILE.format(path=path), decision="blocked"
                 )
+            if self._is_evidence_frame(path):
+                return _gate_outcome(
+                    EVIDENCE_FRAME_NOT_A_FILE.format(path=path), decision="blocked"
+                )
             label, thunk = self._read_file_call(args)
             self._note(label)
             reason = self._read_prompt_reason(path)
@@ -8029,6 +8101,16 @@ class Agent:
         if self._is_tool_output_cache(str(args.get("path", ""))):
             return _gate_outcome(
                 TOOL_OUTPUT_NOT_A_FILE.format(path=str(args.get("path", ""))),
+                decision="blocked",
+            )
+        # And a frame is a RECORD (#318). A model that can write into that store
+        # can overwrite the picture of the page it drove with one of its own
+        # choosing, which is the record becoming an authored artifact — #295 P6
+        # from the other side. Refused rather than carded for the same reason as
+        # above: the card would show a digest under a state directory.
+        if self._is_evidence_frame(str(args.get("path", ""))):
+            return _gate_outcome(
+                EVIDENCE_FRAME_NOT_A_FILE.format(path=str(args.get("path", ""))),
                 decision="blocked",
             )
         if name == "write_file":

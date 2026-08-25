@@ -147,9 +147,12 @@ def sealed(
     much of the tool surface remains un-enveloped (contract §3.4).
 
     The frame is evidence of exactly the same kind (#289) and rides the same
-    envelope: a REFERENCE to bytes that live in the media store, never the
-    bytes. Bulk bytes never enter the log; the record only points at them, and
-    they are purgeable on their own schedule. `frame_skipped` is written only
+    envelope: a REFERENCE to bytes that live in the evidence-frame store, never
+    the bytes. (That store is `browser.frames_dir()`, outside every workspace
+    root since #318 — a reference the model may hold and a file it may read are
+    different permissions, and a frame is only the first.) Bulk bytes never
+    enter the log; the record only points at them, and they are purgeable on
+    their own schedule. `frame_skipped` is written only
     when there is no frame, because a reader must be able to tell a page nobody
     pictured from a page nobody could."""
     meta: dict = {}
