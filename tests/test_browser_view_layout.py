@@ -96,3 +96,26 @@ def test_the_sheet_clears_the_status_bar() -> None:
         "#browser-sheet is full-height again without reserving the top inset — "
         "the top of the browser disappears under the status bar (#226)"
     )
+
+
+def test_the_desktop_cap_is_the_frame_s_own_width() -> None:
+    """On a wide screen the sheet takes the chat column, and stops at the width
+    the frame was captured at (#259). Past that the stage magnifies a picture it
+    already holds at native size, and `bvRequestDetail` starts spending a round
+    trip on every idle glance — so the two numbers are one decision and must not
+    drift apart in silence."""
+    from aish import browser
+
+    desktop = re.search(
+        r"@media \(min-width: 700px\) \{[^}]*#browser-sheet\s*\{([^}]*)\}", CSS, re.S
+    )
+    assert desktop, (
+        "#browser-sheet is back at the 560px picker cap `.sheet` sets — a real "
+        "page in a picker-width column with the window empty beside it (#259)"
+    )
+    cap = re.search(r"min\((\d+)px", desktop.group(1))
+    assert cap and int(cap.group(1)) == browser.VIEW_DESKTOP_WIDTH, (
+        f"the sheet caps at {cap and cap.group(1)}px while frames are captured "
+        f"at {browser.VIEW_DESKTOP_WIDTH}px: below parity it letterboxes what "
+        "was rendered, above it magnifies and asks for detail at rest"
+    )
