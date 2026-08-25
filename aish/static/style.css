@@ -3288,6 +3288,33 @@ body.console-open {
 body.console-open #browser-sheet { z-index: 64; }
 body.console-open #backdrop { z-index: 63; }
 
+/* ---- the browser is not a picker (#259) ----
+   `.sheet`'s 560px cap is right for the model, folder, mic and workspace
+   pickers: short lists of rows, where more width buys nothing. This sheet is a
+   BROWSER, and at picker width a real page ran down a column with most of a
+   1280px window empty beside it — the same class as the full record, which took
+   `min(1040px, 100%)` for the same reason (it is a document, not a picker).
+
+   The ceiling IS the frame's own width, and that is the only number here that
+   means anything. `browser.VIEW_DESKTOP_WIDTH` captures every page at 1280 CSS
+   px no matter what the client asks for — the stage only ever chose the frame's
+   SHAPE — so width buys legibility, never more page. Past 1280 the stage is
+   magnifying a picture it already has at native size, and it stops being free:
+   `bvRequestDetail` fires once the stage needs more than the frame's own
+   density, so a stage wider than the frame would spend a round trip sharpening
+   every idle glance, which is exactly what an overview frame exists to avoid.
+   Below the cap the sheet simply takes what the CHAT COLUMN has — `100%` here
+   is already inset beside the docked rail, and `.sheet`'s `margin-inline: auto`
+   centres it on the chat rather than the window.
+
+   Kept BELOW the base rule for the reason above it: the first `#browser-sheet {`
+   in this file is what test_the_sheet_clears_the_status_bar reads. Nothing
+   vertical is touched, so the phone's landscape column (#226) is unchanged —
+   verified at all ten device cases by scripts/check-browser-sheet.py. */
+@media (min-width: 700px) {
+  #browser-sheet { max-width: min(1280px, 100%); }
+}
+
 .bv-body {
   flex: 1; min-height: 0; overflow: hidden;
   padding: 4px 12px 16px; display: flex; flex-direction: column; gap: 8px;

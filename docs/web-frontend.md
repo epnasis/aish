@@ -606,6 +606,16 @@ A sheet can be dismissed four ways: the Close button, the ✕, the backdrop, and
 
 `bvViewportSize` asks for the remote page at **exactly the stage's shape**, so `object-fit: contain` has nothing to letterbox. Asking for a taller page was a measured regression: a 390×828 page shown in a 430×549 stage fits by HEIGHT and renders at 0.66 scale with black bars down both sides — about 60% of the width wasted, which the owner photographed. Matching the aspect also means scale 1.0, so the page is shown at its own size rather than shrunk.
 
+### On a desktop the sheet is not a picker (#259)
+
+`.sheet` caps at 560px past 700px wide, which is right for the model, folder, mic and workspace pickers — short lists of rows, where more width buys nothing. This one is a BROWSER, full height by design, and it was rendering a real page down a 560px column with the rest of a 1280px window empty beside it: the same class as *A sheet belongs to the chat, not to the window*, one sheet further on. Past 700px it takes `min(1280px, 100%)`.
+
+**The `100%` is the CHAT COLUMN, not the viewport** — the docked query already gives every sheet the shell's left inset, so "what the window has" arrives for free and centring stays centred on the chat.
+
+**And the cap is the frame's own width, which is the only number here that means anything.** `browser.VIEW_DESKTOP_WIDTH` captures every page at 1280 CSS px whatever the client asks for; the stage only ever chose the frame's SHAPE (above). So width buys legibility and never more page, and the useful ceiling is parity — below it the sheet is shrinking what was rendered, above it is magnifying a picture it already holds at native size. It also stops being free at that point: `bvRequestDetail` asks for a sharpening patch once the stage needs more than the frame's own density, so a stage wider than the frame would spend a round trip on every idle glance, which is precisely what an overview frame exists to avoid. `test_the_desktop_cap_is_the_frame_s_own_width` pins the two numbers to each other so they cannot drift apart in silence.
+
+**Nothing vertical is touched, and that is deliberate.** The whole of #226 — the top safe-area inset, the stage's 44px tap-target floor, the toolbar standing down beside an open field, the `max-height: 500px` landscape rules — is a column-height argument, and it is the half no unit test can see. `scripts/check-browser-sheet.py` returns coordinates identical to the ones before this change at all ten device cases, landscape phones included (they are past 700px wide, so they widen too, and every row lands where it did).
+
 ### `[BROWSER-VIEW-EDIT]` — tapping a field opens an editor
 
 The first design put a text field permanently in the sheet with **Type** and **⏎** buttons. Owner feedback after real use, and every clause of it is a distinct defect:
