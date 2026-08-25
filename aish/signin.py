@@ -176,6 +176,78 @@ def carries_secret(text: str, needles: Sequence[str]) -> bool:
     return folded != text and any(needle in folded for needle in needles)
 
 
+# ------------------------------------- what a FAILED sign-in actually means
+#
+# A password box still on the page after the submit used to be the whole test,
+# and it was read as *the site refused the value*: `suspect` written onto the
+# record, which permanently stops the credential being spent, plus a message
+# telling the owner to sign in himself — which also replaces the saved sign-in.
+# eon.pl's login is reCAPTCHA-protected, so a scripted fill-and-submit is
+# scored and refused silently and the form simply comes back. The record read
+# `used: 0` on a password that works every time he types it by hand, and he
+# went round that loop twice, losing a working credential each time (#320).
+#
+# A password box means only *the session did not come up*. It is equally the
+# shape of a CAPTCHA refusing the automation, a submit that never fired, a bot
+# wall, an SPA that had not navigated yet, and a second factor that keeps the
+# password on screen. So marking a credential suspect now needs a POSITIVE
+# signal that the site judged the VALUE. Absent one, the honest answer is
+# "could not sign in", not "your password is wrong" — a wrong accusation here
+# destroys something the owner cannot get back without re-recording, and on a
+# CAPTCHA site the re-record fails identically.
+
+# The vendors' own names, matched case-insensitively as substrings. They are
+# chosen because they are INVARIANT across locale: they appear in the addresses
+# the widget loads its script and its frame from and in the class names it
+# defines, and neither is translated. eon.pl declares itself in Polish — "Ta
+# strona chroniona jest przez reCAPTCHA" — and the brand is the only stable
+# token in that sentence, so matching English prose would find nothing on most
+# of the owner's pages.
+_CAPTCHA_TOKENS: tuple[tuple[str, str], ...] = (
+    ("recaptcha", "reCAPTCHA"),
+    ("hcaptcha", "hCaptcha"),
+    ("h-captcha", "hCaptcha"),
+    ("turnstile", "Cloudflare Turnstile"),
+    ("arkoselabs", "Arkose Labs"),
+    ("funcaptcha", "Arkose Labs"),
+    ("geetest", "GeeTest"),
+    ("captcha.awswaf.com", "AWS WAF"),
+    ("smartcaptcha", "Yandex SmartCaptcha"),
+    ("friendlycaptcha", "Friendly Captcha"),
+    ("mtcaptcha", "MTCaptcha"),
+)
+
+
+def captcha_vendor(marks: Sequence[str], text: str = "") -> str:
+    """Which anti-automation widget this login page declares, or "".
+
+    `marks` are the addresses the page loads scripts and frames from plus the
+    class and id names it carries — structural, and the only thing a v3-style
+    INVISIBLE reCAPTCHA leaves behind, since there is no widget to see. `text`
+    is the rendered page, searched for the brand names alone and never for a
+    sentence around them.
+
+    It is not a judgement about whether the widget actually fired: it is asked
+    only once the session failed to come up, and all it decides is that aish
+    learned nothing about the password."""
+    haystack = "\n".join([*(str(m) for m in marks), text or ""]).lower()
+    for token, vendor in _CAPTCHA_TOKENS:
+        if token in haystack:
+            return vendor
+    return ""
+
+
+# The one HTTP status that means "this credential was not accepted". 403 is
+# deliberately absent: a bot wall answers 403, and reading that as a rejected
+# password rebuilds the exact conflation this is here to end.
+_REFUSED_STATUS = frozenset({401})
+
+
+def refused_the_credential(statuses: Sequence[int]) -> bool:
+    """Did the site answer a credential-bearing request with a refusal?"""
+    return any(int(status) in _REFUSED_STATUS for status in statuses)
+
+
 # Enough of a public-suffix rule for the FALLBACK below, and no more. A real
 # PSL would be a dependency and a monthly update for a question asked only
 # about records saved before destinations were recorded.

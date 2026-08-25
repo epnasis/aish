@@ -1795,6 +1795,50 @@ SECOND_FACTOR_JS = "() => {" + browse_mod.DEEP_JS + """
 }"""
 
 
+# What a login page LOADS is what says it is protected by an anti-automation
+# widget, and it says it the same way in every language (#320). This collects
+# and judges nothing: addresses, class names and ids go to
+# `signin.captcha_vendor`, which owns the vocabulary. Shadow roots are walked
+# for the reason `SIGNIN_STILL_OURS_JS` walks them — a widget rendered into one
+# is invisible to `querySelectorAll`.
+CAPTCHA_MARKS_JS = "() => {" + browse_mod.DEEP_JS + """
+  const marks = [];
+  for (const el of deepAll('script[src], iframe[src]')) {
+    const src = el.getAttribute('src') || '';
+    if (src) marks.push(src.slice(0, 300));
+  }
+  for (const el of deepAll('[class*="captcha" i], [id*="captcha" i], [class*="turnstile" i]')) {
+    // getAttribute, not .className: on an SVG element that property is an
+    // SVGAnimatedString and stringifies to nothing useful.
+    marks.push((el.getAttribute('class') || '') + ' ' + (el.getAttribute('id') || ''));
+  }
+  return marks.slice(0, 200);
+}"""
+
+# The brand name in the page's own words. `innerText`, not `textContent`, for
+# the reason the link merge uses it: it is what the reader SEES, so a hidden
+# template does not count as a declaration.
+PAGE_TEXT_JS = "() => document.body ? document.body.innerText : ''"
+
+# The page's own MACHINE-READABLE statement that it judged what was typed
+# (#320). Both signals are ARIA, so both are the same in every language: a
+# password box the page has marked `aria-invalid`, and the live regions a form
+# announces an error through. Read BEFORE the submit as well as after, because
+# a login page carrying an empty (or already-populated) alert region is the
+# ordinary case — only what APPEARED can be an answer to what was sent.
+SIGNIN_REJECTION_JS = "() => {" + browse_mod.DEEP_JS + """
+  const said = [];
+  for (const el of deepAll('[role="alert"], [role="alertdialog"], [aria-live="assertive"]')) {
+    const text = (el.innerText || '').trim();
+    if (text) said.push(text.slice(0, 200));
+  }
+  return {
+    invalid: deepAll('input[type="password"][aria-invalid="true"]').length > 0,
+    said: said,
+  };
+}"""
+
+
 # Methods that can carry a body at all. A GET has none — but its ADDRESS can
 # still carry a credential, so a GET is read, never waved through.
 _BODY_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -1832,7 +1876,11 @@ def _carries_the_credential(request: Any, needles: Sequence[str]) -> bool:
 
 
 async def _fence_the_origin(
-    page: Any, record: Any, secret: str, incidents: list[str]
+    page: Any,
+    record: Any,
+    secret: str,
+    incidents: list[str],
+    statuses: list[int] | None = None,
 ) -> None:
     """Refuse, at the network, to let THE CREDENTIAL leave where it belongs.
 
@@ -1856,7 +1904,13 @@ async def _fence_the_origin(
 
     Only the ORIGIN of an aborted request is recorded. The address itself may
     carry the credential in its query string, and this list is pushed to his
-    phone and written to the store."""
+    phone and written to the store.
+
+    It also collects what the site ANSWERED those requests with (#320). That
+    lives here rather than in a watcher of its own because "carries the
+    credential" must have exactly one definition and one set of needles: a
+    second observer that matched differently would be a second opinion about
+    which request the status belongs to."""
     needles = signin_mod.secret_needles(secret)
 
     def going_astray(request: Any) -> str:
@@ -1888,6 +1942,22 @@ async def _fence_the_origin(
 
     await page.route("**/*", decide)
 
+    if statuses is None:
+        return
+
+    def note_status(response: Any) -> None:
+        """The status the site gave a request that carried the credential.
+
+        A refusal here is the one unambiguous "the site judged the value" there
+        is, and it is the only reason left to retire a stored password without
+        the page saying so in words."""
+        with contextlib.suppress(Exception):  # a response aish cannot read says nothing
+            if _carries_the_credential(response.request, needles):
+                statuses.append(int(response.status))
+
+    with contextlib.suppress(Exception):  # a page that takes no listener is not an error
+        page.on("response", note_status)
+
 
 @dataclass
 class SignInResult:
@@ -1901,13 +1971,31 @@ class SignInResult:
     # one: the password was almost certainly right.
     second_factor: bool = False
     # Should the stored credential stop being spent? Only when the site
-    # actually refused it.
+    # POSITIVELY refused it — see `_sign_in_on`. A page that merely failed to
+    # let aish in says nothing about the value (#320).
     stale: bool = False
+    # The anti-automation widget the login page declares, when the session did
+    # not come up. Not a verdict on the password: a verdict on aish.
+    captcha: str = ""
+    # Was the credential actually SENT? A refusal by the harness before the
+    # submit and a refusal by the site after it call for opposite things to be
+    # said, and "aish did not use it" is a false statement about the second.
+    tried: bool = False
     url: str = ""
 
 
-async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) -> SignInResult:
-    """Fill and submit the recorded login form on an already-open page."""
+async def _sign_in_on(
+    page: Any,
+    record: Any,
+    identifier: str,
+    password: str,
+    statuses: list[int] | None = None,
+) -> SignInResult:
+    """Fill and submit the recorded login form on an already-open page.
+
+    `statuses` is what the site answered credential-bearing requests with,
+    collected by the fence. It is one of the two positive signals that may
+    retire the stored password."""
     refused = (
         f"aish only ever types a credential at {record.origin}, the exact origin "
         "it was saved for"
@@ -1963,6 +2051,12 @@ async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) ->
             url=page.url,
         )
 
+    # Read BEFORE the press, so the comparison after it is about the submit and
+    # nothing else: a login page that always carries an alert region — a cookie
+    # notice, a maintenance banner — would otherwise read as a rejection the
+    # first time it was looked at.
+    before = await _rejection_marks(page)
+
     # Only a form's OWN submit button is ever pressed. With no form the submit
     # is Enter — the universal gesture, and the one that cannot land on
     # "Continue with Google", which is what choosing a button by its words did.
@@ -1978,12 +2072,49 @@ async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) ->
     await page.wait_for_timeout(SETTLE_MS)
 
     if await _has_password_field(page):
-        # The form came back. That is the site refusing the credential, and it
-        # is the ONLY outcome that may mark it stale — one attempt, never a
-        # retry, because retrying is how an account locks.
+        # The form came back. That means the SESSION DID NOT COME UP, and
+        # nothing more (#320) — it is equally the shape of a CAPTCHA refusing
+        # the automation, a submit that never fired, a bot wall and an SPA that
+        # had not navigated yet. Reading it as "the site refused the value" is
+        # what wrote a false statement about the owner's password onto durable
+        # storage and destroyed a working credential, twice.
+        if vendor := await _captcha_vendor(page):
+            # Named and structural, because it is the one failure aish can
+            # neither fix nor be repaired into fixing: solving a CAPTCHA is on
+            # this project's refused list. Re-recording the sign-in would fail
+            # identically, so nothing here may invite it.
+            return SignInResult(
+                why=(
+                    f"the login page is protected by {vendor}, which refuses a "
+                    "scripted sign-in — aish cannot sign in to this site "
+                    "automatically. The saved sign-in was never judged and is "
+                    "untouched"
+                ),
+                captcha=vendor,
+                tried=True,
+                url=page.url,
+            )
+        rejected = signin_mod.refused_the_credential(statuses or []) or _said_no(
+            before, await _rejection_marks(page)
+        )
+        if rejected:
+            # A POSITIVE signal that the site judged the value: it answered a
+            # credential-bearing request with a refusal, or it said so on the
+            # page in its own machine-readable words. Only this may mark the
+            # credential — one attempt, never a retry, because retrying is how
+            # an account locks.
+            return SignInResult(
+                why="the site refused the saved password, so aish will not try it again",
+                stale=True,
+                tried=True,
+                url=page.url,
+            )
         return SignInResult(
-            why="the site asked for the password again — the stored one looks stale",
-            stale=True,
+            why=(
+                "the sign-in did not go through and the site gave no reason for "
+                "it — the saved password was never judged and is untouched"
+            ),
+            tried=True,
             url=page.url,
         )
     try:
@@ -1991,8 +2122,49 @@ async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) ->
     except Exception:  # noqa: BLE001
         wants_code = False
     if wants_code:
-        return SignInResult(second_factor=True, url=page.url)
-    return SignInResult(ok=True, url=page.url)
+        return SignInResult(second_factor=True, tried=True, url=page.url)
+    return SignInResult(ok=True, tried=True, url=page.url)
+
+
+async def _captcha_vendor(page: Any) -> str:
+    """The anti-automation widget this live page declares, or "".
+
+    Structural on purpose: what the page LOADS and the class names it carries,
+    plus the brand name in its own text. eon.pl declares reCAPTCHA in Polish,
+    and the owner's pages are frequently not in English, so nothing here reads
+    prose — `signin.captcha_vendor` owns the vocabulary and matches only tokens
+    that survive translation."""
+    marks: list[str] = []
+    text = ""
+    with contextlib.suppress(Exception):  # a page that will not answer declares nothing
+        marks = [str(mark) for mark in (await page.evaluate(CAPTCHA_MARKS_JS)) or []]
+    with contextlib.suppress(Exception):
+        text = str((await page.evaluate(PAGE_TEXT_JS)) or "")
+    return signin_mod.captcha_vendor(marks, text)
+
+
+async def _rejection_marks(page: Any) -> Any:
+    """The page's machine-readable error state, or None when it will not say."""
+    try:
+        return await page.evaluate(SIGNIN_REJECTION_JS)
+    except Exception:  # noqa: BLE001 — silence is not a rejection
+        return None
+
+
+def _said_no(before: Any, after: Any) -> bool:
+    """Did the page declare, in answer to the submit, that it refused the value?
+
+    Only what CHANGED counts. An alert region that was already showing was not
+    provoked by the credential, and a page that will not answer either read
+    says nothing at all — the safe direction, because the cost of a wrong yes
+    is a working credential the owner has to re-record."""
+    if not isinstance(after, dict):
+        return False
+    was = before if isinstance(before, dict) else {}
+    if after.get("invalid") and not was.get("invalid"):
+        return True
+    already = {str(said) for said in was.get("said") or []}
+    return any(str(said) not in already for said in after.get("said") or [])
 
 
 def _signin_lines() -> list[str]:
@@ -2144,6 +2316,10 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
     # deliberately NOT consulted for whether the sign-in worked — see
     # `_record_the_outcome`.
     incidents: list[str] = []
+    # What the SITE answered the requests that carried the credential with. The
+    # only thing left that may retire a stored password, alongside the page
+    # saying so itself — see `_sign_in_on` (#320).
+    statuses: list[int] = []
 
     async def job(owner: _Owner) -> SignInResult:
         if owner.view is not None:
@@ -2157,8 +2333,8 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
             await _dismiss_consent(page)
             # Armed BEFORE anything is typed and left up through the submit and
             # the settle, so a delayed exfiltration is caught too.
-            await _fence_the_origin(page, record, password, incidents)
-            return await _sign_in_on(page, record, identifier, password)
+            await _fence_the_origin(page, record, password, incidents, statuses)
+            return await _sign_in_on(page, record, identifier, password, statuses)
         finally:
             owner.read_pages.discard(page)
             with contextlib.suppress(Exception):
@@ -2187,7 +2363,14 @@ def _record_the_outcome(
     the credential land — the record is marked suspect, which is what stops the
     value being spent again, and he is pushed the address it was headed for.
     That happens whether or not the session came up, and it takes precedence
-    over `note_used`, which would clear the very mark being set."""
+    over `note_used`, which would clear the very mark being set.
+
+    **A password box is not a verdict** (#320). `result.stale` arrives set only
+    when the site POSITIVELY refused the value, so that is what gets written
+    here. A CAPTCHA-refused attempt, or one that simply did not get in, leaves
+    the record completely alone: nothing was learned about the password, and
+    marking it destroys a credential whose only repair — re-recording it — then
+    fails in exactly the same way."""
     if incidents:
         text = (
             f"the page tried to send the saved password to {', '.join(incidents)}, "
@@ -2223,6 +2406,17 @@ def _announce(record: Any, result: SignInResult, *, incident: str = "") -> None:
         )
     elif result.ok:
         title, body = f"aish signed in to {host}", "the session had lapsed"
+    elif result.captcha:
+        # The one push that must NOT read as "go and fix your password". His
+        # saved sign-in is still good for his own hands; it is the automation
+        # the site refuses, and asking him to save it again costs him the
+        # credential for nothing.
+        title = f"{host} refuses an automatic sign-in"
+        body = (
+            f"its login page is protected by {result.captcha}. Your saved "
+            f"sign-in is untouched and does not need replacing — open /browser "
+            f"{host} to sign in yourself"
+        )
     elif result.second_factor:
         title, body = f"{host} wants a code", "aish got as far as the second factor"
     else:

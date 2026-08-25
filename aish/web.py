@@ -1512,16 +1512,23 @@ def _browser_read(
                 if again is not None:
                     return (*again[:4], RENEWED_SESSION_NOTE.format(host=host)), ""
                 return None, why
-            renewal = RENEWAL_STOPPED_NOTE.format(
-                host=host,
-                why=(
-                    RENEWAL_SECOND_FACTOR.format(host=host)
-                    if outcome.second_factor
-                    else outcome.why
-                ),
-            ) if (outcome.second_factor or outcome.stale) else (
-                RENEWAL_HELD_NOTE.format(host=host, why=outcome.why)
-            )
+            # Which of the three is true turns on whether the credential was
+            # SENT, never on whether it was blamed (#320): the held note is for
+            # a refusal by aish, and saying it when aish tried and failed is as
+            # false as saying the site refused a value it never judged.
+            if outcome.captcha:
+                renewal = RENEWAL_CAPTCHA_NOTE.format(host=host, why=outcome.why)
+            elif outcome.tried or outcome.second_factor or outcome.stale:
+                renewal = RENEWAL_STOPPED_NOTE.format(
+                    host=host,
+                    why=(
+                        RENEWAL_SECOND_FACTOR.format(host=host)
+                        if outcome.second_factor
+                        else outcome.why
+                    ),
+                )
+            else:
+                renewal = RENEWAL_HELD_NOTE.format(host=host, why=outcome.why)
     if is_blank(text):
         return None, "the browser rendered an empty page"
     # A wall HAS text, so "non-empty" is not the same as "the page". Handing a
@@ -1623,6 +1630,16 @@ RENEWAL_SECOND_FACTOR = (
     "the site then asked for a one-time code, which only they can supply — tell "
     "them to open /browser {host}, finish the sign-in, and ask again"
 )
+# The read path's twin of `BROWSE_SIGNIN_CAPTCHA`, and kept apart from
+# `RENEWAL_HELD_NOTE` for the same reason: aish used the sign-in, the site
+# refused the automation rather than the value, and re-saving it fixes nothing.
+RENEWAL_CAPTCHA_NOTE = (
+    "[aish: {host} asked for a password, and aish CANNOT sign in to this site "
+    "automatically — {why}. Their saved sign-in is untouched and does NOT need "
+    "replacing; do not suggest saving it again. Tell them to open /browser "
+    "{host} and sign in themselves. What follows is the SIGNED-OUT page, not "
+    "their account.]\n"
+)
 
 ANONYMOUS_READ_FORM = (
     " This page is a sign-in form, so it carries no account content at all."
@@ -1665,6 +1682,32 @@ BROWSE_SIGNED_OUT_STALE = (
     "not accepted, so aish will not try it again — {why}. Tell them to run "
     "/browser {host} and sign in themselves; that also replaces the saved "
     "sign-in. Do NOT try other buttons on this page.]\n"
+)
+
+# The site refuses the AUTOMATION, and that is not a verdict on the password
+# (#320). A third note rather than a reuse of either neighbour, because both
+# would be false: aish DID use the sign-in, so the held note's "aish did not
+# use it" is wrong, and the site never judged the value, so the stale note's
+# "was not accepted" is a false statement in aish's own voice. Neither may
+# invite a re-record — following that invitation is what destroyed the owner's
+# eon.pl credential twice, since the next attempt fails identically.
+BROWSE_SIGNIN_CAPTCHA = (
+    "[aish: {host} is asking for a password, and aish CANNOT sign in to this "
+    "site automatically — {why}. The user's saved sign-in is untouched and does "
+    "NOT need replacing; do not suggest saving it again. Tell them to run "
+    "/browser {host} and sign in themselves. Do NOT try other buttons on this "
+    "page.]\n"
+)
+
+# aish used the sign-in and did not get in, and the site said nothing about
+# why. Distinct from the stale note for the same reason: claiming the password
+# was rejected when nothing rejected it is the accusation this fix exists to
+# stop making.
+BROWSE_SIGNIN_UNFINISHED = (
+    "[aish: {host} is asking for a password. aish used the sign-in the user "
+    "saved and did not get all the way in — {why}. The saved sign-in has not "
+    "been judged and is untouched. Tell them to run /browser {host} and sign in "
+    "themselves. Do NOT try other buttons on this page.]\n"
 )
 
 
@@ -2304,12 +2347,18 @@ def _renew_driving(url, snapshot, *, topic, view):
     if outcome is None:
         return BROWSE_SIGNED_OUT_NOTE.format(host=host), snapshot
     if not outcome.ok:
-        if outcome.second_factor:
-            template, why = BROWSE_SIGNED_OUT_STALE, RENEWAL_SECOND_FACTOR.format(
+        if outcome.captcha:
+            template, why = BROWSE_SIGNIN_CAPTCHA, outcome.why
+        elif outcome.second_factor:
+            template, why = BROWSE_SIGNIN_UNFINISHED, RENEWAL_SECOND_FACTOR.format(
                 host=host
             )
         elif outcome.stale:
             template, why = BROWSE_SIGNED_OUT_STALE, outcome.why
+        elif outcome.tried:
+            # aish sent it and did not get in, and the site gave no reason.
+            # "Not accepted" would be a claim nothing supports.
+            template, why = BROWSE_SIGNIN_UNFINISHED, outcome.why
         else:
             # aish held it back. Saying the site refused it would be a false
             # statement in aish's own voice, above the untrusted banner.
