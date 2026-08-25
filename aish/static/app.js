@@ -3181,6 +3181,9 @@ function knowledgeTag(ref, name) {
 //
 // `password` says what was SEEN, never what the page WAS: the check behind it
 // is a password box, and an email-first login's first step does not have one.
+// The first two are READ-ONLY since #320: nothing emits them any more, and they
+// stay here because they are in logs already on disk. A reader that cannot
+// render a word an older writer emitted turns a recorded fact into a blank.
 const FRAME_ABSENT = {
   password: "no picture — this page was showing a password box",
   unknown: "no picture — the page would not say whether it asks for a password",

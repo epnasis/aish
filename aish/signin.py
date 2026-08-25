@@ -74,6 +74,14 @@ class Record:
     # sign-in whose credential request aish did not see, which is why
     # `may_receive_credential` has a fallback rather than failing closed.
     destinations: list[str] = field(default_factory=list)
+    # A picture of the LAST attempt, in the media store — a path, never bytes,
+    # and never a picture borrowed from an earlier attempt (#320). Both fields
+    # are rewritten on every attempt, including to empty, for the reason
+    # `_Seen.start_call` clears the browse frame: a stale picture presented as
+    # this attempt's is worse than no picture. `last_frame_skipped` says WHICH
+    # absence, in `browse.NO_FRAME_*`.
+    last_frame: str = ""
+    last_frame_skipped: str = ""
 
 
 def origin_of(url: str) -> str:
@@ -248,6 +256,77 @@ def refused_the_credential(statuses: Sequence[int]) -> bool:
     return any(int(status) in _REFUSED_STATUS for status in statuses)
 
 
+# ------------------------------------------ the two halves, and their AGREEMENT
+#
+# There are two independent observations of a sign-in that did not get in, and
+# they answer different questions (#320):
+#
+#   DID IT LEAVE?        The fence routes every request the page makes and
+#                        knows which of them carried the value.
+#   DID THE SITE JUDGE IT?  A refusal status on one of those requests, or the
+#                        page's own machine-readable error appearing.
+#
+# **A credential is retired only when BOTH are true**, which is strictly
+# narrower than either alone and is therefore the safe direction. They are
+# composed HERE, in one pure function, precisely so that the next reader cannot
+# collapse them back into a single test — which is the mistake this whole issue
+# is about, one level up: a password box standing in for a verdict.
+
+FAILED_REFUSED = "refused"  # it went out, and something said no to it
+FAILED_CONTRADICTION = "contradiction"  # the two observers disagree
+FAILED_CAPTCHA = "captcha"  # the page refuses automation, not this password
+FAILED_NEVER_SENT = "never_sent"  # nothing carrying it was seen leaving
+FAILED_UNEXPLAINED = "unexplained"  # it went out and the site said nothing
+
+FAILURE_VERDICTS = frozenset(
+    {
+        FAILED_REFUSED,
+        FAILED_CONTRADICTION,
+        FAILED_CAPTCHA,
+        FAILED_NEVER_SENT,
+        FAILED_UNEXPLAINED,
+    }
+)
+
+
+def judge_a_failed_sign_in(
+    *, sent: bool, refused_status: bool, said_no: bool, captcha: str
+) -> str:
+    """What a sign-in that left a password box on the screen actually was.
+
+    Pure, and deliberately not a method on anything that can see a page: the
+    whole value of this rule is that it can be read and tested as a table.
+
+    The order encodes two judgements that are not obvious:
+
+    **A refusal STATUS outranks a CAPTCHA declaration.** 401 means *this
+    credential was not accepted* and nothing else — 403, which is what a bot
+    wall answers, is already excluded. Meanwhile a reCAPTCHA script tag sits on
+    the login page of a large share of the commercial web, so letting the
+    declaration win unconditionally would suppress every genuine stale
+    detection on all of those sites.
+
+    **An ARIA error alone does NOT outrank it.** A widget refusing a scripted
+    submission renders a generic *something went wrong, try again* through the
+    same alert region a wrong password does. That is the same reasoning that
+    excluded 403, applied one level down: on a page that declares a CAPTCHA, an
+    error appearing is not a statement about the value.
+
+    A disagreement — the site answered a request carrying the password, and
+    nothing was recorded leaving — is reported as a CONTRADICTION rather than
+    resolved. One of the two observers is wrong, there is no way to tell which,
+    and acting on either is a claim about the owner's password that nothing
+    supports.
+    """
+    if refused_status:
+        return FAILED_REFUSED if sent else FAILED_CONTRADICTION
+    if captcha:
+        return FAILED_CAPTCHA
+    if said_no:
+        return FAILED_REFUSED if sent else FAILED_CONTRADICTION
+    return FAILED_UNEXPLAINED if sent else FAILED_NEVER_SENT
+
+
 # Enough of a public-suffix rule for the FALLBACK below, and no more. A real
 # PSL would be a dependency and a monthly update for a question asked only
 # about records saved before destinations were recorded.
@@ -331,6 +410,8 @@ def _load() -> list[Record]:
                     last_used=str(row.get("last_used", "")),
                     suspect=str(row.get("suspect", "")),
                     destinations=_origins(row.get("destinations")),
+                    last_frame=str(row.get("last_frame", "")),
+                    last_frame_skipped=str(row.get("last_frame_skipped", "")),
                 )
             )
     return out
@@ -417,6 +498,16 @@ def note_used(origin: str, *, when: str) -> None:
     record = find(origin)
     if record is not None:
         _update(origin, used=record.used + 1, last_used=when, suspect="")
+
+
+def note_frame(origin: str, *, path: str, skipped: str) -> None:
+    """Point the record at a picture of the attempt that just happened (#320).
+
+    Written on EVERY attempt, including with both values empty. A record that
+    kept the last picture it managed to take would present an old page as this
+    attempt's — the borrowed-frame failure `_Seen.start_call` exists to stop,
+    one store over."""
+    _update(origin, last_frame=path, last_frame_skipped="" if path else skipped)
 
 
 def note_failed(origin: str, *, why: str) -> None:

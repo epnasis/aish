@@ -134,11 +134,11 @@ aish drives real pages the owner cannot see, so *"it said the portal had no invo
 | no `frame` key at all | nothing — a log written before frames existed, or a tool that never had a page |
 | `frame`, and the file resolves | the path |
 | `frame`, and the file is gone | the path, marked **purged** |
-| `frame_skipped` | why no picture was taken: `password`, `unknown`, `hands`, `failed` |
+| `frame_skipped` | why no picture was taken: `hands`, `failed` — or, in a log written before #320, `password` or `unknown` |
 
-Those four are why `frame_skipped` exists at all, and they route to four different reactions. *A password box was on the page* is the system working — a screenshot of a login form is exactly the artifact that must not exist. *The page would not say whether there was one* is aish declining to photograph something it could not identify, which is the capture failing CLOSED. *The capture failed* is worth investigating. A blank cell would present all of them as the same thing.
+Those are why `frame_skipped` exists at all, and they route to different reactions. *The owner's own hands were on the browser* is the system working. *The capture failed* is worth investigating. A blank cell would present both as the same thing, and as the same thing again as a step that recorded nothing.
 
-One thing the reader must not be led to over-read: `password` says what was seen, not what the page was. An email-first login's first step has no password box, so it is photographed like any other page — `docs/browser.md` carries that residual.
+**Two of the words are readable here and are no longer written** (#320). *A password box was on the page* used to refuse the capture, on the argument that a screenshot of a login form is the artifact that must not exist — but aish never types a password on the browse path, so the refused frame was an EMPTY form, and the refusal cost the one picture the owner most needed when a sign-in failed. *The page would not say whether there was one* existed only to resolve that question safely and went with it. This reader still renders both, because they are in logs already on disk and a fact a reader cannot render is a fact it has erased. `docs/browser.md` carries the argument.
 
 The bytes are deliberately NOT in the evidence store, which is text-only by construction (`digest_of` hashes UTF-8, `put` writes with `write_text`), and `docs/browser.md` carries the rest of that argument. What matters here is that the governance property is identical either way: **the record only points at the bytes, and the bytes are purgeable on their own schedule.** `_frame_of` is where the resolution happens, and it stats a path rather than importing anything live — the reader's import fence is unchanged.
 

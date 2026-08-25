@@ -26,6 +26,15 @@ def jar(tmp_path, monkeypatch):
     return store
 
 
+@pytest.fixture
+def state(tmp_path, monkeypatch):
+    """The state dir `browser.frames_dir()` resolves for itself — it runs
+    several layers below any agent, so it reads the environment rather than
+    being handed a path (#290)."""
+    monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+    return tmp_path
+
+
 class TestAnOriginIsMatchedExactly:
     """The whole safety property is that a credential belongs to ONE origin.
     `browser.is_logged_in` matches on a dot boundary so a login at eon.pl also
@@ -249,7 +258,11 @@ class TestTheReplayItself:
             def __init__(self, page):
                 self.page = page
 
-            async def press(self, _key):
+            async def press(self, key):
+                if key == "Enter":
+                    self.page.enter_pressed = getattr(
+                        self.page, "enter_pressed", 0
+                    ) + 1
                 return None
 
             async def type(self, text, delay=0):
@@ -263,7 +276,7 @@ class TestTheReplayItself:
         return self.FakePage(**kw)
 
     def _run(self, page, record=None, ident="him@x.pl", password="hunter2hunter2",
-             statuses=None):
+             watch=None, statuses=None):
         import asyncio
 
         from aish import browser
@@ -272,11 +285,22 @@ class TestTheReplayItself:
         record = record or signin_mod.Record(
             origin="https://eon.pl", url="https://eon.pl/login", saved="d"
         )
+        # The default is the ordinary live shape: the fence is up and it SAW
+        # the credential go to the login origin. Tests that care about the
+        # other endings hand in their own. `statuses=` is the shorthand for
+        # "the site answered the credential request with this" and rides the
+        # same watch, because that is where it lives in the real thing.
+        if watch is None:
+            watch = browser._CredentialWatch(
+                armed=True, sent_to=[record.origin]
+            )
+        if statuses is not None:
+            watch.answered.extend(int(status) for status in statuses)
         original = browser._has_password_field
         browser._has_password_field = _fake_has_password(page)
         try:
             return asyncio.run(
-                browser._sign_in_on(page, record, ident, password, statuses)
+                browser._sign_in_on(page, record, ident, password, watch)
             )
         finally:
             browser._has_password_field = original
@@ -335,7 +359,12 @@ class TestTheReplayItself:
         """It was, and that is #320. The form comes back for a CAPTCHA refusing
         the automation, a submit that never fired, a bot wall and an SPA that
         had not navigated yet — and calling every one of those a wrong password
-        destroyed a working credential the owner then had to re-record."""
+        destroyed a working credential the owner then had to re-record.
+
+        Note the default watch here HAS seen the password go out. Having left
+        is one half and it is not enough on its own: something has to have
+        judged it. `TestTheTwoHalvesMustAGREE` drives the case where both are
+        true."""
         page = self._page(url="https://eon.pl/login", form=self.OK_FORM,
                           has_password_after=True)
         result = self._run(page)
@@ -352,6 +381,268 @@ class TestTheReplayItself:
         assert result.second_factor and not result.stale and not result.ok
 
 
+class TestNothingIsStaleUntilItWasSeenToLeave:
+    """#320. `stale` writes a false statement about the owner's password onto
+    durable storage and stops the credential being spent — for months, on
+    eon.pl, on a password that works by hand and was recorded `used: 0`.
+
+    Its only evidence was a password box on the screen after the submit, which
+    is equally true of a rejected password, a submit that never fired, a bot
+    wall, a page that has not navigated yet and a second-factor step. The fence
+    already recognises a credential-bearing request, so the positive signal is
+    free: no credential-bearing request, nothing was learned, no verdict."""
+
+    def _page(self, **kw):
+        return TestTheReplayItself.FakePage(**kw)
+
+    def _run(self, page, watch):
+        return TestTheReplayItself()._run(page, watch=watch)
+
+    def _watch(self, **kw):
+        from aish import browser
+
+        return browser._CredentialWatch(**kw)
+
+    def test_a_form_that_came_back_with_nothing_ever_sent_is_not_stale(self):
+        """The eon.pl session, exactly: the click did not land, so the form
+        came back untouched — and aish wrote 'the stored one looks stale'."""
+        page = self._page(url="https://eon.pl/login", form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        result = self._run(page, self._watch(armed=True))
+        assert result.stale is False
+        assert not result.ok
+        # It says what actually happened, worded to what the fence can
+        # OBSERVE, and it claims nothing about the password — which is the
+        # whole of the repair.
+        assert "never saw the password leave the page" in result.why
+        assert "could not confirm the form was submitted" in result.why
+        assert "nothing has been learned" in result.why
+        assert "stale" not in result.why
+
+    def test_the_verdict_needs_a_WITNESS_and_not_merely_an_empty_list(self):
+        """`sent_to == []` means two different things — nothing went out, or
+        nobody was watching — and only the first supports a claim. A watch that
+        was never armed never reaches the ending at all: aish does not type a
+        credential into a page whose traffic it cannot see."""
+        page = self._page(url="https://eon.pl/login", form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        result = self._run(page, self._watch(armed=False))
+        assert result.stale is False and page.typed == []
+        assert "could not watch" in result.why
+
+    def test_was_tried_is_the_one_place_the_two_facts_are_combined(self):
+        assert self._watch(armed=False, sent_to=["https://eon.pl"]).was_tried is False
+        assert self._watch(armed=True, sent_to=[]).was_tried is False
+        assert self._watch(armed=True, sent_to=["https://eon.pl"]).was_tried is True
+
+    def test_a_credential_the_fence_ABORTED_was_never_sent(self):
+        """A wrong-destination replay is still an incident — that is
+        `_record_the_outcome`'s business — but it is not the site refusing the
+        password, because the site never got it."""
+        route, watch = TestTheFenceIsOnTheCredentialNotTheConnection()._watch(
+            "https://evil.test/collect",
+            body=f"p={TestTheFenceIsOnTheCredentialNotTheConnection.PASSWORD}",
+        )
+        assert route.aborted and watch.blocked == ["https://evil.test"]
+        assert watch.sent_to == [] and watch.was_tried is False
+
+    def test_an_allowed_credential_request_is_what_counts_as_sent(self):
+        route, watch = TestTheFenceIsOnTheCredentialNotTheConnection()._watch(
+            "https://api.eon.pl/auth",
+            body=f"u=him&p={TestTheFenceIsOnTheCredentialNotTheConnection.PASSWORD}",
+        )
+        assert route.continued and watch.sent_to == ["https://api.eon.pl"]
+        assert watch.was_tried is True
+
+    def test_the_pixels_that_fly_past_are_not_the_password_going_out(self):
+        """The whole point of #296 read the other way round: a beacon must not
+        make aish believe the credential was tried any more than it made aish
+        believe the sign-in failed."""
+        route, watch = TestTheFenceIsOnTheCredentialNotTheConnection()._watch(
+            "https://www.google-analytics.com/g/collect", body="en=page_view"
+        )
+        assert route.continued and watch.sent_to == [] and watch.was_tried is False
+
+    def test_a_send_is_recorded_only_after_the_request_was_RELEASED(self):
+        """`sent_to` claims the password left aish's hands. A continue that
+        threw did not release anything, and recording ahead of it would turn
+        the strongest available true statement into a probable one."""
+        import asyncio
+
+        from aish import browser
+
+        klass = TestTheFenceIsOnTheCredentialNotTheConnection
+        page, watch = klass.FakePage(), browser._CredentialWatch()
+        asyncio.run(
+            browser._fence_the_origin(page, klass()._record(), klass.PASSWORD, watch)
+        )
+
+        class Wedged(klass.FakeRoute):
+            async def continue_(self):
+                raise RuntimeError("Target page, context or browser has been closed")
+
+        route = Wedged("https://eon.pl/login", "POST", f"p={klass.PASSWORD}", {})
+        asyncio.run(page.handler(route))
+        assert watch.sent_to == [] and watch.was_tried is False
+
+    def test_a_second_factor_still_outranks_everything(self):
+        """It reaches the code-page check only because the password box is
+        gone; pinned so a later reordering cannot make a 2FA step read as a
+        submit that never fired."""
+        page = self._page(url="https://eon.pl/login", form=TestTheReplayItself.OK_FORM,
+                          wants_code=True)
+        result = self._run(page, self._watch(armed=True))
+        assert result.second_factor and not result.stale
+
+
+class TestASubmitThatDidNotFireGetsOneRetryOfTheBUTTON:
+    """#320. `_sign_in_on` pressed the form's own submit with `element.click()`
+    and had no fallback and no verification that anything was sent. The owner's
+    own logs, on this exact site: *"the click would not land, so aish pressed
+    it with the keyboard, and nothing about that control or the address changed
+    afterwards, so it may not have been registered."*
+
+    This is NOT a second attempt at the credential — the fence has watched
+    every request the page made and nothing carrying the password has left it,
+    so the site has not seen it once. One attempt, never a retry, is about the
+    VALUE reaching the site; this repeats only the gesture."""
+
+    def _page(self, **kw):
+        page = TestTheReplayItself.FakePage(**kw)
+        page.enter_pressed = 0
+        page.focused = []
+        return page
+
+    def _run(self, page, watch):
+        return TestTheReplayItself()._run(page, watch=watch)
+
+    def _watch(self, **kw):
+        from aish import browser
+
+        return browser._CredentialWatch(**kw)
+
+    def test_a_click_that_sent_nothing_is_followed_by_ONE_enter(self):
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        self._run(page, self._watch(armed=True))
+        assert page.submitted is True        # the click happened
+        assert page.enter_pressed == 1       # and exactly one fallback
+        # In the FIELD, not on the button: the button already has focus from
+        # the click that did not land, so Enter there repeats the same gesture.
+        assert page.focused == ["[data-aish-signin='password']"]
+
+    def test_a_click_that_DID_send_gets_no_second_gesture(self):
+        """The guard against a double submission. A request already on the
+        wire is already in `sent_to` — the route handler records before
+        `continue_` returns — so an empty list here is not a race."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        result = self._run(
+            page,
+            self._watch(armed=True, sent_to=["https://eon.pl"], answered=[401]),
+        )
+        assert page.enter_pressed == 0
+        # …and with BOTH halves present that is what a stale verdict is.
+        assert result.stale is True
+
+    def test_an_ANSWER_alone_is_enough_to_stand_the_fallback_down(self):
+        """The other end of the same guard. A page that got an answer to a
+        credential-bearing request has plainly submitted, however that request
+        left — so `answered` closes the one gap `sent_to` has."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        self._run(page, self._watch(armed=True, answered=[200]))
+        assert page.enter_pressed == 0
+
+    def test_a_formless_login_gets_no_fallback_because_enter_WAS_the_submit(self):
+        """Pressing it again is a repeat with no new information."""
+        page = self._page(
+            url="https://www.linkedin.com/login",
+            form={"ok": True, "posts_to": "", "identifier": False,
+                  "submit": False, "form": False,
+                  "page_origin": "https://www.linkedin.com"},
+            has_password_after=True,
+        )
+        from aish import signin as signin_mod
+
+        record = signin_mod.Record(
+            origin="https://www.linkedin.com",
+            url="https://www.linkedin.com/login", saved="d",
+        )
+        TestTheReplayItself()._run(
+            page, record=record, watch=self._watch(armed=True)
+        )
+        assert page.enter_pressed == 1  # the SUBMIT itself, and nothing after it
+
+    def test_a_page_that_navigated_gets_no_second_gesture(self):
+        """A page that moved has acted on something, whatever the fence did or
+        did not see."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          after={"url": "https://eon.pl/mojeon/2fa"},
+                          has_password_after=True)
+        self._run(page, self._watch(armed=True))
+        assert page.enter_pressed == 0
+
+    def test_a_page_that_changed_under_us_gets_no_second_gesture(self):
+        """The same fence the press itself asked: the tagged field present, the
+        origin and the form's destination unchanged."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True,
+                          changed="the form now sends to https://evil.test")
+        # The press itself refuses first, so nothing is submitted at all…
+        result = self._run(page, self._watch(armed=True))
+        assert page.submitted is False and page.enter_pressed == 0
+        assert not result.stale and "evil.test" in result.why
+
+    def test_a_page_that_changed_AFTER_the_press_gets_no_second_gesture(self):
+        """The fallback asks its OWN question, at its own moment. The press
+        passing the fence says nothing about the page a settle later — which is
+        exactly why `SIGNIN_STILL_OURS_JS` exists in the first place."""
+        from aish import browser
+
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        inner = page.evaluate
+        seen = {"n": 0}
+
+        async def evaluate(script, *args):
+            if script is browser.SIGNIN_STILL_OURS_JS:
+                seen["n"] += 1
+                return "" if seen["n"] == 1 else "the password field is gone"
+            return await inner(script, *args)
+
+        page.evaluate = evaluate
+        self._run(page, self._watch(armed=True))
+        assert page.submitted is True and seen["n"] == 2
+        assert page.enter_pressed == 0
+
+    def test_an_unwatched_attempt_never_reaches_the_fallback(self):
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        self._run(page, self._watch(armed=False))
+        assert page.enter_pressed == 0 and page.typed == []
+
+    def test_the_fallback_never_costs_the_ending(self):
+        """A fallback that threw must leave the outcome exactly as it was."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+
+        async def wedged():
+            raise RuntimeError("Target page has been closed")
+
+        page.focus_raises = wedged
+        result = self._run(page, self._watch(armed=True))
+        # Nothing was sent, so the credential is still not called stale.
+        assert result.stale is False
+        assert "could not confirm the form was submitted" in result.why
 class TestAPasswordBoxIsNotAVerdict:
     """#320. Marking a credential suspect is destructive and the owner cannot
     undo it except by re-recording — which, on the site this happened on, fails
@@ -477,6 +768,116 @@ class TestWhatCountsAsTheSiteRefusingTheValue:
         assert signin.refused_the_credential([]) is False
 
 
+class TestTheTwoHalvesMustAGREE:
+    """#320, where the two halves of this fix meet. They answer DIFFERENT
+    questions — *did the password ever leave* (the fence witness) and *did the
+    site judge it* (a refusal status, or the page's own ARIA error) — and a
+    credential is retired only when BOTH are true.
+
+    That is strictly narrower than either alone, which is the safe direction,
+    and it is composed in one pure function so that nobody can collapse it back
+    into a single test. Collapsing two facts into one is the mistake this whole
+    issue is about, one level up: a password box standing in for a verdict."""
+
+    def judge(self, **kw):
+        args = {"sent": False, "refused_status": False, "said_no": False,
+                "captcha": ""}
+        return signin.judge_a_failed_sign_in(**{**args, **kw})
+
+    def test_both_halves_retire_the_credential_and_nothing_else_does(self):
+        assert self.judge(sent=True, refused_status=True) == signin.FAILED_REFUSED
+        assert self.judge(sent=True, said_no=True) == signin.FAILED_REFUSED
+        # …and each half ALONE does not.
+        assert self.judge(sent=True) == signin.FAILED_UNEXPLAINED
+        assert self.judge() == signin.FAILED_NEVER_SENT
+
+    def test_a_judgement_with_no_observed_send_is_a_CONTRADICTION(self):
+        """One of the two observers is wrong and there is no way to tell which
+        — most likely a send aish cannot see. Stated, never acted on: resolving
+        it either way is a claim about his password that nothing supports."""
+        assert self.judge(refused_status=True) == signin.FAILED_CONTRADICTION
+        assert self.judge(said_no=True) == signin.FAILED_CONTRADICTION
+
+    def test_a_refusal_STATUS_outranks_a_captcha_declaration(self):
+        """A reCAPTCHA script tag sits on the login page of a large share of
+        the commercial web. Letting the declaration win unconditionally would
+        suppress every genuine stale detection on all of those sites — the
+        opposite over-correction, and just as blind. 401 means this credential
+        was not accepted and nothing else; 403 is already excluded."""
+        assert self.judge(
+            sent=True, refused_status=True, captcha="reCAPTCHA"
+        ) == signin.FAILED_REFUSED
+
+    def test_an_ARIA_error_does_NOT_outrank_it(self):
+        """A widget refusing a scripted submission renders a generic 'try
+        again' through the same alert region a wrong password does. Same
+        reasoning that excluded 403, one level down."""
+        assert self.judge(
+            sent=True, said_no=True, captcha="reCAPTCHA"
+        ) == signin.FAILED_CAPTCHA
+
+    def test_a_captcha_that_sent_nothing_is_still_the_captcha_outcome(self):
+        """A widget that blocks the submission and a click that never landed
+        produce the same page. The declaration is the more actionable of the
+        two, and the message says the other fact in the same breath."""
+        assert self.judge(captcha="reCAPTCHA") == signin.FAILED_CAPTCHA
+
+    def test_every_verdict_is_one_the_vocabulary_knows(self):
+        seen = {
+            self.judge(sent=sent, refused_status=st, said_no=no, captcha=cap)
+            for sent in (False, True)
+            for st in (False, True)
+            for no in (False, True)
+            for cap in ("", "reCAPTCHA")
+        }
+        assert seen <= signin.FAILURE_VERDICTS
+        assert seen == signin.FAILURE_VERDICTS  # every one is reachable
+
+    def test_the_captcha_message_says_when_nothing_was_seen_leaving(self):
+        """The live ambiguity on eon.pl: two wrong diagnoses were argued from
+        page text alone because nothing recorded whether anything was sent."""
+        from aish import browser
+
+        page = TestTheReplayItself.FakePage(
+            url="https://eon.pl/login", form=TestTheReplayItself.OK_FORM,
+            has_password_after=True, captcha=["https://www.google.com/recaptcha/api.js"],
+        )
+        result = TestTheReplayItself()._run(
+            page, watch=browser._CredentialWatch(armed=True)
+        )
+        assert result.captcha == "reCAPTCHA" and not result.stale
+        assert browser.NOTHING_LEFT_THE_PAGE in result.why
+        assert result.tried is False
+
+    def test_the_same_page_that_DID_send_does_not_say_it(self):
+        from aish import browser
+
+        page = TestTheReplayItself.FakePage(
+            url="https://eon.pl/login", form=TestTheReplayItself.OK_FORM,
+            has_password_after=True, captcha=["https://www.google.com/recaptcha/api.js"],
+        )
+        result = TestTheReplayItself()._run(page)  # the default watch HAS sent
+        assert result.captcha == "reCAPTCHA"
+        assert browser.NOTHING_LEFT_THE_PAGE not in result.why
+        assert result.tried is True
+
+    def test_a_contradiction_reaches_the_owner_as_a_contradiction(self):
+        from aish import browser
+
+        page = TestTheReplayItself.FakePage(
+            url="https://eon.pl/login", form=TestTheReplayItself.OK_FORM,
+            has_password_after=True,
+        )
+        result = TestTheReplayItself()._run(
+            page, watch=browser._CredentialWatch(armed=True, answered=[401])
+        )
+        assert result.stale is False
+        assert result.why == browser.CONTRADICTED
+        # `tried` follows the observer that saw something ARRIVE: a request
+        # that got an answer was sent, however it left.
+        assert result.tried is True
+
+
 class _FakeElement:
     def __init__(self, page, selector):
         self.page = page
@@ -485,6 +886,12 @@ class _FakeElement:
     async def click(self, **_kw):
         if "submit" in self.selector:
             self.page.submitted = True
+
+    async def focus(self):
+        raises = getattr(self.page, "focus_raises", None)
+        if raises is not None:
+            await raises()
+        getattr(self.page, "focused", []).append(self.selector)
 
 
 def _fake_has_password(page):
@@ -512,7 +919,10 @@ class TestACredentialIsOnlyEverTypedAtItsOwnOrigin:
         browser._has_password_field = _fake_has_password(page)
         try:
             return asyncio.run(
-                browser._sign_in_on(page, record, "him@x.pl", "hunter2hunter2")
+                browser._sign_in_on(
+                    page, record, "him@x.pl", "hunter2hunter2",
+                    browser._CredentialWatch(armed=True, sent_to=[record.origin]),
+                )
             )
         finally:
             browser._has_password_field = original
@@ -644,7 +1054,10 @@ class TestALoginPageWithNoFormAtAll:
         browser._has_password_field = _fake_has_password(page)
         try:
             return asyncio.run(
-                browser._sign_in_on(page, record, "him@x.pl", "hunter2hunter2")
+                browser._sign_in_on(
+                    page, record, "him@x.pl", "hunter2hunter2",
+                    browser._CredentialWatch(armed=True, sent_to=[record.origin]),
+                )
             )
         finally:
             browser._has_password_field = original
@@ -730,22 +1143,29 @@ class TestTheFenceIsOnTheCredentialNotTheConnection:
             destinations=list(destinations),
         )
 
-    def _decide(self, url, *, method="POST", body="", headers=None,
-                record=None, secret=None):
+    def _watch(self, url, *, method="POST", body="", headers=None,
+               record=None, secret=None):
+        """(route, watch) after one request has been through the fence."""
         import asyncio
 
         from aish import browser
 
-        page, incidents = self.FakePage(), []
+        page, watch = self.FakePage(), browser._CredentialWatch()
         asyncio.run(
             browser._fence_the_origin(
                 page, record or self._record(),
-                self.PASSWORD if secret is None else secret, incidents,
+                self.PASSWORD if secret is None else secret, watch,
             )
         )
+        assert watch.armed  # the handler is up before anything is judged
         route = self.FakeRoute(url, method, body, headers)
         asyncio.run(page.handler(route))
-        return route, incidents
+        return route, watch
+
+    def _decide(self, url, **kw):
+        """(route, the origins REFUSED) — what most of this class is about."""
+        route, watch = self._watch(url, **kw)
+        return route, watch.blocked
 
     # ---- what is NOT the fence's business
 
@@ -892,13 +1312,16 @@ class TestTheFenceIsOnTheCredentialNotTheConnection:
 
         from aish import browser
 
-        page, incidents = self.FakePage(), []
+        page, watch = self.FakePage(), browser._CredentialWatch()
         asyncio.run(
-            browser._fence_the_origin(page, self._record(), self.PASSWORD, incidents)
+            browser._fence_the_origin(page, self._record(), self.PASSWORD, watch)
         )
         route = _DeadRoute()
         asyncio.run(page.handler(route))
-        assert route.continued and incidents == []
+        assert route.continued and watch.blocked == []
+        # And it is not counted as the password having been sent: a request
+        # aish could not read is one it can claim nothing about.
+        assert watch.sent_to == []
 
 
 class _DeadRoute:
@@ -1109,17 +1532,201 @@ class TestASignInIsJudgedByWhetherTheSessionCameUp:
         record = signin.find("https://eon.pl")
 
         assert browser._record_the_outcome(
-            record, browser.SignInResult(ok=True), [], when="w"
+            record, browser.SignInResult(ok=True),
+            browser._CredentialWatch(armed=True, sent_to=["https://eon.pl"]),
+            when="w",
         ) == ""
         assert signin.find("https://eon.pl").used == 1
 
         text = browser._record_the_outcome(
-            record, browser.SignInResult(ok=True), ["https://evil.test"], when="w"
+            record, browser.SignInResult(ok=True),
+            browser._CredentialWatch(armed=True, blocked=["https://evil.test"]),
+            when="w",
         )
         assert "https://evil.test" in text
         # note_used would have cleared the very mark being set.
         assert signin.find("https://eon.pl").suspect == text
         assert signin.find("https://eon.pl").used == 1
+
+
+class TestEverySignInAttemptIsPhotographed:
+    """#320. The replay took NO snapshot at any point, so a sign-in that did
+    not work left nothing to look at — and two wrong diagnoses were argued off
+    the page text alone. One shutter, at the end of every attempt, success or
+    failure, into the same media store the browse frame uses."""
+
+    JPEG = b"\xff\xd8\xff\xe0" + b"pretend jpeg bytes" * 8
+
+    def _drive(self, monkeypatch, *, blank=None, shot=None,
+               has_password_after=False, pushes=None):
+        import asyncio
+
+        from aish import browser
+
+        if signin.find("https://eon.pl") is None:
+            signin.save("https://eon.pl/login", "him", "hunter2hunter2", today="d")
+        page = _SignInPage([])
+        page._has_password_after = has_password_after
+        page.blanked = 0
+        page.shots = []
+        inner = page.evaluate
+
+        async def evaluate(script, *args):
+            if script is browser.SIGNIN_BLANK_JS:
+                page.blanked += 1
+                if blank == "raise":
+                    raise RuntimeError("Execution context was destroyed")
+                return {"ok": True} if blank is None else blank
+            return await inner(script, *args)
+
+        async def screenshot(**kw):
+            page.shots.append(kw)
+            return shot() if shot is not None else self.JPEG
+
+        page.evaluate = evaluate
+        page.screenshot = screenshot
+        owner = _SignInOwner(page)
+        monkeypatch.setattr(browser, "_has_password_field", _fake_has_password(page))
+        monkeypatch.setattr(
+            browser, "notify", _SilentNotifier([] if pushes is None else pushes)
+        )
+        monkeypatch.setattr(
+            browser, "_submit", lambda job, timeout: asyncio.run(job(owner))
+        )
+        return browser.sign_in("https://eon.pl/faktury"), page
+
+    def test_a_sign_in_that_WORKED_is_photographed(self, state, monkeypatch):
+        import pathlib
+
+        result, page = self._drive(monkeypatch)
+        assert result.ok and result.frame_skipped == ""
+        assert pathlib.Path(result.frame).read_bytes() == self.JPEG
+        assert pathlib.Path(result.frame).parent.name == "media"
+        assert page.shots and page.shots[0]["type"] == "jpeg"
+
+    def test_a_sign_in_that_FAILED_is_photographed(self, state, monkeypatch):
+        """The one he actually asked for: the picture exists precisely when
+        there is a failure to look at."""
+        import pathlib
+
+        result, _ = self._drive(monkeypatch, has_password_after=True)
+        assert not result.ok
+        assert pathlib.Path(result.frame).read_bytes() == self.JPEG
+
+    def test_the_password_field_is_emptied_BEFORE_the_shutter(self, state,
+                                                              monkeypatch):
+        """A password box renders as dots — but a field is not obliged to still
+        BE a password box, because a show-password toggle flips `type` to
+        `text`. The field aish tagged is emptied whatever it has become, and
+        the picture is taken rather than skipped."""
+        result, page = self._drive(monkeypatch)
+        assert page.blanked == 1 and result.frame
+
+    def test_a_blanking_that_could_not_be_confirmed_refuses_the_shutter(
+        self, state, monkeypatch
+    ):
+        """The mirror image of the refusal #320 removed from the browse path,
+        and the difference is the point: there aish had typed nothing, here the
+        document holds his credential."""
+        result, page = self._drive(monkeypatch, blank={"ok": False})
+        assert (result.frame, result.frame_skipped) == ("", "failed")
+        assert page.shots == []  # not taken and discarded — never taken
+
+    def test_a_page_that_will_not_answer_the_blanking_refuses_too(
+        self, state, monkeypatch
+    ):
+        result, page = self._drive(monkeypatch, blank="raise")
+        assert (result.frame, result.frame_skipped) == ("", "failed")
+        assert page.shots == []
+
+    def test_a_failed_capture_costs_the_sign_in_nothing(self, state, monkeypatch):
+        def boom():
+            raise RuntimeError("Timeout 5000ms exceeded")
+
+        result, _ = self._drive(monkeypatch, shot=boom)
+        assert result.ok  # the outcome is untouched — the frame is an extra
+        assert (result.frame, result.frame_skipped) == ("", "failed")
+
+    def test_the_record_points_at_this_attempt_and_never_an_older_one(
+        self, state, monkeypatch
+    ):
+        """The borrowed-frame failure `_Seen.start_call` exists to stop, one
+        store over: a record that kept the last picture it managed to take
+        would present an old page as this attempt's."""
+        result, _ = self._drive(monkeypatch)
+        assert signin.find("https://eon.pl").last_frame == result.frame
+
+        def boom():
+            raise RuntimeError("nope")
+
+        self._drive(monkeypatch, shot=boom)
+        record = signin.find("https://eon.pl")
+        assert record.last_frame == "" and record.last_frame_skipped == "failed"
+
+    def test_an_attempt_that_never_RETURNED_leaves_no_picture_either(
+        self, state, monkeypatch
+    ):
+        """Cleared at the top, not only written at the bottom. An attempt that
+        raises — a navigation timeout, a browser that died — never reaches
+        `_record_the_outcome`, and a record holding the last picture it managed
+        to take would present an older page as this attempt's."""
+        from aish import browser
+
+        result, _ = self._drive(monkeypatch)
+        assert signin.find("https://eon.pl").last_frame == result.frame
+
+        def wedged(job, timeout):
+            raise RuntimeError("Timeout 45000ms exceeded")
+
+        monkeypatch.setattr(browser, "_submit", wedged)
+        with pytest.raises(RuntimeError):
+            browser.sign_in("https://eon.pl/faktury")
+        record = signin.find("https://eon.pl")
+        assert (record.last_frame, record.last_frame_skipped) == ("", "")
+
+    def test_the_store_holds_a_REFERENCE_and_never_the_bytes(self, state,
+                                                             monkeypatch):
+        result, _ = self._drive(monkeypatch)
+        written = signin.STATE.read_text(encoding="utf-8")
+        assert result.frame in written
+        assert "hunter2hunter2" not in written
+        assert self.JPEG[4:20].decode("ascii") not in written
+
+    def test_browser_names_the_picture_and_says_purged_when_it_is_gone(
+        self, state, monkeypatch
+    ):
+        """The media store is a bounded LRU, so a path that stopped resolving
+        is the ORDINARY end of a frame's life — never "there was no picture"."""
+        import pathlib
+
+        from aish import browser
+
+        result, _ = self._drive(monkeypatch)
+        assert result.frame in "\n".join(browser._signin_lines())
+        pathlib.Path(result.frame).unlink()
+        assert "purged" in "\n".join(browser._signin_lines())
+
+    def test_browser_says_WHICH_absence(self, state, monkeypatch):
+        from aish import browser
+
+        def boom():
+            raise RuntimeError("nope")
+
+        self._drive(monkeypatch, shot=boom)
+        assert "no picture of the last attempt — failed" in "\n".join(
+            browser._signin_lines()
+        )
+
+    def test_the_push_names_the_door_and_not_a_filesystem_path(self, state,
+                                                               monkeypatch):
+        """A path on a phone is not something he can do anything with."""
+        pushes: list = []
+        result, _ = self._drive(
+            monkeypatch, has_password_after=True, pushes=pushes
+        )
+        body = pushes[-1][1]
+        assert "picture of the attempt" in body and "/browser" in body
+        assert result.frame not in body
 
 
 class _SilentNotifier:
@@ -1133,7 +1740,7 @@ class _SilentNotifier:
 class _SignInPage(TestTheReplayItself.FakePage):
     """The replay page, plus the network the real one sits on."""
 
-    def __init__(self, beacons=(), *, answers=(), **kw):
+    def __init__(self, beacons=(), *, answers=(), submits=True, **kw):
         super().__init__(
             url=kw.pop("url", "https://eon.pl/login"),
             form=kw.pop("form", TestTheReplayItself.OK_FORM),
@@ -1142,10 +1749,17 @@ class _SignInPage(TestTheReplayItself.FakePage):
         )
         self._beacons = list(beacons)
         self._answers = list(answers)
+        # Does the submit gesture actually put the credential on the wire? True
+        # is the ordinary site. False is the eon.pl shape #320 is about — the
+        # click does not land, so nothing is sent and the form comes back.
+        self._submits = submits
         self._handler = None
         self._listeners: dict = {}
         self.beacons_continued = 0
+        self.credential_requests = 0
         self.closed = False
+
+    url_at_submit = "https://eon.pl/login"
 
     async def goto(self, *_a, **_kw):
         return None
@@ -1170,6 +1784,18 @@ class _SignInPage(TestTheReplayItself.FakePage):
             await self._handler(route)
             self.beacons_continued += int(route.continued)
         self._beacons = []
+        # The submit itself. A response cannot exist without a request that was
+        # routed to produce it, so the credential POST goes through the SAME
+        # handler the real one would — modelling the answer without the request
+        # is an interleaving a browser cannot produce, and it is exactly the
+        # ambiguity #320 turns on.
+        pressed = self.submitted or getattr(self, "enter_pressed", 0)
+        if pressed and self._submits:
+            wire = self._answers or [(self.url_at_submit, "p=hunter2hunter2", None)]
+            for url, body, _status in wire:
+                route = _SignInRoute(url, body)
+                await self._handler(route)
+                self.credential_requests += int(route.continued)
         # ...and the site's own answers come back on the same settle.
         listener = self._listeners.get("response")
         for url, body, status in self._answers if listener else []:
@@ -1221,8 +1847,23 @@ class TestAFailedAttemptLeavesTheOwnersRecordAlone:
         "destinations": [],
     }
 
-    def test_a_captcha_refusal_costs_him_nothing(self, monkeypatch):
+    @staticmethod
+    def _about_the_credential(record):
+        """The record with the ATTEMPT's own fields dropped.
+
+        `last_frame` / `last_frame_skipped` are a fact about the attempt that
+        just happened, not about the credential — they are meant to change on
+        every attempt, and an assertion that froze them would be asserting the
+        picture must not be taken. Everything this class is about is what is
+        left."""
         import dataclasses
+
+        fields = dataclasses.asdict(record)
+        fields.pop("last_frame", None)
+        fields.pop("last_frame_skipped", None)
+        return fields
+
+    def test_a_captcha_refusal_costs_him_nothing(self, monkeypatch):
 
         page = _SignInPage(
             has_password_after=True,
@@ -1236,7 +1877,9 @@ class TestAFailedAttemptLeavesTheOwnersRecordAlone:
         assert result.captcha == "reCAPTCHA"
         # The whole point: the record he made by hand is untouched, and the
         # credential is still spendable.
-        assert dataclasses.asdict(signin.find("https://eon.pl")) == self.AS_HE_RECORDED_IT
+        assert self._about_the_credential(
+            signin.find("https://eon.pl")
+        ) == self.AS_HE_RECORDED_IT
         assert signin.credential("https://eon.pl") == ("him", "hunter2hunter2")
         # And he is told the true thing, without being sent to re-record.
         assert pushes and "does not need replacing" in pushes[0][1]
@@ -1246,13 +1889,14 @@ class TestAFailedAttemptLeavesTheOwnersRecordAlone:
     def test_a_failure_the_site_gave_no_reason_for_costs_him_nothing_either(
         self, monkeypatch
     ):
-        import dataclasses
 
         result, _ = self._drive(
             monkeypatch, page=_SignInPage(has_password_after=True)
         )
         assert not result.ok and not result.stale
-        assert dataclasses.asdict(signin.find("https://eon.pl")) == self.AS_HE_RECORDED_IT
+        assert self._about_the_credential(
+            signin.find("https://eon.pl")
+        ) == self.AS_HE_RECORDED_IT
         assert signin.credential("https://eon.pl") == ("him", "hunter2hunter2")
 
     def test_the_site_answering_the_login_with_a_refusal_still_retires_it(

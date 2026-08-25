@@ -2691,10 +2691,14 @@ class TestATagsWriterAndItsReadersHaveTheSameReach:
             "reads": {"CALENDAR_JS": LIGHT},
         },
         # The login form's fields, re-read immediately before the press because
-        # the tag survives a same-document change.
+        # the tag survives a same-document change — and once more before the
+        # evidence frame, to empty the password field (#320). A shallow reader
+        # there would leave a filled field inside a web component unblanked and
+        # then photograph it, which is this table's failure mode with the worst
+        # possible consequence.
         "data-aish-signin": {
             "writes": {"SIGNIN_FORM_JS": DEEP},
-            "reads": {"SIGNIN_STILL_OURS_JS": DEEP},
+            "reads": {"SIGNIN_STILL_OURS_JS": DEEP, "SIGNIN_BLANK_JS": DEEP},
         },
     }
 

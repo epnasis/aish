@@ -1002,14 +1002,16 @@ async def _password_field_state(page: Any) -> bool | None:
     the serialized HTML does not — the same reason `Page.text` is taken from the
     DOM and not from `page.content()`.
 
-    The third value exists because two callers need OPPOSITE defaults when
-    there is no answer, and one boolean cannot carry that. `query_selector`
-    raises on a page that is navigating or closing under it, which a
-    settled-then-acting flow does produce. Telling the model a page is a wall
-    when aish could not tell would be a false claim about his account;
-    photographing a page aish could not identify is the failure the capture
-    refusal exists to prevent. So the answer is reported as unknown and each
-    caller resolves it in its own safe direction.
+    `query_selector` raises on a page that is navigating or closing under it,
+    which a settled-then-acting flow does produce, and *raised* is not *no*.
+
+    It had two consumers with opposite defaults; since #320 the evidence
+    capture no longer asks, so `_has_password_field` is the only one left. The
+    third value stays because the resolution is a DECISION and has to be
+    visible as one: telling the model a page is a wall when aish could not tell
+    would be a false claim about his account, so the unknown is resolved to
+    `False` there — explicitly, at the one line that does it, rather than by an
+    `except` that happens to return the same thing.
     """
     try:
         return (await page.query_selector("input[type=password]")) is not None
@@ -1023,7 +1025,8 @@ async def _has_password_field(page: Any) -> bool:
     Unchanged behaviour, stated deliberately: a page that will not answer is
     not a wall. Refusing to call something a sign-in page when aish could not
     tell is the safe direction for everything the model and the owner are told.
-    The capture resolves the same unknown the other way — `_evidence_frame`.
+    This is the ONE line that resolves the unknown, and it is written as
+    `is True` rather than as truthiness so the resolution cannot drift.
     """
     return await _password_field_state(page) is True
 
@@ -1839,6 +1842,42 @@ SIGNIN_REJECTION_JS = "() => {" + browse_mod.DEEP_JS + """
 }"""
 
 
+# Emptied before the shutter, so a picture of the sign-in attempt does not
+# carry the password out of the FIELD aish typed it into (#320). That is the
+# whole of what this enforces: a page that mirrors the value into its own text
+# — a hand-rolled show-password that writes into a <span> — is not a field and
+# is not reachable this way. The IDENTIFIER is deliberately left alone; #296
+# already settled that the credential fenced here is the password and not the
+# username, which is on the wire of half the commercial web by design.
+#
+# A password box renders as dots and not as text — that much is the browser's
+# own behaviour and needs no help. What is NOT guaranteed is that the field is
+# still a password box: a great many login pages carry a "show password" toggle
+# that flips `type` to `text`, and the site's own script can flip it whenever it
+# likes. The tag aish wrote survives that flip, so the field can be found and
+# emptied whatever it has become. Emptying rather than skipping the picture is
+# the point — the picture is the artifact the owner asked for.
+#
+# It reports what it did, because the caller REFUSES the shutter unless this
+# came back clean. Blanking that cannot be confirmed is an unknown about a
+# document aish has typed his password into, which is a different thing from
+# the browse path's unknown (there, aish has typed nothing and there is nothing
+# to protect — see `_evidence_frame`).
+#
+# Nothing is dispatched: `.value = ''` fires no events, and the page is closed
+# immediately afterwards, so this cannot affect the sign-in it is photographing.
+SIGNIN_BLANK_JS = "() => {" + browse_mod.DEEP_JS + """
+  const fields = deepAll('[data-aish-signin="password"]');
+  let unmasked = 0;
+  for (const el of fields) {
+    if ((el.getAttribute('type') || '').toLowerCase() !== 'password') unmasked++;
+    try { el.value = ''; } catch (e) { return {ok: false}; }
+    if (el.value) return {ok: false};
+  }
+  return {ok: true, fields: fields.length, unmasked: unmasked};
+}"""
+
+
 # Methods that can carry a body at all. A GET has none — but its ADDRESS can
 # still carry a credential, so a GET is read, never waved through.
 _BODY_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -1875,12 +1914,59 @@ def _carries_the_credential(request: Any, needles: Sequence[str]) -> bool:
     return any(signin_mod.carries_secret(part, needles) for part in _request_carriers(request))
 
 
+@dataclass
+class _CredentialWatch:
+    """What the fence SAW of the credential itself during one sign-in (#320).
+
+    The fence already recognises a credential-bearing request, so it is the one
+    thing in this subsystem that can answer BOTH halves of *was the password
+    refused?* — **did it ever leave**, and **what did the site say back**. They
+    are different questions and this is deliberately one object, because the
+    alternative is two observers with two definitions of "carries the
+    credential", which is a second opinion about which request a status belongs
+    to.
+
+    `armed` is not decoration. `sent_to` being empty means two different things
+    — nothing carrying the credential was let through, or nobody was looking —
+    and only the first supports a claim about the password. Nothing may read
+    `sent_to` without reading `armed`.
+    """
+
+    # Set once `page.route` has returned, so the handler below is installed.
+    armed: bool = False
+    # Origins of credential-bearing requests aish LET GO. Not "the site
+    # received it": aish cannot see that, and this is the strongest true
+    # statement available — the password left aish's hands towards this origin.
+    sent_to: list[str] = field(default_factory=list)
+    # Origins of credential-bearing requests aish ABORTED. A wrong-destination
+    # replay: a fact about the credential, whatever the sign-in's own outcome.
+    blocked: list[str] = field(default_factory=list)
+    # Statuses the site ANSWERED credential-bearing requests with. A refusal
+    # here is the one unambiguous "the site judged the value" there is —
+    # `signin.refused_the_credential` owns which statuses count.
+    answered: list[int] = field(default_factory=list)
+
+    def note_sent(self, origin: str) -> None:
+        if origin and origin not in self.sent_to:
+            self.sent_to.append(origin)
+
+    def note_blocked(self, origin: str) -> None:
+        if origin and origin not in self.blocked:
+            self.blocked.append(origin)
+
+    @property
+    def was_tried(self) -> bool:
+        """Did the password actually go out? Only an ARMED watch may say yes."""
+        return self.armed and bool(self.sent_to)
+
+    @property
+    def was_refused(self) -> bool:
+        """Did the site answer a credential-bearing request with a refusal?"""
+        return signin_mod.refused_the_credential(self.answered)
+
+
 async def _fence_the_origin(
-    page: Any,
-    record: Any,
-    secret: str,
-    incidents: list[str],
-    statuses: list[int] | None = None,
+    page: Any, record: Any, secret: str, watch: _CredentialWatch
 ) -> None:
     """Refuse, at the network, to let THE CREDENTIAL leave where it belongs.
 
@@ -1902,48 +1988,65 @@ async def _fence_the_origin(
     somewhere the owner's own sign-in sent it? Everything else on the wire is
     none of the fence's business and passes unexamined and unreported.
 
-    Only the ORIGIN of an aborted request is recorded. The address itself may
-    carry the credential in its query string, and this list is pushed to his
-    phone and written to the store.
+    Only the ORIGIN of a recorded request is kept, aborted or allowed. The
+    address itself may carry the credential in its query string, and these
+    lists are pushed to his phone and written to the store.
 
-    It also collects what the site ANSWERED those requests with (#320). That
-    lives here rather than in a watcher of its own because "carries the
-    credential" must have exactly one definition and one set of needles: a
-    second observer that matched differently would be a second opinion about
-    which request the status belongs to."""
+    **It also reports what it let THROUGH and what came back** (#320). Both
+    live here, in one `watch`, because the same look that decides whether to
+    abort is the only observation of whether the password was tried at all —
+    and because "carries the credential" must have exactly one definition and
+    one set of needles. A second observer that matched differently would be a
+    second opinion about which request a status belongs to, and it is the
+    agreement between the two halves that decides whether a credential is
+    retired.
+
+    `watch` is filled in place rather than returned: the handlers outlive this
+    call, and every request routed between here and the end of the sign-in is
+    part of the answer."""
     needles = signin_mod.secret_needles(secret)
 
-    def going_astray(request: Any) -> str:
-        """The origin to refuse, or "". Never raises: a request aish cannot
-        read is a request it has nothing to say about, and a fence that hangs
-        the page is worse than no fence at all."""
+    def carries(request: Any) -> bool:
+        """Never raises: a request aish cannot read is a request it has nothing
+        to say about, and a fence that hangs the page is worse than no fence."""
         try:
-            if not _carries_the_credential(request, needles):
+            return _carries_the_credential(request, needles)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def going_astray(request: Any) -> str:
+        """The origin to refuse a credential-bearing request, or ""."""
+        try:
+            if signin_mod.may_receive_credential(record, request.url):
                 return ""
-            return (
-                ""
-                if signin_mod.may_receive_credential(record, request.url)
-                else (signin_mod.origin_of(request.url) or "an unreadable address")
-            )
+            return signin_mod.origin_of(request.url) or "an unreadable address"
         except Exception:  # noqa: BLE001
             return ""
 
     async def decide(route: Any) -> None:
         # The abort and the continue are kept apart deliberately: a failed
         # abort must never fall through to letting the request go.
-        if where := going_astray(route.request):
-            if where not in incidents:
-                incidents.append(where)
+        carrying = carries(route.request)
+        if carrying and (where := going_astray(route.request)):
+            watch.note_blocked(where)
             with contextlib.suppress(Exception):
                 await route.abort()
             return
+        # Read while the request is still alive; a dead one answers nothing,
+        # and the record.origin fallback keeps a send from going unrecorded
+        # just because its address could not be read back.
+        heading_for = record.origin
+        if carrying:
+            with contextlib.suppress(Exception):
+                heading_for = signin_mod.origin_of(route.request.url) or record.origin
         with contextlib.suppress(Exception):
             await route.continue_()
-
-    await page.route("**/*", decide)
-
-    if statuses is None:
-        return
+            # AFTER the continue returned, never before: a `sent_to` written
+            # ahead of it would claim the password left on a request that was
+            # never released. This is the whole positive signal, and the
+            # ordering is what makes it true rather than probable.
+            if carrying:
+                watch.note_sent(heading_for)
 
     def note_status(response: Any) -> None:
         """The status the site gave a request that carried the credential.
@@ -1953,10 +2056,16 @@ async def _fence_the_origin(
         the page saying so in words."""
         with contextlib.suppress(Exception):  # a response aish cannot read says nothing
             if _carries_the_credential(response.request, needles):
-                statuses.append(int(response.status))
+                watch.answered.append(int(response.status))
 
     with contextlib.suppress(Exception):  # a page that takes no listener is not an error
         page.on("response", note_status)
+
+    await page.route("**/*", decide)
+    # LAST, after both observers are attached: `armed` is what licenses every
+    # claim made from this watch afterwards, and a watch that is armed while
+    # one of its halves is not up would license a claim nothing was watching.
+    watch.armed = True
 
 
 @dataclass
@@ -1970,36 +2079,198 @@ class SignInResult:
     # The site asked for a code. Not a failure, and must never be recorded as
     # one: the password was almost certainly right.
     second_factor: bool = False
-    # Should the stored credential stop being spent? Only when the site
-    # POSITIVELY refused it — see `_sign_in_on`. A page that merely failed to
-    # let aish in says nothing about the value (#320).
+    # Should the stored credential stop being spent? Only when BOTH halves are
+    # true (#320): aish WATCHED the password leave, and the site POSITIVELY
+    # said it judged the value. Either alone was a verdict about something
+    # nobody observed — see `_sign_in_on`.
     stale: bool = False
     # The anti-automation widget the login page declares, when the session did
     # not come up. Not a verdict on the password: a verdict on aish.
     captcha: str = ""
-    # Was the credential actually SENT? A refusal by the harness before the
-    # submit and a refusal by the site after it call for opposite things to be
-    # said, and "aish did not use it" is a false statement about the second.
+    # Was the credential SPENT? A refusal by the harness before the submit and
+    # a refusal by the site after it call for opposite things to be said, and
+    # "aish did not use it" is a false statement about the second.
+    #
+    # Set from what was OBSERVED, not from having reached the press: the fence
+    # watched the value leave, or the site advanced past the password (a
+    # session that came up is proof it arrived, whatever the fence saw).
     tried: bool = False
     url: str = ""
+    # A picture of the page at the END of the attempt, success or failure
+    # (#320), in the media store — a REFERENCE, never the bytes. Before this
+    # the replay took no snapshot at any point, so a sign-in that did not work
+    # left the owner nothing to look at. `frame_skipped` says WHICH absence,
+    # in the same closed vocabulary `Snapshot` uses.
+    frame: str = ""
+    frame_skipped: str = ""
+
+
+# What aish says when the form came back and nothing carrying the password was
+# ever SEEN leaving the page. It is not a diagnosis of the site; it is the
+# narrowest true statement aish can make about its own hands, and it is worded
+# to what the fence can observe rather than to what happened — "the site never
+# saw it" would be wider than the fence enforces, since a service worker or a
+# value transformed in the page is invisible to it. The sentence it replaced
+# ("the stored one looks stale") was a false statement about the owner's
+# password, written to durable storage (#320).
+NEVER_SUBMITTED = (
+    "aish filled the form and never saw the password leave the page, so it "
+    "could not confirm the form was submitted at all — nothing has been "
+    "learned about the saved sign-in"
+)
+
+# The two observers disagree: the site answered a request that carried the
+# password, and the route handler never recorded letting one go. One of them is
+# wrong and there is no way to tell which, so this states the disagreement and
+# acts on neither half. Saying it out loud matters — the shape it most likely
+# has is a send aish cannot see (a service worker), which is exactly the blind
+# spot the never-submitted verdict would otherwise hide behind.
+CONTRADICTED = (
+    "the site answered as though it had judged the saved password, but aish "
+    "never saw the password leave the page — those cannot both be true, so "
+    "nothing has been recorded about the saved sign-in"
+)
+
+# Appended to the CAPTCHA outcome when nothing was observed leaving. A widget
+# that blocks the submission and a click that did not land produce the SAME
+# page, and this is the fact that tells the owner which one he is looking at
+# once the picture is in front of him.
+NOTHING_LEFT_THE_PAGE = (
+    ", and nothing carrying the password was seen leaving the page at all"
+)
+
+# The fence is also the only witness, so a sign-in aish cannot watch is a
+# sign-in aish will not make: with no witness there is no honest verdict
+# afterwards, and the credential would be spent for nothing.
+UNWATCHED = (
+    "aish could not watch what the page sends, so it did not type the saved "
+    "sign-in at all — the saved sign-in is untouched"
+)
+
+
+async def _signin_frame(owner: _Owner, page: Any) -> tuple[str, str]:
+    """(stored path, reason there is none) for a picture of a sign-in attempt.
+
+    The owner's oldest complaint about this feature is that it is invisible:
+    the replay took **no snapshot at any point**, so when it failed there was
+    nothing to look at, and two wrong diagnoses were argued from the page text
+    alone. Same store, same reference discipline and same absence vocabulary as
+    the browse frame — the bytes never enter a log, only a path does.
+
+    **The blanking is the whole difference from `_evidence_frame`.** This is
+    the one page in aish that has had the owner's password typed into it, and
+    while a password box renders as dots, a *field* is not obliged to still be
+    a password box: a show-password toggle flips `type` to `text`. So the field
+    aish tagged is emptied first, and the shutter is refused if that could not
+    be confirmed. That refusal is the mirror image of the one #320 removed from
+    the browse path, and the difference is the point: there, aish had typed
+    nothing and the unknown protected nothing; here, the unknown is about a
+    document holding his credential.
+    """
+    try:
+        blanked = await page.evaluate(SIGNIN_BLANK_JS)
+    except Exception:  # noqa: BLE001 — a page that will not answer is an unknown
+        blanked = None
+    if not (blanked or {}).get("ok"):
+        return "", browse_mod.NO_FRAME_FAILED
+    return await _evidence_frame(owner, page, label="sign-in")
+
+
+async def _press_the_button_again(
+    page: Any, record: Any, watch: _CredentialWatch, *, was: str
+) -> None:
+    """A submit that did not fire gets ONE fallback gesture (#320).
+
+    **This is not a second attempt at the credential — it is a second attempt
+    at the BUTTON, and the difference is the whole justification.** The next
+    reader will otherwise take it for a breach of *one attempt, never a retry*.
+    That rule exists because a wrong password tried twice ticks the site's
+    lockout counter; it is about the VALUE reaching the site. Here the fence
+    has routed every request this page made and saw NONE of them carrying the
+    password, so as far as anything can be observed the site has not seen the
+    credential once and this is the first attempt at delivering it rather than
+    the second. The value is already typed; only the gesture is repeated. (The
+    fence's blind spots are the ones `secret_needles` already declares — a
+    service worker, a WebSocket, a value transformed in the page — and on such
+    a site this can be a genuine second delivery. It is bounded to one.)
+
+    The lead this exists for is in the owner's own session logs, on this exact
+    site: *"the click would not land, so aish pressed it with the keyboard, and
+    nothing about that control or the address changed afterwards, so it may not
+    have been registered."* Clicks not landing is documented eon.pl behaviour,
+    and `element.click()` had no fallback and no verification that anything was
+    sent.
+
+    Four conditions, and every one of them is a way of being sure a first
+    submission is not in flight — a double submission is the one thing this may
+    not risk:
+
+    1. **The submit was a CLICK.** With no form the submit already WAS Enter,
+       and pressing it again is a repeat with no new information. Enforced by
+       the caller, which only calls this when it pressed a button.
+    2. **Nothing carrying the password has been let through, and nothing has
+       come BACK.** The route handler records a send before `continue_`
+       returns, so a request already on the wire is already in `sent_to` and an
+       empty list is not a race. `answered` is the same guard from the other
+       end and is not redundant with it: a page that got an answer to a
+       credential-bearing request has plainly submitted, however that request
+       left, so it closes the one gap `sent_to` has (#320).
+    3. **The page has not navigated.** A page that moved has acted on
+       something, whatever the fence did or did not see.
+    4. **It is still the page that was checked**, by the same fence the press
+       itself asked — the tagged field present, the origin and the form's
+       destination unchanged. A page that changed under us gets nothing.
+
+    Once, by construction: straight-line code with no loop and one caller.
+    """
+    if watch.was_tried or watch.answered or not watch.armed:
+        return
+    try:
+        if str(page.url or "") != was:
+            return
+        if await page.evaluate(SIGNIN_STILL_OURS_JS, record.origin):
+            return
+        field = await page.query_selector("[data-aish-signin='password']")
+        if field is None:
+            return
+        # Focus the FIELD, not the button: the button already has focus from
+        # the click that did not land, so Enter there would repeat the same
+        # gesture. Enter in the field is the other way a form is submitted, and
+        # it is the one that worked by hand.
+        await field.focus()
+        await page.keyboard.press("Enter")
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001 — an SPA sign-in never navigates
+            pass
+        await page.wait_for_timeout(SETTLE_MS)
+    except Exception:  # noqa: BLE001 — a fallback that failed leaves the ending alone
+        return
 
 
 async def _sign_in_on(
-    page: Any,
-    record: Any,
-    identifier: str,
-    password: str,
-    statuses: list[int] | None = None,
+    page: Any, record: Any, identifier: str, password: str, watch: _CredentialWatch
 ) -> SignInResult:
     """Fill and submit the recorded login form on an already-open page.
 
-    `statuses` is what the site answered credential-bearing requests with,
-    collected by the fence. It is one of the two positive signals that may
-    retire the stored password."""
+    `watch` is the fence's live account of the credential on the wire, and it
+    is what makes the ending honest (#320). A password box on the screen
+    afterwards is equally true of a rejected password, a submit that never
+    fired, a bot wall, a page that has not navigated yet and a second-factor
+    step that keeps the field on screen — so it decides nothing on its own.
+
+    It carries both halves of the verdict: whether the value ever LEFT
+    (`was_tried`) and what the site ANSWERED the requests that carried it
+    with (`answered`). Neither alone retires a credential."""
     refused = (
         f"aish only ever types a credential at {record.origin}, the exact origin "
         "it was saved for"
     )
+    if not watch.armed:
+        # Before anything is typed. An unwatched sign-in cannot be judged
+        # afterwards — the form coming back would be unattributable — and a
+        # credential spent for an unattributable outcome is spent for nothing.
+        return SignInResult(why=UNWATCHED, url=page.url or "")
     live = signin_mod.origin_of(page.url or "")
     if live != record.origin:
         # A cheap early out. It is NOT the fence — the fence is inside the
@@ -2061,6 +2332,7 @@ async def _sign_in_on(
     # is Enter — the universal gesture, and the one that cannot land on
     # "Continue with Google", which is what choosing a button by its words did.
     submit = await page.query_selector("[data-aish-signin='submit']")
+    was = page.url
     if submit is not None:
         await submit.click(timeout=ACT_TIMEOUT_MS)
     else:
@@ -2071,14 +2343,52 @@ async def _sign_in_on(
         pass
     await page.wait_for_timeout(SETTLE_MS)
 
+    if submit is not None:
+        await _press_the_button_again(page, record, watch, was=was)
+
     if await _has_password_field(page):
-        # The form came back. That means the SESSION DID NOT COME UP, and
+        # The form came back. That means THE SESSION DID NOT COME UP, and
         # nothing more (#320) — it is equally the shape of a CAPTCHA refusing
         # the automation, a submit that never fired, a bot wall and an SPA that
         # had not navigated yet. Reading it as "the site refused the value" is
         # what wrote a false statement about the owner's password onto durable
         # storage and destroyed a working credential, twice.
-        if vendor := await _captcha_vendor(page):
+        #
+        # Two independent observations decide what happened, and the
+        # composition of them lives in `signin.judge_a_failed_sign_in` so that
+        # nobody can quietly collapse it back to one test:
+        #
+        #   DID IT LEAVE   — the fence watched every request this page made and
+        #                    knows which of them carried the value.
+        #   DID THE SITE JUDGE IT — a refusal status on one of those requests,
+        #                    or the page's own machine-readable error.
+        #
+        # A credential is retired only when BOTH are true.
+        after = await _rejection_marks(page)
+        vendor = await _captcha_vendor(page)
+        verdict = signin_mod.judge_a_failed_sign_in(
+            sent=watch.was_tried,
+            refused_status=watch.was_refused,
+            said_no=_said_no(before, after),
+            captcha=vendor,
+        )
+        if verdict == signin_mod.FAILED_REFUSED:
+            # Both halves. The value went out and something said no to it —
+            # one attempt, never a retry, because retrying is how an account
+            # locks.
+            return SignInResult(
+                why="the site refused the saved password, so aish will not try it again",
+                stale=True,
+                tried=True,
+                url=page.url,
+            )
+        if verdict == signin_mod.FAILED_CONTRADICTION:
+            # The two observers disagree, and a disagreement is not a verdict.
+            # `tried` is True because the answering half is the one that saw
+            # something arrive: a request that got an answer was sent, however
+            # it left. Nothing is written to the record either way.
+            return SignInResult(why=CONTRADICTED, tried=True, url=page.url)
+        if verdict == signin_mod.FAILED_CAPTCHA:
             # Named and structural, because it is the one failure aish can
             # neither fix nor be repaired into fixing: solving a CAPTCHA is on
             # this project's refused list. Re-recording the sign-in would fail
@@ -2089,26 +2399,14 @@ async def _sign_in_on(
                     "scripted sign-in — aish cannot sign in to this site "
                     "automatically. The saved sign-in was never judged and is "
                     "untouched"
-                ),
+                )
+                + ("" if watch.was_tried else NOTHING_LEFT_THE_PAGE),
                 captcha=vendor,
-                tried=True,
+                tried=watch.was_tried,
                 url=page.url,
             )
-        rejected = signin_mod.refused_the_credential(statuses or []) or _said_no(
-            before, await _rejection_marks(page)
-        )
-        if rejected:
-            # A POSITIVE signal that the site judged the value: it answered a
-            # credential-bearing request with a refusal, or it said so on the
-            # page in its own machine-readable words. Only this may mark the
-            # credential — one attempt, never a retry, because retrying is how
-            # an account locks.
-            return SignInResult(
-                why="the site refused the saved password, so aish will not try it again",
-                stale=True,
-                tried=True,
-                url=page.url,
-            )
+        if verdict == signin_mod.FAILED_NEVER_SENT:
+            return SignInResult(why=NEVER_SUBMITTED, url=page.url)
         return SignInResult(
             why=(
                 "the sign-in did not go through and the site gave no reason for "
@@ -2175,7 +2473,12 @@ def _signin_lines() -> list[str]:
     validity — eon.pl expires server-side in about fifteen minutes — and
     actually proving it would cost a Chrome launch and a navigation per row on
     a box that evicts the browser for memory. A row that lies is the failure
-    #236 was about; a row that says less is not."""
+    #236 was about; a row that says less is not.
+
+    Since #320 it also names the PICTURE of the last attempt, which is this
+    subsystem's only door onto a sign-in that did not work: the replay runs
+    unattended, on a Mac the owner is never sitting at, and until now it left
+    nothing to look at."""
     records = signin_mod.records()
     if not records:
         return []
@@ -2189,7 +2492,31 @@ def _signin_lines() -> list[str]:
         )
         note = f" — NOT WORKING: {record.suspect}" if record.suspect else ""
         lines.append(f"  {host}  saved {record.saved} - {used}{note}")
+        if picture := _last_attempt_line(record):
+            lines.append(f"    {picture}")
     return lines
+
+
+def _last_attempt_line(record: Any) -> str:
+    """What to say about the picture of the last attempt, or "".
+
+    The media store is a bounded LRU, so a path that no longer resolves is the
+    ORDINARY end of a frame's life and says **purged** — never "there was never
+    a picture". Same three states `aish explain` reports for a browse frame,
+    and for the same reason: absence has to say which absence."""
+    if record.last_frame:
+        try:
+            there = Path(record.last_frame).exists()
+        except OSError:  # an unreadable path is not a claim either way
+            there = False
+        return (
+            f"picture of the last attempt: {record.last_frame}"
+            if there
+            else "picture of the last attempt: purged from the media store"
+        )
+    if record.last_frame_skipped:
+        return f"no picture of the last attempt — {record.last_frame_skipped}"
+    return ""
 
 
 def _hold_credential(owner: Any, url: str, password: str, remember: object) -> None:
@@ -2312,18 +2639,26 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
             )
         )
     identifier, password = pair
-    # Held out here so the outcome can be recorded after the job returns. It is
-    # deliberately NOT consulted for whether the sign-in worked — see
-    # `_record_the_outcome`.
-    incidents: list[str] = []
-    # What the SITE answered the requests that carried the credential with. The
-    # only thing left that may retire a stored password, alongside the page
-    # saying so itself — see `_sign_in_on` (#320).
-    statuses: list[int] = []
+    # Held out here so the outcome can be recorded after the job returns. What
+    # it BLOCKED is deliberately NOT consulted for whether the sign-in worked
+    # (see `_record_the_outcome`); what it let THROUGH and what the site
+    # ANSWERED are the two halves of whether the password may be called stale
+    # at all (#320).
+    watch = _CredentialWatch()
+    # Cleared at the TOP, not only written at the bottom — the same reason
+    # `_Seen.start_call` clears the browse frame (#320). An attempt that never
+    # returns (a navigation timeout, a browser that died) never reaches
+    # `_record_the_outcome`, and a record still holding the last picture it
+    # managed to take would present an older page as this attempt's.
+    signin_mod.note_frame(record.origin, path="", skipped="")
 
     async def job(owner: _Owner) -> SignInResult:
         if owner.view is not None:
-            return SignInResult(why=DRIVEN_BY_HAND)
+            # No page is ever opened here, so the absence is named for the
+            # reason it would have been named at the shutter.
+            return SignInResult(
+                why=DRIVEN_BY_HAND, frame_skipped=browse_mod.NO_FRAME_HANDS
+            )
         context = await owner.context()
         page = await context.new_page()
         owner.read_pages.add(page)
@@ -2333,8 +2668,15 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
             await _dismiss_consent(page)
             # Armed BEFORE anything is typed and left up through the submit and
             # the settle, so a delayed exfiltration is caught too.
-            await _fence_the_origin(page, record, password, incidents, statuses)
-            return await _sign_in_on(page, record, identifier, password, statuses)
+            await _fence_the_origin(page, record, password, watch)
+            outcome = await _sign_in_on(page, record, identifier, password, watch)
+            # Photographed HERE and not inside `_sign_in_on` (#320): that
+            # function returns from a dozen places, and a capture per return
+            # is a capture somebody forgets on the thirteenth. One shutter,
+            # after every ending, on the page as it actually finished — and
+            # before the `finally` below closes it.
+            outcome.frame, outcome.frame_skipped = await _signin_frame(owner, page)
+            return outcome
         finally:
             owner.read_pages.discard(page)
             with contextlib.suppress(Exception):
@@ -2342,14 +2684,14 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
 
     result = _submit(job, timeout)
     incident = _record_the_outcome(
-        record, result, incidents, when=time.strftime("%Y-%m-%dT%H:%M")
+        record, result, watch, when=time.strftime("%Y-%m-%dT%H:%M")
     )
     _announce(record, result, incident=incident)
     return result
 
 
 def _record_the_outcome(
-    record: Any, result: SignInResult, incidents: list[str], *, when: str
+    record: Any, result: SignInResult, watch: _CredentialWatch, *, when: str
 ) -> str:
     """Write what happened to the store, and return the incident text, if any.
 
@@ -2366,14 +2708,23 @@ def _record_the_outcome(
     over `note_used`, which would clear the very mark being set.
 
     **A password box is not a verdict** (#320). `result.stale` arrives set only
-    when the site POSITIVELY refused the value, so that is what gets written
-    here. A CAPTCHA-refused attempt, or one that simply did not get in, leaves
-    the record completely alone: nothing was learned about the password, and
-    marking it destroys a credential whose only repair — re-recording it — then
-    fails in exactly the same way."""
-    if incidents:
+    when the fence WATCHED the password go out AND the site positively said it
+    judged the value, so that is what gets written here. A CAPTCHA-refused
+    attempt, a submit that never fired, and one that simply did not get in all
+    leave the record completely alone: nothing was learned about the password,
+    and marking it destroys a credential whose only repair — re-recording it —
+    then fails in exactly the same way. This function does not re-derive the
+    verdict; it writes what it is handed.
+
+    The picture of the attempt is pointed at FIRST and unconditionally, so an
+    ending that returns early below still replaces whatever the previous
+    attempt left behind."""
+    signin_mod.note_frame(
+        record.origin, path=result.frame, skipped=result.frame_skipped
+    )
+    if watch.blocked:
         text = (
-            f"the page tried to send the saved password to {', '.join(incidents)}, "
+            f"the page tried to send the saved password to {', '.join(watch.blocked)}, "
             "which is not where it goes when he signs in himself"
         )
         signin_mod.note_failed(record.origin, why=text)
@@ -2421,6 +2772,13 @@ def _announce(record: Any, result: SignInResult, *, incident: str = "") -> None:
         title, body = f"{host} wants a code", "aish got as far as the second factor"
     else:
         title, body = f"aish could not sign in to {host}", result.why
+    if result.frame and not result.ok:
+        # Appended AFTER the branches, not inside one: the picture exists for
+        # every ending, and the endings that most need looking at are exactly
+        # the ones somebody would forget to add it to — the CAPTCHA push was
+        # written without it. It names the DOOR rather than the path, because a
+        # filesystem path on a phone is nothing he can act on (#320).
+        body += " — there is a picture of the attempt; run /browser to find it"
     with contextlib.suppress(Exception):
         notify.pushover(title, body)
 
@@ -3536,7 +3894,7 @@ FRAME_TIMEOUT_MS = 5_000
 
 
 async def _evidence_frame(
-    owner: _Owner, page: Any, *, asks_password: bool | None
+    owner: _Owner, page: Any, *, label: str = "browse"
 ) -> tuple[str, str]:
     """(stored path, reason there is none) for a picture of this page.
 
@@ -3544,50 +3902,41 @@ async def _evidence_frame(
     this is one more short job on a page that has already stopped moving, not a
     new wait, a new thread or a poll.
 
-    Three refusals, each the invariant rather than an inference:
+    **One refusal: never while the owner's hands are on the browser.**
+    `_session` already refuses a browse outright while `owner.view` is set, so
+    nothing reaches here in that state today; the check is written where the
+    capture is because that is where the rule belongs, and because the later
+    slices of #289 are the ones that make a page reachable with a viewer on it.
 
-    **Never while the owner's hands are on the browser.** `_session` already
-    refuses a browse outright while `owner.view` is set, so nothing reaches
-    here in that state today; the check is written where the capture is because
-    that is where the rule belongs, and because the later slices of #289 are
-    the ones that make a page reachable with a viewer on it.
-
-    **Never a page showing a PASSWORD BOX.** That is the whole of what is
-    enforced, and the claim is deliberately not "never a sign-in page".
-    `input[type=password]` is a narrow test on purpose, and it is not a test
-    for whether a page is a login: an **email-first login's first step has no
-    password field at all**, so a frame of it can exist and can contain the
-    owner's e-mail address. That residual is stated rather than engineered
-    around — sign-in state cannot be read off a page, which is exactly why
-    stored sign-in state was retired (docs/browser.md, *The list is gone*), and
-    widening the detection here would be re-litigating that.
-
-    **Never a page that would not say.** `asks_password is None` means the
-    query could not be answered — a page navigating or closing under it. The
-    model is told `False` there, because refusing to call something a wall when
-    aish could not tell is the safe direction for a claim about his account.
-    The capture resolves the same unknown the OTHER way, because the one case
-    where aish does not know what it is looking at must not be the case where
-    it photographs it. One boolean cannot carry two opposite defaults, which is
-    why `_password_field_state` reports three values.
+    **There used to be two more, and both were wrong** (#320). A page showing a
+    password box was refused on the grounds that "a screenshot of a login form
+    is precisely the artifact that must not exist" — but **aish never types a
+    password on the browse path**, structurally: the credential replay is
+    `sign_in`, on its own page, and the model cannot ask for one. So the
+    refused frame was an EMPTY login form. It protected nothing, and it cost
+    exactly the picture that matters most, because a sign-in that did not work
+    is precisely when the owner needs to see the screen. The could-not-tell
+    refusal existed only to resolve that question safely; with the question
+    gone it had no job of its own, so it went too rather than being left in
+    place looking load-bearing.
 
     Nothing else is judged. In particular this makes no claim about the page
     being safe to look at — a frame is a RECORD, and a record is detection, not
     protection. Nothing anywhere may be permitted, widened or checked less
     carefully on the grounds that a frame was captured.
+
+    The one page aish HAS typed a credential into gets its own caller,
+    `_signin_frame`, which blanks the field before the shutter rather than
+    declining to look.
     """
     if owner.view is not None:
         return "", browse_mod.NO_FRAME_HANDS
-    if asks_password is None:
-        return "", browse_mod.NO_FRAME_UNKNOWN
-    if asks_password:
-        return "", browse_mod.NO_FRAME_PASSWORD
     try:
         jpeg = await page.screenshot(
             type="jpeg", quality=FRAME_JPEG_QUALITY, timeout=FRAME_TIMEOUT_MS
         )
         stored = media.store(
-            bytes(jpeg), frames_dir(), f"browse {host_of(str(page.url or ''))}"
+            bytes(jpeg), frames_dir(), f"{label} {host_of(str(page.url or ''))}"
         )
     except Exception:  # noqa: BLE001 — an extra that failed must not cost the page
         return "", browse_mod.NO_FRAME_FAILED
@@ -3621,16 +3970,11 @@ async def _snapshot(
     )
     raw, matched, unreached, matching, commit = await _enumerate(page, match)
     controls = browse_mod.controls_from(raw)
-    # ONE observation, resolved differently by its two consumers. They cannot
-    # disagree about the ANSWER — the page is asked once — but they need
-    # opposite defaults when there is no answer, so the observation is a
-    # tri-state and each side picks its own safe direction: the model is told
-    # `False` for could-not-tell, and the capture refuses on it.
-    asks_password = await _password_field_state(page)
-    signin = asks_password is True
-    frame, frame_skipped = await _evidence_frame(
-        owner, page, asks_password=asks_password
-    )
+    # What the MODEL is told about the page being a wall. The capture no longer
+    # consults it (#320): a browse-path login form is an EMPTY login form, and
+    # refusing to photograph it cost the picture and protected nothing.
+    signin = await _has_password_field(page)
+    frame, frame_skipped = await _evidence_frame(owner, page)
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
     # control the model is looking for is very often in the header the narrowing
     # would drop — "Przełącz lokal" sits beside the account name, not in <main>.
