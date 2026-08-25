@@ -557,6 +557,34 @@ class TestASubmitThatDidNotFireGetsOneRetryOfTheBUTTON:
         self._run(page, self._watch(armed=True, answered=[200]))
         assert page.enter_pressed == 0
 
+    def test_an_UNRECOGNISED_post_to_the_site_stands_the_fallback_down(self):
+        """#295. The submit window is open by the time the first press lands,
+        so a body sent where his own sign-in sends the password is visible
+        here — and a page that posted to its own login endpoint has submitted,
+        whether or not the matcher could read it. Pressing again there is the
+        double submission this may not risk."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        self._run(page, self._watch(
+            armed=True, traffic=["POST https://eon.pl/api/login"]
+        ))
+        assert page.enter_pressed == 0
+
+    def test_a_third_party_beacon_does_NOT_stand_the_fallback_down(self):
+        """The eon.pl case this fallback exists for, with the page's analytics
+        firing alongside it. Unrelated traffic decides nothing — that is the
+        #296 rule, and it holds here as much as it holds for a verdict."""
+        page = self._page(url="https://eon.pl/login",
+                          form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        self._run(page, self._watch(
+            armed=True,
+            traffic=["POST https://www.google-analytics.com/g/collect",
+                     "GET https://eon.pl/static/app.js"],
+        ))
+        assert page.enter_pressed == 1
+
     def test_a_formless_login_gets_no_fallback_because_enter_WAS_the_submit(self):
         """Pressing it again is a repeat with no new information."""
         page = self._page(
@@ -666,8 +694,25 @@ class TestAPasswordBoxIsNotAVerdict:
         ))
         assert not result.ok and not result.stale
         assert result.captcha == "reCAPTCHA"
-        assert "cannot sign in to this site automatically" in result.why
-        assert "untouched" in result.why
+        assert "protected by reCAPTCHA" in result.why
+        assert "refuses a scripted sign-in" in result.why
+
+    def test_the_captcha_reason_does_not_repeat_the_note_it_is_dropped_into(self):
+        """The owner saw the same sentence twice in a row: the note opens with
+        "aish CANNOT sign in to this site automatically" and `why` said it
+        again. `why` is a reason clause and the note owns the conclusion."""
+        from aish import web as web_module
+
+        result = self._run(self._failed(
+            captcha=["https://www.google.com/recaptcha/api.js"],
+        ))
+        for template in (
+            web_module.BROWSE_SIGNIN_CAPTCHA, web_module.RENEWAL_CAPTCHA_NOTE,
+        ):
+            note = template.format(host="eon.pl", why=result.why).lower()
+            assert note.count("sign in to this site automatically") == 1
+            # And the note, not `why`, is where "untouched" is said — once.
+            assert note.count("untouched") == 1
 
     def test_the_declaration_is_matched_in_the_owners_own_language(self):
         """eon.pl says it in Polish. The brand is the only token in that
@@ -740,6 +785,74 @@ class TestAPasswordBoxIsNotAVerdict:
             alerts_after=["Nie udało się zalogować"],
         ))
         assert result.captcha == "reCAPTCHA" and not result.stale
+
+
+class TestWhatThePageDIDAtTheMomentOfSubmit:
+    """#295, after #320. "Nothing carrying the password was seen leaving" is an
+    ABSENCE from a matcher that can be blind, so the same sentence covered two
+    situations that need opposite next steps: the button did nothing, and it
+    was submitted and aish could not recognise it.
+
+    The pure half — the format, the cap, and the one question it answers."""
+
+    def test_a_summary_is_method_origin_and_path_and_nothing_else(self):
+        assert signin.request_summary(
+            "post", "https://eon.pl/api/login?user=him%40x.pl&token=abc#frag"
+        ) == "POST https://eon.pl/api/login"
+        assert signin.request_summary("GET", "https://eon.pl") == "GET https://eon.pl/"
+
+    def test_a_query_string_can_never_survive_into_a_summary(self):
+        """A login flow puts identifiers and one-time tokens there, and the
+        query is dropped by construction rather than by stripping."""
+        summary = signin.request_summary(
+            "POST", "https://eon.pl/x?password=hunter2hunter2&otp=938211"
+        )
+        assert summary == "POST https://eon.pl/x"
+        assert "hunter2" not in summary and "938211" not in summary
+
+    def test_an_unreadable_address_or_verb_describes_nothing(self):
+        assert signin.request_summary("POST", "ftp://eon.pl/x") == ""
+        assert signin.request_summary("POST", "not a url") == ""
+        assert signin.request_summary("", "https://eon.pl/x") == ""
+
+    def test_a_body_to_the_sites_OWN_origin_is_the_contradiction(self):
+        assert signin.unrecognised_submission(
+            ["GET https://eon.pl/a.js", "POST https://eon.pl/api/login"],
+            ["https://eon.pl"],
+        ) is True
+        # ...including a destination his own hand sign-in recorded.
+        assert signin.unrecognised_submission(
+            ["POST https://api.eon.pl/auth"], ["https://eon.pl", "https://api.eon.pl"]
+        ) is True
+
+    def test_a_GET_is_not_a_submission_and_a_stranger_is_not_the_site(self):
+        """The tracking pixel and the consent call are none of this function's
+        business, for exactly the reason they are none of the fence's."""
+        assert signin.unrecognised_submission(
+            ["GET https://eon.pl/api/session"], ["https://eon.pl"]
+        ) is False
+        assert signin.unrecognised_submission(
+            ["POST https://www.google-analytics.com/g/collect"], ["https://eon.pl"]
+        ) is False
+        assert signin.unrecognised_submission([], ["https://eon.pl"]) is False
+        assert signin.unrecognised_submission(["POST https://eon.pl/x"], []) is False
+
+    def test_the_window_is_bounded_and_deduplicated(self):
+        from aish import browser
+
+        watch = browser._CredentialWatch(armed=True, watching_traffic=True)
+        for i in range(signin.REQUEST_MAX * 3):
+            watch.note_traffic(f"GET https://eon.pl/{i}")
+        watch.note_traffic("GET https://eon.pl/0")
+        assert len(watch.traffic) == signin.REQUEST_MAX
+
+    def test_nothing_is_kept_outside_the_submit_window(self):
+        """It is an account of ONE gesture, never a log of his browsing."""
+        from aish import browser
+
+        watch = browser._CredentialWatch(armed=True)
+        watch.note_traffic("GET https://eon.pl/anything")
+        assert watch.traffic == []
 
 
 class TestWhatCountsAsTheSiteRefusingTheValue:
@@ -1557,7 +1670,7 @@ class TestEverySignInAttemptIsPhotographed:
 
     JPEG = b"\xff\xd8\xff\xe0" + b"pretend jpeg bytes" * 8
 
-    def _drive(self, monkeypatch, *, blank=None, shot=None,
+    def _drive(self, monkeypatch, *, mask=None, shot=None,
                has_password_after=False, pushes=None):
         import asyncio
 
@@ -1567,16 +1680,16 @@ class TestEverySignInAttemptIsPhotographed:
             signin.save("https://eon.pl/login", "him", "hunter2hunter2", today="d")
         page = _SignInPage([])
         page._has_password_after = has_password_after
-        page.blanked = 0
+        page.masked = 0
         page.shots = []
         inner = page.evaluate
 
         async def evaluate(script, *args):
-            if script is browser.SIGNIN_BLANK_JS:
-                page.blanked += 1
-                if blank == "raise":
+            if script is browser.SIGNIN_MASK_JS:
+                page.masked += 1
+                if mask == "raise":
                     raise RuntimeError("Execution context was destroyed")
-                return {"ok": True} if blank is None else blank
+                return {"ok": True} if mask is None else mask
             return await inner(script, *args)
 
         async def screenshot(**kw):
@@ -1620,29 +1733,43 @@ class TestEverySignInAttemptIsPhotographed:
         assert not result.ok
         assert pathlib.Path(result.frame).read_bytes() == self.JPEG
 
-    def test_the_password_field_is_emptied_BEFORE_the_shutter(self, state,
-                                                              monkeypatch):
+    def test_the_password_field_is_MASKED_BEFORE_the_shutter(self, state,
+                                                             monkeypatch):
         """A password box renders as dots — but a field is not obliged to still
         BE a password box, because a show-password toggle flips `type` to
-        `text`. The field aish tagged is emptied whatever it has become, and
-        the picture is taken rather than skipped."""
+        `text`. The field aish tagged is forced back whatever it has become,
+        and the picture is taken rather than skipped."""
         result, page = self._drive(monkeypatch)
-        assert page.blanked == 1 and result.frame
+        assert page.masked == 1 and result.frame
 
-    def test_a_blanking_that_could_not_be_confirmed_refuses_the_shutter(
+    def test_the_field_is_masked_and_NOT_emptied(self, state, monkeypatch):
+        """The owner's own request. A blanked field is indistinguishable from
+        one that was never filled, so the picture could not answer the question
+        he asks of it — *did the password get typed in at all*. The real
+        snippet must force the type and never touch the value."""
+        from aish import browser
+
+        js = browser.SIGNIN_MASK_JS
+        assert "el.type = 'password'" in js
+        assert "el.value" not in js and "value = ''" not in js
+        # And it fails closed: the read-back is from the live property.
+        assert "if ((el.type || '').toLowerCase() !== 'password') return {ok: false}" in js
+
+    def test_a_masking_that_could_not_be_confirmed_refuses_the_shutter(
         self, state, monkeypatch
     ):
         """The mirror image of the refusal #320 removed from the browse path,
         and the difference is the point: there aish had typed nothing, here the
-        document holds his credential."""
-        result, page = self._drive(monkeypatch, blank={"ok": False})
+        document holds his credential — and now it holds it in a FILLED field,
+        so an unconfirmed mask is the credential in a picture."""
+        result, page = self._drive(monkeypatch, mask={"ok": False})
         assert (result.frame, result.frame_skipped) == ("", "failed")
         assert page.shots == []  # not taken and discarded — never taken
 
-    def test_a_page_that_will_not_answer_the_blanking_refuses_too(
+    def test_a_page_that_will_not_answer_the_masking_refuses_too(
         self, state, monkeypatch
     ):
-        result, page = self._drive(monkeypatch, blank="raise")
+        result, page = self._drive(monkeypatch, mask="raise")
         assert (result.frame, result.frame_skipped) == ("", "failed")
         assert page.shots == []
 
@@ -1953,6 +2080,179 @@ class TestAFailedAttemptLeavesTheOwnersRecordAlone:
         result, _ = self._drive(monkeypatch, page=page)
         assert not result.stale
         assert signin.find("https://eon.pl").suspect == ""
+
+
+class TestTheSubmitWindowIsRECORDEDButNeverJudged:
+    """#295, at the level the owner challenged it. The record said *nothing
+    carrying the password was seen leaving the page*, and he was right to ask
+    what that was worth: it is an absence from a matcher that goes blind on a
+    service worker, a WebSocket, or a value hashed in the page.
+
+    So a FAILED attempt now keeps a bounded account of what the page DID in the
+    submit window — method, origin, path — and the two situations that used to
+    read the same now read differently. **None of it may reach a verdict.**"""
+
+    _drive = TestASignInIsJudgedByWhetherTheSessionCameUp._drive
+
+    def _failed(self, beacons=()):
+        """The eon.pl shape: the submit gesture puts nothing on the wire the
+        fence can recognise, and the form comes back."""
+        return _SignInPage(beacons, submits=False, has_password_after=True)
+
+    def test_the_button_that_did_NOTHING_says_so(self, monkeypatch):
+        result, _ = self._drive(monkeypatch, page=self._failed())
+        assert "never saw the password leave the page" in result.why
+        assert "no other request at all in the submit window" in result.why
+        assert result.requests == []
+
+    def test_an_UNRECOGNISED_submission_to_the_site_reads_differently(
+        self, monkeypatch
+    ):
+        """The blind-matcher case. The page plainly posted a body to eon.pl and
+        the fence matched none of it, so "never sent" is no longer safe to
+        claim — and the honest sentence is that aish cannot tell."""
+        result, _ = self._drive(
+            monkeypatch,
+            page=self._failed([("https://eon.pl/api/login", "u=him&h=9f3c")]),
+        )
+        assert "cannot tell whether the password was submitted" in result.why
+        assert "never saw the password leave the page" not in result.why
+        assert result.requests == ["POST https://eon.pl/api/login"]
+
+    def test_the_SPOKEN_account_is_shorter_than_the_kept_one_and_says_so(self):
+        """The sentence ends up in a push on his phone, so it names a few and
+        counts the rest — while detection reads the whole kept list, because a
+        lower storage cap would let a busy SPA crowd the login POST out of it."""
+        from aish import browser
+
+        many = [f"GET https://eon.pl/{i}.js" for i in range(signin.REQUEST_MAX)]
+        spoken = browser._submit_window(many)
+        assert spoken.count("https://eon.pl/") == browser._SPOKEN_REQUESTS
+        assert f"and {signin.REQUEST_MAX - browser._SPOKEN_REQUESTS} more" in spoken
+        # ...and a short window is spoken whole, with no dangling count.
+        assert "more" not in browser._submit_window(many[:2])
+
+    def test_a_third_party_beacon_is_not_a_submission(self, monkeypatch):
+        """#295's standing rule, unbroken: a human's browser makes the same
+        connections, so their presence proves nothing. The beacon is recorded
+        as what was seen and changes no conclusion."""
+        result, _ = self._drive(
+            monkeypatch,
+            page=self._failed([("https://www.google-analytics.com/g/collect", "e=1")]),
+        )
+        assert "never saw the password leave the page" in result.why
+        assert "POST https://www.google-analytics.com/g/collect" in result.requests
+
+    def test_the_traffic_never_reaches_the_verdict_function(self, monkeypatch):
+        """The line that must not be crossed. `judge_a_failed_sign_in` sees
+        four observations of THE CREDENTIAL and nothing else — handing it this
+        list is the #296 bug returning, where unrelated traffic decided whether
+        a sign-in had worked."""
+        from aish import browser
+        from aish import signin as signin_module
+
+        seen: list = []
+        real = signin_module.judge_a_failed_sign_in
+
+        def spy(*args, **kw):
+            seen.append((args, dict(kw)))
+            return real(*args, **kw)
+
+        monkeypatch.setattr(browser.signin_mod, "judge_a_failed_sign_in", spy)
+        self._drive(
+            monkeypatch,
+            page=self._failed([("https://eon.pl/api/login", "u=him&h=9f3c")]),
+        )
+        assert seen and all(not args for args, _ in seen)
+        for _args, kw in seen:
+            assert set(kw) == {"sent", "refused_status", "said_no", "captcha"}
+            assert all(isinstance(v, (bool, str)) for v in kw.values())
+
+    def test_an_unrecognised_submission_still_touches_NOTHING(self, monkeypatch):
+        """It changes the sentence and never the state. The credential is not
+        retired, `tried` stays what the FENCE observed, and the record is what
+        his own hand sign-in wrote."""
+        result, _ = self._drive(
+            monkeypatch,
+            page=self._failed([("https://eon.pl/api/login", "u=him&h=9f3c")]),
+        )
+        assert not result.stale and not result.tried and not result.ok
+        assert TestAFailedAttemptLeavesTheOwnersRecordAlone._about_the_credential(
+            signin.find("https://eon.pl")
+        ) == TestAFailedAttemptLeavesTheOwnersRecordAlone.AS_HE_RECORDED_IT
+        assert signin.credential("https://eon.pl") == ("him", "hunter2hunter2")
+
+    def test_a_request_that_CARRIED_the_credential_is_never_summarised(
+        self, monkeypatch
+    ):
+        """The summary keeps a PATH, and the path is one of the places
+        `carries_secret` looks — so summarising a matched request could write
+        the password into the note. Matched requests are already accounted for
+        by `sent_to`, which keeps origins and no path."""
+        page = _SignInPage(
+            has_password_after=True,
+            answers=[
+                ("https://eon.pl/login/hunter2hunter2", "p=hunter2hunter2", 500)
+            ],
+        )
+        result, _ = self._drive(monkeypatch, page=page)
+        assert "hunter2hunter2" not in result.why
+        assert "hunter2hunter2" not in " ".join(result.requests)
+        # It was SEEN leaving, so the absence is not being claimed at all and
+        # the account is not composed.
+        assert result.requests == [] and result.tried
+
+    def test_no_summary_can_reach_DURABLE_storage(self, monkeypatch):
+        """`_record_the_outcome` writes `result.why` — and only when `stale`.
+        The two endings that compose a submit-window account are exactly the
+        two that leave the record alone, so no summary can be written; this
+        walks the whole failure table rather than trusting that reading."""
+        from aish import browser
+
+        for page in (
+            self._failed(),
+            self._failed([("https://eon.pl/api/login", "u=him&h=9f3c")]),
+            _SignInPage(has_password_after=True),  # tried, no reason given
+            _SignInPage(  # the site refused it — the one ending that writes
+                has_password_after=True,
+                answers=[("https://eon.pl/api/login", "p=hunter2hunter2", 401)],
+            ),
+        ):
+            signin.save("https://eon.pl/login", "him", "hunter2hunter2", today="d")
+            result, _ = self._drive(monkeypatch, page=page)
+            if result.stale:
+                assert result.requests == []
+                assert "submit window" not in result.why
+            written = signin.STATE.read_text(encoding="utf-8")
+            assert "submit window" not in written
+            assert "hunter2hunter2" not in written
+        # And the ending that DOES write still writes, so this is not passing
+        # because nothing was exercised.
+        assert browser.SignInResult(stale=True).requests == []
+        assert signin.find("https://eon.pl").suspect
+
+    def test_a_captcha_page_says_which_of_the_two_it_was(self, monkeypatch):
+        """A widget blocking the submission and a click that never landed
+        produce the same page. On eon.pl this was the live ambiguity."""
+        from aish import browser
+
+        silent = _SignInPage(
+            submits=False, has_password_after=True,
+            captcha=["https://www.google.com/recaptcha/api.js"],
+        )
+        result, _ = self._drive(monkeypatch, page=silent)
+        assert result.captcha == "reCAPTCHA"
+        assert browser.NOTHING_LEFT_THE_PAGE in result.why
+
+        posted = _SignInPage(
+            [("https://eon.pl/api/login", "u=him&h=9f3c")],
+            submits=False, has_password_after=True,
+            captcha=["https://www.google.com/recaptcha/api.js"],
+        )
+        result, _ = self._drive(monkeypatch, page=posted)
+        assert result.captcha == "reCAPTCHA" and not result.stale
+        assert browser.NOTHING_LEFT_THE_PAGE not in result.why
+        assert "cannot tell whether the password was submitted" in result.why
 
 
 class _SignInOwner:
