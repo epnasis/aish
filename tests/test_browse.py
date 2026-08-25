@@ -2125,6 +2125,40 @@ class TestADrivenPageThatIsAskingForAPassword:
         out = web_module.browse("https://eon.pl/mojeon")
         assert "not accepted" in out and "will not try it again" in out
 
+    def test_a_captcha_site_is_told_as_a_refusal_of_AISH_not_of_the_password(
+        self, monkeypatch
+    ):
+        """#320. The note the model reads must not send him to re-record: on a
+        CAPTCHA-protected login the next attempt fails identically, and each
+        round of that advice cost him a working credential."""
+        from aish import browser as browser_module
+
+        self._driven(
+            monkeypatch,
+            renewal=browser_module.SignInResult(
+                captcha="reCAPTCHA", tried=True, why="protected by reCAPTCHA"
+            ),
+        )
+        out = web_module.browse("https://eon.pl/mojeon")
+        assert "CANNOT sign in to this site automatically" in out
+        assert "does NOT need replacing" in out
+        assert "not accepted" not in out and "will not try it again" not in out
+        assert "also replaces the saved sign-in" not in out
+
+    def test_an_attempt_that_simply_did_not_get_in_blames_nobody(self, monkeypatch):
+        from aish import browser as browser_module
+
+        self._driven(
+            monkeypatch,
+            renewal=browser_module.SignInResult(tried=True, why="no reason given"),
+        )
+        out = web_module.browse("https://eon.pl/mojeon")
+        assert "did not get all the way in" in out
+        assert "has not been judged and is untouched" in out
+        # aish DID use it, so the held note would be a false statement too.
+        assert "aish did not use it" not in out
+        assert "not accepted" not in out
+
     def test_an_ordinary_page_is_completely_unaffected(self, monkeypatch):
         opens = self._driven(monkeypatch, signin_flag=False, renewal=None)
         out = web_module.browse("https://eon.pl/faktury")
