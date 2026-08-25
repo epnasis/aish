@@ -256,6 +256,87 @@ def refused_the_credential(statuses: Sequence[int]) -> bool:
     return any(int(status) in _REFUSED_STATUS for status in statuses)
 
 
+# ----------------- what the page DID at the moment of submit (#295, after #320)
+#
+# "Nothing carrying the password was seen leaving" is an ABSENCE from a matcher
+# that can be blind. A page that posts through a service worker, or hashes the
+# value before sending it, matches nothing even on a real submission — so one
+# sentence covers two situations that need opposite next steps:
+#
+#   THE BUTTON DID NOTHING       — no request was made at all.
+#   IT WENT AND WAS NOT MATCHED  — a request went out and the matcher missed it.
+#
+# So a FAILED attempt keeps a bounded account of the requests the page made in
+# the submit window: METHOD, ORIGIN and PATH only. No bodies, no headers, no
+# query values, no cookies.
+#
+# **This is diagnostic evidence about a failure and it may never feed a
+# verdict.** #295's standing rule — only credential-bearing requests are the
+# fence's business, everything else on the wire flies unexamined — is a rule
+# about VERDICTS: unrelated traffic must never decide whether a sign-in worked,
+# which is the #296 bug all of this grew out of. Nothing here is passed to
+# `judge_a_failed_sign_in`, and nothing here sets `stale` or `tried`. A reader
+# who finds themselves handing this list to the judge is watching that bug
+# come back.
+#
+# It has exactly two consumers: the sentence the owner reads, and the brake on
+# `_press_the_button_again`, which it can only ever apply — a page that posted
+# to its own login endpoint has submitted, so pressing again is the double
+# submission that fallback may not risk.
+REQUEST_MAX = 12  # a login flow, not a log of his browsing
+
+# A path is one of the places a credential can hide, so it is capped like every
+# other piece of a request that gets written down.
+_PATH_MAX = 120
+
+# Methods that carry a body, and so could be a form submission. A GET cannot be
+# what delivered a password to a site that is still rendering a login form.
+_SUBMIT_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+
+def request_summary(method: str, url: str) -> str:
+    """`POST https://eon.pl/api/login` — method, origin and path, or "".
+
+    The format is a contract: `unrecognised_submission` reads it back, and it
+    is the string the owner is shown. The QUERY is dropped BY CONSTRUCTION
+    (`urlsplit().path`) rather than by stripping, because a login flow puts
+    identifiers and one-time tokens there and a strip is something a later
+    edit can loosen."""
+    origin = origin_of(url)
+    if not origin:
+        return ""
+    try:
+        path = urllib.parse.urlsplit(url).path or "/"
+    except ValueError:  # an address that will not parse describes nothing
+        return ""
+    verb = "".join(ch for ch in (method or "").upper() if ch.isalpha())[:10]
+    return f"{verb} {origin}{path[:_PATH_MAX]}" if verb else ""
+
+
+def unrecognised_submission(summaries: Sequence[str], origins: Sequence[str]) -> bool:
+    """Did the page send a BODY to one of the site's own origins while nothing
+    was recognised as carrying the credential?
+
+    That is a contradiction of the same kind #320 already names between its two
+    observers: the page plainly submitted something, and the fence — which
+    routes every request it makes — matched none of it. It does NOT mean the
+    password was sent. It means the "never sent" conclusion is unsafe, and the
+    outcome says so instead of reporting a confident absence.
+
+    `origins` is where the owner's own hand sign-in sent the password (the
+    login origin plus the recorded destinations). Traffic anywhere else is the
+    tracking pixel and the consent call, and is none of this function's
+    business for exactly the reason it is none of the fence's."""
+    allowed = {str(origin) for origin in origins if origin}
+    if not allowed:
+        return False
+    for line in summaries:
+        method, _, address = str(line).partition(" ")
+        if method.upper() in _SUBMIT_METHODS and origin_of(address) in allowed:
+            return True
+    return False
+
+
 # ------------------------------------------ the two halves, and their AGREEMENT
 #
 # There are two independent observations of a sign-in that did not get in, and
@@ -317,6 +398,14 @@ def judge_a_failed_sign_in(
     resolved. One of the two observers is wrong, there is no way to tell which,
     and acting on either is a claim about the owner's password that nothing
     supports.
+
+    **The submit-window traffic is not an argument here and must never become
+    one.** These four are all observations of THE CREDENTIAL; the request
+    summaries kept for a failed attempt are not, and letting unrelated traffic
+    decide whether a sign-in worked is the #296 bug this whole area exists to
+    end. What that evidence may do is change what the owner is TOLD, and stand
+    the button-retry down — a brake it can only ever apply. It may not decide
+    the verdict this function returns.
     """
     if refused_status:
         return FAILED_REFUSED if sent else FAILED_CONTRADICTION
