@@ -833,9 +833,16 @@ class TestCardLatency:
         a measurement is not. A field the code cannot check is left out."""
         for bogus in ("soon", None, True, [], {"ms": 5}):
             assert "shown_ms" not in server_module.card_latency({"shown_ms": bogus})
-        # Negative time was not measured — clamped, so it can never read as an
-        # impossibly fast tap.
-        assert server_module.card_latency({"shown_ms": -50})["shown_ms"] == 0
+
+    def test_time_that_cannot_have_been_measured_leaves_no_number(self):
+        """A negative is DROPPED, not clamped, and the distinction is the whole
+        point of the field. Clamping writes a zero, and zero is the most damning
+        value this record can carry — the instant tap it exists to detect. An
+        unmeasurable value must leave the same absence a string leaves."""
+        assert "shown_ms" not in server_module.card_latency({"shown_ms": -50})
+        assert "held_ms" not in server_module.card_latency({"held_ms": -1})
+        # A REAL zero survives: that one is the finding, not an artefact.
+        assert server_module.card_latency({"shown_ms": 0})["shown_ms"] == 0
 
     def test_a_decision_nobody_was_asked_for_records_no_latency(
         self, app_env, tmp_path

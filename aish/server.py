@@ -1129,14 +1129,20 @@ def card_latency(answer: dict) -> dict:
     zero, which would read as the very thing this exists to detect.
 
     Trusting it is fine — the reporter is the owner's own browser, not fetched
-    content — but it is still clamped at zero, because a number that arrived as
-    a negative was not measured.
+    content — but a NEGATIVE is dropped rather than clamped, and the difference
+    matters more than it looks. Clamping would write a zero, and zero is not a
+    neutral value here: it is the most damning reading this field can hold, the
+    instant tap the whole measurement exists to catch. A number that cannot
+    have been measured must leave no number, on exactly the same terms as a
+    field that arrived as a string. A real zero, on the other hand, is kept —
+    that one IS the finding.
     """
     timing: dict[str, int] = {}
     for field in ("held_ms", "shown_ms"):
         value = answer.get(field)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            timing[field] = max(0, int(value))
+            if value >= 0:
+                timing[field] = int(value)
     return timing
 
 
