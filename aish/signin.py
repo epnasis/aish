@@ -74,6 +74,14 @@ class Record:
     # sign-in whose credential request aish did not see, which is why
     # `may_receive_credential` has a fallback rather than failing closed.
     destinations: list[str] = field(default_factory=list)
+    # A picture of the LAST attempt, in the media store — a path, never bytes,
+    # and never a picture borrowed from an earlier attempt (#320). Both fields
+    # are rewritten on every attempt, including to empty, for the reason
+    # `_Seen.start_call` clears the browse frame: a stale picture presented as
+    # this attempt's is worse than no picture. `last_frame_skipped` says WHICH
+    # absence, in `browse.NO_FRAME_*`.
+    last_frame: str = ""
+    last_frame_skipped: str = ""
 
 
 def origin_of(url: str) -> str:
@@ -259,6 +267,8 @@ def _load() -> list[Record]:
                     last_used=str(row.get("last_used", "")),
                     suspect=str(row.get("suspect", "")),
                     destinations=_origins(row.get("destinations")),
+                    last_frame=str(row.get("last_frame", "")),
+                    last_frame_skipped=str(row.get("last_frame_skipped", "")),
                 )
             )
     return out
@@ -345,6 +355,16 @@ def note_used(origin: str, *, when: str) -> None:
     record = find(origin)
     if record is not None:
         _update(origin, used=record.used + 1, last_used=when, suspect="")
+
+
+def note_frame(origin: str, *, path: str, skipped: str) -> None:
+    """Point the record at a picture of the attempt that just happened (#320).
+
+    Written on EVERY attempt, including with both values empty. A record that
+    kept the last picture it managed to take would present an old page as this
+    attempt's — the borrowed-frame failure `_Seen.start_call` exists to stop,
+    one store over."""
+    _update(origin, last_frame=path, last_frame_skipped="" if path else skipped)
 
 
 def note_failed(origin: str, *, why: str) -> None:

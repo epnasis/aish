@@ -26,6 +26,15 @@ def jar(tmp_path, monkeypatch):
     return store
 
 
+@pytest.fixture
+def state(tmp_path, monkeypatch):
+    """The state dir `browser.frames_dir()` resolves for itself — it runs
+    several layers below any agent, so it reads the environment rather than
+    being handed a path (#290)."""
+    monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+    return tmp_path
+
+
 class TestAnOriginIsMatchedExactly:
     """The whole safety property is that a credential belongs to ONE origin.
     `browser.is_logged_in` matches on a dot boundary so a login at eon.pl also
@@ -1112,6 +1121,165 @@ class TestASignInIsJudgedByWhetherTheSessionCameUp:
         # note_used would have cleared the very mark being set.
         assert signin.find("https://eon.pl").suspect == text
         assert signin.find("https://eon.pl").used == 1
+
+
+class TestEverySignInAttemptIsPhotographed:
+    """#320. The replay took NO snapshot at any point, so a sign-in that did
+    not work left nothing to look at — and two wrong diagnoses were argued off
+    the page text alone. One shutter, at the end of every attempt, success or
+    failure, into the same media store the browse frame uses."""
+
+    JPEG = b"\xff\xd8\xff\xe0" + b"pretend jpeg bytes" * 8
+
+    def _drive(self, monkeypatch, *, blank=None, shot=None,
+               has_password_after=False, pushes=None):
+        import asyncio
+
+        from aish import browser
+
+        if signin.find("https://eon.pl") is None:
+            signin.save("https://eon.pl/login", "him", "hunter2hunter2", today="d")
+        page = _SignInPage([])
+        page._has_password_after = has_password_after
+        page.blanked = 0
+        page.shots = []
+        inner = page.evaluate
+
+        async def evaluate(script, *args):
+            if script is browser.SIGNIN_BLANK_JS:
+                page.blanked += 1
+                if blank == "raise":
+                    raise RuntimeError("Execution context was destroyed")
+                return {"ok": True} if blank is None else blank
+            return await inner(script, *args)
+
+        async def screenshot(**kw):
+            page.shots.append(kw)
+            return shot() if shot is not None else self.JPEG
+
+        page.evaluate = evaluate
+        page.screenshot = screenshot
+        owner = _SignInOwner(page)
+        monkeypatch.setattr(browser, "_has_password_field", _fake_has_password(page))
+        monkeypatch.setattr(
+            browser, "notify", _SilentNotifier([] if pushes is None else pushes)
+        )
+        monkeypatch.setattr(
+            browser, "_submit", lambda job, timeout: asyncio.run(job(owner))
+        )
+        return browser.sign_in("https://eon.pl/faktury"), page
+
+    def test_a_sign_in_that_WORKED_is_photographed(self, state, monkeypatch):
+        import pathlib
+
+        result, page = self._drive(monkeypatch)
+        assert result.ok and result.frame_skipped == ""
+        assert pathlib.Path(result.frame).read_bytes() == self.JPEG
+        assert pathlib.Path(result.frame).parent.name == "media"
+        assert page.shots and page.shots[0]["type"] == "jpeg"
+
+    def test_a_sign_in_that_FAILED_is_photographed(self, state, monkeypatch):
+        """The one he actually asked for: the picture exists precisely when
+        there is a failure to look at."""
+        import pathlib
+
+        result, _ = self._drive(monkeypatch, has_password_after=True)
+        assert not result.ok
+        assert pathlib.Path(result.frame).read_bytes() == self.JPEG
+
+    def test_the_password_field_is_emptied_BEFORE_the_shutter(self, state,
+                                                              monkeypatch):
+        """A password box renders as dots — but a field is not obliged to still
+        BE a password box, because a show-password toggle flips `type` to
+        `text`. The field aish tagged is emptied whatever it has become, and
+        the picture is taken rather than skipped."""
+        result, page = self._drive(monkeypatch)
+        assert page.blanked == 1 and result.frame
+
+    def test_a_blanking_that_could_not_be_confirmed_refuses_the_shutter(
+        self, state, monkeypatch
+    ):
+        """The mirror image of the refusal #320 removed from the browse path,
+        and the difference is the point: there aish had typed nothing, here the
+        document holds his credential."""
+        result, page = self._drive(monkeypatch, blank={"ok": False})
+        assert (result.frame, result.frame_skipped) == ("", "failed")
+        assert page.shots == []  # not taken and discarded — never taken
+
+    def test_a_page_that_will_not_answer_the_blanking_refuses_too(
+        self, state, monkeypatch
+    ):
+        result, page = self._drive(monkeypatch, blank="raise")
+        assert (result.frame, result.frame_skipped) == ("", "failed")
+        assert page.shots == []
+
+    def test_a_failed_capture_costs_the_sign_in_nothing(self, state, monkeypatch):
+        def boom():
+            raise RuntimeError("Timeout 5000ms exceeded")
+
+        result, _ = self._drive(monkeypatch, shot=boom)
+        assert result.ok  # the outcome is untouched — the frame is an extra
+        assert (result.frame, result.frame_skipped) == ("", "failed")
+
+    def test_the_record_points_at_this_attempt_and_never_an_older_one(
+        self, state, monkeypatch
+    ):
+        """The borrowed-frame failure `_Seen.start_call` exists to stop, one
+        store over: a record that kept the last picture it managed to take
+        would present an old page as this attempt's."""
+        result, _ = self._drive(monkeypatch)
+        assert signin.find("https://eon.pl").last_frame == result.frame
+
+        def boom():
+            raise RuntimeError("nope")
+
+        self._drive(monkeypatch, shot=boom)
+        record = signin.find("https://eon.pl")
+        assert record.last_frame == "" and record.last_frame_skipped == "failed"
+
+    def test_the_store_holds_a_REFERENCE_and_never_the_bytes(self, state,
+                                                             monkeypatch):
+        result, _ = self._drive(monkeypatch)
+        written = signin.STATE.read_text(encoding="utf-8")
+        assert result.frame in written
+        assert "hunter2hunter2" not in written
+        assert self.JPEG[4:20].decode("ascii") not in written
+
+    def test_browser_names_the_picture_and_says_purged_when_it_is_gone(
+        self, state, monkeypatch
+    ):
+        """The media store is a bounded LRU, so a path that stopped resolving
+        is the ORDINARY end of a frame's life — never "there was no picture"."""
+        import pathlib
+
+        from aish import browser
+
+        result, _ = self._drive(monkeypatch)
+        assert result.frame in "\n".join(browser._signin_lines())
+        pathlib.Path(result.frame).unlink()
+        assert "purged" in "\n".join(browser._signin_lines())
+
+    def test_browser_says_WHICH_absence(self, state, monkeypatch):
+        from aish import browser
+
+        def boom():
+            raise RuntimeError("nope")
+
+        self._drive(monkeypatch, shot=boom)
+        assert "no picture of the last attempt — failed" in "\n".join(
+            browser._signin_lines()
+        )
+
+    def test_the_push_names_the_door_and_not_a_filesystem_path(self, state,
+                                                               monkeypatch):
+        """A path on a phone is not something he can do anything with."""
+        pushes: list = []
+        result, _ = self._drive(
+            monkeypatch, has_password_after=True, pushes=pushes
+        )
+        body = pushes[-1][1]
+        assert "picture of the attempt" in body and "/browser" in body
+        assert result.frame not in body
 
 
 class _SilentNotifier:

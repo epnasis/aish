@@ -1798,6 +1798,37 @@ SECOND_FACTOR_JS = "() => {" + browse_mod.DEEP_JS + """
 }"""
 
 
+# Emptied before the shutter, so a picture of the sign-in attempt cannot carry
+# the credential (#320).
+#
+# A password box renders as dots and not as text — that much is the browser's
+# own behaviour and needs no help. What is NOT guaranteed is that the field is
+# still a password box: a great many login pages carry a "show password" toggle
+# that flips `type` to `text`, and the site's own script can flip it whenever it
+# likes. The tag aish wrote survives that flip, so the field can be found and
+# emptied whatever it has become. Emptying rather than skipping the picture is
+# the point — the picture is the artifact the owner asked for.
+#
+# It reports what it did, because the caller REFUSES the shutter unless this
+# came back clean. Blanking that cannot be confirmed is an unknown about a
+# document aish has typed his password into, which is a different thing from
+# the browse path's unknown (there, aish has typed nothing and there is nothing
+# to protect — see `_evidence_frame`).
+#
+# Nothing is dispatched: `.value = ''` fires no events, and the page is closed
+# immediately afterwards, so this cannot affect the sign-in it is photographing.
+SIGNIN_BLANK_JS = "() => {" + browse_mod.DEEP_JS + """
+  const fields = deepAll('[data-aish-signin="password"]');
+  let unmasked = 0;
+  for (const el of fields) {
+    if ((el.getAttribute('type') || '').toLowerCase() !== 'password') unmasked++;
+    try { el.value = ''; } catch (e) { return {ok: false}; }
+    if (el.value) return {ok: false};
+  }
+  return {ok: true, fields: fields.length, unmasked: unmasked};
+}"""
+
+
 # Methods that can carry a body at all. A GET has none — but its ADDRESS can
 # still carry a credential, so a GET is read, never waved through.
 _BODY_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -1971,6 +2002,13 @@ class SignInResult:
     # actually refused it — which requires having SEEN it sent (#320).
     stale: bool = False
     url: str = ""
+    # A picture of the page at the END of the attempt, success or failure
+    # (#320), in the media store — a REFERENCE, never the bytes. Before this
+    # the replay took no snapshot at any point, so a sign-in that did not work
+    # left the owner nothing to look at. `frame_skipped` says WHICH absence,
+    # in the same closed vocabulary `Snapshot` uses.
+    frame: str = ""
+    frame_skipped: str = ""
 
 
 # What aish says when the form came back and nothing carrying the password was
@@ -1991,6 +2029,34 @@ UNWATCHED = (
     "aish could not watch what the page sends, so it did not type the saved "
     "sign-in at all — the saved sign-in is untouched"
 )
+
+
+async def _signin_frame(owner: _Owner, page: Any) -> tuple[str, str]:
+    """(stored path, reason there is none) for a picture of a sign-in attempt.
+
+    The owner's oldest complaint about this feature is that it is invisible:
+    the replay took **no snapshot at any point**, so when it failed there was
+    nothing to look at, and two wrong diagnoses were argued from the page text
+    alone. Same store, same reference discipline and same absence vocabulary as
+    the browse frame — the bytes never enter a log, only a path does.
+
+    **The blanking is the whole difference from `_evidence_frame`.** This is
+    the one page in aish that has had the owner's password typed into it, and
+    while a password box renders as dots, a *field* is not obliged to still be
+    a password box: a show-password toggle flips `type` to `text`. So the field
+    aish tagged is emptied first, and the shutter is refused if that could not
+    be confirmed. That refusal is the mirror image of the one #320 removed from
+    the browse path, and the difference is the point: there, aish had typed
+    nothing and the unknown protected nothing; here, the unknown is about a
+    document holding his credential.
+    """
+    try:
+        blanked = await page.evaluate(SIGNIN_BLANK_JS)
+    except Exception:  # noqa: BLE001 — a page that will not answer is an unknown
+        blanked = None
+    if not (blanked or {}).get("ok"):
+        return "", browse_mod.NO_FRAME_FAILED
+    return await _evidence_frame(owner, page, label="sign-in")
 
 
 async def _sign_in_on(
@@ -2111,7 +2177,12 @@ def _signin_lines() -> list[str]:
     validity — eon.pl expires server-side in about fifteen minutes — and
     actually proving it would cost a Chrome launch and a navigation per row on
     a box that evicts the browser for memory. A row that lies is the failure
-    #236 was about; a row that says less is not."""
+    #236 was about; a row that says less is not.
+
+    Since #320 it also names the PICTURE of the last attempt, which is this
+    subsystem's only door onto a sign-in that did not work: the replay runs
+    unattended, on a Mac the owner is never sitting at, and until now it left
+    nothing to look at."""
     records = signin_mod.records()
     if not records:
         return []
@@ -2125,7 +2196,31 @@ def _signin_lines() -> list[str]:
         )
         note = f" — NOT WORKING: {record.suspect}" if record.suspect else ""
         lines.append(f"  {host}  saved {record.saved} - {used}{note}")
+        if picture := _last_attempt_line(record):
+            lines.append(f"    {picture}")
     return lines
+
+
+def _last_attempt_line(record: Any) -> str:
+    """What to say about the picture of the last attempt, or "".
+
+    The media store is a bounded LRU, so a path that no longer resolves is the
+    ORDINARY end of a frame's life and says **purged** — never "there was never
+    a picture". Same three states `aish explain` reports for a browse frame,
+    and for the same reason: absence has to say which absence."""
+    if record.last_frame:
+        try:
+            there = Path(record.last_frame).exists()
+        except OSError:  # an unreadable path is not a claim either way
+            there = False
+        return (
+            f"picture of the last attempt: {record.last_frame}"
+            if there
+            else "picture of the last attempt: purged from the media store"
+        )
+    if record.last_frame_skipped:
+        return f"no picture of the last attempt — {record.last_frame_skipped}"
+    return ""
 
 
 def _hold_credential(owner: Any, url: str, password: str, remember: object) -> None:
@@ -2256,7 +2351,11 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
 
     async def job(owner: _Owner) -> SignInResult:
         if owner.view is not None:
-            return SignInResult(why=DRIVEN_BY_HAND)
+            # No page is ever opened here, so the absence is named for the
+            # reason it would have been named at the shutter.
+            return SignInResult(
+                why=DRIVEN_BY_HAND, frame_skipped=browse_mod.NO_FRAME_HANDS
+            )
         context = await owner.context()
         page = await context.new_page()
         owner.read_pages.add(page)
@@ -2267,7 +2366,14 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
             # Armed BEFORE anything is typed and left up through the submit and
             # the settle, so a delayed exfiltration is caught too.
             await _fence_the_origin(page, record, password, watch)
-            return await _sign_in_on(page, record, identifier, password, watch)
+            outcome = await _sign_in_on(page, record, identifier, password, watch)
+            # Photographed HERE and not inside `_sign_in_on` (#320): that
+            # function returns from a dozen places, and a capture per return
+            # is a capture somebody forgets on the thirteenth. One shutter,
+            # after every ending, on the page as it actually finished — and
+            # before the `finally` below closes it.
+            outcome.frame, outcome.frame_skipped = await _signin_frame(owner, page)
+            return outcome
         finally:
             owner.read_pages.discard(page)
             with contextlib.suppress(Exception):
@@ -2301,7 +2407,14 @@ def _record_the_outcome(
     `result.stale` is the OTHER way a credential is retired, and since #320 it
     reaches here only when the fence watched the password go out and the site
     asked for it again. This function does not re-derive that; it writes what
-    it is handed."""
+    it is handed.
+
+    The picture of the attempt is pointed at FIRST and unconditionally (#320),
+    so an ending that returns early below still replaces whatever the previous
+    attempt left behind."""
+    signin_mod.note_frame(
+        record.origin, path=result.frame, skipped=result.frame_skipped
+    )
     if watch.blocked:
         text = (
             f"the page tried to send the saved password to {', '.join(watch.blocked)}, "
@@ -2341,6 +2454,12 @@ def _announce(record: Any, result: SignInResult, *, incident: str = "") -> None:
         title, body = f"{host} wants a code", "aish got as far as the second factor"
     else:
         title, body = f"aish could not sign in to {host}", result.why
+        if result.frame:
+            # The push is the channel he actually reads, and a sign-in that
+            # did not work is the case a picture exists for. It names the DOOR
+            # rather than the path: a filesystem path on a phone is not
+            # something he can do anything with (#320).
+            body += " — there is a picture of the attempt; run /browser to find it"
     with contextlib.suppress(Exception):
         notify.pushover(title, body)
 
