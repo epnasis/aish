@@ -1138,6 +1138,10 @@ BROWSE_TOOLS = ("browse", "browse_act", "browse_fill")
 # the owner never named; under-tainting costs the fence. The asymmetry decides.
 UNTRUSTED_SOURCE_TOOLS = frozenset(EGRESS_TOOLS | set(BROWSE_TOOLS))
 
+# The members of the set above that take a LOCAL PATH just as readily as a
+# URL, so the tool's name alone does not say whether anything was fetched.
+DUAL_SOURCE_TOOLS = frozenset({"show_image", "read_pdf", "read_media"})
+
 BROWSE_NO_PAGE = (
     "NOT EXECUTED: nothing is open to act on. Call browse(url) first, then act "
     "on a control by the name in the list it gives you."
@@ -3401,8 +3405,26 @@ class Agent:
         # Cache BEFORE overwriting. An unwritable store returns "" and the stub
         # degrades to the old dead end, which must never be an exception in the
         # middle of preparing a turn.
+        # The cached text is the message as the model HAD it, banner and all,
+        # so its attribution is inline and the reader partitions it as ever
+        # (`offers=None`). What is not in the string is where the bytes came
+        # from, and this is the last place that knows (#314). A message with no
+        # tool name gets NO record rather than a cheerful one: the reader's
+        # answer for bytes nobody attributed is already the conservative one,
+        # and writing `untrusted=False` off an empty name would replace it with
+        # a claim this side cannot make.
+        tool_name = str(message.get("tool_name", "") or "")
+        source = (
+            tool_plugins.ContinuationSource(
+                tool=tool_name,
+                untrusted=self._brings_outside_content(tool_name, None),
+                offers=None,
+            )
+            if tool_name
+            else None
+        )
         key = (
-            tool_plugins.store_continuation(content, self.tool_output_dir)
+            tool_plugins.store_continuation(content, self.tool_output_dir, source=source)
             if self.tool_output_dir
             else ""
         )
@@ -3836,8 +3858,19 @@ class Agent:
         with self._provenance_lock:
             captured, self._pending_provenance = self._pending_provenance, []
         for name, args, result in captured:
-            self._note_taint(name, args)
-            self._note_offered_links(args, result)
+            served = self._continuation_source(name, args, result)
+            if served is None:
+                self._note_taint(name, args)
+                self._note_offered_links(args, result)
+            else:
+                # Paging text aish already fetched is not a second, cleaner
+                # acquisition of it — so the entry's own record decides, and
+                # the call that served it is only the courier (#314).
+                self._tainted = self._tainted or served.untrusted
+                self._note_offered_links(
+                    {"url": served.source}, result, offers=served.offers
+                )
+                name = served.tool
             tool = self._plugin_tools.get(name)
             if tool is None or tool.content_from != provenance.MAIL:
                 continue
@@ -3847,7 +3880,42 @@ class Agent:
                 if self._mail_links.get(url) != provenance.SIGN_IN:
                     self._mail_links[url] = kind
 
-    def _note_offered_links(self, args: dict, result: str) -> None:
+    def _continuation_source(
+        self, name: str, args: dict, result: str
+    ) -> "tool_plugins.ContinuationSource | None":
+        """Where the bytes this call served actually came from, or None when it
+        served none (#314).
+
+        `read_tool_output` pages a result back out of the continuation store,
+        and the store keeps the page BODY — the untrusted-content banner is
+        prepended by whoever presents it, and shell and plugin output go
+        through the same door. So a continuation arrives with nothing in the
+        string to say whose words it holds, and #313's banner scan read every
+        one of them as unattributed: page 2 of a listing stopped excusing the
+        links page 1 had excused, and a web read stopped raising taint at all
+        in a task that had not already read the page itself.
+
+        The repair is #311's, one layer over: the harness KNOWS what a tool
+        brought in at the moment it captures it, so the fact travels with the
+        cache entry instead of being re-derived from a string later. The reader
+        asks the entry.
+
+        Only a call that SERVED cached text is attributed. The envelope says so
+        — `source: "cache"` with a byte count is written on that path alone —
+        so an unknown key, a page past the end and a crash are aish's own
+        sentences and are not treated as anything a source said."""
+        if name != "read_tool_output":
+            return None
+        meta = getattr(result, "meta", None) or {}
+        if meta.get("source") != "cache" or not meta.get("bytes"):
+            return None
+        return tool_plugins.continuation_source(
+            str(args.get("continuation", "") or "").strip(), self.tool_output_dir
+        )
+
+    def _note_offered_links(
+        self, args: dict, result: str, offers: bool | None = None
+    ) -> None:
         """Write down the addresses this result actually offered (#294).
 
         The fact "the page linked here" is worth HOLDING rather than
@@ -3882,10 +3950,23 @@ class Agent:
         BELOW the banner, so aish's echo of the address it was asked to fetch
         lands in the scanned half. Costs nothing to keep the set honest: the
         strings are already held in `self.messages`, so this is a projection of
-        memory already paid for."""
-        _, banner, said = result.partition(web.UNTRUSTED_NOTE)
-        if not banner:
+        memory already paid for.
+
+        `offers` is how a CONTINUATION answers the same question without a
+        banner to answer it with (#314). True when the caller holds a record
+        saying these bytes are the source's — the store keeps a page body and
+        the banner is prepended after it — False when they are aish's machine's
+        own, and None when the bytes carry their own attribution and the
+        partition below is the answer. It never widens what a page offered: a
+        continuation is scanned for the links its own source showed, and for
+        nothing else."""
+        if offers is False:
             return
+        said = str(result)
+        if offers is None:
+            _, banner, said = result.partition(web.UNTRUSTED_NOTE)
+            if not banner:
+                return
         requested = str(args.get("url") or args.get("source") or "").strip()
         self._offered_links.update(
             url for url in provenance.urls_in(said) if url != requested
@@ -3910,16 +3991,25 @@ class Agent:
         came from."""
         if self._tainted:
             return
+        self._tainted = self._brings_outside_content(name, args)
+
+    def _brings_outside_content(self, name: str, args: dict | None) -> bool:
+        """Does a result from this call hold content from outside this machine?
+
+        Split out of `_note_taint` because the continuation store has to answer
+        it at the moment it CACHES a result, for a reader that will see the
+        bytes long after the call is over (#314).
+
+        `args` is None when the caller no longer has them — a history trim knows
+        only which tool wrote the message it is shortening — and the tools that
+        take a local path as readily as a URL are then assumed to have fetched.
+        Taint failing to rise is the one direction this must never move."""
         if name in UNTRUSTED_SOURCE_TOOLS:
-            if name in ("show_image", "read_pdf", "read_media"):
-                # These take a local path too, which fetches nothing.
+            if name in DUAL_SOURCE_TOOLS and args is not None:
                 source = str(args.get("url") or args.get("source") or "")
-                if not source.lower().startswith(("http://", "https://")):
-                    return
-            self._tainted = True
-            return
-        if name in self._plugin_tools:
-            self._tainted = True
+                return source.lower().startswith(("http://", "https://"))
+            return True
+        return name in self._plugin_tools
 
     @staticmethod
     def _timed(fn: Callable[[], str]) -> tuple[str, float]:
@@ -4347,7 +4437,7 @@ class Agent:
             topic = str(args.get("topic", "") or "")
             label = f"→ browse: {url}" + (f" (topic: {topic})" if topic else "")
             return label, lambda: web.browse(
-                url, topic or None, cut=self._page_cut(), view=self._browse_view
+                url, topic or None, cut=self._page_cut(name, args), view=self._browse_view
             )
         if name == "browse_fill":
             steps = list(args.get("steps") or [])
@@ -4358,7 +4448,7 @@ class Agent:
             return label, lambda: web.browse_fill(
                 steps,
                 topic=str(args.get("topic", "") or "") or None,
-                cut=self._page_cut(),
+                cut=self._page_cut(name, args),
                 view=self._browse_view,
             )
         target = str(args.get("target", "") or "")
@@ -4375,7 +4465,7 @@ class Agent:
             value=str(args.get("value", "") or ""),
             submit=bool(args.get("submit")),
             topic=str(args.get("topic", "") or "") or None,
-            cut=self._page_cut(),
+            cut=self._page_cut(name, args),
             view=self._browse_view,
         )
 
@@ -4403,7 +4493,7 @@ class Agent:
                 web.read_url,
                 url,
                 topic=str(topic) if topic else None,
-                cut=self._page_cut(),
+                cut=self._page_cut(name, args),
             )
         if name == "show_video":
             url = str(args.get("url", ""))
@@ -4547,7 +4637,9 @@ class Agent:
         window, source = backends.context_window(self.provider, self.num_ctx)
         return tool_plugins.output_caps(window), source
 
-    def _stash_page(self, text: str, shown: int) -> str:
+    def _stash_page(
+        self, text: str, shown: int, source: "tool_plugins.ContinuationSource | None" = None
+    ) -> str:
         """Cache a page a cut could not fit, and return its continuation key.
 
         `web` truncates at its own budget and knows nothing about this store, so
@@ -4558,17 +4650,35 @@ class Agent:
         middle of an output the model was told it could read to the end."""
         if not self.tool_output_dir:
             return ""
-        return tool_plugins.store_continuation(text, self.tool_output_dir, shown=shown)
+        return tool_plugins.store_continuation(
+            text, self.tool_output_dir, shown=shown, source=source
+        )
 
-    def _page_cut(self) -> "web.PageCut":
+    def _page_cut(self, name: str, args: dict) -> "web.PageCut":
         """A fresh recorder for ONE page read (#274).
 
         Per call and never shared: `read_url` runs on the parallel read path, so
         a recorder on the agent would attribute one read's cut to another's
         result. Handing it out here is also what makes the cut appear in the
         trace at all — `web` cuts, this side knows where the cache is and what
-        the record is for."""
-        return web.PageCut(self._stash_page)
+        the record is for.
+
+        It carries the call's PROVENANCE into the cache with the bytes (#314).
+        What is stashed here is the page body, below the banner by
+        construction, so page 2 of a listing is the source talking exactly as
+        page 1 was — and the URL this call asked for is aish's own echo, which
+        `_present` puts inside that body and the record must therefore drop."""
+        return web.PageCut(
+            partial(
+                self._stash_page,
+                source=tool_plugins.ContinuationSource(
+                    tool=name,
+                    untrusted=self._brings_outside_content(name, args),
+                    offers=True,
+                    source=str(args.get("url", "") or ""),
+                ),
+            )
+        )
 
     def _read_tool_output(self, args: dict) -> str:
         """Page a cached tool output (#192). Served from the content-addressed
