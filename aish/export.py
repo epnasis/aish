@@ -35,7 +35,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from . import web
+from . import files, web
 
 # The heavy imports (reportlab via xhtml2pdf) are deferred into the render
 # function so importing this module — and starting the server — stays cheap.
@@ -648,10 +648,10 @@ class _MediaEmbedder:
         card = _link_card(_escape(alt), src, "image not embedded")
         if not src.startswith("/"):
             return card  # relative / ~ / other schemes: no trusted anchor to resolve against
+        path = files.resolved(src)
+        if path is None or not files.within_roots(self.roots, path):
+            return card
         try:
-            path = Path(src).resolve(strict=True)  # resolves .. and symlinks
-            if not any(path.is_relative_to(root) for root in self.roots):
-                return card
             if not path.is_file() or path.stat().st_size > FETCH_MAX_BYTES:
                 return card
             data = path.read_bytes()

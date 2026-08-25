@@ -23,7 +23,7 @@ import shutil
 from collections.abc import Collection
 from pathlib import Path
 
-from .files import is_sensitive_path
+from .files import contains, is_sensitive_path, resolved, within_roots
 
 DEFAULT_ALLOWLIST = Path.home() / ".config" / "aish" / "allow.txt"
 DEFAULT_DENYLIST = Path.home() / ".config" / "aish" / "deny.txt"
@@ -362,10 +362,6 @@ def is_read_only(command: str) -> bool:
     return segments is not None and all(_segment_is_safe(s) for s in segments)
 
 
-def _within_roots(target: Path, resolved_roots: list[Path]) -> bool:
-    return any(target.is_relative_to(r) for r in resolved_roots)
-
-
 def _path_candidate(token: str) -> str | None:
     """The path-like part of a token: the value of a --flag=value token, the
     token itself otherwise, None for bare flags (never paths)."""
@@ -388,18 +384,16 @@ def _token_escape(token: str, cwd: str, resolved_roots: list[Path]) -> tuple[boo
     if candidate is None:
         return False, None
     expanded = os.path.expanduser(candidate)
-    anchored = os.path.isabs(expanded)
     if (
-        not anchored
+        not os.path.isabs(expanded)
         and ".." not in Path(candidate).parts
         and not os.path.lexists(os.path.join(cwd, expanded))
     ):
         return False, None
-    try:
-        target = (Path(expanded) if anchored else Path(cwd) / expanded).resolve()
-    except OSError:
+    target = resolved(candidate, cwd)
+    if target is None:
         return True, None
-    return not _within_roots(target, resolved_roots), target
+    return not within_roots(resolved_roots, target), target
 
 
 def _token_needs_prompt(token: str, cwd: str, resolved_roots: list[Path]) -> bool:
@@ -427,9 +421,9 @@ def paths_escape_roots(command: str, cwd: str, roots) -> bool:
     quietly pull files (or credentials) from elsewhere on the machine."""
     try:
         resolved_roots = [Path(r).resolve() for r in roots]
-        if not _within_roots(Path(cwd).resolve(), resolved_roots):
-            return True
     except OSError:
+        return True
+    if not within_roots(resolved_roots, cwd):
         return True
     segments = split_chain(command)
     if segments is None:
@@ -455,10 +449,10 @@ def escaping_dirs(command: str, cwd: str, roots) -> list[str]:
 
     try:
         resolved_roots = [Path(r).resolve() for r in roots]
-        resolved_cwd = Path(cwd).resolve()
     except OSError:
         return []
-    if not _within_roots(resolved_cwd, resolved_roots):
+    resolved_cwd = resolved(cwd)
+    if resolved_cwd is not None and not within_roots(resolved_roots, resolved_cwd):
         offer(resolved_cwd)
     for segment in split_chain(command) or []:
         try:
@@ -472,27 +466,12 @@ def escaping_dirs(command: str, cwd: str, roots) -> list[str]:
     return dirs
 
 
-def _resolve_operand(token: str, cwd: str) -> Path | None:
-    """Fully resolve a path token (expand ~, anchor a relative token to cwd,
-    defuse '..' and symlinks). None when it can't be resolved — fail closed."""
-    expanded = os.path.expanduser(token)
-    try:
-        base = Path(expanded) if os.path.isabs(expanded) else Path(cwd) / expanded
-        return base.resolve()
-    except OSError:
-        return None
-
-
 def path_within(path: str, cwd: str, scratch_dir: Path) -> bool:
     """True iff `path` resolves to a location STRICTLY inside scratch_dir
     (symlinks and '..' defused). Backs auto-approval of writes into the
     ephemeral scratch workspace; the scratch dir itself and anything that
     escapes it (or can't be resolved) return False — fail closed."""
-    target = _resolve_operand(path, cwd)
-    if target is None:
-        return False
-    scratch = scratch_dir.resolve()
-    return target != scratch and target.is_relative_to(scratch)
+    return contains(scratch_dir, path, cwd, strict=True)
 
 
 def is_scratch_delete(command: str, cwd: str, scratch_dir: Path) -> bool:
@@ -513,7 +492,6 @@ def is_scratch_delete(command: str, cwd: str, scratch_dir: Path) -> bool:
         return False
     if not tokens or tokens[0].rsplit("/", 1)[-1] != "rm":
         return False
-    scratch = scratch_dir.resolve()
     operands: list[str] = []
     flags: set[str] = set()
     longs: set[str] = set()
@@ -535,7 +513,7 @@ def is_scratch_delete(command: str, cwd: str, scratch_dir: Path) -> bool:
         return False
     if not operands:
         return False
-    return all(path_within(operand, cwd, scratch) for operand in operands)
+    return all(path_within(operand, cwd, scratch_dir) for operand in operands)
 
 
 def is_auto_approvable(

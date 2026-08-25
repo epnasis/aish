@@ -12,7 +12,7 @@ One answer, or a whole session's **final** answers. "Final" is structural — an
 
 ## Media embedding (#133)
 
-A local `![](path)` image inlines as base64 **only when the symlink-resolved path stays inside the caller's workspace boundary** — the single boundary `/file` serves under (see `docs/media-and-images.md`). Anything outside becomes a captioned link card and is never read.
+A local `![](path)` image inlines as base64 **only when the symlink-resolved path stays inside the caller's workspace boundary** — the single boundary `/file` serves under (see `docs/media-and-images.md`). Anything outside becomes a captioned link card and is never read. That containment is `files.contains`, the one everything else asks too (#309) — this module used to resolve its own way, `/file` another, and the approval gate a third; `docs/agent-core.md`, *One path-containment function*. The `src.startswith("/")` test in front of it is not part of it: it is the decision that a relative or `~` path in an exported document has no trusted anchor to resolve against at all.
 
 Remote images, whitelisted Google static-map snapshots (needs `GOOGLE_MAPS_API_KEY`) and YouTube thumbnails ARE fetched at export time, each with a timeout and a size cap and a link-card fallback — and each **through `web.py`'s one guarded fetcher** (#178 P1-4, #308). `fetch_image` calls `web.fetch_binary`, so a model-written `![](http://169.254.169.254/…)` cannot fire a server-side GET at metadata or LAN targets when the owner taps export. A blocked URL degrades to the same link card as any other fetch failure. `TestExportMedia` fakes all network at `export.fetch_image`.
 

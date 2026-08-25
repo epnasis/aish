@@ -835,3 +835,88 @@ class TestPrefixSuggestions:
         assert prefix_suggestions("git status && cargo build | wc -l", ["git status"]) == [
             "cargo build"
         ]
+
+
+class TestConsolidationOnlyEverTightens:
+    """`approval.py` is a security boundary, and #309 moved its containment
+    check onto the shared `files.contains`.
+
+    L3 says err toward prompting: a false prompt costs a keystroke, a false
+    auto-approval costs whatever the command did. So the only acceptable
+    direction for that move is MORE prompting. These pin the direction rather
+    than the mechanism — each one is a command whose verdict must not have
+    become more permissive because the check moved."""
+
+    @pytest.fixture
+    def world(self, tmp_path):
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "README.md").write_text("x")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("s")
+        return root, outside
+
+    def approvable(self, command, root):
+        return is_auto_approvable(command, [], cwd=str(root), roots=[root])
+
+    def test_an_absolute_path_out_of_root_still_prompts(self, world):
+        root, outside = world
+        assert not self.approvable(f"cat {outside}/secret.txt", root)
+
+    def test_a_dotdot_path_out_of_root_still_prompts(self, world):
+        root, _ = world
+        assert not self.approvable("cat ../outside/secret.txt", root)
+
+    def test_a_flag_value_path_is_still_checked(self, world):
+        """The path-like half of --flag=value was always checked; a token the
+        parser stopped inspecting would be the permissive direction."""
+        root, outside = world
+        assert not self.approvable(f"grep --file={outside}/secret.txt x", root)
+
+    def test_a_token_naming_nothing_is_still_never_resolved(self, world):
+        """The other direction of the same rule, and the reason it is not just
+        'resolve everything': a grep PATTERN is not a path, and resolving it
+        against cwd would make every search prompt."""
+        root, _ = world
+        assert self.approvable("grep needle README.md", root)
+        assert self.approvable("ls not-created-yet", root)
+
+    def test_a_cwd_outside_every_root_still_prompts(self, world):
+        root, outside = world
+        assert not is_auto_approvable("ls", [], cwd=str(outside), roots=[root])
+
+    def test_an_unresolvable_token_now_prompts_instead_of_raising(self, world):
+        """A path aish cannot spell is a path aish must not trust.
+
+        This one MOVED, in the safe direction. A NUL byte raises ValueError and
+        the old check caught only OSError, so `cat /tmp/bad\\0name` propagated
+        the exception straight out of `is_auto_approvable` — the gate did not
+        approve, it fell over. The shared resolver catches ValueError too, so
+        the answer is now a prompt."""
+        root, _ = world
+        assert not self.approvable("cat /tmp/bad\x00name", root)
+
+    def test_the_scratch_boundary_is_still_strict(self, tmp_path):
+        """path_within backs auto-approved writes, so the scratch dir ITSELF
+        must stay outside it — strictly-below is now a parameter of the shared
+        function rather than a comparison written here."""
+        scratch = (tmp_path / "scratch").resolve()
+        scratch.mkdir()
+        assert path_within(str(scratch / "note.txt"), str(tmp_path), scratch)
+        assert not path_within(str(scratch), str(tmp_path), scratch)
+        assert not path_within(str(tmp_path / "elsewhere.txt"), str(tmp_path), scratch)
+
+    def test_a_scratch_symlink_pointing_out_still_fails_closed(self, tmp_path):
+        scratch = (tmp_path / "scratch").resolve()
+        scratch.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("x")
+        (scratch / "link.txt").symlink_to(outside)
+        assert not path_within(str(scratch / "link.txt"), str(tmp_path), scratch)
+
+    def test_escaping_dirs_still_names_the_resolved_escape(self, world):
+        """Advisory display data, not a gate — but a prompt that offers the
+        wrong directory to trust is its own hazard."""
+        root, outside = world
+        assert escaping_dirs(f"cat {outside}/secret.txt", str(root), [root]) == [str(outside)]

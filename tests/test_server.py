@@ -26,7 +26,12 @@ import aish.notify as notify_module
 import aish.server as server_module
 import aish.session as session_module
 from aish.agent import DENIED_RESULT, WRITE_DENIED
-from aish.server import SESSION_TITLE_PROMPT, TITLE_PROMPT, create_app
+from aish.server import (
+    SESSION_TITLE_PROMPT,
+    TITLE_PROMPT,
+    create_app,
+    safe_session_path,
+)
 from aish.session import SessionLog, synthetic_kind
 
 
@@ -8481,3 +8486,52 @@ class TestExplainEndpoint:
 
         assert doc["running"] is False
         assert "running" not in doc["produced"]
+
+
+class TestOneSessionPathCheck:
+    """Five hand-rolled copies of the same name check became one (#178 §11, #309).
+
+    Every by-name endpoint — resume, delete, rename, export, the offline mirror
+    — turns a chat name straight off the wire into a path in the state
+    directory. Each wrote out `startswith("session-")`, `endswith(".jsonl")`,
+    `"/" not in name` and `".." in name` for itself, so a fix to one of them was
+    a fix to one of them. `safe_session_path` is the single answer; the
+    endpoint-specific part (does the file have to EXIST?) stays at the call site
+    because the callers disagree about it on purpose."""
+
+    def test_a_plain_name_resolves_into_the_state_dir(self, tmp_path):
+        assert safe_session_path(tmp_path, "session-20200101-000000-000000.jsonl") == (
+            tmp_path / "session-20200101-000000-000000.jsonl"
+        )
+
+    def test_existence_is_not_this_functions_question(self, tmp_path):
+        """A rename or a delete may name an OPEN chat that has not written its
+        log yet, so folding existence in here would break three call sites."""
+        assert safe_session_path(tmp_path, "session-nope.jsonl") is not None
+
+    def test_traversal_is_refused(self, tmp_path):
+        for name in (
+            "../../../etc/passwd",
+            "session-../../etc/passwd.jsonl",
+            "sub/session-x.jsonl",
+            "session-x.jsonl/../../y",
+        ):
+            assert safe_session_path(tmp_path, name) is None, name
+
+    def test_a_name_that_is_not_a_chat_log_is_refused(self, tmp_path):
+        for name in ("", "notes.txt", "session-x.txt", "other-x.jsonl", "session-x.jsonl.bak"):
+            assert safe_session_path(tmp_path, name) is None, name
+
+    def test_an_absolute_name_is_refused(self, tmp_path):
+        assert safe_session_path(tmp_path, "/etc/session-x.jsonl") is None
+
+    def test_a_log_symlinked_out_of_the_state_dir_is_refused(self, tmp_path):
+        """New, and in the conservative direction: the containment now runs
+        through files.contains, so a name that passes every character rule and
+        still lands outside the state directory is refused."""
+        state = tmp_path / "state"
+        state.mkdir()
+        outside = tmp_path / "elsewhere.jsonl"
+        outside.write_text("{}\n")
+        (state / "session-linked.jsonl").symlink_to(outside)
+        assert safe_session_path(state, "session-linked.jsonl") is None

@@ -58,7 +58,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from . import backends, browser, dir_ignore, explain, export, notify, tools
+from . import backends, browser, dir_ignore, explain, export, files, notify, tools
 from .agent import (
     CANCELLED_RESULT,
     FEEDBACK_SWITCH_NOTE,
@@ -280,6 +280,34 @@ async def serve_index(request):  # noqa: ARG001 — Starlette route signature
 # system font stack. (#148)
 CONFIG_FONT_DIR = Path.home() / ".config" / "aish" / "fonts"
 _FONT_MEDIA = {".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf", ".otf": "font/otf"}
+
+
+def safe_session_path(state_dir: Path, name: str) -> Path | None:
+    """The log file a chat NAME denotes, or None when the name is not one.
+
+    Every by-name endpoint — resume, delete, rename, export, the offline mirror
+    — takes a chat name straight off the wire and turns it into a path in the
+    state directory. That check was written out by hand at five call sites
+    (#178 §11, #309), each spelling `startswith("session-")`, `endswith(
+    ".jsonl")`, `"/" not in name` and `".." in name` again, and five copies of
+    a traversal check is four chances to be right and one to be wrong.
+
+    Existence is deliberately NOT checked here: the callers disagree about it
+    on purpose — a rename or a delete may name a chat that is open but has not
+    written its log yet — and folding that in would quietly change three of
+    them. What is shared is the NAME rule and the containment, so that is what
+    lives here.
+
+    The containment goes through `files.contains` like every other one, which
+    also means a log that is a symlink pointing out of the state directory is
+    refused rather than followed.
+    """
+    if not (name.startswith("session-") and name.endswith(".jsonl")):
+        return None
+    if ".." in name or Path(name).name != name:
+        return None
+    path = state_dir / name
+    return path if files.contains(state_dir, path) else None
 
 
 async def serve_config_font(request):
@@ -2670,11 +2698,11 @@ class WebServer:
         guidance: list[str] = []
         for raw in paths:
             path = Path(raw)
+            in_uploads = files.contains(uploads, path)
             try:
-                in_uploads = path.resolve().is_relative_to(uploads)
                 size_ok = path.is_file() and path.stat().st_size <= MEDIA_MAX_BYTES
             except OSError:
-                in_uploads = size_ok = False
+                size_ok = False
             suffix = path.suffix.lower()
             if in_uploads and size_ok and suffix in backends.IMAGE_SUFFIXES and "image" in support:
                 images.append(str(path))
@@ -3642,9 +3670,8 @@ class WebServer:
     async def _cold_open(self, name: str) -> Session | None:
         """Load `name` from its log into a fresh Session. Callers go through
         _open_by_name, whose in-flight guard is what makes this single-flight."""
-        safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
-        path = self.state_dir / name
-        if not safe or ".." in name or not path.is_file():
+        path = safe_session_path(self.state_dir, name)
+        if path is None or not path.is_file():
             return None
         self._evict_idle()
         session, history = await asyncio.to_thread(self.open_session, path)
@@ -3889,9 +3916,8 @@ class WebServer:
         audit trail — explicit and confirmed client-side, never bulk. Replies
         with a refreshed session_list so the drawer re-renders."""
         session = self.sessions.get(name)
-        safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
-        path = self.state_dir / name
-        if not safe or ".." in name or (session is None and not path.is_file()):
+        path = safe_session_path(self.state_dir, name)
+        if path is None or (session is None and not path.is_file()):
             await client.ws.send_json(self._gone_error(name))
             return
         if session is not None and session.state() != "idle":
@@ -3938,9 +3964,8 @@ class WebServer:
             await self._refuse(client, "a chat title can't be empty")
             return
         session = self.sessions.get(name)
-        safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
-        path = self.state_dir / name
-        if not safe or ".." in name or (session is None and not path.is_file()):
+        path = safe_session_path(self.state_dir, name)
+        if path is None or (session is None and not path.is_file()):
             await client.ws.send_json(self._gone_error(name))
             return
         if session is not None:
@@ -4718,14 +4743,13 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         raw = request.query_params.get("path", "").strip()
         if not raw:
             return JSONResponse({"error": "missing path"}, status_code=400)
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
+        if not Path(raw).expanduser().is_absolute():
             return JSONResponse({"error": "path must be absolute"}, status_code=400)
-        media_type = IMAGE_TYPES.get(path.suffix.lower())
+        media_type = IMAGE_TYPES.get(Path(raw).suffix.lower())
         if media_type is None:
             return JSONResponse({"error": "unsupported file type"}, status_code=415)
-        path = path.resolve()
-        if not any(path.is_relative_to(r) for r in self._workspace_roots()):
+        path = files.resolved(raw)
+        if path is None or not files.within_roots(self._workspace_roots(), path):
             return JSONResponse({"error": "outside the trusted folders"}, status_code=403)
         if not path.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
@@ -4741,7 +4765,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         # SAME path is exactly the thing a long max-age would leave stale on
         # screen. `private` because a session root is one owner's files and this
         # response passed a token check — no shared proxy may hold it.
-        if path.is_relative_to(self.uploads_dir.resolve()):
+        if files.contains(self.uploads_dir, path):
             headers["Cache-Control"] = "private, max-age=31536000, immutable"
         return FileResponse(path, media_type=media_type, headers=headers)
 
@@ -4773,13 +4797,12 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         raw = request.query_params.get("path", "").strip()
         if not raw:
             return None, JSONResponse({"error": "missing path"}, status_code=400)
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
+        if not Path(raw).expanduser().is_absolute():
             return None, JSONResponse({"error": "path must be absolute"}, status_code=400)
-        if path.suffix.lower() != ".pdf":
+        if Path(raw).suffix.lower() != ".pdf":
             return None, JSONResponse({"error": "not a PDF"}, status_code=415)
-        path = path.resolve()
-        if not any(path.is_relative_to(r) for r in self._workspace_roots()):
+        path = files.resolved(raw)
+        if path is None or not files.within_roots(self._workspace_roots(), path):
             return None, JSONResponse({"error": "outside the trusted folders"}, status_code=403)
         if not path.is_file():
             return None, JSONResponse({"error": "not found"}, status_code=404)
@@ -4835,7 +4858,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             ).hexdigest()[:16]
         )
         headers = {"X-Content-Type-Options": "nosniff", "ETag": etag}
-        if path.is_relative_to(self.uploads_dir.resolve()):
+        if files.contains(self.uploads_dir, path):
             headers["Cache-Control"] = "private, max-age=31536000, immutable"
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers=headers)
@@ -4877,11 +4900,10 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         raw = request.query_params.get("path", "").strip()
         if not raw:
             return JSONResponse({"error": "missing path"}, status_code=400)
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
+        if not Path(raw).expanduser().is_absolute():
             return JSONResponse({"error": "path must be absolute"}, status_code=400)
-        path = path.resolve()
-        if not any(path.is_relative_to(r) for r in self._workspace_roots()):
+        path = files.resolved(raw)
+        if path is None or not files.within_roots(self._workspace_roots(), path):
             return JSONResponse({"error": "outside the trusted folders"}, status_code=403)
         suffix = path.suffix.lower()
         shown = suffix in IMAGE_TYPES or suffix == ".pdf"
@@ -4889,9 +4911,8 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         # asked it to (#237). A browse click that lands an invoice is the same
         # relationship as an upload with the direction reversed: he chose the
         # file, it is his, and a document he cannot open is aish keeping it.
-        mine = (
-            path.is_relative_to(self.uploads_dir.resolve())
-            or path.is_relative_to(browser.downloads_dir().resolve())
+        mine = files.contains(self.uploads_dir, path) or files.contains(
+            browser.downloads_dir(), path
         )
         if not shown and not mine:
             return JSONResponse({"error": "not a downloadable file"}, status_code=415)
@@ -5126,9 +5147,8 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
         name = request.query_params.get("session", "").strip()
-        safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
-        path = self.state_dir / name
-        if not safe or ".." in name or not path.is_file():
+        path = safe_session_path(self.state_dir, name)
+        if path is None or not path.is_file():
             return JSONResponse({"error": f"no such chat: {name}"}, status_code=404)
         image_roots = self._workspace_roots()
 
@@ -5154,9 +5174,8 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         """The requested session's log, or None when the name fails the same
         path-safety check every by-name endpoint applies."""
         name = request.query_params.get("session", "").strip()
-        safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
-        path = self.state_dir / name
-        if not safe or ".." in name or not path.is_file():
+        path = safe_session_path(self.state_dir, name)
+        if path is None or not path.is_file():
             return None
         return path
 

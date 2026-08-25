@@ -30,7 +30,7 @@ from typing import Any, NamedTuple
 
 import yaml
 
-from . import skills, web
+from . import files, skills, web
 
 GLOBAL_RULES_DIR = Path.home() / ".config" / "aish" / "rules"
 
@@ -1780,11 +1780,6 @@ def _touches_path(args: dict, root: str, cwd: str) -> bool:
     nothing. Relative paths resolve against the session's cwd, which is where
     the model's own paths are interpreted.
     """
-    base = Path(root).expanduser()
-    try:
-        base = base.resolve()
-    except OSError:
-        return False
     for key in ("path", "file", "target", "dest", "command"):
         value = str(args.get(key, "") or "").strip()
         if not value:
@@ -1801,14 +1796,7 @@ def _touches_path(args: dict, root: str, cwd: str) -> bool:
                 # Same discipline as the approval gate: a token that names
                 # nothing path-shaped is never resolved.
                 continue
-            candidate = Path(token).expanduser()
-            if not candidate.is_absolute() and cwd:
-                candidate = Path(cwd) / candidate
-            try:
-                resolved = candidate.resolve()
-            except OSError:
-                continue
-            if resolved == base or base in resolved.parents:
+            if files.contains(root, token, cwd or None):
                 return True
     return False
 

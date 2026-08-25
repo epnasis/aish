@@ -48,14 +48,78 @@ def is_sensitive_path(path: str, cwd: str) -> bool:
     return name.endswith(_SENSITIVE_SUFFIXES)
 
 
+def resolved(path: os.PathLike | str, cwd: os.PathLike | str | None = None) -> Path | None:
+    """The real location `path` names — `~` expanded, a relative path anchored
+    to `cwd`, `..` and every symlink defused — or None when it cannot be
+    worked out.
+
+    ONE resolver for the whole codebase (#309), because a containment check is
+    only as good as the resolution under it: `approval.py`, `export.py`,
+    `server.py`, `agent.py` and `term_image.py` each spelled this out for
+    themselves, and the one that got it wrong (`approval._token_escape`, which
+    short-circuited on relative tokens) let a symlink inside a session root
+    point anywhere on the machine and still auto-approve (#178 P1-1).
+
+    None rather than a raise, so every caller's fail-closed branch is the same
+    branch. ValueError joins OSError because a path holding a NUL byte raises
+    that instead, and a path aish cannot spell is a path aish must not trust.
+    """
+    try:
+        return resolve(str(path), str(cwd) if cwd is not None else os.getcwd()).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def contains(
+    root: os.PathLike | str,
+    candidate: os.PathLike | str,
+    cwd: os.PathLike | str | None = None,
+    *,
+    strict: bool = False,
+) -> bool:
+    """True when `candidate` lands inside `root`, both fully resolved (#309).
+
+    THE containment test. Everything that asks "may this path be read / written
+    / served / inlined?" asks it here, so the answer cannot differ by module.
+    Five implementations is how you get four right ones and a wrong one, and
+    the wrong one is never the one you are looking at.
+
+    `strict=True` requires the candidate to be strictly BELOW the root — what
+    the scratch workspace wants, where writing the directory itself is not the
+    same permission as writing a file in it. That is a PARAMETER and not a
+    second function for the same reason the size cap is a parameter of the one
+    fetch (#308).
+
+    Fail closed: anything that will not resolve is not contained. Symlinks are
+    followed on BOTH sides, so a link inside the root pointing out of it is
+    outside (that asymmetry was the bug) and a root reached through a symlink
+    still matches the file under it (`/tmp` vs `/private/tmp` on macOS).
+    """
+    target = resolved(candidate, cwd)
+    base = resolved(root, cwd)
+    if target is None or base is None:
+        return False
+    if strict and target == base:
+        return False
+    return target.is_relative_to(base)
+
+
+def within_roots(
+    roots,
+    candidate: os.PathLike | str,
+    cwd: os.PathLike | str | None = None,
+    *,
+    strict: bool = False,
+) -> bool:
+    """`contains` against a set of roots — inside ANY of them is inside.
+    No roots means nothing is inside, which is the fail-closed reading."""
+    return any(contains(root, candidate, cwd, strict=strict) for root in roots)
+
+
 def is_outside_roots(path: str, cwd: str, roots) -> bool:
     """True when the resolved target (symlinks and .. defused) escapes every
     session root. Fail closed: unresolvable paths count as outside."""
-    try:
-        target = resolve(path, cwd).resolve()
-        return not any(target.is_relative_to(Path(r).resolve()) for r in roots)
-    except OSError:
-        return True
+    return not within_roots(roots, path, cwd)
 
 
 def read_file(path: str, cwd: str, offset: int = 1, limit: int = READ_MAX_LINES) -> str:

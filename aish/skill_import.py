@@ -22,6 +22,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .files import contains
+
 _URLISH = re.compile(r"^(https?://|git@|ssh://|git://)")
 CLONE_TIMEOUT = 120
 
@@ -110,12 +112,10 @@ def stage(
             raise SkillImportError(f"not a directory or a git URL: {repo}")
 
     skill_dir = (base / path).resolve() if path else base
-    try:
-        skill_dir.relative_to(base)
-    except ValueError:
+    if not contains(base, skill_dir):
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
-        raise SkillImportError("path escapes the repository") from None
+        raise SkillImportError("path escapes the repository")
 
     manifest = skill_dir / "SKILL.md"
     if not manifest.is_file():
