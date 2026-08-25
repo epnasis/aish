@@ -8406,6 +8406,62 @@ class TestBrowserView:
             recv_until(ws, "browser_view")
         assert captures == []
 
+    def test_an_already_finished_page_is_not_watched_at_all(
+        self, app_env, monkeypatch
+    ):
+        """#223, fix 1. Every interaction used to leave a watcher, including on
+        a page that had already stopped moving before the shutter fell — where
+        it can only find what it already has. The frame reports what the probe
+        said AT CAPTURE, and a `settled` one is answered with no task, no polls
+        and no second capture.
+
+        The rid/ack pair is what makes this deterministic: the receipt is sent
+        after the handler returns, so the watcher has been scheduled or not by
+        the time it arrives."""
+        from aish import browser as browser_module
+
+        probes = []
+
+        def view_act(action, **kwargs):
+            return browser_module.Frame(
+                jpeg=b"\xff\xd8done", url="https://x.pl/", title="Done", settled=True,
+            )
+
+        monkeypatch.setattr(browser_module, "view_act", view_act)
+        monkeypatch.setattr(
+            browser_module, "view_activity",
+            lambda: probes.append(1) or {"gen": 0, "nav": 0, "quiet": 9, "ready": True},
+        )
+        self._fast_watch(monkeypatch)
+        client, _ = make_client(app_env, [])
+        server = client.app.state.server
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({
+                "type": "browser_view", "action": "scroll", "dy": 900, "rid": "w1",
+            })
+            assert recv_until(ws, "ack")["rid"] == "w1"
+            assert server._view_watch is None
+        assert probes == []
+
+    def test_a_page_that_had_not_finished_is_still_watched(
+        self, app_env, monkeypatch
+    ):
+        """The other direction, and the one that matters: `settled` is FALSE for
+        anything less than certain — a page that would not answer the probe, one
+        still parsing, one merely momentarily quiet, one with a request on the
+        wire. All of those keep the watcher they had."""
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        self._fast_watch(monkeypatch)
+        client, _ = make_client(app_env, [])
+        server = client.app.state.server
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({
+                "type": "browser_view", "action": "scroll", "dy": 900, "rid": "w2",
+            })
+            assert recv_until(ws, "ack")["rid"] == "w2"
+            assert server._view_watch is not None
+
     def test_acting_again_supersedes_the_watcher(self, app_env, monkeypatch):
         """Whatever the old page was about to become, they have moved on — and a
         frame captured for the PREVIOUS action would land on top of the new one,

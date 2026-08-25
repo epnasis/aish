@@ -1561,6 +1561,140 @@ class TestTheWatcherKeepsLookingAfterTheFirstCorrection:
         assert browser.view_settled_frame() is None
 
 
+class TestAnAlreadyQuietPageNeedsNoCorrection:
+    """#223, fix 1. Most interactions used to ship two frames of a few hundred
+    KB over a mobile connection, and the second one is worth nothing when the
+    page had already finished before the shutter fell.
+
+    The whole question is what "already finished" is allowed to mean. The bar
+    is the WATCHER'S OWN letting-go window and never lower — believing a
+    momentarily quiet page is the bug that shipped once and was caught only
+    against real Chrome — plus the half stillness alone cannot supply: nothing
+    on the wire."""
+
+    def _quiet(self, **over):
+        state = {"gen": 3, "quiet": browser.WATCH_SETTLED_MS, "ready": True}
+        state.update(over)
+        return state
+
+    def test_an_inert_page_is_finished(self):
+        assert browser.already_finished(
+            activity=self._quiet(), requests_in_flight=0
+        ) is True
+
+    def test_a_request_on_the_wire_means_something_is_still_coming(self):
+        """The half the issue named, and the one that makes the rest safe.
+        Stillness is measured from the page's last mutation, which may predate
+        the interaction entirely — a click that fires a request and mutates
+        nothing yet reads as quiet-for-ten-seconds. The wire says otherwise."""
+        assert browser.already_finished(
+            activity=self._quiet(), requests_in_flight=1
+        ) is False
+
+    def test_a_momentarily_quiet_page_is_not_finished(self):
+        """The same bar `watch_step` lets go on, deliberately. A lower one here
+        would rebuild the spinner bug one layer up: the watcher would never be
+        started, so nothing would be left to catch the late arrival."""
+        assert browser.already_finished(
+            activity=self._quiet(quiet=400), requests_in_flight=0
+        ) is False
+        assert browser.WATCH_SETTLED_MS > browser.WATCH_QUIET_MS
+
+    def test_a_document_still_parsing_is_not_finished(self):
+        assert browser.already_finished(
+            activity=self._quiet(ready=False), requests_in_flight=0
+        ) is False
+
+    def test_a_page_that_would_not_answer_is_never_called_finished(self):
+        """"Cannot tell" must never be read as "nothing more is coming" — the
+        same asymmetry `watch_step` keeps, resolved the same way."""
+        assert browser.already_finished(
+            activity=None, requests_in_flight=0
+        ) is False
+
+    def test_the_frame_reports_what_it_observed_at_the_shutter(self):
+        """Not which code path ran. `_settle` returns on a timeout and on three
+        unanswered probes as well as on a finished page, so "we called settle"
+        is not evidence of anything; the probe read beside the screenshot is."""
+        import asyncio
+
+        class Page:
+            url = "https://x.pl/"
+            viewport_size = {"width": 1280, "height": 2134}
+            main_frame = None
+            frames = ()
+
+            def __init__(self, quiet):
+                self._quiet = quiet
+
+            async def evaluate(self, js):
+                if "__aish_watch" in js:
+                    return {"gen": 5, "quiet": self._quiet, "ready": True}
+                return None
+
+            async def screenshot(self, **k):
+                return b"\xff\xd8"
+
+            async def title(self):
+                return "T"
+
+            async def wait_for_timeout(self, ms):
+                pass
+
+        def frame_for(quiet, in_flight=0):
+            owner = browser._Owner()
+            owner.view = Page(quiet)
+            owner.view_requests = in_flight
+            return asyncio.new_event_loop().run_until_complete(
+                browser._frame(owner, settle=False)
+            )
+
+        assert frame_for(browser.WATCH_SETTLED_MS).settled is True
+        assert frame_for(100).settled is False
+        assert frame_for(browser.WATCH_SETTLED_MS, in_flight=2).settled is False
+
+    def test_the_count_comes_from_chrome_and_not_from_the_page(self):
+        """Wrapping `window.fetch` would answer the same question and would make
+        `fetch.toString()` report non-native code — a bot-detection signal on
+        exactly the sites this browser exists to read. So the count is read
+        from Playwright's request events, and nothing is injected."""
+        import inspect
+
+        source = inspect.getsource(browser._count_requests)
+        assert 'page.on("request"' in source
+        assert 'page.on("requestfinished"' in source
+        assert 'page.on("requestfailed"' in source
+        assert "evaluate" not in source and "add_init_script" not in source
+
+    def test_the_count_is_wrong_only_in_the_safe_direction(self):
+        """A leaked count — a long poll, a request neither finished nor failed
+        — leaves the number too HIGH, which answers `False` and buys the
+        watcher that would have run anyway. It can never go negative and read
+        as quiet on a page that is not."""
+
+        class Page:
+            def __init__(self):
+                self.handlers = {}
+
+            def on(self, event, fn):
+                self.handlers.setdefault(event, []).append(fn)
+
+            def fire(self, event):
+                for fn in self.handlers.get(event, []):
+                    fn(None)
+
+        owner = browser._Owner()
+        page = Page()
+        browser._count_requests(owner, page)
+        page.fire("requestfinished")
+        assert owner.view_requests == 0
+        page.fire("request")
+        page.fire("request")
+        assert owner.view_requests == 2
+        page.fire("requestfailed")
+        assert owner.view_requests == 1
+
+
 class TestSelectsAndNativePickers:
     """Chrome draws a <select> with NATIVE UI, which `page.screenshot` cannot
     capture — so a tapped select produced a frame that looked completely inert.

@@ -896,6 +896,49 @@ def watch_step(
     return "stop" if page_is_done(quiet_ms=quiet_ms, ready=ready) else "wait"
 
 
+def already_finished(*, activity: dict | None, requests_in_flight: int) -> bool:
+    """Was the page ALREADY finished at the instant it was photographed? (#223)
+
+    An interaction ships a fast frame and then leaves a watcher looking for
+    late arrivals. On a page that was already inert when the shutter fell, that
+    watcher has nothing to find — so this is the question that lets the caller
+    not start one.
+
+    **What it claims, exactly.** At the moment of capture: the page answered
+    the probe, the document was `complete`, it had been continuously still for
+    at least `WATCH_SETTLED_MS` — the same window the watcher itself requires
+    before it lets go — and no request was in flight. That is an observation,
+    not a prediction. A `setTimeout` can still repaint afterwards and this will
+    have said `True`; on that same evidence the watcher's own first poll
+    returns `"stop"`, so it is a case this code never covered rather than one
+    it stops covering. What it genuinely gives up is narrower: a repaint that
+    lands in the gap before that first poll, driven by a timer rather than by a
+    response — the ordinary version of which is ruled out below.
+
+    So the bar is deliberately the WATCHER'S OWN, and never lower. Believing a
+    momentarily quiet page is exactly the bug that shipped once and was caught
+    only against real Chrome (see `WATCH_SETTLED_MS`), and skipping the watcher
+    on that evidence would rebuild it one layer up.
+
+    **The in-flight count is the half that makes the rest safe**, and it is the
+    signal the issue named. Stillness is measured from the page's last
+    mutation, which may predate the interaction entirely — a click that fires a
+    request and mutates nothing yet reads as quiet-for-ten-seconds. A request
+    on the wire is the evidence that something is still coming, and it is read
+    from OUTSIDE the page (see `_Owner.view_requests`).
+
+    Wrong in the only direction it can afford to be: anything unknown, unquiet
+    or unfinished answers `False`, and `False` is the behaviour that shipped."""
+    if activity is None:  # the page would not answer — never read as "nothing"
+        return False
+    if requests_in_flight > 0:
+        return False
+    return page_is_done(
+        quiet_ms=float(activity.get("quiet") or 0),
+        ready=bool(activity.get("ready")),
+    )
+
+
 # How many unanswered probes a read waits through before it stops asking. The
 # view reads silence as "capture anyway, never miss a frame"; a READ has the
 # opposite fallback, because the page that will not run `_WATCH_JS` is the page
@@ -1372,6 +1415,15 @@ class _Owner:
         self.signed_in_here: set[str] = set()
         self.pending_nav = -1      # the navigation count when that happened
         self.last_url = ""         # where the view was, so it can be reopened
+        # How many requests the VIEW page has in flight (#223). Counted from
+        # Playwright's own request events rather than from anything injected
+        # into the page: wrapping `window.fetch` would answer the same question
+        # and would also make `fetch.toString()` report non-native code, which
+        # is a bot-detection signal on exactly the sites this browser exists to
+        # read. It only ever DECIDES TO SKIP work, so every way of being wrong
+        # about it — a leaked count, a long-poll that never finishes — leaves
+        # the number too high and the behaviour exactly as it was.
+        self.view_requests = 0
         # The pages the MODEL is driving (#237, #272), ONE PER CHAT. Each is a
         # page on the same context, never the view's: the view is the owner's
         # hands at a phone viewport, and the two must not fight over one page.
@@ -2673,6 +2725,10 @@ class Frame:
     # Paired with `nav` because a navigation resets the counter to zero, which
     # is a change that would otherwise read as no change at all.
     gen: int = -1
+    # Was the page ALREADY FINISHED at the moment of capture (#223)? See
+    # `already_finished` for exactly what that claims — it is an observation
+    # made at the shutter, never a promise about the future.
+    settled: bool = False
 
 
 async def _frame(
@@ -2716,6 +2772,12 @@ async def _frame(
         nav=owner.navigations,
         gen=-1 if gen is None else int(gen.get("gen", -1)),
         asks_password=asks_for_a_password,
+        # Read at the SHUTTER, from the same probe the generation comes from,
+        # so the answer describes the picture that is about to be sent and not
+        # the page a moment later.
+        settled=already_finished(
+            activity=gen, requests_in_flight=owner.view_requests
+        ),
     )
     # Recorded per NAVIGATION, not per frame: a frame is sent for every tap,
     # scroll and keystroke, and rewriting the file on each of those would spend
@@ -2796,6 +2858,31 @@ def _count_navigation(owner: _Owner, page: Any, frame: Any) -> None:
         pass
 
 
+def _count_requests(owner: _Owner, page: Any) -> None:
+    """Keep a running count of what the view page has on the wire (#223).
+
+    Registered once per view, on the PAGE, which covers its child frames too.
+    Nothing is injected into the document: the count comes from Chrome by way
+    of Playwright, so a page cannot see that it is being counted and a
+    fingerprinting check cannot notice a wrapped `fetch`.
+
+    Deliberately un-bounded and un-timed. The only thing that reads it decides
+    whether to SKIP a watcher, so a count stuck above zero — a long poll, an
+    event stream, a request neither finished nor failed — costs the watcher
+    that would have run anyway, which is exactly today's behaviour."""
+    owner.view_requests = 0
+
+    def started(_request: Any) -> None:
+        owner.view_requests += 1
+
+    def ended(_request: Any) -> None:
+        owner.view_requests = max(0, owner.view_requests - 1)
+
+    page.on("request", started)
+    page.on("requestfinished", ended)
+    page.on("requestfailed", ended)
+
+
 async def _note_dialog(owner: _Owner, dialog: Any) -> None:
     owner.notice = f"the page said: {dialog.message[:200]}"
     try:
@@ -2842,6 +2929,7 @@ async def _open_view(
     # A file chooser opens a native picker on a Mac nobody is sitting at, which
     # would simply hang. Refuse it and say so.
     page.on("filechooser", lambda c: asyncio.ensure_future(_refuse_upload(owner, c)))
+    _count_requests(owner, page)
     owner.view = page
     owner.view_hosts = set()
     owner.view_touched = time.monotonic()

@@ -941,6 +941,22 @@ Naming a spinner is a dead end — aish already has a text-based `browse.still_l
 
 The watcher is one task, globally, because there is one view; a new interaction **supersedes** it, since a frame captured for the previous action would land on top of the new one. `detail` is exempt — a sharpening is not an interaction, and cancelling on it would stop the watch every time he pinched a still-loading page. Polling never STARTS a browser (`_no_browser_yet`): a poll that launched the thing it polls would bring Chrome up on a machine nobody asked. `TestTheWatcherKeepsLookingAfterTheFirstCorrection`, and the server half in `TestBrowserView` — including the superseded-mid-capture interleaving, which is driven rather than asserted about.
 
+### An already-quiet page is not watched at all (#223, fix 1)
+
+Every interaction left a watcher, including on a page that had already stopped moving before the shutter fell — where there is nothing for it to find. `Frame.settled` is the frame's own observation at the moment of capture, and `_browser_view` starts no watcher when it is true.
+
+**What `settled` claims, and nothing wider.** At the instant the screenshot was taken: the page answered the probe, the document was `complete`, it had been continuously still for at least `WATCH_SETTLED_MS`, and no request was in flight. `already_finished` is that predicate, pure. It is an **observation, not a prediction** — a `setTimeout` can still repaint afterwards and this will have said yes.
+
+**The residual, stated rather than implied away.** The watcher's first poll is `WATCH_POLL_MS` after the frame, so a page that moves in that gap keeps a watcher today and loses one now. What narrows that to a real edge is the in-flight count below: the ordinary version of "moved just after the shutter" is a response landing, and a response landing means a request was already on the wire when the shutter fell. What is left is a repaint driven by a timer with no network behind it — and on that same evidence the watcher's own first poll returns `"stop"` anyway, so it is a case this code has never covered rather than one it stops covering.
+
+**The bar is the watcher's own and never lower.** The tempting version reads *"quiet right now"*, which is `WATCH_QUIET_MS` — and that is precisely the bug this file records shipping once and catching only against real Chrome, where the watcher quit 2.6 s after a spinner appeared and the contents landed at 3 s. Deciding not to *start* the watcher on that evidence would rebuild it one layer up, with nothing left behind to correct the frame.
+
+**The in-flight count is what makes stillness mean anything**, and it is the half the issue named. `quiet` is measured from the page's last mutation, which may predate the interaction entirely: a click that fires a request and mutates nothing yet reads as quiet-for-ten-seconds, and the answer lands 500 ms later to nobody. A request on the wire is the evidence that something is still coming.
+
+It is counted **outside the page** — `_count_requests` registers Playwright's `request`/`requestfinished`/`requestfailed` on the view page, so nothing is injected. Wrapping `window.fetch` would answer the same question and would also make `fetch.toString()` report non-native code, which is a fingerprinting signal on exactly the sites the stealth switch exists for. It is deliberately unbounded and untimed: the only thing that reads it decides whether to SKIP work, so every way of being wrong — a long poll, an event stream, a request that neither finishes nor fails — leaves the number too high and the behaviour exactly as it shipped.
+
+**Measured honestly, this buys fewer probes rather than fewer bytes**, because the watcher already pays for a capture only when the page has moved. The byte doubling the issue describes was largely answered by the probe; what remains of it — a carousel or a ticker, which by definition is never continuously still — is bounded by `WATCH_MAX_CAPTURES` and is *not* what this fix reaches. Fixes 2 and 3 and the `scroll` addition from that issue are not built. `TestAnAlreadyQuietPageNeedsNoCorrection`, and `TestBrowserView`'s two ends of the decision.
+
 ## The sheet is full height, so it met the two edges of the screen (#226)
 
 Reclaiming the dead band under the nav row gave `#browser-sheet` `height: 100%`, and it promptly ran into both insets — once visibly, once not.
