@@ -3200,11 +3200,13 @@ const FRAME_ABSENT = {
 // "what the model saw" — the model is handed text and a control list, and a
 // page can repaint after the shutter.
 //
-// `imageSrc` and nothing else builds the URL, so a frame is bound by the same
-// policy as every other picture in the transcript.
+// `frameSrc` and nothing else builds the URL. It used to be `imageSrc`, on the
+// reasoning that a frame is a picture in the transcript like any other — and
+// #318 is the finding that it is not: a frame is a picture of a page from
+// OUTSIDE, and it moved to a store of its own that `/file` does not serve.
 function traceFrame(step) {
   if (step.frame) {
-    const src = imageSrc(step.frame);
+    const src = frameSrc(step.frame);
     if (!src) return null;
     const wrap = document.createElement("div");
     wrap.className = "step-frame";
@@ -5285,6 +5287,19 @@ function imageSrc(target) {
     return `/file?${params}`;
   }
   return null;
+}
+
+// A picture of a page aish drove, which has its own endpoint because it has its
+// own store (#318). The bytes left the workspace boundary so the MODEL could no
+// longer name one to `show_image` and read a hostile page into its own context;
+// `/file` is scoped to that boundary and therefore cannot serve one any more.
+// Same token, same absolute-path rule, a different door — and the door is the
+// only difference, because what a frame is FOR is being looked at.
+function frameSrc(target) {
+  if (typeof target !== "string" || !target.startsWith("/")) return null;
+  const params = new URLSearchParams({ path: target });
+  if (token) params.set("token", token);
+  return `/frame?${params}`;
 }
 
 // The <img> itself, with the broken-file handling every image render shares.

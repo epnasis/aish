@@ -4627,6 +4627,140 @@ class TestFileEndpoint:
             assert ok.status_code == 200
 
 
+class TestFrameEndpoint:
+    """GET /frame (#289, #318): the picture of a page aish drove.
+
+    A frame rendered through `/file` until #318, because it was stored in the
+    media store — which is inside `Agent.workspace_roots`, which is what let the
+    MODEL name a frame to `show_image` and read a hostile page's pixels into its
+    own context. The bytes moved to a store of their own, outside every root, so
+    `/file` cannot serve them any more.
+
+    A record the owner cannot see is not a record (#295 P6), so display did not
+    move with them: it got a door of its own, authorised for exactly these bytes
+    and nothing else. The two endpoints are deliberately NOT supersets of each
+    other — this one cannot serve a project file, and `/file` cannot serve a
+    frame."""
+
+    JPEG = b"\xff\xd8\xff\xe0-a-page-aish-drove"
+
+    def _frame(self, app_env, name="ab12cd-browse-eon-pl.jpg"):
+        frames = Path(app_env["state_dir"]) / "frames"
+        frames.mkdir(parents=True, exist_ok=True)
+        path = frames / name
+        path.write_bytes(self.JPEG)
+        return path
+
+    def test_serves_a_frame_that_no_workspace_root_contains(self, app_env,
+                                                            tmp_path):
+        """The production shape, spelled out because the fixture's default is
+        not it: `app_env` puts the session root at the parent of the state
+        directory, which swallows every store aish owns. Here the root is a
+        project folder beside it, as it is on a real machine — and then `/file`
+        genuinely cannot reach a frame and this endpoint is the only way it is
+        seen.
+
+        The MODEL's side does not rest on that arrangement: `_is_evidence_frame`
+        asks about the store directly, so a root that swallows the state dir is
+        refused anyway. This is about which DOOR the owner's picture comes
+        through."""
+        project = tmp_path / "project"
+        project.mkdir()
+        env = {**app_env, "cwd": str(project)}
+        frame = self._frame(env)
+        client, _ = make_client(env, [])
+        with client:
+            response = client.get("/frame", params={"path": str(frame)})
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "image/jpeg"
+            assert response.headers["x-content-type-options"] == "nosniff"
+            assert response.content == self.JPEG
+            assert client.get("/file", params={"path": str(frame)}).status_code == 403
+
+    def test_refuses_anything_that_is_not_a_frame(self, app_env, tmp_path):
+        """Narrower than `/file`, not wider. A second door onto the workspace
+        would be a second answer to which files leave this machine."""
+        chart = tmp_path / "chart.png"
+        chart.write_bytes(b"\x89PNG-fake-chart")
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.get("/frame", params={"path": str(chart)}).status_code == 403
+            assert client.get("/file", params={"path": str(chart)}).status_code == 200
+
+    def test_symlink_into_the_store_is_resolved_before_the_check(
+        self, app_env, tmp_path
+    ):
+        """Both directions of #309's one containment function: a link OUT of
+        the store is outside it, and a link INTO it is inside."""
+        frame = self._frame(app_env)
+        secret = tmp_path / "secret.jpg"
+        secret.write_bytes(b"\xff\xd8\xff-private")
+        escaping = Path(app_env["state_dir"]) / "frames" / "innocent.jpg"
+        escaping.symlink_to(secret)
+        reaching = tmp_path / "shortcut.jpg"
+        reaching.symlink_to(frame)
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.get(
+                "/frame", params={"path": str(escaping)}
+            ).status_code == 403
+            assert client.get(
+                "/frame", params={"path": str(reaching)}
+            ).status_code == 200
+
+    def test_the_same_rules_as_file_about_handing_bytes_off_the_machine(
+        self, app_env
+    ):
+        frame = self._frame(app_env)
+        notes = Path(app_env["state_dir"]) / "frames" / "notes.txt"
+        notes.write_text("not an image", encoding="utf-8")
+        client, _ = make_client(app_env, [], token="s3cret")
+        with client:
+            assert client.get("/frame", params={"path": str(frame)}).status_code == 403
+            ok = {"path": str(frame), "token": "s3cret"}
+            assert client.get("/frame", params=ok).status_code == 200
+            assert client.get(
+                "/frame", params={"path": str(notes), "token": "s3cret"}
+            ).status_code == 415
+            assert client.get(
+                "/frame", params={"path": "rel.jpg", "token": "s3cret"}
+            ).status_code == 400
+            gone = Path(app_env["state_dir"]) / "frames" / "nope.jpg"
+            assert client.get(
+                "/frame", params={"path": str(gone), "token": "s3cret"}
+            ).status_code == 404
+
+    def test_a_chat_written_before_the_move_still_shows_its_pictures(
+        self, app_env
+    ):
+        """Frames landed in the media store until #318 and the trace rows of
+        every chat already on disk still point there. Serving one here grants
+        nothing `/file` does not already grant the same token — what #318
+        changed is what the MODEL may read — and a fix that blanked the record
+        in his existing chats would be taking the record away to protect it."""
+        legacy = Path(app_env["state_dir"]) / "media"
+        legacy.mkdir(parents=True, exist_ok=True)
+        old = legacy / "ab12cd-browse-eon-pl.jpg"
+        old.write_bytes(self.JPEG)
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client):
+                assert client.get(
+                    "/frame", params={"path": str(old)}
+                ).status_code == 200
+
+    def test_the_save_button_on_a_frame_still_saves(self, app_env):
+        """The picture viewer a frame opens into has always had Save, and the
+        frame is outside the workspace boundary that `/download` scopes to."""
+        frame = self._frame(app_env)
+        client, _ = make_client(app_env, [])
+        with client:
+            response = client.get("/download", params={"path": str(frame)})
+            assert response.status_code == 200
+            assert response.content == self.JPEG
+            assert "attachment" in response.headers["content-disposition"]
+
+
 class TestFileCaching:
     """An upload is fetched twice: once into the composer chip, once by the
     bubble the send produces. The second must cost nothing.

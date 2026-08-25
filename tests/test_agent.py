@@ -10361,17 +10361,22 @@ class TestWhatCanBecomeModelVisibleImageContent:
     - **Produce** — which tools may declare a picture on their result envelope
       for that second one to deliver.
 
-    **And enumerating it shows the condition has ALREADY fired**, which is why
+    **Enumerating it showed the condition had ALREADY fired**, which is why
     this class exists at all. #318 read `show_image` as handing the model back
     only a markdown line; since #215 it also ATTACHES the bytes, and
     `_read_local_image` accepts any path inside `workspace_roots` — which the
-    media store is, deliberately, because that boundary is what lets a frame be
-    displayed. So a frame a driven page left behind is nameable by the model
-    and lands in its own context bannerless, unattributed and untainted (a
-    local path is not outside content under `_brings_outside_content`). What to
-    do about that is #318's decision; what this class does is make a THIRD
-    channel impossible to add quietly, and make the second one's removal
-    equally visible.
+    media store was, and a frame was written into the media store. So a frame a
+    driven page left behind was nameable by the model and landed in its own
+    context bannerless, unattributed and untainted (a local path is not outside
+    content under `_brings_outside_content`).
+
+    **That is closed: frames have their own store, outside every workspace
+    root** (`browser.frames_dir`, #318). The tripwire below now asserts the
+    FIXED property rather than the broken one — a frame is not reachable and
+    cannot become image content — because the property is what needed a test,
+    and a test deleted on the way past is a property that stops being checked.
+    What this class does either way is make a THIRD channel impossible to add
+    quietly, and make the second one's removal equally visible.
     """
 
     # Named with a reason each, both directions pinned — the shape #308's and
@@ -10462,42 +10467,120 @@ class TestWhatCanBecomeModelVisibleImageContent:
         attach, _ = self._sweep()
         assert self.ATTACH_EXEMPT <= attach
 
-    def test_the_condition_has_already_fired_and_this_is_the_tripwire(
-        self, tmp_path
-    ):
-        """The live fact, recorded where the next person meets it. A picture
-        already in the media store — which is where every evidence frame from a
-        driven page lands — is nameable by the MODEL through `show_image`, and
-        arrives in its own context with nothing saying whose page it was.
+    PNG = b"\x89PNG\r\n\x1a\n" + bytes.fromhex(
+        "0000000d4948445200000001000000010802000000907753de0000000c49444154"
+        "08d763f8cfc00000030101003c1f2e6a0000000049454e44ae426082"
+    )
 
-        This asserts what is TRUE today, so closing #318 breaks it and brings
-        whoever closed it here to read why it was written. If you are that
-        person: delete this test, not the docstring above it."""
+    def _agent_with_a_frame(self, tmp_path, monkeypatch):
+        """An agent, and a frame of a driven page in the store the capture
+        really writes to — `browser.frames_dir()`, which resolves the same
+        AISH_STATE_DIR the browser thread reads (#290)."""
         project = tmp_path / "project"
         project.mkdir()
-        frame = b"\x89PNG\r\n\x1a\n" + bytes.fromhex(
-            "0000000d4948445200000001000000010802000000907753de0000000c49444154"
-            "08d763f8cfc00000030101003c1f2e6a0000000049454e44ae426082"
-        )
-        agent, chat = make_agent(
-            [], cwd=str(project), state_dir=tmp_path / "state"
-        )
-        agent.media_dir.mkdir(parents=True, exist_ok=True)
-        stored = agent.media_dir / "a-frame-of-a-driven-page.png"
-        stored.write_bytes(frame)
+        state = tmp_path / "state"
+        monkeypatch.setenv("AISH_STATE_DIR", str(state))
+        agent, chat = make_agent([], cwd=str(project), state_dir=state)
+        frames = agent_module.browser.frames_dir()
+        frames.mkdir(parents=True, exist_ok=True)
+        stored = frames / "abc123-browse-eon-pl.png"
+        stored.write_bytes(self.PNG)
+        return agent, chat, stored
 
+    def test_the_condition_has_already_fired_and_this_is_the_tripwire(
+        self, tmp_path, monkeypatch
+    ):
+        """#317 added this asserting the BROKEN fact, so that closing #318
+        would fail a test and bring whoever closed it to the paragraph
+        explaining why. This is that person's edit: the same property, asserted
+        from the fixed side.
+
+        A frame is a picture of a page from OUTSIDE, written unprompted. It may
+        not become image content in the model's own context — bannerless,
+        unattributed and untainted is what it would be, because a local path
+        carries no host for `_brings_outside_content` to see, so there is no
+        later gate that would catch it. The model naming one to `show_image` is
+        the whole route, and it is refused at `_read_local_image`."""
+        agent, chat, stored = self._agent_with_a_frame(tmp_path, monkeypatch)
         chat.responses = [
             model_says(
                 tool_calls=[tool_call("show_image", source=str(stored), caption="page")]
             ),
-            model_says("looked at it"),
+            model_says("could not look at it"),
         ]
         agent.run_task("what is in that picture?")
 
-        carried = [m for m in agent.messages if m.get("images")]
-        assert carried, "show_image no longer attaches — #318's premise may now hold"
-        assert agent_module.web.UNTRUSTED_NOTE not in carried[0]["content"]
-        assert agent._tainted is False
+        assert not [m for m in agent.messages if m.get("images")]
+        result = tool_messages(agent.messages)[-1]["content"]
+        assert "a picture aish stored of a page it drove" in result
+        # And the refusal must not read as an invitation to widen the boundary:
+        # the ordinary out-of-workspace message says to /add-dir the folder,
+        # which here would mean adding the state dir and reopening the hole.
+        assert "/add-dir" not in result
+
+    def test_the_frame_store_is_not_in_the_workspace_boundary(
+        self, tmp_path, monkeypatch
+    ):
+        """The structural half, stated where the media store's inclusion is:
+        `show_image`'s own store stays inside the boundary (a picture the model
+        ASKED for), and the frame store is outside it (a picture written
+        unprompted, from outside content)."""
+        agent, _chat, stored = self._agent_with_a_frame(tmp_path, monkeypatch)
+        roots = [Path(r) for r in agent.workspace_roots()]
+        assert agent.media_dir in roots
+        assert agent_module.browser.frames_dir() not in roots
+        assert not agent_module.files.within_roots(agent.workspace_roots(), stored)
+
+    def test_a_session_root_that_swallows_the_state_dir_is_still_refused(
+        self, tmp_path, monkeypatch
+    ):
+        """Leaving the list is necessary, not sufficient — the boundary is the
+        SESSION's roots plus aish's stores, so a root containing the state
+        directory puts the store back inside it. Same lesson as #317's cache,
+        which is why the store is asked about directly."""
+        state = tmp_path / "state"
+        monkeypatch.setenv("AISH_STATE_DIR", str(state))
+        agent, chat = make_agent([], cwd=str(tmp_path), state_dir=state)
+        frames = agent_module.browser.frames_dir()
+        frames.mkdir(parents=True, exist_ok=True)
+        stored = frames / "abc123-browse-eon-pl.png"
+        stored.write_bytes(self.PNG)
+        # Inside the boundary now, and still unreadable.
+        assert agent_module.files.within_roots(agent.workspace_roots(), stored)
+        assert agent._is_evidence_frame(str(stored))
+        chat.responses = [
+            model_says(
+                tool_calls=[tool_call("show_image", source=str(stored), caption="page")]
+            ),
+            model_says("could not look at it"),
+        ]
+        agent.run_task("what is in that picture?")
+        assert not [m for m in agent.messages if m.get("images")]
+
+    def test_a_frame_is_neither_read_nor_written_as_a_file(
+        self, tmp_path, monkeypatch
+    ):
+        """read_file on a JPEG returns replacement characters rather than page
+        content, so this is belt-and-braces on the read side — and it is not on
+        the WRITE side. A model that can write into the store can overwrite the
+        picture of the page it drove, which turns the record into an authored
+        artifact (#295 P6). Both are refused, not carded: nobody can tell one
+        digest-named JPEG from another on a card."""
+        agent, chat, stored = self._agent_with_a_frame(tmp_path, monkeypatch)
+        chat.responses = [
+            model_says(tool_calls=[tool_call("read_file", path=str(stored))]),
+            model_says(
+                tool_calls=[
+                    tool_call("write_file", path=str(stored), content="not a page")
+                ]
+            ),
+            model_says("neither worked"),
+        ]
+        agent.run_task("read that frame and then replace it")
+        for message in tool_messages(agent.messages)[:2]:
+            assert "NOT EXECUTED" in message["content"]
+            assert "evidence-frame store" in message["content"]
+        assert stored.read_bytes() == self.PNG
 
 
 class TestSearchingIsReading:

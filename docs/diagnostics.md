@@ -125,7 +125,7 @@ Before this, the rendered `thinking` step kept a 120-character snippet for a liv
 
 ## The picture of a driven page (#289 slice 1)
 
-aish drives real pages the owner cannot see, so *"it said the portal had no invoices"* has never been checkable. A browse call now records `frame` — a path into the media store holding a picture of the page as the model was **shown** it — and the dossier resolves it: `aish explain` prints the path, and the web trace card draws it.
+aish drives real pages the owner cannot see, so *"it said the portal had no invoices"* has never been checkable. A browse call now records `frame` — a path into the evidence-frame store holding a picture of the page as the model was **shown** it — and the dossier resolves it: `aish explain` prints the path, and the web trace card draws it.
 
 **This reader's three-states rule applies unchanged, and the third state is the ordinary one.** The bytes live in a bounded LRU cache, so a reference outliving its picture is how most frames end, not a fault:
 
@@ -140,7 +140,7 @@ Those are why `frame_skipped` exists at all, and they route to different reactio
 
 **Two of the words are readable here and are no longer written** (#320). *A password box was on the page* used to refuse the capture, on the argument that a screenshot of a login form is the artifact that must not exist — but aish never types a password on the browse path, so the refused frame was an EMPTY form, and the refusal cost the one picture the owner most needed when a sign-in failed. *The page would not say whether there was one* existed only to resolve that question safely and went with it. This reader still renders both, because they are in logs already on disk and a fact a reader cannot render is a fact it has erased. `docs/browser.md` carries the argument.
 
-The bytes are deliberately NOT in the evidence store, which is text-only by construction (`digest_of` hashes UTF-8, `put` writes with `write_text`), and `docs/browser.md` carries the rest of that argument. What matters here is that the governance property is identical either way: **the record only points at the bytes, and the bytes are purgeable on their own schedule.** `_frame_of` is where the resolution happens, and it stats a path rather than importing anything live — the reader's import fence is unchanged.
+The bytes are deliberately NOT in the evidence store, which is text-only by construction (`digest_of` hashes UTF-8, `put` writes with `write_text`), and — since #318 — deliberately not in the media store either, because that one is inside `workspace_roots` and a frame the MODEL can read is an input channel rather than a record. `docs/browser.md` carries the rest of that argument. What matters here is that the governance property is identical either way: **the record only points at the bytes, and the bytes are purgeable on their own schedule.** `_frame_of` is where the resolution happens, and it stats a path rather than importing anything live — the reader's import fence is unchanged.
 
 **A frame proves what happened and prevents nothing.** It is a record, which #295 counts as a real control — but for anything irreversible a record is detection, not protection, so nothing in the gates may ever be relaxed on the grounds that a picture will exist. `TestTheEvidenceFrameOnTheRecord`.
 

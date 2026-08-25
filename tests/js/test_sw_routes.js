@@ -95,6 +95,13 @@ check("unversioned static assets revalidate", () => {
 
 check("transcript images get the bounded image cache", () => {
   assert.strictEqual(route("https://aish.example/file?path=/tmp/a.png&token=t"), "image");
+  // A frame is the same kind of bytes through a different door (#318): its
+  // store left the workspace boundary, so /file cannot serve one. Left to the
+  // default it would revalidate — a network round trip per browsed step, and
+  // nothing at all on a transcript read offline.
+  assert.strictEqual(
+    route("https://aish.example/frame?path=/state/frames/a.jpg&token=t"), "image"
+  );
 });
 
 check("non-GET requests are never intercepted", () => {

@@ -360,27 +360,47 @@ def state_dir() -> Path:
 
 
 def frames_dir() -> Path:
-    """Where an evidence frame's bytes land (#289).
+    """Where an evidence frame's bytes land (#289) — its OWN store (#318).
 
-    This IS the media store — the same `state_dir()/media` that `show_image`
-    writes into, deliberately, not a second store beside it. A frame needs
-    exactly what that store already provides and the evidence store cannot:
-    raw bytes (the evidence store's address is the sha256 of UTF-8 text and it
-    reads with `read_text`), content addressing, and a bounded LRU so pictures
-    are a cache rather than an archive. It is also `Agent.media_dir` for any
-    agent that has a state dir — which is every web session — and that is what
-    puts a frame inside `workspace_roots` and lets it be SEEN rather than
-    merely stored.
+    A store of its own, outside every workspace root, and that location is a
+    security property rather than housekeeping. Frames used to go into the
+    media store, which is inside `Agent.workspace_roots`, and that boundary's
+    whole justification is that reading back what the process already wrote
+    UNPROMPTED grants nothing new. Everything else in that store is a picture
+    the model asked for; a frame is a picture of a page from outside, written
+    unprompted. So `show_image(source=<a frame>)` read the file back through
+    `_read_local_image`, `media.store` re-adopted it, and the bytes rode the
+    result envelope into the conversation as native image content —
+    bannerless, unattributed, and untainted, since a local path carries no
+    host for `_brings_outside_content` to see. The store also outlives the
+    task, so a page driven in one chat was reachable from the next.
+
+    Moving the bytes out is the whole fix, and it is the same shape #317 used
+    for the tool-output cache: the boundary does not grow an exception and the
+    file layer does not learn a second provenance path. What a frame needs
+    from a store — raw bytes, content addressing, a bounded LRU — is
+    `media.py`'s mechanics, which this keeps; what it must not inherit is the
+    media store's ADDRESS. (The evidence store next door still cannot hold it:
+    that one is text-only by construction, addressed by the sha256 of UTF-8
+    and read with `read_text`.)
+
+    Being outside the roots means the web UI cannot serve a frame through
+    `/file`, so it has an authorised route of its own (`WebServer.handle_frame`
+    → `/frame`). A frame is a RECORD and a record the owner cannot see is not
+    one; what changed here is what the MODEL may read, never what he may.
 
     Resolved here rather than taken from the Agent because the capture happens
     on the browser's own thread, several layers below any agent. Both sides
     read `AISH_STATE_DIR`, and `aish-web` exports it at startup precisely so
-    every module that resolves it itself resolves it the same.
+    every module that resolves it itself resolves it the same — which is why
+    `Agent._is_evidence_frame` asks THIS function rather than deriving a
+    second answer from its own state dir.
 
-    The cost of sharing is real and is stated in `docs/media-and-images.md`:
-    frames and the owner's own pictures compete for one `MEDIA_MAX_FILES`.
+    Its caps are its own too (`media.FRAME_MAX_*`), which settles the question
+    the shared store left open: a frame can no longer evict a picture from one
+    of the owner's chats. `docs/browser.md`.
     """
-    return state_dir() / "media"
+    return state_dir() / "frames"
 
 
 def downloads_dir() -> Path:
@@ -2149,7 +2169,9 @@ class SignInResult:
     tried: bool = False
     url: str = ""
     # A picture of the page at the END of the attempt, success or failure
-    # (#320), in the media store — a REFERENCE, never the bytes. Before this
+    # (#320), in the evidence-frame store — a REFERENCE, never the bytes. The
+    # store is outside every workspace root (#318), which matters most here:
+    # these are pictures of LOGIN PAGES. Before this
     # the replay took no snapshot at any point, so a sign-in that did not work
     # left the owner nothing to look at. `frame_skipped` says WHICH absence,
     # in the same closed vocabulary `Snapshot` uses.
@@ -2552,7 +2574,7 @@ def _signin_lines() -> list[str]:
 def _last_attempt_line(record: Any) -> str:
     """What to say about the picture of the last attempt, or "".
 
-    The media store is a bounded LRU, so a path that no longer resolves is the
+    The frame store is a bounded LRU, so a path that no longer resolves is the
     ORDINARY end of a frame's life and says **purged** — never "there was never
     a picture". Same three states `aish explain` reports for a browse frame,
     and for the same reason: absence has to say which absence."""
@@ -2564,7 +2586,7 @@ def _last_attempt_line(record: Any) -> str:
         return (
             f"picture of the last attempt: {record.last_frame}"
             if there
-            else "picture of the last attempt: purged from the media store"
+            else "picture of the last attempt: purged from the frame store"
         )
     if record.last_frame_skipped:
         return f"no picture of the last attempt — {record.last_frame_skipped}"
@@ -4024,7 +4046,11 @@ async def _evidence_frame(
             type="jpeg", quality=FRAME_JPEG_QUALITY, timeout=FRAME_TIMEOUT_MS
         )
         stored = media.store(
-            bytes(jpeg), frames_dir(), f"{label} {host_of(str(page.url or ''))}"
+            bytes(jpeg),
+            frames_dir(),
+            f"{label} {host_of(str(page.url or ''))}",
+            max_bytes=media.FRAME_MAX_BYTES,
+            max_files=media.FRAME_MAX_FILES,
         )
     except Exception:  # noqa: BLE001 — an extra that failed must not cost the page
         return "", browse_mod.NO_FRAME_FAILED

@@ -543,9 +543,11 @@ class Snapshot:
     # closes between two snapshots and nets to zero in the diff.
     ledger: list[str] = field(default_factory=list)
     # The evidence frame (#289): a stored picture of what this page LOOKED LIKE
-    # at the moment the model was shown it. A path into the media store, or ""
-    # — the model never receives either; it is written down for the owner, who
-    # otherwise has no way to check a page aish drove and he cannot see.
+    # at the moment the model was shown it. A path into the evidence-frame
+    # store, or "" — the model never receives either; it is written down for
+    # the owner, who otherwise has no way to check a page aish drove and he
+    # cannot see. That store sits outside every workspace root (#318), so the
+    # model cannot reach the bytes even if it learns the path.
     frame: str = ""
     # Why there is no frame, when there is none. Absence must never be the
     # evidence (trace contract corollary 2): "no picture" because a password

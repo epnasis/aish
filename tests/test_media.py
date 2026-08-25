@@ -110,6 +110,53 @@ class TestPrune:
     def test_a_missing_directory_is_not_an_error(self, tmp_path):
         assert media.prune(tmp_path / "nope") == []
 
+    def test_a_caller_may_bring_its_own_caps(self, tmp_path):
+        """#318 gave the evidence-frame store a directory of its own, and a
+        store of its own needs a budget of its own: frames arrive one per
+        snapshot, so under one shared cap seventeen browsing flows turned the
+        whole thing over and the file evicted was plausibly a picture from one
+        of the owner's chats."""
+        import os
+
+        for i in range(5):
+            path = media.store(PNG + bytes([i]), tmp_path, f"frame{i}", max_files=2)
+            os.utime(path, (1000 + i, 1000 + i))
+        media.prune(tmp_path, max_files=2)
+        assert len(list(tmp_path.iterdir())) == 2
+
+    def test_the_module_constants_stay_the_single_answer(self, tmp_path,
+                                                         monkeypatch):
+        """A cap in a default ARGUMENT would bind at import and ignore anything
+        that changed the constant afterwards, so the store would prune to a
+        number nobody could see. Resolved inside the function instead."""
+        monkeypatch.setattr(media, "MEDIA_MAX_FILES", 1)
+        import os
+
+        for i in range(4):
+            path = media.store(PNG + bytes([i]), tmp_path, f"pic{i}")
+            os.utime(path, (1000 + i, 1000 + i))
+        media.prune(tmp_path)
+        assert len(list(tmp_path.iterdir())) == 1
+
+    def test_a_frame_can_no_longer_evict_a_picture_from_a_chat(self, tmp_path):
+        """The whole point of the separation, from the owner's side. The two
+        stores are different directories with different budgets, so a browsing
+        flow cannot cost him a picture in an answer he read last month."""
+        assert media.FRAME_MAX_FILES != media.MEDIA_MAX_FILES
+        pictures = tmp_path / "media"
+        frames = tmp_path / "frames"
+        kept = media.store(PNG, pictures, "a picture in an answer")
+        for i in range(media.MEDIA_MAX_FILES + 5):
+            media.store(
+                JPEG + bytes([i % 251]) * (i + 1),
+                frames,
+                f"browse eon-pl {i}",
+                max_files=media.FRAME_MAX_FILES,
+                max_bytes=media.FRAME_MAX_BYTES,
+            )
+        assert kept.exists()
+        assert len(list(frames.iterdir())) == media.MEDIA_MAX_FILES + 5
+
     def test_a_repeat_store_refreshes_recency(self, tmp_path, monkeypatch):
         """Re-showing the same picture must keep it alive, or the LRU would
         evict exactly the images still in use."""

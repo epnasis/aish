@@ -15,7 +15,7 @@
  *   navigation (index.html)  network-first, 3 s timeout, cache fallback
  *   ?v=<rev> assets          cache-first, forever (the URL names the revision)
  *   other static assets      stale-while-revalidate
- *   /file images             cache-first, LRU-capped (transcript screenshots)
+ *   /file /frame images      cache-first, LRU-capped (transcript screenshots)
  *   /ws /offline /upload …   never touched
  *
  * Why index.html is network-first and everything else is not: the page reads
@@ -36,9 +36,10 @@ const SHELL_CACHE = "aish-shell-v1";
 const IMG_CACHE = "aish-img-v1";
 const CACHES = [SHELL_CACHE, IMG_CACHE];
 
-// Cached transcripts reference screenshots and diagrams through /file; without
-// them an offline transcript renders "🖼 (unavailable)" placeholders. Bounded
-// so a session full of images can't grow the cache without limit.
+// Cached transcripts reference screenshots and diagrams through /file, and the
+// picture of a driven page through /frame; without them an offline transcript
+// renders "🖼 (unavailable)" placeholders. Bounded so a session full of images
+// can't grow the cache without limit.
 const IMG_MAX_ENTRIES = 300;
 
 const NAV_TIMEOUT_MS = 3000;
@@ -91,7 +92,11 @@ function routeFor(request, url, scope) {
   // A rasterised PDF page IS an image, and belongs in the same bounded LRU —
   // left to the default it would accumulate megabytes of pages in the cache the
   // app shell lives in.
-  if (rest.startsWith("/file") || rest.startsWith("/pdf/page")) return "image";
+  // /frame is the evidence-frame endpoint (#318) — the same kind of bytes as
+  // /file's, immutable under a content digest, and needed by a transcript read
+  // offline exactly as a screenshot in an answer is.
+  if (rest.startsWith("/file") || rest.startsWith("/pdf/page")
+      || rest.startsWith("/frame")) return "image";
   // The revision is in the query string, so the URL identifies exact bytes.
   if (url.searchParams.has("v")) return "immutable";
   return "revalidate";

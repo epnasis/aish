@@ -83,9 +83,12 @@ function makeSandbox() {
     traceSvg: () => "",
     fmtSecs: (s) => `${s}s`,
     opened,
-    // The real policy function lives elsewhere in app.js; what matters here is
-    // that traceFrame goes THROUGH it rather than building a URL itself.
+    // The real URL builders live elsewhere in app.js; what matters here is that
+    // traceFrame goes THROUGH one rather than building a URL itself — and that
+    // it is `frameSrc`, not `imageSrc`. A frame left the workspace boundary in
+    // #318, so `/file` does not serve one any more.
     imageSrc: (target) => (target.startsWith("/") ? `/file?path=${target}&token=t` : null),
+    frameSrc: (target) => (target.startsWith("/") ? `/frame?path=${target}&token=t` : null),
     openPreview: (...args) => opened.push(args),
     knowledgeTag() {},
     clampNote: (text) => ({ className: "step-note", textContent: text, children: [] }),
@@ -131,39 +134,55 @@ function check(name, fn) {
 
 check("a browse step draws the picture of the page it read", () => {
   const s = makeSandbox();
-  const rows = browsed(s, { frame: "/state/media/abc-browse-eon-pl.jpg" });
+  const rows = browsed(s, { frame: "/state/frames/abc-browse-eon-pl.jpg" });
   const frame = findByClass(rows[0], ".step-frame");
   assert(frame, "no frame was drawn on the row");
   const img = frame.children[0];
-  assert.equal(img.src, "/file?path=/state/media/abc-browse-eon-pl.jpg&token=t");
+  assert.equal(img.src, "/frame?path=/state/frames/abc-browse-eon-pl.jpg&token=t");
 });
 
-check("the src is built by the shared image policy, never by hand", () => {
-  // A frame is a picture in the transcript like any other, and the one
-  // whitelist/token rule has to govern it too.
+check("the src comes from the frame endpoint, never the workspace one", () => {
+  // #318. The bytes moved to a store of their own so the MODEL could no longer
+  // name a frame to show_image and read a hostile page into its own context;
+  // /file is scoped to the boundary that store left, so a row still asking it
+  // for the picture would draw a 403 in every browsed step.
   const s = makeSandbox();
-  s.imageSrc = () => null;
-  const rows = browsed(s, { frame: "/state/media/abc.jpg" });
+  s.imageSrc = () => { throw new Error("a frame must not go through /file"); };
+  const rows = browsed(s, { frame: "/state/frames/abc.jpg" });
+  assert.equal(
+    findByClass(rows[0], ".step-frame").children[0].src,
+    "/frame?path=/state/frames/abc.jpg&token=t"
+  );
+});
+
+check("the src is built by the shared policy function, never by hand", () => {
+  // One place decides which pictures may load and with what token; a row that
+  // built its own URL would be a second answer.
+  const s = makeSandbox();
+  s.frameSrc = () => null;
+  const rows = browsed(s, { frame: "/state/frames/abc.jpg" });
   assert(!findByClass(rows[0], ".step-frame"), "policy refused the src and it drew anyway");
 });
 
 check("tapping the picture opens the real viewer", () => {
   const s = makeSandbox();
-  const rows = browsed(s, { frame: "/state/media/abc.jpg" });
+  const rows = browsed(s, { frame: "/state/frames/abc.jpg" });
   findByClass(rows[0], ".step-frame").children[0].onclick();
   assert.equal(s.opened.length, 1);
-  assert.equal(s.opened[0][0], "/file?path=/state/media/abc.jpg&token=t");
-  assert.equal(s.opened[0][2][0].file, "/state/media/abc.jpg");
+  assert.equal(s.opened[0][0], "/frame?path=/state/frames/abc.jpg&token=t");
+  // The viewer's Save button saves the FILE, so it carries the path and not the
+  // display URL — /download knows a frame for the same reason /frame does.
+  assert.equal(s.opened[0][2][0].file, "/state/frames/abc.jpg");
 });
 
 check("a frame that will not load says so, not that none was taken", () => {
-  // The media store is a bounded LRU cache: a record outliving its picture is
+  // The frame store is a bounded LRU cache: a record outliving its picture is
   // the ordinary end of a frame's life, and it must never read as an absence.
   // The wording claims only what a failed load proves — from here an evicted
   // file and a stale token are the same event, and `aish explain` is the
   // surface that can tell them apart.
   const s = makeSandbox();
-  const rows = browsed(s, { frame: "/state/media/abc.jpg" });
+  const rows = browsed(s, { frame: "/state/frames/abc.jpg" });
   const frame = findByClass(rows[0], ".step-frame");
   frame.children[0].onerror();
   assert(/could not be loaded/.test(frame.textContent), frame.textContent);
@@ -220,7 +239,7 @@ check("the row renders identically live and on replay", () => {
   const live = makeSandbox();
   const cold = makeSandbox();
   cold.replaying = true;
-  const step = { frame: "/state/media/abc.jpg" };
+  const step = { frame: "/state/frames/abc.jpg" };
   const a = live.traceFrame(step);
   const b = cold.traceFrame(step);
   assert.equal(a.className, b.className);
