@@ -537,15 +537,25 @@ class TestALoginPageWithNoFormAtAll:
         assert result.stale is False
 
 
-class TestTheOriginFenceIsAtTheNetwork:
-    """A form's `action` is a declaration, and a login page can submit by
-    JavaScript to whatever address it likes regardless of it — so the DOM check
-    answers a question the page is not obliged to answer honestly. The fence
-    that holds refuses the REQUEST."""
+class TestTheFenceIsOnTheCredentialNotTheConnection:
+    """#296. The fence used to abort every request with a body going to another
+    origin, and read a non-empty blocked list as the sign-in having failed.
+    Nearly every commercial login page carries a tracking pixel, so it reported
+    failure on most real sites — and on the ones that legitimately post
+    credentials to a sibling origin it prevented the sign-in outright.
+
+    aish holds the value at replay time, so the only question worth asking is
+    whether THIS request is carrying it. Everything else flies unexamined."""
+
+    PASSWORD = "hunter2hunter2"
 
     class FakeRoute:
-        def __init__(self, url, method):
-            self.request = type("R", (), {"url": url, "method": method})()
+        def __init__(self, url, method, body, headers):
+            self.request = type(
+                "R", (),
+                {"url": url, "method": method, "post_data": body,
+                 "headers": headers or {}},
+            )()
             self.aborted = False
             self.continued = False
 
@@ -562,36 +572,472 @@ class TestTheOriginFenceIsAtTheNetwork:
         async def route(self, _pattern, handler):
             self.handler = handler
 
-    def _decide(self, url, method="POST"):
+    def _record(self, destinations=("https://eon.pl", "https://api.eon.pl")):
+        return signin.Record(
+            origin="https://eon.pl", url="https://eon.pl/login", saved="d",
+            destinations=list(destinations),
+        )
+
+    def _decide(self, url, *, method="POST", body="", headers=None,
+                record=None, secret=None):
         import asyncio
 
         from aish import browser
 
-        page, blocked = self.FakePage(), []
-        asyncio.run(browser._fence_the_origin(page, "https://eon.pl", blocked))
-        route = self.FakeRoute(url, method)
+        page, incidents = self.FakePage(), []
+        asyncio.run(
+            browser._fence_the_origin(
+                page, record or self._record(),
+                self.PASSWORD if secret is None else secret, incidents,
+            )
+        )
+        route = self.FakeRoute(url, method, body, headers)
         asyncio.run(page.handler(route))
-        return route, blocked
+        return route, incidents
 
-    def test_a_post_to_another_origin_is_aborted(self):
-        route, blocked = self._decide("https://evil.test/collect")
+    # ---- what is NOT the fence's business
+
+    def test_a_tracking_pixel_neither_blocks_nor_is_reported(self):
+        """The bug the owner hit: a google.com beacon on the eon.pl login page
+        aborted the request and reported the sign-in as failed."""
+        route, incidents = self._decide(
+            "https://www.google-analytics.com/g/collect?v=2",
+            body="en=page_view&dl=https%3A%2F%2Feon.pl%2Flogin",
+        )
+        assert route.continued and not route.aborted
+        assert incidents == []
+
+    def test_a_consent_call_to_a_third_party_flies(self):
+        route, incidents = self._decide(
+            "https://cdn.cookielaw.org/consent/log",
+            body='{"consent":"accepted","domain":"eon.pl"}',
+        )
+        assert route.continued and incidents == []
+
+    def test_a_cross_origin_font_is_untouched(self):
+        route, incidents = self._decide("https://cdn.test/font.woff2", method="GET")
+        assert route.continued and incidents == []
+
+    # ---- where the credential may and may not go
+
+    def test_the_credential_goes_where_his_own_sign_in_sent_it(self):
+        """The other half of the bug: many sites submit credentials to an API
+        subdomain, and aborting that request prevented the sign-in."""
+        route, incidents = self._decide(
+            "https://api.eon.pl/auth/token",
+            body=f'{{"login":"him","password":"{self.PASSWORD}"}}',
+        )
+        assert route.continued and not route.aborted and incidents == []
+
+    def test_the_login_origin_is_always_allowed(self):
+        route, _ = self._decide(
+            "https://eon.pl/mojeon/Logowanie",
+            body=f"user=him&pass={self.PASSWORD}",
+            record=self._record(destinations=["https://sso.eon.pl"]),
+        )
+        assert route.continued
+
+    def test_the_credential_anywhere_else_is_aborted_and_is_an_incident(self):
+        route, incidents = self._decide(
+            "https://evil.test/collect", body=f'{{"p":"{self.PASSWORD}"}}',
+        )
         assert route.aborted and not route.continued
-        assert blocked == ["https://evil.test/collect"]
+        assert incidents == ["https://evil.test"]
 
-    def test_a_post_to_the_recorded_origin_goes_through(self):
-        route, blocked = self._decide("https://eon.pl/api/login")
-        assert route.continued and not route.aborted and blocked == []
+    def test_a_recorded_record_gets_no_site_wide_licence(self):
+        """Once the destinations are known they ARE the fence: a sibling origin
+        his own sign-in never used is not one the credential may go to."""
+        route, incidents = self._decide(
+            "https://telemetry.eon.pl/x", body=self.PASSWORD,
+            record=self._record(destinations=["https://eon.pl"]),
+        )
+        assert route.aborted and incidents == ["https://telemetry.eon.pl"]
 
-    def test_a_cross_origin_GET_is_not_blocked(self):
-        """Fonts, images and scripts are how the login page renders at all."""
-        route, blocked = self._decide("https://cdn.test/font.woff2", method="GET")
-        assert route.continued and blocked == []
+    def test_only_the_origin_is_recorded_never_the_address_that_carried_it(self):
+        """The incident text is pushed to his phone and written to the store,
+        and a credential in a query string would ride along in it."""
+        import urllib.parse
 
-    def test_a_subdomain_is_another_origin(self):
-        route, _ = self._decide("https://api.eon.pl/login")
+        leak = urllib.parse.quote(self.PASSWORD, safe="")
+        route, incidents = self._decide(f"https://evil.test/c?p={leak}", method="GET")
         assert route.aborted
+        assert incidents == ["https://evil.test"]
+        assert self.PASSWORD not in incidents[0] and leak not in incidents[0]
 
-    def test_every_body_method_counts(self):
-        for method in ("POST", "PUT", "PATCH", "put"):
-            route, _ = self._decide("https://evil.test/x", method=method)
-            assert route.aborted, method
+    # ---- the migration
+
+    def test_a_legacy_record_falls_back_to_the_registrable_domain(self):
+        """Every record saved before #296 has no destinations and will not have
+        any until it is re-captured. For SENDING, unlike for TYPING, the sibling
+        origin is the legitimate common case — so the fallback is the site, and
+        the alternative is breaking every stored sign-in aish already has."""
+        route, incidents = self._decide(
+            "https://api.eon.pl/auth", body=self.PASSWORD,
+            record=self._record(destinations=[]),
+        )
+        assert route.continued and incidents == []
+
+    def test_the_fallback_is_still_a_fence(self):
+        legacy = self._record(destinations=[])
+        for elsewhere in ("https://evil.test/c", "https://eon.pl.evil.test/c",
+                          "http://api.eon.pl/auth"):
+            route, incidents = self._decide(
+                elsewhere, body=self.PASSWORD, record=legacy
+            )
+            assert route.aborted, elsewhere
+            assert incidents and self.PASSWORD not in incidents[0]
+
+    # ---- the encodings
+
+    def test_the_encodings_a_real_login_form_actually_puts_on_the_wire(self):
+        import base64
+        import json as jsonlib
+        import re
+        import urllib.parse
+
+        secret = 'pa"ss\\wo+rd żółć'
+        percent = urllib.parse.quote(secret, safe="")
+        spellings = {
+            "raw": secret,
+            "percent-encoded": percent,
+            "lower-case hex": re.sub(
+                r"%([0-9A-F]{2})", lambda m: "%" + m.group(1).lower(), percent
+            ),
+            "mixed-case hex": percent.replace("%C5", "%c5"),
+            "form-encoded": urllib.parse.quote_plus(secret),
+            "json-escaped": jsonlib.dumps(secret, ensure_ascii=False)[1:-1],
+            "json backslash-u escaped": jsonlib.dumps(secret)[1:-1],
+            "base64": base64.b64encode(secret.encode()).decode(),
+            "basic auth": base64.b64encode(f"him@x.pl:{secret}".encode()).decode(),
+        }
+        for name, spelling in spellings.items():
+            route, incidents = self._decide(
+                "https://evil.test/c", body=f'{{"v":"{spelling}"}}', secret=secret
+            )
+            assert route.aborted, name
+            assert incidents == ["https://evil.test"], name
+
+    def test_a_basic_auth_header_counts_as_carrying_it(self):
+        import base64
+
+        token = base64.b64encode(f"him:{self.PASSWORD}".encode()).decode()
+        route, incidents = self._decide(
+            "https://evil.test/c", method="GET",
+            headers={"authorization": f"Basic {token}"},
+        )
+        assert route.aborted and incidents == ["https://evil.test"]
+
+    def test_an_ordinary_body_that_merely_names_the_field_is_not_a_match(self):
+        route, incidents = self._decide(
+            "https://evil.test/c", body='{"password":"","user":"him"}'
+        )
+        assert route.continued and incidents == []
+
+    def test_a_request_that_will_not_answer_is_let_through(self):
+        """A route that hangs is a page that hangs. Nothing here may make the
+        sign-in worse than not fencing at all."""
+        import asyncio
+
+        from aish import browser
+
+        page, incidents = self.FakePage(), []
+        asyncio.run(
+            browser._fence_the_origin(page, self._record(), self.PASSWORD, incidents)
+        )
+        route = _DeadRoute()
+        asyncio.run(page.handler(route))
+        assert route.continued and incidents == []
+
+
+class _DeadRoute:
+    class _Request:
+        method = "POST"
+        post_data = ""
+        headers: dict = {}
+
+        @property
+        def url(self):
+            raise RuntimeError("this request is gone")
+
+    def __init__(self):
+        self.request = self._Request()
+        self.continued = False
+
+    async def continue_(self):
+        self.continued = True
+
+    async def abort(self):
+        raise AssertionError("a request aish cannot read is not an incident")
+
+
+class TestWhereTheCredentialLegitimatelyGoes:
+    """The pure half of the fence: no browser, no request, just the rule."""
+
+    def test_the_registrable_domain_of_the_shapes_his_web_is_made_of(self):
+        for host, site in (
+            ("eon.pl", "eon.pl"),
+            ("api.eon.pl", "eon.pl"),
+            ("www.example.com", "example.com"),
+            ("login.example.co.uk", "example.co.uk"),
+            ("sso.bank.com.pl", "bank.com.pl"),
+            ("localhost", "localhost"),
+            ("", ""),
+        ):
+            assert signin.registrable_domain(host) == site, host
+
+    def test_a_lookalike_domain_is_not_the_site(self):
+        legacy = signin.Record(origin="https://eon.pl", url="https://eon.pl/l", saved="d")
+        assert not signin.may_receive_credential(legacy, "https://eon.pl.evil.test/x")
+        assert not signin.may_receive_credential(legacy, "https://eonpl.test/x")
+
+    def test_recorded_destinations_are_matched_exactly(self):
+        record = signin.Record(
+            origin="https://eon.pl", url="https://eon.pl/l", saved="d",
+            destinations=["https://sso.eon.pl"],
+        )
+        assert signin.may_receive_credential(record, "https://sso.eon.pl/token")
+        assert not signin.may_receive_credential(record, "https://other.eon.pl/t")
+        assert not signin.may_receive_credential(record, "http://sso.eon.pl/t")
+
+    def test_an_unreadable_address_receives_nothing(self):
+        record = signin.Record(origin="https://eon.pl", url="https://eon.pl/l", saved="d")
+        for bad in ("", "about:blank", "data:text/html,x", "javascript:x"):
+            assert not signin.may_receive_credential(record, bad), bad
+
+    def test_an_empty_secret_matches_nothing(self):
+        assert signin.secret_needles("") == ()
+        assert not signin.carries_secret("anything at all", signin.secret_needles(""))
+
+
+class TestWhereTheCredentialWentIsRecordedAndMigrates:
+    def test_the_destinations_are_saved_beside_the_record(self):
+        record = signin.save(
+            "https://eon.pl/login", "him", "pw", today="d",
+            destinations=["https://api.eon.pl/auth", "https://api.eon.pl/again", ""],
+        )
+        assert record.destinations == ["https://api.eon.pl"]
+        assert signin.find("https://eon.pl/x").destinations == ["https://api.eon.pl"]
+
+    def test_the_destination_list_carries_no_secret_either(self, tmp_path):
+        signin.save(
+            "https://eon.pl/login", "him@x.pl", "hunter2hunter2", today="d",
+            destinations=["https://api.eon.pl/auth?p=hunter2hunter2"],
+        )
+        written = (tmp_path / "signins.json").read_text(encoding="utf-8")
+        assert "hunter2hunter2" not in written
+
+    def test_a_record_written_before_this_existed_reads_as_empty(self, tmp_path):
+        (tmp_path / "signins.json").write_text(
+            '[{"origin": "https://eon.pl", "url": "https://eon.pl/login"}]',
+            encoding="utf-8",
+        )
+        record = signin.find("https://eon.pl/x")
+        assert record.destinations == []
+        assert signin.may_receive_credential(record, "https://api.eon.pl/auth")
+
+    def test_a_corrupt_destination_list_costs_the_list_not_the_record(self, tmp_path):
+        (tmp_path / "signins.json").write_text(
+            '[{"origin": "https://eon.pl", "url": "https://eon.pl/login",'
+            ' "destinations": "not-a-list"}]',
+            encoding="utf-8",
+        )
+        assert signin.find("https://eon.pl/x").destinations == []
+
+    def test_the_watcher_records_only_where_the_password_actually_went(self):
+        from aish import browser
+
+        owner = _FakeOwner(_WatchedPage())
+        browser._hold_credential(owner, "https://eon.pl/login", "hunter2hunter2", True)
+        for url, body in (
+            ("https://www.google-analytics.com/collect", "en=page_view"),
+            ("https://api.eon.pl/auth", '{"p":"hunter2hunter2"}'),
+            ("https://eon.pl/login", "pass=hunter2hunter2"),
+            ("https://api.eon.pl/auth", '{"p":"hunter2hunter2"}'),
+        ):
+            owner.view.fire(url, body)
+        assert owner.pending_credential["destinations"] == [
+            "https://api.eon.pl", "https://eon.pl",
+        ]
+
+    def test_nothing_is_watched_until_he_asks_for_it_to_be_saved(self):
+        from aish import browser
+
+        owner = _FakeOwner(_WatchedPage())
+        browser._hold_credential(owner, "https://eon.pl/login", "hunter2hunter2", False)
+        assert owner.view.handlers == []
+
+    def test_clearing_the_held_credential_disarms_the_watcher(self):
+        from aish import browser
+
+        owner = _FakeOwner(_WatchedPage())
+        browser._hold_credential(owner, "https://eon.pl/login", "hunter2hunter2", True)
+        owner.pending_credential = {}
+        owner.view.fire("https://evil.test/c", "hunter2hunter2")
+        assert owner.pending_credential == {}
+
+
+class _WatchedPage:
+    def __init__(self):
+        self.handlers = []
+
+    def on(self, event, handler):
+        assert event == "request"
+        self.handlers.append(handler)
+
+    def fire(self, url, body):
+        request = type(
+            "R", (), {"url": url, "method": "POST", "post_data": body, "headers": {}}
+        )()
+        for handler in self.handlers:
+            handler(request)
+
+
+class _FakeOwner:
+    def __init__(self, page):
+        self.view = page
+        self.pending_credential: dict = {}
+        self.credential_watch = None
+
+
+class TestASignInIsJudgedByWhetherTheSessionCameUp:
+    """The third defect, and the one the owner actually saw: a blocked beacon
+    converted a working sign-in into a reported failure, so aish had him signed
+    in and told him to go and do it by hand."""
+
+    def _drive(self, monkeypatch, beacons, pushes):
+        import asyncio
+
+        from aish import browser
+
+        signin.save("https://eon.pl/login", "him", "hunter2hunter2", today="d")
+        page = _SignInPage(beacons)
+        owner = _SignInOwner(page)
+        monkeypatch.setattr(browser, "_has_password_field", _fake_has_password(page))
+        monkeypatch.setattr(browser, "notify", _SilentNotifier(pushes))
+        monkeypatch.setattr(
+            browser, "_submit", lambda job, timeout: asyncio.run(job(owner))
+        )
+        return browser.sign_in("https://eon.pl/faktury"), page
+
+    def test_a_third_party_beacon_never_turns_a_success_into_a_failure(
+        self, monkeypatch
+    ):
+        result, page = self._drive(
+            monkeypatch,
+            [("https://www.google-analytics.com/collect", "en=page_view")],
+            [],
+        )
+        assert result.ok and not result.stale and not result.why
+        assert page.beacons_continued == 1
+        record = signin.find("https://eon.pl")
+        assert record.suspect == "" and record.used == 1
+
+    def test_the_credential_going_elsewhere_is_an_incident_even_on_a_success(
+        self, monkeypatch
+    ):
+        pushes: list = []
+        result, page = self._drive(
+            monkeypatch, [("https://evil.test/c", "p=hunter2hunter2")], pushes
+        )
+        # The session came up, so that is what is reported...
+        assert result.ok
+        assert page.beacons_continued == 0
+        # ...and the credential is retired anyway, loudly.
+        record = signin.find("https://eon.pl")
+        assert "https://evil.test" in record.suspect and record.used == 0
+        assert signin.credential("https://eon.pl") is None
+        assert pushes and "evil.test" in pushes[0][1]
+        assert "hunter2hunter2" not in "".join(t + b for t, b in pushes)
+
+    def test_the_store_is_told_the_outcome_and_never_the_wire(self):
+        from aish import browser
+
+        signin.save("https://eon.pl/login", "him", "pw", today="d")
+        record = signin.find("https://eon.pl")
+
+        assert browser._record_the_outcome(
+            record, browser.SignInResult(ok=True), [], when="w"
+        ) == ""
+        assert signin.find("https://eon.pl").used == 1
+
+        text = browser._record_the_outcome(
+            record, browser.SignInResult(ok=True), ["https://evil.test"], when="w"
+        )
+        assert "https://evil.test" in text
+        # note_used would have cleared the very mark being set.
+        assert signin.find("https://eon.pl").suspect == text
+        assert signin.find("https://eon.pl").used == 1
+
+
+class _SilentNotifier:
+    def __init__(self, sink):
+        self.sink = sink
+
+    def pushover(self, title, body):
+        self.sink.append((title, body))
+
+
+class _SignInPage(TestTheReplayItself.FakePage):
+    """The replay page, plus the network the real one sits on."""
+
+    def __init__(self, beacons):
+        super().__init__(
+            url="https://eon.pl/login",
+            form=TestTheReplayItself.OK_FORM,
+            after={"url": "https://eon.pl/mojeon"},
+        )
+        self._beacons = list(beacons)
+        self._handler = None
+        self.beacons_continued = 0
+        self.closed = False
+
+    async def goto(self, *_a, **_kw):
+        return None
+
+    async def route(self, _pattern, handler):
+        self._handler = handler
+
+    async def close(self):
+        self.closed = True
+
+    async def wait_for_timeout(self, _ms):
+        # The beacons land WHILE the sign-in settles, which is the real
+        # interleaving: the fence is up, the form has been sent, and the page's
+        # own analytics fire alongside it.
+        if self._handler is None:
+            return
+        for url, body in self._beacons:
+            route = _SignInRoute(url, body)
+            await self._handler(route)
+            self.beacons_continued += int(route.continued)
+        self._beacons = []
+
+
+class _SignInRoute:
+    def __init__(self, url, body):
+        self.request = type(
+            "R", (), {"url": url, "method": "POST", "post_data": body, "headers": {}}
+        )()
+        self.continued = False
+        self.aborted = False
+
+    async def continue_(self):
+        self.continued = True
+
+    async def abort(self):
+        self.aborted = True
+
+
+class _SignInOwner:
+    def __init__(self, page):
+        self.view = None
+        self.read_pages: set = set()
+        self._page = page
+
+    async def context(self):
+        return self
+
+    async def new_page(self):
+        return self._page
+
+
