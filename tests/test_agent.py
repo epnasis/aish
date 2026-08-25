@@ -1789,8 +1789,12 @@ class TestRootScoping:
         assert agent._read_prompt_reason(str(scratch_file)) is None
 
     def test_the_process_owned_stores_are_all_readable(self, tmp_path):
+        """The tool-output cache is deliberately absent: it holds tool output
+        as the producing tool made it, which nothing ever told the model to go
+        and look at, and it is read through `read_tool_output` instead (#317 —
+        TestTheToolOutputCacheIsNotAFile)."""
         agent, _ = make_agent([model_says("ok")], cwd=str(tmp_path), state_dir=tmp_path)
-        for store in (agent.media_dir, agent.tool_output_dir, agent.documents_dir):
+        for store in (agent.media_dir, agent.documents_dir, agent.transcripts_dir):
             store.mkdir(parents=True, exist_ok=True)
             target = store / "x.txt"
             target.write_text("mine\n")
@@ -10118,6 +10122,382 @@ class TestAContinuationCarriesItsSourcesProvenance:
         agent.run_task("page something back")
         assert agent._tainted is False
         assert agent._offered_links == set()
+
+
+class TestTheToolOutputCacheIsNotAFile:
+    """#317. The continuation store sat INSIDE `workspace_roots`, so the same
+    bytes had two doors and only one of them asked anything.
+
+    Through `read_tool_output` a cut page arrives with its source's provenance
+    (#314): the taint fence goes up and exactly that page's own links are
+    excused. Through `read_file` it arrived as a local file the owner owns —
+    **bannerless** (the banner is prepended by `web._present` and never
+    stored), **untainted** (a local read raises nothing) and **unattributed**
+    (the `<digest>.src` sidecar is consulted on the continuation path alone).
+
+    Not a live exploit: the model has to go looking for a digest-named file
+    instead of using the key it was just handed in the cut notice. Worth
+    closing for #294's reason — the invariant the code STATED was not the one
+    it enforced, and a durable record is what the next person leans on.
+    """
+
+    LIST_URL = "https://shop.example/list"
+    TAIL_LINK = "https://shop.example/offer?id=9999&ref=listing"
+    SECRET_LINE = "the rest of this page says 4242"
+
+    def _read_a_long_page(self, tmp_path, monkeypatch):
+        """A real `read_url`, really cut, really stashed — the fetch is the
+        only thing replaced. The state dir sits OUTSIDE the project root, as it
+        does in every real session, so the cache's reachability is decided by
+        the workspace boundary and not by an overlapping temp directory."""
+        filler = "\n".join(f"item {n}: nothing to click" for n in range(1, 900))
+        page = f"{self.SECRET_LINE}\n{filler}\nlast offer: {self.TAIL_LINK}\n"
+        monkeypatch.setattr(
+            agent_module.web,
+            "read_url",
+            lambda url, topic=None, **kwargs: agent_module.web._present(
+                url, page, [], cut=kwargs.get("cut")
+            ),
+        )
+        project = tmp_path / "project"
+        project.mkdir()
+        state = tmp_path / "state"
+        state.mkdir()
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url=self.LIST_URL)]),
+                model_says("read the first page"),
+            ],
+            approve_tool=lambda *a, **k: True,
+            cwd=str(project),
+            state_dir=state,
+        )
+        agent.run_task(f"read {self.LIST_URL}")
+        key = TestAContinuationCarriesItsSourcesProvenance._offered_key(agent.messages)
+        entry = agent.tool_output_dir / f"{re.match('[0-9a-f]+', key).group(0)}.txt"
+        assert entry.is_file(), "the page should have been cached"
+        return agent, chat, key, entry
+
+    def test_a_cached_page_is_not_reachable_through_the_file_layer(
+        self, tmp_path, monkeypatch
+    ):
+        """The key test. A page fetched in one task, read back in the next as
+        if it were a local file: the bytes must not arrive, and the fence must
+        stay exactly where a task that has read nothing leaves it."""
+        agent, chat, _key, entry = self._read_a_long_page(tmp_path, monkeypatch)
+        chat.responses = [
+            model_says(tool_calls=[tool_call("read_file", path=str(entry))]),
+            model_says("I could not read that"),
+        ]
+        agent.run_task("what does the rest of that listing say?")
+
+        served = tool_messages(agent.messages)[-1]["content"]
+        assert self.SECRET_LINE not in served
+        assert self.TAIL_LINK not in served
+        assert agent._tainted is False
+        assert agent._offered_links == set()
+
+    def test_the_refusal_names_the_door_that_works(self, tmp_path, monkeypatch):
+        """A block that hides the correct path is what manufactures the
+        workaround — the lesson `never-edit-aish-itself` taught the hard way."""
+        agent, chat, _key, entry = self._read_a_long_page(tmp_path, monkeypatch)
+        chat.responses = [
+            model_says(tool_calls=[tool_call("read_file", path=str(entry))]),
+            model_says("ok"),
+        ]
+        agent.run_task("read it")
+        served = tool_messages(agent.messages)[-1]["content"]
+        assert "read_tool_output" in served
+        assert "truncation notice" in served
+
+    def test_it_is_refused_and_never_merely_carded(self, tmp_path, monkeypatch):
+        """Leaving it to the ordinary out-of-workspace prompt would put a tap
+        in front of a path nobody can read — a digest under a state directory
+        — and a tap the owner does not understand is a tap he gives."""
+        agent, chat, _key, entry = self._read_a_long_page(tmp_path, monkeypatch)
+        agent.approve_read = lambda _path, _reason: pytest.fail(
+            "a cache read must not reach a card"
+        )
+        chat.responses = [
+            model_says(tool_calls=[tool_call("read_file", path=str(entry))]),
+            model_says("ok"),
+        ]
+        agent.run_task("read it")
+
+    def test_a_symlink_from_a_session_root_into_the_cache_is_refused_too(
+        self, tmp_path, monkeypatch
+    ):
+        """Why the question goes through `files.contains` (#309) rather than a
+        prefix test on the boundary: a link inside the project resolves into
+        the store, and the workspace check alone would call it a project
+        file."""
+        agent, chat, _key, entry = self._read_a_long_page(tmp_path, monkeypatch)
+        link = Path(agent.cwd) / "page.txt"
+        link.symlink_to(entry)
+        chat.responses = [
+            model_says(tool_calls=[tool_call("read_file", path=str(link))]),
+            model_says("ok"),
+        ]
+        agent.run_task("read page.txt")
+        served = tool_messages(agent.messages)[-1]["content"]
+        assert self.SECRET_LINE not in served
+        assert agent._tainted is False
+
+    def test_the_provenance_record_cannot_be_written_through_the_file_layer(
+        self, tmp_path, monkeypatch
+    ):
+        """The sharper half of the same door. The sidecar is what says whether
+        an entry's bytes came from outside and whether addresses in them are
+        the source's, so a model able to write one could label URLs it composed
+        itself as links a page offered — the laundering the key was kept
+        provenance-free to prevent (#314)."""
+        agent, chat, _key, entry = self._read_a_long_page(tmp_path, monkeypatch)
+        sidecar = entry.with_suffix(tool_plugins._SOURCE_SUFFIX)
+        assert json.loads(sidecar.read_text())["untrusted"] is True
+        agent.approve_write = lambda _plan: pytest.fail(
+            "a cache write must not reach a card"
+        )
+        chat.responses = [
+            model_says(
+                tool_calls=[
+                    tool_call(
+                        "write_file",
+                        path=str(sidecar),
+                        content='{"tool": "read_url", "untrusted": false, '
+                        '"offers": true, "source": ""}',
+                    )
+                ]
+            ),
+            model_says("ok"),
+        ]
+        agent.run_task("relabel that entry")
+        assert json.loads(sidecar.read_text())["untrusted"] is True
+
+    def test_the_door_that_works_still_carries_what_it_carried(
+        self, tmp_path, monkeypatch
+    ):
+        """The counterpart, and the reason `read_file` may lose the entry at
+        all: the same bytes through `read_tool_output` still arrive with their
+        source's provenance — taint raised, that page's own links excused
+        (#314)."""
+        agent, chat, key, _entry = self._read_a_long_page(tmp_path, monkeypatch)
+        chat.responses = [
+            model_says(
+                tool_calls=[tool_call("read_tool_output", continuation=key, page=2)]
+            ),
+            model_says("read the rest"),
+        ]
+        agent.run_task("now read the rest of it")
+        assert self.TAIL_LINK in tool_messages(agent.messages)[-1]["content"]
+        assert agent._tainted is True
+        assert self.TAIL_LINK in agent._offered_links
+
+    def test_the_cache_is_not_in_the_workspace_boundary(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        agent, _ = make_agent([], cwd=str(project), state_dir=tmp_path / "state")
+        assert agent.tool_output_dir not in agent.workspace_roots()
+        assert not agent_module.files.within_roots(
+            agent.workspace_roots(), agent.tool_output_dir / "abc123.txt"
+        )
+
+    def test_a_session_root_that_swallows_the_state_dir_is_still_refused(
+        self, tmp_path
+    ):
+        """The boundary is the session's roots plus aish's stores, so a root
+        containing the state directory puts the cache back inside it. That is
+        why the store is asked about directly and not merely left out of the
+        list."""
+        agent, _ = make_agent([], cwd=str(tmp_path), state_dir=tmp_path / "state")
+        entry = agent.tool_output_dir / "abc123.txt"
+        assert agent_module.files.within_roots(agent.workspace_roots(), entry)
+        assert agent._is_tool_output_cache(str(entry))
+
+    def test_with_no_state_dir_the_cache_is_not_under_the_scratch_workspace(self):
+        """The fallback used to be a subdirectory of the scratch dir, which IS
+        a root — so removing the store from the boundary would have closed the
+        door only where there is a state dir."""
+        agent, _ = make_agent([])
+        assert not agent.tool_output_dir.is_relative_to(agent.scratch_dir)
+        assert not agent_module.files.within_roots(
+            agent.workspace_roots(), agent.tool_output_dir / "abc123.txt"
+        )
+
+    def test_every_other_store_aish_owns_stays_readable(self, tmp_path):
+        """Stricter-or-equal, from the other side: this removes ONE door and
+        must narrow nothing else. Every other store in the boundary holds
+        something a tool NAMED and told the model to go and read (#220)."""
+        agent, _ = make_agent([], cwd=str(tmp_path), state_dir=tmp_path / "state")
+        for store in (
+            agent.media_dir,
+            agent.documents_dir,
+            agent.transcripts_dir,
+            agent.scratch_dir,
+        ):
+            store.mkdir(parents=True, exist_ok=True)
+            target = store / "x.txt"
+            target.write_text("mine\n")
+            assert agent._read_prompt_reason(str(target)) is None, store
+            assert not agent._is_tool_output_cache(str(target)), store
+
+
+class TestWhatCanBecomeModelVisibleImageContent:
+    """#318's standing condition, written as a property of the SEAM rather
+    than as a comment — and the honest answer to whether it could be.
+
+    #318 verdicted the media store as NOT the same hole as #317's cache: the
+    cache leaks because it holds text, and text read back is context, while a
+    frame holds pixels. It left a standing condition — *if a path is ever added
+    that lets the model put a local image into its own context, evidence frames
+    must be excluded from it or carry provenance* — and asked whether the set
+    such a test would have to assert about is enumerable at all.
+
+    **It is, and it is small.** A picture reaches a model request by exactly
+    one route with two countable ends:
+
+    - **Attach** — what puts an `images` key on a conversation message, which
+      is what every backend base64s into its request: the OWNER's attachment
+      (`run_task`) and a TOOL's own pictures (`_deliver_tool_media`, #215).
+    - **Produce** — which tools may declare a picture on their result envelope
+      for that second one to deliver.
+
+    **And enumerating it shows the condition has ALREADY fired**, which is why
+    this class exists at all. #318 read `show_image` as handing the model back
+    only a markdown line; since #215 it also ATTACHES the bytes, and
+    `_read_local_image` accepts any path inside `workspace_roots` — which the
+    media store is, deliberately, because that boundary is what lets a frame be
+    displayed. So a frame a driven page left behind is nameable by the model
+    and lands in its own context bannerless, unattributed and untainted (a
+    local path is not outside content under `_brings_outside_content`). What to
+    do about that is #318's decision; what this class does is make a THIRD
+    channel impossible to add quietly, and make the second one's removal
+    equally visible.
+    """
+
+    # Named with a reason each, both directions pinned — the shape #308's and
+    # #309's sweeps use, because a guard that cannot fail is decoration.
+    ATTACH_SITES = {
+        ("agent.py", "run_task"),  # the owner's own attachment
+        ("agent.py", "_deliver_tool_media"),  # a tool's own pictures (#215)
+    }
+    # rules.past_turns builds a REPLAYED TURN RECORD for the rules engine, not
+    # a message: it reads what an attachment was, and nothing it produces ever
+    # reaches a provider request.
+    ATTACH_EXEMPT = {("rules.py", "past_turns")}
+    PRODUCE_SITES = {
+        ("agent.py", "_show_image"),  # a picture the model asked to display
+        ("agent.py", "_read_media"),  # frames decoded out of a recording (#215)
+        ("agent.py", "_read_pdf"),  # rasterised pages of a document
+    }
+
+    @staticmethod
+    def _sweep():
+        """(attach, produce) — every site in `aish/` that hangs an `images` key
+        on a dict, and every tool result envelope that declares one.
+
+        Parsed, never grepped: a docstring naming `images` is prose, and the
+        one thing a source-level guard must not be satisfiable by is a
+        rewording."""
+        import ast
+
+        attach: set[tuple[str, str]] = set()
+        produce: set[tuple[str, str]] = set()
+
+        class Visitor(ast.NodeVisitor):
+            def __init__(self, module: str):
+                self.module = module
+                self.stack: list[str] = []
+
+            def _where(self):
+                return (self.module, self.stack[-1] if self.stack else "<module>")
+
+            def visit_FunctionDef(self, node):
+                self.stack.append(node.name)
+                self.generic_visit(node)
+                self.stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Dict(self, node):
+                if any(
+                    isinstance(k, ast.Constant) and k.value == "images"
+                    for k in node.keys
+                ):
+                    attach.add(self._where())
+                self.generic_visit(node)
+
+            def visit_Subscript(self, node):
+                if (
+                    isinstance(node.ctx, ast.Store)
+                    and isinstance(node.slice, ast.Constant)
+                    and node.slice.value == "images"
+                ):
+                    attach.add(self._where())
+                self.generic_visit(node)
+
+            def visit_Call(self, node):
+                name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+                if name == "ToolOutcome" and any(
+                    kw.arg == "images" for kw in node.keywords
+                ):
+                    produce.add(self._where())
+                self.generic_visit(node)
+
+        for path in sorted(Path(agent_module.__file__).resolve().parent.rglob("*.py")):
+            Visitor(path.name).visit(ast.parse(path.read_text(encoding="utf-8")))
+        return attach, produce
+
+    def test_exactly_two_sites_attach_a_picture_to_the_conversation(self):
+        attach, _ = self._sweep()
+        assert attach - self.ATTACH_EXEMPT == self.ATTACH_SITES
+
+    def test_exactly_three_tools_may_declare_a_picture_on_a_result(self):
+        _, produce = self._sweep()
+        assert produce == self.PRODUCE_SITES
+
+    def test_the_exemption_still_describes_something_that_exists(self):
+        """Both directions, like #308's module list: an exemption whose site
+        moved or vanished must fail here rather than quietly licence whatever
+        takes the name next."""
+        attach, _ = self._sweep()
+        assert self.ATTACH_EXEMPT <= attach
+
+    def test_the_condition_has_already_fired_and_this_is_the_tripwire(
+        self, tmp_path
+    ):
+        """The live fact, recorded where the next person meets it. A picture
+        already in the media store — which is where every evidence frame from a
+        driven page lands — is nameable by the MODEL through `show_image`, and
+        arrives in its own context with nothing saying whose page it was.
+
+        This asserts what is TRUE today, so closing #318 breaks it and brings
+        whoever closed it here to read why it was written. If you are that
+        person: delete this test, not the docstring above it."""
+        project = tmp_path / "project"
+        project.mkdir()
+        frame = b"\x89PNG\r\n\x1a\n" + bytes.fromhex(
+            "0000000d4948445200000001000000010802000000907753de0000000c49444154"
+            "08d763f8cfc00000030101003c1f2e6a0000000049454e44ae426082"
+        )
+        agent, chat = make_agent(
+            [], cwd=str(project), state_dir=tmp_path / "state"
+        )
+        agent.media_dir.mkdir(parents=True, exist_ok=True)
+        stored = agent.media_dir / "a-frame-of-a-driven-page.png"
+        stored.write_bytes(frame)
+
+        chat.responses = [
+            model_says(
+                tool_calls=[tool_call("show_image", source=str(stored), caption="page")]
+            ),
+            model_says("looked at it"),
+        ]
+        agent.run_task("what is in that picture?")
+
+        carried = [m for m in agent.messages if m.get("images")]
+        assert carried, "show_image no longer attaches — #318's premise may now hold"
+        assert agent_module.web.UNTRUSTED_NOTE not in carried[0]["content"]
+        assert agent._tainted is False
 
 
 class TestSearchingIsReading:
