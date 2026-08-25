@@ -335,6 +335,148 @@ class TestStopGate:
         assert marker.exists()  # reset let the first command through
 
 
+class TestAForcedWrapUpMarksWhatItCouldNotCheck:
+    """#253. A forced wrap-up is a turn shape nothing else in the loop has:
+    the model MUST produce a final answer, and it has just been told it may not
+    gather any more evidence. Having had its verification step denied, it wrote
+    *"you have a small credit of exactly 1.90 zl on this agreement account"* and
+    told the owner to pay the lower amount — arithmetic run backwards from a
+    discrepancy, with the two steps that would have confirmed or refuted it
+    being exactly the two that were blocked.
+
+    These tests prove the note is DELIVERED on every forced-wrap-up path, by
+    asserting on the text that reaches the model. Whether it changes what the
+    model then writes is a separate, unmeasured question — see the withdrawn
+    narration paragraph in `docs/agent-core.md` for why that distinction is
+    kept out loud."""
+
+    def _sent_to_the_model(self, chat) -> str:
+        """Everything the model was holding when it wrote its final answer."""
+        return "\n".join(str(m.get("content") or "") for m in chat.calls[-1]["messages"])
+
+    def _docs(self, monkeypatch, fn):
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(agent_module.tools, "read_docs", fn)
+
+    def test_the_denial_that_forces_the_turn_carries_it(self):
+        """The incident's own path: denied, then straight to a text-only turn.
+        The stop gate's refusal is never reached by a model that complies, so
+        the clause has to ride the DENIAL — `_with_feedback`, the one funnel
+        every denial-with-comment builds its text through."""
+        from aish.agent import UNVERIFIED_CLAIM_CLAUSE
+        from aish.approval import Denied
+
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="grep -r 1.90 .")]),
+                model_says("I could not check this."),
+            ],
+            approve=lambda cmd: Denied("you already have the file!!!!"),
+        )
+        agent.run_task("why do the two totals differ?")
+        assert UNVERIFIED_CLAIM_CLAUSE in self._sent_to_the_model(chat)
+
+    def test_a_bare_denial_does_not_carry_it(self):
+        """No comment, no stop gate, no forced turn — the model may simply try
+        something else, so the clause would be context spent on nothing."""
+        from aish.agent import UNVERIFIED_CLAIM_CLAUSE
+
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="rm x")]),
+                model_says("stopped"),
+            ],
+            approve=lambda cmd: False,
+        )
+        agent.run_task("clean up")
+        assert UNVERIFIED_CLAIM_CLAUSE not in self._sent_to_the_model(chat)
+
+    def test_the_stop_gates_refusal_carries_it(self):
+        """The eager model runs another tool before replying, so the refusal —
+        not the denial — is the last thing it holds before the forced turn."""
+        from aish.agent import UNVERIFIED_CLAIM_CLAUSE
+        from aish.approval import Denied
+
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="rm x")]),
+                model_says(tool_calls=[tool_call("run_command", command="ls")]),
+                model_says("stopping."),
+            ],
+            approve=lambda cmd: Denied("this could touch real data"),
+        )
+        agent.run_task("clean up")
+        sent = self._sent_to_the_model(chat)
+        assert sent.count(UNVERIFIED_CLAIM_CLAUSE) == 2  # the denial and the refusal
+
+    def test_the_step_ceiling_wrapup_carries_it(self, monkeypatch):
+        from aish.agent import HARD_STEP_CEILING, UNVERIFIED_CLAIM_CLAUSE
+
+        self._docs(monkeypatch, lambda c, topic=None: f"docs for {c}")
+        calls = [
+            model_says(tool_calls=[tool_call("read_docs", command=f"c{i}")])
+            for i in range(HARD_STEP_CEILING)
+        ]
+        agent, chat = make_agent(calls + [model_says("half done")], max_steps=25)
+        agent.run_task("big task")
+        assert UNVERIFIED_CLAIM_CLAUSE in self._sent_to_the_model(chat)
+
+    def test_the_stall_wrapup_carries_it(self, monkeypatch):
+        from aish.agent import MAX_STALL_STEPS, UNVERIFIED_CLAIM_CLAUSE
+
+        self._docs(monkeypatch, lambda c, topic=None: f"stable {c}")
+        rotate = [
+            model_says(tool_calls=[tool_call("read_docs", command=f"c{i % 3}")])
+            for i in range(3 + MAX_STALL_STEPS)
+        ]
+        agent, chat = make_agent(rotate + [model_says("stuck")], max_steps=100)
+        agent.run_task("spin")
+        assert UNVERIFIED_CLAIM_CLAUSE in self._sent_to_the_model(chat)
+
+    def test_the_loop_detectors_wrapup_carries_it(self, monkeypatch):
+        from aish.agent import UNVERIFIED_CLAIM_CLAUSE
+
+        self._docs(monkeypatch, lambda c, topic=None: "same docs")
+        same = model_says(tool_calls=[tool_call("read_docs", command="ls")])
+        agent, chat = make_agent([same] * 6 + [model_says("stuck")], max_steps=25)
+        agent.run_task("loop")
+        assert UNVERIFIED_CLAIM_CLAUSE in self._sent_to_the_model(chat)
+
+    def test_it_orders_rather_than_suggests_and_shows_the_shape(self):
+        """aish's prompts have a measured failure mode: capability phrasing is
+        ignored, MUST plus a concrete example is not (`docs/agent-core.md`
+        §Narration — a paragraph that only invited a behaviour produced zero of
+        it across every session that ran with it). So the shape is pinned, not
+        only the delivery."""
+        from aish.agent import UNVERIFIED_CLAIM_CLAUSE
+
+        assert "MUST be marked as unverified" in UNVERIFIED_CLAIM_CLAUSE
+        assert "MUST NOT state an unchecked inference as fact" in UNVERIFIED_CLAIM_CLAUSE
+        # Both halves of the worked example: what to write, and what not to.
+        assert "I could not check this" in UNVERIFIED_CLAIM_CLAUSE
+        assert "Do NOT write" in UNVERIFIED_CLAIM_CLAUSE
+        assert "pay the lower amount" in UNVERIFIED_CLAIM_CLAUSE
+
+    def test_the_note_does_not_soften_the_stop_gate(self, tmp_path):
+        """Deny still means STOP. Marking an unverified claim is what the
+        forced turn SAYS, never a licence to go and check after all."""
+        from aish.approval import Denied
+
+        marker = tmp_path / "ran"
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="rm x")]),
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("stopping."),
+            ],
+            approve=lambda cmd: Denied("check with me first"),
+        )
+        result = agent.run_task("clean up")
+        assert not marker.exists()
+        assert result == "stopping."
+
+
 class TestLoop:
     def test_plain_text_response_ends_task(self):
         agent, chat = make_agent([model_says("just an answer")])
@@ -9290,6 +9432,55 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         )
         agent.run_task("read https://shop.example/list and price the offer")
         assert asked == []
+        # The fact is HELD, not re-derived: the address the page showed is in
+        # the record, whole.
+        assert offered in agent._offered_links
+
+    def test_a_prefix_of_an_address_already_fetched_is_not_offered(self, monkeypatch):
+        """#294. The check used to substring-match against every tool message,
+        and aish's own source header echoes the URL it was asked to fetch back
+        into that text — so any PREFIX of an address already read said "the
+        page offered this". Not exploitable (smuggling appends, and a longer
+        string cannot be a substring of a shorter one), but it made the gate
+        illegible: two near-identical addresses, one asked about and one not,
+        for a reason nothing on screen could explain."""
+        full = "https://eon.pl/faktury?id=12345678901234567890&ref=inbox"
+        prefix = "https://eon.pl/faktury?id=12345678901234567890"
+        fetched = self._stub_web(monkeypatch)
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url=full)]),
+                model_says(tool_calls=[tool_call("read_url", url=prefix)]),
+                model_says("done"),
+            ],
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or True,
+        )
+        agent.run_task(f"open {full}")
+        assert fetched == [full, prefix]
+        assert asked and "eon.pl" in asked[0]  # the composed prefix is asked about
+        assert not agent._url_was_offered(prefix)
+
+    def test_aishs_own_source_header_is_not_something_a_page_offered(self, monkeypatch):
+        """The record holds what the PAGE said, never aish's sentence about
+        what it fetched — which is the echo that falsified the old scan."""
+        import aish.agent as agent_module
+
+        requested = "https://shop.example/list"
+        linked = "https://shop.example/offer?id=8891"
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None, **_kw: f"[{url}]\nan offer → {linked}",
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url=requested)]),
+                model_says("read it"),
+            ],
+            approve_tool=lambda *a, **k: True,
+        )
+        agent.run_task(f"read {requested}")
+        assert agent._offered_links == {linked}
 
     def test_a_host_the_owner_named_is_read_freely(self, monkeypatch):
         """Owner provenance used to be recorded only in triggered sessions,
@@ -9569,6 +9760,46 @@ class TestSearchingIsReading:
         assert agent._egress_novel_hosts(
             "read_url", {"url": "https://allegro.pl/go?to=evil.example/?d=secret"}
         ) == ["allegro.pl"]
+
+    def test_a_vouched_host_accepts_any_query_for_the_rest_of_the_session(self):
+        """The residual, pinned so it is a decision and not a surprise (#277,
+        #294). One card for allegro.pl and every later query there is free,
+        whatever it says — there is deliberately no length cap, since an
+        injection chunks a secret across many short ordinary-looking searches
+        and stays under any bound worth having. What bounds it is WHERE it
+        goes: that query reaches allegro.pl's own search index and access logs
+        and nowhere else, so reading it back means controlling allegro.pl — in
+        which case the owner approved the attacker's own hostname and the game
+        was lost at the card, not at the query."""
+        agent, _ = make_agent([])
+        agent._tainted = True
+        agent._approved_hosts.add("allegro.pl")
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://allegro.pl/listing?string=" + "S" * 400}
+        ) is None
+        # The bound that does work is the destination, and it is enforced
+        # before this test is ever reached.
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://elsewhere.example/listing?string=x"}
+        ) == ["elsewhere.example"]
+
+    def test_a_multi_host_search_card_vouches_exactly_the_hosts_it_named(self):
+        """A search card can name several hosts and vouches ALL of them, so
+        the grant is only as legible as that card. Pinned here so it can never
+        grow silently: what enters `_approved_hosts` is exactly the set the
+        preview he read put in front of him — no host is vouched that the card
+        did not say out loud."""
+        shown: list = []
+        agent, _ = make_agent(
+            [],
+            origin="email",
+            approve_tool=lambda name, args, preview=None: shown.append(preview) or True,
+        )
+        query = "invoice site:eon.pl OR site:pge.pl OR site:tauron.pl"
+        assert agent._egress_gate("web_search", {"query": query}) is None
+        named = {"eon.pl", "pge.pl", "tauron.pl"}
+        assert agent._approved_hosts == named
+        assert all(host in shown[0] for host in named)
 
     def test_a_host_he_merely_mentioned_is_not_a_vouch(self, monkeypatch):
         """#178 P0-2's asymmetry, and the reason this is safe. A host is in

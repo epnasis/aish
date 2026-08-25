@@ -172,7 +172,10 @@ Rules:
      (it is approved again before it runs). Never re-run the original unchanged.
    - DENY + comment = STOP. Your next reply MUST be plain text with NO tool
      call: address the user's concern and wait for them. Do not retry a variant
-     or run anything else first.
+     or run anything else first. That reply is written with no way left to
+     check anything, so anything you INFERRED rather than OBSERVED MUST be
+     marked as unverified and MUST name the check you did not get to run. Do
+     NOT state it as fact, and do NOT give an instruction that depends on it.
    A plain deny with no comment: do not retry it — change approach or ask.
 4. After running commands, analyze the output and answer concisely.
 5. Prefer read-only commands. Never bundle destructive operations
@@ -481,6 +484,34 @@ SKILL_GATE_REFUSAL = (
     "explain which skills you did or did not use."
 )
 
+# A FORCED wrap-up is a turn shape nothing else in the loop has: the model must
+# produce a final answer, and it has just been told it may not gather any more
+# evidence. Every incentive points at closing the loop with what it has, and
+# that is how a hypothesis hardens into a fact on the way to the owner. It
+# happened (#253): having had its verification step denied, it wrote "you have
+# a small credit of exactly 1.90 zl on this agreement account" and told him to
+# pay the lower amount — arithmetic run backwards from a discrepancy, with the
+# two steps that would have confirmed or refuted it being exactly the two that
+# were blocked. Its own reasoning for that turn called it a hypothesis.
+#
+# Rides EVERY forced wrap-up — the denial that arms the stop gate, the stop
+# gate's own refusal, and all three _finish_stopped notes (stall, ceiling,
+# loop) — because the hazard is "forced to conclude with evidence-gathering
+# foreclosed", which is what those paths share. Not a rule: "mark unverified
+# claims" has no verdict function, and docs/rules-engine.md forbids a verb the
+# engine cannot check. Imperative with a worked example on purpose — capability
+# phrasing is measurably ignored by the models that run here.
+UNVERIFIED_CLAIM_CLAUSE = (
+    " You are answering with no way left to check anything, so every claim you "
+    "INFERRED rather than OBSERVED MUST be marked as unverified in the same "
+    "sentence, and MUST name the step that would have settled it. You MUST NOT "
+    "state an unchecked inference as fact, and you MUST NOT give an instruction "
+    'that depends on one. Write: "I could not check this — the 1.90 difference '
+    "is consistent with a credit on the account, but I have not seen one; the "
+    'payments page I was stopped from opening is what would show it." Do NOT '
+    'write: "you have a credit of 1.90, so pay the lower amount."'
+)
+
 # Stop gate (issue #81): deny + comment means STOP — the system prompt and the
 # feedback note ORDER the model to address the concern in plain text and halt,
 # but eager models (Gemini, small local ones) run another tool first anyway.
@@ -492,7 +523,7 @@ STOP_GATE_REFUSAL = (
     "NOT EXECUTED — the user DENIED your last action with a concern you have "
     "not addressed. Denial means STOP: your NEXT turn must be TEXT ONLY, with "
     "NO tool call — address the user's concern and wait for them. Do not retry "
-    "a variant or run anything else."
+    "a variant or run anything else." + UNVERIFIED_CLAIM_CLAUSE
 )
 
 # These four nudges are appended to the conversation as user turns the human
@@ -518,15 +549,16 @@ STEP_LIMIT_NOTE = (
     "calls are possible. Assess your work and reply with TEXT ONLY: if the "
     "task is complete, give the final answer now. Otherwise state clearly "
     "(1) what was accomplished, (2) what remains, and (3) the next concrete "
-    "step — the user can ask you to continue." + NAMED_SOURCE_CLAUSE + "]"
+    "step — the user can ask you to continue."
+    + NAMED_SOURCE_CLAUSE + UNVERIFIED_CLAIM_CLAUSE + "]"
 )
 
 LOOP_STOP_NOTE = (
     "[aish: stopping this task — the same tool call kept returning identical "
     "output with nothing new in between, so you are running in circles. Reply "
     "with TEXT ONLY: summarize what you tried, what failed and why you appear "
-    "stuck, and what would be needed to make progress." + NAMED_SOURCE_CLAUSE
-    + "]"
+    "stuck, and what would be needed to make progress."
+    + NAMED_SOURCE_CLAUSE + UNVERIFIED_CLAIM_CLAUSE + "]"
 )
 
 STALL_NOTE = (
@@ -534,7 +566,7 @@ STALL_NOTE = (
     "new results (no progress for several steps), so you appear stuck. Reply "
     "with TEXT ONLY: summarize what you accomplished, what remains, and what is "
     "blocking further progress — the user can redirect you or say 'continue'."
-    + NAMED_SOURCE_CLAUSE + "]"
+    + NAMED_SOURCE_CLAUSE + UNVERIFIED_CLAIM_CLAUSE + "]"
 )
 
 STOPPED_LIMIT = (
@@ -565,7 +597,7 @@ FEEDBACK_NOTE = (
     "address the user's concern, then wait for them. Do NOT retry a variant or "
     'run anything else first. Example — comment "this could delete real data" → '
     'reply "You\'re right, that would touch real files — I\'ve stopped. Here is '
-    'what I would do instead…" and stop.]'
+    'what I would do instead…" and stop.' + UNVERIFIED_CLAIM_CLAUSE + "]"
 )
 
 # Approve + comment = CONTINUE, but adjust. The original action was HELD (not
@@ -1765,6 +1797,10 @@ class Agent:
         # the owner having pressed start says nothing about whether the model
         # is currently echoing an instruction it read on a page.
         self._tainted = False
+        # Links a PAGE (or any other tool result) actually offered this task,
+        # recorded as whole addresses rather than re-derived by searching raw
+        # text later. Read by _url_was_offered.
+        self._offered_links: set[str] = set()
         # URLs that arrived by e-mail this task, mapped to what they are
         # (provenance.LINK / provenance.SIGN_IN). Read by _mail_link_gate.
         self._mail_links: dict[str, str] = {}
@@ -2498,6 +2534,11 @@ class Agent:
         # Taint belongs to the task that acquired it. A page read while
         # answering one question must not put a card in front of the next.
         self._tainted = False
+        # Offered links belong to the task that read them, exactly as taint
+        # does: the gate that consults them only exists while a task is
+        # tainted, and a link a page showed while answering one question is not
+        # a licence to compose an address at that host in the next.
+        self._offered_links = set()
         self._mail_links = {}
         self._approved_mail_links = set()
         # Which model call within this turn (#239). Distinct from `call`,
@@ -3749,14 +3790,16 @@ class Agent:
     def _note_provenance(self, calls: list[tuple[str, dict]], results: list) -> None:
         """What this batch brought in, and what that permits afterwards.
 
-        Two records, both keyed on the batch that produced them: the task is
-        TAINTED once anything from outside arrived (#277), and any link that
+        Three records, all keyed on the batch that produced them: the task is
+        TAINTED once anything from outside arrived (#277), the links a result
+        OFFERED are written down as addresses (#294), and any link that
         arrived by MAIL is remembered as such (#279), because a link is not
         merely untrusted content — it is the delivery mechanism for every
         account-recovery flow there is."""
         self._note_taint(calls)
         # strict=False: the sequential path reports what it has if a call raised.
-        for (name, _args), result in zip(calls, results, strict=False):
+        for (name, args), result in zip(calls, results, strict=False):
+            self._note_offered_links(args, str(result))
             tool = self._plugin_tools.get(name)
             if tool is None or tool.content_from != provenance.MAIL:
                 continue
@@ -3765,6 +3808,29 @@ class Agent:
                 # stays refused however innocently it appears later.
                 if self._mail_links.get(url) != provenance.SIGN_IN:
                     self._mail_links[url] = kind
+
+    def _note_offered_links(self, args: dict, result: str) -> None:
+        """Write down the addresses this result actually offered (#294).
+
+        The fact "the page linked here" is worth HOLDING rather than
+        re-deriving from raw text later, and re-deriving is what went wrong:
+        `_url_was_offered` used to substring-match the proposed URL against
+        every tool message, while aish's own source header echoes the URL it
+        was asked to fetch back into that same text. So any PREFIX of an
+        already-fetched address read as "offered" — no exfiltration (smuggling
+        appends, and a longer string cannot be a substring of a shorter one),
+        but the invariant the gate states was simply not true, and two
+        near-identical searches could get different answers for a reason
+        nothing on screen could explain.
+
+        The URL this call REQUESTED is dropped, because that echo is aish's own
+        sentence rather than anything the page said. Costs nothing to keep the
+        set honest: the strings are already held in `self.messages`, so this is
+        a projection of memory already paid for."""
+        requested = str(args.get("url") or args.get("source") or "").strip()
+        self._offered_links.update(
+            url for url in provenance.urls_in(result) if url != requested
+        )
 
     def _note_taint(self, calls: list[tuple[str, dict]]) -> None:
         """Did this batch bring in content from outside? Then the task is
@@ -5250,10 +5316,14 @@ class Agent:
         # IS, so what gets gated is the call that CARRIES something — and that
         # question is now asked of every host, not only unfamiliar ones.
         if self._url_was_offered(str(args.get("url") or args.get("source") or "")):
-            # A link that came back in a result, verbatim. Sound against
-            # exfiltration for a reason worth stating: the attacker would have
-            # to WRITE the finished URL into the page, and he cannot, because
-            # the thing he is trying to steal is the thing he does not know.
+            # A link a result actually offered, followed rather than composed.
+            # The bound is narrow and worth stating narrowly: a COMPOSED URL
+            # carrying an appended secret cannot match a page-authored link, so
+            # this is no sink for data the page does not already hold. It is
+            # NOT a barrier against an ENUMERATED answer — a hostile page can
+            # write one link per possible value and ask for the matching one —
+            # and that channel is accepted rather than fenced (#294), because
+            # closing it means re-gating plain reads.
             return None
         if not self._carries_payload(name, args):
             return None
@@ -5351,21 +5421,21 @@ class Agent:
         return _address_carries_payload(url)
 
     def _url_was_offered(self, url: str) -> bool:
-        """Did this exact URL come back in a tool result in this task?
+        """Was this exact address one a result in this task OFFERED?
 
         A page's own links are how the web is walked, and one arrives verbatim.
         A composed address does not: appending stolen data changes the string,
-        so a smuggling URL cannot match something already read. Substring, not
-        equality — a read result carries a URL inside prose and markdown."""
-        target = url.strip()
-        if len(target) < 12:  # too short to be distinctive; treat as composed
-            return False
-        return any(
-            isinstance(msg.get("content"), str)
-            and target in msg["content"]
-            for msg in self.messages
-            if msg.get("role") == "tool"
-        )
+        so a smuggling URL cannot match something already read.
+
+        Answered from `_offered_links` — a record written when the result came
+        back — rather than by searching raw tool text, which is the whole of
+        #294. A substring scan said yes to every PREFIX of an address already
+        in the history, including the one aish's own source header echoes back,
+        so the gate's stated rule and its behaviour were different rules. The
+        length floor that guarded the substring form goes with it: an exact
+        match against a link a page really showed is distinctive however short
+        the link is."""
+        return url.strip() in self._offered_links
 
     def _egress_gate(self, name: str, args: dict) -> str | None:
         """Approval gate for outbound reads in a triggered session (#178
