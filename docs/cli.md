@@ -34,6 +34,22 @@
 
 `print_intent` puts the model's stated reason above every gate prompt — command, tool, write, read, import — dimmed and attributed, before the y/N line. The terminal and the web card gate identically, so they show the same reason — and it is printed whole for the same reason the card renders it whole: the one-line snippet the trace keeps cuts the sentence that motivated the feature at an abbreviation and loses all of it. The rationale, the incident, and why nothing tells the model where this lands are in `docs/agent-core.md`.
 
+## The terminal says CHAT; the machine says session (#260)
+
+**"Session" is the machine's word** — a log file, an entry in `WebServer.sessions`, a process lifetime. **"Chat" is the person's word** for the thing they are looking at. The web was renamed on that line first (`docs/web-frontend.md`) and the terminal was deliberately left out, on the argument that here the session genuinely IS the artefact: you handle log paths, `--resume`, files in `~/.local/state/aish/`.
+
+That argument covers the machine-facing surfaces, and they are exactly the ones still excluded. What it does not survive is that **it is the same person and the same object**: a chat started in the browser is resumed in the terminal, so deleting a *chat* in one place and reading `no such session` in the other hands the owner two names for one thing — the complaint that started the web rename in the first place. So the line is drawn by AUDIENCE, not by surface. Identifiers, comments, docstrings, the wire, `session-*.jsonl`, `~/.local/state/aish/` and the recorded verdict tokens go on saying `session`; every string a person reads says chat, including `SYSTEM_PROMPT_TEMPLATE` and `usage_context`, because aish answers questions about itself out of those.
+
+Three things a find-and-replace would have got wrong, which is why `tests/test_chat_vocabulary.py` extends to `cli.py` and the CLI prompt rather than a `sed` running once:
+
+- **`approved+session` is PERSISTED.** The approver records it; `aish explain` and the web trace card read it back out of logs written years apart. The wording above it changed (`chat-allowed:`, `allow prefix for THIS CHAT`); the stored token did not, and `test_the_wire_still_says_session` pins that.
+- **Killing Ollama is not the end of a chat.** The identity prompt used to say stopping the server "terminates the current aish session". It does not: aish stays at the prompt, and the chat's log survives and resumes — what dies is the model process. Renaming it to *chat* would have made a wrong sentence wrong in the owner's vocabulary, so it says what actually stops (`YOU STOP MID-ANSWER`, `cuts this chat off until Ollama is back`). Same for `/jobs`, which is process-wide and survives `/new`: it now says *since aish launched*.
+- **A signed-in browser session is a cookie jar.** The three in the CLI system prompt are allowlisted by exact line, with what they mean instead. An allowlist without reasons rots into a list of things someone gave up on.
+
+**The old spellings still work, and are still completed.** `/session` dispatches beside `/chat` (in the browser too — the same chats, so the same command), `aish usage` takes `--session` beside `--chat`, and the approval-scope key answers to `s` as well as the `c(hat)` it now offers. A rename that breaks the command the owner's fingers already know is a worse bug than the inconsistency it fixes. `--resume` keeps its name — it does not contain the word — and only its help text moved.
+
+---
+
 ## Models
 
 `available_models` merges local Ollama models with the cloud catalog; `cloud_model_catalog` caches provider API results for `CATALOG_TTL` and will only wait `CATALOG_FETCH_WAIT` for them, so the picker never hangs on a slow network. `rank_models` orders them, `switch_model` swaps the backend live, `model_spec` parses the `--model` string, and `save_default_model` persists the choice. `TestModels`, `TestModelPicker`, `TestModelAndJobs`, `TestModelSave`.

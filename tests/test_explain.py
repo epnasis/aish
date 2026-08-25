@@ -741,7 +741,7 @@ class TestSubcommand:
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
         monkeypatch.setattr("sys.argv", ["aish", "explain", "nothing-like-this"])
         assert cli.main() == 1
-        assert "no session log matching" in capsys.readouterr().out
+        assert "no chat log matching" in capsys.readouterr().out
 
 
 def _only_first_brief(path):

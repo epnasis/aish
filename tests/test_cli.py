@@ -3,6 +3,8 @@
 import builtins
 from types import SimpleNamespace
 
+import pytest
+
 from aish.approval import load_prefixes
 from aish.cli import (
     make_approver,
@@ -154,7 +156,12 @@ def test_slash_prefix_resolves_when_unambiguous(tmp_path, capsys):
     assert "ambiguous" in capsys.readouterr().out
 
 
-def test_session_slash_shows_log_path(tmp_path, capsys):
+@pytest.mark.parametrize("spelling", ["/chat", "/session", "/ch", "/sess"])
+def test_chat_slash_shows_log_path(tmp_path, capsys, spelling):
+    """`/chat` is the name (#260); `/session` is what it was called until then
+    and still runs, because a rename that breaks the command the user's fingers
+    already know is a worse bug than the inconsistency it fixes. Prefixes of
+    both resolve, so neither habit has to be typed out in full."""
     from aish.cli import LogRef, handle_slash
     from aish.session import SessionLog
 
@@ -163,10 +170,38 @@ def test_session_slash_shows_log_path(tmp_path, capsys):
     logref = LogRef(log)
     agent = type("A", (), {"reset": lambda self: None, "cwd": str(tmp_path),
                            "roots": [tmp_path], "model": "m"})()
-    assert handle_slash("/session", agent, logref, tmp_path) == "handled"
+    assert handle_slash(spelling, agent, logref, tmp_path) == "handled"
     out = capsys.readouterr().out
     assert str(log.path) in out
     assert "1 message" in out  # the path, not the raw audit trail
+    assert "unknown command" not in out
+
+
+@pytest.mark.parametrize("flag", ["--chat", "--session"])
+def test_usage_accepts_both_spellings_of_the_chat_flag(tmp_path, monkeypatch, capsys, flag):
+    """`aish usage --chat NAME` is the name (#260) and `--session NAME` is the
+    one already in the owner's shell history. Both must reach the lookup; an
+    unrecognised flag prints the usage line instead, which is what tells the
+    two apart."""
+    from aish.cli import _usage_cli
+
+    monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+    assert _usage_cli([flag, "no-such-chat"]) == 1  # ran the lookup, found none
+    assert "no chat log matching" in capsys.readouterr().out
+    assert _usage_cli(["--bogus", "x"]) == 2  # not a flag: usage line, no lookup
+
+
+def test_approving_for_this_chat_answers_to_c_and_to_s(tmp_path, monkeypatch):
+    """The scope key is offered as `c(hat)` (#260), but `s` is what the owner's
+    fingers know and it still means the same thing. The SCOPE is unchanged
+    either way: an in-memory prefix, never written to allow.txt."""
+    allow = tmp_path / "allow.txt"
+    for key in ("c", "s"):
+        approve = make_approver(False, allow, None)
+        scripted_input(monkeypatch, [key, ""])  # scope key, then accept the prefix
+        assert approve("cargo build --quiet") == "cargo build --quiet"
+        assert approve("cargo build --release") == "cargo build --release"  # no prompt
+        assert not allow.exists()
 
 
 def test_always_with_skip_leaves_segment_unvetted(tmp_path, monkeypatch):
@@ -286,11 +321,12 @@ class TestUsageContext:
         text = usage_context("qwen3:8b", False, tmp_path, tmp_path, tmp_path)
         lower = text.lower()
         # names its real model, says it's local (not cloud), and that killing
-        # the server ends the session
+        # the server stops it answering. NOT "ends the chat" (#260): the chat's
+        # log survives an Ollama kill and resumes — what dies is the process.
         assert "qwen3:8b" in text
         assert "not a cloud" in lower
         assert "llama-server" in lower
-        assert "session ends" in lower
+        assert "you stop mid-answer" in lower
 
 
 class TestSlashCompleter:
@@ -398,7 +434,7 @@ class TestSlashCommands:
 
         agent, logref = self.fake_agent(), self.logref(tmp_path)
         assert handle_slash("/resume", agent, logref, tmp_path) == "handled"
-        assert "no earlier session" in capsys.readouterr().out
+        assert "no earlier chat" in capsys.readouterr().out
 
     def test_unknown_command_suggests_help(self, tmp_path, capsys):
         from aish.cli import handle_slash
@@ -800,7 +836,7 @@ def test_resume_invalid_number(tmp_path, capsys):
 
     agent, logref = two_session_setup(tmp_path)
     handle_slash("/resume 9", agent, logref, tmp_path)
-    assert "no such session" in capsys.readouterr().out
+    assert "no such chat" in capsys.readouterr().out
 
 
 def test_resume_search_loads_single_match_directly(tmp_path, capsys):
@@ -834,7 +870,7 @@ def test_resume_search_no_match(tmp_path, capsys):
 
     agent, logref = two_session_setup(tmp_path)
     handle_slash("/resume nonexistent topic", agent, logref, tmp_path)
-    assert "no session matches" in capsys.readouterr().out
+    assert "no chat matches" in capsys.readouterr().out
     assert len(agent.messages) == 1  # nothing loaded
 
 
@@ -882,7 +918,7 @@ def test_delete_excludes_current_session(tmp_path, capsys):
     logref = LogRef(SessionLog.new(tmp_path))
     logref.message({"role": "user", "content": "live conversation"})
     handle_slash("/delete", agent, logref, tmp_path)
-    assert "no earlier session to delete" in capsys.readouterr().out
+    assert "no earlier chat to delete" in capsys.readouterr().out
     assert logref.log.path.exists()
 
 
