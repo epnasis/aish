@@ -550,6 +550,43 @@ class TestTheSessionOutlivesTheOwnerReading:
         owner.view_touched = 99.0
         assert owner.held() is True
 
+    def test_a_read_that_just_finished_keeps_the_browser(self, monkeypatch):
+        """#224. `busy` only says whether a job is running RIGHT NOW, so the
+        reaper's tick could land seconds after a read returned and close the
+        context under the next one — which then paid the ~2s relaunch. On a
+        chat reading every couple of minutes that repeats every tick."""
+        monkeypatch.setattr(browser.time, "monotonic", lambda: 1000.0)
+        owner = browser._Owner()
+        owner.last_used = 1000.0 - 5  # a read finished five seconds ago
+        assert owner.reapable(1000.0) is False
+
+    def test_a_browser_quiet_for_the_whole_window_is_collected(self, monkeypatch):
+        monkeypatch.setattr(browser.time, "monotonic", lambda: 1000.0)
+        owner = browser._Owner()
+        owner.last_used = 1000.0 - browser.IDLE_SECONDS - 1
+        assert owner.reapable(1000.0) is True
+
+    def test_a_browser_that_never_ran_anything_is_collected(self):
+        """`last_used` starts at 0.0 — nothing has ever run, and closing a
+        context that was never opened is a no-op, so eager is correct."""
+        assert browser._Owner().reapable(1000.0) is True
+
+    def test_a_job_in_flight_still_outranks_the_clock(self, monkeypatch):
+        monkeypatch.setattr(browser.time, "monotonic", lambda: 1000.0)
+        owner = browser._Owner()
+        owner.last_used = 0.0  # long quiet by the clock...
+        owner.busy = 1         # ...but something is running
+        assert owner.reapable(1000.0) is False
+
+    def test_a_held_session_still_outranks_the_clock(self, monkeypatch):
+        """The recency check is an ADDITIONAL reason to keep the browser, never
+        a replacement for the two that already existed."""
+        monkeypatch.setattr(browser.time, "monotonic", lambda: 1000.0)
+        owner = self.owner(page=self.open_page(), touched=999.0)
+        owner.last_used = 0.0
+        assert owner.held() is True
+        assert owner.reapable(1000.0) is False
+
     def test_a_reaped_session_stops_reading_as_open(self):
         """A module-level snapshot used to survive the reaper, so aish said a
         session was open for a page that no longer existed (#248). There is no

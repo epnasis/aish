@@ -1342,6 +1342,12 @@ class _Owner:
         self.view_hosts: set[str] = set()
         self.view_touched = 0.0
         self.busy = 0
+        # When a job last FINISHED on this browser. `busy` only answers "is one
+        # running right now", which made the reaper reap a context that had been
+        # used seconds earlier and charge the next read a ~2s relaunch (#224).
+        # 0.0 means nothing has ever run: reaping a context that was never
+        # opened is a no-op, so the eager value is the right one.
+        self.last_used = 0.0
         self.notice = ""   # something native happened that the frame cannot show
         # Counts documents, not URLs. A logout that lands back on a similar
         # address, an SPA route change, or a plain reload all replace the
@@ -1462,10 +1468,28 @@ class _Owner:
 
         while True:
             await asyncio.sleep(IDLE_SECONDS)
-            if self.busy:
-                continue
-            if not self.held():
+            if self.reapable(time.monotonic()):
                 await self._close()
+
+    def reapable(self, now: float) -> bool:
+        """May the browser be closed at `now`? A pure decision, so the rule can
+        be tested without a timer or a Chrome.
+
+        Three reasons to keep it, and the third was missing (#224). A job is
+        RUNNING (`busy`). Somebody is part-way through something that outlives
+        one job (`held`). Or a job merely FINISHED RECENTLY — which the tick
+        alone could not see, because it fired on a wall-clock cadence rather
+        than on how long the browser had actually been quiet. A read that
+        landed five seconds before the tick met a closed context and paid the
+        ~2s relaunch, and on a busy chat that repeats every three minutes.
+
+        The idle window is therefore between one and two ticks, deliberately.
+        Sampling more often to tighten it would spend wakeups to reclaim memory
+        a few seconds sooner, and the launch it saves is worth more than the
+        seconds of Chrome it keeps."""
+        if self.busy or self.held():
+            return False
+        return now - self.last_used >= IDLE_SECONDS
 
     def held(self) -> bool:
         """Is somebody part-way through something? Then this browser stays.
@@ -1615,6 +1639,10 @@ def _submit(job: Callable[[_Owner], Any], timeout: float) -> Any:
             return await job(owner)
         finally:
             owner.busy -= 1
+            # Stamped on the way OUT, which is the moment that matters: the gap
+            # the reaper has to respect starts when a job stops, not when it
+            # started. In-flight is already covered by `busy`.
+            owner.last_used = time.monotonic()
 
     return asyncio.run_coroutine_threadsafe(run(), owner.loop).result(timeout=timeout)
 
