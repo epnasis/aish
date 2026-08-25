@@ -1807,6 +1807,17 @@ class Agent:
         # Mail links vouched for on a card this task. Per LINK, never per host:
         # approving one tracking link must not approve the next one.
         self._approved_mail_links: set[str] = set()
+        # What tool calls brought in, CAPTURED but not yet applied to the three
+        # records above (#311). The two halves have different owners on
+        # purpose. Capture must be structural — it sits in _call_result, the
+        # one funnel every backend's tool calls pass through — because a
+        # backend that brings its own loop otherwise records nothing at all and
+        # the taint fence silently never goes up, which is what claude-max did.
+        # Applying must stay per BATCH, because a call must not meet a gate
+        # raised by its own batch mate. Locked because _call_result runs on the
+        # SDK's worker threads under claude-max.
+        self._provenance_lock = threading.Lock()
+        self._pending_provenance: list[tuple[str, dict, str]] = []
         # Sites the owner has said aish may use AS HIM this session (#221,
         # #237, #287). ONE set, because `read_url` and `browse` are one
         # permission — see SITE_GRANT. Session-scoped like every other grant
@@ -2539,6 +2550,8 @@ class Agent:
         self._offered_links = set()
         self._mail_links = {}
         self._approved_mail_links = set()
+        with self._provenance_lock:
+            self._pending_provenance = []
         # Which model call within this turn (#239). Distinct from `call`,
         # which numbers TOOL calls: one turn makes many model calls and the
         # brief can change between them.
@@ -3724,19 +3737,16 @@ class Agent:
             or gated_by_rule
         ):
             done: list[str] = []
-            try:
-                for name, args in calls:
-                    done.append(
-                        self._call_result(
-                            name,
-                            partial(self._timed, partial(self._dispatch, name, args)),
-                            args=args,
-                            model_call=model_call,
-                        )
+            for name, args in calls:
+                done.append(
+                    self._call_result(
+                        name,
+                        partial(self._timed, partial(self._dispatch, name, args)),
+                        args=args,
+                        model_call=model_call,
                     )
-                return done
-            finally:
-                self._note_provenance(calls, done)
+                )
+            return done
 
         results: list[str] = [""] * len(calls)
         with ThreadPoolExecutor(max_workers=min(len(concurrent), 8)) as pool:
@@ -3766,7 +3776,13 @@ class Agent:
                     )
             finally:
                 self.status.stop()
-                self._note_provenance(calls, results)
+                # The fan-out is a SUB-batch: the calls below could not join it
+                # (they prompt, or they write) and are dispatched afterwards,
+                # so what the reads brought in must be in force before they
+                # run. That was already true here and stays true — this is a
+                # batch boundary in the same sense `note_intent` is, not a
+                # per-call commit.
+                self._commit_provenance()
             self._note(
                 f"✓ {len(futures)} parallel lookups "
                 f"{format_secs(time.perf_counter() - batch_start)}"
@@ -3779,26 +3795,53 @@ class Agent:
                         args=args,
                         model_call=model_call,
                     )
-            self._note_provenance(calls, results)
         return results
 
-    def _note_provenance(self, calls: list[tuple[str, dict]], results: list) -> None:
-        """What this batch brought in, and what that permits afterwards.
+    def _capture_provenance(self, name: str, args: dict, result: str) -> None:
+        """Hold what one call brought in until its batch is over (#311).
 
-        Three records, all keyed on the batch that produced them: the task is
-        TAINTED once anything from outside arrived (#277), the links a result
-        OFFERED are written down as addresses (#294), and any link that
-        arrived by MAIL is remembered as such (#279), because a link is not
-        merely untrusted content — it is the delivery mechanism for every
-        account-recovery flow there is."""
-        self._note_taint(calls)
-        # strict=False: the sequential path reports what it has if a call raised.
-        for (name, args), result in zip(calls, results, strict=False):
-            self._note_offered_links(args, str(result))
+        Called from `_call_result`, which is the single funnel EVERY backend's
+        tool calls pass through — the native loop's two paths and the
+        claude-max SDK path alike — so a backend that brings its own loop
+        inherits provenance instead of having to remember it. That is the whole
+        repair: the three records below were written from `_execute_tool_calls`
+        only, so on claude-max the task looked untainted for its entire life no
+        matter what it read.
+
+        Capture, never apply. `_commit_provenance` does that at the turn
+        boundary, because a call must not meet a gate raised by the call beside
+        it in the same batch. Locked because this runs on the SDK's worker
+        threads under claude-max, where `_call_result` is not on the main
+        thread (see `_call_ids`)."""
+        with self._provenance_lock:
+            self._pending_provenance.append((name, args, result))
+
+    def _commit_provenance(self) -> None:
+        """Apply what the last batch brought in, and what that permits after.
+
+        Three records: the task is TAINTED once anything from outside arrived
+        (#277), the links a result OFFERED are written down as addresses
+        (#294), and any link that arrived by MAIL is remembered as such (#279),
+        because a link is not merely untrusted content — it is the delivery
+        mechanism for every account-recovery flow there is.
+
+        Called from `note_intent`, which both loops reach on every model
+        response BEFORE dispatching that response's tool calls — so the records
+        land between batches, never inside one, and the timing `_note_taint`
+        argues for survives on a seam neither backend can skip. The parallel
+        read-only fan-out calls it too, being a sub-batch: the calls that could
+        not join it are dispatched after it. Draining makes both safe — a
+        second commit has nothing left to apply, so there is no path on which a
+        record lands twice."""
+        with self._provenance_lock:
+            captured, self._pending_provenance = self._pending_provenance, []
+        for name, args, result in captured:
+            self._note_taint(name, args)
+            self._note_offered_links(args, result)
             tool = self._plugin_tools.get(name)
             if tool is None or tool.content_from != provenance.MAIL:
                 continue
-            for url, kind in provenance.links_in_mail(str(result)).items():
+            for url, kind in provenance.links_in_mail(result).items():
                 # SIGN_IN is sticky: the same URL seen once in a reset mail
                 # stays refused however innocently it appears later.
                 if self._mail_links.get(url) != provenance.SIGN_IN:
@@ -3848,16 +3891,18 @@ class Agent:
             url for url in provenance.urls_in(said) if url != requested
         )
 
-    def _note_taint(self, calls: list[tuple[str, dict]]) -> None:
-        """Did this batch bring in content from outside? Then the task is
+    def _note_taint(self, name: str, args: dict) -> None:
+        """Did this call bring in content from outside? Then the task is
         tainted for the rest of its life.
 
-        Set AFTER the batch, deliberately, and that is not a race. Composing an
-        exfiltration URL requires having READ the thing being exfiltrated,
-        which means it came back on an earlier model call — the taint is always
-        in place before the model that saw the content gets to speak. Marking
-        mid-batch would buy nothing and would need locking against the worker
-        pool.
+        Applied AFTER the whole batch, deliberately, and that is not a race.
+        Composing an exfiltration URL requires having READ the thing being
+        exfiltrated, which means it came back on an earlier model call — the
+        taint is always in place before the model that saw the content gets to
+        speak. Marking mid-batch would buy nothing, and it would put a card in
+        front of the second of two ordinary reads issued in one breath. The
+        capture/commit split in `_capture_provenance` is what keeps that
+        timing while still recording on every backend (#311).
 
         A source is untrusted when the tool fetches, drives or wraps something
         this machine does not own — which includes every plugin tool, since a
@@ -3865,18 +3910,16 @@ class Agent:
         came from."""
         if self._tainted:
             return
-        for name, args in calls:
-            if name in UNTRUSTED_SOURCE_TOOLS:
-                if name in ("show_image", "read_pdf", "read_media"):
-                    # These take a local path too, which fetches nothing.
-                    source = str(args.get("url") or args.get("source") or "")
-                    if not source.lower().startswith(("http://", "https://")):
-                        continue
-                self._tainted = True
-                return
-            if name in self._plugin_tools:
-                self._tainted = True
-                return
+        if name in UNTRUSTED_SOURCE_TOOLS:
+            if name in ("show_image", "read_pdf", "read_media"):
+                # These take a local path too, which fetches nothing.
+                source = str(args.get("url") or args.get("source") or "")
+                if not source.lower().startswith(("http://", "https://")):
+                    return
+            self._tainted = True
+            return
+        if name in self._plugin_tools:
+            self._tainted = True
 
     @staticmethod
     def _timed(fn: Callable[[], str]) -> tuple[str, float]:
@@ -4040,59 +4083,71 @@ class Agent:
             call_record["truncated"] = args_dropped
             call_record["cap_source"] = "constant:CALL_ARG_CHARS"
         self._emit_record(**call_record)
+        # Held so the provenance capture below sees whatever the call
+        # produced, including the error text an exception path returns.
+        result = ""
         try:
-            result, elapsed = fn()
-        except ModuleNotFoundError as exc:
-            # A broken install, not a transient failure: retrying the
-            # same call can never succeed, so say so to the model too.
-            result = (
-                f"ERROR: tool '{name}' is unavailable — this aish "
-                f"installation is missing the '{exc.name}' package. "
-                "Do NOT retry this tool; it will keep failing. Tell "
-                "the user to reinstall aish (uv tool install --force "
-                "git+https://github.com/epnasis/aish.git) and restart."
-            )
-            self.echo(result)
-            self._emit_step(
-                kind="tool",
-                name=name,
-                call=call_no,
-                secs=0.0,
-                ok=False,
-                status=tools.STATUS_FAILED,
-                verdict_by=tools.VERDICT_EXCEPTION,
-                summary="unavailable",
-            )
+            try:
+                result, elapsed = fn()
+            except ModuleNotFoundError as exc:
+                # A broken install, not a transient failure: retrying the
+                # same call can never succeed, so say so to the model too.
+                result = (
+                    f"ERROR: tool '{name}' is unavailable — this aish "
+                    f"installation is missing the '{exc.name}' package. "
+                    "Do NOT retry this tool; it will keep failing. Tell "
+                    "the user to reinstall aish (uv tool install --force "
+                    "git+https://github.com/epnasis/aish.git) and restart."
+                )
+                self.echo(result)
+                self._emit_step(
+                    kind="tool",
+                    name=name,
+                    call=call_no,
+                    secs=0.0,
+                    ok=False,
+                    status=tools.STATUS_FAILED,
+                    verdict_by=tools.VERDICT_EXCEPTION,
+                    summary="unavailable",
+                )
+                return result
+            except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
+                # Scrubbed like any other result: a plugin tool is handed its
+                # declared secrets in its environment, so its crash is a place one
+                # can surface (tool_plugins.execute).
+                result = self._scrub_result(f"ERROR: tool '{name}' failed internally: {exc!r}")
+                self.echo(result)
+                self._emit_step(
+                    kind="tool",
+                    name=name,
+                    call=call_no,
+                    secs=0.0,
+                    ok=False,
+                    status=tools.STATUS_FAILED,
+                    verdict_by=tools.VERDICT_EXCEPTION,
+                    summary="failed",
+                )
+                return result
+            result = self._scrub_result(result)
+            self._note(f"{mark} {name} {format_secs(elapsed)}")
+            # The single funnel every tool call passes through, parallel path
+            # included — so a binding's view of "was the routed tool tried, and did
+            # it work?" cannot miss a call that took another branch (#191).
+            # BEFORE _emit_tool_step, which consumes `_run_meta`: that is where a
+            # denied, held or blocked run_command carries its verdict, and reading
+            # it afterwards saw nothing at all.
+            self._observe_for_rules(name, result)
+            self._note_turn_call(name, args, result)
+            self._emit_tool_step(name, args, result, elapsed, call_no)
             return result
-        except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
-            # Scrubbed like any other result: a plugin tool is handed its
-            # declared secrets in its environment, so its crash is a place one
-            # can surface (tool_plugins.execute).
-            result = self._scrub_result(f"ERROR: tool '{name}' failed internally: {exc!r}")
-            self.echo(result)
-            self._emit_step(
-                kind="tool",
-                name=name,
-                call=call_no,
-                secs=0.0,
-                ok=False,
-                status=tools.STATUS_FAILED,
-                verdict_by=tools.VERDICT_EXCEPTION,
-                summary="failed",
-            )
-            return result
-        result = self._scrub_result(result)
-        self._note(f"{mark} {name} {format_secs(elapsed)}")
-        # The single funnel every tool call passes through, parallel path
-        # included — so a binding's view of "was the routed tool tried, and did
-        # it work?" cannot miss a call that took another branch (#191).
-        # BEFORE _emit_tool_step, which consumes `_run_meta`: that is where a
-        # denied, held or blocked run_command carries its verdict, and reading
-        # it afterwards saw nothing at all.
-        self._observe_for_rules(name, result)
-        self._note_turn_call(name, args, result)
-        self._emit_tool_step(name, args, result, elapsed, call_no)
-        return result
+        finally:
+            # The single seam BOTH loops pass through (#311). Recorded here
+            # rather than in _execute_tool_calls, which the claude-max SDK
+            # path never enters — so the taint fence never went up there, on
+            # a backend the owner runs. Captured only; note_intent applies it
+            # at the turn boundary, which is what keeps a call from meeting a
+            # gate its own batch mate raised.
+            self._capture_provenance(name, args, result)
 
     def _emit_tool_step(
         self, name: str, args: dict, result: str, secs: float, call_no: int = 0
@@ -6308,7 +6363,17 @@ class Agent:
         field the model knows is read by the gate gets written FOR the gate.
         Narration is written as chat to the owner, and inheriting honest text
         is the whole reason to reuse it instead of asking for a `why` argument.
+
+        **It is also the turn boundary provenance commits on (#311).** Both
+        loops call this on every model response and BEFORE dispatching that
+        response's tool calls — the native loop right after `_chat_turn`,
+        claude-max on every acting `AssistantMessage` — which is exactly "the
+        last batch is over and the next has not begun". Committing here rather
+        than in `_execute_tool_calls` is what stops a second backend from
+        having a gate the first one has; a backend that skips it also loses the
+        card's intent, so the omission is visible rather than silent.
         """
+        self._commit_provenance()
         self._intent = (said or "").strip()
 
     def turn_intent(self) -> str:
