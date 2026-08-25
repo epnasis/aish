@@ -411,7 +411,7 @@ def start_background(command: str, cwd: str | None = None, log_dir=None) -> str:
 
 def jobs_table() -> str:
     if not JOBS:
-        return "no background jobs this session"
+        return "no background jobs started since aish launched"
     lines = []
     for i, job in enumerate(JOBS, 1):
         code = job["proc"].poll()

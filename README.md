@@ -47,12 +47,12 @@ Według danych Wise: 1 USD ≈ 3,81 PLN …
   *even with* approval, and prompts before it reads secret-bearing files.
 - **📖 Grounded & transparent.** Before using an unfamiliar flag it reads the man
   page instead of trusting training data (chronically wrong for macOS/BSD
-  userland). Every step is echoed, timed, and token-accounted; every session
+  userland). Every step is echoed, timed, and token-accounted; every chat
   leaves an audit trail.
 - **🧠 It learns.** Correct it once and it saves the fix to structured memory.
   Procedures worth repeating become **skills** — playbooks it consults *before*
   its own training data. Repeated, fiddly operations become **tools** it writes
-  for itself. It gets better with every session.
+  for itself. It gets better with every chat.
 - **📱 Terminal *and* phone.** The same agent, same tools, same approval gates,
   behind a phone-friendly web UI. Start a task at your desk, approve it from
   your pocket.
@@ -69,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/epnasis/aish/main/install.sh | sh
 
 aish "what's eating my disk space?"     # one-shot task
 aish                                    # REPL — conversation persists across tasks
-aish --resume                           # pick up an earlier session
+aish --resume                           # pick up an earlier chat
 aish-web                                # serve the same agent to a browser
 ```
 
@@ -217,7 +217,7 @@ with `read_url` or driven with `browse` is cached and paged like any other
 result, so the rest of a 250-row list is one cheap call away rather than a
 re-fetch. The notice measures the loss in the page's own units where it can —
 *"items 1-30 of the 250 numbered here"* — because a character count is not
-something the model can act on, and it is how one session came to report the
+something the model can act on, and it is how one chat came to report the
 first 40 of a ratings list as the whole thing.
 
 Independent lookups in one turn (several searches, a few page reads) run **in
@@ -263,7 +263,7 @@ site's terms, so it is one switch — `AISH_BROWSER_STEALTH=0` turns it off, and
 The default is local-only. When a task needs a stronger model, the *same* agent
 — same tools, same approval gates — runs on a cloud backend instead. Everything
 in that conversation then leaves your machine, so it's an explicit choice
-(`--model` at launch or `/model` mid-session).
+(`--model` at launch or `/model` mid-chat).
 
 | `--model` | Runs on | Cost |
 |---|---|---|
@@ -313,7 +313,7 @@ To see where the tokens went:
 ```sh
 aish usage                      # last 7 days: spend by day and by model
 aish usage --week --all         # everything, by week
-aish usage --session <name>     # what filled THAT chat's context, by tool
+aish usage --chat <name>        # what filled THAT chat's context, by tool
 ```
 
 It reports what was *recorded* — not a billing statement — and says plainly
@@ -471,7 +471,7 @@ thousands of entries without bloating the context.
    nothing new. Your files are unaffected — anywhere else still prompts, and a
    secret path (`~/.ssh`, `.env*`, `*.pem`…) prompts even inside these.
 4. **Audit trail.** Every command and decision (approved / denied / edited /
-   auto) is logged with the session in `~/.local/state/aish/`.
+   auto) is logged with the chat in `~/.local/state/aish/`.
 
 > **Note on what the logs contain.** Session logs are **plaintext JSONL**, and
 > they record command *output* as well as commands — so anything a command
@@ -504,7 +504,7 @@ this UI. Highlights:
   existed, since the logs always recorded it.
 - **Parallel chats.** Several chats open at once, each with its own agent,
   model, directory, and running task; live badges for running / needs-approval,
-  a toast when a background task finishes. Chats live in a **session rail** —
+  a toast when a background task finishes. Chats live in a **chat rail** —
   swipe right anywhere on the conversation (or tap the button) and it slides
   over the chat; on a wide screen it simply stays docked as a sidebar. New chat
   sits in the rail's bottom bar, in thumb reach. One list, most-recently-
@@ -512,7 +512,7 @@ this UI. Highlights:
   so looking for something can't move what you're looking for. The top band is
   **Needs you** — anything holding an approval, plus anything that has moved
   since you last looked at it *on this device* — and it cuts across who started
-  the chat, so an overnight email-triggered session and your own long-running
+  the chat, so an overnight email-triggered chat and your own long-running
   task queue up together. Automation is a glyph on the row, not a separate tab.
   Rows show state, not decoration: a spinner while it works, an alert when it
   needs approving, a glyph when a schedule or an email started it. Pin a chat to
@@ -554,7 +554,7 @@ this UI. Highlights:
   share button appears only where the browser can hand a file to a share sheet,
   which on a phone it can. Attachments with nothing to show them in, like a
   spreadsheet or a zip, save straight from their chip.
-- **Export to PDF, copy anything.** Per-answer or whole-session
+- **Export to PDF, copy anything.** Per-answer or whole-chat
   PDF export (rendered locally), copy chips on every code block / table / answer.
   A single-answer
   PDF is titled and filed after what the answer is *about* — the model that wrote
@@ -730,15 +730,16 @@ scripts in `scripts/`, and reach it from your phone anytime.
 ## Day-to-day reference
 
 **Escapes:** `!<command>` runs directly — no model, no approval. `!cd <dir>` (=
-`/cd`) moves the project and re-anchors the session root (user-only).
+`/cd`) moves the project and re-anchors this chat's root (user-only).
 
-**While a command runs:** Ctrl-C cancels it (not the session); **Ctrl-B**
+**While a command runs:** Ctrl-C cancels it (not aish itself); **Ctrl-B**
 detaches it into a background job that survives aish exiting (`/jobs` lists them).
 
 **Slash commands** (Tab completes): `/resume`, `/delete`, `/rename`, `/new` (or
 `/clear`), `/model [name]` (`--save` to persist), `/learn [hint]`,
 `/feedback [text]` (files a GitHub issue), `/fork` (branch the conversation),
-`/cd`, `/add-dir`, `/aliases`, `/jobs`, `/help`, `/quit`.
+`/cd`, `/add-dir`, `/aliases`, `/jobs`, `/chat` (this chat's log file — the
+older `/session` still works), `/help`, `/quit`.
 
 **Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
 `vi_mode`, and an `[aliases]` table (aish-level aliases, since commands run
@@ -752,8 +753,10 @@ exact same tool call with the exact same output five times is treated as looping
 and stopped with a diagnostic. However it ends, the model gets one final turn to
 report the finished answer — or what's done, what remains, and the next step.
 
-Sessions are the same JSONL files for terminal and web, so `aish --resume` can
-pick up a web session and vice versa.
+Chats are the same JSONL files for terminal and web, so `aish --resume` picks
+up one you started in the browser and vice versa. Because it is the same chat
+either way, both surfaces call it a **chat**; `session` is the machine's word
+for the log file it is written to, and it stays on the file.
 
 **Chats name themselves.** A web chat is named after what it's *about*, not
 after the words you happened to open with — the model that answers it writes the
@@ -777,7 +780,7 @@ hand. Deleting a chat asks the same way.
 terminal and the web chat list all mean the same thing: the chosen chat
 becomes the current one — its conversation, its log file, the model it last used
 and the directory it was working in. The chat you leave is untouched and can be
-resumed back the same way. Nothing is ever copied from one session's log into
+resumed back the same way. Nothing is ever copied from one chat's log into
 another's.
 
 ---

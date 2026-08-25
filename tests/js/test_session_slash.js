@@ -1,8 +1,11 @@
-// Node-only, dependency-free check for issue #146 (the /session slash command
-// copies the session log path). Pulls the real SLASH_COMMANDS / SLASH_ALL /
-// handleSlash out of app.js by marker and runs the /session branch against a
-// stub copyLogPath — proving the web case exists (a missing case would fall to
+// Node-only, dependency-free check for issue #146 (the slash command that
+// copies the chat's log path). Pulls the real SLASH_COMMANDS / SLASH_ALL /
+// handleSlash out of app.js by marker and runs its branch against a stub
+// copyLogPath — proving the web case exists (a missing case would fall to
 // the "unknown command" default, the exact #146 gotcha).
+//
+// It is spelled /chat since #260 renamed the terminal's copy, and /session —
+// what it was called until then — is dispatched beside it on both surfaces.
 //
 // Run manually: node tests/js/test_session_slash.js
 "use strict";
@@ -36,7 +39,8 @@ const snippet = (
 ).replace(/\bconst\b/g, "var");
 vm.runInContext(snippet, sandbox);
 assert(typeof sandbox.handleSlash === "function", "failed to extract handleSlash from app.js");
-assert(sandbox.SLASH_ALL.includes("/session"), "/session must be in SLASH_ALL");
+assert(sandbox.SLASH_ALL.includes("/chat"), "/chat must be in SLASH_ALL");
+assert(sandbox.SLASH_ALL.includes("/session"), "the older /session must still be in SLASH_ALL");
 
 let failures = 0;
 function check(name, fn) {
@@ -51,7 +55,13 @@ function check(name, fn) {
   }
 }
 
-check("/session copies the log path and reports handled", () => {
+check("/chat copies the log path and reports handled", () => {
+  const handled = sandbox.handleSlash("/chat");
+  assert.strictEqual(handled, true, "should report the command was handled");
+  assert.deepStrictEqual(calls, ["copyLogPath"]);
+});
+
+check("/session, the older name, still copies the log path", () => {
   const handled = sandbox.handleSlash("/session");
   assert.strictEqual(handled, true, "should report the command was handled");
   assert.deepStrictEqual(calls, ["copyLogPath"]);

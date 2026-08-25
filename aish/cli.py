@@ -157,27 +157,29 @@ class ChipStream:
             self._emit(self._buf)
             self._buf = ""
 
+# "/session" is the pre-#260 name for "/chat": still completed and still
+# dispatched, so a script or a habit does not break on the rename.
 SLASH_COMMANDS = (
-    "/add-dir", "/aliases", "/browser", "/cd", "/clear", "/delete", "/dir-add",
-    "/exit", "/feedback", "/help", "/jobs", "/learn", "/model", "/new", "/quit",
-    "/rename", "/resume", "/session",
+    "/add-dir", "/aliases", "/browser", "/cd", "/chat", "/clear", "/delete",
+    "/dir-add", "/exit", "/feedback", "/help", "/jobs", "/learn", "/model",
+    "/new", "/quit", "/rename", "/resume", "/session",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
-  {CYAN}/resume{RESET}        switch to an earlier session — its conversation, log file,
+  {CYAN}/resume{RESET}        switch to an earlier chat — its conversation, log file,
                  model and working directory. Type to filter by title, contents,
                  and model (exact match first, then phrase, words, fuzzy),
                  ↑/↓ select, Enter switches, Esc cancels; the chat you leave is
                  untouched and can be resumed back
-  {CYAN}/resume <n>{RESET}    switch to the n-th newest session directly
+  {CYAN}/resume <n>{RESET}    switch to the n-th newest chat directly
   {CYAN}/resume <text>{RESET} open the picker with the filter pre-filled
-  {CYAN}/delete [n|text]{RESET} delete an earlier session permanently (same picker and
+  {CYAN}/delete [n|text]{RESET} delete an earlier chat permanently (same picker and
                  argument forms as /resume, then a y/N confirm; removes the
                  conversation AND its command audit log — the current
-                 session cannot be deleted)
+                 chat cannot be deleted)
   {CYAN}/rename <title>{RESET} give this chat a custom title (overrides the one derived
                  from the first message; shown in /resume and the web drawer)
-  {CYAN}/new, /clear{RESET}   fresh conversation in a new session file (clears the screen;
+  {CYAN}/new, /clear{RESET}   fresh conversation in a new chat (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
                  openai:/claude: — bare provider name picks a default); no
@@ -185,7 +187,7 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  (typing provider:model there offers that exact model);
                  add --save to persist as the startup default (config.toml),
                  /model --save alone persists the current model
-  {CYAN}/cd <dir>{RESET}      move the session to another project: changes the working
+  {CYAN}/cd <dir>{RESET}      move this chat to another project: changes the working
                  directory AND re-anchors the auto-approval root there
                  (Tab completes directories); !cd <dir> does the same
   {CYAN}/add-dir <dir>{RESET} allow auto-approved reads/commands in another directory
@@ -196,7 +198,7 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
   {CYAN}/feedback [text]{RESET} file a bug/idea as a GitHub issue on epnasis/aish —
                  aish drafts it, you approve, it creates the issue
   {CYAN}/browser [url]{RESET}  open a real Chrome window on aish's own persistent profile
-                 so you can sign in to a site; the session is remembered, so
+                 so you can sign in to a site; the sign-in is remembered, so
                  later reads of it are made as you (and each one asks first).
                  No arg shows the profile and which sites you are signed into;
                  {CYAN}/browser forget <host>{RESET} drops one, {CYAN}/browser close{RESET}
@@ -204,8 +206,9 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
   {CYAN}/aliases{RESET}       list command aliases (config.toml [aliases]); expanded on
                  the first word before the approval gate — {CYAN}/aliases import{RESET}
                  pulls your zsh aliases in (existing entries are kept)
-  {CYAN}/jobs{RESET}          list background jobs started this session
-  {CYAN}/session{RESET}       show this session's JSONL log path (+ message count)
+  {CYAN}/jobs{RESET}          list background jobs started since aish launched
+  {CYAN}/chat{RESET}          show the JSONL log file this chat is written to (+ message
+                 count); /session is the old name and still works
   {CYAN}/help{RESET}          this help
   {CYAN}/quit, /exit{RESET}   quit (plain 'exit' works too)
 {BOLD}input:{RESET} Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
@@ -394,7 +397,8 @@ def make_approver(
     """get_scope() -> (cwd, roots): the agent's live directory scope, bound
     late because the agent is constructed after its approver. When present,
     auto-approval is confined to the session roots. get_session_prefixes() ->
-    the LIVE set of prefixes allowed for this session only ('s' at the prompt),
+    the LIVE set of prefixes allowed for this session only ('c' at the prompt,
+    or its pre-#260 spelling 's'),
     unioned with the persistent allowlist but never written to disk; it is owned
     by the AGENT beside roots (#176) and late-bound for the same reason, so a
     session switch resets both halves of the gate's session scope by
@@ -443,11 +447,11 @@ def make_approver(
         print(f"\n{YELLOW}{BOLD}▶ run command?{RESET}{warning}\n  {BOLD}{command}{RESET}")
         escapes = escaping_dirs(command, cwd, roots) if trust_dir and cwd and roots else []
         if escapes:
-            print(f"{YELLOW}  ⚠ outside the session roots:{RESET} {', '.join(escapes)}")
+            print(f"{YELLOW}  ⚠ outside this chat's roots:{RESET} {', '.join(escapes)}")
         options = (
-            "[y/N/a(lways)/s(ession)/t(rust dir)/e(dit)]"
+            "[y/N/a(lways)/c(hat)/t(rust dir)/e(dit)]"
             if escapes
-            else "[y/N/a(lways)/s(ession)/e(dit)]"
+            else "[y/N/a(lways)/c(hat)/e(dit)]"
         )
         try:
             answer = input(f"{YELLOW}{options}{RESET} ").strip().lower()
@@ -467,22 +471,28 @@ def make_approver(
             saved = allow_segments_flow(command, allow_path)
             record(command, "approved+allowlisted" if saved else "approved")
             return command
-        if answer == "s":
+        # "s" was this key's spelling before #260 renamed the scope to CHAT;
+        # it goes on working, because a rename that breaks a habit is worse
+        # than the inconsistency it fixes.
+        if answer in ("c", "s"):
             suggestions = prefix_suggestions(command, known_prefixes())
             if not suggestions:
                 print(f"{DIM}  {NO_PREFIX_NOTE}{RESET}")
             saved = False
             for suggestion in suggestions:
                 typed = input(
-                    f"{YELLOW}allow prefix for THIS SESSION{RESET} "
+                    f"{YELLOW}allow prefix for THIS CHAT{RESET} "
                     f"[{BOLD}{suggestion}{RESET}] "
                     f"(enter=yes, s=skip, or type a different prefix): "
                 ).strip()
                 if typed.lower() == "s":
                     continue
                 session_prefixes().add(typed or suggestion)
-                print(f"{DIM}  session-allowed: {typed or suggestion}{RESET}")
+                print(f"{DIM}  chat-allowed: {typed or suggestion}{RESET}")
                 saved = True
+            # The verdict is PERSISTED and read back — by `aish explain` and by
+            # every trace card replaying a log written before #260. Only the
+            # wording the user reads changed; the stored token did not.
             record(command, "approved+session" if saved else "approved")
             return command
         if answer == "e":
@@ -1008,7 +1018,7 @@ def switch_model(agent, arg: str, saving: bool = False) -> bool:
     if saving:
         print(f"{DIM}model switched to {arg}{RESET}")
     else:
-        print(f"{DIM}model switched to {arg} (this session — /model --save "
+        print(f"{DIM}model switched to {arg} (this chat — /model --save "
               f"makes it the startup default){RESET}")
     if switched_provider:
         print(f"{DIM}note: the system prompt still describes the startup "
@@ -1106,7 +1116,7 @@ def pick_session(state_dir: Path, arg: str, exclude: set, verb: str) -> SessionI
         # Interactive: live-filter picker — typing re-ranks, Enter selects.
         entries = SessionLog.load_entries(state_dir, exclude=exclude)
         if not entries:
-            print(f"{DIM}no earlier session to {verb}{RESET}")
+            print(f"{DIM}no earlier chat to {verb}{RESET}")
             return None
         selected = _box.pick(
             lambda query: SessionLog.rank(entries, query),
@@ -1122,12 +1132,12 @@ def pick_session(state_dir: Path, arg: str, exclude: set, verb: str) -> SessionI
     if searching:
         sessions = SessionLog.search_sessions(state_dir, arg, exclude=exclude)
         if not sessions:
-            print(f"{DIM}no session matches '{arg}'{RESET}")
+            print(f"{DIM}no chat matches '{arg}'{RESET}")
             return None
     else:
         sessions = SessionLog.list_sessions(state_dir, exclude=exclude)
         if not sessions:
-            print(f"{DIM}no earlier session to {verb}{RESET}")
+            print(f"{DIM}no earlier chat to {verb}{RESET}")
             return None
 
     if arg.isdigit():
@@ -1151,7 +1161,7 @@ def pick_session(state_dir: Path, arg: str, exclude: set, verb: str) -> SessionI
             return None
         choice = int(answer) if answer.isdigit() else 1
     if not 1 <= choice <= len(sessions):
-        print(f"{DIM}no such session number{RESET}")
+        print(f"{DIM}no such chat number{RESET}")
         return None
     return sessions[choice - 1]
 
@@ -1244,7 +1254,7 @@ def handle_slash(
         logref.log = SessionLog.new(state_dir)
         logref.model(model_spec(agent))
         print("\033[2J\033[3J\033[H", end="")  # clear screen + scrollback
-        print(banner(f"fresh conversation — session {logref.log.path.name}"))
+        print(banner(f"fresh conversation — {logref.log.path.name}"))
         return "handled"
     if command == "/resume":
         parts = task.split(maxsplit=1)
@@ -1397,12 +1407,14 @@ def handle_slash(
     if command == "/jobs":
         print(f"{DIM}{tools.jobs_table()}{RESET}")
         return "handled"
-    if command == "/session":
+    if command in ("/chat", "/session"):
         # Just the path (+ a message count), never the raw audit trail: the log
         # can be huge, and it's a local file the user greps/tails themselves.
+        # The command is about the CHAT; what it prints is the FILE, and the
+        # line says both rather than pretending the file is the chat (#260).
         path = logref.log.path
         count = len(SessionLog.load_messages(path)) if path.exists() else 0
-        print(f"{DIM}session log: {path}{RESET}")
+        print(f"{DIM}this chat's log: {path}{RESET}")
         print(f"{DIM}{count} message(s){RESET}")
         return "handled"
     if command == "/help":
@@ -1448,11 +1460,11 @@ def identity_context(model: str, provider: str) -> str:
             "The Ollama process (ollama / llama-server, often ~20+ GB RAM) that the user "
             "sees in `top`/`ps` IS you: it is the server executing your weights right now. "
             "If the user stops Ollama, quits the Ollama app, or runs `killall llama-server` "
-            "/ `ollama stop`, THIS SESSION ENDS immediately — you would be killing "
+            "/ `ollama stop`, YOU STOP MID-ANSWER — you would be killing "
             "yourself. So when the user is hunting memory hogs or asks about that process, "
             "say plainly that it is you; never recommend or run a command that kills it "
-            "without first warning that it terminates the current aish session, and let "
-            "them decide."
+            "without first warning that it cuts this chat off until Ollama is back, "
+            "and let them decide."
         )
     label = PROVIDER_LABELS.get(provider, provider)
     model_desc = f"the model '{model}'" if model else "a Claude model"
@@ -1464,7 +1476,7 @@ def identity_context(model: str, provider: str) -> str:
         f"leaves this machine for {label}'s servers, so be conservative about "
         "pulling sensitive local data (keys, credentials, personal files) into "
         "context, and warn the user before reading such files. Local Ollama models "
-        "are unrelated to you; stopping Ollama does not affect this session."
+        "are unrelated to you; stopping Ollama does not affect this chat."
     )
 
 
@@ -1487,9 +1499,9 @@ About aish (you) — use this to answer questions about your own usage:
 prefixes to {allow_path}; the suggested prefix is the static subcommand path \
 — e.g. 'gh issue create', never a blanket 'gh'; chained |/&&/|| segments are \
 vetted and allowlisted independently; read-only commands auto-approve), \
-s=allow for THIS SESSION only (same prefix flow, kept in memory and \
-forgotten on exit), e=edit the command first. \
-Auto-approval is confined to the session roots (the launch directory plus \
+c=allow for THIS CHAT only (s still works; same prefix flow, kept in memory \
+and forgotten on exit), e=edit the command first. \
+Auto-approval is confined to this chat's roots (the launch directory plus \
 any the user added): commands whose path arguments point outside them, and \
 read_file outside them, prompt even when otherwise read-only or allowlisted. \
 Only the user can widen this via /cd or /add-dir — if you need a file \
@@ -1508,8 +1520,8 @@ this machine, so never put private local content into them.
 - Showing images: you CAN display images. Whenever your answer involves an \
 image file the user would want to look at (a chart or plot you generated, a \
 downloaded picture), you MUST reference it with markdown image syntax and \
-its absolute path — ![caption](/absolute/path.png) — when it is inside the \
-session roots; mentioning the path in prose alone does not display it. \
+its absolute path — ![caption](/absolute/path.png) — when it is inside this \
+chat's roots; mentioning the path in prose alone does not display it. \
 Terminals that support inline graphics (iTerm2, kitty, WezTerm, ghostty) \
 then show the image right under your answer; elsewhere the path stays \
 visible as text.
@@ -1535,39 +1547,40 @@ waiting on a rate limit, that is aish pacing deliberately — not a hang. A \
 quota that is SPENT rather than busy cannot be waited out; say so instead of \
 suggesting a retry. The user sets their own tier with \
 AISH_RATE_LIMIT_<PROVIDER>="rpm=..,tpm=..", and sees where the tokens went \
-with `aish usage` (add --session <name> to see which tool filled a chat's \
+with `aish usage` (add --chat <name> to see which tool filled a chat's \
 context). Long pages and images are what fill it fastest.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` is an alias for /cd — it moves the project directory and \
-re-anchors the session root. Ctrl-C cancels only the \
+re-anchors this chat's root. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.
 - REPL slash commands (Tab autocompletes them; an unambiguous prefix works, \
 e.g. /res for /resume): /resume opens a live picker \
-over ALL earlier sessions with start date, message count, and the model each \
-session last used (summary = the session's first \
+over ALL earlier chats with start date, message count, and the model each \
+chat last used (summary = the chat's first \
 user message): typing filters by title, full contents, and model name \
 deterministically (exact title match, then phrase, then all-words, then \
 fuzzy — no LLM involved), arrow keys select, Enter switches, Esc cancels; \
 /resume <text> \
 pre-fills the filter and /resume N switches to the N-th newest directly. \
-Resuming SWITCHES this REPL to the chosen session — its conversation, its \
+Resuming SWITCHES this REPL to the chosen chat — its conversation, its \
 log file, the model it last used and the directory it was working in all \
 become the current ones, and the chat being left is untouched (resume it \
-back the same way). It never merges two conversations. Session \
+back the same way). It never merges two conversations. Their log \
 files are append-only; /delete opens the same picker to permanently remove \
-an earlier session (conversation and audit log, y/N confirm — the current \
-session cannot be deleted). /new or /clear (or plain 'clear') starts a \
+an earlier chat (conversation and audit log, y/N confirm — the current \
+chat cannot be deleted). /new or /clear (or plain 'clear') starts a \
 fresh conversation and clears the screen; /model <name> switches the model \
-for this session and /model alone opens the same type-to-filter picker over \
+for this chat and /model alone opens the same type-to-filter picker over \
 installed Ollama models and the cloud providers (typing provider:model inside \
 the picker offers that exact cloud model as a selectable row); adding --save \
 persists the choice as the startup default in the config file, and \
 /model --save alone persists the current model; /jobs lists \
-background jobs; /help lists commands; /quit or /exit quits; /cd <dir> \
-moves the project directory AND re-anchors the session root there (user \
+background jobs; /chat shows this chat's log file (its older name /session \
+still works); /help lists commands; /quit or /exit quits; /cd <dir> \
+moves the project directory AND re-anchors this chat's root there (user \
 only — !cd is its alias; your commands always run in the project \
 directory and a bare cd from you is rejected); /add-dir <dir> \
-(alias /dir-add) adds another directory tree to the session roots.
+(alias /dir-add) adds another directory tree to this chat's roots.
 - Long-running commands (servers, watchers, big upgrades): set \
 background=true on run_command — it detaches, survives aish exiting, and \
 logs to a file you can tail with normal commands. The user can also detach a \
@@ -1586,7 +1599,7 @@ section of your context and the rest are searchable with recall. Legacy \
 one-line lessons from {lessons_path} still appear there too. When the user \
 asks about your learnings, quote the Memory section or search with recall. \
 For longer curated notes the user maintains, ~/.config/aish/AISH.md is \
-loaded each session.
+loaded at startup.
 - Multiline input: Enter submits; a newline is inserted by Ctrl+J, by ending \
 the line with a backslash then Enter, or by Option/Alt+Enter (in iTerm2 only \
 with "Left Option key: Esc+"); pasted text keeps its newlines.
@@ -1594,9 +1607,9 @@ with "Left Option key: Esc+"); pasted text keeps its newlines.
 autocompletes project files after '@'). The path is relative to the working \
 directory — when its contents matter to the task, read it with read_file \
 before answering.
-- Sessions: conversation + command audit trail logged to {state_dir}; \
-`aish --resume` opens the same session picker as /resume at launch (piped \
-input resumes the most recent session). When the user refers to earlier \
+- Chats: conversation + command audit trail logged to {state_dir}; \
+`aish --resume` opens the same picker as /resume at launch (piped \
+input resumes the most recent chat). When the user refers to earlier \
 work ("the fix from yesterday", "what went wrong last time"), use the \
 recall tool to find and read the relevant past conversation instead of \
 asking them to repeat it.
@@ -1753,14 +1766,14 @@ def _skill_cli(args: list[str]) -> int:
 
 
 def _explain_cli(args: list[str]) -> int:
-    """`aish explain <session> [turn] [--tools] [--context]` — what governed a turn (#214).
+    """`aish explain <chat> [turn] [--tools] [--context]` — what governed a turn (#214).
 
     Pure read: no model call, no rule file opened, nothing that could report how
     aish behaves TODAY instead of how it behaved then (docs/trace-contract.md §0).
     """
     from . import explain as explain_mod
 
-    usage = "usage: aish explain <session-name-or-path> [turn] [--tools] [--context]"
+    usage = "usage: aish explain <chat-name-or-log-path> [turn] [--tools] [--context]"
     flags = {"--tools", "--context"}
     show_tools = "--tools" in args
     show_context = "--context" in args
@@ -1777,11 +1790,11 @@ def _explain_cli(args: list[str]) -> int:
             return 2
     matches = explain_mod.resolve(rest[0])
     if not matches:
-        print(f"no session log matching {rest[0]!r} in {explain_mod.state_dir()}")
+        print(f"no chat log matching {rest[0]!r} in {explain_mod.state_dir()}")
         return 1
     if len(matches) > 1:
         # Never guess: a diagnosis about the wrong chat is worse than no answer.
-        print(f"{len(matches)} sessions match {rest[0]!r} — be more specific:")
+        print(f"{len(matches)} chats match {rest[0]!r} — be more specific:")
         for path in matches[-20:]:
             print(f"  {path.name}")
         return 2
@@ -1794,7 +1807,7 @@ def _explain_cli(args: list[str]) -> int:
 
 
 def _usage_cli(args: list[str]) -> int:
-    """`aish usage [--days N] [--week] [--session X] [--json]` — what was spent
+    """`aish usage [--days N] [--week] [--chat X] [--json]` — what was spent
     and what filled the context (#262).
 
     Pure read, like `aish explain`: no model call, no live process state. It
@@ -1805,7 +1818,7 @@ def _usage_cli(args: list[str]) -> int:
     from . import explain as explain_mod
     from . import usage as usage_mod
 
-    usage_line = "usage: aish usage [--days N] [--week] [--session NAME] [--json]"
+    usage_line = "usage: aish usage [--days N] [--week] [--chat NAME] [--json]"
     days: int | None = 7
     target = ""
     as_json = "--json" in args
@@ -1821,7 +1834,8 @@ def _usage_cli(args: list[str]) -> int:
             days = int(value)
         elif flag == "--all":
             days = None
-        elif flag == "--session" and rest:
+        # --session is the pre-#260 spelling and stays accepted (#260).
+        elif flag in ("--chat", "--session") and rest:
             target = rest.pop(0)
         else:
             print(usage_line)
@@ -1829,11 +1843,11 @@ def _usage_cli(args: list[str]) -> int:
     if target:
         matches = explain_mod.resolve(target)
         if not matches:
-            print(f"no session log matching {target!r} in {explain_mod.state_dir()}")
+            print(f"no chat log matching {target!r} in {explain_mod.state_dir()}")
             return 1
         if len(matches) > 1:
             # Never guess: a cost report about the wrong chat is worse than none.
-            print(f"{len(matches)} sessions match {target!r} — be more specific:")
+            print(f"{len(matches)} chats match {target!r} — be more specific:")
             for path in matches[-20:]:
                 print(f"  {path.name}")
             return 2
@@ -1904,7 +1918,7 @@ def main() -> int:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="pick an earlier session to continue (same picker as /resume; "
+        help="pick an earlier chat to continue (same picker as /resume; "
         "resumes the latest when input is piped)",
     )
     args = parser.parse_args()
@@ -1951,7 +1965,7 @@ def main() -> int:
             # silently assuming the most recent session.
             entries = SessionLog.load_entries(state_dir)
             if not entries:
-                print(f"{DIM}no previous session found — starting fresh{RESET}")
+                print(f"{DIM}no previous chat found — starting fresh{RESET}")
             else:
                 selected = _box.pick(
                     lambda query: SessionLog.rank(entries, query),
@@ -1964,7 +1978,7 @@ def main() -> int:
         else:  # pipes/scripts can't pick — keep resuming the latest
             chosen = SessionLog.latest(state_dir)
             if chosen is None:
-                print(f"{DIM}no previous session found — starting fresh{RESET}")
+                print(f"{DIM}no previous chat found — starting fresh{RESET}")
         if chosen is not None:
             history, recorded_spec, *_ = SessionLog._parse(chosen)
             log = SessionLog(chosen)
@@ -2015,8 +2029,8 @@ def main() -> int:
         return cwd, [Path(cwd).resolve()]
 
     def get_session_prefixes() -> set[str]:
-        # The agent owns the 's' allowances so a session switch drops them with
-        # the roots (#176); before it exists nothing has been allowed yet.
+        # The agent owns the 'c'/'s' allowances so a session switch drops them
+        # with the roots (#176); before it exists nothing has been allowed yet.
         return agent_holder[0].session_prefixes if agent_holder else set()
 
     def trust_dir(path: str) -> str:
@@ -2150,7 +2164,7 @@ def main() -> int:
         return 0
 
     if not history:  # a resumed session continues where it was — no big banner
-        print(banner(f"model {args.model} · session {log.path.name} · /help · Ctrl-D quits"))
+        print(banner(f"model {args.model} · {log.path.name} · /help · Ctrl-D quits"))
     # quick-reply menu from the last answer; seeded from a resumed final answer (#167)
     pending_chips: list[tuple[str, str]] = resumed_chips
     while True:

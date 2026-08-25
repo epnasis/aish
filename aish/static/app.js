@@ -8206,7 +8206,7 @@ const SLASH_COMMANDS = [
   ["/jobs", "list background jobs"],
   ["/browser", "open a page — or type anything to search — in aish's own browser"],
   ["/browser anon", "the separate profile web searches are read with"],
-  ["/session", "show this chat's log path (copyable)"],
+  ["/chat", "show this chat's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
   ["/explain", "the full record of a turn — what it was given, thought, ran and answered"],
   ["/help", "about aish web"],
@@ -8574,7 +8574,8 @@ function submitCommand() {
   input.focus(); // stay in the terminal, ready for the next command
 }
 
-const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit"]);
+// "/session" is the pre-#260 name for "/chat": off the menu, still dispatched.
+const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit", "/session"]);
 
 function handleSlash(text) {
   let [command, ...rest] = text.split(/\s+/);
@@ -8646,7 +8647,7 @@ function handleSlash(text) {
       openBrowserView(arg);
       return true;
     }
-    case "/session": copyLogPath(); return true; // path came in on hello (#146)
+    case "/chat": case "/session": copyLogPath(); return true; // path came in on hello (#146)
     case "/mic": openMicSheet(); return true;
     // The second door to the dossier, and not a fallback: a turn that ran
     // nothing may have no trace card, and a turn older than the bounded first
