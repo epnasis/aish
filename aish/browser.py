@@ -1353,6 +1353,27 @@ class _Owner:
         """Record what this page downloads. Registered for EVERY page."""
         page.on("download", lambda download: self.downloads.append((page, download)))
 
+    def claimable(self, page: Any, *, browse_page: Any) -> bool:
+        """Whether `browse_page`'s chat may take `page` as its own.
+
+        A page a `read` opened belongs to the read, which CLOSES it on its way
+        out; a page another chat is standing on belongs to that chat. Anything
+        else on the context is this session's — including the popup that lived
+        for half a second.
+
+        Asked in one place because both callers ask it about the same set and a
+        second phrasing is what produced #291: a new tab was adopted with no
+        exclusion at all, so a read landing inside a press window moved the
+        chat onto the reader's tab and the read then closed it."""
+        if page is browse_page:
+            return True
+        others = {
+            session.page
+            for session in self.browse_pages.values()
+            if session.page is not browse_page
+        }
+        return page not in self.read_pages and page not in others
+
     def take_downloads(
         self, *, read_page: Any = None, browse_page: Any = None
     ) -> list[Any]:
@@ -1363,20 +1384,13 @@ class _Owner:
         keeps the ephemeral popup counting (the `target=_blank` download tab
         Chrome closes the instant the transfer starts) without handing it to
         whichever chat happened to snapshot next."""
-        others = {
-            session.page
-            for session in self.browse_pages.values()
-            if session.page is not browse_page
-        }
         keep: list[tuple[Any, Any]] = []
         mine: list[Any] = []
         for page, download in self.downloads:
             if read_page is not None:
                 claim = page is read_page
             else:
-                claim = page is browse_page or (
-                    page not in self.read_pages and page not in others
-                )
+                claim = self.claimable(page, browse_page=browse_page)
             (mine if claim else keep).append(download if claim else (page, download))
         self.downloads = keep
         return mine
@@ -3230,9 +3244,20 @@ async def _adopt_new_tab(
 
     Otherwise the model presses "Pobierz e-fakturę", the document opens beside
     it, and the snapshot faithfully reports the page it was already on — which
-    reads as "nothing happened"."""
+    reads as "nothing happened".
+
+    Only a tab this session may CLAIM (#291). A concurrent `read` opens its own
+    page on the same context and closes it in its `finally`, so adopting one
+    left the chat holding a page that no longer existed and answering
+    NOTHING_OPEN on its next act."""
     try:
-        opened = [p for p in page.context.pages if p not in before and not p.is_closed()]
+        opened = [
+            p
+            for p in page.context.pages
+            if p not in before
+            and not p.is_closed()
+            and owner.claimable(p, browse_page=page)
+        ]
     except Exception:  # noqa: BLE001 — no context to ask is no new tab
         return page
     if not opened:

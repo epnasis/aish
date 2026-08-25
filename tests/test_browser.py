@@ -2670,6 +2670,116 @@ class TestAChatGetsItsOwnTab:
         assert owner.held() is False, "every chat idle collects it"
 
 
+class TestAReadsTabIsNotAdopted:
+    """#291. A `read` opens its own page on the SAME context and closes it in
+    its `finally`. `_adopt_new_tab` excluded nothing, so a read landing inside
+    a press window moved the chat onto the reader's tab — and the read then
+    closed it, leaving the chat pointing at a page that no longer exists and
+    answering NOTHING_OPEN on its next act.
+
+    The interleaving is the test: the tab appears BETWEEN the press and the
+    adopt, which is the only window in which it is indistinguishable from a
+    tab the press itself opened."""
+
+    class Context:
+        def __init__(self):
+            self.pages = []
+
+    class FakePage:
+        def __init__(self, context, url="https://eon.pl/mojeon"):
+            self.url = url
+            self.closed = False
+            self._context = context
+            context.pages.append(self)
+
+        def is_closed(self):
+            return self.closed
+
+        @property
+        def context(self):
+            return self._context
+
+        async def wait_for_load_state(self, *a, **k):
+            pass
+
+        async def close(self):
+            self.closed = True
+
+    def _drive(self, monkeypatch, during):
+        """One click, with `during` running between the press and the adopt."""
+        from aish import browse as browse_mod
+
+        context = self.Context()
+        page = self.FakePage(context)
+        owner = _owner_on(page)
+
+        async def snapshot(_owner, session, *, problem="", notice="", asked="",
+                           match="", started_work=False):
+            return browse_mod.Snapshot(
+                url=session.page.url, title="", text="", problem=problem
+            )
+
+        async def press(_page, _target, *, mutating, href):
+            during(owner, context)
+            return ""
+
+        live = [{"n": 1, "kind": "button", "name": "Pobierz e-fakturę"}]
+        monkeypatch.setattr(
+            browser, "_enumerate", lambda p, m="": _done((live, 1, 0, 0, ""))
+        )
+        monkeypatch.setattr(browser, "_snapshot", snapshot)
+        monkeypatch.setattr(browser, "_find", lambda p, n: _done((f"locator-{n}", True)))
+        monkeypatch.setattr(browser, "_reachable_now", lambda t: _done(""))
+        monkeypatch.setattr(browser, "_centre", lambda t: _done(None))
+        monkeypatch.setattr(browser, "_dismiss_consent", lambda p: _done(None))
+        monkeypatch.setattr(browser, "_press", press)
+        monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        browser.browse_act("Pobierz e-fakturę", "click")
+        return owner, page, context
+
+    def test_the_chat_keeps_its_page_when_a_read_opens_one_mid_press(
+        self, monkeypatch
+    ):
+        reads = []
+
+        def a_read_starts(owner, context):
+            read_page = self.FakePage(context, url="https://imdb.com/ratings")
+            owner.read_pages.add(read_page)
+            reads.append(read_page)
+
+        owner, page, _ = self._drive(monkeypatch, a_read_starts)
+        assert owner.browse_pages[""].page is page
+
+        # …and the read ends the way every read ends: it closes its page.
+        owner.read_pages.discard(reads[0])
+        _run(reads[0].close())
+        session = _run(browser._session(owner, "", opening=False))
+        assert session.page is page, "the chat was left on the page a read closed"
+
+    def test_a_tab_the_press_itself_opened_is_still_adopted(self, monkeypatch):
+        """The behaviour the adopt exists for (#246): the e-invoice opens
+        beside the page, and reporting the page it was already on reads as
+        "nothing happened"."""
+        opened = []
+
+        def a_popup_opens(owner, context):
+            opened.append(self.FakePage(context, url="https://eon.pl/faktura.pdf"))
+
+        owner, page, _ = self._drive(monkeypatch, a_popup_opens)
+        assert owner.browse_pages[""].page is opened[0]
+
+    def test_another_chats_new_tab_is_not_adopted_either(self, monkeypatch):
+        """Same exclusion, the other half of it: a chat that opened its own tab
+        inside this press window owns that tab (#272)."""
+        def another_chat_opens(owner, context):
+            other = self.FakePage(context, url="https://qatarairways.com/")
+            owner.browse_pages["chat-b"] = browser._Session(other)
+
+        owner, page, _ = self._drive(monkeypatch, another_chat_opens)
+        assert owner.browse_pages[""].page is page
+
+
 class TestOneDefinitionOfAFinishedPage:
     """#251. The owner's screen and the model's read ask the same question —
     "has this page finished?" — and used to answer it separately: a watcher
