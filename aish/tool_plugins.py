@@ -166,15 +166,53 @@ def output_caps(window_tokens: int) -> tuple[int, int]:
     return head, budget - head
 
 
+# Where a cached output CAME FROM, written beside it at store time (#314).
+#
+# A continuation is served bannerless: the store holds the page BODY and the
+# untrusted-content banner is prepended by whoever presents it, so the reader
+# cannot tell a fetched page from shell output by looking at the bytes.
+# Sniffing for the banner there would be the same mistake as deriving offered
+# links by substring search (#294) — whether text came from outside is known
+# when it is captured, so it travels WITH the entry instead of being re-derived
+# from a string on a later, colder code path.
+@dataclass(frozen=True)
+class ContinuationSource:
+    """`tool` produced these bytes; `untrusted` says they came from outside
+    this machine (#277); `offers` says addresses in them are the SOURCE's
+    rather than aish's (#294/#313), with None meaning the bytes carry their own
+    banner and the reader partitions them as it always did; `source` is the URL
+    the producing call requested, which is aish's echo and not a link the page
+    showed."""
+
+    tool: str
+    untrusted: bool
+    offers: bool | None
+    source: str = ""
+
+
+# Bytes with no record beside them: cached by an older aish, or a sidecar that
+# did not survive. Conservative in BOTH directions — outside content (so the
+# taint fence goes up, which is the half that does not fail safe) and nothing
+# offered (so no call is excused on text nobody attributed).
+UNKNOWN_CONTINUATION = ContinuationSource(tool="", untrusted=True, offers=False)
+
+# The sidecar rides next to the bytes rather than inside them: the file stays
+# purely content-addressed, so paging offsets are the text's own.
+_SOURCE_SUFFIX = ".src"
+
+
 # A key is the content digest, optionally carrying how much of that content the
-# model was ALREADY SHOWN. The suffix rides on the key rather than in a sidecar
-# file so the bytes stay purely content-addressed — two tools that produce the
-# same output still share one file, and pruning still has exactly one thing to
-# delete per cached output.
+# model was ALREADY SHOWN. The suffix rides on the key rather than beside it so
+# the bytes stay purely content-addressed — two tools that produce the same
+# output still share one file. It is also the one thing the model is HANDED, so
+# nothing that grants anything may be encoded here: provenance lives in the
+# sidecar above precisely because a key can be invented (#314).
 _KEY_RE = re.compile(r"([0-9a-f]{4,32})(?:s([0-9]{1,9}))?")
 
 
-def store_continuation(text: str, store_dir, shown: int | None = None) -> str:
+def store_continuation(
+    text: str, store_dir, shown: int | None = None, source: ContinuationSource | None = None
+) -> str:
     """Cache a full tool output and return its content-addressed key. Returns
     "" if the store is unwritable — a missing continuation degrades to today's
     dead end, which must never be an exception in the middle of a tool call.
@@ -184,7 +222,14 @@ def store_continuation(text: str, store_dir, shown: int | None = None) -> str:
     browse result is cut at `web.PAGE_MAX_CHARS` and has no idea what the
     agent's context window makes of `output_caps`; paging against the wrong
     anchor is the silent mid-output hole the docstring below exists to
-    prevent."""
+    prevent.
+
+    `source` is what the reader will not be able to see: the bytes are stored
+    below the banner, so the caller records here what the result said about
+    itself (#314). It overwrites any earlier record for the same digest, which
+    is safe because identical bytes offer identical links — and a caller that
+    cannot say gives None, leaving the reader its own conservative answer
+    rather than a claim nobody could make."""
     try:
         store = Path(store_dir)
         store.mkdir(parents=True, exist_ok=True)
@@ -194,6 +239,18 @@ def store_continuation(text: str, store_dir, shown: int | None = None) -> str:
             path.touch()  # refresh recency; the bytes are already right
         else:
             path.write_text(text, encoding="utf-8")
+        if source is not None:
+            (store / f"{digest}{_SOURCE_SUFFIX}").write_text(
+                json.dumps(
+                    {
+                        "tool": source.tool,
+                        "untrusted": source.untrusted,
+                        "offers": source.offers,
+                        "source": source.source,
+                    }
+                ),
+                encoding="utf-8",
+            )
         prune_continuations(store)
         return digest if shown is None else f"{digest}s{max(0, int(shown))}"
     except OSError:
@@ -235,11 +292,41 @@ def read_continuation(key: str, store_dir, page: int, head: int, tail: int) -> s
     return text[start : start + size]
 
 
+def continuation_source(key: str, store_dir) -> ContinuationSource | None:
+    """What the entry behind `key` says about where its bytes came from.
+
+    None when there is no entry at all — an invented or evicted key serves no
+    text, so there is nothing to attribute. `UNKNOWN_CONTINUATION` when the
+    bytes are there but nothing beside them says whose they are, which is the
+    fail-safe answer rather than the permissive one."""
+    parsed = _KEY_RE.fullmatch(key or "")
+    if parsed is None or store_dir is None:
+        return None
+    store = Path(store_dir)
+    if not (store / f"{parsed.group(1)}.txt").exists():
+        return None
+    try:
+        record = json.loads(
+            (store / f"{parsed.group(1)}{_SOURCE_SUFFIX}").read_text(encoding="utf-8")
+        )
+        return ContinuationSource(
+            tool=str(record["tool"]),
+            untrusted=bool(record["untrusted"]),
+            offers=None if record["offers"] is None else bool(record["offers"]),
+            source=str(record.get("source", "")),
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return UNKNOWN_CONTINUATION
+
+
 def prune_continuations(store_dir) -> None:
     """LRU-evict the continuation store. Best-effort by the same reasoning as
     media.prune: a file vanishing under us must not raise into a tool call."""
     try:
-        files = [p for p in Path(store_dir).iterdir() if p.is_file()]
+        # The sidecar is part of its entry, never an entry of its own: counting
+        # one would halve the store's real capacity and evicting one on its own
+        # would silently un-attribute bytes that are still there (#314).
+        files = [p for p in Path(store_dir).glob("*.txt") if p.is_file()]
     except OSError:
         return
     entries = []
@@ -259,6 +346,7 @@ def prune_continuations(store_dir) -> None:
             path.unlink()
         except OSError:
             continue
+        path.with_suffix(_SOURCE_SUFFIX).unlink(missing_ok=True)
         total -= size
         kept -= 1
 
@@ -636,7 +724,19 @@ def envelope(
 
     body = out
     if len(out) > head + tail:
-        key = store_continuation(out, store_dir) if store_dir else ""
+        # A wrapper is arbitrary code and the manifest never says where its
+        # bytes came from, so a plugin result is outside content — and it is
+        # never bannered, so page 2 of one offers exactly what page 1 did:
+        # nothing (#313, #314).
+        key = (
+            store_continuation(
+                out,
+                store_dir,
+                source=ContinuationSource(tool=name, untrusted=True, offers=False),
+            )
+            if store_dir
+            else ""
+        )
         body = _truncate(out, head, tail)
         meta["truncation"] = {
             "kept": head + tail,

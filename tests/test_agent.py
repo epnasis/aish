@@ -9857,6 +9857,269 @@ class TestProvenanceIsCapturedPerCallAndCommittedPerTurn:
         assert agent._tainted is True
 
 
+class TestAContinuationCarriesItsSourcesProvenance:
+    """#314. `read_tool_output` serves page 2+ out of the continuation store,
+    and the store holds the page BODY — the untrusted-content banner is
+    prepended by whoever presents it, and shell and plugin output go through
+    the same door. So #313's banner scan read every continuation as
+    unattributed text: page 2 of a listing stopped excusing the links page 1
+    excused, and a paged web read stopped raising taint at all.
+
+    The repair is #311's, one layer over. Whether text came from outside is
+    known when it is CAPTURED, so it travels with the cache entry; sniffing for
+    a banner on the way back out is the same class of mistake as #294's
+    substring search for offered links. Bannering the continuation would have
+    been wrong twice over — it would mark this machine's own shell output as
+    attacker-controlled, and it would say so on text no attacker wrote.
+    """
+
+    LIST_URL = "https://shop.example/list"
+    HEAD_LINK = "https://shop.example/offer?id=1111&ref=listing"
+    TAIL_LINK = "https://shop.example/offer?id=9999&ref=listing"
+
+    def _long_listing(self):
+        """A listing whose first offer is inside the cut and whose last offer
+        is past it. The tail line carries no ` → `, so `link_note` does not
+        lift it into page 1 — which is the whole point: it is reachable only by
+        paging."""
+        filler = "\n".join(f"item {n}: nothing to click" for n in range(1, 900))
+        return (
+            f"first offer → {self.HEAD_LINK}\n{filler}\nlast offer: {self.TAIL_LINK}\n"
+        )
+
+    def _stub_page(self, monkeypatch):
+        """The REAL presentation — banner, source header, cut and stash — with
+        only the fetch replaced. A hand-written stub would test the assertion
+        instead of the code that makes it true."""
+        page = self._long_listing()
+
+        def read_url(url, topic=None, **kwargs):
+            body = page if url == self.LIST_URL else "one offer, 34 zl"
+            return agent_module.web._present(url, body, [], cut=kwargs.get("cut"))
+
+        monkeypatch.setattr(agent_module.web, "read_url", read_url)
+        return page
+
+    @staticmethod
+    def _offered_key(messages):
+        """The key aish offered, read off the cut notice — a real model has no
+        other way to know it either."""
+        for message in reversed(messages):
+            found = re.search(
+                r'read_tool_output\(continuation="([^"]+)"', str(message.get("content", ""))
+            )
+            if found:
+                return found.group(1)
+        raise AssertionError("no continuation key was offered")
+
+    def test_page_two_of_a_read_excuses_what_page_one_excused(self, monkeypatch):
+        """The key test. One read, cut in half: a link on page 1 is followed
+        without a card, and the identical link on page 2 must be too. The gate
+        answering the same question two ways for a reason nothing on screen
+        explains is the #294 complaint, one layer over."""
+        self._stub_page(monkeypatch)
+        asked: list = []
+        script = self
+
+        class PagingChat:
+            step = 0
+            calls: list = []
+
+            def __call__(self, **kwargs):
+                self.calls.append(kwargs)
+                PagingChat.step += 1
+                if PagingChat.step == 1:
+                    return model_says(
+                        tool_calls=[tool_call("read_url", url=script.LIST_URL)]
+                    )
+                if PagingChat.step == 2:
+                    key = script._offered_key(kwargs["messages"])
+                    return model_says(tool_calls=[
+                        tool_call("read_tool_output", continuation=key, page=2)
+                    ])
+                if PagingChat.step == 3:
+                    return model_says(
+                        tool_calls=[tool_call("read_url", url=script.TAIL_LINK)]
+                    )
+                return model_says("the last offer is 34 zl")
+
+        agent = Agent(
+            model="fake",
+            approve=lambda _cmd: True,
+            client_chat=PagingChat(),
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or True,
+        )
+        agent.run_task(f"read {self.LIST_URL} and price the LAST offer")
+
+        assert self.HEAD_LINK in agent._offered_links  # page 1, as before
+        assert self.TAIL_LINK in agent._offered_links  # page 2, restored
+        assert agent._url_was_offered(self.TAIL_LINK)
+        assert asked == []
+
+    def test_a_continuation_offers_only_what_its_own_source_showed(self, monkeypatch):
+        """The bound on the relaxation, stated as a test: page 2 excuses the
+        addresses in page 2, and an address COMPOSED from one of them is a
+        different string and still draws a card. That property is what makes
+        the excuse sound at all — smuggling appends."""
+        self._stub_page(monkeypatch)
+        composed = self.TAIL_LINK + "&iban=PL61109010140000071219812874"
+        asked: list = []
+        script = self
+
+        class PagingChat:
+            step = 0
+            calls: list = []
+
+            def __call__(self, **kwargs):
+                self.calls.append(kwargs)
+                PagingChat.step += 1
+                if PagingChat.step == 1:
+                    return model_says(
+                        tool_calls=[tool_call("read_url", url=script.LIST_URL)]
+                    )
+                if PagingChat.step == 2:
+                    key = script._offered_key(kwargs["messages"])
+                    return model_says(tool_calls=[
+                        tool_call("read_tool_output", continuation=key, page=2)
+                    ])
+                if PagingChat.step == 3:
+                    return model_says(tool_calls=[tool_call("read_url", url=composed)])
+                return model_says("stopped")
+
+        agent = Agent(
+            model="fake",
+            approve=lambda _cmd: True,
+            client_chat=PagingChat(),
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or False,
+        )
+        agent.run_task(f"read {script.LIST_URL}")
+        assert not agent._url_was_offered(composed)
+        assert asked and "shop.example" in asked[0]
+
+    def test_paging_a_web_read_raises_the_taint_fence(self, monkeypatch):
+        """The half that does not fail safe, and the reason it leads. Taint is
+        per TASK; the store outlives the task. So a page fetched in one task
+        and PAGED in the next brought the outside in while the fence stayed
+        down for the whole of that second task — attended, that is
+        `_egress_gate` returning on its first line however hostile the page
+        was (#277)."""
+        self._stub_page(monkeypatch)
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url=self.LIST_URL)]),
+                model_says("read the first page"),
+            ],
+            approve_tool=lambda *a, **k: True,
+        )
+        agent.run_task(f"read {self.LIST_URL}")
+        key = self._offered_key(agent.messages)
+
+        chat.responses = [
+            model_says(tool_calls=[
+                tool_call("read_tool_output", continuation=key, page=2)
+            ]),
+            model_says("read the rest"),
+        ]
+        agent.run_task("now read the rest of it")
+        assert agent._tainted is True
+        assert self.TAIL_LINK in agent._offered_links
+
+    def test_paging_shell_output_taints_nothing_and_offers_nothing(self):
+        """The reason the continuation may not simply be bannered: the same
+        store pages this machine's OWN output through the same door. Marking it
+        untrusted would teach the model to discount its own shell, and would
+        put an injection banner on text no attacker wrote."""
+        linked = "https://shop.example/offer?id=8891&ref=listing"
+        agent, chat = make_agent([])
+        message = {
+            "role": "tool",
+            "tool_name": "run_command",
+            "content": "a local log mentioning " + linked + "\n" + ("x" * 4000),
+        }
+        key = agent._trim_tool_message(message)
+        assert key
+
+        chat.responses = [
+            model_says(tool_calls=[
+                tool_call("read_tool_output", continuation=key, page=1)
+            ]),
+            model_says("read the log"),
+        ]
+        agent.run_task("page the log back")
+        served = tool_messages(agent.messages)[-1]["content"]
+        assert linked in served
+        assert agent_module.web.UNTRUSTED_NOTE not in served
+        assert agent._tainted is False
+        assert agent._offered_links == set()
+
+    def test_paging_plugin_output_offers_nothing_but_is_still_outside_content(
+        self, tmp_path, monkeypatch
+    ):
+        """A plugin result is unbannered, so page 1 offered nothing and page 2
+        must offer nothing either — but a wrapper is arbitrary code and the
+        manifest never says where its bytes came from, so paging it is outside
+        content exactly as the first call was."""
+        linked = "https://shop.example/offer?id=8891&ref=listing"
+        out = "a wrapper printing " + linked + "\n" + ("y" * 20000)
+        key = tool_plugins.store_continuation(
+            out,
+            tmp_path,
+            source=tool_plugins.ContinuationSource(
+                tool="weather", untrusted=True, offers=False
+            ),
+        )
+        agent, chat = make_agent([])
+        monkeypatch.setattr(agent, "tool_output_dir", tmp_path)
+        chat.responses = [
+            model_says(tool_calls=[
+                tool_call("read_tool_output", continuation=key, page=1)
+            ]),
+            model_says("read it"),
+        ]
+        agent.run_task("page the wrapper output back")
+        assert linked in tool_messages(agent.messages)[-1]["content"]
+        assert agent._offered_links == set()
+        assert agent._tainted is True
+
+    def test_bytes_with_no_record_beside_them_are_treated_as_outside_content(
+        self, tmp_path, monkeypatch
+    ):
+        """Entries cached before this shipped carry no record. The fail-safe
+        answer is BOTH conservative directions at once: outside content, so the
+        fence goes up, and nothing offered, so nothing is excused on text
+        nobody attributed."""
+        linked = "https://shop.example/offer?id=8891&ref=listing"
+        key = tool_plugins.store_continuation(
+            "an unattributed cache entry mentioning " + linked, tmp_path
+        )
+        agent, chat = make_agent([])
+        monkeypatch.setattr(agent, "tool_output_dir", tmp_path)
+        chat.responses = [
+            model_says(tool_calls=[
+                tool_call("read_tool_output", continuation=key, page=1)
+            ]),
+            model_says("read it"),
+        ]
+        agent.run_task("page it back")
+        assert agent._tainted is True
+        assert agent._offered_links == set()
+
+    def test_a_key_that_serves_no_text_attributes_nothing(self, monkeypatch):
+        """An unknown key, and a page past the end, answer with aish's OWN
+        sentence. Attributing those to a source would re-open #313 through the
+        back door — one of them names an aish install URL."""
+        agent, chat = make_agent([])
+        chat.responses = [
+            model_says(tool_calls=[
+                tool_call("read_tool_output", continuation="deadbeef", page=2)
+            ]),
+            model_says("that key is gone"),
+        ]
+        agent.run_task("page something back")
+        assert agent._tainted is False
+        assert agent._offered_links == set()
+
+
 class TestSearchingIsReading:
     """#293. Finding information is the first half of reading it, so a search
     is a read whichever tool performs it — `web_search`, or a site's own search

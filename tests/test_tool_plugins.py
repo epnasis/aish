@@ -873,3 +873,54 @@ class TestContinuation:
         assert tp.read_continuation("deadbeef", tmp_path / "nope", 2, 600, 200) is None
         assert tp.read_continuation("../etc/passwd", tmp_path, 2, 600, 200) is None
         assert tp.read_continuation("deadbeefs12s3", tmp_path, 2, 600, 200) is None
+
+
+class TestACachedOutputCarriesWhereItCameFrom:
+    """#314. A continuation is served bannerless — the store holds the page
+    BODY and the untrusted-content banner is prepended by whoever presents it —
+    so the reader cannot tell a fetched page from shell output by looking at
+    the bytes. The fact travels WITH the entry instead."""
+
+    def test_the_record_survives_the_round_trip(self, tmp_path):
+        source = tp.ContinuationSource(
+            tool="read_url", untrusted=True, offers=True, source="https://shop.example/list"
+        )
+        key = tp.store_continuation("a listing\n" * 500, tmp_path, shown=120, source=source)
+        assert tp.continuation_source(key, tmp_path) == source
+
+    def test_bytes_with_no_record_are_unknown_rather_than_trusted(self, tmp_path):
+        """The fail-safe answer, in both directions at once: outside content so
+        the taint fence goes up, and nothing offered so nothing is excused on
+        text nobody attributed."""
+        key = tp.store_continuation("cached by an older aish", tmp_path)
+        assert tp.continuation_source(key, tmp_path) == tp.UNKNOWN_CONTINUATION
+        assert tp.UNKNOWN_CONTINUATION.untrusted is True
+        assert tp.UNKNOWN_CONTINUATION.offers is False
+
+    def test_a_key_with_no_entry_attributes_nothing(self, tmp_path):
+        """No entry means no text was served, so there is nothing to attribute
+        — which is a different answer from `UNKNOWN_CONTINUATION`, and must not
+        taint a task that read nothing."""
+        assert tp.continuation_source("deadbeef", tmp_path) is None
+        assert tp.continuation_source("../etc/passwd", tmp_path) is None
+        assert tp.continuation_source("", tmp_path) is None
+
+    def test_the_record_is_part_of_its_entry_and_never_an_entry_itself(
+        self, tmp_path, monkeypatch
+    ):
+        """Counting a sidecar as an entry would halve the store's real
+        capacity, and evicting one on its own would silently un-attribute bytes
+        that are still there — which is the failure this whole issue is."""
+        monkeypatch.setattr(tp, "CONTINUATION_MAX_FILES", 3)
+        source = tp.ContinuationSource(tool="read_url", untrusted=True, offers=True)
+        keys = [
+            tp.store_continuation(f"page {n}\n" * 20, tmp_path, source=source)
+            for n in range(6)
+        ]
+        assert len(list(tmp_path.glob("*.txt"))) == 3
+        # Every surviving entry still knows where it came from, and no record
+        # outlived the bytes it describes.
+        alive = [k for k in keys if tp.continuation_source(k, tmp_path) is not None]
+        assert len(alive) == 3
+        assert all(tp.continuation_source(k, tmp_path) == source for k in alive)
+        assert len(list(tmp_path.glob("*.src"))) == 3
