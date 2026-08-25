@@ -444,24 +444,34 @@ def prune_downloads(directory: Any, keep_bytes: int = DOWNLOADS_KEEP_BYTES) -> l
 # reason would drift between them, and both of them would be quoting a sentence
 # nobody could search for.
 #
-# There are exactly four, and each is a different fact about the same absence:
+# There are exactly four, and each is a different fact about the same absence.
+# TWO OF THEM ARE NO LONGER WRITTEN (#320) and are kept anyway: they are in
+# logs already on disk, and a reader that cannot render a word an older writer
+# emitted turns a recorded fact into a blank. Retiring a vocabulary entry means
+# retiring the WRITER, never the reading of it.
 
-# The page was showing a PASSWORD BOX. Named for what is on the page rather
-# than for "sign-in", because that is all the check can see: `input[type=
-# password]`, deliberately narrow, and NOT a test for whether a page is a login
-# — an email-first login's first step has no password field at all.
-NO_FRAME_PASSWORD = "password"
-# aish could not tell whether it did. The page would not answer the query, so
-# the capture refuses: the one case where aish does not know what it is looking
-# at must not be the case where it photographs it. Kept apart from `failed`
-# because they route to different repairs — a capture that broke, against a
-# page that would not say what it was.
-NO_FRAME_UNKNOWN = "unknown"
 NO_FRAME_HANDS = "hands"  # the owner's own hands were on the browser
 NO_FRAME_FAILED = "failed"  # the capture did not produce a stored picture
+
+# READ-ONLY since #320. The page was showing a password box, which used to be
+# refused on the grounds that a screenshot of a login form is the artifact that
+# must not exist — but aish never types a password on the browse path, so the
+# refused frame was an EMPTY form, and the refusal cost the one picture the
+# owner most needed when a sign-in failed.
+NO_FRAME_PASSWORD = "password"
+# READ-ONLY since #320. aish could not tell whether it did. This existed only
+# to resolve the question above safely; with that question gone it had no job
+# of its own, and a branch that looks load-bearing and is not is worse than no
+# branch. Still kept apart from `failed` when reading an older log: a capture
+# that broke and a page that would not say route to different repairs.
+NO_FRAME_UNKNOWN = "unknown"
+
 NO_FRAME_REASONS = frozenset(
     {NO_FRAME_PASSWORD, NO_FRAME_UNKNOWN, NO_FRAME_HANDS, NO_FRAME_FAILED}
 )
+# What a snapshot may still write today. Anything outside this is a reader's
+# concern only, and `test_only_two_reasons_are_still_written` pins the line.
+NO_FRAME_WRITTEN = frozenset({NO_FRAME_HANDS, NO_FRAME_FAILED})
 
 
 @dataclass
