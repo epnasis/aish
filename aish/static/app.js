@@ -1599,6 +1599,7 @@ function handle(event) {
     case "cwd_changed": renderWorkspace(event); break;
     case "job_list": $("ws-jobs").textContent = event.text || "—"; break;
     case "browser_view": onBrowserView(event); break;
+    case "browser_watch": onBrowserWatch(event); break;
     case "file_list": onFileList(event); break;
     case "session_state": onSessionState(event); break;
     case "session_deleted": onSessionDeleted(event); break;
@@ -8289,6 +8290,7 @@ const SLASH_COMMANDS = [
   ["/jobs", "list background jobs"],
   ["/browser", "open a page — or type anything to search — in aish's own browser"],
   ["/browser anon", "the separate profile web searches are read with"],
+  ["/watch", "see the page aish is on in this chat, as it works"],
   ["/chat", "show this chat's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
   ["/explain", "the full record of a turn — what it was given, thought, ran and answered"],
@@ -8730,6 +8732,11 @@ function handleSlash(text) {
       openBrowserView(arg);
       return true;
     }
+    // The same sheet, pointed at THIS CHAT's own tab and read-only (#289). A
+    // slash command rather than a chip or a card: `[CHIP-NEVER-COMMANDS]` is
+    // what keeps a fetched page from being able to open aish's browser sheet,
+    // and watch mode is a door into the same sheet.
+    case "/watch": openWatchView(); return true;
     case "/chat": case "/session": copyLogPath(); return true; // path came in on hello (#146)
     case "/mic": openMicSheet(); return true;
     // The second door to the dossier, and not a fallback: a turn that ran
@@ -12250,7 +12257,13 @@ function bvScheduleDetail() {
 }
 
 function bvRequestDetail() {
-  if ($("browser-sheet").hidden || !bvOpen) return;
+  // The SECOND of the two callers of `bvMayTouchPage`, and the reason the rule
+  // is a function rather than a line inside `bvSend`: this one deliberately
+  // bypasses that guard (below), so it would have bypassed the read-only rule
+  // with it. A watch frame is captured at the browse context's own density
+  // (1x, docs/browser.md) and there is no clip-recapture for it, so there is
+  // nothing to sharpen here besides.
+  if ($("browser-sheet").hidden || !bvOpen || !bvMayTouchPage()) return;
   const rect = bvVisiblePageRect();
   const density = bvFrameDensity();
   if (!rect || !density) return;
@@ -12349,6 +12362,7 @@ let bvBusyTimer = null;
  *  meant aish could not read ANY page until the 15-minute idle cap expired. */
 function bvEndIfOpen() {
   restoreConsoleFocus(); // a browser opened over the console hands typing back
+  bvEndWatch();          // ...and a watch dies with the sheet it was shown in
   if (!bvOpen) return;
   bvOpen = false;
   bvIdle();
@@ -12357,6 +12371,107 @@ function bvEndIfOpen() {
 }
 // [BROWSER-VIEW-END-END]
 
+// [BROWSER-WATCH-START]
+// Watch mode: the same sheet, pointed at the page THIS CHAT is driving, and
+// read-only (#289 slice 2). The owner asked for it in one sentence — "I
+// actually want to see what it does" — and until now the only account of what
+// aish did on a page was a developer's own Chrome.
+//
+// **`bvWatch` is what makes the sheet read-only, so it has ONE owner.** Set by
+// `openWatchView`, cleared by `bvEndWatch`, and read by `bvMayTouchPage` —
+// which is the whole of the rule. A stray writer here does not make the sheet
+// look wrong; it makes a tap reach the page the model is standing on, which
+// costs the model its own gate (see below).
+//
+// **Why read-only, since it is only a tap.** Every gate decision downstream is
+// made against the page as the MODEL was shown it: the submit card's form
+// values, the control classification, the act-time re-resolution fence. A
+// human scrolling changes the reachable set; a resize crosses a responsive
+// breakpoint and control names change. The act-time fence would then correctly
+// refuse each act and the flow becomes a refusal storm that reads as the model
+// flailing. Temporal separation is the only fix — stepping in is a later slice
+// with an approval of its own, and nothing here may anticipate it.
+//
+// **Nothing aish says is ever rendered inside the frame.** The frame is an
+// `<img>` of the site's own document and every word this mode writes goes to
+// `#bv-status`, outside it. Structural today, and stated because the residual
+// attack is the page painting "aish says: enter your card here" in pixels —
+// the answer to which is that nothing in aish's voice is ever composited in.
+//
+// **And watching relaxes nothing.** #295 P2: no control's safety argument may
+// contain "the owner will see it", and a live window is exactly the thing that
+// makes that argument tempting. A view is not a control.
+let bvWatch = "";   // the chat whose page this sheet WATCHES; "" while driving
+
+/** May the sheet send something that touches the remote page?
+ *
+ *  The one rule, in one place, with two callers — `bvSend` (every interaction:
+ *  click, scroll, goto, back, refresh, resize, the field editor) and
+ *  `bvRequestDetail` (which deliberately bypasses `bvSend`). `resize` is worth
+ *  naming: in watch mode it does not exist, because a resize would re-lay-out
+ *  the page under the model. */
+function bvMayTouchPage() { return bvWatch === ""; }
+
+/** What each `idle` reason says, in the owner's terms rather than the code's.
+ *  Four closed reasons, matching `browser.WATCH_*` — a free-text reason would
+ *  drift between the two ends, the same way `FRAME_ABSENT` would. */
+const WATCH_IDLE = {
+  "no-page": "aish is not on a page in this chat right now",
+  hands: "your own browser has the browser — aish's page here was closed",
+  "browser-off": "the browser is switched off",
+  failed: "could not get a picture of the page",
+};
+
+function openWatchView() {
+  if (!currentSession) { showToast("open a chat first"); return; }
+  // The owner's own browser and a watch are the same sheet in two modes, so
+  // entering one leaves the other. `/browser` outranks — it takes the whole
+  // Chrome — and `openBrowserView` ends the watch from its own side.
+  bvEndIfOpen();
+  bvWatch = currentSession;
+  bvProfile = "";
+  openSheet("browser-sheet");
+  $("browser-sheet").classList.add("bv-watching");
+  $("bv-frame").removeAttribute("src");
+  bvFocusRect = null;   // the driving view's outline belongs to a page nobody is on
+  bvResetZoom();
+  $("bv-url").value = "";
+  $("bv-url").readOnly = true;   // an address to READ; typing one would navigate
+  $("bv-empty").hidden = true;
+  $("bv-status").textContent = "watching this chat — looking for aish's page…";
+  send({ type: "browser_watch", action: "start" });
+}
+
+/** Stop watching. Idempotent, and safe when no watch was running — it hangs
+ *  off `bvEndIfOpen`, the one funnel every sheet dismissal already goes
+ *  through, for the reason that region records: a sheet can be dismissed four
+ *  ways and only the button ever told the server. */
+function bvEndWatch() {
+  if (!bvWatch) return;
+  bvWatch = "";
+  $("browser-sheet").classList.remove("bv-watching");
+  $("bv-url").readOnly = false;
+  send({ type: "browser_watch", action: "stop" });
+}
+
+function onBrowserWatch(event) {
+  // The session firewall already dropped a frame belonging to another chat;
+  // this is the other half — a frame arriving after the sheet was closed, or
+  // after it was switched to driving, paints nothing.
+  if (!bvWatch || $("browser-sheet").hidden) return;
+  if (event.action === "idle") {
+    $("bv-frame").removeAttribute("src");
+    $("bv-status").textContent = WATCH_IDLE[event.reason] || "no picture";
+    return;
+  }
+  if (event.action !== "frame") return;
+  $("bv-frame").src = `data:image/jpeg;base64,${event.jpeg}`;
+  $("bv-url").value = event.url || "";
+  // Set as TEXT, and outside the picture: the title is the site's own words.
+  $("bv-status").textContent = event.title || event.url || "";
+}
+// [BROWSER-WATCH-END]
+
 function bvIdle() {
   bvBusy = false;
   clearTimeout(bvBusyTimer);
@@ -12364,6 +12479,7 @@ function bvIdle() {
 }
 
 function bvSend(message) {
+  if (!bvMayTouchPage()) return false; // watch mode is READ-ONLY ([BROWSER-WATCH])
   if (bvBusy) return false;           // one interaction in flight: frames must stay ordered
   bvBusy = true;
   $("bv-busy").hidden = false;
@@ -12448,6 +12564,17 @@ function onBrowserView(event) {
   // Saved, not asked: the checkbox was the question and he already answered
   // it. This is the receipt, with the one-tap way back out.
   if (event.saved) bvSavedSignin(event.saved);
+  // Opening his own browser relaunches the whole Chrome and takes every chat's
+  // page with it (#289). Saying so beats a chat quietly discovering, a minute
+  // later, that the page it was mid-flow on is gone — a toast, because it is
+  // news about somewhere else and there is nothing to decide about it.
+  if (event.closed_pages) {
+    showToast(
+      event.closed_pages === 1
+        ? "closed the page aish was on in 1 chat"
+        : `closed the pages aish was on in ${event.closed_pages} chats`,
+    );
+  }
   bvFocusRect = event.focus || null;
   bvPaint(false);   // re-clamp AND redraw the outline for the new geometry
   if (event.focus && event.focus.tapped && event.focus.editable) bvOpenEditor(event.focus);
@@ -12688,6 +12815,11 @@ function bvLabel(text) {
 }
 
 function openBrowserView(url, profile) {
+  // His own browser OUTRANKS a watch, and takes the whole Chrome with it: the
+  // server counts the chats whose page this is about to close and says so on
+  // the frame (`closed_pages`). Leaving the mode first is what puts the sheet
+  // back in its driving shape.
+  bvEndWatch();
   bvProfile = profile === "search" ? "search" : "";
   openSheet("browser-sheet");
   $("bv-frame").removeAttribute("src");
@@ -12819,6 +12951,15 @@ function wireBrowserView() {
       if (bvZoom.scale > 1) bvResetZoom();
       else bvZoomAt(2.5, e.clientX, e.clientY);
       bvScheduleDetail();
+      return;
+    }
+    if (!bvMayTouchPage()) {
+      // Watch mode ([BROWSER-WATCH]): a tap presses nothing. The timer is still
+      // armed, because zoom is client-side and stays — without it the second
+      // tap of a pair would take the first-tap path and double-tap would not
+      // zoom. No tap marker either: local feedback for an action that will not
+      // happen is a lie about what the tap did.
+      bvTapTimer = setTimeout(() => { bvTapTimer = null; }, BV_DOUBLE_TAP_MS);
       return;
     }
     const point = browserViewPoint(img, e.clientX, e.clientY);

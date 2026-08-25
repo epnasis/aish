@@ -560,6 +560,13 @@
     <button class="bv-x" data-close="browser-sheet" aria-label="close browser" title="close">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".7"/></svg>
     </button>
+    <!-- Watch mode (#289): the sheet is a WINDOW onto the page aish is driving
+         in this chat, not a browser you are holding. The badge says so, because
+         the two modes are pixel-identical otherwise and only one of them does
+         anything when you tap the page. CSS hides the nav row and the address
+         clear alongside it — there is nothing to go back to and nothing to
+         type, and a control that does nothing is worse than no control. -->
+    <span id="bv-watch-tag" class="bv-watch-tag">watching</span>
     <span class="bv-url-wrap">
       <!-- TEXT, not url, and inputmode text rather than url: this box takes a
            search phrase now, and iOS's URL keyboard trades the space bar for

@@ -5302,6 +5302,146 @@ async def _stop(
     return snapshot
 
 
+# --------------------------------------------- watching a chat's own tab (#289)
+#
+# A window onto the page the MODEL is driving, for an owner who otherwise has
+# no way to see it. Read-only, and deliberately NOT the remote view.
+#
+# **It is not the remote view because it cannot be.** `_open_view` tears the
+# whole read context down and relaunches it view-shaped: a fixed viewport and
+# `device_scale_factor` are LAUNCH arguments on a persistent context, and Chrome
+# locks the profile directory, so there is no way to point the existing sheet at
+# a browse tab. `close_now()` empties `browse_pages`, so opening `/browser`
+# destroys every chat's page. Watch mode must never do that — it is a window
+# onto a tab that already exists, so it photographs that tab where it stands.
+#
+# **What it does to the page, in full: it takes a screenshot, and it reads the
+# address, the title, and whether the tab is still open.** Nothing else, and
+# `TestWatchingTheTabTheModelIsDriving` pins that as a LIST rather than as an
+# intention — its fake page raises on every other attribute, so a verb this
+# ever grows fails there first. No resize, no scroll, no click, no
+# keyboard, and nothing injected — not even the activity probe `_WATCH_JS`
+# installs for the remote view, which is why this polls on a plain interval
+# rather than reusing `watch_step`. The reason is semantic and must not be
+# "improved" on: every gate decision downstream is made against the page as the
+# MODEL was shown it, so a human scrolling changes the reachable set and a
+# resize crosses a responsive breakpoint and renames controls. The act-time
+# fence would then correctly refuse each act, and the flow becomes a refusal
+# storm that reads as the model flailing. Temporal separation is the only fix,
+# and stepping in is a later slice with its own approval.
+#
+# **A picture is a VIEW, never a control.** Nothing in the browse gate, the
+# act-time fence, the irreversible refusals or the host grant may be relaxed,
+# widened or checked less carefully because the owner can now watch — #295 P2
+# is explicit that "he will see it" is not a safety argument, and this is
+# exactly the place someone would be tempted to make it.
+#
+# **Nothing is stored.** `_evidence_frame` writes one file per snapshot into a
+# store with its own cap (#318); a watch stream at one frame a second would
+# turn that store over in minutes. These bytes go to the socket and nowhere
+# else — no `media.store` call exists on this path.
+#
+# **And it never keeps a tab alive.** `session.touched` is deliberately not
+# updated here: watching consents to nothing and changes nothing, including how
+# long the reaper leaves the page open.
+
+# Why a picture is not being sent. A closed vocabulary because the client turns
+# each one into a different sentence, and they route to different repairs.
+WATCH_NO_BROWSER = "browser-off"   # disabled, or unavailable on preview
+WATCH_HANDS = "hands"              # the owner's own /browser view has the browser
+WATCH_NO_PAGE = "no-page"          # this chat is not on a page right now
+WATCH_FAILED = "failed"            # the capture did not come back
+
+
+@dataclass
+class WatchFrame:
+    """One live look at the page a chat is driving. Never stored, never logged.
+
+    Deliberately carries no width/height: the remote view needs those to map a
+    tap into page coordinates, and there is no tap here. Not carrying them is
+    the cheapest possible statement that nothing on this path can address a
+    point on the page."""
+
+    jpeg: bytes
+    url: str
+    title: str
+
+
+def browse_watch_frame(
+    key: str = "", *, timeout: float = 20.0
+) -> tuple[WatchFrame | None, str]:
+    """(a picture of this chat's tab, or the reason there is none).
+
+    **The one refusal that is a safety property is the first branch:** never
+    while the owner's own hands are on the browser. `/browser` outranks watch
+    mode — it takes the whole context — and while `owner.view` is set there is
+    nothing of the model's left to photograph anyway. Written here, at the
+    capture, so it is one line rather than an ordering the callers have to keep.
+
+    A watcher NEVER launches Chrome. A poll that started the thing it polls
+    would bring a browser up on a machine nobody asked, which is the same rule
+    `_no_browser_yet` already keeps for the remote view's probe."""
+    if unavailable_reason():
+        return None, WATCH_NO_BROWSER
+    if _no_browser_yet():
+        return None, WATCH_NO_PAGE
+
+    async def job(owner: _Owner) -> tuple[WatchFrame | None, str]:
+        if owner.view is not None:
+            return None, WATCH_HANDS
+        session = owner.browse_pages.get(key)
+        if session is None:
+            return None, WATCH_NO_PAGE
+        page = session.page
+        try:
+            if page.is_closed():
+                return None, WATCH_NO_PAGE
+        except Exception:  # noqa: BLE001 — a page that cannot answer is gone
+            return None, WATCH_NO_PAGE
+        jpeg = await page.screenshot(
+            type="jpeg", quality=FRAME_JPEG_QUALITY, timeout=FRAME_TIMEOUT_MS
+        )
+        return (
+            WatchFrame(
+                jpeg=bytes(jpeg),
+                url=str(page.url or ""),
+                title=str(await page.title() or ""),
+            ),
+            "",
+        )
+
+    try:
+        return _submit(job, timeout)
+    except Exception:  # noqa: BLE001 — a look that failed is a look that failed
+        return None, WATCH_FAILED
+
+
+def browse_tab_count() -> int:
+    """How many chats hold a browse tab right now.
+
+    Only ever used to SAY WHAT IS ABOUT TO BE CLOSED: opening `/browser` tears
+    the context down and takes every one of these with it, and doing that
+    silently is the thing #289 asks it not to do. Never launches Chrome to
+    answer — with no browser running there is nothing to close."""
+    if _no_browser_yet():
+        return 0
+
+    async def job(owner: _Owner) -> int:
+        alive = 0
+        for session in owner.browse_pages.values():
+            try:
+                if not session.page.is_closed():
+                    alive += 1
+            except Exception:  # noqa: BLE001 — a page that cannot answer is gone
+                continue
+        return alive
+
+    try:
+        return int(_submit(job, 10.0))
+    except Exception:  # noqa: BLE001 — a count that cannot be taken claims nothing
+        return 0
+
+
 def browse_fields(*, key: str = "", timeout: float = 20.0) -> list:
     """The controls on the live page, without the page — for a card that has to
     say what a form currently HOLDS.

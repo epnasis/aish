@@ -245,6 +245,17 @@ recently — one row per site, so a run of searches doesn't bury everything else
 looked up, the way your own browser's does. `/browser forget <host>` stops
 treating a site as signed in and `/browser close` shuts it down.
 
+When aish is **driving** a page in a chat — pressing buttons, filling a form —
+`/watch` opens that same sheet as a **live window on the page it is on**, in
+that chat. You see what it is doing while it does it, and again when it moves
+on. It is a window and not a browser: nothing you do there touches the page.
+That is deliberate rather than shy — aish decides what to press from the page
+*as it was shown it*, so a scroll or a resize from your side would change what
+is reachable and make it refuse its own next step. Watching costs nothing, asks
+nothing and changes nothing; it runs only while the sheet is open. Opening your
+own browser with `/browser` takes the whole Chrome back, so it closes the page
+aish was on — and says how many chats that was.
+
 Searching has a **second, separate profile** that is signed into nothing — it
 is what `web_search` reads results pages with, so a search never carries your
 sessions and never needs your approval. `/browser anon` shows it;

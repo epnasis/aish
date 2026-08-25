@@ -60,6 +60,11 @@ const sandbox = {
   openSheet(name) { calls.push(`sheet:${name}`); },
   send(message) { calls.push(`send:${JSON.stringify(message)}`); return true; },
   bvSend(message) { calls.push(`bvSend:${JSON.stringify(message)}`); return true; },
+  // Opening HIS browser leaves watch mode first (#289): the two are one sheet
+  // in two modes, and `/browser` outranks. Stubbed here — the mode itself is
+  // pinned by test_browser_watch.js.
+  bvEndWatch() { calls.push("bvEndWatch"); },
+  openWatchView() { calls.push("openWatchView"); },
   bvResetZoom() {},
   bvViewportSize() { return { width: 1024, height: 1400 }; },
   openBrowserView: null,

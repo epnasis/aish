@@ -405,6 +405,25 @@ TRIGGER_RETRY_AFTER_S = 30      # Retry-After hint on either 429
 # threads cost only memory.
 WORKER_POOL_SIZE = 32
 
+# Live watch (#289 slice 2): how often a watcher photographs the page a chat is
+# driving. A capture measured ~27 ms on this browse context (docs/browser.md),
+# so one a second is under three percent of the owner loop the model's own acts
+# run on — and it is paid ONLY while a viewer has the sheet open, which is the
+# whole bound. There is no probe: the remote view's `_WATCH_JS` installs
+# observers INTO the document, and watch mode's guarantee is that it touches
+# nothing, so it trades a little wire traffic for that. Identical frames are
+# dropped before they reach the socket, so a still page costs no bytes at all.
+BROWSE_WATCH_INTERVAL_S = 1.0
+# And what a device that cannot keep up is allowed to accumulate. A frame is
+# ~67 KB and a client's outbox is unbounded, so a phone on a link slower than
+# the stream would grow a backlog of stale pictures for as long as the sheet is
+# left open. Past this, a tick SKIPS that client rather than queueing behind:
+# being shown fewer frames is the right way to be wrong about a live view, and
+# it self-corrects the moment the socket catches up. Counted over the whole
+# outbox rather than over frames alone — during a streaming answer that means
+# the transcript wins, which is also the right order.
+BROWSE_WATCH_MAX_BACKLOG = 8
+
 # Restart recovery (#164). A task killed mid-run (a deploy restart, a crash, an
 # OOM) has NOTHING to bring it back: a user chat sits half-answered until
 # somebody notices, and an automated one — an email trigger whose message the
@@ -1541,7 +1560,14 @@ with /learn \
 distills the conversation into saved skills/memory (an optional hint \
 follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \
 lessons file); the composer also accepts /model /resume /delete /new /fork \
-/cd /add-dir /jobs /help. To branch the conversation and explore a tangent \
+/cd /add-dir /jobs /watch /help. \
+When you are driving a page in this chat with browse/browse_act/browse_fill, \
+the user CAN see it: /watch opens a live, read-only window on the page you are \
+on, in this chat. Say so when they ask what a page looks like, say they cannot \
+see what you are doing, or doubt what you report a page said. It shows them \
+the page and changes nothing — it is not a way for them to click, type or \
+scroll on it, and it never interrupts you. \
+To branch the conversation and explore a tangent \
 without touching the current thread, the user types /fork (or /branch): it \
 copies the whole conversation so far into a NEW chat and switches there, \
 leaving this one untouched — tell them to use it when they want to try an \
@@ -1725,6 +1751,13 @@ class Client:
         self.outbox: asyncio.Queue = asyncio.Queue()
         self.viewing: Session | None = None
         self.sender: asyncio.Task | None = None
+        # The chat whose browse tab this connection is WATCHING (#289 slice 2),
+        # "" when it is not. Per-client and not per-session: a watcher exists
+        # because a screen is open, so it must die with that screen — which is
+        # what keeps a background flow from paying a screenshot tax nobody is
+        # looking at. Cleared by `_leave`, so leaving a chat drops the watch on
+        # it whether that was a switch or a disconnect.
+        self.watching = ""
 
 
 class Session:
@@ -1912,6 +1945,12 @@ class WebServer:
         # ONE, globally, because there is one view: a second would race the
         # first to capture the same page and send both frames.
         self._view_watch: asyncio.Task | None = None
+        # Live watch (#289 slice 2): one poll task per WATCHED CHAT, keyed by
+        # session name. Per chat rather than per client so two devices watching
+        # the same chat cost one stream of captures; the task ends itself the
+        # moment no client is watching that name, which is the whole of the
+        # "watchers run only while a viewer has the sheet open" rule.
+        self._browse_watchers: dict[str, asyncio.Task] = {}
         self.worker_pool = ThreadPoolExecutor(
             max_workers=WORKER_POOL_SIZE, thread_name_prefix="aish-worker"
         )
@@ -2018,6 +2057,12 @@ class WebServer:
         # cancel_futures (3.9+) drops anything still queued instead of
         # deadlocking shutdown on a thread that never returns.
         self._stop_watching()   # before the pool it polls through goes away
+        for client in self.clients:   # and every live watch, for the same reason
+            client.watching = ""
+        for task in list(self._browse_watchers.values()):
+            if not task.done():
+                task.cancel()
+        self._browse_watchers.clear()
         self.worker_pool.shutdown(wait=False, cancel_futures=True)
         for client in list(self.clients):
             with contextlib.suppress(Exception):
@@ -2347,6 +2392,12 @@ class WebServer:
         session's controller, control is released (controller = None) and a
         fresh `role` tells the remaining viewers nobody is driving now. A plain
         observer leaving changes no one's role, so it emits nothing."""
+        # A live watch belongs to the chat being LEFT (#289 slice 2), so it ends
+        # here rather than at each of the two callers. `_show` leaves before it
+        # attaches, so a session switch drops the watch; `_detach` leaves on the
+        # way out, so a closed socket does too. Before the early return, which
+        # is the first attach of a connection and a no-op for a watch.
+        self._unwatch(client)
         session = client.viewing
         if session is None:
             return
@@ -2553,6 +2604,11 @@ class WebServer:
             await self._browser(client, str(message.get("arg", "")).strip())
         elif kind == "browser_view":
             await self._browser_view(client, message)
+        elif kind == "browser_watch":
+            # VIEW message (#289 slice 2): watching costs nothing and consents
+            # to nothing, so it claims no control of the chat. #295 P1 — the
+            # unit of consent is a consequence, and looking has none.
+            await self._browse_watch(client, message)
         elif kind == "files":
             await self._send_files(client, str(message.get("query", "")))
         elif kind == "stop":
@@ -4226,6 +4282,18 @@ class WebServer:
             self._view_client = client
         elif action == "close":
             self._view_client = None
+        # The owner's browser OUTRANKS the model's tabs and must say what it
+        # takes (#289). `view_open` relaunches the context view-shaped, and
+        # `close_now` empties `browse_pages` — so every chat that was on a page
+        # loses it. Counted BEFORE the open, because afterwards there is nothing
+        # left to count, and only on a deliberate `open`: the reopen `view_act`
+        # performs on a reaped view is not a moment the owner chose. Watchers
+        # find out for themselves, from the capture's own `hands` refusal.
+        closed_pages = 0
+        if action == "open":
+            closed_pages = await loop.run_in_executor(
+                self.worker_pool, browser.browse_tab_count
+            )
 
         def run():
             if action == "recent":
@@ -4318,7 +4386,7 @@ class WebServer:
                 {"type": "browser_view", "action": "closed", "hosts": result}
             )
             return
-        await self._send_frame(client, result)
+        await self._send_frame(client, result, closed_pages=closed_pages)
         # An already-quiet page needs no correction (#223). `settled` is the
         # frame's own observation at the shutter — the document complete, still
         # for the watcher's own letting-go window, and nothing on the wire — so
@@ -4340,11 +4408,15 @@ class WebServer:
         self._view_watch = asyncio.ensure_future(self._watch_view(client, result))
         return
 
-    async def _send_frame(self, client: Client, result) -> None:
+    async def _send_frame(self, client: Client, result, *, closed_pages: int = 0) -> None:
         await client.ws.send_json(
             {
                 "type": "browser_view",
                 "action": "frame",
+                # How many chats' pages this open just closed (#289). Omitted
+                # when it is none, so an ordinary frame is byte-identical to
+                # what it always was.
+                **({"closed_pages": closed_pages} if closed_pages else {}),
                 "jpeg": base64.b64encode(result.jpeg).decode("ascii"),
                 "url": result.url,
                 "title": result.title,
@@ -4427,6 +4499,160 @@ class WebServer:
             raise
         except Exception:  # noqa: BLE001 — a watcher that fails just stops watching
             return
+
+    # ------------------------------------------ live watch (#289 slice 2)
+    #
+    # A read-only window onto the page THIS CHAT is driving, for an owner whose
+    # only account of what aish did on a page was, until slice 1, a developer's
+    # Chrome. It is a mode of the same sheet and it is emphatically NOT the
+    # remote view: `/browser` relaunches the whole context view-shaped and takes
+    # every chat's tab with it (docs/browser.md), so watch mode photographs the
+    # tab where it stands instead.
+    #
+    # **Read-only is enforced by the channel having no verb that touches a
+    # page.** `browser_watch` accepts `start` and `stop`, neither of which
+    # carries a coordinate, a key, a size or a URL — there is nothing here to
+    # express a click, a scroll, a keystroke or a resize with, and no
+    # `browse_*`/`view_*` function is reachable from this handler except the
+    # screenshot. That is the enforcement, not an ordering of checks.
+    #
+    # **A view is not a control (#295 P2).** Nothing anywhere may be relaxed,
+    # widened or checked less carefully because a screen is now open on it.
+
+    async def _browse_watch(self, client: Client, message: dict) -> None:
+        """Start or stop this connection's watch on the chat it is viewing."""
+        action = str(message.get("action", "")).strip()
+        if action == "stop":
+            self._unwatch(client)
+            return
+        if action != "start":
+            return
+        session = client.viewing
+        if session is None:
+            return
+        # The chat is the one on SCREEN, never one named in the message: a chat
+        # a client is not viewing is a chat it has no business photographing,
+        # and taking the name from the wire would be the one way to say so.
+        client.watching = session.name
+        task = self._browse_watchers.get(session.name)
+        if task is None or task.done():
+            self._browse_watchers[session.name] = asyncio.ensure_future(
+                self._watch_browse(session.name)
+            )
+
+    def _unwatch(self, client: Client) -> None:
+        """This connection stops watching. Safe when it never started."""
+        name, client.watching = client.watching, ""
+        if not name or any(c.watching == name for c in self.clients):
+            return
+        task = self._browse_watchers.pop(name, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _to_watchers(
+        self, name: str, event: dict, *, drop_when_behind: bool = False
+    ) -> int:
+        """Push one event to every connection watching `name`; how many took it.
+
+        Straight to each outbox rather than through the session's Bridge, for
+        the same reason console output is: a live frame is not transcript. It
+        must not be recorded, must not reach viewers who have no sheet open,
+        and must not be replayed — nothing here is ever stored, on the server
+        or in the log. Stamped with the session so app.js's existing firewall
+        drops a frame belonging to a chat that is no longer on screen (L5).
+
+        `drop_when_behind` is set for FRAMES and not for the one-line absences:
+        a client already `BROWSE_WATCH_MAX_BACKLOG` deep is skipped rather than
+        queued behind, because the outbox is unbounded and a frame is ~67 KB, so
+        a device on a link slower than the stream would otherwise accumulate
+        stale pictures for as long as the sheet is left open. The COUNT is what
+        makes that safe rather than a hole: the caller advances "what is on
+        screen" only when somebody took the picture, so the one watcher on a
+        slow link is offered the same frame again next tick instead of being
+        left looking at nothing on a page that has since stopped changing."""
+        taken = 0
+        for client in self.clients:
+            if client.watching != name:
+                continue
+            if drop_when_behind and client.outbox.qsize() >= BROWSE_WATCH_MAX_BACKLOG:
+                continue
+            client.outbox.put_nowait(event)
+            taken += 1
+        return taken
+
+    async def _watch_browse(self, name: str) -> None:
+        """Photograph one chat's browse tab while somebody is looking.
+
+        A plain interval, with no probe, and that is a deliberate trade against
+        `_watch_view` next door. The probe there is cheap because it installs a
+        MutationObserver and a PerformanceObserver INTO the document; watch
+        mode's whole guarantee is that it puts nothing into the page, so it pays
+        a capture instead. Identical bytes are dropped here rather than sent, so
+        a page that is not moving costs the loop ~27 ms a second and the socket
+        nothing.
+
+        Ends when nobody is watching, and only then — it has no timer of its own
+        and no cap, because the thing that bounds it is the sheet being open.
+        A chat with no page open is NOT an ending: aish is often between pages,
+        and a window that closed itself the moment the tab did would be shut
+        every time the model navigated."""
+        loop = asyncio.get_running_loop()
+        on_screen = b""
+        said = ""
+        try:
+            while True:
+                session = self.sessions.get(name)
+                if session is None or not any(c.watching == name for c in self.clients):
+                    return
+                frame, reason = await loop.run_in_executor(
+                    self.worker_pool,
+                    functools.partial(
+                        browser.browse_watch_frame, session.agent.browse_key
+                    ),
+                )
+                if frame is None:
+                    on_screen = b""
+                    # Only on a CHANGE of reason: repeating "nothing is open"
+                    # once a second is a stream of its own, and the sentence on
+                    # screen is already saying it.
+                    if reason != said:
+                        said = reason
+                        self._to_watchers(
+                            name,
+                            {
+                                "type": "browser_watch",
+                                "action": "idle",
+                                "reason": reason,
+                                "session": name,
+                            },
+                        )
+                elif frame.jpeg != on_screen:
+                    took = self._to_watchers(
+                        name,
+                        {
+                            "type": "browser_watch",
+                            "action": "frame",
+                            "jpeg": base64.b64encode(frame.jpeg).decode("ascii"),
+                            "url": frame.url,
+                            "title": frame.title,
+                            "session": name,
+                        },
+                        drop_when_behind=True,
+                    )
+                    # Only once somebody actually took it. A frame dropped for
+                    # backlog must stay offerable, or a slow client that missed
+                    # one would be left on a blank sheet the moment the page
+                    # stopped changing.
+                    if took:
+                        on_screen, said = frame.jpeg, ""
+                await asyncio.sleep(BROWSE_WATCH_INTERVAL_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a watcher that fails just stops watching
+            return
+        finally:
+            if self._browse_watchers.get(name) is asyncio.current_task():
+                del self._browse_watchers[name]
 
     async def _add_dir(self, client: Client, path: str) -> None:
         session = client.viewing

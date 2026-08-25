@@ -8,6 +8,7 @@ import asyncio
 import base64
 import contextlib
 import datetime
+import inspect
 import json
 import logging
 import os
@@ -8840,6 +8841,327 @@ class TestBrowserView:
             event = recv_until(ws, "browser_view")
             assert event["action"] == "error"
             assert "Playwright" in event["error"]
+
+    def test_opening_his_own_browser_says_what_it_closes(self, app_env, monkeypatch):
+        """`/browser` OUTRANKS the model's tabs and takes the whole Chrome with
+        it: `view_open` relaunches the context view-shaped and `close_now`
+        empties `browse_pages`. Doing that silently is the thing #289 asks it
+        not to do — a chat mid-flow simply discovers, a minute later, that its
+        page is gone.
+
+        Counted BEFORE the open, because afterwards there is nothing to count."""
+        from aish import browser as browser_module
+
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        monkeypatch.setattr(browser_module, "browse_tab_count", lambda: 2)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "open", "url": "https://x.pl"})
+            event = recv_until(ws, "browser_view")
+        assert event["closed_pages"] == 2
+
+    def test_an_ordinary_frame_claims_no_closures(self, app_env, monkeypatch):
+        """Omitted when it is none, so every other frame is byte-identical to
+        what it always was — and a zero would read as a claim that the count
+        was taken, which on any action but `open` it is not."""
+        from aish import browser as browser_module
+
+        calls = []
+        counted = []
+        self._fake_view(monkeypatch, calls)
+        monkeypatch.setattr(
+            browser_module, "browse_tab_count", lambda: counted.append(1) or 3
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "click", "x": 1, "y": 2})
+            event = recv_until(ws, "browser_view")
+        assert "closed_pages" not in event
+        assert counted == []   # a click closes nothing, so nothing is counted
+
+
+class TestBrowseWatch:
+    """Live watch (#289 slice 2): a read-only window onto the page THIS CHAT is
+    driving, for an owner who otherwise cannot see it.
+
+    It is a mode of the same sheet and emphatically not the remote view — that
+    one relaunches the whole context and destroys every chat's tab. The capture
+    itself is `browser.browse_watch_frame` (`tests/test_browser.py`); what is
+    driven here is the half that decides WHEN one is taken and WHO gets it.
+    """
+
+    JPEG = b"\xff\xd8first"
+    NEXT = b"\xff\xd8second"
+
+    def _fast(self, monkeypatch):
+        """Real loop, compressed clock. The interval is what makes the watcher
+        cheap on a live box; the decisions are what these tests are about."""
+        monkeypatch.setattr(server_module, "BROWSE_WATCH_INTERVAL_S", 0.005)
+
+    def _script(self, monkeypatch, results):
+        """Answer each poll from `results`, repeating the last one forever.
+        Records the browse key every poll asked about."""
+        from aish import browser as browser_module
+
+        asked = []
+
+        def watch(key):
+            asked.append(key)
+            i = min(len(asked) - 1, len(results) - 1)
+            return results[i]
+
+        monkeypatch.setattr(browser_module, "browse_watch_frame", watch)
+        return asked
+
+    def _frame(self, jpeg, url="https://eon.pl/mojeon", title="Moje eON"):
+        from aish import browser as browser_module
+
+        return (browser_module.WatchFrame(jpeg=jpeg, url=url, title=title), "")
+
+    def test_the_owner_sees_the_page_this_chat_is_driving(self, app_env, monkeypatch):
+        self._fast(monkeypatch)
+        asked = self._script(monkeypatch, [self._frame(self.JPEG)])
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "browser_watch", "action": "start"})
+            event = recv_until(ws, "browser_watch")
+            session = client.app.state.server.sessions[hello["session"]]
+        assert event["action"] == "frame"
+        assert base64.b64decode(event["jpeg"]) == self.JPEG
+        assert event["url"] == "https://eon.pl/mojeon"
+        assert event["title"] == "Moje eON"
+        # THE CHAT'S OWN TAB. The key is the chat's `BrowseView` key (#272), read
+        # off the agent rather than taken from the wire — a chat a client is not
+        # viewing is a chat it has no business photographing, and taking a name
+        # from the message would be the one way to say otherwise.
+        assert asked and asked[0] == session.agent.browse_key
+        # And the frame is STAMPED, so app.js's existing session firewall drops
+        # one belonging to a chat that is no longer on screen (L5).
+        assert event["session"] == hello["session"]
+
+    def test_an_unchanged_page_costs_no_bytes(self, app_env, monkeypatch):
+        """A picture a second is affordable because the identical ones are
+        dropped before the socket: a page that is not moving costs the owner
+        loop a capture and the phone nothing."""
+        self._fast(monkeypatch)
+        self._script(
+            monkeypatch,
+            [self._frame(self.JPEG), self._frame(self.JPEG), self._frame(self.NEXT)],
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_watch", "action": "start"})
+            first = recv_until(ws, "browser_watch")
+            second = recv_until(ws, "browser_watch")
+        assert base64.b64decode(first["jpeg"]) == self.JPEG
+        assert base64.b64decode(second["jpeg"]) == self.NEXT
+
+    def test_no_page_says_which_absence_and_says_it_once(self, app_env, monkeypatch):
+        """A chat between pages is the ordinary case — aish navigates — so it is
+        NOT an ending. It says so once, because repeating it every second is a
+        stream of its own; then the next real frame lands normally."""
+        from aish import browser as browser_module
+
+        self._fast(monkeypatch)
+        self._script(
+            monkeypatch,
+            [
+                (None, browser_module.WATCH_NO_PAGE),
+                (None, browser_module.WATCH_NO_PAGE),
+                self._frame(self.JPEG),
+            ],
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_watch", "action": "start"})
+            first = recv_until(ws, "browser_watch")
+            second = recv_until(ws, "browser_watch")
+        assert first == {
+            **first,
+            "action": "idle",
+            "reason": browser_module.WATCH_NO_PAGE,
+        }
+        # The repeat is swallowed; the next event is the page arriving.
+        assert second["action"] == "frame"
+
+    def test_his_own_browser_taking_the_page_is_reported_not_streamed(
+        self, app_env, monkeypatch
+    ):
+        """Never stream a frame while the owner's hands are on the browser.
+        The refusal is the capture's own (one line, `owner.view is not None`);
+        what this pins is that the watcher reports it rather than going blank,
+        and that it PICKS BACK UP — a watch does not die because he looked at
+        his browser for a minute."""
+        from aish import browser as browser_module
+
+        self._fast(monkeypatch)
+        self._script(
+            monkeypatch,
+            [(None, browser_module.WATCH_HANDS), self._frame(self.JPEG)],
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_watch", "action": "start"})
+            first = recv_until(ws, "browser_watch")
+            second = recv_until(ws, "browser_watch")
+        assert (first["action"], first["reason"]) == ("idle", browser_module.WATCH_HANDS)
+        assert second["action"] == "frame"
+
+    def test_stopping_ends_the_watcher(self, app_env, monkeypatch):
+        """Watchers run only while a viewer has the sheet open — otherwise every
+        background flow pays a screenshot tax on a 16 GB box."""
+        self._fast(monkeypatch)
+        self._script(monkeypatch, [self._frame(self.JPEG)])
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            server = client.app.state.server
+            ws.send_json({"type": "browser_watch", "action": "start"})
+            recv_until(ws, "browser_watch")
+            assert hello["session"] in server._browse_watchers
+            ws.send_json({"type": "browser_watch", "action": "stop", "rid": "1"})
+            recv_until(ws, "ack")
+            assert not any(c.watching for c in server.clients)
+            assert hello["session"] not in server._browse_watchers
+
+    def test_leaving_the_chat_ends_the_watch(self, app_env, monkeypatch):
+        """A watch belongs to the chat being LEFT, so it ends in `_leave` — the
+        one place both a session switch and a disconnect already go through.
+        Without that a client that switched chats would keep a stream running
+        that its own session firewall then drops on arrival."""
+        self._fast(monkeypatch)
+        self._script(monkeypatch, [self._frame(self.JPEG)])
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            server = client.app.state.server
+            ws.send_json({"type": "browser_watch", "action": "start"})
+            recv_until(ws, "browser_watch")
+            ws.send_json({"type": "new"})            # a different chat
+            recv_until(ws, "hello")
+            assert hello["session"] not in server._browse_watchers
+            assert not any(c.watching == hello["session"] for c in server.clients)
+
+    def test_a_disconnect_ends_it_too(self, app_env, monkeypatch):
+        self._fast(monkeypatch)
+        self._script(monkeypatch, [self._frame(self.JPEG)])
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, hello, _):
+                ws.send_json({"type": "browser_watch", "action": "start"})
+                recv_until(ws, "browser_watch")
+            server = client.app.state.server
+            assert hello["session"] not in server._browse_watchers
+
+    def test_watching_claims_no_control_of_the_chat(self, app_env, monkeypatch):
+        """#295 P1: reading is free and the unit of consent is a consequence.
+        Watching has none — it draws no card, and it does not take the chat off
+        whoever was driving it."""
+        self._fast(monkeypatch)
+        self._script(monkeypatch, [self._frame(self.JPEG)])
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            server = client.app.state.server
+            session = server.sessions[hello["session"]]
+            session.controller = None
+            ws.send_json({"type": "browser_watch", "action": "start"})
+            recv_until(ws, "browser_watch")
+            assert session.controller is None
+
+    def test_the_watch_channel_has_no_verb_that_touches_a_page(self):
+        """The read-only guarantee, stated as what the code enforces rather than
+        as an intention: this handler accepts `start` and `stop`, neither of
+        which carries a coordinate, a size, a key or a URL — so there is nothing
+        here to express a click, a scroll, a keystroke or a resize with. The
+        only browser function it can reach is the screenshot.
+
+        Source-level on purpose. The failure this guards against is a verb
+        somebody adds later and nobody thinks to drive."""
+        source = inspect.getsource(server_module.WebServer._browse_watch)
+        assert set(re.findall(r'action [!=]= "(\w+)"', source)) == {"start", "stop"}
+        # And the action is the ONLY thing read off the wire: no coordinate, no
+        # size, no key, no URL — so there is nothing to express a page touch
+        # with even if a branch wanted to. The chat comes from `client.viewing`.
+        assert re.findall(r"message\.get\(([^)]*)\)", source) == ['"action", ""']
+        loop = inspect.getsource(server_module.WebServer._watch_browse)
+        reached = {
+            name for name in dir(server_module.browser)
+            if not name.startswith("_") and f"browser.{name}" in loop
+        }
+        assert reached == {"browse_watch_frame"}, reached
+
+    def test_a_device_that_cannot_keep_up_is_skipped_not_queued_behind(
+        self, app_env, monkeypatch
+    ):
+        """A frame is ~67 KB and an outbox is unbounded, so a phone on a link
+        slower than the stream would grow a backlog of stale pictures for as
+        long as the sheet is left open. Skipping is the right way to be wrong
+        about a live view.
+
+        The half that makes it safe rather than a hole is what this drives: the
+        watcher advances "what is on screen" only when somebody took the
+        picture, so a frame dropped for backlog is offered again — otherwise a
+        client that missed one would sit on a blank sheet forever the moment
+        the page stopped changing."""
+        server = server_module.WebServer.__new__(server_module.WebServer)
+        client = server_module.Client.__new__(server_module.Client)
+        client.watching = "chat"
+        client.outbox = asyncio.Queue()
+        server.clients = {client}
+        for _ in range(server_module.BROWSE_WATCH_MAX_BACKLOG):
+            client.outbox.put_nowait({"type": "token"})
+        took = server._to_watchers(
+            "chat", {"type": "browser_watch", "action": "frame"}, drop_when_behind=True
+        )
+        assert took == 0
+        # An ABSENCE is one line and always gets through: it is the sentence
+        # that says why the picture stopped, which is exactly what a backed-up
+        # client most needs.
+        assert server._to_watchers("chat", {"type": "browser_watch", "action": "idle"})
+        while not client.outbox.empty():
+            client.outbox.get_nowait()
+        assert server._to_watchers(
+            "chat", {"type": "browser_watch", "action": "frame"}, drop_when_behind=True
+        ) == 1
+
+    def test_the_model_knows_it_can_be_watched(self):
+        """aish answers questions about itself, so a user-visible capability it
+        has never heard of is one the owner has to discover on his own. Stated
+        as what it IS — a window — because the tempting misreading is that the
+        owner can now step in, which is a later slice with its own approval."""
+        context = server_module.web_usage_context(
+            "model", "ollama", "/allow", "/deny", "/state"
+        )
+        assert "/watch" in context
+        assert "read-only window" in context
+        assert "not a way for them to click" in context
+
+    def test_a_live_frame_is_never_recorded(self, app_env, monkeypatch):
+        """Live frames go to the socket and nowhere else. Not through the
+        session Bridge — which would record them into the transcript and replay
+        them to a viewer with no sheet open — and never to disk. Same reason
+        console output bypasses the bridge: a picture is not transcript."""
+        self._fast(monkeypatch)
+        self._script(monkeypatch, [self._frame(self.JPEG), self._frame(self.NEXT)])
+        client, _ = make_client(app_env, [model_says("watched")])
+        with client, connected(client) as (ws, hello, _):
+            server = client.app.state.server
+            session = server.sessions[hello["session"]]
+            ws.send_json({"type": "browser_watch", "action": "start"})
+            recv_until(ws, "browser_watch")
+            recv_until(ws, "browser_watch")
+            before = len(session.bridge.transcript)
+            # A real turn AFTER the frames, so the log exists to be checked and
+            # the transcript is known to be growing for other reasons — a
+            # never-written log would make the on-disk half vacuously true.
+            ws.send_json({"type": "task", "text": "hi"})
+            recv_until(ws, "done")
+            assert len(session.bridge.transcript) > before
+            assert not any(
+                e["type"].startswith("browser_") for e in session.bridge.transcript
+            )
+        text = (server.state_dir / hello["session"]).read_text(encoding="utf-8")
+        assert "browser_watch" not in text
+        assert base64.b64encode(self.JPEG).decode("ascii") not in text
 
 
 class TestExplainEndpoint:

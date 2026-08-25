@@ -105,6 +105,16 @@ const OWNED = {
       + " (#203)",
     set: true,
   },
+  bvWatch: {
+    owners: ["BROWSER-WATCH"],
+    instead: "call openWatchView() to enter watch mode and bvEndWatch() to leave it",
+    why: "it is the ONE thing that makes the browser sheet read-only (#289): `bvMayTouchPage`"
+      + " reads it, and `bvSend` and `bvRequestDetail` are the only two paths that can send"
+      + " something which touches the page the MODEL is standing on. A stray writer does not"
+      + " make the sheet look wrong — it lets a human scroll, resize or click a page every"
+      + " later gate decision is made against, and the act-time fence then correctly refuses"
+      + " each act, which reads as the model flailing",
+  },
   currentTrace: {
     owners: ["TRACE-OPEN", "TRACE-CLOSE"],
     instead: "call ensureTrace() / finishTrace()",

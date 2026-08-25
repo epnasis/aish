@@ -42,6 +42,10 @@ function world({ frame, stage, box, dpr, natural, sheetHidden = false, open = tr
   const sandbox = {
     bvFrame: frame,
     bvOpen: open,
+    // Not watch mode: a sharpening is one of the two callers of the read-only
+    // rule ([BROWSER-WATCH]), because it deliberately bypasses `bvSend`.
+    // test_browser_watch.js drives the other answer.
+    bvMayTouchPage: () => true,
     window: { devicePixelRatio: dpr },
     setTimeout: (fn) => { sandbox.__timer = fn; return 1; },
     clearTimeout: () => {},

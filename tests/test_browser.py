@@ -3349,3 +3349,205 @@ class TestTheEvidenceFrame:
         assert agent.media_dir in roots
         frame = browser.frames_dir() / "abc123-browse-eon-pl.jpg"
         assert agent._is_evidence_frame(str(frame))
+
+
+class TestWatchingTheTabTheModelIsDriving:
+    """#289 slice 2 — the live half of the picture slice 1 stored.
+
+    A window onto THIS CHAT's own tab, read-only, for an owner whose only
+    account of what aish did on a page was a developer's Chrome.
+
+    The structural fact everything here is built around: opening the remote
+    view relaunches the context view-shaped and `close_now()` empties
+    `browse_pages`, so `/browser` destroys every chat's page. Watch mode must
+    not do that, so it photographs the tab where it stands.
+    """
+
+    JPEG = b"\xff\xd8\xff\xe0" + b"a live look at the page" * 4
+
+    def _page(self, *, url="https://eon.pl/mojeon", title="Moje eON", closed=False):
+        seen = {"shots": 0, "titles": 0, "other": []}
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.url = url
+
+            def is_closed(self):
+                return closed
+
+            async def screenshot(self, **kw):
+                seen["shots"] += 1
+                seen["kw"] = kw
+                return TestWatchingTheTabTheModelIsDriving.JPEG
+
+            async def title(self):
+                seen["titles"] += 1
+                return title
+
+            # Anything else the watcher might reach for MUST be a failure, not
+            # a silent success: this is the class of bug the read-only claim is
+            # about, and a fake that answers everything cannot catch it.
+            def __getattr__(self, name):
+                seen["other"].append(name)
+                raise AssertionError(
+                    f"watch mode touched the page: {name}. Read-only means the "
+                    "page is never touched — no resize, no scroll, no click, "
+                    "no keyboard, and nothing injected."
+                )
+
+        return FakePage(), seen
+
+    def test_a_watch_frame_is_a_screenshot_and_nothing_else(self, state, monkeypatch):
+        """The whole read-only guarantee, stated as narrowly as the code keeps
+        it: watch mode takes a picture and reads the address and the title.
+
+        Not "the page is never touched" in the abstract — the fake raises on
+        every other attribute, so any verb this ever grows fails here first."""
+        page, seen = self._page()
+        owner = _owner_on(page)
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        monkeypatch.setattr(browser, "_no_browser_yet", lambda: False)
+        frame, why = browser.browse_watch_frame("")
+        assert why == ""
+        assert frame is not None
+        assert frame.jpeg == self.JPEG
+        assert frame.url == "https://eon.pl/mojeon"
+        assert frame.title == "Moje eON"
+        assert seen["shots"] == 1 and seen["titles"] == 1
+        assert seen["other"] == []
+        # No width/height on the frame at all. The remote view carries them so a
+        # tap can be mapped into page coordinates; carrying none is the cheapest
+        # possible statement that nothing here can address a point on the page.
+        assert not hasattr(frame, "width")
+
+    def test_a_live_frame_is_never_stored(self, state, monkeypatch):
+        """Slice 1 stores one frame per snapshot into a store with its own cap
+        (1000 files, #318). A watch stream at a frame a second would turn that
+        store over in minutes, so these bytes go to the socket and nowhere
+        else — the store directory is not even created."""
+        page, _ = self._page()
+        owner = _owner_on(page)
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        monkeypatch.setattr(browser, "_no_browser_yet", lambda: False)
+        monkeypatch.setattr(
+            browser.media,
+            "store",
+            lambda *a, **k: pytest.fail("a watch frame reached the frame store"),
+        )
+        for _ in range(3):
+            frame, why = browser.browse_watch_frame("")
+            assert frame is not None and why == ""
+        assert not browser.frames_dir().exists()
+
+    def test_watching_never_keeps_a_tab_alive(self, state, monkeypatch):
+        """Watching consents to nothing and changes nothing — including how
+        long the reaper leaves the page open. `_snapshot` touches the session
+        because the MODEL acted; a picture is not an act."""
+        page, _ = self._page()
+        owner = _owner_on(page)
+        owner.browse_pages[""].touched = 1234.0
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        monkeypatch.setattr(browser, "_no_browser_yet", lambda: False)
+        browser.browse_watch_frame("")
+        assert owner.browse_pages[""].touched == 1234.0
+
+    def test_never_while_the_owners_hands_are_on_the_browser(self, state, monkeypatch):
+        """The one refusal here that is a safety property, and it is ONE line
+        at the capture rather than an ordering the callers have to keep.
+
+        #320 removed the password-box refusal from the browse path on purpose —
+        a login page is photographed deliberately now, because the owner needs
+        to see it — and nothing here reintroduces it. What is refused is the
+        state where the picture is not aish's to take."""
+        page, seen = self._page(url="https://eon.pl/mojeon/Logowanie")
+        owner = _owner_on(page)
+        owner.view = object()   # his own /browser view has the browser
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        monkeypatch.setattr(browser, "_no_browser_yet", lambda: False)
+        frame, why = browser.browse_watch_frame("")
+        assert frame is None
+        assert why == browser.WATCH_HANDS
+        assert seen["shots"] == 0
+
+    def test_a_chat_with_no_tab_is_told_so_rather_than_shown_anothers(
+        self, state, monkeypatch
+    ):
+        """The key is the chat (#272). A watcher on a chat that never opened a
+        page must not fall back to whatever document happens to be loaded —
+        that is the same rule `BrowseView` keeps for the model."""
+        page, seen = self._page()
+        owner = _owner_on(page)          # the "" chat has a tab
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        monkeypatch.setattr(browser, "_no_browser_yet", lambda: False)
+        frame, why = browser.browse_watch_frame("another-chat")
+        assert frame is None
+        assert why == browser.WATCH_NO_PAGE
+        assert seen["shots"] == 0
+
+    def test_a_closed_tab_reads_as_no_page(self, state, monkeypatch):
+        page, seen = self._page(closed=True)
+        owner = _owner_on(page)
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        monkeypatch.setattr(browser, "_no_browser_yet", lambda: False)
+        frame, why = browser.browse_watch_frame("")
+        assert (frame, why) == (None, browser.WATCH_NO_PAGE)
+        assert seen["shots"] == 0
+
+    def test_a_watcher_never_launches_chrome(self, state, monkeypatch):
+        """A poll that started the thing it polls would bring Chrome up on a
+        machine nobody asked — the rule `_no_browser_yet` already keeps for the
+        remote view's probe, and the reason this answers "no page" rather than
+        opening one."""
+        monkeypatch.setattr(browser, "_no_browser_yet", lambda: True)
+        monkeypatch.setattr(
+            browser,
+            "_submit",
+            lambda *a, **k: pytest.fail("a watch poll reached the browser"),
+        )
+        assert browser.browse_watch_frame("") == (None, browser.WATCH_NO_PAGE)
+
+    def test_a_failed_capture_says_which_absence(self, state, monkeypatch):
+        """Four closed reasons, because they route to different repairs and a
+        blank reads as the wrong one. Same discipline as `NO_FRAME_*`."""
+        monkeypatch.setattr(browser, "_no_browser_yet", lambda: False)
+
+        def boom(job, timeout):
+            raise RuntimeError("the browser went away")
+
+        monkeypatch.setattr(browser, "_submit", boom)
+        assert browser.browse_watch_frame("") == (None, browser.WATCH_FAILED)
+
+    def test_a_disabled_browser_says_so(self, state, monkeypatch):
+        monkeypatch.setenv("AISH_BROWSER", "0")
+        monkeypatch.setattr(
+            browser,
+            "_submit",
+            lambda *a, **k: pytest.fail("a watch poll reached a disabled browser"),
+        )
+        assert browser.browse_watch_frame("") == (None, browser.WATCH_NO_BROWSER)
+
+    def test_the_count_of_what_opening_the_view_will_close(self, state, monkeypatch):
+        """`/browser` outranks watch mode and must say what it kills. This is
+        the number behind that sentence — counted BEFORE the open, because
+        afterwards there is nothing left to count."""
+        first, _ = self._page()
+        second, _ = self._page()
+        dead, _ = self._page(closed=True)
+        owner = browser._Owner()
+        owner.browse_pages = {
+            "a": browser._Session(first),
+            "b": browser._Session(second),
+            "c": browser._Session(dead),
+        }
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        monkeypatch.setattr(browser, "_no_browser_yet", lambda: False)
+        assert browser.browse_tab_count() == 2
+
+    def test_counting_never_launches_chrome_either(self, monkeypatch):
+        monkeypatch.setattr(browser, "_no_browser_yet", lambda: True)
+        monkeypatch.setattr(
+            browser,
+            "_submit",
+            lambda *a, **k: pytest.fail("counting tabs reached the browser"),
+        )
+        assert browser.browse_tab_count() == 0
