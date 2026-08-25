@@ -2763,3 +2763,80 @@ class TestATagsWriterAndItsReadersHaveTheSameReach:
     def test_the_guard_catches_a_new_tag(self):
         found = self._tags_in_source(extra="el.setAttribute('data-aish-row', '1')")
         assert found - set(self.TAGS) == {"data-aish-row"}
+
+
+class TestTheFrameReferenceRidesTheResult:
+    """#289 slice 1. The bytes live in the media store; the RESULT carries a
+    reference to them, on the same envelope a page cut already rides. Bulk
+    bytes never enter the log — the record only points at them, and they are
+    purgeable on their own schedule."""
+
+    def _opens(self, monkeypatch, snap):
+        monkeypatch.setattr(web_module, "_require_public", lambda _u: None)
+        monkeypatch.setattr(
+            web_module.browser, "browse_open",
+            lambda url, *, topic="", key="": snap,
+        )
+
+    def test_a_browse_hands_back_the_frame_of_the_page_it_showed(self, monkeypatch):
+        view = web_module.BrowseView()
+        self._opens(monkeypatch, snapshot(frame="/store/media/abc.jpg"))
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert out.meta["frame"] == "/store/media/abc.jpg"
+        # A reference, never the bytes: nothing about the picture is in the
+        # string the model reads or in the record that quotes it.
+        assert "jpeg" not in out.lower()
+
+    def test_the_reason_there_is_none_travels_too(self, monkeypatch):
+        """Absence must never be the evidence: a page nobody pictured and a
+        page nobody COULD picture route to different repairs."""
+        view = web_module.BrowseView()
+        self._opens(
+            monkeypatch, snapshot(frame_skipped=browse.NO_FRAME_SIGNIN)
+        )
+        out = web_module.browse("https://eon.pl/login", view=view)
+        assert out.meta["frame_skipped"] == browse.NO_FRAME_SIGNIN
+        assert "frame" not in out.meta
+
+    def test_a_call_that_reached_no_page_borrows_no_picture(self, monkeypatch):
+        """The failure this guards. A refused or dead call presents nothing, so
+        the view still holds the LAST page's frame — and attaching it would put
+        a picture of one page on the record of another."""
+        view = web_module.BrowseView()
+        self._opens(monkeypatch, snapshot(frame="/store/media/abc.jpg"))
+        first = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert first.meta["frame"] == "/store/media/abc.jpg"
+
+        def refused(_url):
+            raise web_module.BlockedURLError("not a public host")
+
+        monkeypatch.setattr(web_module, "_require_public", refused)
+        out = web_module.browse("http://192.168.1.1/", view=view)
+        assert not hasattr(out, "meta")
+        assert "ERROR" in out
+
+    def test_an_act_reports_the_page_it_just_produced(self, monkeypatch):
+        view = web_module.BrowseView()
+        shown(snapshot(controls=[control(n=1)]))
+        view.remember(snapshot(controls=[control(n=1)]))
+        monkeypatch.setattr(
+            web_module.browser, "browse_act",
+            lambda *a, **kw: snapshot(
+                url="https://eon.pl/faktury", frame="/store/media/after.jpg"
+            ),
+        )
+        out = web_module.browse_act("Przełącz lokal", view=view)
+        assert out.meta["frame"] == "/store/media/after.jpg"
+
+    def test_a_cut_and_a_frame_ride_the_same_envelope(self, monkeypatch):
+        """One envelope, both kinds of evidence — a second carrier would be a
+        second thing for a reader to know about."""
+        view = web_module.BrowseView()
+        cut = web_module.PageCut()
+        self._opens(
+            monkeypatch,
+            snapshot(text="x" * 200_000, frame="/store/media/abc.jpg"),
+        )
+        out = web_module.browse("https://eon.pl/mojeon", cut=cut, view=view)
+        assert out.meta["frame"] == "/store/media/abc.jpg"
+        assert out.meta["truncation"]

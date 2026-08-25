@@ -124,9 +124,15 @@ class PageCut:
         return key
 
 
-def sealed(text: str, cut: PageCut | None) -> str:
-    """The result, with the cut recorded on it — or unchanged when nothing was
-    cut.
+def sealed(
+    text: str,
+    cut: PageCut | None,
+    *,
+    frame: str = "",
+    frame_skipped: str = "",
+) -> str:
+    """The result, with the cut and the evidence frame recorded on it — or
+    unchanged when there is neither.
 
     Constructed LAST and nowhere else, because a string operation on a
     `ToolOutcome` returns a plain `str` and silently drops the envelope
@@ -138,10 +144,24 @@ def sealed(text: str, cut: PageCut | None) -> str:
     inventing one to make the row look enveloped would be a claim the runtime
     cannot support. The agent's prefix sniff still decides ok/failed and still
     records itself as `verdict_by: "prefix"`, which is the honest measure of how
-    much of the tool surface remains un-enveloped (contract §3.4)."""
-    if cut is None or cut.record is None:
+    much of the tool surface remains un-enveloped (contract §3.4).
+
+    The frame is evidence of exactly the same kind (#289) and rides the same
+    envelope: a REFERENCE to bytes that live in the media store, never the
+    bytes. Bulk bytes never enter the log; the record only points at them, and
+    they are purgeable on their own schedule. `frame_skipped` is written only
+    when there is no frame, because a reader must be able to tell a page nobody
+    pictured from a page nobody could."""
+    meta: dict = {}
+    if cut is not None and cut.record is not None:
+        meta.update(bytes=cut.total, truncation=cut.record)
+    if frame:
+        meta["frame"] = frame
+    elif frame_skipped:
+        meta["frame_skipped"] = frame_skipped
+    if not meta:
         return text
-    return tools.ToolOutcome(text, bytes=cut.total, truncation=cut.record)
+    return tools.ToolOutcome(text, **meta)
 
 
 def _capped(
@@ -1979,10 +1999,26 @@ class BrowseView:
         # it. Compared before an act so a page another chat drove is refused
         # rather than acted on — see `browser.PAGE_TAKEN`.
         self.epoch: int | None = None
+        # The evidence frame of the page this chat was SHOWN by the call now
+        # running (#289), and why there is none when there is none. Cleared at
+        # the top of every browse entry point rather than only written at the
+        # bottom: a call that never reaches a page — an SSRF refusal, a dead
+        # host, a control that no longer resolves — must not borrow the picture
+        # of the page before it, which is exactly what "the last frame I saw"
+        # would hand it.
+        self.frame = ""
+        self.frame_skipped = ""
+
+    def start_call(self) -> None:
+        """A new browse call begins: this chat has been shown nothing yet."""
+        self.frame = ""
+        self.frame_skipped = ""
 
     def remember(self, snapshot: Any) -> None:
         self.shown = snapshot
         self.epoch = getattr(snapshot, "epoch", None)
+        self.frame = str(getattr(snapshot, "frame", "") or "")
+        self.frame_skipped = str(getattr(snapshot, "frame_skipped", "") or "")
 
     def commit_evidence(self) -> str:
         """What the page this chat was last shown says it COMMITS, if anything.
@@ -1998,6 +2034,7 @@ class BrowseView:
         self.shown = None
         self.runs = 0
         self.epoch = None
+        self.start_call()
 
 
 # For callers with no chat behind them — the CLI, a test, a plugin. Same
@@ -2011,6 +2048,11 @@ _DEFAULT_VIEW.key = ""
 
 def _key(view: "BrowseView | None") -> str:
     return view.key if view is not None else ""
+
+
+def _seen(view: "BrowseView | None") -> BrowseView:
+    """This chat's view, or the shared one a chatless caller degrades to."""
+    return view if view is not None else _DEFAULT_VIEW
 
 
 def forget_shown_page() -> None:
@@ -2057,7 +2099,7 @@ def _present_snapshot(
     it is genuinely a different page, when the change is bigger than the page,
     when something went wrong, when the model asks, or every DELTA_RUN_MAX
     reports so its picture cannot drift for long."""
-    seen = view if view is not None else _DEFAULT_VIEW
+    seen = _seen(view)
     if (
         acted
         and seen.shown is not None
@@ -2213,7 +2255,10 @@ def browse(
 ) -> str:
     """Open a page in the browser the owner is signed into, and describe what
     can be pressed on it."""
-    return sealed(_browse(url, topic, cut=cut, view=view), cut)
+    seen = _seen(view)
+    seen.start_call()
+    text = _browse(url, topic, cut=cut, view=view)
+    return sealed(text, cut, frame=seen.frame, frame_skipped=seen.frame_skipped)
 
 
 def _browse(
@@ -2288,9 +2333,10 @@ def browse_act(
     view: BrowseView | None = None,
 ) -> str:
     """Do one thing to the control the model named, and hand back what changed."""
-    return sealed(
-        _browse_act(target, action, text, value, submit, topic, cut, view), cut
-    )
+    seen = _seen(view)
+    seen.start_call()
+    text_out = _browse_act(target, action, text, value, submit, topic, cut, view)
+    return sealed(text_out, cut, frame=seen.frame, frame_skipped=seen.frame_skipped)
 
 
 def _browse_act(
@@ -2308,7 +2354,7 @@ def _browse_act(
     # runs. A destination the SSRF guard would refuse is simply not offered as a
     # fallback — the same fence `browse` itself applies to a model-chosen URL.
     href, mutating, expect_download = "", False, False
-    seen = view if view is not None else _DEFAULT_VIEW
+    seen = _seen(view)
     current = seen.shown
     control = (
         browse_mod.resolve(current.controls, target).control if current else None
@@ -2356,7 +2402,10 @@ def browse_fill(
 ) -> str:
     """Fill in a form on the page browse opened — several controls, then at
     most one press — as one act."""
-    return sealed(_browse_fill(steps, topic, cut=cut, view=view), cut)
+    seen = _seen(view)
+    seen.start_call()
+    text = _browse_fill(steps, topic, cut=cut, view=view)
+    return sealed(text, cut, frame=seen.frame, frame_skipped=seen.frame_skipped)
 
 
 def _browse_fill(
@@ -2366,7 +2415,7 @@ def _browse_fill(
     cut: PageCut | None = None,
     view: BrowseView | None = None,
 ) -> str:
-    seen = view if view is not None else _DEFAULT_VIEW
+    seen = _seen(view)
     current = seen.shown
     if current is None:
         return "ERROR: nothing is open to fill in. Call browse(url) first."
