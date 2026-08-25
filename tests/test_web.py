@@ -137,9 +137,36 @@ class TestWebSearch:
         assert "2. Real Python" in result
         assert "read_url" in result  # nudge to open a page next
 
+    def test_results_reach_the_model_marked_as_untrusted_content(self):
+        """Titles and snippets are page-authored text, ranked by an index anyone
+        can push on with ordinary SEO — the same threat a fetched page carries,
+        and until #305 the fetch said so and the search said nothing at all.
+
+        The SAME banner constant, deliberately: two spellings of "this came from
+        outside" is how one of them stops being read."""
+        self.install(
+            [{"title": "Buy now", "href": "https://shop.example", "body": "cheap"}]
+        )
+        result = web.web_search("thing")
+        assert web.UNTRUSTED_NOTE in result
+        # aish's own voice stays ABOVE the banner; the stranger's words below it.
+        assert result.startswith("[aish:")
+        assert result.index(web.UNTRUSTED_NOTE) < result.index("1. Buy now")
+
+    def test_the_marking_says_which_words_are_the_page_s(self):
+        """Capability phrasing gets ignored here; MUST plus a concrete example
+        is what a model acts on."""
+        assert web.SEARCH_RESULTS_NOTE.startswith(web.UNTRUSTED_NOTE)
+        assert "MUST" in web.SEARCH_RESULTS_NOTE
+        assert "snippet" in web.SEARCH_RESULTS_NOTE
+
     def test_no_results(self):
         self.install([])
-        assert "No results" in web.web_search("zzz")
+        result = web.web_search("zzz")
+        assert "No results" in result
+        # Nothing came back, so nothing outside wrote anything here. A banner
+        # over aish's own sentence would teach the model to skip it.
+        assert web.UNTRUSTED_NOTE not in result
 
     def test_an_empty_search_is_an_answer_not_an_error(self):
         """ddgs signals "nothing matched" by RAISING, not by returning [].
