@@ -2441,6 +2441,22 @@ class TestWhatRealPickersActuallyLookLike:
         assert "removeAttribute('data-aish-cell')" in browse.CALENDAR_JS
 
 
+def page_snippets():
+    """Every JS snippet aish runs in a page, by name.
+
+    Shared by both guards below because they ask about the same set: one that
+    each snippet crosses shadow boundaries, one that a tag's writer and its
+    readers cross the same ones."""
+    from aish import browser as browser_module
+
+    found = {}
+    for module in (browse, browser_module):
+        for name in dir(module):
+            if name.endswith("_JS") and isinstance(getattr(module, name), str):
+                found[name] = getattr(module, name)
+    return found
+
+
 class TestEveryPageReaderLooksThroughShadowRoots:
     """The boundary is handled ONCE, and no new snippet may forget it (#273).
 
@@ -2472,14 +2488,7 @@ class TestEveryPageReaderLooksThroughShadowRoots:
     }
 
     def _snippets(self):
-        from aish import browser as browser_module
-
-        found = {}
-        for module in (browse, browser_module):
-            for name in dir(module):
-                if name.endswith("_JS") and isinstance(getattr(module, name), str):
-                    found[name] = getattr(module, name)
-        return found
+        return page_snippets()
 
     def test_the_inventory_is_not_empty(self):
         """A rename that empties the sweep must fail loudly, not pass."""
@@ -2556,3 +2565,201 @@ class TestEveryPageReaderLooksThroughShadowRoots:
         for js in (browse.FLOOD_JS, browser_module.SIGNIN_FORM_JS,
                    browser_module.SECOND_FACTOR_JS):
             assert browse.DEEP_JS in js, "copied instead of shared"
+
+
+DEEP = "crosses shadow boundaries"
+LIGHT = "stops at the light DOM"
+
+
+class TestATagsWriterAndItsReadersHaveTheSameReach:
+    """#292. The sweep above is the WEAKER half, and would not have caught the
+    bug that prompted it: it asks whether a snippet crosses shadow boundaries,
+    never whether two snippets that talk to each other cross the SAME ones.
+
+    Both times this bit, the shape was identical — one pass stamps an attribute
+    on an element, another pass looks that attribute up and cannot see it:
+
+    - `CONTROLS_JS` tagged `data-aish-n` through shadow roots and `CALENDAR_JS`
+      looked it up with `document.querySelector`, which reported "no day cells
+      were found in the picker that opened".
+    - `SIGNIN_FORM_JS` tags `data-aish-signin` and `SIGNIN_STILL_OURS_JS` reads
+      it back. Making the writer deep without the reader would have had aish
+      tag the password field and then refuse to type into it, saying "the
+      password field is gone" — and that one was introduced BY the fix for the
+      first.
+
+    Both halves pass the sweep above individually. Nothing checked that they
+    agree, and the failure surfaces as a FACT ABOUT THE PAGE rather than as a
+    defect, so nobody goes looking for a bug.
+
+    The pairing is WRITTEN OUT below rather than inferred. There are three tags;
+    a regex that guessed which snippet reads which tag would be one more silent
+    thing to be wrong, in a guard whose whole subject is silence."""
+
+    # tag → who stamps it, who looks it up, and how far each of them can see.
+    #
+    # The Playwright-side readers — `_find`'s `locator('[data-aish-n=…]')`, the
+    # cell press, and the sign-in `fill` steps — are deliberately absent: the
+    # CSS engine pierces open shadow roots, so they are DEEP by construction and
+    # can never be the shallow half of a pair. The tag sweep below still covers
+    # them, so a tag they invent cannot go unlisted.
+    TAGS = {
+        # The page's control numbering. `CONTROLS_JS` stamps it inside the walk
+        # that descends shadow roots, and clears last pass's tag in the same
+        # walk; `CALENDAR_JS` looks the field up to find whose picker is open.
+        "data-aish-n": {
+            "writes": {"CONTROLS_JS": DEEP},
+            "reads": {"CONTROLS_JS": DEEP, "CALENDAR_JS": DEEP},
+        },
+        # The picker's own numbering, written and cleared entirely inside
+        # `CALENDAR_JS`. LIGHT on both sides, and consistent with itself: the
+        # cells come from `grid.querySelectorAll`, so a tag can only ever be
+        # stamped where the document-wide clear can reach it.
+        "data-aish-cell": {
+            "writes": {"CALENDAR_JS": LIGHT},
+            "reads": {"CALENDAR_JS": LIGHT},
+        },
+        # The login form's fields, re-read immediately before the press because
+        # the tag survives a same-document change.
+        "data-aish-signin": {
+            "writes": {"SIGNIN_FORM_JS": DEEP},
+            "reads": {"SIGNIN_STILL_OURS_JS": DEEP},
+        },
+    }
+
+    # How a lookup of a tag says how far it can see. Only lookups are visible
+    # this way: a `setAttribute` carries the reach of whatever walk found the
+    # element, which no regex can read — that half of the table is the human's,
+    # and is why the table is written out rather than inferred.
+    LOOKUP = {
+        DEEP: r"deep(?:One|All|ById)\(\s*['\"]\[{tag}",
+        LIGHT: r"document\.(?:querySelector(?:All)?|getElementById)\(\s*['\"]\[?{tag}",
+    }
+
+    def _entries(self, tags):
+        for tag, sides in tags.items():
+            for side in ("writes", "reads"):
+                for name, reach in sides[side].items():
+                    yield tag, side, name, reach
+
+    def _disagreements(self, tags):
+        """Tags whose writers and readers do not claim the same reach."""
+        bad = {}
+        for tag, sides in tags.items():
+            claimed = set(sides["writes"].values()) | set(sides["reads"].values())
+            if len(claimed) > 1:
+                bad[tag] = sorted(claimed)
+        return bad
+
+    def _misdeclared(self, tags, snippets):
+        """Entries whose lookups contradict the reach the table claims."""
+        import re
+
+        bad = {}
+        for tag, _side, name, reach in self._entries(tags):
+            js = snippets.get(name, "")
+            seen = {
+                how
+                for how, pattern in self.LOOKUP.items()
+                if re.search(pattern.format(tag=re.escape(tag)), js)
+            }
+            if seen and seen != {reach}:
+                bad[(tag, name)] = f"claims {reach!r}, looks it up {sorted(seen)}"
+        return bad
+
+    def test_a_writer_and_its_readers_claim_the_same_reach(self):
+        assert not self._disagreements(self.TAGS), (
+            "one pass stamps this tag and another cannot see what it stamped — "
+            "the reader reports it as a fact about the page"
+        )
+
+    def test_the_claimed_reach_is_the_one_the_code_uses(self):
+        assert not self._misdeclared(self.TAGS, page_snippets()), (
+            "the table says one thing and the lookup does another, which makes "
+            "the pairing above meaningless"
+        )
+
+    def test_every_snippet_that_touches_a_tag_is_in_the_table(self):
+        """A new reader that nobody paired is exactly how this happened twice.
+        The table must name every snippet that mentions the tag — not the ones
+        somebody remembered."""
+        snippets = page_snippets()
+        unlisted = {}
+        for tag, sides in self.TAGS.items():
+            named = set(sides["writes"]) | set(sides["reads"])
+            touching = {name for name, js in snippets.items() if tag in js}
+            if touching - named:
+                unlisted[tag] = sorted(touching - named)
+        assert not unlisted, (
+            "these snippets touch a tag and the table does not say how far they "
+            f"can see — add them to TAGS with their reach: {unlisted}"
+        )
+
+    def test_the_table_has_no_stale_entries(self):
+        """A snippet that stopped using a tag must leave, or the next one to
+        take its name inherits a claim nobody checked."""
+        snippets = page_snippets()
+        gone = sorted(
+            f"{name} for {tag}"
+            for tag, _side, name, _reach in self._entries(self.TAGS)
+            if tag not in snippets.get(name, "")
+        )
+        assert not gone, f"named in TAGS but no longer touches the tag: {gone}"
+
+    def test_no_tag_is_used_outside_the_table(self):
+        """A NEW `data-aish-*` tag has to arrive with its pairing, or the table
+        rots and the guard quietly stops covering the code."""
+        found = self._tags_in_source()
+        assert found == set(self.TAGS), (
+            f"tags in the source: {sorted(found)}; tags paired: "
+            f"{sorted(self.TAGS)}"
+        )
+
+    def _tags_in_source(self, extra=""):
+        import pathlib
+        import re
+
+        from aish import browser as browser_module
+
+        text = extra
+        for module in (browse, browser_module):
+            text += pathlib.Path(module.__file__).read_text()
+        return set(re.findall(r"data-aish-[a-z-]+", text))
+
+    def test_the_guard_catches_a_reader_left_behind(self):
+        """A guard that cannot fail is decoration. This plants the #292 bug —
+        the writer made deep, the reader left on `document.querySelector` — and
+        both halves of the check have to find it."""
+        doctored = {
+            "data-aish-signin": {
+                "writes": {"SIGNIN_FORM_JS": DEEP},
+                "reads": {"SIGNIN_STILL_OURS_JS": LIGHT},
+            }
+        }
+        assert self._disagreements(doctored) == {
+            "data-aish-signin": sorted([DEEP, LIGHT])
+        }
+        assert self._misdeclared(doctored, page_snippets())
+        # …and the same lie told the other way round: a claim of DEEP over a
+        # document-scoped lookup. Both patterns have to bite, or half the check
+        # is decoration.
+        overclaimed = {
+            "data-aish-cell": {
+                "writes": {"CALENDAR_JS": DEEP},
+                "reads": {"CALENDAR_JS": DEEP},
+            }
+        }
+        assert self._misdeclared(overclaimed, page_snippets())
+
+    def test_the_guard_catches_an_unlisted_snippet(self, monkeypatch):
+        monkeypatch.setattr(
+            browse, "REGRESSION_PROBE_JS",
+            "() => document.querySelector('[data-aish-n=\"1\"]')",
+            raising=False,
+        )
+        with pytest.raises(AssertionError, match="the table does not say"):
+            self.test_every_snippet_that_touches_a_tag_is_in_the_table()
+
+    def test_the_guard_catches_a_new_tag(self):
+        found = self._tags_in_source(extra="el.setAttribute('data-aish-row', '1')")
+        assert found - set(self.TAGS) == {"data-aish-row"}
