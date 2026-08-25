@@ -439,6 +439,18 @@ def prune_downloads(directory: Any, keep_bytes: int = DOWNLOADS_KEEP_BYTES) -> l
     return removed
 
 
+# Why a snapshot carries no evidence frame (#289). A closed vocabulary, because
+# it is written into a trace record and read back by two renderers: a free-text
+# reason would drift between them, and both of them would be quoting a sentence
+# nobody could search for.
+#
+# There are exactly three, and each is a different fact about the same absence:
+NO_FRAME_SIGNIN = "signin"  # the page was putting a password box in front of us
+NO_FRAME_HANDS = "hands"  # the owner's own hands were on the browser
+NO_FRAME_FAILED = "failed"  # the capture did not produce a stored picture
+NO_FRAME_REASONS = frozenset({NO_FRAME_SIGNIN, NO_FRAME_HANDS, NO_FRAME_FAILED})
+
+
 @dataclass
 class Snapshot:
     """A page as the model receives it: what it says, and what it can press."""
@@ -507,6 +519,16 @@ class Snapshot:
     # and the page delta cannot report any of it: a suggestion list opens and
     # closes between two snapshots and nets to zero in the diff.
     ledger: list[str] = field(default_factory=list)
+    # The evidence frame (#289): a stored picture of what this page LOOKED LIKE
+    # at the moment the model was shown it. A path into the media store, or ""
+    # — the model never receives either; it is written down for the owner, who
+    # otherwise has no way to check a page aish drove and he cannot see.
+    frame: str = ""
+    # Why there is no frame, when there is none. Absence must never be the
+    # evidence (trace contract corollary 2): "no picture" because the page was
+    # a sign-in door and "no picture" because the capture failed route to
+    # completely different repairs, and one of them is not a fault at all.
+    frame_skipped: str = ""
 
     def control(self, n: int) -> Control | None:
         for control in self.controls:

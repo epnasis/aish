@@ -2945,3 +2945,184 @@ class TestWhatCountsAsEvidenceOfASession:
         self._renders(monkeypatch, "sign in to continue", signin=True)
         web_module.read_url("https://eon.pl/faktury")
         assert browser.seen_signed_in() == set()
+
+
+class TestTheEvidenceFrame:
+    """#289 slice 1. aish drives real pages the owner cannot see, so when it
+    reports what a page said there has been no way to check. A frame is a
+    picture of the page AT THE MOMENT THE MODEL WAS SHOWN IT — not a claim
+    about what the model saw, which is text and a control list.
+
+    It is a RECORD and therefore detection, never protection: nothing anywhere
+    is permitted, widened or checked less carefully because a frame exists.
+    """
+
+    JPEG = b"\xff\xd8\xff\xe0" + b"pretend jpeg bytes" * 8
+
+    def _page(self, *, shots=None, url="https://eon.pl/mojeon"):
+        taken = []
+
+        class FakePage:
+            def __init__(self):
+                self.url = url
+
+            async def screenshot(self, **kw):
+                taken.append(kw)
+                if shots is not None:
+                    return shots()
+                return TestTheEvidenceFrame.JPEG
+
+        return FakePage(), taken
+
+    def test_a_frame_is_stored_in_the_media_store_and_pointed_at(self, state):
+        page, taken = self._page()
+        path, why = _run(
+            browser._evidence_frame(browser._Owner(), page, signin=False)
+        )
+        assert why == ""
+        assert pathlib.Path(path).read_bytes() == self.JPEG
+        # The media store, not a store of its own, and not the evidence store
+        # (whose address is the sha256 of UTF-8 text and which reads back with
+        # read_text). Bulk bytes never enter the log; the record points at them.
+        assert pathlib.Path(path).parent == browser.frames_dir()
+        assert taken[0]["type"] == "jpeg"
+
+    def test_the_same_page_twice_is_one_file(self, state):
+        """Content-addressed, so a retry costs nothing and a flow that reads
+        the same page twice does not fill the store with duplicates."""
+        page, _ = self._page()
+        first, _ = _run(browser._evidence_frame(browser._Owner(), page, signin=False))
+        second, _ = _run(browser._evidence_frame(browser._Owner(), page, signin=False))
+        assert first == second
+        assert len(list(browser.frames_dir().iterdir())) == 1
+
+    def test_a_sign_in_page_is_never_pictured(self, state):
+        """A screenshot of a login form is exactly the artifact that must not
+        exist. The snapshot already knows the page is asking for a password."""
+        page, taken = self._page()
+        path, why = _run(
+            browser._evidence_frame(browser._Owner(), page, signin=True)
+        )
+        assert (path, why) == ("", browser.browse_mod.NO_FRAME_SIGNIN)
+        assert taken == []  # not taken and discarded — never taken
+
+    def test_no_frame_while_the_owner_has_his_hands_on_the_browser(self, state):
+        owner = browser._Owner()
+        owner.view = object()
+        page, taken = self._page()
+        path, why = _run(browser._evidence_frame(owner, page, signin=False))
+        assert (path, why) == ("", browser.browse_mod.NO_FRAME_HANDS)
+        assert taken == []
+
+    def test_a_failed_capture_costs_the_snapshot_nothing(self, state):
+        """The frame is an extra, never a dependency: a screenshot that times
+        out or throws must still leave the model holding its page."""
+
+        def boom():
+            raise RuntimeError("Timeout 5000ms exceeded")
+
+        page, _ = self._page(shots=boom)
+        assert _run(browser._evidence_frame(browser._Owner(), page, signin=False)) == (
+            "",
+            browser.browse_mod.NO_FRAME_FAILED,
+        )
+
+    def test_bytes_that_are_not_an_image_are_reported_not_raised(self, state):
+        """`media.store` refuses anything that is not a displayable image, and
+        that refusal must land as "no picture", not in the model's face."""
+        page, _ = self._page(shots=lambda: b"<html>not a jpeg</html>")
+        _, why = _run(browser._evidence_frame(browser._Owner(), page, signin=False))
+        assert why == browser.browse_mod.NO_FRAME_FAILED
+
+    def test_every_reason_is_one_the_record_vocabulary_knows(self, state):
+        """The reason is written into a trace record and read back by two
+        renderers, so it is a closed vocabulary rather than a sentence."""
+        from aish import browse as browse_mod
+
+        assert browse_mod.NO_FRAME_REASONS == {
+            browse_mod.NO_FRAME_SIGNIN,
+            browse_mod.NO_FRAME_HANDS,
+            browse_mod.NO_FRAME_FAILED,
+        }
+
+    def _snapshot_of(self, monkeypatch, *, signin, screenshot):
+        from aish import browse as browse_mod
+
+        class FakePage:
+            url = "https://eon.pl/mojeon"
+
+            async def title(self):
+                return "Moje eON"
+
+            async def screenshot(self, **kw):
+                return screenshot()
+
+        page = FakePage()
+        owner = _owner_on(page)
+        monkeypatch.setattr(
+            browser, "_settled_text", lambda p, **kw: _resolved("the page")
+        )
+        monkeypatch.setattr(
+            browser, "_without_option_floods", lambda p, t: _resolved(t)
+        )
+        monkeypatch.setattr(
+            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, ""))
+        )
+        monkeypatch.setattr(
+            browser, "_save_downloads", lambda o, **kw: _resolved([])
+        )
+        monkeypatch.setattr(
+            browser, "_has_password_field", lambda p: _resolved(signin)
+        )
+        snapshot = _run(browser._snapshot(owner, owner.browse_pages[""]))
+        assert isinstance(snapshot, browse_mod.Snapshot)
+        return snapshot
+
+    def test_the_snapshot_carries_the_frame_it_captured(self, state, monkeypatch):
+        snapshot = self._snapshot_of(
+            monkeypatch, signin=False, screenshot=lambda: self.JPEG
+        )
+        assert snapshot.frame_skipped == ""
+        assert pathlib.Path(snapshot.frame).read_bytes() == self.JPEG
+
+    def test_one_password_observation_decides_both_answers(
+        self, state, monkeypatch
+    ):
+        """`signin` is read once and used twice — told to the model, and used
+        to refuse the capture — so the two can never disagree about which page
+        this was."""
+        snapshot = self._snapshot_of(
+            monkeypatch, signin=True, screenshot=lambda: self.JPEG
+        )
+        assert snapshot.signin is True
+        assert snapshot.frame == ""
+        assert snapshot.frame_skipped == browser.browse_mod.NO_FRAME_SIGNIN
+
+    def test_a_failed_capture_still_yields_the_page(self, state, monkeypatch):
+        def boom():
+            raise RuntimeError("nope")
+
+        snapshot = self._snapshot_of(monkeypatch, signin=False, screenshot=boom)
+        assert snapshot.text == "the page"
+        assert snapshot.url == "https://eon.pl/mojeon"
+        assert snapshot.frame_skipped == browser.browse_mod.NO_FRAME_FAILED
+
+    def test_frames_land_where_the_agent_displays_pictures_from(self, tmp_path,
+                                                                monkeypatch):
+        """The frame is only evidence if it can be SEEN, and what makes it
+        displayable is that it lands inside `Agent.workspace_roots`. The
+        browser resolves AISH_STATE_DIR itself (it runs several layers below
+        any agent) and aish-web exports it from the same value it hands the
+        Agent (#290) — this pins that the two answers agree, because a frame
+        stored anywhere else would 403 in the chat."""
+        from aish.agent import Agent
+
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        agent = Agent(
+            model="fake",
+            approve=lambda *a, **k: True,
+            client_chat=lambda **kw: {},
+            state_dir=tmp_path,
+        )
+        assert browser.frames_dir() == agent.media_dir
+        assert agent.media_dir in [pathlib.Path(r) for r in agent.workspace_roots()]
