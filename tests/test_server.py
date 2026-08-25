@@ -757,6 +757,143 @@ class TestApprovalIntentEndToEnd:
         assert "intent" not in record
 
 
+class TestCardLatency:
+    """How long the card was there before it was decided (#306).
+
+    Every design in this space leans on the claim that SOME cards are worth
+    spending — the rare, checkable-at-a-glance ones. Nothing measured it. What
+    the record now carries is the pair that makes it checkable: `held_ms`, the
+    gate's own wait, which is always knowable and is only a FLOOR; and
+    `shown_ms`, how long the browser had the card RENDERED when it was tapped,
+    which is the number a sub-second value indicts. A card tapped blind is
+    worse than no card — it turns a missing control into a recorded consent."""
+
+    def _command_records(self, app_env):
+        records = []
+        for log in sorted((app_env["state_dir"]).glob("session-*.jsonl")):
+            for line in log.read_text(encoding="utf-8").splitlines():
+                record = json.loads(line)
+                if record.get("kind") == "command":
+                    records.append(record)
+        return records
+
+    def _decide(self, app_env, tmp_path, **answer):
+        marker = tmp_path / "latency"
+        client, _chat = make_client(app_env, [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+            model_says("finished"),
+        ])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "touch it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json(
+                {"type": "approval", "id": request["id"], "action": "approve", **answer}
+            )
+            recv_until(ws, "done")
+        [record] = self._command_records(app_env)
+        return record
+
+    def test_the_gates_own_wait_is_always_written_down(self, app_env, tmp_path):
+        """`held_ms` needs no cooperation from anyone — the gate measured it."""
+        record = self._decide(app_env, tmp_path)
+        assert isinstance(record["held_ms"], int)
+        assert record["held_ms"] >= 0
+
+    def test_the_browser_says_how_long_the_card_was_on_screen(
+        self, app_env, tmp_path
+    ):
+        record = self._decide(app_env, tmp_path, shown_ms=4200)
+        assert record["shown_ms"] == 4200
+
+    def test_a_sub_second_tap_is_recorded_as_one(self, app_env, tmp_path):
+        """The whole point: this is the value that says the card was not read,
+        and it must survive to the log as itself, not be rounded into nothing."""
+        record = self._decide(app_env, tmp_path, shown_ms=180)
+        assert record["shown_ms"] == 180
+
+    def test_a_client_that_reports_nothing_records_no_number(
+        self, app_env, tmp_path
+    ):
+        """Absent, never zero. Zero is the reading this field exists to detect,
+        so inventing one would manufacture the exact finding it looks for."""
+        record = self._decide(app_env, tmp_path)
+        assert "shown_ms" not in record
+        assert record["held_ms"] >= 0  # the half that IS knowable still lands
+
+    def test_the_browser_cannot_author_the_gates_own_number(
+        self, app_env, tmp_path
+    ):
+        """`held_ms` is stamped over whatever arrived. The client is trusted for
+        what only it can see; it is not an authority on the server's clock."""
+        record = self._decide(app_env, tmp_path, held_ms=99999999)
+        assert record["held_ms"] < 99999999
+
+    def test_a_report_that_is_not_a_number_is_not_recorded_as_one(self):
+        """Trusting the owner's own browser is fine; parsing whatever it sent as
+        a measurement is not. A field the code cannot check is left out."""
+        for bogus in ("soon", None, True, [], {"ms": 5}):
+            assert "shown_ms" not in server_module.card_latency({"shown_ms": bogus})
+
+    def test_time_that_cannot_have_been_measured_leaves_no_number(self):
+        """A negative is DROPPED, not clamped, and the distinction is the whole
+        point of the field. Clamping writes a zero, and zero is the most damning
+        value this record can carry — the instant tap it exists to detect. An
+        unmeasurable value must leave the same absence a string leaves."""
+        assert "shown_ms" not in server_module.card_latency({"shown_ms": -50})
+        assert "held_ms" not in server_module.card_latency({"held_ms": -1})
+        # A REAL zero survives: that one is the finding, not an artefact.
+        assert server_module.card_latency({"shown_ms": 0})["shown_ms"] == 0
+
+    def test_a_decision_nobody_was_asked_for_records_no_latency(
+        self, app_env, tmp_path
+    ):
+        """An auto-approval draws no card, so there is no time on screen to
+        report. A denylist block and a triggered-session auto-run are the same
+        case — a duration here would be a duration for a question never put."""
+        app_env["allow_path"].write_text("ls\ntouch\n", encoding="utf-8")
+        client, _chat = make_client(app_env, [
+            model_says(tool_calls=[
+                tool_call("run_command", command=f"touch {tmp_path}/auto")
+            ]),
+            model_says("finished"),
+        ])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "touch it"})
+            recv_until(ws, "done")
+        [record] = self._command_records(app_env)
+        assert record["decision"] == "auto"
+        assert "held_ms" not in record and "shown_ms" not in record
+
+    def test_a_card_the_server_denied_by_itself_reports_no_screen_time(self):
+        """Shutdown and Stop force-deny every held card. Nobody looked at
+        those, and the record says so instead of scoring them as instant."""
+        assert server_module.card_latency({"action": "deny", "held_ms": 61000}) == {
+            "held_ms": 61000
+        }
+
+    def test_a_stopped_turn_denies_its_card_without_inventing_a_look(
+        self, app_env, tmp_path
+    ):
+        """The same claim, driven through the real force-deny path rather than
+        asserted about it. Stop unparks the worker with a bare deny — there was
+        no tap, so there is no screen time, and the wait is still recorded."""
+        marker = tmp_path / "never"
+        client, _chat = make_client(app_env, [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+            model_says("stopped"),
+        ])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "touch it"})
+            recv_until(ws, "approval_request")
+            ws.send_json({"type": "stop"})
+            recv_until(ws, "done")
+            assert not marker.exists()
+        [record] = self._command_records(app_env)
+        assert record["decision"] == "denied"
+        assert "shown_ms" not in record
+        assert isinstance(record["held_ms"], int)
+
+
 class TestCommandApproval:
     def responses(self, command):
         return [
@@ -6243,9 +6380,11 @@ class _FakeBridge:
 class _FakeLog:
     def __init__(self):
         self.records: list = []
+        self.timings: list = []
 
-    def command(self, command, decision, intent="", preview=""):
+    def command(self, command, decision, intent="", preview="", **timing):
         self.records.append((command, decision, intent))
+        self.timings.append(timing)
 
 
 # The step refused in the incident behind #252, personal details removed. The
@@ -7021,7 +7160,12 @@ class TestBridgeOnWait:
 
         bridge.on_wait = hook
         result = bridge.ask({"type": "approval_request", "kind": "tool", "tool": "x"})
-        assert result == {"action": "deny"}
+        # The verdict, plus the gate's own measurement of how long it waited for
+        # it (#306). Every decided card carries one and `ask` stamps it, because
+        # that half of the latency is the server's own and the browser is not an
+        # authority on it.
+        assert result["action"] == "deny"
+        assert isinstance(result["held_ms"], int) and result["held_ms"] >= 0
         assert seen == [("tool", False)]  # empty viewers → False
 
     def test_on_wait_error_never_breaks_the_gate(self):
@@ -7033,8 +7177,8 @@ class TestBridgeOnWait:
 
         bridge.on_wait = boom
         # The gate still returns the answer despite the hook raising.
-        assert bridge.ask({"type": "approval_request", "kind": "tool", "tool": "x"}) \
-            == {"action": "approve"}
+        answer = bridge.ask({"type": "approval_request", "kind": "tool", "tool": "x"})
+        assert answer["action"] == "approve"
 
 
 class TestRestartResume:

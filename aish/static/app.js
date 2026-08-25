@@ -6906,6 +6906,7 @@ function onApprovalRequest(event) {
   cards.set(event.id, card);
   pendingCards += 1;
   refreshStatusline();
+  markShown(card); // the clock starts when it goes on screen ([CARD-LATENCY])
   messagesEl.appendChild(card);
   scrollToEnd(true);
   // Modal-like focus (desktop only): the composer usually holds focus, so a
@@ -6944,6 +6945,37 @@ function buttonRow(card, specs) {
   return row;
 }
 
+// [CARD-LATENCY-START]
+// How long the card had been on screen when it was answered (#306).
+//
+// The whole consent design rests on the claim that SOME cards are still worth
+// spending — the rare, checkable-at-a-glance ones. Nothing measured it. A card
+// tapped blind is worse than no card, because it converts a missing control
+// into a recorded consent, and a sub-second tap is a blind tap.
+//
+// performance.now(), because it is monotonic: a clock change, a time-zone
+// shift or a phone waking from sleep must not be able to invent a plausible
+// number. It measures RENDER → tap, which can only be LONGER than the card was
+// really visible (a background tab, a card scrolled off) — so a small value is
+// unambiguous evidence and a large one claims nothing, which is the direction
+// a measurement is allowed to be wrong in.
+//
+// Absent, never zero, when this client never rendered the card: a page that
+// reloaded and answered a replayed one, a card the server force-denied. The
+// server writes an unknown down as unknown rather than supplying a number
+// nothing can check.
+function markShown(card) {
+  card.dataset.shownAt = String(performance.now());
+}
+
+function shownExtra(card) {
+  const stamped = (card && card.dataset && card.dataset.shownAt) || "";
+  const at = stamped ? Number(stamped) : NaN;
+  if (!Number.isFinite(at)) return {};
+  return { shown_ms: Math.max(0, Math.round(performance.now() - at)) };
+}
+// [CARD-LATENCY-END]
+
 function answerCard(id, action, extra) {
   const card = cards.get(id);
   const controls = card ? [...card.querySelectorAll("button, input, textarea")] : [];
@@ -6953,7 +6985,7 @@ function answerCard(id, action, extra) {
   // answered and no way back to it — so the disabling is undone with it
   // ([ACK-LEDGER]). Nothing here re-sends: `bridge.answer` drops a duplicate,
   // but a second verdict the user did not give is not this layer's to invent.
-  act({ type: "approval", id, action, ...extra }, {
+  act({ type: "approval", id, action, ...extra, ...shownExtra(card) }, {
     label: "your answer to the approval",
     lost: () => { for (const c of controls) c.disabled = false; },
   });
