@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import NamedTuple, TextIO
+from typing import Any, NamedTuple, TextIO
 
 TITLE_MAX = 60
 SNIPPET_MAX = 90  # preview line under the title in the web sessions drawer
@@ -2344,7 +2344,13 @@ class SessionLog:
         )
 
     def command(
-        self, command: str, decision: str, intent: str = "", preview: str = ""
+        self,
+        command: str,
+        decision: str,
+        intent: str = "",
+        preview: str = "",
+        held_ms: int | None = None,
+        shown_ms: int | None = None,
     ) -> None:
         """`intent` is what the model SAID it was doing when this decision was
         made (#252) — the same text the card showed. Recorded so a stated
@@ -2365,10 +2371,29 @@ class SessionLog:
         across two session logs, and `explain` could not have helped: it is a
         reader, so a preview that was never written down is simply gone.
 
-        Omitted when empty, on the same terms as `intent`."""
-        extra = {"intent": intent} if intent else {}
+        Omitted when empty, on the same terms as `intent`.
+
+        `held_ms` and `shown_ms` are how long the question was in front of him
+        before he answered it (#306). Two numbers because they are two claims:
+        `held_ms` is how long the gate waited, which is always knowable and is
+        a floor — a card held all night with nobody attached scores hours of
+        nothing. `shown_ms` is how long the card had actually been RENDERED
+        when it was tapped, reported by the browser, and it is the one that
+        indicts: a card decided in under a second was not read, and a card
+        tapped blind is worse than no card, because it turns a missing control
+        into a recorded consent.
+
+        Both are omitted when unknown, and `shown_ms` is unknown often — a
+        forced deny at shutdown, a reload that answered a replayed card, any
+        client that does not report it. Writing a zero there would state
+        exactly the thing the field exists to detect. Nothing infers it."""
+        extra: dict[str, Any] = {"intent": intent} if intent else {}
         if preview:
             extra["preview"] = preview
+        if held_ms is not None:
+            extra["held_ms"] = held_ms
+        if shown_ms is not None:
+            extra["shown_ms"] = shown_ms
         self._record("command", command=command, decision=decision, **extra)
 
     def set_title(self, title: str, auto: bool = False) -> None:

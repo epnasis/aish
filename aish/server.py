@@ -814,6 +814,10 @@ class Bridge:
         event["id"] = uid = uuid.uuid4().hex
         slot: queue.Queue = queue.Queue(maxsize=1)
         self.pending[uid] = slot
+        # Monotonic: a card can be held across a clock change, an NTP step or a
+        # sleeping laptop, and wall time would then report a negative or a
+        # fictional hold (#306).
+        asked_at = time.monotonic()
         self.emit(event)
         # Announce the hold to non-viewers. Hops to the loop thread like emit()
         # does — this runs on the agent worker — and is registered in `pending`
@@ -831,7 +835,14 @@ class Bridge:
             except Exception:  # noqa: BLE001 — notification must not break approval
                 pass
         try:
-            return slot.get()
+            # A COPY: the value in the slot is the client's own message dict,
+            # still held by the loop thread that is about to read its `rid` off
+            # it. And `held_ms` is stamped unconditionally, over anything the
+            # client sent — this half of the measurement is the server's own,
+            # and a browser must not be able to author it (#306).
+            decided = dict(slot.get())
+            decided["held_ms"] = round((time.monotonic() - asked_at) * 1000)
+            return decided
         finally:
             self.pending.pop(uid, None)
             # AFTER the pop, so the row this schedules can no longer see the
@@ -1101,6 +1112,34 @@ def _triggered_safe(name: str, args: dict) -> bool:
     return False
 
 
+def card_latency(answer: dict) -> dict:
+    """How long the card was there before it was decided (#306) — two numbers,
+    and they are deliberately not one.
+
+    `held_ms` is the gate's own wait, `Bridge.ask` to `Bridge.answer`. Always
+    present on a decided card, and it is a FLOOR, not an answer: a card can sit
+    held for an hour with nobody attached to look at it.
+
+    `shown_ms` is the browser's: from the card actually being rendered to the
+    tap. That is the load-bearing one, because a sub-second value indicts —
+    the card cannot have been READ. It is absent whenever the client did not
+    report it (a page that reloaded and answered a replayed card, a forced deny
+    at shutdown or on Stop), and absence is the honest answer: a claim the code
+    cannot check must not be made in the harness's voice. Never defaulted to
+    zero, which would read as the very thing this exists to detect.
+
+    Trusting it is fine — the reporter is the owner's own browser, not fetched
+    content — but it is still clamped at zero, because a number that arrived as
+    a negative was not measured.
+    """
+    timing: dict[str, int] = {}
+    for field in ("held_ms", "shown_ms"):
+        value = answer.get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            timing[field] = max(0, int(value))
+    return timing
+
+
 def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir,
                        get_origin=None, get_session_prefixes=None, get_intent=None):
     """The three approval callbacks, backed by browser round trips. Mirrors
@@ -1139,8 +1178,16 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         if said := intent():
             request["intent"] = said
 
-    def record(command: str, decision: str, preview: str = "") -> None:
-        logref.command(command, decision, intent(), preview)
+    def record(
+        command: str, decision: str, preview: str = "", card: dict | None = None
+    ) -> None:
+        """`card` is the browser's answer to the approval card; the latency it
+        carries says how long the owner had the question in front of him (#306).
+        Omitted entirely for a decision no card was ever drawn for — a denylist
+        block, an auto-approval, a triggered-session policy run."""
+        logref.command(
+            command, decision, intent(), preview, **card_latency(card or {})
+        )
 
     def resolve(uid: str, decision: str, comment: str = "") -> None:
         event = {"type": "approval_resolved", "id": uid, "decision": decision}
@@ -1193,13 +1240,13 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             return Approved(comment, final) if comment else final
 
         if action == "approve":
-            record(command, tagged("approved"))
+            record(command, tagged("approved"), card=answer)
             resolve(request["id"], "approved", comment)
             return granted()
         if action == "approve_trust" and escapes:
             notes = [trust_dir(directory) for directory in escapes]
             bridge.emit({"type": "echo", "text": "✓ " + "; ".join(notes)})
-            record(command, tagged(f"approved+trusted:{','.join(escapes)}"))
+            record(command, tagged(f"approved+trusted:{','.join(escapes)}"), card=answer)
             resolve(request["id"], "approved", comment)
             return granted()
         if action == "approve_session":
@@ -1207,7 +1254,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             bridge.emit(
                 {"type": "echo", "text": f"✓ chat-allowed: {', '.join(suggestions)}"}
             )
-            record(command, tagged("approved+session"))
+            record(command, tagged("approved+session"), card=answer)
             resolve(request["id"], "approved", comment)
             return granted()
         if action == "approve_always":
@@ -1216,7 +1263,11 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             bridge.emit(
                 {"type": "echo", "text": f"✓ always-allowed: {', '.join(suggestions)}"}
             )
-            record(command, tagged(f"approved+always:{','.join(suggestions)}"))
+            record(
+                command,
+                tagged(f"approved+always:{','.join(suggestions)}"),
+                card=answer,
+            )
             resolve(request["id"], "approved", comment)
             return granted()
         if action == "edit":
@@ -1226,13 +1277,13 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
                 # `ls` could be edited into `rm -rf /` and run unchecked.
                 reason = check_denied(edited, load_prefixes(deny_path))
                 if reason:
-                    record(f"{command} => {edited}", f"blocked: {reason}")
+                    record(f"{command} => {edited}", f"blocked: {reason}", card=answer)
                     resolve(request["id"], "denied")
                     return blocked(edited, reason)
-                record(f"{command} => {edited}", tagged("edited"))
+                record(f"{command} => {edited}", tagged("edited"), card=answer)
                 resolve(request["id"], "edited", comment)
                 return granted(edited)
-        record(command, tagged("denied"))
+        record(command, tagged("denied"), card=answer)
         resolve(request["id"], "denied", comment)
         return Denied(comment) if comment else None
 
@@ -1258,6 +1309,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         record(
             f"{verb} {plan.target}",
             f"{decision} (feedback: {comment})" if comment else decision,
+            card=answer,
         )
         resolve(request["id"], decision, comment)
         if approved:
@@ -1279,11 +1331,11 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         action = answer.get("action")
         if action == "approve_trust" and escapes:
             bridge.emit({"type": "echo", "text": f"✓ {trust_dir(directory)}"})
-            record(f"read {path}", f"approved+trusted:{directory}")
+            record(f"read {path}", f"approved+trusted:{directory}", card=answer)
             resolve(request["id"], "approved")
             return True
         approved = action == "approve"
-        record(f"read {path}", "approved" if approved else "denied")
+        record(f"read {path}", "approved" if approved else "denied", card=answer)
         resolve(request["id"], "approved" if approved else "denied")
         return approved
 
@@ -1324,6 +1376,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             f"{decision} (feedback: {comment})" if comment else decision,
             # What he was ASKED, not just what aish meant to do (#284).
             preview or "",
+            card=answer,
         )
         resolve(request["id"], decision, comment)
         if approved:
@@ -1349,7 +1402,11 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         approved = answer.get("action") == "approve"
         comment = str(answer.get("comment") or "").strip()
         decision = "approved" if approved else "denied"
-        record(f"import skill {name}", f"{decision} (feedback: {comment})" if comment else decision)
+        record(
+            f"import skill {name}",
+            f"{decision} (feedback: {comment})" if comment else decision,
+            card=answer,
+        )
         resolve(request["id"], decision, comment)
         if approved:
             return Approved(comment) if comment else True

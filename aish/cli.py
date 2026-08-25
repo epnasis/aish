@@ -257,9 +257,19 @@ class LogRef:
             self.last_answer_id = written
 
     def command(
-        self, command: str, decision: str, intent: str = "", preview: str = ""
+        self,
+        command: str,
+        decision: str,
+        intent: str = "",
+        preview: str = "",
+        held_ms: int | None = None,
+        shown_ms: int | None = None,
     ) -> None:
-        self.log.command(command, decision, intent, preview)
+        # The terminal draws no card, so the CLI never has the two latencies to
+        # pass (#306) — the parameters are here because this is one interface
+        # with three implementations, and a keyword the wrapper does not accept
+        # is a TypeError inside the approval path.
+        self.log.command(command, decision, intent, preview, held_ms, shown_ms)
 
     def set_title(self, title: str) -> None:
         self.log.set_title(title)

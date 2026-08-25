@@ -66,6 +66,19 @@ A card showed the action and nothing else, so the owner reverse-engineered its p
 
 `tests/js/test_card_intent.js`.
 
+### `[CARD-LATENCY]` — a sub-second tap is a blind tap
+
+The consent design rests on the claim that SOME cards are still worth spending — the rare, checkable-at-a-glance ones. Nothing measured it. What the record held was the negative: an eleven-line grant card is one he scrolls past, and a five-cards-per-search flow trained the tap that lost a purchase. A card tapped blind is **worse** than no card, because it converts a missing control into a *recorded consent* (#306).
+
+`markShown` stamps the card at the moment it goes on screen and `shownExtra` puts the elapsed milliseconds on the `approval` message; the server writes it beside its own `held_ms` (`docs/web-server.md`). Only the browser can know this one — the server's wait says how long the card was HELD, which is an hour of nothing when nobody is attached.
+
+- **`performance.now()`, never `Date.now()`.** A phone waking from sleep, an NTP step or a timezone change must not be able to author a plausible number. Monotonic time cannot go backwards.
+- **It measures render → tap, which is an over-count**, never an under-count: a card in a background tab or scrolled out of view still accrues time. That asymmetry is the point — a small value is unambiguous evidence the card cannot have been read, and a large one claims nothing.
+- **A card this page never drew reports NOTHING.** A verdict sent after a reload, for a card whose element is gone, carries no `shown_ms` at all. A zero would state the exact finding the field exists to detect, so an unknown travels as an unknown and the server writes it down as one.
+- **The stamp happens at render, not at answer time.** Deferring it would make every tap measure zero — the finding, manufactured.
+
+`tests/js/test_card_latency.js`.
+
 ### The approval card for a rule shows what it MEANS
 
 A write approval card renders the plan's diff. For a rule that diff is YAML **the owner did not write** — the model named field values and the harness rendered the file — so approving the diff would mean approving an implementation detail he has no reason to audit. The card therefore carries an optional `note`, the compiled meaning in English (*when this, then that*) plus which of his recent turns the rule would have bound, and it renders **above** the diff rather than instead of it: the YAML stays one glance away for anyone who wants it. Set as text, never markup — the words are the owner's own description coming back to him. An ordinary file write sends no note and is unchanged, with no empty box. `tests/js/test_rule_card_note.js`.
