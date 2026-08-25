@@ -1798,8 +1798,13 @@ SECOND_FACTOR_JS = "() => {" + browse_mod.DEEP_JS + """
 }"""
 
 
-# Emptied before the shutter, so a picture of the sign-in attempt cannot carry
-# the credential (#320).
+# Emptied before the shutter, so a picture of the sign-in attempt does not
+# carry the password out of the FIELD aish typed it into (#320). That is the
+# whole of what this enforces: a page that mirrors the value into its own text
+# — a hand-rolled show-password that writes into a <span> — is not a field and
+# is not reachable this way. The IDENTIFIER is deliberately left alone; #296
+# already settled that the credential fenced here is the password and not the
+# username, which is on the wire of half the commercial web by design.
 #
 # A password box renders as dots and not as text — that much is the browser's
 # own behaviour and needs no help. What is NOT guaranteed is that the field is
@@ -2012,14 +2017,17 @@ class SignInResult:
 
 
 # What aish says when the form came back and nothing carrying the password was
-# ever seen leaving the page. It is not a diagnosis of the site; it is the
-# narrowest true statement aish can make about its own hands, and the sentence
-# it replaced ("the stored one looks stale") was a false statement about the
-# owner's password written to durable storage (#320).
+# ever SEEN leaving the page. It is not a diagnosis of the site; it is the
+# narrowest true statement aish can make about its own hands, and it is worded
+# to what the fence can observe rather than to what happened — "the site never
+# saw it" would be wider than the fence enforces, since a service worker or a
+# value transformed in the page is invisible to it. The sentence it replaced
+# ("the stored one looks stale") was a false statement about the owner's
+# password, written to durable storage (#320).
 NEVER_SUBMITTED = (
-    "aish filled the form but could not submit it — nothing carrying the "
-    "password ever left the page, so the site never saw it and nothing has "
-    "been learned about the saved sign-in"
+    "aish filled the form and never saw the password leave the page, so it "
+    "could not confirm the form was submitted at all — nothing has been "
+    "learned about the saved sign-in"
 )
 
 # The fence is also the only witness, so a sign-in aish cannot watch is a
@@ -2069,10 +2077,13 @@ async def _press_the_button_again(
     reader will otherwise take it for a breach of *one attempt, never a retry*.
     That rule exists because a wrong password tried twice ticks the site's
     lockout counter; it is about the VALUE reaching the site. Here the fence
-    has watched every request this page made and NOTHING carrying the password
-    has left it, so the site has not seen the credential once, and this is the
-    first attempt at delivering it rather than the second. The value is already
-    typed; only the gesture is repeated.
+    has routed every request this page made and saw NONE of them carrying the
+    password, so as far as anything can be observed the site has not seen the
+    credential once and this is the first attempt at delivering it rather than
+    the second. The value is already typed; only the gesture is repeated. (The
+    fence's blind spots are the ones `secret_needles` already declares — a
+    service worker, a WebSocket, a value transformed in the page — and on such
+    a site this can be a genuine second delivery. It is bounded to one.)
 
     The lead this exists for is in the owner's own session logs, on this exact
     site: *"the click would not land, so aish pressed it with the keyboard, and
@@ -2417,6 +2428,12 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
     # (see `_record_the_outcome`); what it let THROUGH is what decides whether
     # the password can be called stale at all (#320).
     watch = _CredentialWatch()
+    # Cleared at the TOP, not only written at the bottom — the same reason
+    # `_Seen.start_call` clears the browse frame (#320). An attempt that never
+    # returns (a navigation timeout, a browser that died) never reaches
+    # `_record_the_outcome`, and a record still holding the last picture it
+    # managed to take would present an older page as this attempt's.
+    signin_mod.note_frame(record.origin, path="", skipped="")
 
     async def job(owner: _Owner) -> SignInResult:
         if owner.view is not None:

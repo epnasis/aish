@@ -381,9 +381,11 @@ class TestNothingIsStaleUntilItWasSeenToLeave:
         result = self._run(page, self._watch(armed=True))
         assert result.stale is False
         assert not result.ok
-        # It says what actually happened, and it claims nothing about the
-        # password — which is the whole of the repair.
-        assert "could not submit" in result.why
+        # It says what actually happened, worded to what the fence can
+        # OBSERVE, and it claims nothing about the password — which is the
+        # whole of the repair.
+        assert "never saw the password leave the page" in result.why
+        assert "could not confirm the form was submitted" in result.why
         assert "nothing has been learned" in result.why
         assert "stale" not in result.why
 
@@ -595,7 +597,8 @@ class TestASubmitThatDidNotFireGetsOneRetryOfTheBUTTON:
         page.focus_raises = wedged
         result = self._run(page, self._watch(armed=True))
         # Nothing was sent, so the credential is still not called stale.
-        assert result.stale is False and "could not submit" in result.why
+        assert result.stale is False
+        assert "could not confirm the form was submitted" in result.why
 
 
 class _FakeElement:
@@ -1381,6 +1384,27 @@ class TestEverySignInAttemptIsPhotographed:
         self._drive(monkeypatch, shot=boom)
         record = signin.find("https://eon.pl")
         assert record.last_frame == "" and record.last_frame_skipped == "failed"
+
+    def test_an_attempt_that_never_RETURNED_leaves_no_picture_either(
+        self, state, monkeypatch
+    ):
+        """Cleared at the top, not only written at the bottom. An attempt that
+        raises — a navigation timeout, a browser that died — never reaches
+        `_record_the_outcome`, and a record holding the last picture it managed
+        to take would present an older page as this attempt's."""
+        from aish import browser
+
+        result, _ = self._drive(monkeypatch)
+        assert signin.find("https://eon.pl").last_frame == result.frame
+
+        def wedged(job, timeout):
+            raise RuntimeError("Timeout 45000ms exceeded")
+
+        monkeypatch.setattr(browser, "_submit", wedged)
+        with pytest.raises(RuntimeError):
+            browser.sign_in("https://eon.pl/faktury")
+        record = signin.find("https://eon.pl")
+        assert (record.last_frame, record.last_frame_skipped) == ("", "")
 
     def test_the_store_holds_a_REFERENCE_and_never_the_bytes(self, state,
                                                              monkeypatch):
