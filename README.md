@@ -495,7 +495,9 @@ this UI. Highlights:
 - **Tap-able approvals.** Approve / This chat / Always / Deny,
   with a pencil to edit a command first and an optional comment field whose text
   travels with whichever button you press — *approve + comment* means "rework it
-  this way and re-propose", *deny + comment* means "stop and explain".
+  this way and re-propose", *deny + comment* means "stop and explain". The
+  explanation that follows a deny has to mark anything aish inferred but never
+  got to verify, and name the step it was stopped from taking.
 - **Nothing lost on a locked phone.** Reconnecting replays the transcript,
   including any approval still waiting. Survives server restarts too. Every turn
   carries the time it happened — including chats from long before the feature

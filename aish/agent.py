@@ -172,7 +172,10 @@ Rules:
      (it is approved again before it runs). Never re-run the original unchanged.
    - DENY + comment = STOP. Your next reply MUST be plain text with NO tool
      call: address the user's concern and wait for them. Do not retry a variant
-     or run anything else first.
+     or run anything else first. That reply is written with no way left to
+     check anything, so anything you INFERRED rather than OBSERVED MUST be
+     marked as unverified and MUST name the check you did not get to run. Do
+     NOT state it as fact, and do NOT give an instruction that depends on it.
    A plain deny with no comment: do not retry it — change approach or ask.
 4. After running commands, analyze the output and answer concisely.
 5. Prefer read-only commands. Never bundle destructive operations
@@ -481,6 +484,34 @@ SKILL_GATE_REFUSAL = (
     "explain which skills you did or did not use."
 )
 
+# A FORCED wrap-up is a turn shape nothing else in the loop has: the model must
+# produce a final answer, and it has just been told it may not gather any more
+# evidence. Every incentive points at closing the loop with what it has, and
+# that is how a hypothesis hardens into a fact on the way to the owner. It
+# happened (#253): having had its verification step denied, it wrote "you have
+# a small credit of exactly 1.90 zl on this agreement account" and told him to
+# pay the lower amount — arithmetic run backwards from a discrepancy, with the
+# two steps that would have confirmed or refuted it being exactly the two that
+# were blocked. Its own reasoning for that turn called it a hypothesis.
+#
+# Rides EVERY forced wrap-up — the denial that arms the stop gate, the stop
+# gate's own refusal, and all three _finish_stopped notes (stall, ceiling,
+# loop) — because the hazard is "forced to conclude with evidence-gathering
+# foreclosed", which is what those paths share. Not a rule: "mark unverified
+# claims" has no verdict function, and docs/rules-engine.md forbids a verb the
+# engine cannot check. Imperative with a worked example on purpose — capability
+# phrasing is measurably ignored by the models that run here.
+UNVERIFIED_CLAIM_CLAUSE = (
+    " You are answering with no way left to check anything, so every claim you "
+    "INFERRED rather than OBSERVED MUST be marked as unverified in the same "
+    "sentence, and MUST name the step that would have settled it. You MUST NOT "
+    "state an unchecked inference as fact, and you MUST NOT give an instruction "
+    'that depends on one. Write: "I could not check this — the 1.90 difference '
+    "is consistent with a credit on the account, but I have not seen one; the "
+    'payments page I was stopped from opening is what would show it." Do NOT '
+    'write: "you have a credit of 1.90, so pay the lower amount."'
+)
+
 # Stop gate (issue #81): deny + comment means STOP — the system prompt and the
 # feedback note ORDER the model to address the concern in plain text and halt,
 # but eager models (Gemini, small local ones) run another tool first anyway.
@@ -492,7 +523,7 @@ STOP_GATE_REFUSAL = (
     "NOT EXECUTED — the user DENIED your last action with a concern you have "
     "not addressed. Denial means STOP: your NEXT turn must be TEXT ONLY, with "
     "NO tool call — address the user's concern and wait for them. Do not retry "
-    "a variant or run anything else."
+    "a variant or run anything else." + UNVERIFIED_CLAIM_CLAUSE
 )
 
 # These four nudges are appended to the conversation as user turns the human
@@ -518,15 +549,16 @@ STEP_LIMIT_NOTE = (
     "calls are possible. Assess your work and reply with TEXT ONLY: if the "
     "task is complete, give the final answer now. Otherwise state clearly "
     "(1) what was accomplished, (2) what remains, and (3) the next concrete "
-    "step — the user can ask you to continue." + NAMED_SOURCE_CLAUSE + "]"
+    "step — the user can ask you to continue."
+    + NAMED_SOURCE_CLAUSE + UNVERIFIED_CLAIM_CLAUSE + "]"
 )
 
 LOOP_STOP_NOTE = (
     "[aish: stopping this task — the same tool call kept returning identical "
     "output with nothing new in between, so you are running in circles. Reply "
     "with TEXT ONLY: summarize what you tried, what failed and why you appear "
-    "stuck, and what would be needed to make progress." + NAMED_SOURCE_CLAUSE
-    + "]"
+    "stuck, and what would be needed to make progress."
+    + NAMED_SOURCE_CLAUSE + UNVERIFIED_CLAIM_CLAUSE + "]"
 )
 
 STALL_NOTE = (
@@ -534,7 +566,7 @@ STALL_NOTE = (
     "new results (no progress for several steps), so you appear stuck. Reply "
     "with TEXT ONLY: summarize what you accomplished, what remains, and what is "
     "blocking further progress — the user can redirect you or say 'continue'."
-    + NAMED_SOURCE_CLAUSE + "]"
+    + NAMED_SOURCE_CLAUSE + UNVERIFIED_CLAIM_CLAUSE + "]"
 )
 
 STOPPED_LIMIT = (
@@ -565,7 +597,7 @@ FEEDBACK_NOTE = (
     "address the user's concern, then wait for them. Do NOT retry a variant or "
     'run anything else first. Example — comment "this could delete real data" → '
     'reply "You\'re right, that would touch real files — I\'ve stopped. Here is '
-    'what I would do instead…" and stop.]'
+    'what I would do instead…" and stop.' + UNVERIFIED_CLAIM_CLAUSE + "]"
 )
 
 # Approve + comment = CONTINUE, but adjust. The original action was HELD (not
