@@ -168,6 +168,121 @@ _DETAIL_ALIGNMENT = """([zoom, rect]) => {
 }"""
 
 
+# Watch mode (#289 slice 2) is the SAME column with two rows taken out of it —
+# the nav row, and the address bar's clear — plus a badge added to the top bar.
+# Removing rows can only give the stage more room, but the BADGE is new furniture
+# in a row that was already tight, and the address field is the elastic member
+# beside it: on the narrowest phone this is where "watching" would push the URL
+# to nothing or wrap the row into a second line, and no fake DOM can see either.
+_OPEN_WATCHING = """(vvh) => {
+  document.getElementById('boot-loader')?.remove();
+  openSheet('browser-sheet');
+  document.getElementById('bv-empty').hidden = true;
+  document.getElementById('browser-sheet').classList.add('bv-watching');
+  const url = document.getElementById('bv-url');
+  url.readOnly = true;
+  url.value = 'https://www.eon.pl/mojeon/faktury-i-platnosci?lokal=12345';
+  // What onBrowserWatch writes: the page's own title, on the status line and
+  // never inside the picture. Set here so the --shots are representative — the
+  // default hint ("tap a field to type") belongs to the DRIVING mode and is
+  // replaced by openWatchView, which this script does not go through.
+  document.getElementById('bv-status').textContent = 'Faktury i płatności';
+  // The browse context's own shape (a 1440x900 window), not the stage's: watch
+  // mode may not ask the page to re-lay-out, so a desktop page on a portrait
+  // phone letterboxes top and bottom. That is the cost, and it should be
+  // visible in the screenshot rather than hidden by a convenient fixture.
+  document.getElementById('bv-frame').src = 'data:image/svg+xml;base64,' + btoa(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="820">' +
+    '<rect width="100%" height="100%" fill="#33475a"/></svg>');
+  document.body.style.height = vvh + 'px';
+}"""
+
+_MEASURE_WATCHING = """() => {
+  const vis = (el) => el && getComputedStyle(el).display !== 'none' && !el.hidden;
+  const r = (el) => { if (!vis(el)) return null;
+    const b = el.getBoundingClientRect();
+    return {t: Math.round(b.top), b: Math.round(b.bottom),
+            h: Math.round(b.height), w: Math.round(b.width)}; };
+  const s = document.getElementById('browser-sheet');
+  return {
+    url:   r(document.getElementById('bv-url')),
+    tag:   r(document.getElementById('bv-watch-tag')),
+    clear: r(document.getElementById('bv-url-clear')),
+    nav:   r(s.querySelector('.bv-nav')),
+    stage: r(s.querySelector('.bv-stage')),
+    close: r(s.querySelector('.bv-x')),
+    top:   r(s.querySelector('.bv-top')),
+  };
+}"""
+
+
+def _check_watch_mode(port: int, shots: Path | None) -> int:
+    """Does the read-only sheet still fit, and does it SAY it is read-only?"""
+    from playwright.sync_api import sync_playwright
+
+    bad = 0
+    print()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(channel="chrome")
+        for label, w, h, top, bot, vvh in (
+            ("watching, Pro Max portrait", 430, 932, 59, 34, 932),
+            ("watching, SE portrait", 375, 667, 0, 0, 667),
+            ("watching, Pro landscape", 852, 393, 0, 21, 393),
+        ):
+            ctx = browser.new_context(
+                viewport={"width": w, "height": h},
+                device_scale_factor=3, is_mobile=True, has_touch=True,
+            )
+            page = ctx.new_page()
+            insets = {"top": top, "bottom": bot}
+            if w > h:
+                insets |= {"left": 59, "right": 59}
+            ctx.new_cdp_session(page).send(
+                "Emulation.setSafeAreaInsetsOverride", {"insets": insets}
+            )
+            page.goto(f"http://127.0.0.1:{port}/index.html",
+                      wait_until="domcontentloaded")
+            page.wait_for_timeout(500)
+            page.evaluate(_OPEN_WATCHING, vvh)
+            page.wait_for_timeout(250)
+            g = page.evaluate(_MEASURE_WATCHING)
+            probs = []
+            # The mode has to be VISIBLE. The two modes are pixel-identical
+            # otherwise and only one of them does anything when you tap.
+            if not g["tag"]:
+                probs.append("the 'watching' badge is not shown")
+            # Nothing that would touch the page is offered. A control that does
+            # nothing is worse than no control.
+            if g["nav"]:
+                probs.append("the back/reload row is still offered")
+            if g["clear"]:
+                probs.append("the address bar's clear is still offered")
+            # One row, not two: the badge must not wrap the top bar.
+            if g["tag"] and g["top"] and g["top"]["h"] > g["tag"]["h"] * 2:
+                probs.append(f"the top bar wrapped ({g['top']['h']}px)")
+            # And the address must still be legible beside it.
+            if g["url"] and g["url"]["w"] < 120:
+                probs.append(f"the address is squeezed to {g['url']['w']}px")
+            if g["stage"] and g["stage"]["h"] < MIN_TAPPABLE:
+                probs.append(f"stage too small ({g['stage']['h']}px)")
+            if g["close"] and g["close"]["t"] < top:
+                probs.append(f"close under the status bar (y={g['close']['t']})")
+            bad += bool(probs)
+            rows = "  ".join(
+                f"{k}={g[k]['t']}..{g[k]['b']}" if g[k] else f"{k}=hidden"
+                for k in ("tag", "url", "stage", "nav")
+            )
+            print(f"{'FAIL' if probs else 'ok  '}  {label:34} vp={vvh:4}  {rows}")
+            for pr in probs:
+                print(f"        *** {pr}")
+            if shots:
+                stem = label.replace(", ", "_").replace(" ", "-")
+                page.screenshot(path=str(shots / f"{stem}.png"))
+            ctx.close()
+        browser.close()
+    return bad
+
+
 def _check_detail_alignment(port: int, shots: Path | None) -> int:
     """Does the sharpened patch cover the page rectangle it says it covers?"""
     from playwright.sync_api import sync_playwright
@@ -256,6 +371,7 @@ def main() -> int:
         print(f"\n{len(CASES) - failures}/{len(CASES)} cases reachable")
         # Inside the try: the file server is what serves index.html, and it is
         # shut down in the finally.
+        failures += _check_watch_mode(port, shots)
         failures += _check_detail_alignment(port, shots)
     finally:
         srv.shutdown()

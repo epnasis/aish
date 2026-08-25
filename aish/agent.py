@@ -2186,6 +2186,17 @@ class Agent:
         only place one can be, so this is what makes a bare name resolvable."""
         return Path(self.state_dir) / "uploads" if self.state_dir else None
 
+    @property
+    def browse_key(self) -> str:
+        """This chat's name for its own browser tab (#272).
+
+        Read-only, and read by exactly one thing outside the browse path: the
+        live-watch loop (#289 slice 2), which needs to know WHICH tab this
+        chat's window looks at. Exposed as a property rather than letting the
+        server reach into `_browse_view` so the tab a chat drives has one
+        answer, and so nothing outside can point a chat at another chat's."""
+        return self._browse_view.key
+
     def _restore_attachments(self, message: dict) -> dict:
         """One stored message, with the files it names turned back into model
         guidance. Untouched when it names none, which is almost every message

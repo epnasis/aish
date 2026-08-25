@@ -185,6 +185,14 @@ class ClaudeMaxAgent:
     def lessons_path(self):
         return self.inner.lessons_path
 
+    @property
+    def browse_key(self) -> str:
+        # The inner Agent is what dispatches `browse`, so its BrowseView holds
+        # the tab this chat is driving — and the live watch (#289 slice 2) has
+        # to be able to find it here too, or watching a claude-max chat would
+        # fail with an AttributeError the watcher swallows as "stop watching".
+        return self.inner.browse_key
+
     def rebase(self, target: str) -> str:
         result = self.inner.rebase(target)
         if not result.startswith("ERROR"):

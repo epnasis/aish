@@ -3370,6 +3370,22 @@ body.console-open #backdrop { z-index: 63; }
   border: none; background: none; color: var(--fg);
 }
 .bv-x svg { width: 26px; height: 26px; display: block; }
+/* Watch mode (#289): the same sheet, read-only, on the page aish is driving in
+   THIS chat. Everything the mode removes is removed because it would touch the
+   page — Back, Reload, and the address bar's clear (which only exists so you
+   can type a new address). The badge is what tells the two modes apart; without
+   it they are pixel-identical, and only one of them does anything on a tap.
+   The stage keeps its gestures, because zoom and pan are entirely local. */
+.bv-watch-tag {
+  display: none; flex: 0 0 auto;
+  padding: 3px 8px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+  background: var(--chip-bg); color: var(--dim);
+}
+#browser-sheet.bv-watching .bv-watch-tag { display: inline-flex; }
+#browser-sheet.bv-watching .bv-nav,
+#browser-sheet.bv-watching #bv-url-clear { display: none; }
+#browser-sheet.bv-watching .bv-url { padding-right: 12px; color: var(--dim); }
 .bv-picker[hidden] { display: none; }
 .bv-picker {
   position: absolute; inset: 0; z-index: 4; display: flex;

@@ -223,6 +223,13 @@ function ledgerWorld({ socket = "open" } = {}) {
     // SIGN-IN is deliberately not here: it arms the approval gate, so it goes
     // through act() as `browser_login`.
     browser_view: "self-evident",
+    // WATCHING claims nothing, on screen or on the server ([BROWSER-WATCH]).
+    // `start` that goes missing shows as a sheet that never fills — the status
+    // line still says it is looking — and `stop` that goes missing costs one
+    // watcher, which the server ends itself the moment this client stops
+    // being a viewer of that chat. Neither leaves anything on screen for a
+    // receipt to take back, and neither consents to anything (#295 P1).
+    browser_watch: "fails safe",
   };
 
   const bare = [...src.matchAll(/send\(\{ type: "([a-z_]+)"/g)].map((m) => m[1]);

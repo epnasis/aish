@@ -772,6 +772,51 @@ The read context runs at `device_scale_factor` 1 — the remote view's crispness
 
 `TestTheEvidenceFrame` pins the store, the one remaining refusal, the failed capture, the two removed ones (a login page IS pictured now, and the capture no longer asks the page what it is) and the store-location agreement; `TestTheFrameReferenceRidesTheResult` pins that the reference rides the `ToolOutcome` envelope beside a page cut and that a call which reached no page borrows no picture; `TestTheEvidenceFrameOnTheRecord` pins the trace step, the three states in `aish explain`, and that no bytes enter the log.
 
+## Watching what it is doing, live (#289 slice 2)
+
+Slice 1 left a picture on every step after the fact. This is the live half, asked for by name: *"I actually want to see what it does."* `/watch` in the web app opens the browser sheet as a **read-only window onto this chat's own tab** — `browser.browse_watch_frame`, `server._watch_browse`, `app.js`'s `[BROWSER-WATCH]`.
+
+**It cannot be the remote view, and that structural fact is what the whole design is shaped by.** `_open_view` calls `owner.close_now()` before it opens: the view needs a fixed viewport and `device_scale_factor`, which are *launch* arguments on a persistent context, and Chrome locks the profile directory — so the read context is torn down and relaunched view-shaped, and `_close()` empties `browse_pages`. **Opening `/browser` destroys every chat's browse tab.** Pointing the existing sheet at the model's page is therefore not a small change; watch mode photographs the tab where it stands instead, and `/browser` is left exactly as it was — globally exclusive, and outranking this.
+
+### What it does to the page, stated as narrowly as the code keeps it
+
+**It takes a screenshot; it reads the address, the title, and whether the tab is still open. That is the entire list**, and `TestWatchingTheTabTheModelIsDriving` pins it as a list rather than as an intention — the fake page raises on every other attribute, so a verb this ever grows fails there first. No resize, no scroll, no click, no keyboard — and nothing injected, not even the activity probe. That last one is the difference from `_watch_view` next door: `_WATCH_JS` installs a MutationObserver and a PerformanceObserver *into the document*, which is cheap and correct for the owner's own view and is exactly what this may not do. So watch mode pays a capture on a plain interval instead of a probe, and drops identical bytes before they reach the socket — a page that is not moving costs the owner loop one screenshot a second and the phone nothing.
+
+**The reason is semantic, and it must not be "improved" on.** Every gate decision downstream is made against `BrowseView.shown` — the page *as the model was shown it*. The submit card's form values, the control classification and the act-time re-resolution fence all assume nothing moved between showing and pressing except what the model did. A human scrolling changes the reachable set; a resize crosses a responsive breakpoint and control names change. The act-time fence would then *correctly* refuse each act, and the flow becomes a refusal storm that burns `MAX_STALL_STEPS` and reads as the model flailing. A mutex cannot fix that; only temporal separation can, and stepping in is a later slice with an approval of its own.
+
+**A view is not a control (#295 P2).** Nothing in the browse gate, the act-time fence, the irreversible refusals or the site grant is loosened, widened or checked less carefully because a screen is now open on it. This is the section where that argument becomes newly tempting — *"he can see it happening"* is exactly the safety argument the epic forbids, and the tense trap applies too: *"he could have seen it"* is the same violation.
+
+**Nothing aish says is ever rendered inside the frame.** Structurally true — the frame is `page.screenshot` of the site's own document, drawn as an `<img>`, and every word watch mode writes goes to the status line outside it. Stated because the residual attack is the page painting *"aish says: enter your card here"* in pixels.
+
+### Four things it refuses, and one of them is the safety property
+
+`browse_watch_frame` returns `(frame, reason)`; the reasons are a closed vocabulary (`WATCH_HANDS`, `WATCH_NO_PAGE`, `WATCH_NO_BROWSER`, `WATCH_FAILED`) for the same reason `NO_FRAME_*` is — two renderers read them and a free-text reason drifts between the ends.
+
+- **Never while the owner's hands are on the browser.** One line, `owner.view is not None`, at the capture rather than an ordering the callers keep. `/browser` outranks; while his view is set there is nothing of the model's left to photograph anyway. It is reported rather than fatal — the watch picks back up when he closes his browser, because a watch should not die because he looked at something for a minute.
+- **A chat with no tab is told so, never shown another chat's.** The key is the chat (`BrowseView.key`, #272), read off the agent and never taken from the wire. Between pages is the ordinary case, so it is a sentence and not an ending.
+- **A watcher never launches Chrome** (`_no_browser_yet`) — the rule the remote view's probe already keeps. A poll that started the thing it polls would bring a browser up on a machine nobody asked.
+- **And a picture never keeps a tab alive.** `session.touched` is deliberately not updated: watching consents to nothing and changes nothing, including how long the reaper leaves the page open.
+
+**Note what is NOT refused.** #320 removed the password-box refusal from the browse path on purpose — a login page is photographed deliberately now, because a sign-in that did not work is exactly when he needs to see the screen — and nothing here reintroduces it. The picture is for him; since #318 the store is out of the model's reach, and a live frame is not stored at all.
+
+### Live frames are not stored, and watchers exist only while somebody is looking
+
+**Nothing is written.** Slice 1 stores one frame per snapshot into `frames_dir()` under its own cap (1000 files / 100 MB, #318); a watch stream at a frame a second would turn that store over in minutes. There is no `media.store` call on this path, the frame store directory is not even created by one, and `_to_watchers` pushes straight to each client's outbox rather than through the session's `Bridge` — so a live frame never enters the transcript, never replays, and never reaches a viewer with no sheet open. Same reasoning that keeps console output out of transcripts.
+
+**A watcher is one task per WATCHED CHAT and it ends when nobody is watching.** Otherwise every background flow pays a screenshot tax on a box that also runs a Home Assistant VM and Colima under a 16 GB roof. `Client.watching` is the whole of the subscription, and it is cleared in `_leave` — the one place both a session switch and a disconnect already go through, so a watch belongs to the chat being left rather than to a rule each caller has to remember.
+
+### `/browser` says what it kills
+
+Opening the owner's own browser closes every chat's page. `browse_tab_count()` is read **before** the open — afterwards there is nothing left to count — and rides back on the frame as `closed_pages`, which the sheet says out loud. Only on a deliberate `open`: the reopen `view_act` performs on a reaped view is not a moment he chose. Watchers find out for themselves, from the capture's `hands` refusal, which is why there is one enforcement point rather than an explicit teardown that has to agree with it.
+
+### What it costs, stated rather than left to be found
+
+- **The picture is the browse context's shape, not the phone's.** The remote view asks the page to lay itself out in the stage's aspect (`view_size`); watch mode may not — that is `resize`, and it is exactly what the read-only rule forbids. So a 1440×820 desktop window on a portrait phone fills the width and letterboxes top and bottom: on a 375-wide screen the page renders about 214 px tall. Pinch and double-tap are there and are free, and `scripts/check-browser-sheet.py`'s three watch cases photograph it honestly rather than with a convenient fixture.
+- **And it is 1×.** The browse context runs at `device_scale_factor` 1 — the view's crispness comes from `VIEW_SCALE`, a *launch* argument, which is the same structural fact this whole design is built around. `view_detail`'s clip-recapture is the answer if zoom ever needs more, and it is deliberately not wired here: it is a `browser_view` message, so it would be a second path past the read-only rule for a sharpening nobody has asked for yet.
+- **A capture is ~27 ms on the owner loop, once a second, only while somebody is looking.** A watched flow is that much slower.
+
+`TestWatchingTheTabTheModelIsDriving` pins the capture — that a watch frame is a screenshot and *nothing else* (the fake page raises on every other attribute), that nothing is stored, that the tab is not kept alive, the four absences, the hands refusal and the tab count. `TestBrowseWatch` (`tests/test_server.py`) drives the loop end to end over a real socket: the chat's own key, the session stamp, identical frames dropped, an absence said once, the hands case resuming, stop / switch / disconnect each ending the watcher, that watching claims no control, that the channel has no verb that touches a page, and that nothing reaches the transcript or the log. `tests/js/test_browser_watch.js` pins the sheet's half.
+
 ## The document at the end of the flow
 
 Driving the portal gets you to the invoice; it does not get you the invoice. The E.ON session ended holding real `…/ebokapi/GetDocument?objectId=…` URLs it could do nothing with, because `read_pdf` and `fetch_binary` go through the anonymous opener — the same identity gap #236 closed for reads, one tool over. So `accept_downloads` is now **True** (it was deliberately False), and a click that produces a file saves it under `~/.local/state/aish/browser/downloads`.

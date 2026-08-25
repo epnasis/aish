@@ -232,6 +232,19 @@ class TestConstructorWiring:
         with pytest.raises(TypeError):
             ClaudeMaxAgent(model="fake", bogus_capability=lambda: None)
 
+    def test_the_browse_tab_is_findable_through_the_wrapper(
+        self, monkeypatch, tmp_path, project_scope
+    ):
+        """The inner Agent dispatches `browse`, so its `BrowseView` holds the
+        tab this chat drives — and the live watch (#289 slice 2) reads that key
+        off `session.agent`. Without the delegation, watching a claude-max chat
+        raises an AttributeError the watcher swallows as "stop watching", which
+        is a feature quietly missing for one backend: exactly the failure the
+        no-**kwargs-sink rule above exists to prevent."""
+        agent, _ = make_max_agent(monkeypatch, tmp_path)
+        assert agent.browse_key == agent.inner.browse_key
+        assert agent.browse_key
+
     def test_capability_callbacks_reach_inner_agent(
         self, monkeypatch, tmp_path, project_scope
     ):

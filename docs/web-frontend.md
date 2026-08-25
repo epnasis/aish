@@ -628,6 +628,24 @@ A sheet can be dismissed four ways: the Close button, the ✕, the backdrop, and
 
 **Nothing vertical is touched, and that is deliberate.** The whole of #226 — the top safe-area inset, the stage's 44px tap-target floor, the toolbar standing down beside an open field, the `max-height: 500px` landscape rules — is a column-height argument, and it is the half no unit test can see. `scripts/check-browser-sheet.py` returns coordinates identical to the ones before this change at all ten device cases, landscape phones included (they are past 700px wide, so they widen too, and every row lands where it did).
 
+### `[BROWSER-WATCH]` — the same sheet, read-only, on the page aish is driving
+
+**L1.** `/watch` opens the browser sheet as a window onto **this chat's own tab** (#289 slice 2), for the ask the owner made by name: *"I actually want to see what it does."* The server half, and what the capture is allowed to do to the page, are `docs/browser.md`.
+
+**`bvWatch` is the whole of read-only, so it has one owner.** Set by `openWatchView`, cleared by `bvEndWatch`, read by `bvMayTouchPage` — which has exactly two callers, and they are the only two paths in app.js that can send something reaching the page: `bvSend` (every interaction the sheet produces — click, scroll, goto, back, refresh, **resize**, the field editor) and `bvRequestDetail` (which deliberately bypasses `bvSend`, so it would have bypassed the rule with it). A third `browser_view` sender exists and is deliberately not gated: `bvEndIfOpen`'s `close`, which ends the OWNER's own view and touches no page, guarded by `bvOpen` so it can only close a view this client has seen a frame from. `test_browser_watch.js` asserts that set against the SOURCE, so a fourth sender cannot appear quietly.
+
+**Why read-only is not fussiness.** Every gate decision downstream is made against the page *as the model was shown it*. A human scrolling changes the reachable set; a resize crosses a responsive breakpoint and control names change. The act-time fence would then correctly refuse each act and the flow reads as the model flailing. `resize` therefore **does not exist** in this mode — it is on the test's gesture list for that reason.
+
+**Zoom and pan stay, because they are local.** A tap still arms the double-tap timer while watching, and that is load-bearing rather than tidy: without it the second tap of a pair takes the first-tap path and double-tap never zooms. It paints no tap marker, though — local feedback for a press that will not happen is a lie about what the tap did.
+
+**Nothing aish says is ever rendered inside the frame.** The picture is the site's own document as an `<img>`; every word this mode writes goes to `#bv-status`, outside it. Structural, and stated because the residual attack is the page painting *"aish says: enter your card here"* in pixels.
+
+**The two modes are exclusive and `/browser` outranks.** `openWatchView` leaves the driving view first; `openBrowserView` calls `bvEndWatch`; `bvEndIfOpen` — the one funnel every sheet dismissal already goes through — ends both. Opening his own browser closes every chat's page, and the frame carries `closed_pages` so the sheet says so rather than letting a chat discover it a minute later.
+
+**`WATCH_IDLE` is four closed reasons** matching `browser.WATCH_*`, for the reason `FRAME_ABSENT` is: a free-text reason drifts between the two ends. *No page* is the ordinary case — aish navigates — so it is a sentence and not an ending, and it takes the previous picture down rather than leaving one claiming to be now. An unrecognised reason still renders a sentence, never a blank.
+
+**A door for watching is a slash command deliberately.** `[CHIP-NEVER-COMMANDS]` is what keeps a fetched page from opening aish's browser sheet on one tap, and watch mode is a door into the same sheet. — `test_browser_watch.js`
+
 ### `[BROWSER-VIEW-EDIT]` — tapping a field opens an editor
 
 The first design put a text field permanently in the sheet with **Type** and **⏎** buttons. Owner feedback after real use, and every clause of it is a distinct defect:
