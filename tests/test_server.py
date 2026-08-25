@@ -9,6 +9,7 @@ import base64
 import contextlib
 import datetime
 import json
+import logging
 import os
 import pathlib
 import re
@@ -20,6 +21,8 @@ from types import SimpleNamespace
 
 import pytest
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+from uvicorn.protocols.utils import ClientDisconnected
 
 import aish.browse as browse_module
 import aish.browser as browser_module
@@ -8817,3 +8820,242 @@ class TestOneSessionPathCheck:
         outside.write_text("{}\n")
         (state / "session-linked.jsonl").symlink_to(outside)
         assert safe_session_path(state, "session-linked.jsonl") is None
+
+
+class _FakeSocket:
+    """A websocket that answers handle_ws's handshake and can be told to die on
+    a given send — the one thing a TestClient socket cannot do deterministically.
+
+    Sends are counted: `fail_at=1` dies on the replay (the hello landed),
+    `fail_at=2` completes the whole attach and dies on the first LIVE event, so
+    the client stays a viewer with a socket nobody can write to. `error`
+    defaults to uvicorn's ClientDisconnected — what production actually raises.
+    Incoming messages arrive through `push`, so this drives a real connection.
+    """
+
+    def __init__(self, *, session: str = "", fail_at: int | None = None, error=None):
+        self.headers: dict[str, str] = {}
+        self.query_params = {"token": TEST_TOKEN}
+        if session:
+            self.query_params["session"] = session
+        self.sent: list[dict] = []
+        self.fail_at = fail_at
+        self.error = error if error is not None else ClientDisconnected()
+        self.closed: int | None = None
+        self.inbox: asyncio.Queue = asyncio.Queue()
+
+    async def accept(self) -> None:
+        pass
+
+    async def close(self, code: int | None = None) -> None:
+        self.closed = code
+
+    async def send_json(self, data) -> None:
+        if self.fail_at is not None and len(self.sent) >= self.fail_at:
+            raise self.error
+        self.sent.append(data)
+
+    async def receive_json(self):
+        message = await self.inbox.get()
+        if message is None:
+            raise WebSocketDisconnect(1000)
+        return message
+
+    def push(self, server, message) -> None:
+        """Deliver a client message (or None to hang up) from the test thread."""
+        server.loop.call_soon_threadsafe(self.inbox.put_nowait, message)
+
+
+def _serve(server, socket):
+    """Run one connection through the REAL handle_ws on the app's own loop."""
+    return asyncio.run_coroutine_threadsafe(server.handle_ws(socket), server.loop)
+
+
+def _command_records(app_env) -> list[dict]:
+    """Every kind:"command" decision record this app wrote (same scan as
+    TestCardLatency, reused here for the card nobody was ever shown)."""
+    records = []
+    for log in sorted(app_env["state_dir"].glob("session-*.jsonl")):
+        for line in log.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record.get("kind") == "command":
+                records.append(record)
+    return records
+
+
+def _wait_until(predicate, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.01)
+    raise AssertionError("condition never became true")
+
+
+class TestClientVanishes:
+    """#315: a client that goes away mid-send.
+
+    Two halves. The filed one is cosmetic — a closed tab raising
+    ClientDisconnected out of the replay logged a full unhandled-ASGI
+    traceback. The one that matters is the approval card: a socket dying around
+    an open gate must never let the action through, and must never cost the
+    other viewers their card.
+    """
+
+    def responses(self, command):
+        return [
+            model_says(tool_calls=[tool_call("run_command", command=command)]),
+            model_says("finished"),
+        ]
+
+    def test_disconnect_mid_replay_ends_the_attach_quietly(self, app_env, caplog):
+        client, _ = make_client(app_env, [])
+        with client:
+            server = client.app.state.server
+            socket = _FakeSocket(fail_at=1)  # hello lands, the replay does not
+            with caplog.at_level(logging.DEBUG, logger="aish.web"):
+                _serve(server, socket).result(timeout=5)  # returns, does not raise
+            ours = [r for r in caplog.records if r.name == "aish.web"]
+            assert ours, "a disconnect mid-replay must still say so once"
+            assert all(r.exc_info is None for r in ours)  # a line, not a traceback
+
+    def test_a_failed_attach_leaves_nothing_half_registered(self, app_env):
+        """The half that made the traceback more than cosmetic: _attach ran
+        OUTSIDE the try/finally, so a raise there skipped _detach and left a
+        ghost in the viewer set forever — and the viewer set is what decides
+        whether the owner is told a chat is holding on an approval."""
+        client, _ = make_client(app_env, [])
+        with client:
+            server = client.app.state.server
+            _serve(server, _FakeSocket(fail_at=1)).result(timeout=5)
+            assert server.clients == set()
+            assert all(not s.viewers for s in server.sessions.values())
+
+    def test_a_genuine_send_failure_still_surfaces(self, app_env):
+        """A disconnect is one specific exception. A serialization error is a
+        bug in what we are sending and must NOT be swallowed with it — while
+        the connection is still torn down cleanly."""
+        client, _ = make_client(app_env, [])
+        with client:
+            server = client.app.state.server
+            socket = _FakeSocket(fail_at=1, error=TypeError("not serializable"))
+            with pytest.raises(TypeError):
+                _serve(server, socket).result(timeout=5)
+            assert server.clients == set()
+
+    def test_a_dead_socket_at_the_card_never_runs_the_command(self, app_env, tmp_path):
+        """THE one. The gate's outcome must not be decided by a network event:
+        the card is emitted into each viewer's OUTBOX, never written to a socket
+        by the parked worker, so a client vanishing at that instant cannot
+        approve, cannot skip the gate, and cannot lose the request."""
+        marker = tmp_path / "unapproved"
+        client, chat = make_client(app_env, self.responses(f"touch {marker}"))
+        with client:
+            server = client.app.state.server
+            name = server._default.name
+            socket = _FakeSocket(session=name, fail_at=2)  # attaches, then dies
+            future = _serve(server, socket)
+            _wait_until(lambda: len(socket.sent) == 2)
+            socket.push(server, {"type": "task", "text": "run it"})
+            # The worker parks on a card nobody can be shown.
+            _wait_until(lambda: server._default.bridge.pending)
+            assert not marker.exists()
+            # A second, live client picks the same card up off the replay and
+            # denies it: the gate stayed open, and only an answer moves it.
+            with connected(client, f"/ws?session={name}") as (ws, _, replay):
+                request = next(
+                    e for e in replay["events"] if e["type"] == "approval_request"
+                )
+                ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
+                recv_until(ws, "done")
+            assert not marker.exists()
+            assert tool_results(chat)[-1]["content"] == DENIED_RESULT
+            socket.push(server, None)
+            future.result(timeout=5)
+
+    def test_one_dead_socket_does_not_cost_the_others_their_card(
+        self, app_env, tmp_path
+    ):
+        """Three viewers, the middle one's socket dead. The fan-out is a loop
+        over OUTBOXES — nothing in it can raise — so the dead one costs the
+        other two nothing, and either of them can answer."""
+        marker = tmp_path / "approved-elsewhere"
+        client, _ = make_client(app_env, self.responses(f"touch {marker}"))
+        with client, connected(client) as (first, hello, _):
+            server = client.app.state.server
+            name = hello["session"]
+            socket = _FakeSocket(session=name, fail_at=2)
+            future = _serve(server, socket)
+            _wait_until(lambda: len(socket.sent) == 2)
+            with connected(client, f"/ws?session={name}") as (second, _, _):
+                _wait_until(lambda: len(server._default.viewers) == 3)
+                assert any(c.ws is socket for c in server._default.viewers)
+                first.send_json({"type": "task", "text": "run it"})
+                # BOTH live viewers get the card; the dead one is simply skipped
+                # by its own sender, not by the fan-out.
+                request = recv_until(first, "approval_request")
+                mirrored = recv_until(second, "approval_request")
+                assert mirrored["id"] == request["id"]
+                # ...and the one that did not start the turn can answer it.
+                second.send_json(
+                    {"type": "approval", "id": request["id"], "action": "approve"}
+                )
+                recv_until(first, "done")
+                assert marker.exists()
+            # The dead socket never took its own connection down with it — it is
+            # still parked on receive, exactly as a wedged phone would be.
+            assert not future.done()
+            socket.push(server, None)
+            future.result(timeout=5)
+
+    def test_a_card_no_screen_ever_showed_records_no_screen_time(
+        self, app_env, tmp_path
+    ):
+        """#306 meets #315, and this is the axis on which a vanished client
+        could make the trace lie. `held_ms` is the gate's own clock and is
+        always knowable. `shown_ms` is the BROWSER's, so a card that reached no
+        screen must record none at all — a zero is the exact finding that field
+        exists to detect, and writing one for a card nobody was shown would say
+        the owner tapped it blind."""
+        marker = tmp_path / "never-shown"
+        client, _ = make_client(app_env, self.responses(f"touch {marker}"))
+        with client:
+            server = client.app.state.server
+            name = server._default.name
+            socket = _FakeSocket(session=name, fail_at=2)
+            future = _serve(server, socket)
+            _wait_until(lambda: len(socket.sent) == 2)
+            socket.push(server, {"type": "task", "text": "run it"})
+            _wait_until(lambda: server._default.bridge.pending)
+            socket.push(server, {"type": "stop"})  # force-denied, never rendered
+            _wait_until(lambda: not server._default.bridge.pending)
+            _wait_until(lambda: not server._default.busy)
+            socket.push(server, None)
+            future.result(timeout=5)
+        assert not marker.exists()
+        records = _command_records(app_env)
+        assert records, "a forced deny is still recorded like any other deny"
+        for record in records:
+            assert isinstance(record["held_ms"], int)  # the gate's own clock
+            assert "shown_ms" not in record  # absent, never zero, never inferred
+
+    def test_the_card_never_reaches_a_socket_from_the_gate(self):
+        """The pin under the verdict, in the shape tests/test_pty.py uses for
+        "the model has no write path to the console".
+
+        `Bridge.ask` emits the card into each viewer's OUTBOX and returns; the
+        socket is written later by that Client's own sender task. That
+        indirection is the ONLY reason a client vanishing at the instant a card
+        is emitted cannot raise into the worker parked inside the gate. If it is
+        ever removed — a delivery-coupled emit, an awaited send — the property
+        would go quiet rather than fail, so it fails here instead."""
+        import inspect
+
+        source = inspect.getsource(server_module.Bridge)
+        assert "outbox.put_nowait" in source
+        for socket_verb in ("send_json", ".ws", "await ", "async "):
+            assert socket_verb not in source, (
+                f"Bridge touched {socket_verb!r}: the approval gate must never "
+                "depend on a socket write succeeding"
+            )
