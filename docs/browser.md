@@ -508,9 +508,26 @@ Also required: exactly one visible password field, in the main frame. A login fo
 
 ### One attempt, never a retry
 
-The form coming back is the site refusing the credential, and it is the **only** outcome that marks it stale. Retrying a wrong password is how accounts lock, and unattended it locks them silently. A stale record answers `credential()` with `None` — the value that must not be spent again — while the record itself survives so `/browser` can explain why. A fresh capture clears it.
+Retrying a wrong password is how accounts lock, and unattended it locks them silently. A stale record answers `credential()` with `None` — the value that must not be spent again — while the record itself survives so `/browser` can explain why. A fresh capture clears it.
 
 **A second factor is not a failure**, and telling them apart matters: the password was almost certainly right, so recording it as stale would burn a good credential and send him back to a full sign-in. It ends as a hand-off — the note names `/browser <host>`, and the push says the site wants a code.
+
+### Nothing is stale until it was seen to LEAVE (#320)
+
+For its first weeks the whole of the evidence for *the site refused the credential* was **a password box on the screen after the submit**. That is equally true of a rejected password, a submit that never fired, a bot wall, a page that had not navigated yet, and a second-factor page that keeps the field on screen. On eon.pl it was the second one every single time, and what `stale` does is not print a bad message — it **writes a false statement about the owner's password to durable storage and stops the credential being spent**, then invites a repair that fails identically. He re-recorded the sign-in twice; the record read `used: 0`, so the replay had never once succeeded, on a password that works by hand.
+
+**The positive signal was already there, and free.** Since #296 the fence recognises a credential-bearing request — that is the whole of what it does. So it is also the only witness to the question that matters: *did the password actually go out?* `_CredentialWatch` is that witness, filled by the same route handler that decides whether to abort, and `stale` now requires `watch.was_tried`.
+
+- **`sent_to` is written AFTER `route.continue_()` returned, never before.** A send recorded ahead of the release would claim the password left on a request that was never let go, and the ordering is what makes the statement true rather than probable. What it claims is exactly *the password left aish's hands towards this origin* — not that the server received it, which nothing here can see.
+- **An ABORTED credential-bearing request is not a send.** A wrong-destination replay is still an incident and still retires the credential (that is `_record_the_outcome`'s business, unchanged), but it is not the site refusing the password, because the site never got it.
+- **`armed` is not decoration.** An empty `sent_to` means two different things — nothing went out, or nobody was looking — and only the first supports a claim. `was_tried` is the one place the two are combined, so nothing can read one without the other.
+- **An unwatched sign-in is not made at all.** `_sign_in_on` returns before it types anything if the watch is not armed. With no witness there is no honest verdict afterwards, and a credential spent for an unattributable outcome is spent for nothing.
+
+**This does not weaken one-attempt; it narrows it.** Nothing here re-submits anything, and the rule was always about which outcomes retire a credential. It now retires one on the outcome that actually justifies it.
+
+**The residual, stated rather than discovered.** The witness sees what `page.route` routes: the address, body and headers of every request the page makes. It does *not* see a WebSocket frame (not a request), a request made by a **service worker** (Playwright does not route those by default), or a value **hashed or encrypted in the page before it is sent** — the same blind spot `secret_needles` already declares, one consequence further on. On such a site a genuinely wrong password reads as *never submitted*, so aish declines to retire it and will type it again at the next lapse rather than once. That is the safe direction of the two — it costs repeated attempts where the old behaviour cost a working credential permanently — but it is a real trade and the mitigation is the ordinary one: every attempt pushes, every attempt is on the record, and `/browser forget <host>` is one command. Note also that a site which transforms the credential before sending it would have been captured with **no `destinations` at all**, since the capture-time watcher shares `_request_carriers` with the fence.
+
+`TestNothingIsStaleUntilItWasSeenToLeave`.
 
 ### The DRIVING path needs this too, and shipping without it made things worse
 

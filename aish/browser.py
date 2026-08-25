@@ -1831,8 +1831,49 @@ def _carries_the_credential(request: Any, needles: Sequence[str]) -> bool:
     return any(signin_mod.carries_secret(part, needles) for part in _request_carriers(request))
 
 
+@dataclass
+class _CredentialWatch:
+    """What the fence SAW of the credential itself during one sign-in (#320).
+
+    The fence already recognises a credential-bearing request, so it is the one
+    thing in this subsystem that can answer *was the password actually tried?*
+    — and that question is what tells the site refusing a password apart from
+    aish failing to submit the form at all. Both leave a password box on the
+    screen afterwards, and for months only the second one was ever happening on
+    eon.pl while the first one was being written to the store.
+
+    `armed` is not decoration. `sent_to` being empty means two different things
+    — nothing carrying the credential was let through, or nobody was looking —
+    and only the first supports a claim about the password. Nothing may read
+    `sent_to` without reading `armed`.
+    """
+
+    # Set once `page.route` has returned, so the handler below is installed.
+    armed: bool = False
+    # Origins of credential-bearing requests aish LET GO. Not "the site
+    # received it": aish cannot see that, and this is the strongest true
+    # statement available — the password left aish's hands towards this origin.
+    sent_to: list[str] = field(default_factory=list)
+    # Origins of credential-bearing requests aish ABORTED. A wrong-destination
+    # replay: a fact about the credential, whatever the sign-in's own outcome.
+    blocked: list[str] = field(default_factory=list)
+
+    def note_sent(self, origin: str) -> None:
+        if origin and origin not in self.sent_to:
+            self.sent_to.append(origin)
+
+    def note_blocked(self, origin: str) -> None:
+        if origin and origin not in self.blocked:
+            self.blocked.append(origin)
+
+    @property
+    def was_tried(self) -> bool:
+        """Did the password actually go out? Only an ARMED watch may say yes."""
+        return self.armed and bool(self.sent_to)
+
+
 async def _fence_the_origin(
-    page: Any, record: Any, secret: str, incidents: list[str]
+    page: Any, record: Any, secret: str, watch: _CredentialWatch
 ) -> None:
     """Refuse, at the network, to let THE CREDENTIAL leave where it belongs.
 
@@ -1854,39 +1895,62 @@ async def _fence_the_origin(
     somewhere the owner's own sign-in sent it? Everything else on the wire is
     none of the fence's business and passes unexamined and unreported.
 
-    Only the ORIGIN of an aborted request is recorded. The address itself may
-    carry the credential in its query string, and this list is pushed to his
-    phone and written to the store."""
+    Only the ORIGIN of a recorded request is kept, aborted or allowed. The
+    address itself may carry the credential in its query string, and these
+    lists are pushed to his phone and written to the store.
+
+    **It also reports what it let THROUGH** (#320), because the same look that
+    decides whether to abort is the only observation of whether the password
+    was tried at all. `watch` is filled in place rather than returned: the
+    handler outlives this call, and every request routed between here and the
+    end of the sign-in is part of the answer."""
     needles = signin_mod.secret_needles(secret)
 
-    def going_astray(request: Any) -> str:
-        """The origin to refuse, or "". Never raises: a request aish cannot
-        read is a request it has nothing to say about, and a fence that hangs
-        the page is worse than no fence at all."""
+    def carries(request: Any) -> bool:
+        """Never raises: a request aish cannot read is a request it has nothing
+        to say about, and a fence that hangs the page is worse than no fence."""
         try:
-            if not _carries_the_credential(request, needles):
+            return _carries_the_credential(request, needles)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def going_astray(request: Any) -> str:
+        """The origin to refuse a credential-bearing request, or ""."""
+        try:
+            if signin_mod.may_receive_credential(record, request.url):
                 return ""
-            return (
-                ""
-                if signin_mod.may_receive_credential(record, request.url)
-                else (signin_mod.origin_of(request.url) or "an unreadable address")
-            )
+            return signin_mod.origin_of(request.url) or "an unreadable address"
         except Exception:  # noqa: BLE001
             return ""
 
     async def decide(route: Any) -> None:
         # The abort and the continue are kept apart deliberately: a failed
         # abort must never fall through to letting the request go.
-        if where := going_astray(route.request):
-            if where not in incidents:
-                incidents.append(where)
+        carrying = carries(route.request)
+        if carrying and (where := going_astray(route.request)):
+            watch.note_blocked(where)
             with contextlib.suppress(Exception):
                 await route.abort()
             return
+        # Read while the request is still alive; a dead one answers nothing,
+        # and the record.origin fallback keeps a send from going unrecorded
+        # just because its address could not be read back.
+        heading_for = record.origin
+        if carrying:
+            with contextlib.suppress(Exception):
+                heading_for = signin_mod.origin_of(route.request.url) or record.origin
         with contextlib.suppress(Exception):
             await route.continue_()
+            # AFTER the continue returned, never before: a `sent_to` written
+            # ahead of it would claim the password left on a request that was
+            # never released. This is the whole positive signal, and the
+            # ordering is what makes it true rather than probable.
+            if carrying:
+                watch.note_sent(heading_for)
 
     await page.route("**/*", decide)
+    # Last, so nothing can read `armed` as true while the handler is not up.
+    watch.armed = True
 
 
 @dataclass
@@ -1901,17 +1965,50 @@ class SignInResult:
     # one: the password was almost certainly right.
     second_factor: bool = False
     # Should the stored credential stop being spent? Only when the site
-    # actually refused it.
+    # actually refused it — which requires having SEEN it sent (#320).
     stale: bool = False
     url: str = ""
 
 
-async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) -> SignInResult:
-    """Fill and submit the recorded login form on an already-open page."""
+# What aish says when the form came back and nothing carrying the password was
+# ever seen leaving the page. It is not a diagnosis of the site; it is the
+# narrowest true statement aish can make about its own hands, and the sentence
+# it replaced ("the stored one looks stale") was a false statement about the
+# owner's password written to durable storage (#320).
+NEVER_SUBMITTED = (
+    "aish filled the form but could not submit it — nothing carrying the "
+    "password ever left the page, so the site never saw it and nothing has "
+    "been learned about the saved sign-in"
+)
+
+# The fence is also the only witness, so a sign-in aish cannot watch is a
+# sign-in aish will not make: with no witness there is no honest verdict
+# afterwards, and the credential would be spent for nothing.
+UNWATCHED = (
+    "aish could not watch what the page sends, so it did not type the saved "
+    "sign-in at all — the saved sign-in is untouched"
+)
+
+
+async def _sign_in_on(
+    page: Any, record: Any, identifier: str, password: str, watch: _CredentialWatch
+) -> SignInResult:
+    """Fill and submit the recorded login form on an already-open page.
+
+    `watch` is the fence's live account of the credential on the wire, and it
+    is what makes the ending honest (#320). A password box on the screen
+    afterwards is equally true of a rejected password, a submit that never
+    fired, a bot wall, a page that has not navigated yet and a second-factor
+    step that keeps the field on screen — so it decides nothing on its own."""
     refused = (
         f"aish only ever types a credential at {record.origin}, the exact origin "
         "it was saved for"
     )
+    if not watch.armed:
+        # Before anything is typed. An unwatched sign-in cannot be judged
+        # afterwards — the form coming back would be unattributable — and a
+        # credential spent for an unattributable outcome is spent for nothing.
+        return SignInResult(why=UNWATCHED, url=page.url or "")
     live = signin_mod.origin_of(page.url or "")
     if live != record.origin:
         # A cheap early out. It is NOT the fence — the fence is inside the
@@ -1978,9 +2075,17 @@ async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) ->
     await page.wait_for_timeout(SETTLE_MS)
 
     if await _has_password_field(page):
-        # The form came back. That is the site refusing the credential, and it
-        # is the ONLY outcome that may mark it stale — one attempt, never a
-        # retry, because retrying is how an account locks.
+        # The form came back — and on its own that says nothing about the
+        # password (#320). It is the site refusing the credential ONLY if the
+        # credential was actually sent, and the fence is the witness: it looks
+        # at every request this page made and knows which of them carried the
+        # value. No credential-bearing request, no claim.
+        #
+        # One attempt, never a retry, is untouched by this — it NARROWS which
+        # outcomes retire a credential, and retiring one is what stops it being
+        # spent again. Nothing here re-submits anything.
+        if not watch.was_tried:
+            return SignInResult(why=NEVER_SUBMITTED, url=page.url)
         return SignInResult(
             why="the site asked for the password again — the stored one looks stale",
             stale=True,
@@ -2140,10 +2245,11 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
             )
         )
     identifier, password = pair
-    # Held out here so the outcome can be recorded after the job returns. It is
-    # deliberately NOT consulted for whether the sign-in worked — see
-    # `_record_the_outcome`.
-    incidents: list[str] = []
+    # Held out here so the outcome can be recorded after the job returns. What
+    # it BLOCKED is deliberately NOT consulted for whether the sign-in worked
+    # (see `_record_the_outcome`); what it let THROUGH is what decides whether
+    # the password can be called stale at all (#320).
+    watch = _CredentialWatch()
 
     async def job(owner: _Owner) -> SignInResult:
         if owner.view is not None:
@@ -2157,8 +2263,8 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
             await _dismiss_consent(page)
             # Armed BEFORE anything is typed and left up through the submit and
             # the settle, so a delayed exfiltration is caught too.
-            await _fence_the_origin(page, record, password, incidents)
-            return await _sign_in_on(page, record, identifier, password)
+            await _fence_the_origin(page, record, password, watch)
+            return await _sign_in_on(page, record, identifier, password, watch)
         finally:
             owner.read_pages.discard(page)
             with contextlib.suppress(Exception):
@@ -2166,14 +2272,14 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
 
     result = _submit(job, timeout)
     incident = _record_the_outcome(
-        record, result, incidents, when=time.strftime("%Y-%m-%dT%H:%M")
+        record, result, watch, when=time.strftime("%Y-%m-%dT%H:%M")
     )
     _announce(record, result, incident=incident)
     return result
 
 
 def _record_the_outcome(
-    record: Any, result: SignInResult, incidents: list[str], *, when: str
+    record: Any, result: SignInResult, watch: _CredentialWatch, *, when: str
 ) -> str:
     """Write what happened to the store, and return the incident text, if any.
 
@@ -2187,10 +2293,15 @@ def _record_the_outcome(
     the credential land — the record is marked suspect, which is what stops the
     value being spent again, and he is pushed the address it was headed for.
     That happens whether or not the session came up, and it takes precedence
-    over `note_used`, which would clear the very mark being set."""
-    if incidents:
+    over `note_used`, which would clear the very mark being set.
+
+    `result.stale` is the OTHER way a credential is retired, and since #320 it
+    reaches here only when the fence watched the password go out and the site
+    asked for it again. This function does not re-derive that; it writes what
+    it is handed."""
+    if watch.blocked:
         text = (
-            f"the page tried to send the saved password to {', '.join(incidents)}, "
+            f"the page tried to send the saved password to {', '.join(watch.blocked)}, "
             "which is not where it goes when he signs in himself"
         )
         signin_mod.note_failed(record.origin, why=text)

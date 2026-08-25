@@ -243,7 +243,8 @@ class TestTheReplayItself:
     def _page(self, **kw):
         return self.FakePage(**kw)
 
-    def _run(self, page, record=None, ident="him@x.pl", password="hunter2hunter2"):
+    def _run(self, page, record=None, ident="him@x.pl", password="hunter2hunter2",
+             watch=None):
         import asyncio
 
         from aish import browser
@@ -252,10 +253,19 @@ class TestTheReplayItself:
         record = record or signin_mod.Record(
             origin="https://eon.pl", url="https://eon.pl/login", saved="d"
         )
+        # The default is the ordinary live shape: the fence is up and it SAW
+        # the credential go to the login origin. Tests that care about the
+        # other endings hand in their own.
+        if watch is None:
+            watch = browser._CredentialWatch(
+                armed=True, sent_to=["https://eon.pl"]
+            )
         original = browser._has_password_field
         browser._has_password_field = _fake_has_password(page)
         try:
-            return asyncio.run(browser._sign_in_on(page, record, ident, password))
+            return asyncio.run(
+                browser._sign_in_on(page, record, ident, password, watch)
+            )
         finally:
             browser._has_password_field = original
 
@@ -309,7 +319,10 @@ class TestTheReplayItself:
         assert result.ok and not result.stale and not result.second_factor
         assert page.typed == ["him@x.pl", "hunter2hunter2"]
 
-    def test_the_form_coming_back_means_stale_never_a_retry(self):
+    def test_the_form_coming_back_after_the_password_went_out_means_stale(self):
+        """One attempt, never a retry — narrowed by #320 to the case that
+        justifies it: the fence WATCHED the password leave, and the site asked
+        for it again anyway."""
         page = self._page(url="https://eon.pl/login", form=self.OK_FORM,
                           has_password_after=True)
         result = self._run(page)
@@ -323,6 +336,118 @@ class TestTheReplayItself:
                           wants_code=True)
         result = self._run(page)
         assert result.second_factor and not result.stale and not result.ok
+
+
+class TestNothingIsStaleUntilItWasSeenToLeave:
+    """#320. `stale` writes a false statement about the owner's password onto
+    durable storage and stops the credential being spent — for months, on
+    eon.pl, on a password that works by hand and was recorded `used: 0`.
+
+    Its only evidence was a password box on the screen after the submit, which
+    is equally true of a rejected password, a submit that never fired, a bot
+    wall, a page that has not navigated yet and a second-factor step. The fence
+    already recognises a credential-bearing request, so the positive signal is
+    free: no credential-bearing request, nothing was learned, no verdict."""
+
+    def _page(self, **kw):
+        return TestTheReplayItself.FakePage(**kw)
+
+    def _run(self, page, watch):
+        return TestTheReplayItself()._run(page, watch=watch)
+
+    def _watch(self, **kw):
+        from aish import browser
+
+        return browser._CredentialWatch(**kw)
+
+    def test_a_form_that_came_back_with_nothing_ever_sent_is_not_stale(self):
+        """The eon.pl session, exactly: the click did not land, so the form
+        came back untouched — and aish wrote 'the stored one looks stale'."""
+        page = self._page(url="https://eon.pl/login", form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        result = self._run(page, self._watch(armed=True))
+        assert result.stale is False
+        assert not result.ok
+        # It says what actually happened, and it claims nothing about the
+        # password — which is the whole of the repair.
+        assert "could not submit" in result.why
+        assert "nothing has been learned" in result.why
+        assert "stale" not in result.why
+
+    def test_the_verdict_needs_a_WITNESS_and_not_merely_an_empty_list(self):
+        """`sent_to == []` means two different things — nothing went out, or
+        nobody was watching — and only the first supports a claim. A watch that
+        was never armed never reaches the ending at all: aish does not type a
+        credential into a page whose traffic it cannot see."""
+        page = self._page(url="https://eon.pl/login", form=TestTheReplayItself.OK_FORM,
+                          has_password_after=True)
+        result = self._run(page, self._watch(armed=False))
+        assert result.stale is False and page.typed == []
+        assert "could not watch" in result.why
+
+    def test_was_tried_is_the_one_place_the_two_facts_are_combined(self):
+        assert self._watch(armed=False, sent_to=["https://eon.pl"]).was_tried is False
+        assert self._watch(armed=True, sent_to=[]).was_tried is False
+        assert self._watch(armed=True, sent_to=["https://eon.pl"]).was_tried is True
+
+    def test_a_credential_the_fence_ABORTED_was_never_sent(self):
+        """A wrong-destination replay is still an incident — that is
+        `_record_the_outcome`'s business — but it is not the site refusing the
+        password, because the site never got it."""
+        route, watch = TestTheFenceIsOnTheCredentialNotTheConnection()._watch(
+            "https://evil.test/collect",
+            body=f"p={TestTheFenceIsOnTheCredentialNotTheConnection.PASSWORD}",
+        )
+        assert route.aborted and watch.blocked == ["https://evil.test"]
+        assert watch.sent_to == [] and watch.was_tried is False
+
+    def test_an_allowed_credential_request_is_what_counts_as_sent(self):
+        route, watch = TestTheFenceIsOnTheCredentialNotTheConnection()._watch(
+            "https://api.eon.pl/auth",
+            body=f"u=him&p={TestTheFenceIsOnTheCredentialNotTheConnection.PASSWORD}",
+        )
+        assert route.continued and watch.sent_to == ["https://api.eon.pl"]
+        assert watch.was_tried is True
+
+    def test_the_pixels_that_fly_past_are_not_the_password_going_out(self):
+        """The whole point of #296 read the other way round: a beacon must not
+        make aish believe the credential was tried any more than it made aish
+        believe the sign-in failed."""
+        route, watch = TestTheFenceIsOnTheCredentialNotTheConnection()._watch(
+            "https://www.google-analytics.com/g/collect", body="en=page_view"
+        )
+        assert route.continued and watch.sent_to == [] and watch.was_tried is False
+
+    def test_a_send_is_recorded_only_after_the_request_was_RELEASED(self):
+        """`sent_to` claims the password left aish's hands. A continue that
+        threw did not release anything, and recording ahead of it would turn
+        the strongest available true statement into a probable one."""
+        import asyncio
+
+        from aish import browser
+
+        klass = TestTheFenceIsOnTheCredentialNotTheConnection
+        page, watch = klass.FakePage(), browser._CredentialWatch()
+        asyncio.run(
+            browser._fence_the_origin(page, klass()._record(), klass.PASSWORD, watch)
+        )
+
+        class Wedged(klass.FakeRoute):
+            async def continue_(self):
+                raise RuntimeError("Target page, context or browser has been closed")
+
+        route = Wedged("https://eon.pl/login", "POST", f"p={klass.PASSWORD}", {})
+        asyncio.run(page.handler(route))
+        assert watch.sent_to == [] and watch.was_tried is False
+
+    def test_a_second_factor_still_outranks_everything(self):
+        """It reaches the code-page check only because the password box is
+        gone; pinned so a later reordering cannot make a 2FA step read as a
+        submit that never fired."""
+        page = self._page(url="https://eon.pl/login", form=TestTheReplayItself.OK_FORM,
+                          wants_code=True)
+        result = self._run(page, self._watch(armed=True))
+        assert result.second_factor and not result.stale
 
 
 class _FakeElement:
@@ -360,7 +485,10 @@ class TestACredentialIsOnlyEverTypedAtItsOwnOrigin:
         browser._has_password_field = _fake_has_password(page)
         try:
             return asyncio.run(
-                browser._sign_in_on(page, record, "him@x.pl", "hunter2hunter2")
+                browser._sign_in_on(
+                    page, record, "him@x.pl", "hunter2hunter2",
+                    browser._CredentialWatch(armed=True, sent_to=[record.origin]),
+                )
             )
         finally:
             browser._has_password_field = original
@@ -492,7 +620,10 @@ class TestALoginPageWithNoFormAtAll:
         browser._has_password_field = _fake_has_password(page)
         try:
             return asyncio.run(
-                browser._sign_in_on(page, record, "him@x.pl", "hunter2hunter2")
+                browser._sign_in_on(
+                    page, record, "him@x.pl", "hunter2hunter2",
+                    browser._CredentialWatch(armed=True, sent_to=[record.origin]),
+                )
             )
         finally:
             browser._has_password_field = original
@@ -578,22 +709,29 @@ class TestTheFenceIsOnTheCredentialNotTheConnection:
             destinations=list(destinations),
         )
 
-    def _decide(self, url, *, method="POST", body="", headers=None,
-                record=None, secret=None):
+    def _watch(self, url, *, method="POST", body="", headers=None,
+               record=None, secret=None):
+        """(route, watch) after one request has been through the fence."""
         import asyncio
 
         from aish import browser
 
-        page, incidents = self.FakePage(), []
+        page, watch = self.FakePage(), browser._CredentialWatch()
         asyncio.run(
             browser._fence_the_origin(
                 page, record or self._record(),
-                self.PASSWORD if secret is None else secret, incidents,
+                self.PASSWORD if secret is None else secret, watch,
             )
         )
+        assert watch.armed  # the handler is up before anything is judged
         route = self.FakeRoute(url, method, body, headers)
         asyncio.run(page.handler(route))
-        return route, incidents
+        return route, watch
+
+    def _decide(self, url, **kw):
+        """(route, the origins REFUSED) — what most of this class is about."""
+        route, watch = self._watch(url, **kw)
+        return route, watch.blocked
 
     # ---- what is NOT the fence's business
 
@@ -740,13 +878,16 @@ class TestTheFenceIsOnTheCredentialNotTheConnection:
 
         from aish import browser
 
-        page, incidents = self.FakePage(), []
+        page, watch = self.FakePage(), browser._CredentialWatch()
         asyncio.run(
-            browser._fence_the_origin(page, self._record(), self.PASSWORD, incidents)
+            browser._fence_the_origin(page, self._record(), self.PASSWORD, watch)
         )
         route = _DeadRoute()
         asyncio.run(page.handler(route))
-        assert route.continued and incidents == []
+        assert route.continued and watch.blocked == []
+        # And it is not counted as the password having been sent: a request
+        # aish could not read is one it can claim nothing about.
+        assert watch.sent_to == []
 
 
 class _DeadRoute:
@@ -956,12 +1097,16 @@ class TestASignInIsJudgedByWhetherTheSessionCameUp:
         record = signin.find("https://eon.pl")
 
         assert browser._record_the_outcome(
-            record, browser.SignInResult(ok=True), [], when="w"
+            record, browser.SignInResult(ok=True),
+            browser._CredentialWatch(armed=True, sent_to=["https://eon.pl"]),
+            when="w",
         ) == ""
         assert signin.find("https://eon.pl").used == 1
 
         text = browser._record_the_outcome(
-            record, browser.SignInResult(ok=True), ["https://evil.test"], when="w"
+            record, browser.SignInResult(ok=True),
+            browser._CredentialWatch(armed=True, blocked=["https://evil.test"]),
+            when="w",
         )
         assert "https://evil.test" in text
         # note_used would have cleared the very mark being set.
