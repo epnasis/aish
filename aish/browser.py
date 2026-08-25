@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Any
 
 from . import browse as browse_mod
-from . import notify
+from . import media, notify
 from . import signin as signin_mod
 
 # A launch is ~2s, so the context is kept warm; an idle Chrome is ~400 MB, so
@@ -357,6 +357,30 @@ def state_dir() -> Path:
     return Path(
         os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
     )
+
+
+def frames_dir() -> Path:
+    """Where an evidence frame's bytes land (#289).
+
+    This IS the media store — the same `state_dir()/media` that `show_image`
+    writes into, deliberately, not a second store beside it. A frame needs
+    exactly what that store already provides and the evidence store cannot:
+    raw bytes (the evidence store's address is the sha256 of UTF-8 text and it
+    reads with `read_text`), content addressing, and a bounded LRU so pictures
+    are a cache rather than an archive. It is also `Agent.media_dir` for any
+    agent that has a state dir — which is every web session — and that is what
+    puts a frame inside `workspace_roots` and lets it be SEEN rather than
+    merely stored.
+
+    Resolved here rather than taken from the Agent because the capture happens
+    on the browser's own thread, several layers below any agent. Both sides
+    read `AISH_STATE_DIR`, and `aish-web` exports it at startup precisely so
+    every module that resolves it itself resolves it the same.
+
+    The cost of sharing is real and is stated in `docs/media-and-images.md`:
+    frames and the owner's own pictures compete for one `MEDIA_MAX_FILES`.
+    """
+    return state_dir() / "media"
 
 
 def downloads_dir() -> Path:
@@ -970,16 +994,38 @@ async def _without_option_floods(page: Any, text: str) -> str:
     return browse_mod.strip_option_floods(text, list(floods or []))
 
 
-async def _has_password_field(page: Any) -> bool:
-    """Is the RENDERED page asking for a password?
+async def _password_field_state(page: Any) -> bool | None:
+    """Does the RENDERED page show a password box? True, False, or **None for
+    could-not-tell**.
 
     Playwright's selector engine pierces open shadow roots, so this sees a form
     the serialized HTML does not — the same reason `Page.text` is taken from the
-    DOM and not from `page.content()`."""
+    DOM and not from `page.content()`.
+
+    The third value exists because two callers need OPPOSITE defaults when
+    there is no answer, and one boolean cannot carry that. `query_selector`
+    raises on a page that is navigating or closing under it, which a
+    settled-then-acting flow does produce. Telling the model a page is a wall
+    when aish could not tell would be a false claim about his account;
+    photographing a page aish could not identify is the failure the capture
+    refusal exists to prevent. So the answer is reported as unknown and each
+    caller resolves it in its own safe direction.
+    """
     try:
         return (await page.query_selector("input[type=password]")) is not None
-    except Exception:  # noqa: BLE001 — a page that will not answer is not a wall
-        return False
+    except Exception:  # noqa: BLE001 — see the docstring: this is not False
+        return None
+
+
+async def _has_password_field(page: Any) -> bool:
+    """Is the RENDERED page showing a password box, as the MODEL is told it?
+
+    Unchanged behaviour, stated deliberately: a page that will not answer is
+    not a wall. Refusing to call something a sign-in page when aish could not
+    tell is the safe direction for everything the model and the owner are told.
+    The capture resolves the same unknown the other way — `_evidence_frame`.
+    """
+    return await _password_field_state(page) is True
 
 
 # The page's own <main>, when it declares one. Purely a BUDGET decision: a read
@@ -3244,6 +3290,88 @@ async def _find(page: Any, n: int) -> tuple[Any, bool]:
     return None, False
 
 
+# The evidence frame (#289) — a stored picture of the page as the model was
+# shown it, for the owner who cannot see the browser aish is driving.
+#
+# Quality 50 for the same reason the remote view uses it, and the VIEWPORT
+# rather than the whole document: this is the browse context, whose window is
+# 1440x900 and whose device_scale_factor is 1. Measured on a dense 60-tile
+# shop page at 1440x820, this machine, headless Chrome:
+#
+#   q40  60 KB   q50  67 KB   q60  73 KB   q70  84 KB
+#   capture ~27 ms at every quality; the SAME page full-height is 311 KB
+#
+# So quality is nearly free and HEIGHT is what costs — which is why a frame is
+# one screenful. It is not a claim about how much of the page the model read:
+# the model reads the whole text, and the frame shows what the page looked like
+# where a person would start reading it.
+FRAME_JPEG_QUALITY = 50
+# A capture is an EXTRA and must never cost the snapshot. Bounded well above the
+# ~27 ms measured above and well under anything a caller would notice; on the
+# far side of it the model still gets its page and the record says the capture
+# failed, which is a true statement either way.
+FRAME_TIMEOUT_MS = 5_000
+
+
+async def _evidence_frame(
+    owner: _Owner, page: Any, *, asks_password: bool | None
+) -> tuple[str, str]:
+    """(stored path, reason there is none) for a picture of this page.
+
+    Called at snapshot time, on the owner loop, after the page has settled — so
+    this is one more short job on a page that has already stopped moving, not a
+    new wait, a new thread or a poll.
+
+    Three refusals, each the invariant rather than an inference:
+
+    **Never while the owner's hands are on the browser.** `_session` already
+    refuses a browse outright while `owner.view` is set, so nothing reaches
+    here in that state today; the check is written where the capture is because
+    that is where the rule belongs, and because the later slices of #289 are
+    the ones that make a page reachable with a viewer on it.
+
+    **Never a page showing a PASSWORD BOX.** That is the whole of what is
+    enforced, and the claim is deliberately not "never a sign-in page".
+    `input[type=password]` is a narrow test on purpose, and it is not a test
+    for whether a page is a login: an **email-first login's first step has no
+    password field at all**, so a frame of it can exist and can contain the
+    owner's e-mail address. That residual is stated rather than engineered
+    around — sign-in state cannot be read off a page, which is exactly why
+    stored sign-in state was retired (docs/browser.md, *The list is gone*), and
+    widening the detection here would be re-litigating that.
+
+    **Never a page that would not say.** `asks_password is None` means the
+    query could not be answered — a page navigating or closing under it. The
+    model is told `False` there, because refusing to call something a wall when
+    aish could not tell is the safe direction for a claim about his account.
+    The capture resolves the same unknown the OTHER way, because the one case
+    where aish does not know what it is looking at must not be the case where
+    it photographs it. One boolean cannot carry two opposite defaults, which is
+    why `_password_field_state` reports three values.
+
+    Nothing else is judged. In particular this makes no claim about the page
+    being safe to look at — a frame is a RECORD, and a record is detection, not
+    protection. Nothing anywhere may be permitted, widened or checked less
+    carefully on the grounds that a frame was captured.
+    """
+    if owner.view is not None:
+        return "", browse_mod.NO_FRAME_HANDS
+    if asks_password is None:
+        return "", browse_mod.NO_FRAME_UNKNOWN
+    if asks_password:
+        return "", browse_mod.NO_FRAME_PASSWORD
+    try:
+        jpeg = await page.screenshot(
+            type="jpeg", quality=FRAME_JPEG_QUALITY, timeout=FRAME_TIMEOUT_MS
+        )
+        stored = media.store(
+            bytes(jpeg), frames_dir(), f"browse {host_of(str(page.url or ''))}"
+        )
+    except Exception:  # noqa: BLE001 — an extra that failed must not cost the page
+        return "", browse_mod.NO_FRAME_FAILED
+    return str(stored), ""
+
+
 async def _snapshot(
     owner: _Owner,
     session: _Session,
@@ -3271,6 +3399,16 @@ async def _snapshot(
     )
     raw, matched, unreached, matching, commit = await _enumerate(page, match)
     controls = browse_mod.controls_from(raw)
+    # ONE observation, resolved differently by its two consumers. They cannot
+    # disagree about the ANSWER — the page is asked once — but they need
+    # opposite defaults when there is no answer, so the observation is a
+    # tri-state and each side picks its own safe direction: the model is told
+    # `False` for could-not-tell, and the capture refuses on it.
+    asks_password = await _password_field_state(page)
+    signin = asks_password is True
+    frame, frame_skipped = await _evidence_frame(
+        owner, page, asks_password=asks_password
+    )
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
     # control the model is looking for is very often in the header the narrowing
     # would drop — "Przełącz lokal" sits beside the account name, not in <main>.
@@ -3284,7 +3422,9 @@ async def _snapshot(
         matching=matching,
         unreachable=unreached,
         epoch=session.epoch,
-        signin=await _has_password_field(page),
+        signin=signin,
+        frame=frame,
+        frame_skipped=frame_skipped,
         problem=problem,
         notice=notice,
         downloads=await _save_downloads(owner, browse_page=page),

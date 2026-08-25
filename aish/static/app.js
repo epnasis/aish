@@ -3174,6 +3174,66 @@ function knowledgeTag(ref, name) {
   ref.titleEl.appendChild(tag);
 }
 
+// [TRACE-FRAME-START]
+// Why a browse step has no picture. Four, closed, matching browse.py's
+// NO_FRAME_* — a page that never had one and a page whose capture failed are
+// different facts, and a row that showed neither would read as neither.
+//
+// `password` says what was SEEN, never what the page WAS: the check behind it
+// is a password box, and an email-first login's first step does not have one.
+const FRAME_ABSENT = {
+  password: "no picture — this page was showing a password box",
+  unknown: "no picture — the page would not say whether it asks for a password",
+  hands: "no picture — you were driving the browser yourself",
+  failed: "no picture — the capture did not come back",
+};
+
+// What the page LOOKED LIKE when the model read it (#289): the one thing about
+// a browsed page nobody could check, because aish drives pages the owner never
+// sees. A node for the step's row, or null when the step is about anything else.
+//
+// The claim is deliberately narrow and is exactly what the capture enforces:
+// the picture is of the page at the moment the model was shown it. It is NOT
+// "what the model saw" — the model is handed text and a control list, and a
+// page can repaint after the shutter.
+//
+// `imageSrc` and nothing else builds the URL, so a frame is bound by the same
+// policy as every other picture in the transcript.
+function traceFrame(step) {
+  if (step.frame) {
+    const src = imageSrc(step.frame);
+    if (!src) return null;
+    const wrap = document.createElement("div");
+    wrap.className = "step-frame";
+    const name = "the page as aish read it";
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.alt = name;
+    // The bytes are a bounded LRU cache and are purgeable on their own
+    // schedule, so a record can outlive what it points at. Never let that read
+    // as though nothing was ever captured — but say only what a failed load
+    // actually proves: from here an evicted file, a stale token and a server
+    // that is not answering are the same event. `aish explain` stats the path
+    // and so is the surface that gets to use the word purged.
+    img.onerror = () => {
+      wrap.textContent =
+        "the picture of this page could not be loaded (the store may have cleared it)";
+      wrap.className = "step-sub step-frame-gone";
+    };
+    img.onclick = () => openPreview(src, name, [{ src, name, file: step.frame }], 0);
+    img.src = src;
+    wrap.appendChild(img);
+    return wrap;
+  }
+  const why = FRAME_ABSENT[step.frame_skipped];
+  if (!why) return null;
+  const note = document.createElement("span");
+  note.className = "step-sub step-frame-none";
+  note.textContent = why;
+  return note;
+}
+// [TRACE-FRAME-END]
+
 function toolStart(t, step) {
   t.started += 1;
   const [title, iconKey] = TOOL_META[step.name] || [step.name, "dot", "--dim"];
@@ -3280,6 +3340,11 @@ function toolFinish(t, step) {
     ref.main.appendChild(errWrap);
     renderErrorBox(errWrap, step.error);
   }
+  // Last on the row, because it is the biggest thing on it and everything above
+  // is what the step SAYS about itself. Pure function of the step, so a chat
+  // redrawn from its log shows the same picture the live turn did (L2).
+  const frame = traceFrame(step);
+  if (frame) ref.main.appendChild(frame);
   updateTraceHead(t);
 }
 

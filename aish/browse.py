@@ -439,6 +439,31 @@ def prune_downloads(directory: Any, keep_bytes: int = DOWNLOADS_KEEP_BYTES) -> l
     return removed
 
 
+# Why a snapshot carries no evidence frame (#289). A closed vocabulary, because
+# it is written into a trace record and read back by two renderers: a free-text
+# reason would drift between them, and both of them would be quoting a sentence
+# nobody could search for.
+#
+# There are exactly four, and each is a different fact about the same absence:
+
+# The page was showing a PASSWORD BOX. Named for what is on the page rather
+# than for "sign-in", because that is all the check can see: `input[type=
+# password]`, deliberately narrow, and NOT a test for whether a page is a login
+# — an email-first login's first step has no password field at all.
+NO_FRAME_PASSWORD = "password"
+# aish could not tell whether it did. The page would not answer the query, so
+# the capture refuses: the one case where aish does not know what it is looking
+# at must not be the case where it photographs it. Kept apart from `failed`
+# because they route to different repairs — a capture that broke, against a
+# page that would not say what it was.
+NO_FRAME_UNKNOWN = "unknown"
+NO_FRAME_HANDS = "hands"  # the owner's own hands were on the browser
+NO_FRAME_FAILED = "failed"  # the capture did not produce a stored picture
+NO_FRAME_REASONS = frozenset(
+    {NO_FRAME_PASSWORD, NO_FRAME_UNKNOWN, NO_FRAME_HANDS, NO_FRAME_FAILED}
+)
+
+
 @dataclass
 class Snapshot:
     """A page as the model receives it: what it says, and what it can press."""
@@ -507,6 +532,17 @@ class Snapshot:
     # and the page delta cannot report any of it: a suggestion list opens and
     # closes between two snapshots and nets to zero in the diff.
     ledger: list[str] = field(default_factory=list)
+    # The evidence frame (#289): a stored picture of what this page LOOKED LIKE
+    # at the moment the model was shown it. A path into the media store, or ""
+    # — the model never receives either; it is written down for the owner, who
+    # otherwise has no way to check a page aish drove and he cannot see.
+    frame: str = ""
+    # Why there is no frame, when there is none. Absence must never be the
+    # evidence (trace contract corollary 2): "no picture" because a password
+    # box was on the page, "no picture" because the page would not say, and
+    # "no picture" because the capture failed route to three different
+    # repairs, and only the last of them is a fault.
+    frame_skipped: str = ""
 
     def control(self, n: int) -> Control | None:
         for control in self.controls:
