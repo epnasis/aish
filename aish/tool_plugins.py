@@ -37,6 +37,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .paths import config_home
 from .tools import (
     STATUS_FAILED,
     STATUS_OK,
@@ -49,7 +50,7 @@ from .tools import (
     classify_output,
 )
 
-GLOBAL_TOOLS_DIR = Path.home() / ".config" / "aish" / "tools"
+GLOBAL_TOOLS_DIR = config_home() / "tools"
 # Soft budget on the TOTAL exposed tool count (native + plugin). Every tool
 # schema is resent on EVERY turn, so an unbounded tool list quietly eats the
 # context window (epic #178 item 14: 18 plugin tools ≈ 6.9k tokens/turn on a

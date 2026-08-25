@@ -36,6 +36,7 @@ from .approval import (
     save_prefix,
 )
 from .embeddings import SemanticIndex
+from .paths import config_home
 from .session import SessionInfo, SessionLog, attachment_names, strip_attachment_notes
 from .skills import GLOBAL_SKILLS_DIR
 
@@ -1855,7 +1856,7 @@ def main() -> int:
         return _usage_cli(sys.argv[2:])
 
     config_path = Path(
-        os.environ.get("AISH_CONFIG", str(Path.home() / ".config" / "aish" / "config.toml"))
+        os.environ.get("AISH_CONFIG", str(config_home() / "config.toml"))
     )
     config = load_config(config_path)
 

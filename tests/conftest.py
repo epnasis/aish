@@ -20,21 +20,24 @@ from aish import tool_plugins as tool_plugins_module
 
 @pytest.fixture(autouse=True)
 def isolated_global_dirs(tmp_path_factory, monkeypatch):
-    monkeypatch.setattr(
-        skills_module, "GLOBAL_SKILLS_DIR", tmp_path_factory.mktemp("global-skills")
-    )
-    monkeypatch.setattr(
-        skills_module, "GLOBAL_MEMORY_DIR", tmp_path_factory.mktemp("global-memory")
-    )
-    monkeypatch.setattr(
-        tool_plugins_module, "GLOBAL_TOOLS_DIR", tmp_path_factory.mktemp("global-tools")
-    )
-    # Rules (#191) are evaluated at the top of EVERY task, so the developer's
-    # own corpus would otherwise start governing the suite the day they write
-    # their first rule — a test failing because of a file outside the repo.
-    monkeypatch.setattr(
-        rules_module, "GLOBAL_RULES_DIR", tmp_path_factory.mktemp("global-rules")
-    )
+    home = tmp_path_factory.mktemp("config-home")
+    # The knob itself (#254), for whatever resolves the config home LATER —
+    # config.toml, or a subprocess that imports aish. The four constants below
+    # are bound at import, so they are rebound directly rather than left to it.
+    monkeypatch.setenv("AISH_CONFIG_HOME", str(home))
+    for module, attr, name in (
+        (skills_module, "GLOBAL_SKILLS_DIR", "skills"),
+        (skills_module, "GLOBAL_MEMORY_DIR", "memory"),
+        (tool_plugins_module, "GLOBAL_TOOLS_DIR", "tools"),
+        # Rules (#191) are evaluated at the top of EVERY task, so the
+        # developer's own corpus would otherwise start governing the suite the
+        # day they write their first rule — a test failing because of a file
+        # outside the repo.
+        (rules_module, "GLOBAL_RULES_DIR", "rules"),
+    ):
+        directory = home / name
+        directory.mkdir()
+        monkeypatch.setattr(module, attr, directory)
 
 
 @pytest.fixture

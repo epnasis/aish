@@ -31,8 +31,9 @@ from typing import Any, NamedTuple
 import yaml
 
 from . import skills, web
+from .paths import config_home
 
-GLOBAL_RULES_DIR = Path.home() / ".config" / "aish" / "rules"
+GLOBAL_RULES_DIR = config_home() / "rules"
 
 # The SUBJECTS a `when:` block can examine — the thing being matched, named,
 # the way every policy language names it (IAM's Action/Resource, Cedar's

@@ -39,8 +39,10 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-GLOBAL_SKILLS_DIR = Path.home() / ".config" / "aish" / "skills"
-GLOBAL_MEMORY_DIR = Path.home() / ".config" / "aish" / "memory"
+from .paths import config_home
+
+GLOBAL_SKILLS_DIR = config_home() / "skills"
+GLOBAL_MEMORY_DIR = config_home() / "memory"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # The inline index is capped so the prompt stays small no matter how many

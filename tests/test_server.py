@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.testclient import TestClient
 
+import aish.browse as browse_module
 import aish.browser as browser_module
 import aish.notify as notify_module
 import aish.server as server_module
@@ -1631,6 +1632,143 @@ class TestWriteApproval:
             assert step["ok"] is False
             assert "+new line" in step["diff"]
             assert step["comment"] == "leave it as is"
+
+
+class TestBrowseApproval:
+    """Driving a page, over the wire (#290).
+
+    There was no server-side case for the browse gate at all, and the run that
+    went looking for one blocked with no card — read as the transport failing
+    to deliver a browse card. It was not the transport. `browse` OPENS free
+    (a read is a read whichever tool performs it, agent-core), so a scripted
+    `browse` never reaches a gate and goes straight to a REAL Chrome; the
+    `call` trace record is written BEFORE the whole dispatch and the `gate`
+    step is a rules-engine record, so "a call with no gate step" says nothing
+    about whether a card was asked for.
+
+    The card is spent on the first PRESS, and these are what that looks like
+    from a socket. Browser functions are stubbed at the module boundary, the
+    same way tool implementations are everywhere else in this suite — the
+    gate, the card, the bridge and the agent loop are all real.
+    """
+
+    URL = "https://eon.pl/mojeon"
+
+    def _snapshot(self, text="your invoices"):
+        return browse_module.Snapshot(
+            url=self.URL, title="eOn", text=text,
+            controls=browse_module.controls_from(
+                [{"n": 0, "kind": "button", "name": "Faktury"}]
+            ),
+        )
+
+    def _stub_browser(self, monkeypatch) -> list:
+        """What actually reached the page — [] means nothing was pressed."""
+        pressed: list = []
+        monkeypatch.setattr(
+            browser_module, "browse_open", lambda url, **kw: self._snapshot()
+        )
+        monkeypatch.setattr(
+            browser_module, "browse_act",
+            lambda address, action, **kw: (
+                pressed.append((address, action)), self._snapshot("invoice list")
+            )[1],
+        )
+        return pressed
+
+    def _responses(self, *, press=True):
+        script = [model_says(tool_calls=[tool_call("browse", url=self.URL)])]
+        if press:
+            script.append(
+                model_says(tool_calls=[
+                    tool_call("browse_act", target="Faktury", action="click")
+                ])
+            )
+        script.append(model_says("opened the invoices"))
+        return script
+
+    def test_opening_a_page_asks_nothing(self, app_env, monkeypatch):
+        """The scenario the issue scripted: a bare `browse` runs to completion.
+
+        No card, and — the half that was actually missing — a `done`, so a
+        harness driving this path has something to wait for."""
+        self._stub_browser(monkeypatch)
+        client, _ = make_client(app_env, self._responses(press=False))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "open my eon account"})
+            events = []
+            for _ in range(200):
+                event = ws.receive_json()
+                events.append(event)
+                if event["type"] == "done":
+                    break
+            assert events[-1]["type"] == "done"
+            assert not any(e["type"] == "approval_request" for e in events)
+
+    def test_the_press_draws_the_grant_card_and_proceeds(self, app_env, monkeypatch):
+        pressed = self._stub_browser(monkeypatch)
+        client, _ = make_client(app_env, self._responses())
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "open eon and press Faktury"})
+            request = recv_until(ws, "approval_request")
+            assert request["kind"] == "tool"
+            assert request["tool"] == "browse_act"
+            # The card the whole grant rests on says WHOSE hands are on the
+            # page — the sentence the owner is agreeing to, not the tool name.
+            assert "eon.pl" in request["preview"]
+            assert "as you" in request["preview"]
+            assert pressed == []  # nothing touched the page before the answer
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            assert recv_until(ws, "approval_resolved")["decision"] == "approved"
+            recv_until(ws, "done")
+        assert pressed == [("Faktury", "click")]
+
+    def test_denying_the_grant_never_presses(self, app_env, monkeypatch):
+        pressed = self._stub_browser(monkeypatch)
+        client, chat = make_client(app_env, self._responses())
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "open eon and press Faktury"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
+            recv_until(ws, "done")
+        assert pressed == []
+        assert "eon.pl" in tool_results(chat, call_index=2)[-1]["content"]
+
+    def test_the_grant_is_asked_once_and_the_log_records_it(self, app_env, monkeypatch):
+        """One card per site, and the trace says what he was shown (#284)."""
+        pressed = self._stub_browser(monkeypatch)
+        script = self._responses()
+        script.insert(2, model_says(tool_calls=[
+            tool_call("browse_act", target="Faktury", action="click")
+        ]))
+        client, _ = make_client(app_env, script)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "press it twice"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+            server = client.app.state.server
+            path = server.active.logref.log.path
+        assert len(pressed) == 2  # the second press rode the same grant
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        cards = [r for r in records if r["kind"] == "command"]
+        assert len(cards) == 1
+        assert cards[0]["decision"] == "approved"
+        # The sentence he was shown, not just the call (#284).
+        assert "eon.pl" in cards[0]["preview"]
+        # The grant outlives the agent holding it, so it is on disk too.
+        assert [r["host"] for r in records if r["kind"] == "site_grant"] == ["eon.pl"]
+
+    def test_the_apps_state_dir_owns_the_browser_profile(self, app_env):
+        """A server given its own `state_dir` must not drive the OWNER's Chrome.
+
+        `browser.profile_dir()` hangs off `AISH_STATE_DIR`, which `create_app`
+        resolved but never published — so an "isolated" harness on port 8899
+        opened the owner's real, signed-in profile, and a browse that blocked
+        on it looked like a card that never arrived. Same shape as #254: the
+        argument said isolated and the environment decided."""
+        make_client(app_env, [model_says("hi")])
+        assert browser_module.profile_dir().is_relative_to(app_env["state_dir"])
 
 
 class TestReconnect:

@@ -99,6 +99,7 @@ from .cli import (
 )
 from .documents import DocumentError, page_count, page_png
 from .embeddings import SemanticIndex
+from .paths import config_home
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
 from .seen import SeenLedger
@@ -5424,6 +5425,15 @@ def create_app(
         state_dir
         or os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
     )
+    # Publish what we just decided, because this app is not the only thing that
+    # answers "where does aish keep its state" — `browser` (the profile and the
+    # downloads), `signin` and `secrets` each resolve AISH_STATE_DIR themselves,
+    # at call time, and none of them can see this argument (#290). Left unset,
+    # a server built with its own state_dir still drove the OWNER's real,
+    # signed-in Chrome profile: the argument said isolated and the environment
+    # decided. Writing it back makes the server the single owner of the answer;
+    # in production the value is the same one it was read from.
+    os.environ["AISH_STATE_DIR"] = str(state_dir)
     # Base URL for notification deep-links (#163): a push tap must open the
     # session in the real UI, so this is the public origin, not the LAN bind.
     public_url = (public_url or os.environ.get("AISH_PUBLIC_URL", "")).rstrip("/")
@@ -5814,7 +5824,7 @@ def create_app(
 
 def main() -> int:
     config_path = Path(
-        os.environ.get("AISH_CONFIG", str(Path.home() / ".config" / "aish" / "config.toml"))
+        os.environ.get("AISH_CONFIG", str(config_home() / "config.toml"))
     )
     config = load_config(config_path)
     # Seed config.toml with the default folder-browser ignore list on first use,

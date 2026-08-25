@@ -12,9 +12,10 @@ with the REAL server and REAL frontend but a scripted model — same shape as
 ## The rule that comes before the recipe
 
 **A verification MUST NOT type into a chat it did not create.** Use the
-harness below (its own `state_dir`, `allow_path`, `deny_path`, `config_path`
-and `cwd`, on port 8899); if a check genuinely needs the live server, click ＋
-for a NEW chat first and drive only that.
+harness below (its own `state_dir`, `allow_path`, `deny_path`, `config_path`,
+`cwd` and `AISH_CONFIG_HOME`, on port 8899 — the next section says exactly what
+that does and does not cover); if a check genuinely needs the live server,
+click ＋ for a NEW chat first and drive only that.
 
 This is not hygiene, it is a real incident. On 2026-07-28 a verification run
 drove the live UI through Chrome while the browser was parked on the owner's
@@ -26,54 +27,51 @@ chat, and they were still being read as "what's new here" days later.
 Port is not a defence: `scripts/aish-preview.sh` points preview at PROD's
 `AISH_STATE_DIR` on purpose, so :8788 writes the same sessions as :8787.
 
-## The harness is NOT fully isolated — know what it still shares (#254)
+## What the harness isolates, and what it still shares (#254)
 
-The temp `state_dir` isolates sessions. It does **not** isolate the knowledge
-layer: `rules.GLOBAL_RULES_DIR`, `skills.GLOBAL_SKILLS_DIR`,
-`skills.GLOBAL_MEMORY_DIR` and `tool_plugins.GLOBAL_TOOLS_DIR` all resolve from
-`Path.home()`, so a verification run reads — and could write — the owner's live
-rules, skills, memory and plugin tools. No `create_app` parameter reaches them,
-and `AISH_CONFIG` does not help; it names `config.toml` only.
+Isolated, and you must pass every one of them: `state_dir`, `allow_path`,
+`deny_path`, `config_path`, `cwd` — and, since #254, the owner's config tree
+through the **`AISH_CONFIG_HOME`** environment variable. One knob moves all
+four directories under it: `rules/`, `skills/`, `memory/`, `tools/`.
 
-Two consequences, and the second is the one that bites:
+    AISH_CONFIG_HOME=$WORKDIR/config uv run python <script> $WORKDIR
+
+**Set it in the environment, not in Python.** The four constants
+(`rules.GLOBAL_RULES_DIR`, `skills.GLOBAL_SKILLS_DIR`,
+`skills.GLOBAL_MEMORY_DIR`, `tool_plugins.GLOBAL_TOOLS_DIR`) are resolved at
+IMPORT time, so a `setattr` after `import aish.server` is too late for
+anything already bound.
+
+Two reasons it matters, and the second is the one that bites:
 
 - **The owner's rules govern your run.** Verifying #252, a scripted step with
   no narration never reached an approval card at all: `answer-me-first` refused
   the tool call and re-prompted first, which reads exactly like the feature
-  being broken. Expect rules in front of anything you are trying to observe,
-  and check the corpus before concluding the harness is wrong.
+  being broken. With an empty config home the card appears immediately.
 - **`remember` / `create_skill` / `import_skill` write for real.** Approving
-  one of those on a harness card lands in `~/.config/aish/`, permanently. Only
-  your choice of scripted tool calls prevents it. Do not script them.
+  one of those on a harness card used to land in `~/.config/aish/`,
+  permanently. The knob is what makes that structurally impossible; before it,
+  only your choice of scripted tool calls prevented it.
 
-**Cut them off if the run is not about them.** They are module-level constants,
-so rebinding them BEFORE importing `aish.server` gives a genuinely empty
-knowledge layer — the same thing `tests/conftest.py`'s autouse
-`isolated_global_dirs` does for the pytest suite, and for the same reason its
-comment gives: otherwise the developer's own corpus starts governing the run.
+Keep the owner's corpus (leave the variable unset) only when the rules or the
+retrieval ARE what you are verifying; then expect them in front of everything
+and read the trace before believing the feature is at fault.
 
-```python
-from aish import rules as rules_module
-from aish import skills as skills_module
-from aish import tool_plugins as tool_plugins_module
+**Still shared, and no knob moves them:**
 
-for mod, attr in ((skills_module, "GLOBAL_SKILLS_DIR"),
-                  (skills_module, "GLOBAL_MEMORY_DIR"),
-                  (tool_plugins_module, "GLOBAL_TOOLS_DIR"),
-                  (rules_module, "GLOBAL_RULES_DIR")):
-    d = workdir / "global" / attr.lower()
-    d.mkdir(parents=True, exist_ok=True)
-    setattr(mod, attr, d)
+- **The Keychain** — `notify.pushover` reads live Pushover credentials and
+  pushes to the owner's real phone; `secrets` and `signin` read real stored
+  credentials. Export `AISH_NOTIFY=0` unless notifications are the subject.
+- **The browser profile and downloads**, which hang off `AISH_STATE_DIR` (the
+  environment variable, not `create_app`'s `state_dir` argument) — a real
+  Chrome driven here is signed in AS THE OWNER. Export `AISH_STATE_DIR` too if
+  the run can reach `browser`.
+- **The network and the real shell.** `run_command` executes for real inside
+  `cwd`, and `web_search` / `read_url` leave the machine.
 
-from aish.server import create_app  # AFTER the rebinding
-```
-
-Measured: without it, a scripted `mkdir` never reached an approval card — a
-live rule refused the call first — and the run looked like the approval gate
-was broken. With it, the card appeared immediately. Keep the owner's corpus
-only when the rules or the retrieval ARE what you are verifying; then expect
-them in front of everything and read the trace before believing the feature is
-at fault.
+The pytest suite makes the same cut in `tests/conftest.py`
+(`isolated_global_dirs`, `no_real_notifications`, `no_real_secrets`,
+`no_real_browser`), pinned by `test_suite_never_reaches_the_real_knowledge_store`.
 
 ## Recipe
 
@@ -84,7 +82,8 @@ at fault.
      `aish.server.create_app(...)` with isolated `state_dir` / `allow_path` /
      `deny_path` / `cwd` under a temp dir,
    - runs `uvicorn.run(app, host="127.0.0.1", port=8899)`.
-2. `uv run python <script> <workdir>` in the background; wait for
+2. `AISH_CONFIG_HOME=<workdir>/config uv run python <script> <workdir>` in the
+   background; wait for
    `curl http://127.0.0.1:8899/` → 200.
 3. Drive with the Chrome tools: type into the "Ask aish" box and either click
    the send arrow or press Cmd/Ctrl+Enter. A bare Enter does NOT submit — it
