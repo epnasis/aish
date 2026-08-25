@@ -9642,14 +9642,14 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
 
     def test_a_local_document_is_not_an_outside_source(self, tmp_path):
         agent, _ = make_agent([])
-        agent._note_taint([("read_pdf", {"source": str(tmp_path / "own.pdf")})])
+        agent._note_taint("read_pdf", {"source": str(tmp_path / "own.pdf")})
         assert agent._tainted is False
-        agent._note_taint([("read_pdf", {"source": "https://x.example/a.pdf"})])
+        agent._note_taint("read_pdf", {"source": "https://x.example/a.pdf"})
         assert agent._tainted is True
 
     def test_browsing_a_page_taints_the_task(self):
         agent, _ = make_agent([])
-        agent._note_taint([("browse", {"url": "https://eon.pl"})])
+        agent._note_taint("browse", {"url": "https://eon.pl"})
         assert agent._tainted is True
 
     def test_a_search_taints_the_task_exactly_as_a_fetch_does(self):
@@ -9659,9 +9659,9 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         in EGRESS_TOOLS and so in UNTRUSTED_SOURCE_TOOLS — and this pins it,
         because the marking is guidance and the fence is not."""
         searched, _ = make_agent([])
-        searched._note_taint([("web_search", {"query": "cheap flights"})])
+        searched._note_taint("web_search", {"query": "cheap flights"})
         fetched, _ = make_agent([])
-        fetched._note_taint([("read_url", {"url": "https://blog.example/post"})])
+        fetched._note_taint("read_url", {"url": "https://blog.example/post"})
         assert searched._tainted is fetched._tainted is True
 
     def test_a_memory_saved_after_reading_the_web_holds_for_review(self, monkeypatch):
@@ -9722,6 +9722,139 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         assert agent._egress_novel_hosts(
             "read_url", {"url": f"https://{long_label}.x.example/p"}
         ) == [f"{long_label}.x.example"]
+
+
+class TestProvenanceIsCapturedPerCallAndCommittedPerTurn:
+    """The timing half of #311. Recording moved to `_call_result` so every
+    backend inherits it, but the APPLY stayed per turn: a call must not meet a
+    gate raised by the call beside it in the same batch. That invariant lived
+    only in a comment on `_note_taint`, which is exactly how it would be lost
+    the next time someone moves the recording."""
+
+    def _stub_web(self, monkeypatch):
+        import aish.agent as agent_module
+
+        fetched: list[str] = []
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None, **_kw: (fetched.append(url), f"page at {url}")[1],
+        )
+        return fetched
+
+    def test_a_call_is_not_gated_by_what_its_own_batch_read(self, monkeypatch):
+        """Two actions in ONE model turn: the read taints the task, and the
+        save beside it still goes through. Committing per call would card it."""
+        self._stub_web(monkeypatch)
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://blog.example/post"),
+                    _remember_call("he prefers oat milk", "oat-milk"),
+                ]),
+                model_says("done"),
+            ],
+            approve_tool=lambda *a, **k: asked.append(a) or True,
+        )
+        agent.run_task("read the post and remember the milk thing")
+        assert asked == []
+        assert agent._tainted is True  # committed by the turn that followed
+
+    def test_the_parallel_fan_out_is_a_sub_batch_and_commits_before_the_rest(
+        self, monkeypatch
+    ):
+        """The concurrent path is where capture runs while a pool is live, and
+        it has its OWN boundary: the calls that could not join the fan-out are
+        dispatched after it, so what the reads brought in is in force before
+        they run. Pinned because it is the one place the commit is not the turn
+        boundary, and because relaxing it would be the only way this change
+        could make anything more permissive."""
+        fetched = self._stub_web(monkeypatch)
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://a.example/one"),
+                    tool_call("read_url", url="https://b.example/two"),
+                    _remember_call("he prefers oat milk", "oat-milk"),
+                ]),
+                model_says("done"),
+            ],
+            approve_tool=lambda *a, **k: asked.append(a) or True,
+        )
+        agent.run_task("read both and remember the milk thing")
+        assert sorted(fetched) == ["https://a.example/one", "https://b.example/two"]
+        assert [name for name, *_ in asked] == ["remember"]
+        assert agent._tainted is True
+
+    def test_concurrent_capture_loses_nothing(self, monkeypatch):
+        """Every call in the fan-out is recorded, not just the one that
+        finished first — the failure a shared buffer written from workers would
+        produce."""
+        import aish.agent as agent_module
+
+        offered = {
+            "https://a.example/one": "https://a.example/deal/1",
+            "https://b.example/two": "https://b.example/deal/2",
+        }
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None, **_kw: (
+                f"{agent_module.web.UNTRUSTED_NOTE}[{url}]\nlinks to {offered[url]}"
+            ),
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://a.example/one"),
+                    tool_call("read_url", url="https://b.example/two"),
+                ]),
+                model_says("done"),
+            ],
+        )
+        agent.run_task("read both")
+        assert agent._offered_links == set(offered.values())
+
+    def test_the_batch_after_it_IS_gated(self, monkeypatch):
+        """The other half: deferring the apply must not lose it. The same save
+        one turn later meets the fence the read put up."""
+        self._stub_web(monkeypatch)
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://blog.example/post")
+                ]),
+                model_says(tool_calls=[
+                    _remember_call("he prefers oat milk", "oat-milk")
+                ]),
+                model_says("not saving that"),
+            ],
+            approve_tool=lambda name, args, preview=None: asked.append(name) or False,
+        )
+        agent.run_task("read the post, then remember the milk thing")
+        assert asked == ["remember"]
+
+    def test_a_tool_that_raised_still_taints(self, monkeypatch):
+        """Capture sits in a `finally`: a read that crashed mid-fetch had
+        already reached out, so dropping its taint would be the one direction
+        this may never move."""
+        import aish.agent as agent_module
+
+        def boom(url, topic=None, **_kw):
+            raise RuntimeError("connection reset")
+
+        monkeypatch.setattr(agent_module.web, "read_url", boom)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://blog.example/post")
+                ]),
+                model_says("that failed"),
+            ],
+        )
+        agent.run_task("read the post")
+        assert agent._tainted is True
 
 
 class TestSearchingIsReading:
@@ -10040,7 +10173,8 @@ class TestALinkThatArrivedByMail:
 
     def test_a_tool_that_does_not_declare_mail_records_nothing(self, tmp_path):
         agent, _ = make_agent([])
-        agent._note_provenance([("web_search", {})], ["https://x.test/reset?t=1"])
+        agent._capture_provenance("web_search", {}, "https://x.test/reset?t=1")
+        agent._commit_provenance()
         assert agent._mail_links == {}
 
     def test_the_grant_is_per_link_never_per_host(self, tmp_path):

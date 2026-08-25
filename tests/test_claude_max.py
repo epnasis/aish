@@ -98,6 +98,13 @@ class FakeSDK:
 
         async def gen():
             for message in stream:
+                # A callable stands for "the SDK now runs the tool handlers of
+                # the message just yielded" — the only way to interleave a
+                # batch of tool calls BETWEEN two assistant messages, which is
+                # what a turn boundary actually looks like here.
+                if callable(message):
+                    await message(sdk)
+                    continue
                 yield message
             text = "done"
             if script is not None:
@@ -639,3 +646,164 @@ class TestDeliveriesAreNotFinalAnswers:
         assert session_answers(
             [json.loads(line) for line in text.splitlines()]
         ) == ["answer one", "answer two"]
+
+
+class TestProvenanceConformance:
+    """#311. `_note_provenance` was reached only from `_execute_tool_calls`,
+    which is the native loop's function and nothing else's — so on claude-max
+    the task looked untainted for its entire life however much of the open web
+    it read, and a link that arrived by mail was not recognised as having done
+    so. Both loops are driven over the SAME tool results here and must produce
+    the same three records: a claude-max-only test would have to be remembered
+    again for the next backend, which is the failure this issue IS.
+    """
+
+    HOSTILE = "https://blog.example/post"
+    OFFERED = "https://blog.example/offer/42"
+    PROBE = "https://probe.example/p"
+    RESET_LINK = "https://eon.test/r?t=abc123"
+    MAIL = [
+        {
+            "from": "noreply@eon.pl",
+            "subject": "Resetowanie hasla",
+            "body": f"Kliknij, aby zresetowac haslo: {RESET_LINK}",
+        }
+    ]
+
+    def _mail_tool(self):
+        """A read-only plugin tool declaring its output is e-mail. conftest
+        points GLOBAL_TOOLS_DIR at a temp dir suite-wide, so real discovery
+        finds it on both backends — including through the SDK MCP server."""
+        from aish import tool_plugins
+
+        tool_dir = tool_plugins.GLOBAL_TOOLS_DIR / "mail_search"
+        tool_dir.mkdir(parents=True, exist_ok=True)
+        (tool_dir / "TOOL.md").write_text(
+            "---\nname: mail_search\ndescription: search mail\n"
+            "exec: ./wrapper\nmutating: no\nreturns: text\n"
+            "content_from: email\n"
+            'schema: {"q": {"type": "string"}}\n---\nbody\n',
+            encoding="utf-8",
+        )
+        wrapper = tool_dir / "wrapper"
+        wrapper.write_text(
+            "#!/bin/sh\ncat <<'EOF'\n"
+            + json.dumps(self.MAIL, ensure_ascii=False)
+            + "\nEOF\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+
+    def _probe(self, monkeypatch, holder):
+        """Snapshot the three records AT THE MOMENT the second batch runs —
+        which is where they matter, since every gate that reads them runs
+        inside a dispatch. Comparing after the run would be the weaker claim."""
+        import aish.agent as agent_module
+
+        seen: list[tuple] = []
+
+        def read_url(url, topic=None, **_kw):
+            if url == self.PROBE:
+                inner = holder["agent"]
+                seen.append(
+                    (
+                        inner._tainted,
+                        sorted(inner._offered_links),
+                        dict(inner._mail_links),
+                    )
+                )
+                return f"{agent_module.web.UNTRUSTED_NOTE}[{url}]\nnothing here"
+            return (
+                f"{agent_module.web.UNTRUSTED_NOTE}[{url}]\n"
+                f"a listing linking to {self.OFFERED}"
+            )
+
+        monkeypatch.setattr(agent_module.web, "read_url", read_url)
+        return seen
+
+    def _native(self, monkeypatch):
+        from tests.test_agent import make_agent, model_says, tool_call
+
+        holder: dict = {}
+        seen = self._probe(monkeypatch, holder)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("mail_search", q="invoices"),
+                    tool_call("read_url", url=self.HOSTILE),
+                ]),
+                model_says(tool_calls=[tool_call("read_url", url=self.PROBE)]),
+                model_says("done"),
+            ],
+            approve_tool=lambda *_a, **_k: True,
+        )
+        holder["agent"] = agent
+        agent.run_task("check my mail and read the post")
+        return seen
+
+    def _acting(self, fake, name):
+        return fake.AssistantMessage(
+            [fake.TextBlock("working"), fake.ToolUseBlock(name)]
+        )
+
+    def _batch(self, *calls, into=None):
+        async def run(sdk):
+            for name, args in calls:
+                result = await sdk.call(name, args)
+                if into is not None:
+                    into.append(result)
+
+        return run
+
+    def _claude_max(self, monkeypatch, tmp_path):
+        holder: dict = {}
+        seen = self._probe(monkeypatch, holder)
+        agent, fake = make_max_agent(
+            monkeypatch, tmp_path, approve_tool=lambda *_a, **_k: True
+        )
+        holder["agent"] = agent.inner
+        fake.streams.append([
+            self._acting(fake, "mail_search"),
+            self._batch(
+                ("mail_search", {"q": "invoices"}),
+                ("read_url", {"url": self.HOSTILE}),
+            ),
+            self._acting(fake, "read_url"),
+            self._batch(("read_url", {"url": self.PROBE})),
+        ])
+        agent.run_task("check my mail and read the post")
+        return seen
+
+    def test_both_backends_record_the_same_provenance(self, monkeypatch, tmp_path):
+        from aish import provenance
+
+        self._mail_tool()
+        native = self._native(monkeypatch)
+        max_side = self._claude_max(monkeypatch, tmp_path)
+        expected = [(True, [self.OFFERED], {self.RESET_LINK: provenance.SIGN_IN})]
+        # Asserted against a LITERAL, not only against each other: two backends
+        # that both record nothing would agree perfectly.
+        assert native == expected
+        assert max_side == expected
+
+    def test_the_sdk_path_gates_an_emailed_sign_in_link(self, monkeypatch, tmp_path):
+        """The consequence, end to end on the backend that lacked it: the mail
+        arrived through the SDK's own tool handler, and the reset link it
+        carried is refused outright instead of followed."""
+        self._mail_tool()
+        holder: dict = {}
+        self._probe(monkeypatch, holder)
+        agent, fake = make_max_agent(
+            monkeypatch, tmp_path, approve_tool=lambda *_a, **_k: True
+        )
+        holder["agent"] = agent.inner
+        followed: list[str] = []
+        fake.streams.append([
+            self._acting(fake, "mail_search"),
+            self._batch(("mail_search", {"q": "invoices"})),
+            self._acting(fake, "read_url"),
+            self._batch(("read_url", {"url": self.RESET_LINK}), into=followed),
+        ])
+        agent.run_task("check my mail")
+        assert "NOT EXECUTED" in followed[-1]
+        assert self.RESET_LINK in followed[-1]
