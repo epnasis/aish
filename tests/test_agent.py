@@ -9378,6 +9378,18 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         agent._note_taint([("browse", {"url": "https://eon.pl"})])
         assert agent._tainted is True
 
+    def test_a_search_taints_the_task_exactly_as_a_fetch_does(self):
+        """The provenance question #305 asks one layer down: a result set is
+        attacker-influenceable through ordinary SEO, so a turn that has only
+        SEARCHED has still read the outside. It already does — `web_search` is
+        in EGRESS_TOOLS and so in UNTRUSTED_SOURCE_TOOLS — and this pins it,
+        because the marking is guidance and the fence is not."""
+        searched, _ = make_agent([])
+        searched._note_taint([("web_search", {"query": "cheap flights"})])
+        fetched, _ = make_agent([])
+        fetched._note_taint([("read_url", {"url": "https://blog.example/post"})])
+        assert searched._tainted is fetched._tainted is True
+
     def test_a_memory_saved_after_reading_the_web_holds_for_review(self, monkeypatch):
         """Where an injection becomes PERMANENT: a memory outlives the page,
         the task and the session, and is retrieved into every future one."""
