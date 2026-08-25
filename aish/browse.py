@@ -444,11 +444,24 @@ def prune_downloads(directory: Any, keep_bytes: int = DOWNLOADS_KEEP_BYTES) -> l
 # reason would drift between them, and both of them would be quoting a sentence
 # nobody could search for.
 #
-# There are exactly three, and each is a different fact about the same absence:
-NO_FRAME_SIGNIN = "signin"  # the page was putting a password box in front of us
+# There are exactly four, and each is a different fact about the same absence:
+
+# The page was showing a PASSWORD BOX. Named for what is on the page rather
+# than for "sign-in", because that is all the check can see: `input[type=
+# password]`, deliberately narrow, and NOT a test for whether a page is a login
+# — an email-first login's first step has no password field at all.
+NO_FRAME_PASSWORD = "password"
+# aish could not tell whether it did. The page would not answer the query, so
+# the capture refuses: the one case where aish does not know what it is looking
+# at must not be the case where it photographs it. Kept apart from `failed`
+# because they route to different repairs — a capture that broke, against a
+# page that would not say what it was.
+NO_FRAME_UNKNOWN = "unknown"
 NO_FRAME_HANDS = "hands"  # the owner's own hands were on the browser
 NO_FRAME_FAILED = "failed"  # the capture did not produce a stored picture
-NO_FRAME_REASONS = frozenset({NO_FRAME_SIGNIN, NO_FRAME_HANDS, NO_FRAME_FAILED})
+NO_FRAME_REASONS = frozenset(
+    {NO_FRAME_PASSWORD, NO_FRAME_UNKNOWN, NO_FRAME_HANDS, NO_FRAME_FAILED}
+)
 
 
 @dataclass
@@ -525,9 +538,10 @@ class Snapshot:
     # otherwise has no way to check a page aish drove and he cannot see.
     frame: str = ""
     # Why there is no frame, when there is none. Absence must never be the
-    # evidence (trace contract corollary 2): "no picture" because the page was
-    # a sign-in door and "no picture" because the capture failed route to
-    # completely different repairs, and one of them is not a fault at all.
+    # evidence (trace contract corollary 2): "no picture" because a password
+    # box was on the page, "no picture" because the page would not say, and
+    # "no picture" because the capture failed route to three different
+    # repairs, and only the last of them is a fault.
     frame_skipped: str = ""
 
     def control(self, n: int) -> Control | None:

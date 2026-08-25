@@ -1342,15 +1342,18 @@ class TestTheEvidenceFrameOnTheRecord:
         log = self._browsed(
             tmp_path,
             monkeypatch,
-            tools.ToolOutcome("a sign-in door", frame_skipped=browse_mod.NO_FRAME_SIGNIN),
+            tools.ToolOutcome(
+                "a page with a password box",
+                frame_skipped=browse_mod.NO_FRAME_PASSWORD,
+            ),
         )
         lg = explain_mod.load(log.path)
         doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
         call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
         assert call["frame"] == ""
-        assert call["frame_skipped"] == browse_mod.NO_FRAME_SIGNIN
+        assert call["frame_skipped"] == browse_mod.NO_FRAME_PASSWORD
         assert "frame_state" not in call
-        assert browse_mod.NO_FRAME_SIGNIN in explain_mod.explain(log.path, root=tmp_path)
+        assert browse_mod.NO_FRAME_PASSWORD in explain_mod.explain(log.path, root=tmp_path)
 
     def test_a_call_that_recorded_nothing_claims_no_capture_was_considered(
         self, tmp_path

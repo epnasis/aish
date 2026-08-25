@@ -170,13 +170,24 @@ check("a frame that will not load says so, not that none was taken", () => {
   assert(!/purged/.test(frame.textContent), "the browser cannot know it was purged");
 });
 
-check("a sign-in page says why it has no picture", () => {
+check("a page with a password box says why it has no picture", () => {
+  // The row says what was SEEN — a password box — not that the page WAS a
+  // sign-in. The check behind it cannot tell the second thing.
   const s = makeSandbox();
-  const rows = browsed(s, { frame_skipped: "signin" });
+  const rows = browsed(s, { frame_skipped: "password" });
   const note = findByClass(rows[0], ".step-frame-none");
   assert(note, "no reason was drawn");
-  assert(/asking for a password/.test(note.textContent), note.textContent);
-  assert(!findByClass(rows[0], ".step-frame"), "a sign-in page must never be pictured");
+  assert(/showing a password box/.test(note.textContent), note.textContent);
+  assert(!findByClass(rows[0], ".step-frame"), "such a page must never be pictured");
+});
+
+check("a page that would not say is told apart from one that had no box", () => {
+  // The two are opposite facts: one is a page aish read and photographed a
+  // decision about, the other is a page it could not read at all.
+  const s = makeSandbox();
+  const rows = browsed(s, { frame_skipped: "unknown" });
+  assert(/would not say/.test(
+    findByClass(rows[0], ".step-frame-none").textContent));
 });
 
 check("a failed capture is told apart from a page that had no picture to take", () => {
@@ -196,7 +207,9 @@ check("a step with no frame at all draws nothing", () => {
   assert.equal(s.traceFrame({ kind: "tool", name: "run_command" }), null);
 });
 
-check("an unknown reason draws nothing rather than a blank note", () => {
+check("a reason this client does not know draws nothing, not a blank note", () => {
+  // A later aish adding a fifth reason must degrade to silence here, never to
+  // an empty italic line that reads as a bug.
   const s = makeSandbox();
   assert.equal(s.traceFrame({ frame_skipped: "something a later aish wrote" }), null);
 });

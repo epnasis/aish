@@ -2977,7 +2977,7 @@ class TestTheEvidenceFrame:
     def test_a_frame_is_stored_in_the_media_store_and_pointed_at(self, state):
         page, taken = self._page()
         path, why = _run(
-            browser._evidence_frame(browser._Owner(), page, signin=False)
+            browser._evidence_frame(browser._Owner(), page, asks_password=False)
         )
         assert why == ""
         assert pathlib.Path(path).read_bytes() == self.JPEG
@@ -2991,26 +2991,46 @@ class TestTheEvidenceFrame:
         """Content-addressed, so a retry costs nothing and a flow that reads
         the same page twice does not fill the store with duplicates."""
         page, _ = self._page()
-        first, _ = _run(browser._evidence_frame(browser._Owner(), page, signin=False))
-        second, _ = _run(browser._evidence_frame(browser._Owner(), page, signin=False))
+        first, _ = _run(browser._evidence_frame(browser._Owner(), page, asks_password=False))
+        second, _ = _run(browser._evidence_frame(browser._Owner(), page, asks_password=False))
         assert first == second
         assert len(list(browser.frames_dir().iterdir())) == 1
 
-    def test_a_sign_in_page_is_never_pictured(self, state):
+    def test_a_page_showing_a_password_box_is_never_pictured(self, state):
         """A screenshot of a login form is exactly the artifact that must not
-        exist. The snapshot already knows the page is asking for a password."""
+        exist. What is enforced is precisely "a password box was on the page" —
+        the check is `input[type=password]` and is not a test for whether a
+        page is a login, so the claim is worded to what it can see."""
         page, taken = self._page()
         path, why = _run(
-            browser._evidence_frame(browser._Owner(), page, signin=True)
+            browser._evidence_frame(browser._Owner(), page, asks_password=True)
         )
-        assert (path, why) == ("", browser.browse_mod.NO_FRAME_SIGNIN)
+        assert (path, why) == ("", browser.browse_mod.NO_FRAME_PASSWORD)
         assert taken == []  # not taken and discarded — never taken
+
+    def test_a_page_that_would_not_say_is_never_pictured_either(self, state):
+        """The fail-open this exists to close. `_has_password_field` answers
+        False when the page will not run the query, which is the SAFE direction
+        for what the model is told and the WRONG one here: the single case
+        where aish cannot tell what it is looking at must not be the case where
+        it photographs it."""
+        page, taken = self._page()
+        path, why = _run(
+            browser._evidence_frame(browser._Owner(), page, asks_password=None)
+        )
+        assert (path, why) == ("", browser.browse_mod.NO_FRAME_UNKNOWN)
+        assert taken == []
+
+    def test_could_not_tell_is_not_filed_as_a_failed_capture(self, state):
+        """A capture that broke and a page that would not say what it was route
+        to different repairs, so they are different words."""
+        assert browser.browse_mod.NO_FRAME_UNKNOWN != browser.browse_mod.NO_FRAME_FAILED
 
     def test_no_frame_while_the_owner_has_his_hands_on_the_browser(self, state):
         owner = browser._Owner()
         owner.view = object()
         page, taken = self._page()
-        path, why = _run(browser._evidence_frame(owner, page, signin=False))
+        path, why = _run(browser._evidence_frame(owner, page, asks_password=False))
         assert (path, why) == ("", browser.browse_mod.NO_FRAME_HANDS)
         assert taken == []
 
@@ -3022,7 +3042,7 @@ class TestTheEvidenceFrame:
             raise RuntimeError("Timeout 5000ms exceeded")
 
         page, _ = self._page(shots=boom)
-        assert _run(browser._evidence_frame(browser._Owner(), page, signin=False)) == (
+        assert _run(browser._evidence_frame(browser._Owner(), page, asks_password=False)) == (
             "",
             browser.browse_mod.NO_FRAME_FAILED,
         )
@@ -3031,7 +3051,7 @@ class TestTheEvidenceFrame:
         """`media.store` refuses anything that is not a displayable image, and
         that refusal must land as "no picture", not in the model's face."""
         page, _ = self._page(shots=lambda: b"<html>not a jpeg</html>")
-        _, why = _run(browser._evidence_frame(browser._Owner(), page, signin=False))
+        _, why = _run(browser._evidence_frame(browser._Owner(), page, asks_password=False))
         assert why == browser.browse_mod.NO_FRAME_FAILED
 
     def test_every_reason_is_one_the_record_vocabulary_knows(self, state):
@@ -3040,12 +3060,29 @@ class TestTheEvidenceFrame:
         from aish import browse as browse_mod
 
         assert browse_mod.NO_FRAME_REASONS == {
-            browse_mod.NO_FRAME_SIGNIN,
+            browse_mod.NO_FRAME_PASSWORD,
+            browse_mod.NO_FRAME_UNKNOWN,
             browse_mod.NO_FRAME_HANDS,
             browse_mod.NO_FRAME_FAILED,
         }
 
-    def _snapshot_of(self, monkeypatch, *, signin, screenshot):
+    def test_a_page_that_will_not_answer_is_unknown_and_not_False(self, state):
+        """The seam the whole fix rests on. `query_selector` raises on a page
+        navigating or closing under it, and one boolean cannot carry two
+        opposite defaults."""
+
+        class Wobbling:
+            url = "https://eon.pl/mojeon"
+
+            async def query_selector(self, _sel):
+                raise RuntimeError("Execution context was destroyed")
+
+        assert _run(browser._password_field_state(Wobbling())) is None
+        # …and what the MODEL is told is unchanged: not a wall.
+        assert _run(browser._has_password_field(Wobbling())) is False
+
+    def _snapshot_of(self, monkeypatch, *, screenshot, password=False,
+                     query_selector=None):
         from aish import browse as browse_mod
 
         class FakePage:
@@ -3056,6 +3093,11 @@ class TestTheEvidenceFrame:
 
             async def screenshot(self, **kw):
                 return screenshot()
+
+            async def query_selector(self, sel):
+                if query_selector is not None:
+                    return query_selector(sel)
+                return object() if password else None
 
         page = FakePage()
         owner = _owner_on(page)
@@ -3071,38 +3113,52 @@ class TestTheEvidenceFrame:
         monkeypatch.setattr(
             browser, "_save_downloads", lambda o, **kw: _resolved([])
         )
-        monkeypatch.setattr(
-            browser, "_has_password_field", lambda p: _resolved(signin)
-        )
+        # The real password check runs against the fake page, deliberately: the
+        # defect this class exists to pin is in how its answer is resolved.
         snapshot = _run(browser._snapshot(owner, owner.browse_pages[""]))
         assert isinstance(snapshot, browse_mod.Snapshot)
         return snapshot
 
     def test_the_snapshot_carries_the_frame_it_captured(self, state, monkeypatch):
-        snapshot = self._snapshot_of(
-            monkeypatch, signin=False, screenshot=lambda: self.JPEG
-        )
+        snapshot = self._snapshot_of(monkeypatch, screenshot=lambda: self.JPEG)
         assert snapshot.frame_skipped == ""
         assert pathlib.Path(snapshot.frame).read_bytes() == self.JPEG
 
-    def test_one_password_observation_decides_both_answers(
-        self, state, monkeypatch
-    ):
-        """`signin` is read once and used twice — told to the model, and used
-        to refuse the capture — so the two can never disagree about which page
-        this was."""
+    def test_one_observation_two_opposite_defaults(self, state, monkeypatch):
+        """The page is asked ONCE, so the model's answer and the capture's
+        refusal can never disagree about what was seen. They resolve the
+        UNANSWERED case in opposite directions, which is why the observation is
+        a tri-state rather than a bool."""
         snapshot = self._snapshot_of(
-            monkeypatch, signin=True, screenshot=lambda: self.JPEG
+            monkeypatch, screenshot=lambda: self.JPEG, password=True
         )
         assert snapshot.signin is True
         assert snapshot.frame == ""
-        assert snapshot.frame_skipped == browser.browse_mod.NO_FRAME_SIGNIN
+        assert snapshot.frame_skipped == browser.browse_mod.NO_FRAME_PASSWORD
+
+    def test_a_page_that_would_not_say_is_not_photographed(self, state, monkeypatch):
+        """The fail-open, driven end to end through the real check: the page
+        raises, the model is told it is not a wall (unchanged), and no picture
+        is stored. The one case where aish cannot tell what it is looking at
+        must not be the case where it photographs it."""
+
+        def raises(_sel):
+            raise RuntimeError("Execution context was destroyed")
+
+        snapshot = self._snapshot_of(
+            monkeypatch, screenshot=lambda: self.JPEG, query_selector=raises
+        )
+        assert snapshot.signin is False   # what the model is told: unchanged
+        assert snapshot.frame == ""
+        assert snapshot.frame_skipped == browser.browse_mod.NO_FRAME_UNKNOWN
+        # Nothing was written at all — the store directory is not even created.
+        assert not browser.frames_dir().exists()
 
     def test_a_failed_capture_still_yields_the_page(self, state, monkeypatch):
         def boom():
             raise RuntimeError("nope")
 
-        snapshot = self._snapshot_of(monkeypatch, signin=False, screenshot=boom)
+        snapshot = self._snapshot_of(monkeypatch, screenshot=boom)
         assert snapshot.text == "the page"
         assert snapshot.url == "https://eon.pl/mojeon"
         assert snapshot.frame_skipped == browser.browse_mod.NO_FRAME_FAILED

@@ -3175,11 +3175,15 @@ function knowledgeTag(ref, name) {
 }
 
 // [TRACE-FRAME-START]
-// Why a browse step has no picture. Three, closed, matching browse.py's
+// Why a browse step has no picture. Four, closed, matching browse.py's
 // NO_FRAME_* — a page that never had one and a page whose capture failed are
 // different facts, and a row that showed neither would read as neither.
+//
+// `password` says what was SEEN, never what the page WAS: the check behind it
+// is a password box, and an email-first login's first step does not have one.
 const FRAME_ABSENT = {
-  signin: "no picture — this page was asking for a password",
+  password: "no picture — this page was showing a password box",
+  unknown: "no picture — the page would not say whether it asks for a password",
   hands: "no picture — you were driving the browser yourself",
   failed: "no picture — the capture did not come back",
 };

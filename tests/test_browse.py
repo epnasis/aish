@@ -2792,10 +2792,10 @@ class TestTheFrameReferenceRidesTheResult:
         page nobody COULD picture route to different repairs."""
         view = web_module.BrowseView()
         self._opens(
-            monkeypatch, snapshot(frame_skipped=browse.NO_FRAME_SIGNIN)
+            monkeypatch, snapshot(frame_skipped=browse.NO_FRAME_PASSWORD)
         )
         out = web_module.browse("https://eon.pl/login", view=view)
-        assert out.meta["frame_skipped"] == browse.NO_FRAME_SIGNIN
+        assert out.meta["frame_skipped"] == browse.NO_FRAME_PASSWORD
         assert "frame" not in out.meta
 
     def test_a_call_that_reached_no_page_borrows_no_picture(self, monkeypatch):
