@@ -52,7 +52,7 @@ import re
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -1309,6 +1309,9 @@ class _Owner:
         # the remote-view input path retains nothing by default and this is the
         # one bounded exception, opened only by his own checkbox.
         self.pending_credential: dict = {}
+        # The view page a credential watcher is attached to, so it is attached
+        # once per view rather than once per keystroke (#296).
+        self.credential_watch: Any = None
         # Hosts whose page ASKED FOR A PASSWORD while he was looking at it.
         # This — not the browsing history — is what `view_close` may ask him
         # about. See `_note_visit`.
@@ -1704,18 +1707,46 @@ SECOND_FACTOR_JS = "() => {" + browse_mod.DEEP_JS + """
 }"""
 
 
-# Methods that can carry a credential in a body. A GET cannot, and blocking
-# cross-origin GETs during a sign-in would break the fonts and images the login
-# page needs to render.
-_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
+# Methods that can carry a body at all. A GET has none — but its ADDRESS can
+# still carry a credential, so a GET is read, never waved through.
+_BODY_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# One request's worth of text to search. A file upload is megabytes and a
+# credential is not hiding at the far end of one.
+_SCAN_MAX_CHARS = 64_000
 
 
-class _OffOriginBlocked(Exception):
-    """The page tried to send a body somewhere else while signing in."""
+def _request_carriers(request: Any) -> list[str]:
+    """The parts of a request that could carry a credential: its address, its
+    body, its headers.
+
+    Shared by the fence and by the capture-time watcher deliberately. A writer
+    and a reader of the same fact must look in the same places — the lesson
+    `SIGNIN_STILL_OURS_JS` records about shadow roots, one layer out: if
+    capture cannot see a destination the fence can, the fence aborts the very
+    request the owner's own sign-in makes."""
+    parts: list[str] = []
+    for read in (
+        lambda: request.url or "",
+        lambda: (request.post_data or "") if request.method.upper() in _BODY_METHODS else "",
+        lambda: "\n".join(str(v) for v in (request.headers or {}).values()),
+    ):
+        with contextlib.suppress(Exception):  # a dead request answers nothing
+            if piece := read():
+                parts.append(piece[:_SCAN_MAX_CHARS])
+    return parts
 
 
-async def _fence_the_origin(page: Any, expected: str, blocked: list[str]) -> None:
-    """Refuse, at the network, to let this page POST anywhere but `expected`.
+def _carries_the_credential(request: Any, needles: Sequence[str]) -> bool:
+    if not needles:
+        return False
+    return any(signin_mod.carries_secret(part, needles) for part in _request_carriers(request))
+
+
+async def _fence_the_origin(
+    page: Any, record: Any, secret: str, incidents: list[str]
+) -> None:
+    """Refuse, at the network, to let THE CREDENTIAL leave where it belongs.
 
     **This is the fence, and the DOM checks are only an early out.** A form's
     `action` is a declaration, and a login page can submit by JavaScript to
@@ -1725,25 +1756,47 @@ async def _fence_the_origin(page: Any, expected: str, blocked: list[str]) -> Non
     the static check simultaneously too weak and, when it was mandatory, strong
     enough to refuse the ordinary case.
 
-    Blocking the REQUEST needs no guess about encoding: it does not go looking
-    for the password in a body that may be JSON, form-encoded or percent-
-    escaped. Anything with a body going to another origin is denied for the few
-    seconds the sign-in takes. A cross-origin analytics beacon losing one POST
-    in that window costs nothing."""
+    What it fences is the credential and not the connection (#296). The first
+    version aborted every request with a body going to another origin, which on
+    a real commercial login page means the tracking pixel and the consent call
+    — so it fired on virtually every site, and a page that legitimately posts
+    credentials to an API subdomain had its sign-in prevented rather than
+    merely misreported. aish holds the value here, so it can ask the only
+    question that matters: is THIS request carrying it, and is it going
+    somewhere the owner's own sign-in sent it? Everything else on the wire is
+    none of the fence's business and passes unexamined and unreported.
+
+    Only the ORIGIN of an aborted request is recorded. The address itself may
+    carry the credential in its query string, and this list is pushed to his
+    phone and written to the store."""
+    needles = signin_mod.secret_needles(secret)
+
+    def going_astray(request: Any) -> str:
+        """The origin to refuse, or "". Never raises: a request aish cannot
+        read is a request it has nothing to say about, and a fence that hangs
+        the page is worse than no fence at all."""
+        try:
+            if not _carries_the_credential(request, needles):
+                return ""
+            return (
+                ""
+                if signin_mod.may_receive_credential(record, request.url)
+                else (signin_mod.origin_of(request.url) or "an unreadable address")
+            )
+        except Exception:  # noqa: BLE001
+            return ""
 
     async def decide(route: Any) -> None:
-        request = route.request
-        try:
-            if request.method.upper() in _BODY_METHODS:
-                origin = signin_mod.origin_of(request.url)
-                if origin and origin != expected:
-                    blocked.append(request.url)
-                    await route.abort()
-                    return
-            await route.continue_()
-        except Exception:  # noqa: BLE001 — a dead route must not hang the page
+        # The abort and the continue are kept apart deliberately: a failed
+        # abort must never fall through to letting the request go.
+        if where := going_astray(route.request):
+            if where not in incidents:
+                incidents.append(where)
             with contextlib.suppress(Exception):
-                await route.continue_()
+                await route.abort()
+            return
+        with contextlib.suppress(Exception):
+            await route.continue_()
 
     await page.route("**/*", decide)
 
@@ -1903,6 +1956,43 @@ def _hold_credential(owner: Any, url: str, password: str, remember: object) -> N
     if remember:
         held["remember"] = True
     owner.pending_credential = held
+    if held.get("remember"):
+        _watch_where_the_credential_goes(owner)
+
+
+def _watch_where_the_credential_goes(owner: Any) -> None:
+    """Record the origins his OWN sign-in sends the password to (#296).
+
+    The replay fence needs to know where the credential legitimately goes, and
+    the only authority on that is the sign-in that worked — a login page may
+    post to an API subdomain or a central identity host, and nothing the page
+    declares about itself is obliged to say so. So it is watched, here, at the
+    one moment aish can see it happen.
+
+    Armed only once he has ticked the box, and it reads `pending_credential`
+    on every request rather than closing over the value, so clearing that
+    dict — which `_save_held_credential` does — disarms it. Nothing is written
+    or logged: the origins ride along with the value already being held, and
+    only the origins are ever persisted."""
+    page = owner.view
+    if page is None or owner.credential_watch is page:
+        return
+
+    def note(request: Any) -> None:
+        held = owner.pending_credential
+        secret = held.get("password") or ""
+        if not held.get("remember") or not secret:
+            return
+        if not _carries_the_credential(request, signin_mod.secret_needles(secret)):
+            return
+        origin = signin_mod.origin_of(request.url)
+        seen = held.setdefault("destinations", [])
+        if origin and origin not in seen:
+            seen.append(origin)
+
+    with contextlib.suppress(Exception):  # a watcher that will not attach is not an error
+        page.on("request", note)
+        owner.credential_watch = page
 
 
 def _hold_identifier(owner: Any, url: str, value: str) -> None:
@@ -1935,6 +2025,7 @@ def _save_held_credential(owner: Any) -> str:
             held.get("identifier", ""),
             held["password"],
             today=time.strftime("%Y-%m-%d"),
+            destinations=held.get("destinations", []),
         )
     except Exception:  # noqa: BLE001 — a failed save must not cost him the frame
         return ""
@@ -1961,6 +2052,10 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
             )
         )
     identifier, password = pair
+    # Held out here so the outcome can be recorded after the job returns. It is
+    # deliberately NOT consulted for whether the sign-in worked — see
+    # `_record_the_outcome`.
+    incidents: list[str] = []
 
     async def job(owner: _Owner) -> SignInResult:
         if owner.view is not None:
@@ -1968,44 +2063,58 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
         context = await owner.context()
         page = await context.new_page()
         owner.read_pages.add(page)
-        blocked: list[str] = []
         try:
             await page.goto(record.url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             await page.wait_for_timeout(SETTLE_MS)
             await _dismiss_consent(page)
             # Armed BEFORE anything is typed and left up through the submit and
             # the settle, so a delayed exfiltration is caught too.
-            await _fence_the_origin(page, record.origin, blocked)
-            outcome = await _sign_in_on(page, record, identifier, password)
-            if blocked:
-                # Not a hypothetical: say it, and never report the sign-in as
-                # having worked when the page was caught doing this.
-                where = signin_mod.origin_of(blocked[0]) or blocked[0]
-                return SignInResult(
-                    why=(
-                        f"that page tried to send something to {where} while it "
-                        f"was being signed in — aish blocked it and stopped. "
-                        f"Sign in yourself at /browser {host_of(record.origin)}"
-                    ),
-                    url=outcome.url or page.url,
-                )
-            return outcome
+            await _fence_the_origin(page, record, password, incidents)
+            return await _sign_in_on(page, record, identifier, password)
         finally:
             owner.read_pages.discard(page)
             with contextlib.suppress(Exception):
                 await page.close()
 
     result = _submit(job, timeout)
-    when = time.strftime("%Y-%m-%dT%H:%M")
+    incident = _record_the_outcome(
+        record, result, incidents, when=time.strftime("%Y-%m-%dT%H:%M")
+    )
+    _announce(record, result, incident=incident)
+    return result
+
+
+def _record_the_outcome(
+    record: Any, result: SignInResult, incidents: list[str], *, when: str
+) -> str:
+    """Write what happened to the store, and return the incident text, if any.
+
+    **The sign-in's outcome is whether the session came up, and nothing else**
+    (#296). What the fence saw on the wire used to decide it, so a blocked
+    tracking beacon reported a working sign-in as a failure and sent the owner
+    off to do by hand a thing that was already done. That link is severed: the
+    result travels back untouched.
+
+    An incident is a fact about the CREDENTIAL, so it lands where facts about
+    the credential land — the record is marked suspect, which is what stops the
+    value being spent again, and he is pushed the address it was headed for.
+    That happens whether or not the session came up, and it takes precedence
+    over `note_used`, which would clear the very mark being set."""
+    if incidents:
+        text = (
+            f"the page tried to send the saved password to {', '.join(incidents)}, "
+            "which is not where it goes when he signs in himself"
+        )
+        signin_mod.note_failed(record.origin, why=text)
+        return text
     if result.ok:
         signin_mod.note_used(record.origin, when=when)
     elif result.stale:
         signin_mod.note_failed(record.origin, why=result.why)
-    _announce(record, result)
-    return result
+    return ""
 
 
-def _announce(record: Any, result: SignInResult) -> None:
+def _announce(record: Any, result: SignInResult, *, incident: str = "") -> None:
     """Tell him aish used his credential — on the channel that needs no answer.
 
     A NOTICE, not a card. He has said he will not read a card per action, and
@@ -2014,7 +2123,17 @@ def _announce(record: Any, result: SignInResult) -> None:
     construction — once per lapse, not once per act. Never raises: a renewal
     must not fail because a phone is unreachable."""
     host = host_of(record.origin)
-    if result.ok:
+    if incident:
+        # The loudest thing that can happen here, and it outranks whether the
+        # session came up: the credential is retired either way, so the message
+        # he needs is the one that tells him to replace it.
+        title = f"aish held your {host} password back"
+        body = (
+            f"{incident}. aish stopped that request"
+            + (" — the session did come up" if result.ok else "")
+            + f". Sign in at /browser {host} to save it afresh"
+        )
+    elif result.ok:
         title, body = f"aish signed in to {host}", "the session had lapsed"
     elif result.second_factor:
         title, body = f"{host} wants a code", "aish got as far as the second factor"
