@@ -2601,6 +2601,18 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
    when the edit was denied/held so it reads as proposed-but-not-written. */
 .step-diff { margin-top: 8px; }
 .step-diff.not-applied { opacity: 0.55; }
+/* The evidence frame (#289): what the page looked like when the model read it.
+   Capped in HEIGHT rather than shown whole — the row is a timeline entry, and
+   a full 1440x900 page pushes the next step off the screen. Tap opens the real
+   viewer, where it pinches and zooms like any other picture. */
+.step-frame { margin-top: 8px; }
+.step-frame img {
+  display: block; width: 100%; max-height: 190px; object-fit: cover;
+  object-position: top center;
+  border-radius: 10px; border: 0.5px solid var(--sep); background: var(--ctp-base);
+  cursor: zoom-in;
+}
+.step-frame-gone, .step-frame-none { font-style: italic; }
 .step-output { margin-top: 8px; }
 /* empty stdout/stderr: a compact one-liner (with the exit code) instead of an
    empty box carrying copy/wrap/expand controls for nothing. */
