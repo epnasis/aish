@@ -172,13 +172,20 @@ class TestTheReplayItself:
 
     class FakePage:
         def __init__(self, url, form, *, after=None, has_password_after=False,
-                     wants_code=False, changed=""):
+                     wants_code=False, changed="", captcha=(), page_text="",
+                     alerts=(), alerts_after=None, invalid_after=False):
             self.url = url
             self._form = form
             self._after = after or {}
             self._has_password_after = has_password_after
             self._wants_code = wants_code
             self._changed = changed
+            self._captcha = list(captcha)
+            self._page_text = page_text
+            self._alerts = list(alerts)
+            self._alerts_after = alerts_after
+            self._invalid_after = invalid_after
+            self._rejection_reads = 0
             self.typed: list[str] = []
             self.submitted = False
             self.evaluated = 0
@@ -208,6 +215,18 @@ class TestTheReplayItself:
                 return self._changed
             if script is browser.SECOND_FACTOR_JS:
                 return self._wants_code
+            if script is browser.CAPTCHA_MARKS_JS:
+                return list(self._captcha)
+            if script is browser.PAGE_TEXT_JS:
+                return self._page_text
+            if script is browser.SIGNIN_REJECTION_JS:
+                # The real page is read once before the submit and once after,
+                # and only the difference counts.
+                self._rejection_reads += 1
+                if self._rejection_reads == 1:
+                    return {"invalid": False, "said": list(self._alerts)}
+                said = self._alerts if self._alerts_after is None else self._alerts_after
+                return {"invalid": self._invalid_after, "said": list(said)}
             return None
 
         async def query_selector(self, selector):
@@ -243,7 +262,8 @@ class TestTheReplayItself:
     def _page(self, **kw):
         return self.FakePage(**kw)
 
-    def _run(self, page, record=None, ident="him@x.pl", password="hunter2hunter2"):
+    def _run(self, page, record=None, ident="him@x.pl", password="hunter2hunter2",
+             statuses=None):
         import asyncio
 
         from aish import browser
@@ -255,7 +275,9 @@ class TestTheReplayItself:
         original = browser._has_password_field
         browser._has_password_field = _fake_has_password(page)
         try:
-            return asyncio.run(browser._sign_in_on(page, record, ident, password))
+            return asyncio.run(
+                browser._sign_in_on(page, record, ident, password, statuses)
+            )
         finally:
             browser._has_password_field = original
 
@@ -309,12 +331,17 @@ class TestTheReplayItself:
         assert result.ok and not result.stale and not result.second_factor
         assert page.typed == ["him@x.pl", "hunter2hunter2"]
 
-    def test_the_form_coming_back_means_stale_never_a_retry(self):
+    def test_the_form_coming_back_is_not_by_itself_a_stale_password(self):
+        """It was, and that is #320. The form comes back for a CAPTCHA refusing
+        the automation, a submit that never fired, a bot wall and an SPA that
+        had not navigated yet — and calling every one of those a wrong password
+        destroyed a working credential the owner then had to re-record."""
         page = self._page(url="https://eon.pl/login", form=self.OK_FORM,
                           has_password_after=True)
         result = self._run(page)
-        assert not result.ok and result.stale
-        assert "stale" in result.why
+        assert not result.ok and result.tried
+        assert not result.stale and not result.captcha
+        assert "was never judged" in result.why
 
     def test_a_second_factor_is_not_a_failure(self):
         """The password was almost certainly right; recording it as stale would
@@ -323,6 +350,131 @@ class TestTheReplayItself:
                           wants_code=True)
         result = self._run(page)
         assert result.second_factor and not result.stale and not result.ok
+
+
+class TestAPasswordBoxIsNotAVerdict:
+    """#320. Marking a credential suspect is destructive and the owner cannot
+    undo it except by re-recording — which, on the site this happened on, fails
+    identically. So it now needs a POSITIVE signal that the SITE judged the
+    VALUE, and the absence of success is not one."""
+
+    _page = TestTheReplayItself._page
+    _run = TestTheReplayItself._run
+    FakePage = TestTheReplayItself.FakePage
+    OK_FORM = TestTheReplayItself.OK_FORM
+
+    def _failed(self, **kw):
+        return self._page(
+            url="https://eon.pl/login", form=self.OK_FORM,
+            has_password_after=True, **kw,
+        )
+
+    def test_a_captcha_page_that_does_not_sign_in_never_blames_the_password(self):
+        result = self._run(self._failed(
+            captcha=["https://www.google.com/recaptcha/api.js?render=abc"],
+        ))
+        assert not result.ok and not result.stale
+        assert result.captcha == "reCAPTCHA"
+        assert "cannot sign in to this site automatically" in result.why
+        assert "untouched" in result.why
+
+    def test_the_declaration_is_matched_in_the_owners_own_language(self):
+        """eon.pl says it in Polish. The brand is the only token in that
+        sentence that survives translation, so it is the only one matched."""
+        result = self._run(self._failed(
+            page_text="Ta strona chroniona jest przez reCAPTCHA.",
+        ))
+        assert result.captcha == "reCAPTCHA" and not result.stale
+
+    def test_the_other_spellings_are_recognised_too(self):
+        for mark, vendor in (
+            ("https://js.hcaptcha.com/1/api.js", "hCaptcha"),
+            ("https://challenges.cloudflare.com/turnstile/v0/api.js",
+             "Cloudflare Turnstile"),
+            ("https://client-api.arkoselabs.com/v2/api.js", "Arkose Labs"),
+        ):
+            result = self._run(self._failed(captcha=[mark]))
+            assert result.captcha == vendor, mark
+            assert not result.stale
+
+    def test_an_invisible_widget_is_seen_by_what_the_page_LOADS(self):
+        """reCAPTCHA v3 renders nothing at all — the script tag is the whole
+        declaration, and it is what eon.pl actually has."""
+        result = self._run(self._failed(
+            captcha=["https://www.gstatic.com/recaptcha/releases/x/recaptcha__pl.js"],
+            page_text="Zaloguj się",
+        ))
+        assert result.captcha == "reCAPTCHA"
+
+    def test_a_password_box_with_no_reason_given_does_not_set_stale(self):
+        result = self._run(self._failed())
+        assert not result.stale and not result.captcha and result.tried
+        assert "gave no reason" in result.why
+
+    def test_the_site_saying_no_in_its_own_markup_still_sets_stale(self):
+        """An alert region that APPEARED in answer to the submit is the page's
+        own statement that it judged what was typed."""
+        result = self._run(self._failed(
+            alerts=[], alerts_after=["Nieprawidłowy login lub hasło"],
+        ))
+        assert result.stale and result.tried and not result.captcha
+        assert "refused the saved password" in result.why
+
+    def test_a_field_the_page_marks_invalid_still_sets_stale(self):
+        result = self._run(self._failed(invalid_after=True))
+        assert result.stale
+
+    def test_an_alert_that_was_already_showing_is_not_an_answer(self):
+        """A cookie notice or a maintenance banner in a live region is not a
+        verdict on a password — it was there before anything was sent."""
+        result = self._run(self._failed(
+            alerts=["Używamy plików cookie"],
+            alerts_after=["Używamy plików cookie"],
+        ))
+        assert not result.stale
+
+    def test_a_refusal_status_on_the_credential_request_still_sets_stale(self):
+        assert self._run(self._failed(), statuses=[200, 401]).stale is True
+
+    def test_a_bot_wall_status_is_not_a_rejected_password(self):
+        """403 is what a bot wall answers, and reading it as a wrong password
+        rebuilds the exact conflation this fixes."""
+        assert self._run(self._failed(), statuses=[403, 429]).stale is False
+
+    def test_a_captcha_outranks_a_reason_the_page_gave(self):
+        """A CAPTCHA refusal often renders an error of its own. Nothing was
+        learned about the password either way, so the credential survives."""
+        result = self._run(self._failed(
+            captcha=["https://www.google.com/recaptcha/api.js"],
+            alerts_after=["Nie udało się zalogować"],
+        ))
+        assert result.captcha == "reCAPTCHA" and not result.stale
+
+
+class TestWhatCountsAsTheSiteRefusingTheValue:
+    """The pure halves, pinned where they can be read without a browser."""
+
+    def test_a_vendor_is_found_in_an_address_a_class_or_the_text(self):
+        assert signin.captcha_vendor(
+            ["https://www.google.com/recaptcha/api.js"]
+        ) == "reCAPTCHA"
+        assert signin.captcha_vendor(["g-recaptcha  "]) == "reCAPTCHA"
+        assert signin.captcha_vendor(["cf-turnstile "]) == "Cloudflare Turnstile"
+        assert signin.captcha_vendor(["h-captcha "]) == "hCaptcha"
+        assert signin.captcha_vendor(
+            [], "Ta strona chroniona jest przez reCAPTCHA"
+        ) == "reCAPTCHA"
+
+    def test_an_ordinary_login_page_declares_nothing(self):
+        assert signin.captcha_vendor(
+            ["https://eon.pl/static/app.js", "https://www.google-analytics.com/g"],
+            "Zaloguj się\nHasło\nNie pamiętasz hasła?",
+        ) == ""
+
+    def test_only_a_refusal_status_counts(self):
+        assert signin.refused_the_credential([401]) is True
+        assert signin.refused_the_credential([200, 302, 403, 429, 500]) is False
+        assert signin.refused_the_credential([]) is False
 
 
 class _FakeElement:
@@ -904,13 +1056,14 @@ class TestASignInIsJudgedByWhetherTheSessionCameUp:
     converted a working sign-in into a reported failure, so aish had him signed
     in and told him to go and do it by hand."""
 
-    def _drive(self, monkeypatch, beacons, pushes):
+    def _drive(self, monkeypatch, beacons=(), pushes=None, page=None):
         import asyncio
 
         from aish import browser
 
+        pushes = [] if pushes is None else pushes
         signin.save("https://eon.pl/login", "him", "hunter2hunter2", today="d")
-        page = _SignInPage(beacons)
+        page = page or _SignInPage(beacons)
         owner = _SignInOwner(page)
         monkeypatch.setattr(browser, "_has_password_field", _fake_has_password(page))
         monkeypatch.setattr(browser, "notify", _SilentNotifier(pushes))
@@ -980,14 +1133,17 @@ class _SilentNotifier:
 class _SignInPage(TestTheReplayItself.FakePage):
     """The replay page, plus the network the real one sits on."""
 
-    def __init__(self, beacons):
+    def __init__(self, beacons=(), *, answers=(), **kw):
         super().__init__(
-            url="https://eon.pl/login",
-            form=TestTheReplayItself.OK_FORM,
-            after={"url": "https://eon.pl/mojeon"},
+            url=kw.pop("url", "https://eon.pl/login"),
+            form=kw.pop("form", TestTheReplayItself.OK_FORM),
+            after=kw.pop("after", {"url": "https://eon.pl/mojeon"}),
+            **kw,
         )
         self._beacons = list(beacons)
+        self._answers = list(answers)
         self._handler = None
+        self._listeners: dict = {}
         self.beacons_continued = 0
         self.closed = False
 
@@ -996,6 +1152,9 @@ class _SignInPage(TestTheReplayItself.FakePage):
 
     async def route(self, _pattern, handler):
         self._handler = handler
+
+    def on(self, event, handler):
+        self._listeners[event] = handler
 
     async def close(self):
         self.closed = True
@@ -1011,6 +1170,11 @@ class _SignInPage(TestTheReplayItself.FakePage):
             await self._handler(route)
             self.beacons_continued += int(route.continued)
         self._beacons = []
+        # ...and the site's own answers come back on the same settle.
+        listener = self._listeners.get("response")
+        for url, body, status in self._answers if listener else []:
+            listener(_SignInResponse(url, body, status))
+        self._answers = []
 
 
 class _SignInRoute:
@@ -1026,6 +1190,118 @@ class _SignInRoute:
 
     async def abort(self):
         self.aborted = True
+
+
+class _SignInResponse:
+    def __init__(self, url, body, status):
+        self.request = type(
+            "R", (), {"url": url, "method": "POST", "post_data": body, "headers": {}}
+        )()
+        self.status = status
+
+
+class TestAFailedAttemptLeavesTheOwnersRecordAlone:
+    """#320, at the level the damage actually happened: the STORE. He recorded
+    the sign-in by hand — which only ever succeeds — and the automated replay
+    then wrote onto the record that his password looked stale, so the value
+    stopped being spent and the only repair offered was to record it again.
+    Twice."""
+
+    _drive = TestASignInIsJudgedByWhetherTheSessionCameUp._drive
+
+    # What his own hand sign-in wrote, field for field. A failed automated
+    # attempt must leave exactly this behind.
+    AS_HE_RECORDED_IT = {
+        "origin": "https://eon.pl",
+        "url": "https://eon.pl/login",
+        "saved": "d",
+        "used": 0,
+        "last_used": "",
+        "suspect": "",
+        "destinations": [],
+    }
+
+    def test_a_captcha_refusal_costs_him_nothing(self, monkeypatch):
+        import dataclasses
+
+        page = _SignInPage(
+            has_password_after=True,
+            captcha=["https://www.google.com/recaptcha/api.js?render=eon"],
+            page_text="Ta strona chroniona jest przez reCAPTCHA.",
+        )
+        pushes: list = []
+        result, _ = self._drive(monkeypatch, pushes=pushes, page=page)
+
+        assert not result.ok and not result.stale
+        assert result.captcha == "reCAPTCHA"
+        # The whole point: the record he made by hand is untouched, and the
+        # credential is still spendable.
+        assert dataclasses.asdict(signin.find("https://eon.pl")) == self.AS_HE_RECORDED_IT
+        assert signin.credential("https://eon.pl") == ("him", "hunter2hunter2")
+        # And he is told the true thing, without being sent to re-record.
+        assert pushes and "does not need replacing" in pushes[0][1]
+        assert "reCAPTCHA" in pushes[0][1]
+        assert "hunter2hunter2" not in "".join(t + b for t, b in pushes)
+
+    def test_a_failure_the_site_gave_no_reason_for_costs_him_nothing_either(
+        self, monkeypatch
+    ):
+        import dataclasses
+
+        result, _ = self._drive(
+            monkeypatch, page=_SignInPage(has_password_after=True)
+        )
+        assert not result.ok and not result.stale
+        assert dataclasses.asdict(signin.find("https://eon.pl")) == self.AS_HE_RECORDED_IT
+        assert signin.credential("https://eon.pl") == ("him", "hunter2hunter2")
+
+    def test_the_site_answering_the_login_with_a_refusal_still_retires_it(
+        self, monkeypatch
+    ):
+        """The signal that survives: the site answered the request that CARRIED
+        the password with 401. Collected by the same fence that already reads
+        those requests, so there is one definition of which request it was."""
+        page = _SignInPage(
+            has_password_after=True,
+            answers=[("https://eon.pl/api/login", "p=hunter2hunter2", 401)],
+        )
+        result, _ = self._drive(monkeypatch, page=page)
+        assert result.stale and not result.ok
+        record = signin.find("https://eon.pl")
+        assert record.suspect and record.used == 0
+        assert signin.credential("https://eon.pl") is None
+
+    def test_the_pages_own_words_never_reach_the_record(self, monkeypatch):
+        """#296's invariant, across the new signals. A login page that echoes a
+        failed password back into its own error text is a real shape, and the
+        alert text is READ to decide whether the site answered — it is never
+        what gets written. Only the fixed sentence is."""
+        page = _SignInPage(
+            has_password_after=True,
+            alerts_after=["Błędne hasło: hunter2hunter2"],
+            answers=[("https://eon.pl/api/login", "p=hunter2hunter2", 401)],
+        )
+        pushes: list = []
+        result, _ = self._drive(monkeypatch, pushes=pushes, page=page)
+        assert result.stale
+        written = (signin.STATE).read_text(encoding="utf-8")
+        assert "hunter2hunter2" not in written
+        assert "hunter2hunter2" not in result.why
+        assert "hunter2hunter2" not in "".join(t + b for t, b in pushes)
+        assert "hunter2hunter2" not in signin.find("https://eon.pl").suspect
+
+    def test_a_beacon_answering_401_says_nothing_about_the_password(
+        self, monkeypatch
+    ):
+        """The status has to be on a request that carried the value. A consent
+        endpoint refusing an unrelated call is not the site refusing him."""
+        page = _SignInPage(
+            has_password_after=True,
+            answers=[("https://consent.example/x", "cmp=1", 401)],
+        )
+        result, _ = self._drive(monkeypatch, page=page)
+        assert not result.stale
+        assert signin.find("https://eon.pl").suspect == ""
 
 
 class _SignInOwner:
