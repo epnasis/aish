@@ -9290,6 +9290,55 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         )
         agent.run_task("read https://shop.example/list and price the offer")
         assert asked == []
+        # The fact is HELD, not re-derived: the address the page showed is in
+        # the record, whole.
+        assert offered in agent._offered_links
+
+    def test_a_prefix_of_an_address_already_fetched_is_not_offered(self, monkeypatch):
+        """#294. The check used to substring-match against every tool message,
+        and aish's own source header echoes the URL it was asked to fetch back
+        into that text — so any PREFIX of an address already read said "the
+        page offered this". Not exploitable (smuggling appends, and a longer
+        string cannot be a substring of a shorter one), but it made the gate
+        illegible: two near-identical addresses, one asked about and one not,
+        for a reason nothing on screen could explain."""
+        full = "https://eon.pl/faktury?id=12345678901234567890&ref=inbox"
+        prefix = "https://eon.pl/faktury?id=12345678901234567890"
+        fetched = self._stub_web(monkeypatch)
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url=full)]),
+                model_says(tool_calls=[tool_call("read_url", url=prefix)]),
+                model_says("done"),
+            ],
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or True,
+        )
+        agent.run_task(f"open {full}")
+        assert fetched == [full, prefix]
+        assert asked and "eon.pl" in asked[0]  # the composed prefix is asked about
+        assert not agent._url_was_offered(prefix)
+
+    def test_aishs_own_source_header_is_not_something_a_page_offered(self, monkeypatch):
+        """The record holds what the PAGE said, never aish's sentence about
+        what it fetched — which is the echo that falsified the old scan."""
+        import aish.agent as agent_module
+
+        requested = "https://shop.example/list"
+        linked = "https://shop.example/offer?id=8891"
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None, **_kw: f"[{url}]\nan offer → {linked}",
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url=requested)]),
+                model_says("read it"),
+            ],
+            approve_tool=lambda *a, **k: True,
+        )
+        agent.run_task(f"read {requested}")
+        assert agent._offered_links == {linked}
 
     def test_a_host_the_owner_named_is_read_freely(self, monkeypatch):
         """Owner provenance used to be recorded only in triggered sessions,
@@ -9557,6 +9606,46 @@ class TestSearchingIsReading:
         assert agent._egress_novel_hosts(
             "read_url", {"url": "https://allegro.pl/go?to=evil.example/?d=secret"}
         ) == ["allegro.pl"]
+
+    def test_a_vouched_host_accepts_any_query_for_the_rest_of_the_session(self):
+        """The residual, pinned so it is a decision and not a surprise (#277,
+        #294). One card for allegro.pl and every later query there is free,
+        whatever it says — there is deliberately no length cap, since an
+        injection chunks a secret across many short ordinary-looking searches
+        and stays under any bound worth having. What bounds it is WHERE it
+        goes: that query reaches allegro.pl's own search index and access logs
+        and nowhere else, so reading it back means controlling allegro.pl — in
+        which case the owner approved the attacker's own hostname and the game
+        was lost at the card, not at the query."""
+        agent, _ = make_agent([])
+        agent._tainted = True
+        agent._approved_hosts.add("allegro.pl")
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://allegro.pl/listing?string=" + "S" * 400}
+        ) is None
+        # The bound that does work is the destination, and it is enforced
+        # before this test is ever reached.
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://elsewhere.example/listing?string=x"}
+        ) == ["elsewhere.example"]
+
+    def test_a_multi_host_search_card_vouches_exactly_the_hosts_it_named(self):
+        """A search card can name several hosts and vouches ALL of them, so
+        the grant is only as legible as that card. Pinned here so it can never
+        grow silently: what enters `_approved_hosts` is exactly the set the
+        preview he read put in front of him — no host is vouched that the card
+        did not say out loud."""
+        shown: list = []
+        agent, _ = make_agent(
+            [],
+            origin="email",
+            approve_tool=lambda name, args, preview=None: shown.append(preview) or True,
+        )
+        query = "invoice site:eon.pl OR site:pge.pl OR site:tauron.pl"
+        assert agent._egress_gate("web_search", {"query": query}) is None
+        named = {"eon.pl", "pge.pl", "tauron.pl"}
+        assert agent._approved_hosts == named
+        assert all(host in shown[0] for host in named)
 
     def test_a_host_he_merely_mentioned_is_not_a_vouch(self, monkeypatch):
         """#178 P0-2's asymmetry, and the reason this is safe. A host is in
