@@ -3818,13 +3818,34 @@ class Agent:
         near-identical searches could get different answers for a reason
         nothing on screen could explain.
 
-        The URL this call REQUESTED is dropped, because that echo is aish's own
-        sentence rather than anything the page said. Costs nothing to keep the
-        set honest: the strings are already held in `self.messages`, so this is
-        a projection of memory already paid for."""
+        Only the text BELOW the untrusted-content banner is scanned (#313).
+        The banner is already the structural line between aish's voice and the
+        source's — every `[aish: …]` note sits above it by construction — so
+        asking "was this below the banner" answers "did the SOURCE write it"
+        without a second list of aish's own sentences to keep in step. The
+        first version dropped one such sentence (the URL this call requested)
+        and left the rest: `web.STALE_SESSION_NOTE` tells the user to run
+        `/browser https://{host}`, and that host was being written down as a
+        link the page offered.
+
+        A result with NO banner records NOTHING, deliberately. No banner means
+        nothing in the string says whose words these are, and a set documented
+        as "what the source offered" must not be filled from text nobody
+        attributed. It fails the safe way: the set only ever EXCUSES a call, so
+        an address missing from it is gated, never waved through.
+
+        The REQUESTED URL is still dropped on top of that, because the banner
+        does not subsume it: `web._present` puts the `[<url>]` source header
+        BELOW the banner, so aish's echo of the address it was asked to fetch
+        lands in the scanned half. Costs nothing to keep the set honest: the
+        strings are already held in `self.messages`, so this is a projection of
+        memory already paid for."""
+        _, banner, said = result.partition(web.UNTRUSTED_NOTE)
+        if not banner:
+            return
         requested = str(args.get("url") or args.get("source") or "").strip()
         self._offered_links.update(
-            url for url in provenance.urls_in(result) if url != requested
+            url for url in provenance.urls_in(said) if url != requested
         )
 
     def _note_taint(self, calls: list[tuple[str, dict]]) -> None:

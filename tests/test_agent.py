@@ -9419,7 +9419,11 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         offered = "https://shop.example/offer?id=8891&ref=listing"
         monkeypatch.setattr(
             agent_module.web, "read_url",
-            lambda url, topic=None, **_kw: f"a listing linking to {offered}",
+            # The real envelope, banner and all: what a page offered is read
+            # from below that banner, so a stub without one tests nothing.
+            lambda url, topic=None, **_kw: (
+                f"{agent_module.web.UNTRUSTED_NOTE}[{url}]\na listing linking to {offered}"
+            ),
         )
         asked: list = []
         agent, _ = make_agent(
@@ -9463,14 +9467,20 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
 
     def test_aishs_own_source_header_is_not_something_a_page_offered(self, monkeypatch):
         """The record holds what the PAGE said, never aish's sentence about
-        what it fetched — which is the echo that falsified the old scan."""
+        what it fetched — which is the echo that falsified the old scan.
+
+        This one is why the requested-URL drop survives #313's banner split:
+        `web._present` puts the `[<url>]` header BELOW the banner, so it lands
+        in the half that gets scanned."""
         import aish.agent as agent_module
 
         requested = "https://shop.example/list"
         linked = "https://shop.example/offer?id=8891"
         monkeypatch.setattr(
             agent_module.web, "read_url",
-            lambda url, topic=None, **_kw: f"[{url}]\nan offer → {linked}",
+            lambda url, topic=None, **_kw: (
+                f"{agent_module.web.UNTRUSTED_NOTE}[{url}]\nan offer → {linked}"
+            ),
         )
         agent, _ = make_agent(
             [
@@ -9481,6 +9491,79 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         )
         agent.run_task(f"read {requested}")
         assert agent._offered_links == {linked}
+
+    def test_a_note_aish_wrote_is_not_something_a_page_offered(self, monkeypatch):
+        """#313. `STALE_SESSION_NOTE` is aish's own sentence, sits above the
+        untrusted banner, and tells the user to run `/browser https://<host>`
+        — so the host aish wrote was going into the record as a link the page
+        showed. Nearly harmless (a bare host carries no payload), and exactly
+        the defect #294 was about: the set says "what the source offered" and
+        held something no source offered."""
+        import aish.agent as agent_module
+
+        requested = "https://eon.pl/faktury"
+        linked = "https://eon.pl/logowanie?next=faktury"
+        note = agent_module.web.STALE_SESSION_NOTE.format(host="eon.pl")
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None, **_kw: (
+                f"{note}{agent_module.web.UNTRUSTED_NOTE}[{url}]\nsign in → {linked}"
+            ),
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url=requested)]),
+                model_says("the session expired"),
+            ],
+            approve_tool=lambda *a, **k: True,
+        )
+        agent.run_task(f"read {requested}")
+        assert agent._offered_links == {linked}
+        assert not agent._url_was_offered("https://eon.pl")
+
+    def test_a_result_with_no_banner_offers_nothing(self, monkeypatch):
+        """#313. Nothing in an unbannered result says whose words it holds, so
+        a set documented as "what the source offered" is not filled from it.
+        Fails the safe way — the set only ever EXCUSES a call, so an address
+        missing from it is gated rather than waved through."""
+        import aish.agent as agent_module
+
+        linked = "https://shop.example/offer?id=8891"
+        monkeypatch.setattr(
+            agent_module.tools, "read_docs",
+            lambda *a, **k: f"a local note mentioning {linked}",
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="git")]),
+                model_says("read it"),
+            ],
+            approve_tool=lambda *a, **k: True,
+        )
+        agent.run_task("check the notes")
+        assert agent._offered_links == set()
+
+    def test_a_search_result_still_offers_its_urls(self, monkeypatch):
+        """#313. A search marks itself with `SEARCH_RESULTS_NOTE`, which is
+        `UNTRUSTED_NOTE` plus one sentence — so the split finds it. Pinned
+        because respelling that constant would silently stop every search
+        result counting as offered, and nothing else would say so."""
+        import aish.agent as agent_module
+
+        hit = "https://shop.example/offer?id=8891"
+        monkeypatch.setattr(
+            agent_module.web, "web_search",
+            lambda q: f"{agent_module.web.SEARCH_RESULTS_NOTE}1. An offer\n   {hit}\n   cheap",
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("web_search", query="an offer")]),
+                model_says("found one"),
+            ],
+            approve_tool=lambda *a, **k: True,
+        )
+        agent.run_task("find an offer")
+        assert hit in agent._offered_links
 
     def test_a_host_the_owner_named_is_read_freely(self, monkeypatch):
         """Owner provenance used to be recorded only in triggered sessions,
