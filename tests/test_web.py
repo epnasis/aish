@@ -1318,3 +1318,191 @@ class TestWhereTheSearchLanded:
         web.search_page("one")
         web.search_page("two")
         assert len(reads) == 1
+
+
+AISH = pathlib.Path(__file__).resolve().parent.parent / "aish"
+
+# The raw entry points, written the way they are actually spelled. A pattern
+# matching only `urlopen(` would miss `build_opener` — which is exactly how you
+# end up with a second opener carrying no redirect handler.
+RAW_OPENERS = {
+    "urlopen": r"\burlopen\(",
+    "build_opener": r"\bbuild_opener\(",
+    "urllib.request.Request": r"\burllib\.request\.Request\(",
+    "urlretrieve": r"\burlretrieve\(",
+    "http.client connection": r"\bhttp\.client\.HTTPS?Connection\(",
+    "socket.create_connection": r"\bsocket\.create_connection\(",
+    "requests": r"\brequests\.(get|post|put|delete|head|request|Session)\(",
+    "httpx": r"\bhttpx\.(get|post|put|delete|head|request|Client|AsyncClient)\(",
+    "aiohttp": r"\baiohttp\.ClientSession\(",
+}
+
+
+def _raw_openers_in(paths, allowed=()):
+    """{module name: [entry points it opens with]} for everything not exempt."""
+    import re
+
+    found = {}
+    for path in paths:
+        if path.name in allowed:
+            continue
+        text = path.read_text()
+        hits = [what for what, pat in RAW_OPENERS.items() if re.search(pat, text)]
+        if hits:
+            found[path.name] = hits
+    return found
+
+
+class TestOneGuardedFetcher:
+    """The raw opener lives in `web.py` and nowhere else (#308).
+
+    Every guard on an outbound request — the wire encoding, the resolve-every-
+    address public requirement, the redirect re-check, the timeout, the size cap
+    — is a property of `_guarded_fetch`, not of the URL. A second `urlopen`
+    somewhere under `aish/` is a second chance to omit one, and that is history
+    rather than theory: `export.fetch_image` fetched model-written URLs with no
+    SSRF guard at all until #178 P1-4, and kept its own request, timeout and cap
+    for a long time after.
+
+    So this is a list, not a habit: a module either fetches through `web.py`, or
+    is named here with the reason it need not."""
+
+    # Modules that open a connection themselves ON PURPOSE. The reason is the
+    # point — an entry with a bad reason is how this test stops meaning anything.
+    ALLOWED = {
+        "web.py": "IS the guarded fetcher — _guarded_fetch and _opener live here",
+        "notify.py": (
+            "POSTs to _PUSHOVER_URL, a module constant: no model-written or "
+            "page-written URL can reach it, and the guarded fetch is a GET"
+        ),
+        "email_poll.py": (
+            "POSTs to aish's OWN server (/trigger), which is local by design — "
+            "the public-address requirement would block it, correctly"
+        ),
+    }
+
+    def _sources(self):
+        return sorted(AISH.rglob("*.py"))
+
+    def test_the_sweep_is_not_empty(self):
+        """A move or a rename that empties the sweep must fail loudly, not pass."""
+        names = {path.name for path in self._sources()}
+        assert len(names) >= 30, sorted(names)
+        assert {"web.py", "export.py", "media.py", "recordings.py"} <= names
+
+    def test_nothing_but_web_opens_its_own_connection(self):
+        offenders = _raw_openers_in(self._sources(), self.ALLOWED)
+        assert not offenders, (
+            "these fetch outside the one guarded fetcher — call web.fetch_binary "
+            f"(or web._guarded_fetch), or name the module in ALLOWED with why: {offenders}"
+        )
+
+    def test_the_allow_list_has_no_stale_entries(self):
+        """A module that was deleted must leave the list, or the next file to
+        take its name inherits an exemption nobody meant to give."""
+        names = {path.name for path in self._sources()}
+        gone = sorted(set(self.ALLOWED) - names)
+        assert not gone, f"named in ALLOWED but no longer exists: {gone}"
+
+    def test_no_exemption_sits_unused(self):
+        """The other direction: an exemption for a module that no longer opens
+        anything is a licence lying around waiting to be picked up."""
+        paths = {path.name: path for path in self._sources()}
+        idle = sorted(
+            name for name in self.ALLOWED if name in paths and not _raw_openers_in([paths[name]])
+        )
+        assert idle == [], f"exempt but no longer fetches: {idle}"
+
+    def test_the_sweep_actually_catches_one(self, tmp_path):
+        """A guard that cannot fail is decoration. This plants exactly the
+        mistake #308 was — a second fetch with its own opener — and the sweep
+        has to find it."""
+        planted = tmp_path / "rogue.py"
+        planted.write_text(
+            "import urllib.request\n"
+            "def grab(url):\n"
+            "    with urllib.request.urlopen(url, timeout=5) as r:\n"
+            "        return r.read()\n"
+        )
+        assert _raw_openers_in([planted]) == {"rogue.py": ["urlopen"]}
+
+
+class _FakeBinaryResponse:
+    def __init__(self, data):
+        self._data = data
+        self.headers = email.message.Message()
+        self.headers["Content-Type"] = "image/png"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, size=None):
+        return self._data if size is None else self._data[:size]
+
+
+class TestGuardedFetchArguments:
+    """A caller that genuinely differs differs by ARGUMENT (#308).
+
+    `export.fetch_image` wants a larger cap, a shorter timeout and its own
+    User-Agent. Those are parameters of the one fetch; the guards are not, and
+    there is no argument that turns any of them off."""
+
+    def _capture(self, monkeypatch, body=b"x" * 50):
+        monkeypatch.setattr(web.socket, "getaddrinfo", fake_resolver("93.184.216.34"))
+        seen = {}
+
+        def fake_open(request, timeout=None):
+            seen["url"] = request.full_url
+            seen["timeout"] = timeout
+            seen["agent"] = request.get_header("User-agent")
+            return _FakeBinaryResponse(body)
+
+        monkeypatch.setattr(web._opener, "open", fake_open)
+        return seen
+
+    def test_fetch_binary_carries_the_callers_timeout_and_agent(self, monkeypatch):
+        seen = self._capture(monkeypatch)
+        web.fetch_binary("https://example.com/x.png", 10, timeout=5.0, user_agent="aish-export")
+        assert seen == {
+            "url": "https://example.com/x.png",
+            "timeout": 5.0,
+            "agent": "aish-export",
+        }
+
+    def test_the_defaults_are_this_modules_own(self, monkeypatch):
+        seen = self._capture(monkeypatch)
+        web.fetch_binary("https://example.com/x.png", 10)
+        assert seen["timeout"] == web.FETCH_TIMEOUT
+        assert seen["agent"] == web.USER_AGENT
+
+    def test_fetch_binary_still_reads_one_byte_past_the_cap(self, monkeypatch):
+        """"At the limit" and "over it" are different answers, and the extra
+        byte is the only way the caller can tell them apart."""
+        self._capture(monkeypatch, body=b"y" * 100)
+        data, _ = web.fetch_binary("https://example.com/x.png", 10)
+        assert len(data) == 11
+
+    def test_the_url_is_wire_encoded_before_it_is_checked(self, monkeypatch):
+        """#213 and the SSRF check must see the SAME bytes the request carries."""
+        seen = self._capture(monkeypatch)
+        web.fetch_binary("https://example.com/zdjęcie.png", 10)
+        assert seen["url"] == "https://example.com/zdj%C4%99cie.png"
+
+    def test_a_blocked_host_never_reaches_the_opener(self, monkeypatch):
+        def boom(*args, **kwargs):  # pragma: no cover — reaching it IS the failure
+            raise AssertionError("opened a connection to a blocked target")
+
+        monkeypatch.setattr(web._opener, "open", boom)
+        with pytest.raises(web.BlockedURLError):
+            web.fetch_binary("http://169.254.169.254/latest/meta-data/", 10)
+
+    def test_a_non_http_scheme_is_refused(self, monkeypatch):
+        def boom(*args, **kwargs):  # pragma: no cover — reaching it IS the failure
+            raise AssertionError("opened a non-http(s) URL")
+
+        monkeypatch.setattr(web._opener, "open", boom)
+        with pytest.raises(web.BlockedURLError):
+            web.fetch_binary("file:///etc/passwd", 10)

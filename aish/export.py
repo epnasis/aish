@@ -31,7 +31,6 @@ import os
 import re
 import unicodedata
 import urllib.parse
-import urllib.request
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -427,26 +426,25 @@ _ATTR_RES = {
 
 def fetch_image(url: str) -> bytes | None:
     """GET a remote image with a hard timeout and size cap. Any failure —
-    network error, non-2xx, oversize, offline — returns None and the caller
-    falls back to a captioned link card. http/https only, PUBLIC hosts only:
-    the URL comes from model output, so without web.py's SSRF guard an
-    injected `![](http://169.254.169.254/…)` would fire a server-side GET at
-    cloud metadata / the LAN the moment the owner taps export (#178 P1-4).
-    web._opener re-runs the same check on every redirect hop.
+    blocked target, network error, non-2xx, oversize, offline — returns None
+    and the caller falls back to a captioned link card.
+
+    The URL comes from model output, so this must carry every guard `read_url`
+    carries: public hosts only (resolving every address the name maps to),
+    re-checked on each redirect hop. It does so by BEING web.py's fetch rather
+    than by repeating it (#308) — an injected `![](http://169.254.169.254/…)`
+    would otherwise fire a server-side GET at cloud metadata / the LAN the
+    moment the owner taps export (#178 P1-4). Export's larger cap and shorter
+    timeout are arguments to that one fetch, not a reason for a second one.
 
     Module-level (and looked up via the module at call time) so tests
     monkeypatch it; nothing else in this module opens a socket."""
     if not url.startswith(("http://", "https://")):
         return None
-    url = web._wire_url(url)  # an image URL may carry non-ASCII; HTTP may not
     try:
-        web._require_public(url)
-    except web.BlockedURLError:
-        return None
-    request = urllib.request.Request(url, headers={"User-Agent": "aish-export"})
-    try:
-        with web._opener.open(request, timeout=FETCH_TIMEOUT) as response:
-            data = response.read(FETCH_MAX_BYTES + 1)
+        data, _ = web.fetch_binary(
+            url, FETCH_MAX_BYTES, timeout=FETCH_TIMEOUT, user_agent="aish-export"
+        )
     except Exception:
         return None
     if not data or len(data) > FETCH_MAX_BYTES:

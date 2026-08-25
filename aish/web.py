@@ -2500,19 +2500,51 @@ _opener = urllib.request.build_opener(
 )
 
 
-def _fetch(url: str) -> tuple[str, str]:
-    """Decoded body text and its content type, size-capped. Public hosts only."""
+def _guarded_fetch(
+    url: str, *, max_bytes: int, timeout: float, user_agent: str
+) -> tuple[bytes, str, str]:
+    """THE outbound HTTP fetch (#308). Body bytes, content type, charset.
+
+    Four properties travel together here and none of them is separable: the
+    wire encoding (#213), the public-address requirement (`_require_public`,
+    which resolves EVERY address the host maps to and unwraps v4-mapped v6),
+    the opener whose redirect handler re-runs that check on every hop, and the
+    timeout plus size cap. A second fetch written elsewhere is a second chance
+    to leave one of them out, and that is not hypothetical: `export.py`'s image
+    fetch shipped without the SSRF guard at all (#178 P1-4), on URLs the MODEL
+    had written into an answer.
+
+    So callers that genuinely differ differ by ARGUMENT — a bigger cap for
+    images, a shorter timeout, its own User-Agent — never by a second copy.
+    `tests/test_web.py::TestOneGuardedFetcher` is the lint that keeps it that
+    way: the raw opener may appear in this module and nowhere else in `aish/`.
+    """
     url = _wire_url(url)
     _require_public(url)
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with _opener.open(request, timeout=FETCH_TIMEOUT) as response:
-        content_type = response.headers.get_content_type()
-        charset = response.headers.get_content_charset() or "utf-8"
-        raw = response.read(FETCH_MAX_BYTES)
+    request = urllib.request.Request(url, headers={"User-Agent": user_agent})
+    with _opener.open(request, timeout=timeout) as response:
+        return (
+            response.read(max_bytes),
+            response.headers.get_content_type(),
+            response.headers.get_content_charset() or "utf-8",
+        )
+
+
+def _fetch(url: str) -> tuple[str, str]:
+    """Decoded body text and its content type, size-capped. Public hosts only."""
+    raw, content_type, charset = _guarded_fetch(
+        url, max_bytes=FETCH_MAX_BYTES, timeout=FETCH_TIMEOUT, user_agent=USER_AGENT
+    )
     return raw.decode(charset, errors="replace"), content_type
 
 
-def fetch_binary(url: str, max_bytes: int) -> tuple[bytes, str]:
+def fetch_binary(
+    url: str,
+    max_bytes: int,
+    *,
+    timeout: float = FETCH_TIMEOUT,
+    user_agent: str = USER_AGENT,
+) -> tuple[bytes, str]:
     """Raw body bytes and content type, through the SAME SSRF guard and
     redirect-rechecking opener as every other fetch here (#188: show_image
     fetches server-side so the browser never loads a model-chosen remote URL).
@@ -2520,12 +2552,9 @@ def fetch_binary(url: str, max_bytes: int) -> tuple[bytes, str]:
     Reads one byte past the cap so the caller can tell "at the limit" from
     "over it". Raises BlockedURLError / urllib.error.* / OSError — the caller
     turns those into a message the model can act on."""
-    url = _wire_url(url)
-    _require_public(url)
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with _opener.open(request, timeout=FETCH_TIMEOUT) as response:
-        content_type = response.headers.get_content_type()
-        data = response.read(max_bytes + 1)
+    data, content_type, _ = _guarded_fetch(
+        url, max_bytes=max_bytes + 1, timeout=timeout, user_agent=user_agent
+    )
     return data, content_type
 
 
