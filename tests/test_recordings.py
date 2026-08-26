@@ -6,7 +6,7 @@ or spawns ffmpeg — the same rule as every other suite in this repo.
 
 import pytest
 
-from aish import recordings
+from aish import provenance, recordings
 from aish.recordings import Chapter, Recording, RecordingError
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 40
@@ -448,7 +448,9 @@ class TestTranscriptStore:
         second = load(with_captions(), tmp_path)
         assert second.path == first.path
         assert second.path.stat().st_mtime_ns == written or True  # touched, not rewritten
-        assert len(list((tmp_path / "transcripts").iterdir())) == 1
+        # Renditions, not files: each one now carries its provenance record
+        # beside it (#319), and a record is part of its artefact.
+        assert len(list((tmp_path / "transcripts").glob("*.md"))) == 1
 
     def test_an_edited_track_becomes_a_different_rendition(self, tmp_path):
         """Keyed on the caption BYTES: a re-cut video's new captions must not
@@ -476,6 +478,34 @@ class TestTranscriptStore:
     def test_a_track_that_holds_no_cues_is_not_silence(self, tmp_path):
         with pytest.raises(RecordingError, match="not as having said nothing"):
             load(with_captions(), tmp_path, text="WEBVTT\n\n")
+
+    def test_the_rendition_says_a_stranger_wrote_it(self, tmp_path):
+        """#319. The store is inside `workspace_roots` so the model can grep the
+        file this tool just named, and a caption track is written by whoever
+        uploaded the video — so the fact rides beside the bytes, where a plain
+        `read_file` on them will find it. Unconditional: there is nothing to
+        decide, a caption track is always fetched."""
+        transcript = load(with_captions(), tmp_path)
+        record = provenance.artefact_source(transcript.path)
+        assert record is not None
+        assert record.outside is True
+        assert record.tool == "read_media"
+        assert "caption track" in record.what
+
+    def test_the_record_is_evicted_with_the_rendition_it_describes(self, tmp_path):
+        """#314's lesson carried over: counting records would halve the store's
+        capacity, and evicting one alone would leave words nothing attributes."""
+        store = tmp_path / "transcripts"
+        transcript = load(with_captions(), tmp_path)
+        assert recordings.prune_transcripts(store) == []  # ONE entry, not two
+
+        monkey = recordings.CAPTION_STORE_MAX_FILES
+        try:
+            recordings.CAPTION_STORE_MAX_FILES = 0
+            assert recordings.prune_transcripts(store) == [transcript.path]
+        finally:
+            recordings.CAPTION_STORE_MAX_FILES = monkey
+        assert not provenance.record_path(transcript.path).exists()
 
 
 class TestClassification:
