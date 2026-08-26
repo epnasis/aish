@@ -146,7 +146,10 @@ class SignInSeen:
     writes no block at all, rather than an empty one that reads as an attempt
     with nothing to show (trace contract corollary 2)."""
 
-    __slots__ = ("host", "frame", "frame_skipped", "console", "covered", "ok")
+    __slots__ = (
+        "host", "frame", "frame_skipped", "console", "covered", "ok",
+        "verdict", "observed",
+    )
 
     def __init__(self) -> None:
         self.host = ""
@@ -165,6 +168,13 @@ class SignInSeen:
         # rendered identically, and a renewal that worked end to end was
         # painted with the same weight as the failure the record exists for.
         self.ok = False
+        # What a FAILED attempt was judged to be, and the observations that
+        # judged it (#325). Both or neither, and only where the failure table
+        # actually ran: a token with no inputs beside it is a rendering of the
+        # verdict, which is the one thing an evidence record may not be
+        # (trace contract §4).
+        self.verdict = ""
+        self.observed: dict[str, Any] = {}
 
     def note(self, host: str, outcome: Any) -> None:
         """An attempt happened at `host`, and this is what it left behind.
@@ -178,6 +188,37 @@ class SignInSeen:
         self.console = [str(line) for line in (getattr(outcome, "console", None) or [])]
         self.covered = str(getattr(outcome, "covered", "") or "")
         self.ok = bool(getattr(outcome, "ok", False))
+        self._note_the_judgement(outcome)
+
+    def _note_the_judgement(self, outcome: Any) -> None:
+        """The verdict token and the observations it was composed from.
+
+        Read field by field rather than by `asdict`, and coerced here, for the
+        same soft-dependency reason as everything above: a stubbed or older
+        outcome must degrade to an attempt with no judgement on it, never to
+        an exception inside a read.
+
+        **Nothing page-authored passes through here.** Four of the five are
+        booleans; `declared_widget` is aish's own canonical brand name for a
+        token it matched (`signin._CAPTCHA_TOKENS`), never a span of the
+        document — which is what keeps this clear of the contract's
+        no-fetched-content clause that `console` needed an exception to."""
+        verdict = str(getattr(outcome, "verdict", "") or "")
+        observed = getattr(outcome, "observed", None)
+        if not verdict or observed is None:
+            return
+        self.verdict = verdict
+        self.observed = {
+            "credential_seen_leaving": bool(
+                getattr(observed, "credential_seen_leaving", False)
+            ),
+            "refusal_status": bool(getattr(observed, "refusal_status", False)),
+            "page_said_no": bool(getattr(observed, "page_said_no", False)),
+            "declared_widget": str(getattr(observed, "declared_widget", "") or ""),
+            "body_to_own_origin": bool(
+                getattr(observed, "body_to_own_origin", False)
+            ),
+        }
 
     def record(self) -> dict:
         """The trace block, or `{}` when no sign-in was attempted at all."""
@@ -196,6 +237,16 @@ class SignInSeen:
             block["console"] = list(self.console)
         if self.covered:
             block["covered"] = self.covered
+        if self.verdict and self.observed:
+            # The GROUP's presence is the discriminator, which is what lets
+            # every key inside it be written unconditionally: inside a group
+            # that is here, `false` and `""` are positive observations rather
+            # than absences, and no reader has to tell a zero from an omission
+            # (corollary 2). What the absence of the group cannot say is
+            # stated in the contract: it is a log written before this, OR an
+            # attempt that ended before the failure table ran.
+            block["verdict"] = self.verdict
+            block["observed"] = dict(self.observed)
         return block
 
 

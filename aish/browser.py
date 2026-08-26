@@ -2336,6 +2336,52 @@ async def _fence_the_origin(
     watch.armed = True
 
 
+@dataclass(frozen=True)
+class SignInObserved:
+    """What was SEEN of one failed attempt — the inputs the failure table was a
+    function of, kept as they were passed to it (#325).
+
+    These four reached `signin.judge_a_failed_sign_in`, produced a token, and
+    were then discarded: only the owner-facing SENTENCE survived, into the tool
+    result and into `signins.json` as `suspect`. Prose both times. So nobody
+    could check afterwards what aish had actually seen, which is the exact
+    shape of the failure #320/#321 are about — a cause asserted in aish's own
+    voice with no recorded observation able to contradict it.
+
+    Every field is a thing aish OBSERVED and none of them names a cause.
+    `declared_widget` in particular is a page DECLARATION: it never selected
+    the outcome (`FAILED_CAPTCHA` was removed for doing exactly that) and
+    recording it must not let it start.
+
+    NO CREDENTIAL, by construction, like the result it rides on: four of the
+    five are booleans, and the fifth is aish's own canonical brand name from
+    `signin._CAPTCHA_TOKENS` — never a span of the page.
+    """
+
+    # The FENCE watched the value leave (`_CredentialWatch.was_tried`, which is
+    # armed AND sent). An absence here is an absence from a matcher with
+    # declared blind spots, never proof that nothing was sent.
+    credential_seen_leaving: bool = False
+    # The site answered a request the fence recognised as carrying the value
+    # with a refusal status. 401 only — 403 is a bot wall.
+    refusal_status: bool = False
+    # The page's own machine-readable error APPEARED in answer to the submit
+    # (`_said_no`): `aria-invalid`, or a live region that was not saying it
+    # before. What it is a statement ABOUT is not settled by this field.
+    page_said_no: bool = False
+    # The anti-automation widget the login page declares about itself, or "".
+    # An observation about the PAGE. It disqualifies `page_said_no` as a
+    # judgement of the value and does nothing else — see `captcha_vendor`.
+    declared_widget: str = ""
+    # The page sent a BODY to one of the site's own origins in the submit
+    # window (`signin.unrecognised_submission`, asked unconditionally here).
+    # Recorded as the observation it is rather than as the derived fact the
+    # wording uses: "aish could not recognise what it submitted" is this AND
+    # NOT `credential_seen_leaving`, which a reader can compute and which two
+    # separate fields cannot drift apart on.
+    body_to_own_origin: bool = False
+
+
 @dataclass
 class SignInResult:
     """How an automatic sign-in went. Carries NO credential, by construction."""
@@ -2417,6 +2463,18 @@ class SignInResult:
     # of itself, so it is spoken in aish's voice with the element's own name
     # quoted; and it rides out to the trace beside the picture.
     covered: str = ""
+    # The TOKEN `signin.judge_a_failed_sign_in` returned, and the observations
+    # it composed (#325). Both or neither: a token with no inputs beside it is
+    # a rendering of the verdict, which is the one thing trace contract §4
+    # forbids an evidence record to be.
+    #
+    # Set ONLY where the table actually ran — the form came back after the
+    # submit. A success, a second factor, a press something covered and every
+    # ending before the submit leave both empty, because no failure was judged
+    # there and a token invented for them would be a verdict about an attempt
+    # nothing evaluated.
+    verdict: str = ""
+    observed: SignInObserved | None = None
 
 
 # What aish says when the form came back and nothing carrying the password was
@@ -2894,30 +2952,56 @@ async def _sign_in_on(
             said_no=said,
             captcha=vendor,
         )
-        # Asked only when the fence saw nothing, because it is a statement
-        # about that silence and nothing else: the page sent a body where the
-        # owner's own sign-in sends the password, and none of it matched. It
-        # sets no field on the result — not `stale`, not `tried`.
-        unrecognised = not watch.was_tried and signin_mod.unrecognised_submission(
+        # The page sent a body where the owner's own sign-in sends the
+        # password. Asked unconditionally so that what is RECORDED is the
+        # observation; the SENTENCE below still speaks only the derived fact,
+        # which is this and nothing the fence recognised — a statement about
+        # that silence, and one that sets no field on the result (not `stale`,
+        # not `tried`).
+        body_to_own_origin = signin_mod.unrecognised_submission(
             watch.traffic, [record.origin, *record.destinations]
         )
+        unrecognised = not watch.was_tried and body_to_own_origin
+        observed = SignInObserved(
+            credential_seen_leaving=watch.was_tried,
+            refusal_status=watch.was_refused,
+            page_said_no=said,
+            declared_widget=vendor,
+            body_to_own_origin=body_to_own_origin,
+        )
+
+        def judged(result: SignInResult) -> SignInResult:
+            """Stamp the token and its inputs onto whichever ending happened.
+
+            One stamp rather than a keyword pair per return, for the reason
+            the shutter fires once in `job` and not at each of a dozen
+            endings: a per-return copy is the one somebody forgets on the next
+            ending added, and a failure recorded without its observations is
+            precisely the state this record exists to end.
+            """
+            result.verdict = verdict
+            result.observed = observed
+            return result
+
         if verdict == signin_mod.FAILED_REFUSED:
             # Both halves. The value went out and something said no to it —
             # one attempt, never a retry, because retrying is how an account
             # locks.
-            return SignInResult(
+            return judged(SignInResult(
                 why="the site refused the saved password, so aish will not try it again",
                 stale=True,
                 tried=True,
                 filled=True,
                 url=page.url,
-            )
+            ))
         if verdict == signin_mod.FAILED_CONTRADICTION:
             # The two observers disagree, and a disagreement is not a verdict.
             # `tried` is True because the answering half is the one that saw
             # something arrive: a request that got an answer was sent, however
             # it left. Nothing is written to the record either way.
-            return SignInResult(why=CONTRADICTED, tried=True, filled=True, url=page.url)
+            return judged(
+                SignInResult(why=CONTRADICTED, tried=True, filled=True, url=page.url)
+            )
         # The widget the page declares is APPENDED to the observation on the
         # two endings that end without a verdict, never made into one. There
         # used to be a FAILED_CAPTCHA verdict standing right here, selected by
@@ -2938,7 +3022,7 @@ async def _sign_in_on(
             # that sent something aish could not read demand opposite next
             # steps, and until now both read as "never sent".
             gesture = GESTURE_CLICKED if submit is not None else GESTURE_ENTER
-            return SignInResult(
+            return judged(SignInResult(
                 why=(SUBMITTED_UNRECOGNISED if unrecognised else NEVER_SUBMITTED)
                 .format(gesture=gesture)
                 + _submit_window(watch.traffic)
@@ -2947,7 +3031,7 @@ async def _sign_in_on(
                 filled=True,
                 requests=list(watch.traffic),
                 url=page.url,
-            )
+            ))
         # FAILED_UNEXPLAINED: it left, and nothing aish trusts judged it.
         # Saying "no reason given" plainly — rather than reaching for the most
         # plausible cause in view — is what keeps the blind spot visible: if
@@ -2970,13 +3054,13 @@ async def _sign_in_on(
                 "the sign-in did not go through and the site gave no reason for "
                 "it — the saved password was never judged and is untouched"
             )
-        return SignInResult(
+        return judged(SignInResult(
             why=why + declared,
             captcha=vendor,
             tried=True,
             filled=True,
             url=page.url,
-        )
+        ))
     try:
         wants_code = bool(await page.evaluate(SECOND_FACTOR_JS))
     except Exception:  # noqa: BLE001
