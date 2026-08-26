@@ -1506,11 +1506,20 @@ def _signin_lines(signin: dict) -> list[str]:
     On a different page from the one the call reported, so it is labelled as
     one. The three reference states are the frame's own (§3.4): a path that
     resolves, a path whose bytes the bounded store has since dropped, and a
-    recorded reason there is no picture at all."""
+    recorded reason there is no picture at all.
+
+    **It says ATTEMPTED, because that is all the block records.** `host` is
+    written whenever a sign-in was tried, success or failure — the contract
+    says so — so "aish signed in again", which is what this line used to read,
+    was a claim about an outcome no field here carries. A dossier assembled
+    from recorded evidence may not say more than the evidence does."""
     host = str(signin.get("host") or "")
     if not host:
         return []
-    lines = [f"     {DIM}aish signed in again at {host} during this call{RESET}"]
+    lines = [
+        f"     {DIM}aish attempted an automatic sign-in at {host} "
+        f"during this call{RESET}"
+    ]
     if path := str(signin.get("frame") or ""):
         gone = signin.get("frame_state") != RECORDED
         lines.append(

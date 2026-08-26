@@ -3773,3 +3773,54 @@ class TestWatchingTheTabTheModelIsDriving:
             lambda *a, **k: pytest.fail("counting tabs reached the browser"),
         )
         assert browser.browse_tab_count() == 0
+
+
+class TestARenewedSessionOnlyCLAIMSOneWhenTheReReadAgrees:
+    """The same false claim as the sign-in's own `ok`, one seam up.
+
+    `_browser_read` attached *"aish signed in again as the user — what follows
+    IS their account"* to whatever the re-read produced, without ever asking
+    the re-read whether it was still a login page. A note in aish's own voice,
+    above the untrusted-content banner, telling the model that a signed-out
+    page is the owner's data.
+
+    Fixing `sign_in`'s claim makes this rare rather than impossible: the
+    session was confirmed at this URL a moment earlier, so a wall here is a
+    disagreement aish cannot explain — and "I do not know why" is what it
+    says, rather than picking a story or letting the renewed note stand."""
+
+    def _read(self, monkeypatch, *, walled_again, ok=True):
+        from aish import browser as browser_module
+
+        pages = []
+
+        def read(url, **_kw):
+            pages.append(url)
+            return browser_module.Page(
+                text=page_sized("Zaloguj sie" if walled_again else "Faktury"),
+                title="", images=[], url=url, status=200,
+                signin=len(pages) == 1 or walled_again,
+            )
+
+        monkeypatch.setattr(browser, "read", read)
+        monkeypatch.setattr(
+            web_module, "_renew_session",
+            lambda _u, *, seen=None: browser_module.SignInResult(ok=ok),
+        )
+        return web_module._browser_read("https://eon.pl/faktury")
+
+    def test_a_re_read_that_still_walls_is_not_reported_as_the_account(
+        self, monkeypatch
+    ):
+        (result, _why) = self._read(monkeypatch, walled_again=True)
+        note = result[4]
+        assert "SIGNED-OUT page" in note and "not their account" in note
+        assert "What follows IS their account" not in note
+        # It states both observations and stops there. Naming a cause is the
+        # class of sentence this whole area is being repaired from.
+        assert "cannot tell why" in note
+
+    def test_a_re_read_that_came_back_as_him_says_so(self, monkeypatch):
+        (result, _why) = self._read(monkeypatch, walled_again=False)
+        assert "What follows IS their account" in result[4]
+        assert result[3] is False

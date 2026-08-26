@@ -1615,9 +1615,17 @@ def _browser_read(
         if outcome is not None:
             if outcome.ok:
                 again, why = _browser_read(url, renew=False)
-                if again is not None:
-                    return (*again[:4], RENEWED_SESSION_NOTE.format(host=host)), ""
-                return None, why
+                if again is None:
+                    return None, why
+                # The re-read's OWN live password test (`again[3]`), asked
+                # before the note claims what follows is the account. The
+                # sign-in confirmed a session at this URL a moment ago, so
+                # this disagreeing is rare — and a note that says "this IS
+                # their account" over a login form is exactly the false claim
+                # the sign-in's own ending was just repaired for, one seam up.
+                return (*again[:4], (
+                    RENEWED_BUT_STILL_WALLED if again[3] else RENEWED_SESSION_NOTE
+                ).format(host=host)), ""
             # Which of the three is true turns on whether the credential was
             # SENT, never on whether it was blamed (#320): the held note is for
             # a refusal by aish, and saying it when aish tried and failed is as
@@ -1723,6 +1731,21 @@ ANONYMOUS_READ_NOTE = (
 RENEWED_SESSION_NOTE = (
     "[aish: the session at {host} had lapsed, so aish signed in again as the "
     "user with the sign-in they saved. What follows IS their account.]\n"
+)
+
+# The sign-in confirmed a session at this URL, and the very next read of it
+# came back asking for a password anyway. Both halves are OBSERVATIONS and the
+# note states them as two facts rather than resolving them into a cause: aish
+# does not know why, and "I do not know why" is an ordinary outcome here. What
+# it must not do is let the renewed note's "what follows IS their account"
+# stand over a login form — the model would read the signed-out page as data.
+RENEWED_BUT_STILL_WALLED = (
+    "[aish: the session at {host} had lapsed, so aish signed in again as the "
+    "user with the sign-in they saved, and checked that the page had stopped "
+    "asking for a password — and reading it again it is asking for one. aish "
+    "cannot tell why. What follows is the SIGNED-OUT page, not their account: "
+    "nothing in it is their data. Tell them to open /browser {host} and sign "
+    "in themselves.]\n"
 )
 
 # The renewal was tried and did not finish. Both endings are worth saying out
@@ -1852,6 +1875,30 @@ BROWSE_SIGNIN_UNFINISHED = (
     "saved and did not get all the way in — {why}. The saved sign-in has not "
     "been judged and is untouched. Tell them to run /browser {host} and sign in "
     "themselves. Do NOT try other buttons on this page.]\n"
+)
+
+# The driving path's twin of `RENEWED_BUT_STILL_WALLED`, and it carries the
+# instruction the read path has no need for: a page that is still a login page
+# is exactly where the model went looking for a door and pressed "Continue
+# with Google" (#280).
+BROWSE_RENEWED_BUT_STILL_WALLED = (
+    "[aish: {host} had signed the user out, so aish signed in again with the "
+    "sign-in they saved and checked that the session came up — and this page "
+    "is asking for a password anyway. aish cannot tell why. Nothing on this "
+    "page is their account. Tell them to run /browser {host} and sign in "
+    "themselves. Do NOT try other buttons on this page.]\n"
+)
+
+# The sign-in worked and the page could not be opened again, so what the model
+# is looking at is the snapshot from BEFORE it — a signed-out page. Kept apart
+# from the note above because the next step differs: nothing here says the
+# session is bad, only that this view is stale, and one re-open fixes it.
+BROWSE_RENEWED_NOT_REOPENED = (
+    "[aish: {host} had signed the user out and aish signed in again with the "
+    "sign-in they saved, but the page could not be opened again afterwards. "
+    "What follows is the page as it was BEFORE the sign-in — a signed-out "
+    "page, and not their account. Open the same URL again to see it as them; "
+    "do NOT try other buttons on this page.]\n"
 )
 
 
@@ -2631,7 +2678,13 @@ def _renew_driving(url, snapshot, *, topic, view, signin_seen=None):
     try:
         again = browser.browse_open(url, topic=topic or "", key=_key(view))
     except Exception:  # noqa: BLE001 — keep the page we have
-        return RENEWED_SESSION_NOTE.format(host=host), snapshot
+        # The page kept is the SIGNED-OUT one this function was handed: it is
+        # the reason there was a renewal at all. Saying "what follows IS their
+        # account" over it would be false about the page in front of the
+        # model, whatever the sign-in achieved.
+        return BROWSE_RENEWED_NOT_REOPENED.format(host=host), snapshot
+    if again.signin:
+        return BROWSE_RENEWED_BUT_STILL_WALLED.format(host=host), again
     return RENEWED_SESSION_NOTE.format(host=host), again
 
 

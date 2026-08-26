@@ -2250,13 +2250,19 @@ class TestADrivenPageThatIsAskingForAPassword:
     BROWSE — so a portal that had signed him out arrived as an ordinary page
     with a couple of odd buttons, and the model went looking for a door."""
 
-    def _driven(self, monkeypatch, *, signin_flag=True, renewal=None, opened=None):
+    def _driven(self, monkeypatch, *, signin_flag=True, renewal=None, opened=None,
+                reopen_signin=False, reopen_raises=False):
+        """One fake page, parametrised — never a second one. `reopen_*` is
+        what the RE-OPEN after a renewal does: still a login page, or a tab
+        that died. Both used to be labelled "what follows IS their account"."""
         opens = []
 
         def browse_open(url, *, topic="", key=""):
             opens.append(url)
+            if len(opens) > 1 and reopen_raises:
+                raise RuntimeError("the tab died")
             snap = snapshot(url=url, text="Sign in to continue", controls=[])
-            snap.signin = signin_flag if len(opens) == 1 else False
+            snap.signin = signin_flag if len(opens) == 1 else reopen_signin
             return snap
 
         monkeypatch.setattr(web_module.browser, "browse_open", browse_open)
@@ -2290,6 +2296,42 @@ class TestADrivenPageThatIsAskingForAPassword:
         out = web_module.browse("https://eon.pl/mojeon")
         assert len(opens) == 2  # signed in, then opened again
         assert "signed in again as the user" in out
+
+    def test_a_re_open_that_still_walls_is_not_reported_as_the_account(
+        self, monkeypatch
+    ):
+        """The driving path's half of the same false claim. The note used to
+        be attached to whatever the re-open produced, so a page still showing
+        a login form arrived labelled as the owner's account — and this is the
+        path where the model then goes looking for a door to press."""
+        from aish import browser as browser_module
+
+        self._driven(
+            monkeypatch, renewal=browser_module.SignInResult(ok=True),
+            reopen_signin=True,
+        )
+        out = web_module.browse("https://eon.pl/mojeon")
+        assert "asking for a password anyway" in out
+        assert "cannot tell why" in out
+        assert "Do NOT try other buttons" in out
+        assert "signed in again as the user with the sign-in they saved. What" not in out
+
+    def test_a_re_open_that_FAILED_says_the_page_is_the_one_from_before(
+        self, monkeypatch
+    ):
+        """The snapshot kept is the signed-out one this function was handed —
+        it is why there was a renewal at all — so claiming it is the account
+        would be false about the page in front of the model whatever the
+        sign-in achieved."""
+        from aish import browser as browser_module
+
+        self._driven(
+            monkeypatch, renewal=browser_module.SignInResult(ok=True),
+            reopen_raises=True,
+        )
+        out = web_module.browse("https://eon.pl/mojeon")
+        assert "as it was BEFORE the sign-in" in out
+        assert "not their account" in out
 
     def test_a_second_factor_ends_as_a_hand_off_not_a_failure(self, monkeypatch):
         from aish import browser as browser_module

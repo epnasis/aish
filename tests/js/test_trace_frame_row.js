@@ -334,7 +334,7 @@ check("the sign-in attempt's own page is shown, labelled as a different page", (
   });
   const box = findByClass(rows[0], ".step-signin");
   assert(box, "the sign-in evidence was not drawn");
-  assert(/signed in again at eon\.pl/.test(box.children[0].textContent),
+  assert(/attempted an automatic sign-in at eon\.pl/.test(box.children[0].textContent),
          box.children[0].textContent);
   assert(/not the one above/.test(box.children[0].textContent));
   const shot = findByClass(box, ".step-frame");
