@@ -1463,7 +1463,7 @@ class TestTheConsoleAndTheSignInOnTheRecord:
         assert call["signin"]["host"] == "eon.pl"
         assert call["signin"]["frame_state"] == explain_mod.RECORDED
         out = explain_mod.explain(log.path, root=tmp_path)
-        assert "signed in again at eon.pl" in out
+        assert "attempted an automatic sign-in at eon.pl" in out
         assert "picture of the sign-in page" in out
         assert "the sign-in page wrote to its own console" in out
 

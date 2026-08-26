@@ -52,7 +52,7 @@ import re
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -1923,6 +1923,25 @@ SIGNIN_FORM_JS = "(expected) => {" + browse_mod.DEEP_JS + """
   // has TWO buttons, so the count fails and the submit stays Enter, exactly
   // as before. No word list, no button text, no test id — those are the
   // things that made the model guess in the first place.
+  //
+  // And the count runs only where ENTER IS DEMONSTRABLY A NO-OP. WHATWG's
+  // implicit submission performs no submission at all when a form has no
+  // default button and MORE THAN ONE field that blocks implicit submission —
+  // which is the eon.pl shape exactly, and the reason its Enter sent nothing.
+  // Where the form has ONE such field, Enter submits it, so there is nothing
+  // for a press to fix and the button is left alone: this can only ever
+  // SUBTRACT presses, never add one, which is the only direction a heuristic
+  // that picks a control without reading it may move in.
+  //
+  // The blocking set is the spec's own list, and a missing `type` is Text
+  // (hence the '' entry) — the same reason TEXTY carries one. Counted through
+  // the form's descendants rather than `form.elements`, so a field associated
+  // by the `form=` attribute from outside is not counted: that undercounts,
+  // which falls back to Enter, which is the safe side of this gate.
+  const BLOCKS_IMPLICIT_SUBMISSION = [
+    'text', 'search', 'url', 'tel', 'email', 'password', 'date', 'month',
+    'week', 'time', 'datetime-local', 'number', '',
+  ];
   let submit = null;
   if (form) {
     const pressable = [...form.querySelectorAll('button, input[type=submit]')].filter(
@@ -1930,7 +1949,15 @@ SIGNIN_FORM_JS = "(expected) => {" + browse_mod.DEEP_JS + """
     );
     submit = pressable.filter(
       (el) => (el.getAttribute('type') || '').toLowerCase() !== 'button'
-    )[0] || (pressable.length === 1 ? pressable[0] : null);
+    )[0] || null;
+    if (!submit && pressable.length === 1) {
+      const blocking = [...form.querySelectorAll('input')].filter(
+        (el) => BLOCKS_IMPLICIT_SUBMISSION.includes(
+          (el.getAttribute('type') || '').toLowerCase()
+        )
+      );
+      if (blocking.length > 1) submit = pressable[0];
+    }
   }
   if (submit) submit.setAttribute('data-aish-signin', 'submit');
   return {
@@ -2313,6 +2340,11 @@ async def _fence_the_origin(
 class SignInResult:
     """How an automatic sign-in went. Carries NO credential, by construction."""
 
+    # THE SESSION CAME UP, and nothing weaker. It used to mean "the login page
+    # stopped showing a password box", which a *forgot password* button and a
+    # show-password toggle both produce with nothing signed in — so a wrong
+    # press ended here, counted a use, and pushed "aish signed in". It is now
+    # set only where the URL that walled was read afresh and stopped asking.
     ok: bool = False
     # A reason the owner can act on, or "" — never the model's to interpret
     # loosely: it is rendered verbatim above the untrusted-content banner.
@@ -2343,8 +2375,11 @@ class SignInResult:
     # "aish did not use it" is a false statement about the second.
     #
     # Set from what was OBSERVED, not from having reached the press: the fence
-    # watched the value leave, or the site advanced past the password (a
-    # session that came up is proof it arrived, whatever the fence saw).
+    # watched the value leave, or the SESSION CAME UP — which is proof it
+    # arrived, whatever the fence saw. That second half is why it rests on the
+    # confirmed ending and not on the login page moving on: a page that moved
+    # on with no session behind it proves nothing about where the value went,
+    # so the unconfirmed ending carries only what the fence watched.
     tried: bool = False
     url: str = ""
     # A picture of the page at the END of the attempt, success or failure
@@ -2513,6 +2548,42 @@ COVERED_SUBMIT = (
 )
 
 
+# The attempt ended on a page with no password box on it, and that is NOT a
+# session. Two ordinary shapes reach here with nothing signed in:
+#
+#   THE PRESS NAVIGATED AWAY — *forgot password*, *create account*. The new
+#     page has no password field, so the old test ended the attempt `ok=True`,
+#     counted a use, and pushed "aish signed in" for a form that was never
+#     submitted.
+#   THE PRESS WAS A SHOW-PASSWORD TOGGLE — the field flips to `type="text"`,
+#     so `input[type=password]` finds nothing on the very page that is still
+#     sitting there asking for the password.
+#
+# So `ok` is earned by the SESSION, not by the login page moving on: the URL
+# whose wall triggered this renewal is read again, afresh, and has to stop
+# asking. Where no session exists the fresh read walls, and this is what the
+# owner is told. Deliberately NOT gated on the fence having seen the credential
+# leave — that would report a working sign-in as unconfirmed on every site
+# inside the fence's declared blind spots (a service worker, a WebSocket, a
+# value hashed in the page), which is the #296 failure by another name.
+MOVED_ON_NO_SESSION = (
+    "the page moved on, but the session did not come up — the page that was "
+    "asking for a password is still asking for one when it is read again, so "
+    "nothing has been learned about the saved sign-in"
+)
+
+# The same ending where the fresh read could not answer at all: the navigation
+# failed, or the page would not say whether it holds a password box. aish saw
+# no session and it also saw no wall, so it claims neither. "I do not know why"
+# is an ordinary outcome here and gets ordinary words; inventing a cause is
+# what this whole area is being repaired from.
+COULD_NOT_CONFIRM = (
+    "aish could not tell whether the session came up — the page that was "
+    "asking for a password did not answer when it was read again, so nothing "
+    "has been learned about the saved sign-in"
+)
+
+
 async def _signin_frame(owner: _Owner, page: Any) -> tuple[str, str]:
     """(stored path, reason there is none) for a picture of a sign-in attempt.
 
@@ -2645,9 +2716,21 @@ async def _press_the_button_again(
 
 
 async def _sign_in_on(
-    page: Any, record: Any, identifier: str, password: str, watch: _CredentialWatch
+    page: Any,
+    record: Any,
+    identifier: str,
+    password: str,
+    watch: _CredentialWatch,
+    *,
+    session_is_up: Callable[[], Awaitable[bool | None]],
 ) -> SignInResult:
     """Fill and submit the recorded login form on an already-open page.
+
+    `session_is_up` is the only thing that may end this `ok`: it reads the URL
+    that walled, afresh, and answers True (no password asked for), False (still
+    walled) or None (it could not tell). It is handed in rather than done here
+    because it needs a page of its OWN — this function has one page, the login
+    page, and a login page that moved on says nothing about a session.
 
     `watch` is the fence's live account of the credential on the wire, and it
     is what makes the ending honest (#320). A password box on the screen
@@ -2900,7 +2983,77 @@ async def _sign_in_on(
         wants_code = False
     if wants_code:
         return SignInResult(second_factor=True, tried=True, filled=True, url=page.url)
-    return SignInResult(ok=True, tried=True, filled=True, url=page.url)
+
+    # The page moved past the password. That is NOT the session coming up, and
+    # treating it as such is what a wrong press turns into a false success:
+    # *forgot password* navigates to a page with no password box, and a
+    # show-password toggle leaves the same page with none either. So the claim
+    # is checked where it is actually about — the URL whose wall triggered this
+    # renewal, read AFRESH. No session, no unwalled read.
+    #
+    # `tried` follows the same evidence rule it always did, and only the
+    # CONFIRMED ending may set it unconditionally: "the site advanced past the
+    # password" is proof the credential arrived only once something is known to
+    # be signed in. Unconfirmed, all that is known is what the fence watched.
+    confirmed = await session_is_up()
+    if confirmed is True:
+        return SignInResult(ok=True, tried=True, filled=True, url=page.url)
+    return SignInResult(
+        why=MOVED_ON_NO_SESSION if confirmed is False else COULD_NOT_CONFIRM,
+        tried=watch.was_tried,
+        filled=True,
+        url=page.url,
+    )
+
+
+async def _the_session_is_up(owner: _Owner, url: str) -> bool | None:
+    """Read `url` on a FRESH page: True = it no longer asks for a password.
+
+    The one question a sign-in's `ok` is allowed to rest on, asked where it is
+    actually about. `url` is the address whose wall triggered the renewal — the
+    model chose which URL triggers one, and it still chooses nothing about
+    where the credential goes, so this adds no reach: it is the very read the
+    caller is about to make anyway, made one moment earlier and thrown away.
+
+    A page of its own, deliberately. The login page is where the wrong press
+    landed, so anything read off it is a statement about that press; a new page
+    at the walled URL carries the profile's cookies and nothing else, and if no
+    session was established it walls exactly as it did before the attempt. It
+    is also the only reader here with no blind spot to declare: a page that
+    stopped answering after a press cannot make this one answer wrongly,
+    because this one is a different document.
+
+    Three values, and the third is not folded into the second: `None` is *aish
+    could not tell*, which supports no claim in either direction and gets its
+    own sentence at the ending. Resolving it to False would put the words "the
+    session did not come up" in front of the owner on the evidence of a
+    navigation timeout.
+
+    The fence is NOT on this page and does not need to be: nothing is typed
+    here, so there is no credential to fence.
+    """
+    try:
+        context = await owner.context()
+        page = await context.new_page()
+    except Exception:  # noqa: BLE001 — a browser that died is not a wall either
+        # And never a raise: this runs after the attempt, so throwing here
+        # would cost the outcome, the picture and the console that go with it.
+        return None
+    # A page a read OWNS, like the login page beside it: a browse session must
+    # not be able to adopt this tab, and its downloads are nobody's chat's.
+    owner.read_pages.add(page)
+    try:
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            await page.wait_for_timeout(SETTLE_MS)
+        except Exception:  # noqa: BLE001 — a read that did not happen is not a verdict
+            return None
+        asks = await _password_field_state(page)
+        return None if asks is None else not asks
+    finally:
+        owner.read_pages.discard(page)
+        with contextlib.suppress(Exception):
+            await page.close()
 
 
 async def _captcha_vendor(page: Any) -> str:
@@ -2953,6 +3106,11 @@ def _signin_lines() -> list[str]:
     actually proving it would cost a Chrome launch and a navigation per row on
     a box that evicts the browser for memory. A row that lies is the failure
     #236 was about; a row that says less is not.
+
+    `used Nx` therefore says what it counts and no more: sign-ins whose
+    SESSION was seen to come up, since that is what `note_used` is now called
+    on. It used to include attempts where a wrong button merely moved the
+    login page along.
 
     Since #320 it also names the PICTURE of the last attempt, which is this
     subsystem's only door onto a sign-in that did not work: the replay runs
@@ -3104,7 +3262,15 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
 
     Never called by the model, and it takes no model-supplied argument beyond
     the URL that was already being read. The page it drives is the one the
-    OWNER recorded, not the one that was asked for."""
+    OWNER recorded, not the one that was asked for.
+
+    **`url` is also what the outcome is judged against.** A sign-in's outcome
+    is whether the session came up (#296), so the ending that claims one reads
+    this URL again on a fresh page and requires that it has stopped asking for
+    a password — see `_the_session_is_up`. Every consumer of `ok` therefore
+    inherits one honest claim rather than repeating the test: `note_used`, the
+    push, both renewal notes in `web.py` and the `/browser` listing's counter.
+    """
     record = signin_mod.find(url)
     if record is None:
         return None
@@ -3163,7 +3329,14 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
             # Armed BEFORE anything is typed and left up through the submit and
             # the settle, so a delayed exfiltration is caught too.
             await _fence_the_origin(page, record, password, watch)
-            outcome = await _sign_in_on(page, record, identifier, password, watch)
+            # The confirmation is a page of its own at the URL that walled, so
+            # it is handed in as a capability rather than done inside: opening
+            # it costs one navigation and is spent ONLY on the ending that
+            # would otherwise claim a session, never on a failure.
+            outcome = await _sign_in_on(
+                page, record, identifier, password, watch,
+                session_is_up=partial(_the_session_is_up, owner, url),
+            )
             # Photographed HERE and not inside `_sign_in_on` (#320): that
             # function returns from a dozen places, and a capture per return
             # is a capture somebody forgets on the thirteenth. One shutter,

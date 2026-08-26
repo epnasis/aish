@@ -610,6 +610,15 @@ def _update(origin: str, **fields: object) -> None:
 
 
 def note_used(origin: str, *, when: str) -> None:
+    """A sign-in that WORKED: the counter `/browser` reports, and the mark it
+    clears.
+
+    Its meaning rests entirely on its one caller's definition of worked, and
+    that definition is the session having been seen up — `browser.sign_in`
+    reads the walled URL again on a fresh page before it claims one. This
+    counter used to include attempts where a wrong button merely moved the
+    login page along, which is how a record can read `used: 3` for a sign-in
+    that never once happened."""
     record = find(origin)
     if record is not None:
         _update(origin, used=record.used + 1, last_used=when, suspect="")

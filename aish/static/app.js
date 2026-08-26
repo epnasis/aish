@@ -3311,13 +3311,18 @@ function coveredBlock(covered) {
 // sign-in page — it is a different document the model did not ask for and
 // cannot name. Borrowing the key would be a stated guarantee wider than the
 // capture enforces, so this has its own, and says out loud which page it is.
+//
+// It says ATTEMPTED, and that is not a wording preference: `host` is written
+// whenever a sign-in was TRIED, success or failure, so "aish signed in again"
+// — what this read until now — claimed an outcome no field in the block
+// carries. The renderer may not say more than the record does.
 function signinEvidence(signin) {
   if (!signin || !signin.host) return null;
   const box = document.createElement("div");
   box.className = "step-signin";
   const head = document.createElement("div");
   head.className = "step-sub step-signin-head";
-  head.textContent = `aish signed in again at ${signin.host} during this step — below is that page, not the one above`;
+  head.textContent = `aish attempted an automatic sign-in at ${signin.host} during this step — below is that page, not the one above`;
   box.appendChild(head);
   const shot = framePicture(signin.frame, `the sign-in page at ${signin.host}`);
   if (shot) {

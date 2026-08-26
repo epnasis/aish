@@ -190,7 +190,8 @@ class TestTheReplayItself:
         def __init__(self, url, form, *, after=None, has_password_after=False,
                      wants_code=False, changed="", captcha=(), page_text="",
                      alerts=(), alerts_after=None, invalid_after=False,
-                     covered_by="", consent_selector=""):
+                     covered_by="", consent_selector="",
+                     password_check_raises=False):
             # THE OVERLAY (#321). `covered_by` is what the page has sitting on
             # top of its SUBMIT BUTTON — the eon.pl shape exactly: the fields
             # are reachable, the form fills, and the one control that has to be
@@ -218,6 +219,12 @@ class TestTheReplayItself:
             self._alerts = list(alerts)
             self._alerts_after = alerts_after
             self._invalid_after = invalid_after
+            # A page that will not answer the password question at all — the
+            # third state `_password_field_state` exists for. Only the tests
+            # that run the REAL `_has_password_field` see this; the rest fake
+            # that function outright, which is why the could-not-tell case
+            # went unnoticed until it produced a false success.
+            self._password_check_raises = password_check_raises
             self._rejection_reads = 0
             self.typed: list[str] = []
             self.submitted = False
@@ -296,6 +303,15 @@ class TestTheReplayItself:
             return _Banner()
 
         async def query_selector(self, selector):
+            if selector == "input[type=password]":
+                # What the REAL `_has_password_field` asks a live page. Most
+                # tests here replace that function; the ones about what it
+                # RESOLVES must not, so the fake answers it honestly.
+                if self._password_check_raises:
+                    raise RuntimeError("the page is navigating")
+                return (
+                    _FakeElement(self, selector) if self._has_password_after else None
+                )
             # Only tags the enumeration actually SET can be found — a submit
             # button on a formless page is never tagged, so Playwright would
             # return None here and the code must fall through to Enter.
@@ -333,7 +349,7 @@ class TestTheReplayItself:
         return self.FakePage(**kw)
 
     def _run(self, page, record=None, ident="him@x.pl", password="hunter2hunter2",
-             watch=None, statuses=None):
+             watch=None, statuses=None, confirms=True):
         import asyncio
 
         from aish import browser
@@ -357,7 +373,10 @@ class TestTheReplayItself:
         browser._has_password_field = _fake_has_password(page)
         try:
             return asyncio.run(
-                browser._sign_in_on(page, record, ident, password, watch)
+                browser._sign_in_on(
+                    page, record, ident, password, watch,
+                    session_is_up=_answers(confirms),
+                )
             )
         finally:
             browser._has_password_field = original
@@ -621,6 +640,68 @@ class TestWhichControlIsTheSUBMIT:
         assert seen["result"]["ok"] is True and seen["result"]["form"] is False
         assert seen["result"]["submit"] is False
         assert "submit" not in seen["tagged"]
+
+    def test_a_form_ENTER_would_submit_keeps_its_enter(self):
+        """The gate on the counted press, and the whole of what it subtracts.
+
+        The fallback exists because Enter is a NO-OP on eon.pl's form: WHATWG
+        implicit submission performs no submission at all when a form has no
+        default button and MORE THAN ONE field that blocks it. Where the form
+        has ONE such field — the "welcome back, enter your password" shape —
+        Enter submits it, so there is nothing for a press to fix, and pressing
+        a button chosen without reading it buys nothing and can only be wrong.
+
+        This can only ever SUBTRACT presses. The eon shape above still gets
+        its button, which is the case the whole fallback exists for."""
+        seen = self._tags(self._form(
+            self.HIDDEN, self.HIDDEN, self.PASSWORD,
+            {"tag": "button", "attrs": {"type": "button"}, "label": "Zaloguj się"},
+        ))
+        assert seen["result"]["ok"] is True
+        assert seen["result"]["submit"] is False
+        assert "submit" not in seen["tagged"]
+        # ...and the password field is still tagged: the credential is typed
+        # either way, and only the GESTURE differs.
+        assert seen["tagged"]["password"]["tag"] == "INPUT"
+
+    def test_hidden_inputs_are_not_fields_that_block_implicit_submission(self):
+        """`type="hidden"` is not in the spec's list, which is what makes the
+        eon.pl count TWO — a text and a password beside three hidden ones — and
+        not five. Counting them would let any form with a CSRF token press its
+        single button, which is the opposite of a gate."""
+        seen = self._tags(self._form(
+            self.HIDDEN, self.HIDDEN, self.HIDDEN, self.TEXT, self.PASSWORD,
+            {"tag": "button", "attrs": {"type": "button"}, "label": "Zaloguj się"},
+        ))
+        assert seen["tagged"]["submit"]["label"] == "Zaloguj się"
+
+        # One text-entry field beside any number of hidden ones is the
+        # single-field shape, and Enter is what submits it.
+        alone = self._tags(self._form(
+            self.HIDDEN, self.HIDDEN, self.HIDDEN, self.PASSWORD,
+            {"tag": "button", "attrs": {"type": "button"}, "label": "Zaloguj się"},
+        ))
+        assert alone["result"]["submit"] is False
+
+    def test_a_typeless_input_is_a_text_field_like_the_spec_says(self):
+        """A missing `type` is the Text state, so it blocks implicit
+        submission like any other. Reading it as "not a text field" would
+        stand the gate down on an ordinary hand-written login form."""
+        seen = self._tags(self._form(
+            {"tag": "input", "attrs": {"name": "Email"}}, self.PASSWORD,
+            {"tag": "button", "attrs": {"type": "button"}, "label": "Zaloguj się"},
+        ))
+        assert seen["tagged"]["submit"]["label"] == "Zaloguj się"
+
+    def test_the_gate_never_touches_a_form_with_a_REAL_submit_control(self):
+        """The gate is on the fallback and nothing else: a genuine submit
+        control is pressed whatever the field count is, because there the
+        press is what the page itself declares the gesture to be."""
+        seen = self._tags(self._form(
+            self.PASSWORD,
+            {"tag": "button", "attrs": {}, "label": "Zaloguj się"},
+        ))
+        assert seen["tagged"]["submit"]["label"] == "Zaloguj się"
 
     def test_the_fake_dom_refuses_a_selector_it_cannot_parse(self):
         """A fake that quietly matches nothing would pass every test above
@@ -1351,6 +1432,20 @@ class _FakeElement:
         getattr(self.page, "focused", []).append(self.selector)
 
 
+def _answers(verdict):
+    """The fresh read of the walled URL, canned.
+
+    `True` — it stopped asking for a password, so a session exists; `False` —
+    it is still asking; `None` — aish could not tell. The default at every call
+    site here is True, which is the ordinary live shape: these tests are about
+    the OTHER endings, and `TestOKIsTheSESSIONComingUp` drives the real
+    `_the_session_is_up` over a real second page."""
+    async def look():
+        return verdict
+
+    return look
+
+
 def _fake_has_password(page):
     async def check(_page):
         return page._has_password_after
@@ -1379,6 +1474,7 @@ class TestACredentialIsOnlyEverTypedAtItsOwnOrigin:
                 browser._sign_in_on(
                     page, record, "him@x.pl", "hunter2hunter2",
                     browser._CredentialWatch(armed=True, sent_to=[record.origin]),
+                    session_is_up=_answers(True),
                 )
             )
         finally:
@@ -1514,6 +1610,7 @@ class TestALoginPageWithNoFormAtAll:
                 browser._sign_in_on(
                     page, record, "him@x.pl", "hunter2hunter2",
                     browser._CredentialWatch(armed=True, sent_to=[record.origin]),
+                    session_is_up=_answers(True),
                 )
             )
         finally:
@@ -1936,7 +2033,8 @@ class TestASignInIsJudgedByWhetherTheSessionCameUp:
     converted a working sign-in into a reported failure, so aish had him signed
     in and told him to go and do it by hand."""
 
-    def _drive(self, monkeypatch, beacons=(), pushes=None, page=None):
+    def _drive(self, monkeypatch, beacons=(), pushes=None, page=None,
+               wall_check=None, fake_password_check=True):
         import asyncio
 
         from aish import browser
@@ -1944,8 +2042,16 @@ class TestASignInIsJudgedByWhetherTheSessionCameUp:
         pushes = [] if pushes is None else pushes
         signin.save("https://eon.pl/login", "him", "hunter2hunter2", today="d")
         page = page or _SignInPage(beacons)
-        owner = _SignInOwner(page)
-        monkeypatch.setattr(browser, "_has_password_field", _fake_has_password(page))
+        owner = _SignInOwner(page, wall_check)
+        self.owner = owner
+        if fake_password_check:
+            # The default, and how every test here has always run. Turning it
+            # OFF runs the real `_has_password_field` against the fake page,
+            # which is the only way to reach the could-not-tell resolution
+            # that a faked-out check hides.
+            monkeypatch.setattr(
+                browser, "_has_password_field", _fake_has_password(page)
+            )
         monkeypatch.setattr(browser, "notify", _SilentNotifier(pushes))
         monkeypatch.setattr(
             browser, "_submit", lambda job, timeout: asyncio.run(job(owner))
@@ -2788,16 +2894,260 @@ class TestTheSubmitWindowIsRECORDEDButNeverJudged:
         assert "declares it is protected by reCAPTCHA" in result.why
 
 
+class _WallCheckPage:
+    """The FRESH read of the walled URL that a sign-in's `ok` now rests on.
+
+    A page of its OWN, which is the whole point: the login page is where the
+    press landed, so a login page that moved on is a statement about the press
+    and not about a session. This one carries only the profile's cookies, so
+    with nothing signed in it walls exactly as the read that triggered the
+    renewal did."""
+
+    def __init__(self, *, walled=False, answers=True, goto_raises=False,
+                 open_raises=False):
+        self._walled = walled
+        self._answers = answers
+        self._goto_raises = goto_raises
+        # The context cannot even hand out a page — a browser that died since
+        # the press. Read by the owner below, because that is where the real
+        # failure happens.
+        self.open_raises = open_raises
+        self.visited: list[str] = []
+        self.closed = False
+
+    async def goto(self, url, **_kw):
+        self.visited.append(url)
+        if self._goto_raises:
+            raise RuntimeError("the fresh read never loaded")
+
+    async def wait_for_timeout(self, _ms):
+        return None
+
+    async def query_selector(self, selector):
+        assert selector == "input[type=password]"
+        if not self._answers:
+            raise RuntimeError("the page is navigating")
+        return object() if self._walled else None
+
+    async def close(self):
+        self.closed = True
+
+
 class _SignInOwner:
-    def __init__(self, page):
+    def __init__(self, page, wall_check=None):
         self.view = None
         self.read_pages: set = set()
         self._page = page
+        # The second page the context is asked for is the confirmation's. A
+        # single-page owner would hand the login page back for it, which is
+        # exactly the conflation the confirmation exists to break.
+        self.wall_check = wall_check if wall_check is not None else _WallCheckPage()
+        self.pages_opened = 0
 
     async def context(self):
         return self
 
     async def new_page(self):
-        return self._page
+        self.pages_opened += 1
+        if self.pages_opened == 1:
+            return self._page
+        if self.wall_check.open_raises:
+            raise RuntimeError("the browser is gone")
+        return self.wall_check
 
 
+
+
+class TestOKIsTheSESSIONComingUpAndNothingLess:
+    """The false success the counted-button fix made reachable.
+
+    `_sign_in_on` consulted its whole failure analysis only `if await
+    _has_password_field(page)`, which asks the LOGIN PAGE for
+    `input[type=password]`. So every way of removing that box without signing
+    anything in fell straight through to `ok=True` — a use counted on the
+    record, and a push telling the owner aish had signed him in:
+
+      THE PRESS NAVIGATED AWAY. *Forgot password*, *create account*. The form
+        has one visible button and it is not the login control; the new page
+        has no password field, so the old test called it a session.
+      THE PRESS WAS A SHOW-PASSWORD TOGGLE. The field flips to `type="text"`
+        and `input[type=password]` finds nothing on the very page that is
+        still sitting there asking for the password.
+      THE PAGE STOPPED ANSWERING. `_has_password_field` resolves could-not-tell
+        to False — the right resolution for telling the model a page is a wall,
+        and a false success when it decides whether one came up.
+
+    So `ok` is gated on the SESSION, read where the session is actually about:
+    the URL whose wall triggered the renewal, on a fresh page, afterwards. No
+    session, no unwalled read — structurally, with no matcher to be blind.
+
+    Deliberately NOT gated on the fence having watched the credential leave.
+    That fence has declared blind spots (a service worker, a WebSocket, a value
+    hashed in the page), so on every site inside them a working renewal would
+    report as unconfirmed and never reach `note_used` — a record reading
+    `used: 0` on a sign-in that works every time, which is the exact symptom
+    #320 exists to end. `test_a_success_the_fence_NEVER_SAW_is_still_a_success`
+    is what stops that alternative being reintroduced."""
+
+    _drive = TestASignInIsJudgedByWhetherTheSessionCameUp._drive
+
+    def _record(self):
+        return signin.find("https://eon.pl")
+
+    def test_a_press_that_navigated_away_is_not_a_sign_in(self, monkeypatch):
+        """(a). The single visible button was *forgot password*: the page
+        moved, nothing was submitted, and the page it moved to has no password
+        box. The fresh read of the URL that walled still walls."""
+        pushes: list = []
+        result, _ = self._drive(
+            monkeypatch,
+            pushes=pushes,
+            page=_SignInPage(submits=False, after={"url": "https://eon.pl/przypomnij"}),
+            wall_check=_WallCheckPage(walled=True),
+        )
+        assert not result.ok and not result.stale and not result.captcha
+        assert "the session did not come up" in result.why
+        # The record is what the damage lands on, and it is untouched.
+        assert self._record().used == 0 and self._record().suspect == ""
+        assert signin.credential("https://eon.pl") is not None
+        # And nothing told him he was signed in.
+        assert pushes and "could not sign in" in pushes[0][0]
+
+    def test_a_show_password_toggle_is_not_a_sign_in(self, monkeypatch):
+        """(b). The same ending by the other route, and the interleaving is
+        genuinely different: the page never moved at all. The field is now
+        `type="text"`, so the login page answers "no password box" while
+        sitting there asking for the password."""
+        page = _SignInPage(
+            submits=False, has_password_after=False,
+            after={"url": "https://eon.pl/login"},
+        )
+        result, _ = self._drive(
+            monkeypatch, page=page, wall_check=_WallCheckPage(walled=True)
+        )
+        assert not result.ok
+        assert "the session did not come up" in result.why
+        assert self._record().used == 0 and self._record().suspect == ""
+
+    def test_a_page_that_stopped_answering_after_the_press_is_not_a_sign_in(
+        self, monkeypatch
+    ):
+        """The hole nobody listed. This runs the REAL `_has_password_field`
+        over a page that raises — a page navigating or closing under the read,
+        which a settled-then-acting flow does produce — so the resolution to
+        False happens for real, and the fresh page is what answers instead."""
+        import asyncio
+
+        from aish import browser
+
+        page = _SignInPage(submits=False, password_check_raises=True)
+        # The resolution itself, pinned at the line that does it: could-not-tell
+        # is False here, and that is correct for what this function is FOR.
+        assert asyncio.run(browser._password_field_state(page)) is None
+        assert asyncio.run(browser._has_password_field(page)) is False
+
+        result, _ = self._drive(
+            monkeypatch, page=page, wall_check=_WallCheckPage(walled=True),
+            fake_password_check=False,
+        )
+        assert not result.ok
+        assert "the session did not come up" in result.why
+        assert self._record().used == 0 and self._record().suspect == ""
+
+    def test_a_session_that_came_up_is_confirmed_and_counted(self, monkeypatch):
+        """The ordinary success, and the only ending allowed to claim one."""
+        pushes: list = []
+        result, _ = self._drive(monkeypatch, pushes=pushes)
+        assert result.ok and result.tried and not result.why
+        assert self._record().used == 1
+        assert pushes and pushes[0][0] == "aish signed in to eon.pl"
+
+    def test_the_fresh_read_is_of_the_URL_THAT_WALLED_not_the_login_page(
+        self, monkeypatch
+    ):
+        """The question is *is he signed in*, and the page that can answer it
+        is the one that asked for a password — not the login form, which a site
+        may keep serving to a signed-in session. It is also the read the caller
+        is about to make anyway."""
+        self._drive(monkeypatch)
+        check = self.owner.wall_check
+        assert check.visited == ["https://eon.pl/faktury"]
+        assert self._record().url == "https://eon.pl/login"  # never visited here
+        assert check.closed  # one navigation, and the tab does not survive it
+
+    def test_a_success_the_fence_NEVER_SAW_is_still_a_success(self, monkeypatch):
+        """The rejected alternative, pinned so it cannot come back.
+
+        Gating `ok` on the fence having watched the credential leave would fail
+        exactly here: this page submits by a route the matcher cannot see, the
+        session comes up, and the record must still count a use. Reporting this
+        as "could not confirm" would manufacture `used: 0` on a sign-in that
+        works — the symptom, as a false alarm, plus a wrong push per lapse."""
+        page = _SignInPage(submits=False)  # nothing recognised on the wire
+        result, _ = self._drive(monkeypatch, page=page)
+        assert result.ok and self._record().used == 1
+        assert result.tried  # the session came up, so the value did arrive
+
+    def test_a_fresh_read_that_cannot_answer_claims_NEITHER(self, monkeypatch):
+        """No evidence, no claim — in both directions. A navigation that failed
+        is not a wall, so it may not be reported as one, and "aish could not
+        tell" is an ordinary outcome that gets ordinary words."""
+        for check in (
+            _WallCheckPage(goto_raises=True), _WallCheckPage(answers=False)
+        ):
+            result, _ = self._drive(
+                monkeypatch, page=_SignInPage(submits=False), wall_check=check
+            )
+            assert not result.ok
+            assert "could not tell whether the session came up" in result.why
+            assert "did not come up" not in result.why
+            assert self._record().used == 0 and self._record().suspect == ""
+
+    def test_a_browser_that_DIED_before_the_check_costs_only_the_claim(
+        self, monkeypatch
+    ):
+        """The confirmation runs after the attempt, so it may never raise: an
+        exception out of it would cost the outcome, the picture and the
+        console along with it. A context that cannot hand out a page answers
+        *could not tell*, like every other read that did not happen."""
+        result, _ = self._drive(
+            monkeypatch, page=_SignInPage(submits=False),
+            wall_check=_WallCheckPage(open_raises=True),
+        )
+        assert not result.ok
+        assert "could not tell whether the session came up" in result.why
+        assert self._record().used == 0 and self._record().suspect == ""
+
+    def test_an_ending_that_never_claimed_a_session_opens_no_second_page(
+        self, monkeypatch
+    ):
+        """The confirmation costs one navigation and is spent only where a
+        session would otherwise be claimed. A failed attempt never pays it."""
+        result, _ = self._drive(
+            monkeypatch, page=_SignInPage(submits=False, has_password_after=True)
+        )
+        assert not result.ok and "never saw the password leave" in result.why
+        assert self.owner.pages_opened == 1
+        assert self.owner.wall_check.visited == []
+
+    def test_the_unconfirmed_ending_carries_only_what_the_fence_WATCHED(
+        self, monkeypatch
+    ):
+        """`tried` used to be unconditionally True here, on the premise that
+        advancing past the password proves the credential arrived. That premise
+        is exactly what a wrong press breaks — so it is justified only on the
+        confirmed ending, and the unconfirmed one reports the fence.
+
+        It decides what the owner is told: "aish did not use it" is false once
+        the password was seen leaving, and true when nothing was."""
+        sent, _ = self._drive(
+            monkeypatch, page=_SignInPage(submits=True),
+            wall_check=_WallCheckPage(walled=True),
+        )
+        assert not sent.ok and sent.tried is True
+
+        held, _ = self._drive(
+            monkeypatch, page=_SignInPage(submits=False),
+            wall_check=_WallCheckPage(walled=True),
+        )
+        assert not held.ok and held.tried is False
