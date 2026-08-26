@@ -19,7 +19,7 @@ import pytest
 
 from aish import agent as agent_module
 from aish import browse as browse_mod
-from aish import explain, tool_plugins
+from aish import explain, signin, tool_plugins
 from aish import web as web_module
 from tests.test_agent import FakeChat, model_says, tool_call
 
@@ -391,3 +391,91 @@ class TestTheContractSaysWhatTheCodeDoes:
         cut = web_module.PageCut(lambda _t, _s: "k")
         cut.keep("x" * 100, 10, "constant:PAGE_MAX_CHARS")
         assert set(parsed) == set(cut.record)
+
+    @staticmethod
+    def _example(key):
+        """The named object out of section 3.4's example block, parsed."""
+        block = TestTheContractSaysWhatTheCodeDoes._contract().split("### 3.4")[1]
+        example = block[block.index(f'"{key}"'):]
+        example = example[example.index("{"):]
+        depth, end = 0, 0
+        for i, ch in enumerate(example):
+            depth += (ch == "{") - (ch == "}")
+            if depth == 0:
+                end = i + 1
+                break
+        return json.loads(example[:end].replace("…", ""))
+
+    @staticmethod
+    def _signin_row():
+        row = TestTheContractSaysWhatTheCodeDoes._contract().split("| `signin` |")[1]
+        return row[: row.index("\n")]
+
+    @staticmethod
+    def _verdict_section():
+        """§3.4.1 — the specifying text for `signin.verdict` / `.observed`."""
+        contract = TestTheContractSaysWhatTheCodeDoes._contract()
+        section = contract.split("#### 3.4.1")[1]
+        return section[: section.index("\nA continuation fetch")]
+
+    def test_the_signin_example_is_what_a_judged_failure_actually_writes(self):
+        """#325. The observations behind a failed sign-in were computed and
+        discarded — only the owner-facing sentence survived, so nothing on
+        disk could contradict a claim about why one failed. A contract change
+        with no contract test is how the `"from": "cache"` drift above lasted
+        a year."""
+        from aish import browser
+
+        seen = web_module.SignInSeen()
+        seen.note("eon.pl", browser.SignInResult(
+            frame="/store/frames/login.jpg",
+            console=["error: Failed to load resource: recaptcha"],
+            covered="clb clb-container",
+            verdict=signin.FAILED_NEVER_SENT,
+            observed=browser.SignInObserved(declared_widget="reCAPTCHA"),
+        ))
+        record = seen.record()
+        parsed = self._example("signin")
+        # `frame_skipped` is in the doc beside `frame` to show the vocabulary;
+        # the writer emits exactly one of that pair (contract section 3.4).
+        assert set(parsed) - {"frame_skipped"} == set(record)
+        assert set(parsed["observed"]) == set(record["observed"])
+        assert record["verdict"] in signin.FAILURE_VERDICTS
+
+    def test_the_documented_verdict_vocabulary_is_the_one_the_code_can_return(self):
+        """A closed vocabulary read back by a log scan and, later, by an exam
+        built from real recorded failures. A doc naming a token the table
+        cannot return sends the next reader looking for a failure that does
+        not exist — and a token the doc omits is one they will not know to
+        look for."""
+        spec = self._verdict_section()
+        for token in signin.FAILURE_VERDICTS:
+            assert f"`{token}`" in spec
+        # ...and the outcome that was REMOVED is not quietly back in the
+        # vocabulary by way of the document (#321).
+        assert "`captcha`" not in spec and "FAILED_CAPTCHA" in spec
+
+    def test_the_contract_says_no_credential_and_nothing_page_authored(self):
+        """Section 8.6 forbids fetched content and `console` needed a stated
+        exception for it. These keys must not quietly ride that exception:
+        four booleans and aish's own brand name for a token it matched."""
+        spec = self._verdict_section()
+        assert "§8.6 needs no exception here" in spec
+        assert "never a span of the document" in spec
+
+    def test_every_observation_the_code_writes_is_in_the_contract(self):
+        """The pair travels together, so the doc has to name both halves and
+        every field inside the second — a field written into every log from
+        here and described nowhere is one a later reader cannot trust."""
+        from aish import browser
+
+        seen = web_module.SignInSeen()
+        seen.note("eon.pl", browser.SignInResult(
+            verdict=signin.FAILED_UNEXPLAINED, observed=browser.SignInObserved(),
+        ))
+        spec = self._verdict_section()
+        for name in seen.record()["observed"]:
+            assert f"`{name}`" in spec
+        # ...and the row that used to hold all of this still points at it, so
+        # the reader of the table is not left with two keys and no rules.
+        assert "3.4.1" in self._signin_row()

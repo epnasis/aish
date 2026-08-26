@@ -3776,6 +3776,10 @@ class TestTheSignInAttemptIsOnTheStepItHappenedUnder:
         frame_skipped = ""
         console = ["uncaught: ReferenceError: grecaptcha is not defined"]
         covered = ""
+        # No judgement by default: this stub is the shape of an outcome from
+        # before #325, which must degrade to an attempt with no verdict on it.
+        verdict = ""
+        observed = None
 
     def _driven(self, monkeypatch, outcome):
         monkeypatch.setattr(web_module, "_require_public", lambda _u: None)
@@ -3918,3 +3922,93 @@ class TestTheSignInAttemptIsOnTheStepItHappenedUnder:
         # object carries no `ok`, and "not seen to come up" is exactly what a
         # session nobody observed coming up is.
         assert seen.record() == {"host": "eon.pl", "ok": False}
+
+    def _judged(self, **kw):
+        from aish import browser
+
+        outcome = self._Outcome()
+        outcome.verdict = kw.pop("verdict", "never_sent")
+        outcome.observed = browser.SignInObserved(**kw)
+        return outcome
+
+    def test_what_was_SEEN_of_a_failure_reaches_the_step(self, monkeypatch):
+        """#325. The four observations were composed into a token and thrown
+        away; only the owner-facing SENTENCE survived, as prose in the result
+        and as prose in `signins.json`. Nobody could check afterwards what
+        aish had actually seen — the exact hole that let a cause nothing
+        observed stand for weeks."""
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, self._judged(
+            declared_widget="reCAPTCHA", body_to_own_origin=True,
+        ))
+        block = web_module.browse("https://eon.pl/mojeon", view=view).meta["signin"]
+        assert block["verdict"] == "never_sent"
+        assert block["observed"] == {
+            "credential_seen_leaving": False,
+            "refusal_status": False,
+            "page_said_no": False,
+            "declared_widget": "reCAPTCHA",
+            "body_to_own_origin": True,
+        }
+
+    def test_every_observation_is_written_even_when_it_is_false(self, monkeypatch):
+        """The group's PRESENCE is the discriminator, which is what lets the
+        keys inside it be unconditional: a `false` here is a thing aish looked
+        for and did not see, and it must not be confusable with a key nobody
+        wrote (corollary 2). Two of these route to opposite repairs — chase
+        the gesture, or chase the matcher."""
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, self._judged(verdict="unexplained",
+                                               credential_seen_leaving=True))
+        block = web_module.browse("https://eon.pl/mojeon", view=view).meta["signin"]
+        assert set(block["observed"]) == {
+            "credential_seen_leaving", "refusal_status", "page_said_no",
+            "declared_widget", "body_to_own_origin",
+        }
+        assert block["observed"]["refusal_status"] is False
+        assert block["observed"]["declared_widget"] == ""
+
+    def test_a_token_never_travels_without_the_observations_under_it(
+        self, monkeypatch
+    ):
+        """Trace contract §4: an evidence record holds the inputs the verdict
+        was a function of, never a rendering of the verdict. A stubbed or
+        older outcome carrying a token and nothing else degrades to no
+        judgement at all rather than to a bare conclusion."""
+        outcome = self._Outcome()
+        outcome.verdict = "refused"
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, outcome)
+        block = web_module.browse("https://eon.pl/mojeon", view=view).meta["signin"]
+        assert "verdict" not in block and "observed" not in block
+
+    def test_an_attempt_that_never_reached_the_table_writes_neither_key(
+        self, monkeypatch
+    ):
+        """A session that came up and a site asking for a code are not
+        failures anything judged. A verdict key on either would assert an
+        outcome no observation produced — this record exists to end that, not
+        to move it somewhere new."""
+        for name, field in (("ok", True), ("second_factor", True)):
+            outcome = self._Outcome()
+            setattr(outcome, name, field)
+            view = web_module.BrowseView()
+            self._driven(monkeypatch, outcome)
+            block = web_module.browse(
+                "https://eon.pl/mojeon", view=view
+            ).meta["signin"]
+            assert block["host"] == "eon.pl"
+            assert "verdict" not in block and "observed" not in block
+
+    def test_the_record_cannot_carry_the_credential(self, monkeypatch):
+        """The standing constraint. Four booleans and aish's own brand name
+        for a token it matched — no page span, no value, no length of one."""
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, self._judged(
+            verdict="refused", credential_seen_leaving=True, refusal_status=True,
+            page_said_no=True, declared_widget="reCAPTCHA",
+        ))
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        block = out.meta["signin"]
+        assert [type(v) for v in block["observed"].values()].count(bool) == 4
+        assert isinstance(block["observed"]["declared_widget"], str)

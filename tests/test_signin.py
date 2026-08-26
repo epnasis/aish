@@ -2894,6 +2894,237 @@ class TestTheSubmitWindowIsRECORDEDButNeverJudged:
         assert "declares it is protected by reCAPTCHA" in result.why
 
 
+class TestWhatWasSEENIsWrittenDownAndNotOnlyWhatWasCONCLUDED:
+    """#325. The four observations reached `judge_a_failed_sign_in`, produced a
+    token, and were then thrown away — what survived was the owner-facing
+    SENTENCE, into the tool result and into `signins.json` as `suspect`. Prose
+    both times, so nothing could be checked afterwards and no later reader
+    could contradict a claim about why a sign-in failed.
+
+    That is the shape of #320/#321 exactly: a cause asserted in aish's own
+    voice with no recorded observation able to disagree with it. So the token
+    and its inputs now ride the attempt, and the assertions below are about
+    what was OBSERVED — never about what it means."""
+
+    _run = TestTheReplayItself._run
+    _page = TestTheReplayItself._page
+    FakePage = TestTheReplayItself.FakePage
+    OK_FORM = TestTheReplayItself.OK_FORM
+
+    def _watch(self, **kw):
+        from aish import browser
+
+        return browser._CredentialWatch(**{"armed": True, **kw})
+
+    def _failed(self, **kw):
+        return self._page(
+            url="https://eon.pl/login", form=self.OK_FORM,
+            has_password_after=True, **kw,
+        )
+
+    def test_every_ending_of_the_failure_table_carries_its_token(self):
+        """A walk of the table rather than one ending, because the stamp is
+        what a fifth ending has to remember to do."""
+        blind = self._watch()  # armed, and it saw nothing leave
+        seen = self._watch(sent_to=["https://eon.pl"])
+        cases = {
+            signin.FAILED_NEVER_SENT: self._run(self._failed(), watch=blind),
+            signin.FAILED_UNEXPLAINED: self._run(self._failed(), watch=seen),
+            signin.FAILED_REFUSED: self._run(
+                self._failed(), watch=self._watch(
+                    sent_to=["https://eon.pl"], answered=[401]
+                )
+            ),
+            signin.FAILED_CONTRADICTION: self._run(
+                self._failed(), watch=self._watch(answered=[401])
+            ),
+        }
+        for expected, result in cases.items():
+            assert result.verdict == expected
+            assert result.observed is not None
+        assert set(cases) == signin.FAILURE_VERDICTS  # all four reached
+
+    def test_the_observations_are_the_arguments_the_TABLE_was_given(self):
+        """Not a second computation of the same question. A record assembled
+        beside the decision instead of from it is a record that can disagree
+        with the decision it claims to explain."""
+        from aish import browser
+        from aish import signin as signin_module
+
+        given: list = []
+        real = signin_module.judge_a_failed_sign_in
+
+        def spy(**kw):
+            given.append(dict(kw))
+            return real(**kw)
+
+        original = browser.signin_mod.judge_a_failed_sign_in
+        browser.signin_mod.judge_a_failed_sign_in = spy
+        try:
+            result = self._run(
+                self._failed(
+                    captcha=["https://www.google.com/recaptcha/api.js"],
+                    alerts_after=["Nie udalo sie zalogowac"],
+                ),
+                watch=self._watch(sent_to=["https://eon.pl"]),
+            )
+        finally:
+            browser.signin_mod.judge_a_failed_sign_in = original
+        assert len(given) == 1
+        observed = result.observed
+        assert observed.credential_seen_leaving is given[0]["sent"]
+        assert observed.refusal_status is given[0]["refused_status"]
+        assert observed.page_said_no is given[0]["said_no"]
+        assert observed.declared_widget == given[0]["captcha"]
+        # ...and this attempt really did exercise the interesting values, so
+        # the equality above is not four falses agreeing with each other.
+        assert observed.credential_seen_leaving and observed.page_said_no
+        assert observed.declared_widget == "reCAPTCHA"
+
+    def test_the_declaration_is_recorded_as_a_page_fact_and_selects_nothing(self):
+        """`FAILED_CAPTCHA` was a verdict once, and it told the owner for weeks
+        that reCAPTCHA had refused a sign-in that was never submitted. Writing
+        the declaration down must not be the way it comes back: it is recorded
+        beside a verdict the two credential observations decided."""
+        result = self._run(
+            self._failed(captcha=["https://www.google.com/recaptcha/api.js"]),
+            watch=self._watch(),
+        )
+        assert result.observed.declared_widget == "reCAPTCHA"
+        assert result.verdict == signin.FAILED_NEVER_SENT
+        assert "captcha" not in signin.FAILURE_VERDICTS
+
+    def test_a_page_that_declares_nothing_records_the_absence_as_an_absence(self):
+        result = self._run(self._failed(), watch=self._watch())
+        assert result.observed.declared_widget == ""
+
+    def test_the_body_observation_is_kept_apart_from_the_conclusion_drawn(self):
+        """`unrecognised_submission` is *a body went to the site's own origin*
+        AND *the fence recognised nothing* — two observations, and the second
+        is `credential_seen_leaving`. What is recorded is the first, so a
+        reader recomputes the conclusion instead of reading a copy of it that
+        a later edit can leave behind."""
+        posted = ["POST https://eon.pl/api/login"]
+        blind = self._run(
+            self._failed(), watch=self._watch(traffic=list(posted))
+        )
+        assert blind.observed.body_to_own_origin is True
+        assert blind.observed.credential_seen_leaving is False
+        assert "cannot tell whether the password was submitted" in blind.why
+
+        # The same page traffic with the fence NOT blind: the observation is
+        # unchanged and only the sentence's conclusion differs.
+        seen = self._run(
+            self._failed(),
+            watch=self._watch(sent_to=["https://eon.pl"], traffic=list(posted)),
+        )
+        assert seen.observed.body_to_own_origin is True
+        assert seen.observed.credential_seen_leaving is True
+        assert "cannot tell whether the password was submitted" not in seen.why
+
+    def test_a_beacon_is_not_a_body_to_the_site(self):
+        result = self._run(
+            self._failed(),
+            watch=self._watch(
+                traffic=["POST https://www.google-analytics.com/g/collect"]
+            ),
+        )
+        assert result.observed.body_to_own_origin is False
+
+    def test_an_ending_that_never_reached_the_TABLE_carries_no_token(self):
+        """A success, a second factor and a press something covered are not
+        failures the table judged. A token invented for them would be a verdict
+        about an attempt nothing evaluated — which is the whole defect, in a
+        new place."""
+        signed_in = self._run(self._page(
+            url="https://eon.pl/login", form=self.OK_FORM,
+            after={"url": "https://eon.pl/mojeon"},
+        ))
+        assert signed_in.ok and signed_in.verdict == "" and signed_in.observed is None
+
+        code = self._run(self._page(
+            url="https://eon.pl/login", form=self.OK_FORM, wants_code=True,
+        ))
+        assert code.second_factor and code.verdict == "" and code.observed is None
+
+        covered = self._run(self._failed(covered_by="clb clb-container"))
+        assert covered.covered == "clb clb-container"
+        assert covered.verdict == "" and covered.observed is None
+
+        elsewhere = self._run(self._page(
+            url="https://eon.pl/login",
+            form={**self.OK_FORM, "posts_to": "https://evil.test"},
+        ))
+        assert elsewhere.verdict == "" and elsewhere.observed is None
+
+    def test_no_observation_can_carry_the_credential(self):
+        """The standing constraint of this whole subsystem. Four of the five
+        are booleans and the fifth is aish's own brand name for a token it
+        matched, so there is nowhere for a value to hide — walked rather than
+        argued, because that is what a later field has to survive."""
+        import dataclasses
+
+        result = self._run(
+            self._failed(
+                captcha=["https://www.google.com/recaptcha/api.js"],
+                page_text="haslo hunter2hunter2",
+                alerts_after=["hunter2hunter2 jest nieprawidlowe"],
+            ),
+            watch=self._watch(
+                sent_to=["https://eon.pl"],
+                traffic=["POST https://eon.pl/api/login"],
+            ),
+        )
+        fields = dataclasses.asdict(result.observed)
+        assert set(fields) == {
+            "credential_seen_leaving", "refusal_status", "page_said_no",
+            "declared_widget", "body_to_own_origin",
+        }
+        assert "hunter2hunter2" not in "".join(str(v) for v in fields.values())
+        assert [type(v) for v in fields.values()].count(bool) == 4
+        assert fields["declared_widget"] == "reCAPTCHA"
+
+    def test_the_whole_recorded_block_is_walked_for_the_credential(self):
+        """End to end, from a page carrying the password in its text, its alert
+        and its own request path, to the JSON that goes on disk forever. The
+        field walk above is about the shape; this is about the bytes, and it is
+        the assertion a later field has to keep passing."""
+        import json
+
+        from aish import web as web_module
+
+        result = self._run(
+            self._failed(
+                captcha=["https://www.google.com/recaptcha/api.js"],
+                page_text="haslo: hunter2hunter2",
+                alerts_after=["hunter2hunter2 jest nieprawidlowe"],
+            ),
+            watch=self._watch(
+                sent_to=["https://eon.pl"],
+                traffic=["POST https://eon.pl/login/hunter2hunter2"],
+            ),
+        )
+        seen = web_module.SignInSeen()
+        seen.note("eon.pl", result)
+        block = seen.record()
+        assert block["verdict"] and block["observed"]
+        assert "hunter2hunter2" not in json.dumps(block)
+        # ...and the traffic summary that DOES hold a path never rides here.
+        assert "requests" not in block and "why" not in block
+
+    def test_the_token_written_is_always_one_the_vocabulary_KNOWS(self):
+        """A closed vocabulary read back by a log scan and, later, by an exam
+        built from real failures. Free text here would drift."""
+        for watch in (
+            self._watch(),
+            self._watch(sent_to=["https://eon.pl"]),
+            self._watch(answered=[401]),
+            self._watch(sent_to=["https://eon.pl"], answered=[401]),
+        ):
+            result = self._run(self._failed(), watch=watch)
+            assert result.verdict in signin.FAILURE_VERDICTS
+
+
 class _WallCheckPage:
     """The FRESH read of the walled URL that a sign-in's `ok` now rests on.
 
