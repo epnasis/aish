@@ -39,6 +39,22 @@ This is **wider than the contract's §6.13 table**, which names five plugin cons
 
 ---
 
+## Two facts wearing one field name
+
+`output` on a `tool` step meant **what the command printed**. On a denied one it meant **what the owner typed on the card**. Nothing on the record said which — a reader had to already know `decision` to read the field correctly, which is a field that cannot be read at the point a dossier reads it. That is the defect #323 fixed, and it is worth naming as a class rather than as a bug: whenever one key carries two facts, the log is not merely incomplete, it is confidently wrong, and it is wrong in the direction of the reader believing a command printed the owner's own sentence.
+
+So the sentence became `comment`, a key of its own, on **every** path that refused or held because of one. It was already that on the write path; `run_command` used `output`, and the eight tool gates (plugin, egress, mail-link, remember, browse, the rule gate's owner card, the tool-file and rule-file writes, the skill import) left it only as prose inside the result text, which lands in `error`. `output` now means stdout on every path, including the empty string on a step where nothing ran.
+
+**One carrier per shape, and one funnel.** A gate refusal already travels on `tools.ToolOutcome.meta`, which is correct on the parallel read path where an instance attribute would race, so `_gate_outcome` grew a `comment` argument and nothing else had to be plumbed. `run_command` and the writes already travel on `_run_meta`. Both are merged in `_emit_tool_step`, so the scrub and the cap are applied THERE — once, last, over both carriers — for the same reason the refused-decision rule and the `output` scrub are: a fix per site is a fix the next site does not inherit. Owner-authored is not the same as safe to store; the card is a text box he may have pasted a value into, and `agent._owner_comment` sends it through the same `secrets.scrub` as every other free text before capping it at `COMMENT_CHARS`. `TestApprovalCommentIsARecordedField`.
+
+**The stop gate now records its own life.** The arming, each refusal it makes, and the clearing are `gate` records in the shape the contract had specified and nothing had written (§6.1). Each is emitted by the line that made the decision — `armed_by: "denial_comment"` is a CAUSE, and the only place it is earned is the `if comment:` branch inside `_arm_stop_gate`; `cleared_by: "text_only_turn"` only in the branch that tested `content and not tool_calls`. Assembling either afterwards would state a cause nothing checked. `max_rounds: 0` says the gate is unbounded rather than leaving the field out: it never lifts by exhausting a counter, which is exactly the distinction §6.2 says the skill gate still cannot make about itself.
+
+**A held action's replacement carries `replaces`.** Approve + comment holds A and the model re-proposes B, and nothing joined B to A or to the sentence that caused it. `_emit_tool_step` registers a held call under its tool name and hands the id to the next call to that tool in the same turn. What the field asserts is only what was observed — *the first later call to the same tool while a hold was outstanding* — and not that the model actually reworked anything; the held call's own args are on the record, so that question is the reader's next lookup rather than the harness's guess.
+
+**Nothing about a verdict moved.** A held action is still held even when the approval carried an edited `command`, a denial still arms the gate, and the gate still clears only on a text-only turn — pinned beside the records that now describe them, because a recording change that quietly moved a gate would be far worse than the gap it closed.
+
+---
+
 ## The truncator with the largest blast radius
 
 The per-task trim takes every prior tool output down to a 200-char stub. It is recorded, because a truncation nobody can see is indistinguishable from a model that ignored the result. `TestTrimIsRecorded`.
