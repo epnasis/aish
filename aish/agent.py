@@ -1334,9 +1334,11 @@ REFUSED_DECISIONS = frozenset({"denied", "held", "blocked", "rejected"})
 def _scrub_page_console(step: dict) -> None:
     """Redact stored secrets out of a browse step's PAGE-AUTHORED words.
 
-    Two fields today: the console lines, and the name of whatever was found
+    Three fields today: the console lines, the name of whatever was found
     covering a control (#321) — an id, a class or a tag, which the site writes
-    and could therefore write anything into.
+    and could therefore write anything into — and `problem`, aish's own
+    sentence about a failed action, which quotes page-authored names (a
+    control's label, a covering element) inside it.
 
     A console message is whatever the page had in scope, and a login page that
     echoes a rejected password into its own error text writes it to `console`
@@ -1356,6 +1358,8 @@ def _scrub_page_console(step: dict) -> None:
     covered = step.get("covered")
     if isinstance(covered, dict) and covered.get("by"):
         step["covered"] = {**covered, "by": secrets.scrub(str(covered["by"]))}
+    if step.get("problem"):
+        step["problem"] = secrets.scrub(str(step["problem"]))
     signin = step.get("signin")
     if isinstance(signin, dict):
         block = dict(signin)

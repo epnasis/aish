@@ -557,6 +557,11 @@ def _signin_of(step: dict) -> dict:
             state = PURGED
     return {
         "host": str(block.get("host") or ""),
+        # Tri-state on purpose: True is a session seen to come up, False one
+        # that was not, and None a log written before the outcome was recorded
+        # — a reader that collapsed the third into the second would be
+        # asserting a failure nothing observed.
+        "ok": block.get("ok") if isinstance(block.get("ok"), bool) else None,
         "frame": path,
         "frame_state": state,
         "frame_skipped": "" if path else str(block.get("frame_skipped") or ""),
@@ -626,6 +631,14 @@ def _did(turn: Turn) -> dict:
                 "output": step.get("output") or "",
                 "decision": step.get("decision"),
                 "verdict_by": step.get("verdict_by"),
+                # aish's own observations that the action did not do what it
+                # looked like it should: the sentence saying it could not be
+                # carried out as asked, and an action whose delta against the
+                # page last shown came back empty. Facts, never verdicts —
+                # they are what the chat renderer keys console surfacing on,
+                # and this reader reports them wherever they were recorded.
+                "problem": str(step.get("problem") or ""),
+                "unchanged": bool(step.get("unchanged")),
                 # What this call had to cut, and whether it left a way back.
                 # Recorded for every truncator (contract §3.4); `read`
                 # is which cached output a paging call actually read, which is
@@ -672,6 +685,8 @@ def _did(turn: Turn) -> dict:
                 "output": "",
                 "decision": None,
                 "verdict_by": None,
+                "problem": "",
+                "unchanged": False,
                 "truncation": {},
                 "read": "",
                 "gates": per_call.pop(call, []),
@@ -1508,17 +1523,26 @@ def _signin_lines(signin: dict) -> list[str]:
     resolves, a path whose bytes the bounded store has since dropped, and a
     recorded reason there is no picture at all.
 
-    **It says ATTEMPTED, because that is all the block records.** `host` is
-    written whenever a sign-in was tried, success or failure — the contract
-    says so — so "aish signed in again", which is what this line used to read,
-    was a claim about an outcome no field here carries. A dossier assembled
-    from recorded evidence may not say more than the evidence does."""
+    **It says ATTEMPTED, and adds the outcome only where one was recorded.**
+    `host` is written whenever a sign-in was tried, success or failure — the
+    contract says so — so "aish signed in again", which is what this line used
+    to read, was a claim about an outcome no field then carried. `ok` carries
+    it now: `SignInResult.ok`, set only where the walled URL was read afresh
+    and the session was seen to come up. A block without the key is an older
+    log and gets the attempt sentence alone — a dossier assembled from
+    recorded evidence may not say more than the evidence does."""
     host = str(signin.get("host") or "")
     if not host:
         return []
+    ok = signin.get("ok")
+    outcome = (
+        " — the session came up" if ok is True
+        else " — the session was not seen to come up" if ok is False
+        else ""
+    )
     lines = [
         f"     {DIM}aish attempted an automatic sign-in at {host} "
-        f"during this call{RESET}"
+        f"during this call{outcome}{RESET}"
     ]
     if path := str(signin.get("frame") or ""):
         gone = signin.get("frame_state") != RECORDED
@@ -1607,6 +1631,15 @@ def _call_lines(call: dict) -> list[str]:
         lines.append(
             f"     {DIM}{_covered_line(cover['by'], dismissed=cover['dismissed'])}"
             f"{RESET}"
+        )
+    if problem := str(call.get("problem") or ""):
+        # aish's own sentence about its own act, reported verbatim. It is why
+        # the chat renderer surfaced this call's console; the dossier prints
+        # both unconditionally, because it is opened on purpose.
+        lines.append(f"     {DIM}problem: {problem[:200]}{RESET}")
+    if call.get("unchanged"):
+        lines.append(
+            f"     {DIM}nothing on the page changed when aish did this{RESET}"
         )
     lines.extend(_console_lines(call.get("console") or [], "the page"))
     if signin := call.get("signin"):

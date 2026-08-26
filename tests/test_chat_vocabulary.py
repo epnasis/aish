@@ -65,6 +65,11 @@ ALLOWED = {
     "AISH, not from the page, and it is true — it tells you the session has expired, or that the",
     'says and then STOP. Say "your eon.pl session has expired — run /browser '
     "https://eon.pl to sign",
+    # The sign-in attempt's outcome on a trace step: the SITE's login session,
+    # seen to come up (or not) after an automatic renewal — the same cookie
+    # jar as above, worded to exactly what `signin.ok` records.
+    " and the session came up",
+    " and the session was not seen to come up",
 }
 
 _ALPHA_WORD = re.compile(r"^[A-Za-z]{2,}$")

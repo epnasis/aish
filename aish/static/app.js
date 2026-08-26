@@ -3257,9 +3257,52 @@ function frameWhere(step) {
   return cap;
 }
 
+// Should this step's recorded console be DRAWN? Recorded always, surfaced on
+// anomaly — and "anomaly" means aish's OWN observation that the step did not
+// do what it looked like it should, each one a fact the step itself carries:
+// the tool failed (`ok: false`), aish said it could not carry the action out
+// (`problem`), the action's delta against the page last shown came back empty
+// (`unchanged` — the one case where an empty report and a thrown handler are
+// one answer), or a click could not land and was never got through
+// (`covered` without `dismissed`). Never the page's own noisiness: the number
+// of sites that log errors on every healthy page is enormous, and a step
+// painted with them reads as a failure nothing observed — the owner's first
+// successful automatic sign-in rendered covered in console blocks. A clean
+// step draws nothing; the lines stay on the record and `aish explain` reads
+// them back unconditionally, because a dossier is opened on purpose.
+function consoleWanted(step) {
+  return step.ok === false
+    || !!step.problem
+    || !!step.unchanged
+    || !!(step.covered && step.covered.by && !step.covered.dismissed);
+}
+
+// aish's own sentence that this action could not be carried out as asked —
+// the step's `problem`, verbatim. It is what explains why a console follows on
+// a row whose tool-level status still reads ok (a browse whose action failed
+// still returns a page). Set as text: it quotes page-authored names inside it.
+// Skipped when a covered block is drawn — COVERED_STUCK and the cover are the
+// same fact worded twice, and the cover's wording is the owner's.
+function problemBlock(problem) {
+  const box = document.createElement("div");
+  box.className = "step-sub step-problem";
+  box.textContent = String(problem);
+  return box;
+}
+
+// The action's delta against the page last shown came back empty. A fact and
+// not a failure — a press that legitimately changes nothing also records it —
+// worded to exactly what the writer computed.
+function unchangedBlock() {
+  const box = document.createElement("div");
+  box.className = "step-sub step-unchanged";
+  box.textContent = "nothing on the page changed when aish did this";
+  return box;
+}
+
 // The page's own console during this action (errors, warnings and uncaught
 // exceptions). The heading is not decoration: these are the PAGE's words, and
-// a block of red monospace under an aish row would otherwise read as aish
+// a block of monospace under an aish row would otherwise read as aish
 // reporting on itself. It is drawn as text and never as markup — the residual
 // attack is a page writing something that looks like part of the app.
 function consoleBlock(lines, whose) {
@@ -3312,17 +3355,27 @@ function coveredBlock(covered) {
 // cannot name. Borrowing the key would be a stated guarantee wider than the
 // capture enforces, so this has its own, and says out loud which page it is.
 //
-// It says ATTEMPTED, and that is not a wording preference: `host` is written
-// whenever a sign-in was TRIED, success or failure, so "aish signed in again"
-// — what this read until now — claimed an outcome no field in the block
-// carries. The renderer may not say more than the record does.
+// It says ATTEMPTED, and more only where the record does: `host` is written
+// whenever a sign-in was TRIED, success or failure, and `ok` — written since
+// the outcome joined the record — is `SignInResult.ok`, set only where the
+// walled URL was read afresh and the session was seen to come up. A block
+// without `ok` is an older log, and gets the attempt sentence alone; the
+// renderer may not say more than the record does.
+//
+// The console follows the same surface-on-anomaly rule the step's own console
+// does: a renewal that WORKED is the ordinary ending, and the owner's first
+// successful one rendered covered in the login page's everyday errors. Not
+// seen to come up (or unknown) still shows it — that is the failure the
+// record was built for, and the eon.pl day it exists to end.
 function signinEvidence(signin) {
   if (!signin || !signin.host) return null;
   const box = document.createElement("div");
   box.className = "step-signin";
   const head = document.createElement("div");
   head.className = "step-sub step-signin-head";
-  head.textContent = `aish attempted an automatic sign-in at ${signin.host} during this step — below is that page, not the one above`;
+  const outcome = signin.ok === true ? " and the session came up"
+    : signin.ok === false ? " and the session was not seen to come up" : "";
+  head.textContent = `aish attempted an automatic sign-in at ${signin.host} during this step${outcome} — below is that page, not the one above`;
   box.appendChild(head);
   const shot = framePicture(signin.frame, `the sign-in page at ${signin.host}`);
   if (shot) {
@@ -3335,7 +3388,7 @@ function signinEvidence(signin) {
   }
   const covered = coveredBlock(signin.covered ? { by: signin.covered } : null);
   if (covered) box.appendChild(covered);
-  if (signin.console && signin.console.length) {
+  if (signin.console && signin.console.length && signin.ok !== true) {
     box.appendChild(consoleBlock(signin.console, "the sign-in page"));
   }
   return box;
@@ -3356,7 +3409,11 @@ function traceFrame(step) {
   }
   const cover = coveredBlock(step.covered);
   if (cover) parts.push(cover);
-  if (step.console && step.console.length) {
+  if (step.problem && !cover) parts.push(problemBlock(step.problem));
+  if (step.unchanged) parts.push(unchangedBlock());
+  // Surfaced only on a step that recorded its own anomaly (consoleWanted);
+  // the record itself is unconditional and `aish explain` reads all of it.
+  if (step.console && step.console.length && consoleWanted(step)) {
     parts.push(consoleBlock(step.console, "the page"));
   }
   const signin = signinEvidence(step.signin);
