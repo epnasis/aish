@@ -1778,7 +1778,11 @@ def _model_error_line(
     if not final:
         return f"✕ {what} (attempt {attempt}) — retrying in {delay:.0f}s"
     if failure.exhausted:
-        return f"✕ {what}: the quota is spent, not merely busy — not retrying"
+        # "Spent" only where the provider NAMED a long-window quota; a bare
+        # long retry hint proves the wait, not whose budget is empty.
+        if failure.scope == ratelimit.LONG:
+            return f"✕ {what}: the quota is spent, not merely busy — not retrying"
+        return f"✕ {what}: the wait the provider asked for is too long to sit out — not retrying"
     if not failure.retryable:
         return f"✕ {what} — retrying cannot change this, not retrying"
     return f"✕ {what} — gave up after {attempt} attempts"
@@ -1794,9 +1798,18 @@ def _unavailable_text(failure: ratelimit.CallFailure | None) -> str:
     if failure is None:  # unreachable in the loop; cheaper than an assert
         return "the model call failed"
     if failure.exhausted:
+        # Two sentences for two kinds of evidence: a quota the provider SCOPED
+        # to the day is known spent; a bare long retry hint proves only that
+        # the wait cannot be sat out, and "spent" would be a claim about a
+        # budget nothing checked.
+        spent = (
+            "this quota is spent rather than busy"
+            if failure.scope == ratelimit.LONG
+            else "this quota cannot be waited out inside this task"
+        )
         return (
-            f"{failure.kind.replace('_', ' ')}: this quota is spent rather than "
-            f"busy — retrying will not help until it resets. {failure.text}"
+            f"{failure.kind.replace('_', ' ')}: {spent} — retrying will not "
+            f"help until it resets. {failure.text}"
         )
     if not failure.retryable:
         return f"{failure.kind.replace('_', ' ')} (not retryable): {failure.text}"

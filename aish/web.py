@@ -360,12 +360,23 @@ _BLOCKED_CODES = browser.BLOCK_STATUS
 _JINA_STUB = "maybe requiring CAPTCHA"
 
 
+# Shared by both dead ends below. The advice is the same either way; what
+# differs — and must, because one is an observed refusal and the other is a
+# fetch that was ANSWERED — is the sentence in front of it.
+_READER_WARNING = (
+    " Do NOT retry through r.jina.ai or any other third-party "
+    "reader: it fetches with no session and does worse. Use a different "
+    "source, or ask the user to open the page in /browser"
+)
+
+
 def _blocked_note(url: str) -> str:
+    # Spoken only where the refusal was OBSERVED: the caller gates this on the
+    # HTTP status being in `_BLOCKED_CODES`, and the browser has been tried
+    # (here or on the pre-fetch route) before it is composed.
     return (
         " — the site refused a plain fetch and the browser could not render it "
-        "either. Do NOT retry through r.jina.ai or any other third-party "
-        "reader: it fetches with no session and does worse. Use a different "
-        "source, or ask the user to open the page in /browser"
+        "either." + _READER_WARNING
     )
 
 # Fetched pages are attacker-controllable; flag them so the model treats the
@@ -1618,19 +1629,15 @@ def _browser_read(
                 if again is not None:
                     return (*again[:4], RENEWED_SESSION_NOTE.format(host=host)), ""
                 return None, why
-            # Which of the three is true turns on whether the credential was
-            # SENT, never on whether it was blamed (#320): the held note is for
-            # a refusal by aish, and saying it when aish tried and failed is as
-            # false as saying the site refused a value it never judged.
-            if outcome.captcha:
-                # The wider claim — *this SITE cannot be signed into
-                # automatically* — is earned only where the password was
-                # observed leaving, because that is the only sign the widget
-                # was ever given something to refuse (#321).
-                renewal = (
-                    RENEWAL_CAPTCHA_REFUSED if outcome.tried else RENEWAL_CAPTCHA_NOTE
-                ).format(host=host, why=outcome.why)
-            elif outcome.tried or outcome.second_factor or outcome.stale:
+            # Which of the three is true turns on what was OBSERVED of the
+            # credential — sent, typed-but-unconfirmed, or held — never on a
+            # cause (#320): the held note is for a refusal by aish, and saying
+            # it when aish tried and failed is as false as saying the site
+            # refused a value it never judged. A fourth branch used to route
+            # on `outcome.captcha` here — a script tag on the page selecting
+            # the sentence — and it is gone on purpose: the declaration now
+            # rides inside `why` as the observation it is (#321).
+            if outcome.tried or outcome.second_factor or outcome.stale:
                 renewal = RENEWAL_STOPPED_NOTE.format(
                     host=host,
                     why=(
@@ -1639,6 +1646,8 @@ def _browser_read(
                         else outcome.why
                     ),
                 )
+            elif getattr(outcome, "filled", False):
+                renewal = RENEWAL_UNSUBMITTED_NOTE.format(host=host, why=outcome.why)
             else:
                 renewal = RENEWAL_HELD_NOTE.format(host=host, why=outcome.why)
     if is_blank(text):
@@ -1742,29 +1751,22 @@ RENEWAL_SECOND_FACTOR = (
     "the site then asked for a one-time code, which only they can supply — tell "
     "them to open /browser {host}, finish the sign-in, and ask again"
 )
-# The read path's twin of `BROWSE_SIGNIN_CAPTCHA`, and kept apart from
-# `RENEWAL_HELD_NOTE` for the same reason: aish used the sign-in, the site
-# refused the automation rather than the value, and re-saving it fixes nothing.
-#
-# NARROWED to a claim about the ATTEMPT (#321) — see `BROWSE_SIGNIN_CAPTCHA`
-# below for why, and `RENEWAL_CAPTCHA_REFUSED` for the version that may say
-# more.
-RENEWAL_CAPTCHA_NOTE = (
-    "[aish: {host} asked for a password, and aish could not complete the "
-    "sign-in here — {why}. Their saved sign-in is untouched and does NOT need "
-    "replacing; do not suggest saving it again. Tell them to open /browser "
-    "{host} and sign in themselves. What follows is the SIGNED-OUT page, not "
-    "their account.]\n"
-)
-# The same outcome once the password was actually OBSERVED leaving the page:
-# the widget was given a submission and the session still did not come up, so
-# the wider claim is earned.
-RENEWAL_CAPTCHA_REFUSED = (
-    "[aish: {host} asked for a password, and aish CANNOT sign in to this site "
-    "automatically — {why}. Their saved sign-in is untouched and does NOT need "
-    "replacing; do not suggest saving it again. Tell them to open /browser "
-    "{host} and sign in themselves. What follows is the SIGNED-OUT page, not "
-    "their account.]\n"
+# The read path's twin of `BROWSE_SIGNIN_UNSUBMITTED`, and kept apart from
+# `RENEWAL_HELD_NOTE` for the same reason: aish typed the credential in, so
+# "aish did not use it" would be false — but nothing was ever observed
+# leaving, so the stopped note's "did not get all the way in" would claim an
+# attempt the site may never have seen. This note replaces the CAPTCHA pair
+# that stood here: those were selected by a script tag on the page and told
+# the model — and through it the owner — that the site refuses automatic
+# sign-ins, a cause nothing checked and eon.pl disproved (#321). What was
+# right about them survives here on its own evidence: nothing was learned
+# about the credential, so nothing may invite a re-record.
+RENEWAL_UNSUBMITTED_NOTE = (
+    "[aish: {host} asked for a password, and aish filled in the sign-in the "
+    "user saved but could not confirm the form was ever submitted — {why}. "
+    "Their saved sign-in is untouched and does NOT need replacing; do not "
+    "suggest saving it again. Tell them to open /browser {host} and sign in "
+    "themselves. What follows is the SIGNED-OUT page, not their account.]\n"
 )
 
 ANONYMOUS_READ_FORM = (
@@ -1810,37 +1812,24 @@ BROWSE_SIGNED_OUT_STALE = (
     "sign-in. Do NOT try other buttons on this page.]\n"
 )
 
-# The site refuses the AUTOMATION, and that is not a verdict on the password
-# (#320). A third note rather than a reuse of either neighbour, because both
-# would be false: aish DID use the sign-in, so the held note's "aish did not
-# use it" is wrong, and the site never judged the value, so the stale note's
-# "was not accepted" is a false statement in aish's own voice. Neither may
-# invite a re-record — following that invitation is what destroyed the owner's
-# eon.pl credential twice, since the next attempt fails identically.
-#
-# **NARROWED TO THE ATTEMPT (#321).** It used to say *this site cannot be
-# signed into automatically*, inferred from a script tag on the page — and
-# eon.pl disproves that: it can be, once the banner over its login button is
-# gone, and on that page the CAPTCHA never refused anything because nothing was
-# ever submitted to it. So the standing claim is about what aish could not do
-# here, and the claim about the SITE is made only from the twin below, which is
-# selected when the password was observed to LEAVE — the one observation that
-# says the widget was given a submission to refuse at all. Both stay untouched
-# in the half that matters: the credential is not marked, and neither invites a
-# re-record.
-BROWSE_SIGNIN_CAPTCHA = (
-    "[aish: {host} is asking for a password, and aish could not complete the "
-    "sign-in here — {why}. The user's saved sign-in is untouched and does "
-    "NOT need replacing; do not suggest saving it again. Tell them to run "
-    "/browser {host} and sign in themselves. Do NOT try other buttons on this "
-    "page.]\n"
-)
-BROWSE_SIGNIN_CAPTCHA_REFUSED = (
-    "[aish: {host} is asking for a password, and aish CANNOT sign in to this "
-    "site automatically — {why}. The user's saved sign-in is untouched and does "
-    "NOT need replacing; do not suggest saving it again. Tell them to run "
-    "/browser {host} and sign in themselves. Do NOT try other buttons on this "
-    "page.]\n"
+# The form was filled and nothing was ever confirmed submitted — a fourth
+# note rather than a reuse of either neighbour, because both would be false:
+# aish typed the credential in, so the held note's "aish did not use it" is
+# wrong, and nothing was observed reaching the site, so the unfinished note's
+# "did not get all the way in" claims an attempt the site may never have
+# seen. A CAPTCHA pair used to stand here, selected by a script tag on the
+# page, saying the site refuses automatic sign-ins — a cause nothing checked,
+# and on eon.pl a false one: the widget never refused anything, because the
+# submit never fired (#321). The half that was right survives on its own
+# evidence: nothing was learned about the credential, so nothing may invite a
+# re-record — following that invitation is what destroyed the owner's eon.pl
+# credential twice.
+BROWSE_SIGNIN_UNSUBMITTED = (
+    "[aish: {host} is asking for a password. aish filled in the sign-in the "
+    "user saved but could not confirm the form was ever submitted — {why}. "
+    "The saved sign-in is untouched and does NOT need replacing; do not "
+    "suggest saving it again. Tell them to run /browser {host} and sign in "
+    "themselves. Do NOT try other buttons on this page.]\n"
 )
 
 # aish used the sign-in and did not get in, and the site said nothing about
@@ -2044,6 +2033,7 @@ def _read_url(
         # A JavaScript-only page: the fetch succeeded and returned a shell.
         # This is the commonest browser win by far — far more of the web than
         # the sites that actively block automation.
+        browser_why = anonymous_why
         if not anonymous_why:
             rendered, why = _browser_read(url, signin_seen=signin_seen)
             if rendered is not None:
@@ -2052,7 +2042,15 @@ def _read_url(
             )
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
-        return f"ERROR: {url} returned no readable text{_blocked_note(url)}"
+            browser_why = why
+        # This used to append `_blocked_note`, whose first clause is "the site
+        # refused a plain fetch" — but on this path the fetch was ANSWERED,
+        # 200 with no readable text, and nothing here observed a refusal. The
+        # error states the two facts it has and the browser's own reason.
+        return (
+            f"ERROR: {url} returned no readable text, and the browser could "
+            f"not read it either ({browser_why})." + _READER_WARNING
+        )
 
     if login_form and not anonymous_why:
         # THE PAGE SAID SO. A login wall is not an error — it is 200 with a full
@@ -2605,15 +2603,12 @@ def _renew_driving(url, snapshot, *, topic, view, signin_seen=None):
     if outcome is None:
         return BROWSE_SIGNED_OUT_NOTE.format(host=host), snapshot
     if not outcome.ok:
-        if outcome.captcha:
-            # The claim about the SITE is earned only where the password was
-            # observed leaving; otherwise the widget refused nothing and all
-            # aish can say is that it could not get in here (#321).
-            template, why = (
-                BROWSE_SIGNIN_CAPTCHA_REFUSED if outcome.tried
-                else BROWSE_SIGNIN_CAPTCHA
-            ), outcome.why
-        elif outcome.second_factor:
+        # Routed on what was OBSERVED of the credential and nothing else. A
+        # `captcha` branch used to be first here — a script tag on the page
+        # selecting a note that said the site refuses automatic sign-ins, a
+        # cause nothing checked (#321). The declaration now rides inside
+        # `why`, worded as the observation it is.
+        if outcome.second_factor:
             template, why = BROWSE_SIGNIN_UNFINISHED, RENEWAL_SECOND_FACTOR.format(
                 host=host
             )
@@ -2623,6 +2618,10 @@ def _renew_driving(url, snapshot, *, topic, view, signin_seen=None):
             # aish sent it and did not get in, and the site gave no reason.
             # "Not accepted" would be a claim nothing supports.
             template, why = BROWSE_SIGNIN_UNFINISHED, outcome.why
+        elif getattr(outcome, "filled", False):
+            # Typed in and never confirmed submitted — "aish did not use it"
+            # and "did not get all the way in" would both overclaim.
+            template, why = BROWSE_SIGNIN_UNSUBMITTED, outcome.why
         else:
             # aish held it back. Saying the site refused it would be a false
             # statement in aish's own voice, above the untrusted banner.

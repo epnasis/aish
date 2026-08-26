@@ -46,15 +46,13 @@ Merge back to main after tests pass, then remove the worktree. `make ship` alway
 
 ## No evidence, no claim
 
-**Every claim carries the evidence that established it. A claim with no evidence is a guess, and a guess must not be made, shipped, or spoken in aish's own voice.** The test is mechanical: name the line of code, the command output, or the experiment that checked the thing being asserted. If you cannot name it, you do not know it — go and find out, or say you do not know.
+**Every claim carries what established it.** The test is mechanical: name the line of code, the command output, or the experiment that checked the thing being asserted. If you cannot name one, you do not know it — find out, or say you do not know. Artifacts (a log, page text, a fetched copy) *suggest* hypotheses; only an experiment that would come out differently under a rival hypothesis *settles* one.
 
-**This binds what aish SAYS, not only what you say.** *"I pressed Enter and no request left the page"* is an observation. *"reCAPTCHA refused the sign-in"* is an interpretation. Only the first may appear in a message, a log, a trace record or a push. Where a cause genuinely is evidenced — a 401 on a request carrying the credential IS the site refusing it — the causal statement is earned and belongs.
+**This binds what aish SAYS, not only what you say.** Any sentence aish emits — an outcome, a note, a push, an error string — states what was observed. A cause may be stated only where a line checked it: a 401 on a request carrying the credential IS the site refusing it, and that claim is earned. *"reCAPTCHA refused the sign-in"* was a hypothesis shipped as an outcome and repeated to the owner about a widget that was never given anything to refuse.
 
-**Why this is a rule and not a preference.** On 2026-08-26 a hypothesis about a failed sign-in was asserted in an issue, implemented from that issue as a named outcome, and aish then told the owner on every attempt that the page was *"protected by reCAPTCHA, which refuses a scripted sign-in."* It had never observed that. The real cause, found later by experiment, was that the code never targeted the page's login button at all. The guess became evidence for itself, survived four rounds of the owner reporting it wrong, and — worst — **removed aish's ability to report its own ignorance**. His words: *"you basically don't allow yourself even for the application to report the problem and you break the blind spot."*
+**"I did X, Y happened, aish does not know why" must be a sayable ending in every outcome vocabulary.** A vocabulary that forces a cause will be handed a guess, and the guess then stands where the disproving evidence should be — that is the defect, not the wrong guess. When the unknown ending is too common, **improve the instrumentation; never sharpen the sentence.**
 
-**"I do not know why" is an ordinary, unembarrassed outcome and must always be available.** A vocabulary that structurally forces a cause to be named is a defect: it makes guessing the path of least resistance.
-
-**When the instrumentation cannot distinguish two explanations, change the instrumentation — never reach for a more confident guess.** Artifacts (page text, a log, a fetched copy) suggest hypotheses; only an experiment that would come out differently under a rival hypothesis settles one. Hold hypotheses freely, test them, ship none of them.
+This binds your own diagnoses too: a hypothesis is for designing the experiment that checks it, never for writing into code, issues or docs as fact. Law **L8** in `docs/agent-core.md`; the scar in `docs/browser.md` (#320, #321).
 
 ## Where the knowledge lives
 

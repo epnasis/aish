@@ -2311,25 +2311,51 @@ class TestADrivenPageThatIsAskingForAPassword:
         out = web_module.browse("https://eon.pl/mojeon")
         assert "not accepted" in out and "will not try it again" in out
 
-    def test_a_captcha_site_is_told_as_a_refusal_of_AISH_not_of_the_password(
+    def test_a_declaring_site_is_told_by_observation_never_by_the_declaration(
         self, monkeypatch
     ):
-        """#320. The note the model reads must not send him to re-record: on a
-        CAPTCHA-protected login the next attempt fails identically, and each
-        round of that advice cost him a working credential."""
+        """#320/#321. The note used to be selected by `outcome.captcha` — a
+        script tag on the page choosing a sentence that said the SITE refuses
+        automatic sign-ins. The declaration now rides inside `why`, and the
+        note is routed on what was observed of the credential; nothing may
+        send him to re-record, because nothing was learned about the value."""
         from aish import browser as browser_module
 
         self._driven(
             monkeypatch,
             renewal=browser_module.SignInResult(
-                captcha="reCAPTCHA", tried=True, why="protected by reCAPTCHA"
+                captcha="reCAPTCHA", tried=True, filled=True,
+                why="it left and nothing judged it",
             ),
         )
         out = web_module.browse("https://eon.pl/mojeon")
-        assert "CANNOT sign in to this site automatically" in out
-        assert "does NOT need replacing" in out
+        assert "did not get all the way in" in out
+        assert "it left and nothing judged it" in out
+        assert "CANNOT sign in to this site automatically" not in out
         assert "not accepted" not in out and "will not try it again" not in out
         assert "also replaces the saved sign-in" not in out
+
+    def test_a_filled_form_never_confirmed_submitted_gets_its_own_note(
+        self, monkeypatch
+    ):
+        """The eon.pl shape: typed in, gesture made, nothing observed leaving.
+        "aish did not use it" (held) and "did not get all the way in"
+        (unfinished) would both overclaim, and the note must not invite a
+        re-record — nothing was learned about the credential."""
+        from aish import browser as browser_module
+
+        self._driven(
+            monkeypatch,
+            renewal=browser_module.SignInResult(
+                filled=True, why="nothing was seen leaving the page",
+            ),
+        )
+        out = web_module.browse("https://eon.pl/mojeon")
+        assert "could not confirm the form was ever submitted" in out
+        assert "does NOT need replacing" in out
+        assert "aish did not use it" not in out
+        assert "did not get all the way in" not in out
+        assert "not accepted" not in out
 
     def test_an_attempt_that_simply_did_not_get_in_blames_nobody(self, monkeypatch):
         from aish import browser as browser_module
@@ -3524,11 +3550,13 @@ class TestWhatCoveredAControlReachesTheTrace:
         out = web_module.browse_act("Zaloguj", view=view)
         assert not hasattr(out, "meta") or "covered" not in out.meta
 
-    def test_a_covered_sign_in_is_told_as_a_refusal_by_AISH(self, monkeypatch):
+    def test_a_covered_sign_in_is_told_as_unsubmitted_never_as_refused(self, monkeypatch):
         """The note has to be the one that says the saved sign-in is untouched
-        and is not the problem — never the stale note, which says the site did
-        not accept it. Nothing here judged the password, because nothing was
-        ever submitted to the site."""
+        and does not need replacing — never the stale note, which says the
+        site did not accept it, and never the held note's "aish did not use
+        it": the form WAS filled, so that would overclaim in the other
+        direction. Nothing here judged the password, because nothing was ever
+        submitted to the site."""
         outcome = TestTheSignInAttemptIsOnTheStepItHappenedUnder._Outcome()
         outcome.captcha = ""
         outcome.covered = "clb clb-container"
@@ -3544,7 +3572,7 @@ class TestWhatCoveredAControlReachesTheTrace:
         monkeypatch.setattr(web_module.browser, "browse_open", browse_open)
         monkeypatch.setattr(web_module.browser, "sign_in", lambda _u: outcome)
         out = str(web_module.browse("https://eon.pl/mojeon", view=view))
-        assert "aish did not use it" in out
+        assert "could not confirm the form was ever submitted" in out
         assert "clb clb-container" in out
         # Never the stale note: nothing said the site refused the value.
         assert "was not accepted" not in out
@@ -3578,11 +3606,14 @@ class TestTheSignInAttemptIsOnTheStepItHappenedUnder:
 
     class _Outcome:
         ok = False
-        why = "the site refused the automation"
+        # Shaped like the real never-sent ending: an observation, with the
+        # declaration riding along as a page fact — never a stated cause.
+        why = "aish filled the form and never saw the password leave the page"
         captcha = "reCAPTCHA"
         second_factor = False
         stale = False
         tried = False
+        filled = True
         frame = "/store/frames/login.jpg"
         frame_skipped = ""
         console = ["uncaught: ReferenceError: grecaptcha is not defined"]
