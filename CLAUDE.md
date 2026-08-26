@@ -44,6 +44,10 @@ Merge back to main after tests pass, then remove the worktree. `make ship` alway
 
 **A verification run MUST NOT send a message to a chat it did not start.** Use the isolated harness in `.claude/skills/verify/SKILL.md` (its own `state_dir`, port 8899); if a check genuinely needs the live server, click ＋ for a NEW chat first and drive only that. The port is not a defence — `scripts/aish-preview.sh` points preview at PROD's `AISH_STATE_DIR` deliberately, so :8788 writes the same sessions as :8787. On 2026-07-28 a verification run drove the live UI through Chrome while the browser was parked on the owner's own shopping chat and typed five probes into it; a chat has no way to delete a message, so they are permanent, they auto-retitled the chat, and days later they were still what the owner saw when the chat flagged itself as having something new (#201).
 
+## aish reports observations, never unverified causes
+
+**Any sentence aish emits — outcomes, notes, pushes, error strings — states what was observed; a cause may be stated only where a line of code checked the thing being asserted.** "aish pressed submit and no request left the page" is a fact; "reCAPTCHA refused the sign-in" was a hypothesis shipped as an outcome and repeated to the owner about a widget that was never given anything to refuse. "I did X, Y happened, aish does not know why" must be an ordinary, sayable ending in every outcome vocabulary — a vocabulary that forces a cause will be handed a guess, and the guess then stands where the disproving evidence should be. When the unknown ending is too common, improve instrumentation; never sharpen the sentence. This binds your diagnoses too: a hypothesis is for designing the experiment that checks it, not for writing into code, issues, or docs as fact. Law L8 in `docs/agent-core.md`; the scar in `docs/browser.md` (#321).
+
 ## Where the knowledge lives
 
 **This file is a routing table, not the knowledge.** It holds the rules that apply to every task; the rationale for each area lives in `docs/` and is read on demand.

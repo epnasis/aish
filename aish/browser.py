@@ -2307,9 +2307,19 @@ class SignInResult:
     # said it judged the value. Either alone was a verdict about something
     # nobody observed — see `_sign_in_on`.
     stale: bool = False
-    # The anti-automation widget the login page declares, when the session did
-    # not come up. Not a verdict on the password: a verdict on aish.
+    # The anti-automation widget the login page DECLARES — what it loads and
+    # says about itself — when the session did not come up. An observation
+    # about the page and nothing more: it is spoken as a declaration, and it
+    # never selects the outcome or names the cause. It did both once, and the
+    # sentence it produced — "reCAPTCHA refused the sign-in" — was said to the
+    # owner for weeks about a widget that had never been given anything to
+    # refuse (#321).
     captcha: str = ""
+    # The form was FILLED and the submit gesture made. What separates "aish
+    # got as far as pressing" from "aish stopped before typing" — the two need
+    # different sentences, because "aish did not use it" is true of the second
+    # and unknowable for the first once the watch may be blind.
+    filled: bool = False
     # Was the credential SPENT? A refusal by the harness before the submit and
     # a refusal by the site after it call for opposite things to be said, and
     # "aish did not use it" is a false statement about the second.
@@ -2364,10 +2374,26 @@ class SignInResult:
 # value transformed in the page is invisible to it. The sentence it replaced
 # ("the stored one looks stale") was a false statement about the owner's
 # password, written to durable storage (#320).
+#
+# {gesture} names WHICH gesture was made, because the fact-the-gesture-the-
+# absence is the whole report and the gesture is where the eon.pl lead was:
+# "aish found no submit button" on a page whose login button the owner can
+# SEE points straight at the code's own filter, where a cause-shaped sentence
+# pointed away from it.
 NEVER_SUBMITTED = (
-    "aish filled the form and never saw the password leave the page, so it "
-    "could not confirm the form was submitted at all — nothing has been "
-    "learned about the saved sign-in"
+    "aish filled the form, {gesture}, and never saw the password leave the "
+    "page — so it could not confirm the form was submitted at all, and "
+    "nothing has been learned about the saved sign-in"
+)
+
+# The two gestures a replay can make, said as what aish DID. The Enter one
+# also says what aish did NOT find, because on a page whose button is
+# `<button type="button">` that absence is aish's own doing and the sentence
+# is where the owner can catch it.
+GESTURE_CLICKED = "pressed the form's submit button"
+GESTURE_ENTER = (
+    "found no submit button on the form so it pressed Enter in the password "
+    "field"
 )
 
 # The two observers disagree: the site answered a request that carried the
@@ -2382,32 +2408,34 @@ CONTRADICTED = (
     "nothing has been recorded about the saved sign-in"
 )
 
-# Appended to the CAPTCHA outcome when nothing was observed leaving. A widget
-# that blocks the submission and a click that did not land produce the SAME
-# page, and this is the fact that tells the owner which one he is looking at
-# once the picture is in front of him.
-NOTHING_LEFT_THE_PAGE = (
-    ", and nothing carrying the password was seen leaving the page at all"
+# Appended to the observation when the failed page declares an
+# anti-automation widget. The declaration is a real observation — the page
+# loads the vendor's script and says so — and the owner needs it: it is a lead
+# he can verify. What it may never be again is the stated cause. "The login
+# page is protected by reCAPTCHA, which refused the sign-in" was said on every
+# eon.pl attempt about a widget that was never given anything to refuse,
+# because the submit never fired (#321) — a hypothesis in aish's voice,
+# standing exactly where the evidence against it should have been. So the
+# clause states the declaration, says in the same breath that the declaration
+# is all that was observed, and stops.
+DECLARED_WIDGET = (
+    "; the page declares it is protected by {vendor} — a declaration aish "
+    "observed on the page, not something aish saw act on this attempt"
 )
 
 # The blind-matcher case (#295): the page plainly sent a body to the site's own
 # origin in the submit window, and nothing in it was recognised as carrying the
-# password. Both of these are worded to what aish OBSERVED, because the honest
-# sentence here is narrow: aish does not know the password was sent, and it no
+# password. Worded to what aish OBSERVED, because the honest sentence here is
+# narrow: aish does not know the password was sent, and it no
 # longer knows that it was not. A service worker, a WebSocket and a value
 # hashed in the page are all invisible to the matcher — the blind spots
 # `secret_needles` already declares — and this is the first outcome able to
 # notice that one of them may have just happened.
 SUBMITTED_UNRECOGNISED = (
-    "aish filled the form and pressed submit, and the page then sent something "
+    "aish filled the form, {gesture}, and the page then sent something "
     "to the site itself that aish did not recognise as carrying the password — "
     "so it cannot tell whether the password was submitted or not, and nothing "
     "has been learned about the saved sign-in"
-)
-UNRECOGNISED_LEFT_THE_PAGE = (
-    ", and although nothing was recognised as carrying the password, the page "
-    "did send something to the site itself — so aish cannot tell whether the "
-    "password was submitted"
 )
 
 
@@ -2709,6 +2737,7 @@ async def _sign_in_on(
                 return SignInResult(
                     why=COVERED_SUBMIT.format(by=cover.by),
                     covered=cover.by,
+                    filled=True,
                     url=page.url,
                 )
             # Either nothing was covering it — in which case this failed for a
@@ -2748,15 +2777,18 @@ async def _sign_in_on(
         # A credential is retired only when BOTH are true.
         after = await _rejection_marks(page)
         vendor = await _captcha_vendor(page)
-        # Four observations of THE CREDENTIAL, and the submit-window traffic is
-        # deliberately not among them (#295). Letting unrelated traffic decide
-        # whether a sign-in worked is the #296 bug. Its only reach into this
-        # function is the WORDING chosen below, on the endings that claim an
-        # absence; the verdict itself is decided without it.
+        # Three observations of THE CREDENTIAL plus the page's widget
+        # declaration, which can only disqualify one of them — and the
+        # submit-window traffic is deliberately not among any of it (#295).
+        # Letting unrelated traffic decide whether a sign-in worked is the
+        # #296 bug. Its only reach into this function is the WORDING chosen
+        # below, on the endings that claim an absence; the verdict itself is
+        # decided without it.
+        said = _said_no(before, after)
         verdict = signin_mod.judge_a_failed_sign_in(
             sent=watch.was_tried,
             refused_status=watch.was_refused,
-            said_no=_said_no(before, after),
+            said_no=said,
             captcha=vendor,
         )
         # Asked only when the fence saw nothing, because it is a statement
@@ -2774,6 +2806,7 @@ async def _sign_in_on(
                 why="the site refused the saved password, so aish will not try it again",
                 stale=True,
                 tried=True,
+                filled=True,
                 url=page.url,
             )
         if verdict == signin_mod.FAILED_CONTRADICTION:
@@ -2781,70 +2814,64 @@ async def _sign_in_on(
             # `tried` is True because the answering half is the one that saw
             # something arrive: a request that got an answer was sent, however
             # it left. Nothing is written to the record either way.
-            return SignInResult(why=CONTRADICTED, tried=True, url=page.url)
-        if verdict == signin_mod.FAILED_CAPTCHA:
-            # Named and structural, because it is the one failure aish can
-            # neither fix nor be repaired into fixing: solving a CAPTCHA is on
-            # this project's refused list. Re-recording the sign-in would fail
-            # identically, so nothing here may invite it.
-            #
-            # `why` is a REASON CLAUSE and stops there. Both notes that render
-            # it (`BROWSE_SIGNIN_CAPTCHA`, `RENEWAL_CAPTCHA_NOTE`) already open
-            # with "aish CANNOT sign in to this site automatically" and already
-            # say the saved sign-in is untouched, so saying either here put the
-            # same sentence in front of the owner twice in a row.
-            tail = ""
-            if not watch.was_tried:
-                tail = (
-                    UNRECOGNISED_LEFT_THE_PAGE if unrecognised
-                    else NOTHING_LEFT_THE_PAGE
-                ) + _submit_window(watch.traffic)
-            # **NARROWED TO THE ATTEMPT UNLESS THE WIDGET WAS SEEN TO REFUSE
-            # ANYTHING (#321).** "which refuses a scripted sign-in" is a claim
-            # about the SITE, inferred from a script tag — and eon.pl disproves
-            # it: that page signs in perfectly once the banner over its button
-            # is gone, and its reCAPTCHA never refused a thing, because nothing
-            # was ever submitted to it. The one observation that says the widget
-            # was actually given a submission to refuse is the fence watching
-            # the password LEAVE, so that is what hardens the claim. Absent it,
-            # aish says what it can support: it could not get in here.
-            #
-            # Both stay REASON CLAUSES and neither restates its note: the
-            # narrowed note already opens with "aish could not complete the
-            # sign-in here", so a `why` saying it again is exactly the
-            # repetition `test_the_captcha_reason_does_not_repeat_the_note_it_
-            # is_dropped_into` exists for, one wording along.
-            return SignInResult(
-                why=(
-                    f"the login page is protected by {vendor}, which refused "
-                    "the sign-in"
-                    if watch.was_tried
-                    else f"the login page is protected by {vendor}"
-                )
-                + tail,
-                captcha=vendor,
-                tried=watch.was_tried,
-                requests=[] if watch.was_tried else list(watch.traffic),
-                url=page.url,
-            )
+            return SignInResult(why=CONTRADICTED, tried=True, filled=True, url=page.url)
+        # The widget the page declares is APPENDED to the observation on the
+        # two endings that end without a verdict, never made into one. There
+        # used to be a FAILED_CAPTCHA verdict standing right here, selected by
+        # a script tag, and its sentence — "the login page is protected by
+        # reCAPTCHA, which refused the sign-in" — was a hypothesis in aish's
+        # own voice: on eon.pl the widget was never given anything to refuse,
+        # because the submit never fired (#321). Worse, the confident cause
+        # replaced the observations (nothing left the page; the site said
+        # nothing) that would have pointed at the true one. The declaration is
+        # still worth saying — it is a real page fact and a lead the owner can
+        # verify — so it rides along as exactly that, in `DECLARED_WIDGET`'s
+        # words, which state its own evidentiary status.
+        declared = DECLARED_WIDGET.format(vendor=vendor) if vendor else ""
         if verdict == signin_mod.FAILED_NEVER_SENT:
             # The verdict is the same either way — nothing carrying the
             # password was recognised leaving, so the credential is untouched.
             # What changes is the sentence: a page that sent NOTHING and a page
             # that sent something aish could not read demand opposite next
             # steps, and until now both read as "never sent".
+            gesture = GESTURE_CLICKED if submit is not None else GESTURE_ENTER
             return SignInResult(
                 why=(SUBMITTED_UNRECOGNISED if unrecognised else NEVER_SUBMITTED)
-                + _submit_window(watch.traffic),
+                .format(gesture=gesture)
+                + _submit_window(watch.traffic)
+                + declared,
+                captcha=vendor,
+                filled=True,
                 requests=list(watch.traffic),
                 url=page.url,
             )
-        return SignInResult(
-            why=(
+        # FAILED_UNEXPLAINED: it left, and nothing aish trusts judged it.
+        # Saying "no reason given" plainly — rather than reaching for the most
+        # plausible cause in view — is what keeps the blind spot visible: if
+        # this ending is common somewhere, the instrumentation needs to say
+        # more, not the sentence. Two wordings, because the observations
+        # differ: `said` can be true here only on a widget-declaring page
+        # (anywhere else it is a refusal), and there a fresh error message is
+        # a real observation that "gave no reason" would erase — but not one
+        # aish can read as being about the password, and the sentence says
+        # both halves rather than picking one.
+        if said:
+            why = (
+                "the sign-in did not go through — the page showed a new "
+                "message after the submit, but aish cannot tell whether it "
+                "was about the password, so the saved password was not judged "
+                "and is untouched"
+            )
+        else:
+            why = (
                 "the sign-in did not go through and the site gave no reason for "
                 "it — the saved password was never judged and is untouched"
-            ),
+            )
+        return SignInResult(
+            why=why + declared,
+            captcha=vendor,
             tried=True,
+            filled=True,
             url=page.url,
         )
     try:
@@ -2852,8 +2879,8 @@ async def _sign_in_on(
     except Exception:  # noqa: BLE001
         wants_code = False
     if wants_code:
-        return SignInResult(second_factor=True, tried=True, url=page.url)
-    return SignInResult(ok=True, tried=True, url=page.url)
+        return SignInResult(second_factor=True, tried=True, filled=True, url=page.url)
+    return SignInResult(ok=True, tried=True, filled=True, url=page.url)
 
 
 async def _captcha_vendor(page: Any) -> str:
@@ -3063,10 +3090,19 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
         return None
     pair = signin_mod.credential(record.origin)
     if pair is None:
+        # The record says WHY it was marked, so that is what is said — "was
+        # not accepted last time" was this line's own words for every suspect
+        # record, including ones marked for reasons that were not the site
+        # refusing anything (a blocked destination, for one). And a record
+        # that is not suspect at all reaches here only when the Keychain
+        # answered nothing, which is its own fact and not a refusal by anyone.
+        marked = record.suspect or (
+            "aish could not read the saved password back from the Keychain"
+        )
         return SignInResult(
             why=(
-                f"the saved sign-in for {record.origin} was not accepted last time, so "
-                f"aish will not try it again — sign in at /browser {host_of(url)} and it "
+                f"the saved sign-in for {record.origin} is not being tried again — "
+                f"{marked}. Sign in at /browser {host_of(url)} and it "
                 "will be saved afresh"
             )
         )
@@ -3151,13 +3187,13 @@ def _record_the_outcome(
 
     **A password box is not a verdict** (#320). `result.stale` arrives set only
     when the fence WATCHED the password go out AND the site positively said it
-    judged the value, so that is what gets written here. A CAPTCHA-refused
-    attempt, a submit that never fired, a press something was COVERING (#321),
-    and one that simply did not get in all
+    judged the value, so that is what gets written here. A submit that never
+    fired, a press something was COVERING (#321), and one that simply did not
+    get in all
     leave the record completely alone: nothing was learned about the password,
     and marking it destroys a credential whose only repair — re-recording it —
-    then fails in exactly the same way. This function does not re-derive the
-    verdict; it writes what it is handed.
+    fixes nothing that was observed to be wrong. This function does not
+    re-derive the verdict; it writes what it is handed.
 
     The picture of the attempt is pointed at FIRST and unconditionally, so an
     ending that returns early below still replaces whatever the previous
@@ -3200,21 +3236,18 @@ def _announce(record: Any, result: SignInResult, *, incident: str = "") -> None:
         )
     elif result.ok:
         title, body = f"aish signed in to {host}", "the session had lapsed"
-    elif result.captcha:
-        # The one push that must NOT read as "go and fix your password". His
-        # saved sign-in is still good for his own hands; it is the automation
-        # the site refuses, and asking him to save it again costs him the
-        # credential for nothing.
-        title = f"{host} refuses an automatic sign-in"
-        body = (
-            f"its login page is protected by {result.captcha}. Your saved "
-            f"sign-in is untouched and does not need replacing — open /browser "
-            f"{host} to sign in yourself"
-        )
     elif result.second_factor:
         title, body = f"{host} wants a code", "aish got as far as the second factor"
     else:
-        title, body = f"aish could not sign in to {host}", result.why
+        # Every failure is pushed as the OBSERVATION `why` carries, plus the
+        # one step that is his either way. A dedicated CAPTCHA push used to
+        # sit here titled "{host} refuses an automatic sign-in" — a claim
+        # about the site that nothing checked, sent to his phone on every
+        # eon.pl attempt while the actual failure was a submit that never
+        # fired (#321). A cause aish verified (the 401 ending) arrives here
+        # too, inside `why`, because there the code checked it.
+        title = f"aish could not sign in to {host}"
+        body = f"{result.why} — open /browser {host} to sign in yourself"
     if result.frame and not result.ok:
         # Appended AFTER the branches, not inside one: the picture exists for
         # every ending, and the endings that most need looking at are exactly
@@ -5089,10 +5122,14 @@ def browse_act(
             return await shot(
                 owner,
                 session,
+                # The parenthesis is the OBSERVATION (`unreachable`'s closed
+                # vocabulary) and it is all that is claimed. This used to add
+                # "the menu or panel holding it has closed" — a cause none of
+                # those reason codes establishes, the same retired guess as
+                # `STUCK_NOT_COVERED`'s "something may be covering it".
                 problem=(
                     f"{control.address!r} is still on the page but cannot be "
-                    f"pressed now ({gone}) — the menu or panel holding it has "
-                    "closed since you last saw it. Here is the page as it is "
+                    f"pressed now ({gone}). Here is the page as it is "
                     "now; act on something from THIS list."
                 ),
             )

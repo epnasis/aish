@@ -791,9 +791,15 @@ class Governor:
                         raise Cancelled(f"{key}: stopped while waiting for headroom")
                     now = self._clock()
                     if (left := self._exhausted_left(now, key)) is not None:
+                        # Worded to what `exhausted` actually checks: a quota
+                        # the provider scoped to the day, or a wait too long
+                        # to honour. "Spent rather than busy", which stood
+                        # here, asserted the first for both — and for a bare
+                        # long hint nothing checked whose budget was empty.
                         raise RateLimited(
-                            f"{key}: this quota is spent rather than busy — it does not "
-                            f"reset for about {left / 60:.0f} min, so nothing was sent",
+                            f"{key}: this quota cannot be waited out inside this "
+                            f"task — it is not expected to reset for about "
+                            f"{left / 60:.0f} min, so nothing was sent",
                             retry_after_s=left,
                         )
                     wait_for = None

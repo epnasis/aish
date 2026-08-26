@@ -749,33 +749,35 @@ class TestAPasswordBoxIsNotAVerdict:
         ))
         assert not result.ok and not result.stale
         assert result.captcha == "reCAPTCHA"
-        assert "protected by reCAPTCHA" in result.why
-        # The password was OBSERVED leaving (the default watch), so the widget
-        # was given a submission and the claim that it refused one is earned.
+        # The password was OBSERVED leaving (the default watch), so the ending
+        # is the observation: it left, nothing judged it. The declaration is
+        # spoken as a page fact — never as what stopped the sign-in.
         assert result.tried is True
-        assert "refused the sign-in" in result.why
+        assert "gave no reason" in result.why
 
-    def test_the_captcha_reason_does_not_repeat_the_note_it_is_dropped_into(self):
-        """The owner saw the same sentence twice in a row: the note opens with
-        "aish CANNOT sign in to this site automatically" and `why` said it
-        again. `why` is a reason clause and the note owns the conclusion."""
-        from aish import web as web_module
+    def test_the_declaration_is_spoken_as_a_declaration_and_never_as_the_cause(self):
+        """The systemic defect behind #321: "the login page is protected by
+        reCAPTCHA, which refused the sign-in" was said to the owner on every
+        eon.pl attempt, about a widget that was never given anything to refuse
+        — the submit never fired. The declaration is a real observation and it
+        stays; the causal clause is what nothing checked, so no wording of it
+        may survive. The sentence must also say what the declaration IS, so
+        the model cannot re-promote it to a cause on the way to the owner."""
+        for watch in (None, self._watch(armed=True)):  # sent, and never-sent
+            result = self._run(
+                self._failed(captcha=["https://www.google.com/recaptcha/api.js"]),
+                **({"watch": watch} if watch is not None else {}),
+            )
+            assert "declares it is protected by reCAPTCHA" in result.why
+            assert "not something aish saw act" in result.why
+            for cause in ("which refused", "refuses", "cannot sign in"):
+                assert cause not in result.why
 
-        result = self._run(self._failed(
-            captcha=["https://www.google.com/recaptcha/api.js"],
-        ))
-        for template in (
-            web_module.BROWSE_SIGNIN_CAPTCHA_REFUSED,
-            web_module.RENEWAL_CAPTCHA_REFUSED,
-        ):
-            note = template.format(host="eon.pl", why=result.why).lower()
-            assert note.count("sign in to this site automatically") == 1
-            # And the note, not `why`, is where "untouched" is said — once.
-            assert note.count("untouched") == 1
-
-    def test_the_narrowed_captcha_note_does_not_repeat_itself_either(self):
-        """The pair selected when nothing was seen leaving. Same discipline:
-        the note owns the conclusion, `why` supplies only the reason."""
+    def test_the_unsubmitted_note_does_not_repeat_the_reason_it_is_dropped_into(self):
+        """`why` is a reason clause and the note owns the conclusion — the
+        discipline that outlived the CAPTCHA notes it was learned on. The
+        never-sent `why` is dropped into the UNSUBMITTED pair, and "untouched"
+        must reach the owner once, from the note."""
         from aish import web as web_module
 
         result = self._run(
@@ -784,11 +786,12 @@ class TestAPasswordBoxIsNotAVerdict:
         )
         assert result.tried is False
         for template in (
-            web_module.BROWSE_SIGNIN_CAPTCHA, web_module.RENEWAL_CAPTCHA_NOTE,
+            web_module.BROWSE_SIGNIN_UNSUBMITTED,
+            web_module.RENEWAL_UNSUBMITTED_NOTE,
         ):
             note = template.format(host="eon.pl", why=result.why).lower()
-            assert note.count("could not complete the sign-in here") == 1
             assert note.count("untouched") == 1
+            assert note.count("could not confirm the form was ever submitted") == 1
 
     def test_the_declaration_is_matched_in_the_owners_own_language(self):
         """eon.pl says it in Polish. The brand is the only token in that
@@ -853,14 +856,19 @@ class TestAPasswordBoxIsNotAVerdict:
         rebuilds the exact conflation this fixes."""
         assert self._run(self._failed(), statuses=[403, 429]).stale is False
 
-    def test_a_captcha_outranks_a_reason_the_page_gave(self):
-        """A CAPTCHA refusal often renders an error of its own. Nothing was
-        learned about the password either way, so the credential survives."""
+    def test_a_captcha_declaration_disqualifies_a_reason_the_page_gave(self):
+        """A widget's refusal renders an error of its own, through the same
+        alert region a wrong password does — so on a declaring page the alert
+        is not evidence about the value, and the credential survives. What the
+        declaration must NOT do is become the stated cause: the sentence says
+        a message appeared and that aish cannot read it, and stops."""
         result = self._run(self._failed(
             captcha=["https://www.google.com/recaptcha/api.js"],
             alerts_after=["Nie udało się zalogować"],
         ))
         assert result.captcha == "reCAPTCHA" and not result.stale
+        assert "cannot tell whether it was about the password" in result.why
+        assert "refused" not in result.why
 
 
 class TestWhatThePageDIDAtTheMomentOfSubmit:
@@ -997,19 +1005,29 @@ class TestTheTwoHalvesMustAGREE:
             sent=True, refused_status=True, captcha="reCAPTCHA"
         ) == signin.FAILED_REFUSED
 
-    def test_an_ARIA_error_does_NOT_outrank_it(self):
+    def test_an_ARIA_error_on_a_declaring_page_is_DISQUALIFIED_not_outranked(self):
         """A widget refusing a scripted submission renders a generic 'try
-        again' through the same alert region a wrong password does. Same
-        reasoning that excluded 403, one level down."""
+        again' through the same alert region a wrong password does — so on a
+        declaring page the alert stops counting as a judgement of the value.
+        What it must never do is produce a captcha VERDICT: the attempt ends
+        as the observation it was, and the declaration rides along as a page
+        fact. FAILED_CAPTCHA was returned here once, and it is the branch that
+        told the owner reCAPTCHA had refused a sign-in that was never
+        submitted (#321)."""
         assert self.judge(
             sent=True, said_no=True, captcha="reCAPTCHA"
-        ) == signin.FAILED_CAPTCHA
+        ) == signin.FAILED_UNEXPLAINED
+        assert self.judge(
+            said_no=True, captcha="reCAPTCHA"
+        ) == signin.FAILED_NEVER_SENT
 
-    def test_a_captcha_that_sent_nothing_is_still_the_captcha_outcome(self):
-        """A widget that blocks the submission and a click that never landed
-        produce the same page. The declaration is the more actionable of the
-        two, and the message says the other fact in the same breath."""
-        assert self.judge(captcha="reCAPTCHA") == signin.FAILED_CAPTCHA
+    def test_a_declaration_alone_never_selects_a_verdict(self):
+        """A script tag on the page is an observation about the PAGE. The
+        verdict is the pair of observations about the CREDENTIAL, whatever the
+        page decorates itself with."""
+        assert self.judge(captcha="reCAPTCHA") == signin.FAILED_NEVER_SENT
+        assert self.judge(sent=True, captcha="reCAPTCHA") == signin.FAILED_UNEXPLAINED
+        assert "captcha" not in signin.FAILURE_VERDICTS
 
     def test_every_verdict_is_one_the_vocabulary_knows(self):
         seen = {
@@ -1022,9 +1040,11 @@ class TestTheTwoHalvesMustAGREE:
         assert seen <= signin.FAILURE_VERDICTS
         assert seen == signin.FAILURE_VERDICTS  # every one is reachable
 
-    def test_the_captcha_message_says_when_nothing_was_seen_leaving(self):
-        """The live ambiguity on eon.pl: two wrong diagnoses were argued from
-        page text alone because nothing recorded whether anything was sent."""
+    def test_a_declaring_page_that_sent_nothing_leads_with_the_absence(self):
+        """The live case on eon.pl: form filled, gesture made, nothing left the
+        page — and the sentence used to lead with the reCAPTCHA declaration,
+        which is how the wrong cause reached the owner on every attempt. The
+        OBSERVATION leads; the declaration follows as a page fact."""
         from aish import browser
 
         page = TestTheReplayItself.FakePage(
@@ -1035,11 +1055,32 @@ class TestTheTwoHalvesMustAGREE:
             page, watch=browser._CredentialWatch(armed=True)
         )
         assert result.captcha == "reCAPTCHA" and not result.stale
-        assert browser.NOTHING_LEFT_THE_PAGE in result.why
+        assert result.why.startswith(
+            browser.NEVER_SUBMITTED.format(gesture=browser.GESTURE_CLICKED)
+        )
+        assert "declares it is protected by reCAPTCHA" in result.why
         assert result.tried is False
 
-    def test_the_same_page_that_DID_send_does_not_say_it(self):
+    def test_the_sentence_names_the_gesture_that_was_actually_made(self):
+        """The owner's own spec for this report: the fact, the GESTURE, and
+        the absence. On eon.pl the gesture was the lead — "found no submit
+        button" on a page whose login button he can see points at the filter
+        that excluded it, where the cause-shaped sentence pointed away."""
         from aish import browser
+
+        page = TestTheReplayItself.FakePage(
+            url="https://eon.pl/login",
+            form={**TestTheReplayItself.OK_FORM, "submit": False},
+            has_password_after=True,
+        )
+        result = TestTheReplayItself()._run(
+            page, watch=browser._CredentialWatch(armed=True)
+        )
+        assert "found no submit button" in result.why
+        assert "pressed Enter in the password field" in result.why
+        assert "never saw the password leave" in result.why
+
+    def test_the_same_page_that_DID_send_does_not_claim_the_absence(self):
 
         page = TestTheReplayItself.FakePage(
             url="https://eon.pl/login", form=TestTheReplayItself.OK_FORM,
@@ -1047,7 +1088,7 @@ class TestTheTwoHalvesMustAGREE:
         )
         result = TestTheReplayItself()._run(page)  # the default watch HAS sent
         assert result.captcha == "reCAPTCHA"
-        assert browser.NOTHING_LEFT_THE_PAGE not in result.why
+        assert "never saw the password leave" not in result.why
         assert result.tried is True
 
     def test_a_contradiction_reaches_the_owner_as_a_contradiction(self):
@@ -2273,7 +2314,7 @@ class TestAFailedAttemptLeavesTheOwnersRecordAlone:
         fields.pop("last_frame_skipped", None)
         return fields
 
-    def test_a_captcha_refusal_costs_him_nothing(self, monkeypatch):
+    def test_a_failure_on_a_declaring_page_costs_him_nothing(self, monkeypatch):
 
         page = _SignInPage(
             has_password_after=True,
@@ -2291,9 +2332,13 @@ class TestAFailedAttemptLeavesTheOwnersRecordAlone:
             signin.find("https://eon.pl")
         ) == self.AS_HE_RECORDED_IT
         assert signin.credential("https://eon.pl") == ("him", "hunter2hunter2")
-        # And he is told the true thing, without being sent to re-record.
-        assert pushes and "does not need replacing" in pushes[0][1]
-        assert "reCAPTCHA" in pushes[0][1]
+        # And the push is the observation, the declaration as a declaration,
+        # and the one step that is his — never the cause the retired push
+        # asserted ("{host} refuses an automatic sign-in") on a widget nothing
+        # saw act.
+        assert pushes and "untouched" in pushes[0][1]
+        assert "declares it is protected by reCAPTCHA" in pushes[0][1]
+        assert "refuses" not in pushes[0][0] and "refused" not in pushes[0][1]
         assert "hunter2hunter2" not in "".join(t + b for t, b in pushes)
 
     def test_a_failure_the_site_gave_no_reason_for_costs_him_nothing_either(
@@ -2507,18 +2552,19 @@ class TestTheSubmitWindowIsRECORDEDButNeverJudged:
         assert browser.SignInResult(stale=True).requests == []
         assert signin.find("https://eon.pl").suspect
 
-    def test_a_captcha_page_says_which_of_the_two_it_was(self, monkeypatch):
-        """A widget blocking the submission and a click that never landed
-        produce the same page. On eon.pl this was the live ambiguity."""
-        from aish import browser
-
+    def test_a_declaring_page_still_says_which_of_the_two_it_was(self, monkeypatch):
+        """A silent window and an unrecognised submission demand opposite next
+        steps, and the declaration on the page must not collapse them back
+        into one sentence — that collapse is exactly what the retired captcha
+        outcome did on eon.pl."""
         silent = _SignInPage(
             submits=False, has_password_after=True,
             captcha=["https://www.google.com/recaptcha/api.js"],
         )
         result, _ = self._drive(monkeypatch, page=silent)
         assert result.captcha == "reCAPTCHA"
-        assert browser.NOTHING_LEFT_THE_PAGE in result.why
+        assert "no other request at all in the submit window" in result.why
+        assert "declares it is protected by reCAPTCHA" in result.why
 
         posted = _SignInPage(
             [("https://eon.pl/api/login", "u=him&h=9f3c")],
@@ -2527,8 +2573,8 @@ class TestTheSubmitWindowIsRECORDEDButNeverJudged:
         )
         result, _ = self._drive(monkeypatch, page=posted)
         assert result.captcha == "reCAPTCHA" and not result.stale
-        assert browser.NOTHING_LEFT_THE_PAGE not in result.why
         assert "cannot tell whether the password was submitted" in result.why
+        assert "declares it is protected by reCAPTCHA" in result.why
 
 
 class _SignInOwner:
