@@ -659,8 +659,25 @@ def _call_facts(result: str, run_meta: dict | None) -> tuple[str, str]:
     return str(status), decision
 
 
-def _gate_outcome(text: str, decision: str) -> tools.ToolOutcome:
+def _owner_comment(comment: str) -> str:
+    """The owner's own sentence, on its way into the record (#323).
+
+    Owner-authored is not the same as safe to store: the card is a text box he
+    may have pasted a value into, and a value that reaches the log is on disk
+    in plain text forever. Scrubbed through the SAME path as every other free
+    text (`secrets.scrub`) rather than a second one, then capped.
+    """
+    return secrets.scrub(str(comment))[:COMMENT_CHARS]
+
+
+def _gate_outcome(text: str, decision: str, comment: str = "") -> tools.ToolOutcome:
     """A refusal, carrying its own verdict (#192, contract §6.13).
+
+    `comment` is the owner's sentence off the approval card, carried as its own
+    key rather than folded into the result text (#323). It rides the envelope
+    for the same reason the verdict does: the meta travels WITH the value, so
+    it is correct on the parallel read path where an instance attribute would
+    be a race.
 
     Five refusal constants used to be logged by prefix sniff alone —
     `USER DENIED`, `NOT RUN` and `BLOCKED` all start with none of the sniffed
@@ -673,12 +690,17 @@ def _gate_outcome(text: str, decision: str) -> tools.ToolOutcome:
     Built LAST, after any `_with_feedback` concatenation: ToolOutcome is a str
     subclass, so string operations return a plain str and silently drop it.
     """
-    return tools.ToolOutcome(
-        text,
-        status=tools.STATUS_FAILED,
-        verdict_by=tools.VERDICT_GATE,
-        decision=decision,
-    )
+    meta: dict[str, Any] = {
+        "status": tools.STATUS_FAILED,
+        "verdict_by": tools.VERDICT_GATE,
+        "decision": decision,
+    }
+    # Only when he actually typed one: an empty key would read as a comment
+    # that said nothing, which is a different fact from no comment at all
+    # (contract corollary 2).
+    if comment:
+        meta["comment"] = comment
+    return tools.ToolOutcome(text, **meta)
 
 
 def _display_path(path: Path) -> str:
@@ -1615,6 +1637,10 @@ REASONING_CHARS = 262144
 # body does not put a second copy of the file in the log — the diff already
 # records that. Applied per value, so a long one never displaces its siblings.
 CALL_ARG_CHARS = 8000
+# The owner's sentence on an approval card, as it enters the record (#323,
+# contract §8.5). A card is a phone-sized text box, so this is generous for the
+# real thing and bounded against a paste.
+COMMENT_CHARS = 400
 # The chat's opened-links ledger (#267): how long a successful fetch keeps
 # vouching for its URL, and how many URLs are remembered at once.
 #
@@ -2139,6 +2165,15 @@ class Agent:
         # by the main loop only on a text-only turn (deny means stop). While
         # armed, _stop_gate refuses every tool call.
         self._pending_comment_response = False
+        # What the gate's own records name (#323): which call armed it, the
+        # owner's sentence (already scrubbed), and how many calls it has
+        # refused since. Carried rather than re-derived at each refusal.
+        self._stop_gate_armed_call = 0
+        self._stop_gate_comment = ""
+        self._stop_gate_refusals = 0
+        # tool name -> the call number of an action HELD for adjustment and not
+        # yet stood in for (#323). Consumed by the next call to that tool.
+        self._held_calls: dict[str, int] = {}
         self.base_context = context
         # The scratch workspace (issue #70): a private dir where the model may
         # create AND delete throwaway files without prompting.
@@ -2691,6 +2726,12 @@ class Agent:
         # A new task starts un-gated: any pending comment belonged to the last
         # task and would otherwise stall the first tool call of this one.
         self._pending_comment_response = False
+        self._stop_gate_armed_call = 0
+        self._stop_gate_comment = ""
+        self._stop_gate_refusals = 0
+        # A hold belongs to the turn it was proposed in — `call` numbers restart
+        # here, so a stale entry would join a replacement to another turn's id.
+        self._held_calls = {}
         # Taint belongs to the task that acquired it. A page read while
         # answering one question must not put a card in front of the next.
         self._tainted = False
@@ -2959,6 +3000,22 @@ class Agent:
             was_stopped = self._pending_comment_response
             if content and not tool_calls:
                 self._pending_comment_response = False
+                # Emitted from the line that clears it, so `cleared_by` states
+                # what this branch actually tested and not a later guess
+                # (§6.1). Without it the gate's lifting is invisible and the
+                # log shows refusals that simply stop.
+                if was_stopped:
+                    self._record_stop_gate(
+                        "allowed",
+                        # No call: the turn that lifts the gate ran no tool, and
+                        # `call` is the join to the action a verdict governed.
+                        call=0,
+                        round_=self._stop_gate_refusals,
+                        evidence={
+                            "cleared_by": "text_only_turn",
+                            "armed_by_call": self._stop_gate_armed_call,
+                        },
+                    )
 
             if not tool_calls:
                 result = content or EMPTY_RESPONSE
@@ -4503,6 +4560,24 @@ class Agent:
                 if len(output) > STEP_OUTPUT_CAP:
                     output = output[:STEP_OUTPUT_CAP] + "\n… (truncated)"
                 step["output"] = output
+        # The owner's sentence off the approval card, scrubbed and capped in
+        # the ONE funnel every carrier passes through (#323) — the envelope
+        # (`_gate_outcome`), `_run_meta` (run_command), and the write path's
+        # own key all land here, so a second site cannot be added without it.
+        comment = step.get("comment")
+        if comment:
+            step["comment"] = _owner_comment(comment)
+        # The action this one stands in place of (#323). Registered and read in
+        # the same funnel, so the join needs no plumbing through ~10 gates.
+        # What it ASSERTS is only what was observed: the first later call to
+        # the SAME tool in this turn while a hold was outstanding. It is not a
+        # claim that the model actually reworked anything — the held call's own
+        # args are recorded, so whether it did is the reader's lookup.
+        replaced = self._held_calls.pop(name, 0)
+        if replaced and replaced != call_no:
+            step["replaces"] = replaced
+        if step.get("decision") == "held":
+            self._held_calls[name] = call_no
         # ONE rule, applied last, over every path that can refuse: if the
         # action did not happen, the step is not green. This is wider than the
         # five plugin constants the contract enumerates (§6.13) — `run_command`
@@ -5913,12 +5988,15 @@ class Agent:
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
-                _with_feedback(EGRESS_DENIED, decision.comment), decision="denied"
+                _with_feedback(EGRESS_DENIED, decision.comment),
+                decision="denied",
+                comment=decision.comment,
             )
         if isinstance(decision, Approved):
             return _gate_outcome(
                 TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
                 decision="held",
+                comment=decision.comment,
             )
         if decision is None or decision is False:
             return _gate_outcome(EGRESS_DENIED, decision="denied")
@@ -5976,12 +6054,15 @@ class Agent:
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
-                _with_feedback(MAIL_LINK_DENIED, decision.comment), decision="denied"
+                _with_feedback(MAIL_LINK_DENIED, decision.comment),
+                decision="denied",
+                comment=decision.comment,
             )
         if isinstance(decision, Approved):
             return _gate_outcome(
                 TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
                 decision="held",
+                comment=decision.comment,
             )
         if decision is None or decision is False:
             return _gate_outcome(MAIL_LINK_DENIED, decision="denied")
@@ -6342,12 +6423,15 @@ class Agent:
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
-                _with_feedback(denial, decision.comment), decision="denied"
+                _with_feedback(denial, decision.comment),
+                decision="denied",
+                comment=decision.comment,
             )
         if isinstance(decision, Approved):
             return _gate_outcome(
                 TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
                 decision="held",
+                comment=decision.comment,
             )
         if decision is None or decision is False:
             return _gate_outcome(denial, decision="denied")
@@ -6400,12 +6484,15 @@ class Agent:
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
-                _with_feedback(REMEMBER_DENIED, decision.comment), decision="denied"
+                _with_feedback(REMEMBER_DENIED, decision.comment),
+                decision="denied",
+                comment=decision.comment,
             )
         if isinstance(decision, Approved):
             return _gate_outcome(
                 TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
                 decision="held",
+                comment=decision.comment,
             )
         if decision is None or decision is False:
             return _gate_outcome(REMEMBER_DENIED, decision="denied")
@@ -7346,14 +7433,14 @@ class Agent:
             )
             self._record_gate(verdict, name, args, "refused", escalated=True,
                               message=message)
-            return _gate_outcome(message, decision="denied")
+            return _gate_outcome(message, decision="denied", comment=decision.comment)
         if isinstance(decision, Approved):
             message = TOOL_HELD_FOR_ADJUSTMENT.format(
                 name=name, comment=decision.comment
             )
             self._record_gate(verdict, name, args, "held", escalated=True,
                               message=message)
-            return _gate_outcome(message, decision="held")
+            return _gate_outcome(message, decision="held", comment=decision.comment)
         if decision is None or decision is False:
             message = rules.OWNER_HELD.format(rule=binding.name, tool=name)
             self._record_gate(verdict, name, args, "refused", escalated=True,
@@ -7394,11 +7481,11 @@ class Agent:
                 rules.OWNER_DENIED.format(rule=binding.name, tool=name), decision.comment
             )
             self._record_gate(verdict, name, args, "refused", escalated=True, message=message)
-            return _gate_outcome(message, decision="denied")
+            return _gate_outcome(message, decision="denied", comment=decision.comment)
         if isinstance(decision, Approved):
             message = TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment)
             self._record_gate(verdict, name, args, "held", escalated=True, message=message)
-            return _gate_outcome(message, decision="held")
+            return _gate_outcome(message, decision="held", comment=decision.comment)
         if decision is None or decision is False:
             message = rules.OWNER_DENIED.format(rule=binding.name, tool=name)
             self._record_gate(verdict, name, args, "refused", escalated=True, message=message)
@@ -7453,9 +7540,65 @@ class Agent:
         the model addresses it in plain text (issue #81). No-op for a bare
         denial, matching the note that only fires on a comment. Approvals never
         arm this — they mean continue (the command is held for adjustment,
-        re-proposed, and approved again)."""
+        re-proposed, and approved again).
+
+        The record is written HERE, on the line that makes the decision, and
+        that is what earns `armed_by: "denial_comment"` (contract §6.1). A
+        record assembled anywhere else would be a reconstruction stating a
+        cause nothing checked — the failure CLAUDE.md's *No evidence, no claim*
+        exists to stop. Not armed, no record: absence means disarmed, which
+        §3.3 makes readable from `_pending_comment_response` alone.
+        """
         if comment:
             self._pending_comment_response = True
+            self._stop_gate_armed_call = self._current_call()
+            self._stop_gate_comment = _owner_comment(comment)
+            self._stop_gate_refusals = 0
+            self._record_stop_gate(
+                "refused", call=self._stop_gate_armed_call, round_=0
+            )
+
+    def _record_stop_gate(
+        self,
+        verdict: str,
+        call: int,
+        round_: int,
+        tool: str = "",
+        args: dict | None = None,
+        evidence: dict | None = None,
+    ) -> None:
+        """The stop gate's own §3.3 `gate` record — the arming, each refusal it
+        then makes, and the clearing (§6.1, which graded all three invisible).
+
+        `max_rounds: 0` says the gate is UNBOUNDED, which is the whole of its
+        design: it never lifts by exhausting a counter, only by a text-only
+        turn. Recorded rather than omitted so "did it lift because he was
+        answered, or because it ran out?" — the question §6.2 says the skill
+        gate cannot answer — is a lookup here.
+        """
+        self._emit_record(
+            kind="gate",
+            call=call,
+            at="gate",
+            gate="stop_gate",
+            binding=None,
+            rule=None,
+            tool=tool,
+            action=rules.cap_action(args),
+            verdict=verdict,
+            tier=0,
+            evidence=self._stop_gate_evidence() if evidence is None else evidence,
+            round=round_,
+            max_rounds=0,
+            escalated=False,
+        )
+
+    def _stop_gate_evidence(self) -> dict:
+        return {
+            "armed_by_call": self._stop_gate_armed_call,
+            "armed_by": "denial_comment",
+            "comment": self._stop_gate_comment,
+        }
 
     def _stop_gate(self, name: str, args: dict) -> str | None:
         """Refusal while a denial's concern is unaddressed, else None.
@@ -7475,6 +7618,17 @@ class Agent:
                 "output": "Held until you address the user's concern.",
             }
         self._note("✋ stopped until you address the user's concern")
+        # Each refusal, naming the denial that armed it (§6.1). Four refused
+        # steps in a row used to record the effect and never the decision, so
+        # "why was everything refused?" meant reading the conversation back.
+        self._stop_gate_refusals += 1
+        self._record_stop_gate(
+            "refused",
+            call=self._current_call(),
+            round_=self._stop_gate_refusals,
+            tool=name,
+            args=args,
+        )
         # Carried structurally rather than sniffed: the stop gate fires on
         # EVERY tool, parallel reads included, where an instance attribute
         # would race between concurrent calls.
@@ -7697,8 +7851,14 @@ class Agent:
                 # Deny + comment = STOP: address the concern, then halt. The stop
                 # gate holds every tool until a text-only reply, which ends the
                 # task so the user can steer before anything else runs.
+                # The comment is its OWN key (#323). It used to be written to
+                # `output`, which means what the command printed — so that field
+                # could only be read correctly by a reader who already knew
+                # `decision`, and a field whose meaning depends on another field
+                # is unreadable in the place a dossier looks first.
                 self._run_meta = {
-                    "command": command, "decision": "denied", "output": decision.comment or "",
+                    "command": command, "decision": "denied", "output": "",
+                    "comment": decision.comment,
                 }
                 self._arm_stop_gate(decision.comment)
                 return _with_feedback(DENIED_RESULT, decision.comment)
@@ -7708,7 +7868,8 @@ class Agent:
                 # asked and re-proposes, and that adjusted command is approved
                 # again before it runs (issue #81). Approval never stops the task.
                 self._run_meta = {
-                    "command": command, "decision": "held", "output": decision.comment,
+                    "command": command, "decision": "held", "output": "",
+                    "comment": decision.comment,
                 }
                 return HELD_FOR_ADJUSTMENT.format(comment=decision.comment)
             if decision is None or decision is False:
@@ -7838,7 +7999,9 @@ class Agent:
                 # Deny + comment = STOP (issue #81): address the concern, then halt.
                 self._arm_stop_gate(decision.comment)
                 return _gate_outcome(
-                    _with_feedback(DENIED_RESULT, decision.comment), decision="denied"
+                    _with_feedback(DENIED_RESULT, decision.comment),
+                    decision="denied",
+                    comment=decision.comment,
                 )
             if isinstance(decision, Approved):
                 # Approve + comment = CONTINUE but adjust: the original args are
@@ -7848,6 +8011,7 @@ class Agent:
                         name=tool.name, comment=decision.comment
                     ),
                     decision="held",
+                    comment=decision.comment,
                 )
             if decision is None or decision is False:
                 return _gate_outcome(DENIED_RESULT, decision="denied")
@@ -8020,9 +8184,20 @@ class Agent:
         decision = self.approve_write(plan)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
-            return _with_feedback(WRITE_DENIED, decision.comment)
+            # Enveloped for the same reason every other refusal is (#192): the
+            # bare string sniffs as a SUCCESS, so a denied tool/rule file logged
+            # green. And it carries the comment as its own key (#323).
+            return _gate_outcome(
+                _with_feedback(WRITE_DENIED, decision.comment),
+                decision="denied",
+                comment=decision.comment,
+            )
         if isinstance(decision, Approved):
-            return WRITE_HELD_FOR_ADJUSTMENT.format(comment=decision.comment)
+            return _gate_outcome(
+                WRITE_HELD_FOR_ADJUSTMENT.format(comment=decision.comment),
+                decision="held",
+                comment=decision.comment,
+            )
         if not decision:
             return WRITE_DENIED
         files.commit(plan)
@@ -8107,9 +8282,20 @@ class Agent:
         decision = self.approve_write(plan)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
-            return _with_feedback(WRITE_DENIED, decision.comment)
+            # Enveloped for the same reason every other refusal is (#192): the
+            # bare string sniffs as a SUCCESS, so a denied tool/rule file logged
+            # green. And it carries the comment as its own key (#323).
+            return _gate_outcome(
+                _with_feedback(WRITE_DENIED, decision.comment),
+                decision="denied",
+                comment=decision.comment,
+            )
         if isinstance(decision, Approved):
-            return WRITE_HELD_FOR_ADJUSTMENT.format(comment=decision.comment)
+            return _gate_outcome(
+                WRITE_HELD_FOR_ADJUSTMENT.format(comment=decision.comment),
+                decision="held",
+                comment=decision.comment,
+            )
         if not decision:
             return WRITE_DENIED
         files.commit(plan)
@@ -8362,9 +8548,13 @@ class Agent:
             )
             if isinstance(decision, Denied):
                 self._arm_stop_gate(decision.comment)
-                return _with_feedback(
-                    f"Import of {name!r} was DENIED — nothing was installed.",
-                    decision.comment,
+                return _gate_outcome(
+                    _with_feedback(
+                        f"Import of {name!r} was DENIED — nothing was installed.",
+                        decision.comment,
+                    ),
+                    decision="denied",
+                    comment=decision.comment,
                 )
             if not decision:
                 return f"Import of {name!r} was denied — nothing was installed."

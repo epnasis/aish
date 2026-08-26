@@ -6051,6 +6051,390 @@ class TestRunCommandRefusalsAreRedToo:
         assert step["ok"] == (step["status"] == "ok")
 
 
+def remember_call(name: str, note: str):
+    """`tool_call()` takes the TOOL name positionally, so a tool whose own
+    argument is called `name` cannot go through it."""
+    return SimpleNamespace(
+        function=SimpleNamespace(name="remember", arguments={"name": name, "note": note})
+    )
+
+
+class TestApprovalCommentIsARecordedField:
+    """#323, docs/trace-contract.md §3.4 and §6.1.
+
+    The comment he types on a card IS the flow — deny+comment stops the turn,
+    approve+comment holds the action and orders a rework — and it was the one
+    input the record did not hold as a field. On `run_command` it was written
+    to `output`, the field that otherwise means what the command PRINTED, so
+    that field could only be read correctly by a reader who already knew
+    `decision`: a field whose meaning depends on another field, in the place a
+    dossier looks first. On every tool gate it survived only as prose inside
+    the result text, landing in `error`."""
+
+    @pytest.fixture(autouse=True)
+    def _opt_in(self, project_scope):
+        pass
+
+    def _steps(self, responses, **kwargs) -> list[dict]:
+        steps: list[dict] = []
+        agent, _ = make_agent(responses, step_log=steps.append, **kwargs)
+        agent.run_task("do the thing")
+        return steps
+
+    @staticmethod
+    def _tools(steps, name=None) -> list[dict]:
+        return [
+            s for s in steps
+            if s.get("kind") == "tool" and (name is None or s["name"] == name)
+        ]
+
+    # ------------------------------------------------------------ run_command
+
+    def _run_command_steps(self, approve) -> list[dict]:
+        return self._steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="rm -rf /tmp/x")]),
+                model_says("understood"),
+            ],
+            approve=approve,
+        )
+
+    def test_a_denial_comment_is_its_own_field_and_output_stays_stdout(self):
+        steps = self._run_command_steps(lambda _cmd: Denied("that is the live database"))
+        (step,) = self._tools(steps)
+        assert step["comment"] == "that is the live database"
+        assert step["decision"] == "denied"
+        # `output` means what the command printed. It printed nothing.
+        assert step["output"] == ""
+
+    def test_a_hold_comment_is_its_own_field_too(self):
+        steps = self._run_command_steps(lambda _cmd: Approved("use the scratch dir"))
+        (step,) = self._tools(steps)
+        assert step["comment"] == "use the scratch dir"
+        assert step["decision"] == "held"
+        assert step["output"] == ""
+
+    def test_an_approved_command_carries_its_stdout_and_no_comment(self):
+        steps = self._steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
+                model_says("done"),
+            ],
+        )
+        (step,) = self._tools(steps)
+        assert "hi" in step["output"]
+        assert "comment" not in step
+
+    def test_no_path_writes_a_comment_into_output(self):
+        """The headline defect, pinned as a property rather than per path: two
+        different facts must never wear one field name."""
+        for verdict in (Denied("no, not there"), Approved("no, not there")):
+            steps = self._run_command_steps(lambda _cmd, v=verdict: v)
+            for step in self._tools(steps):
+                assert "no, not there" not in (step.get("output") or "")
+
+    # ------------------------------------------------------------ tool gates
+
+    def test_the_egress_gate_records_the_comment_as_a_field(self, monkeypatch):
+        monkeypatch.setattr(agent_module.web, "read_url", lambda *a, **kw: "the page")
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://x.test/a")]),
+                model_says("understood"),
+            ],
+            approve_tool=lambda n, a, p=None: Denied("that host is not mine"),
+            step_log=steps.append,
+        )
+        agent.origin = "email"
+        agent.run_task("read it")
+        (step,) = self._tools(steps, "read_url")
+        assert step["comment"] == "that host is not mine"
+        assert step["decision"] == "denied"
+
+    def test_the_mail_link_gate_records_the_comment_as_a_field(self):
+        """The envelope is the carrier — `_gate_outcome`'s meta is what
+        `_emit_tool_step` merges onto the step, which the egress case above
+        drives end to end. A mailed link is seeded per turn, so the gate is
+        exercised the way its own tests do."""
+        from aish import provenance
+
+        agent, _ = make_agent([], approve_tool=lambda n, a, p=None: Approved("open it yourself"))
+        agent._mail_links = {"https://m.test/x": provenance.LINK}
+        out = agent._mail_link_gate("read_url", {"url": "https://m.test/x"})
+        assert out.meta["comment"] == "open it yourself"
+        assert out.meta["decision"] == "held"
+
+    def test_the_remember_gate_records_the_comment_as_a_field(self, tmp_path):
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                # `name` is a tool ARGUMENT here, so the call is built directly
+                # rather than through tool_call()'s **arguments.
+                model_says(tool_calls=[remember_call("x", "a fact")]),
+                model_says("understood"),
+            ],
+            approve_tool=lambda n, a, p=None: Denied("that is not worth keeping"),
+            step_log=steps.append,
+            cwd=str(tmp_path),
+        )
+        agent.origin = "email"
+        agent.run_task("save it")
+        (step,) = self._tools(steps, "remember")
+        assert step["comment"] == "that is not worth keeping"
+        assert step["decision"] == "denied"
+
+    def test_the_browse_gate_records_the_comment_as_a_field(self):
+        """Opening a page is free; the card is spent on the first PRESS, so
+        the gate is driven where it actually fires."""
+        from aish import browse as browse_mod
+
+        agent, _ = make_agent([], approve_tool=lambda n, a, p=None: Denied("not that site"))
+        agent._browse_view.remember(
+            browse_mod.Snapshot(
+                url="https://b.test/x", title="", text="t",
+                controls=browse_mod.controls_from(
+                    [{"n": 0, "kind": "button", "name": "Zaplac"}]
+                ),
+            )
+        )
+        out = agent._browse_gate("browse_act", {"target": "Zaplac"})
+        assert out.meta["comment"] == "not that site"
+        assert out.meta["decision"] == "denied"
+
+    def test_the_rule_gate_records_the_comment_as_a_field(self, tmp_path):
+        """`ask_me_first` goes straight to the owner, so his sentence is the
+        only thing on the record that says why the call did not happen."""
+        logged: list[dict] = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("web_search", query="tar flags")]),
+                model_says("understood"),
+            ],
+            rule_texts=(HOLD_RULE,),
+            approve_tool=lambda n, a, p=None: Denied("not while I am out"),
+            step_log=logged.append,
+        )
+        agent.run_task(TASK)
+        (step,) = self._tools(logged, "web_search")
+        assert step["comment"] == "not while I am out"
+        assert step["decision"] == "denied"
+
+    def test_a_plugin_tool_gate_records_the_comment_as_a_field(self, tmp_path):
+        tdir = tmp_path / ".aish" / "tools" / "writer"
+        tdir.mkdir(parents=True)
+        (tdir / "TOOL.md").write_text(
+            "---\nname: writer\ndescription: echo the text\nexec: ./run.sh\n"
+            "mutating: yes\nreturns: text\n"
+            'schema: {"text": {"type": "string", "required": true}}\n---\nbody\n'
+        )
+        wrapper = tdir / "run.sh"
+        wrapper.write_text("#!/bin/sh\ncat\n")
+        wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+        steps = self._steps(
+            [
+                model_says(tool_calls=[tool_call("writer", text="hi")]),
+                model_says("understood"),
+            ],
+            cwd=str(tmp_path),
+            approve_tool=lambda n, a, p=None: Approved("shorter, please"),
+        )
+        (step,) = self._tools(steps, "writer")
+        assert step["comment"] == "shorter, please"
+        assert step["decision"] == "held"
+
+    def test_the_write_path_keeps_its_comment(self, tmp_path):
+        """Unchanged by #323 — it was the one path that already had it."""
+        target = tmp_path / "note.txt"
+        steps = self._steps(
+            [
+                model_says(
+                    tool_calls=[tool_call("write_file", path=str(target), content="hi")]
+                ),
+                model_says("understood"),
+            ],
+            approve_write=lambda _plan: Denied("put it under docs/"),
+            cwd=str(tmp_path),
+        )
+        (step,) = self._tools(steps, "write_file")
+        assert step["comment"] == "put it under docs/"
+
+    # -------------------------------------------------------- the stop gate
+
+    def _gates(self, steps) -> list[dict]:
+        return [
+            s for s in steps
+            if s.get("kind") == "gate" and s.get("gate") == "stop_gate"
+        ]
+
+    def test_the_arm_the_refusals_and_the_clear_are_all_recorded(self, tmp_path):
+        """§6.1 graded all three invisible: "the arming — which denial, which
+        comment, at which call — is not recorded at all, and neither is the
+        clearing"."""
+        marker = tmp_path / "gated"
+        steps = self._steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="rm x")]),
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                # Chatty preamble alongside a command is NOT a text-only turn:
+                # it must be refused like the bare one, and write no clear.
+                model_says(
+                    "on it",
+                    tool_calls=[tool_call("run_command", command=f"touch {marker}")],
+                ),
+                model_says("You're right — stopping."),
+            ],
+            approve=lambda _cmd: Denied("this could touch real data"),
+        )
+        armed, refused, refused_again, cleared = self._gates(steps)
+        assert refused_again["verdict"] == "refused" and refused_again["round"] == 2
+        assert armed["verdict"] == "refused"
+        assert armed["evidence"] == {
+            "armed_by_call": armed["call"],
+            "armed_by": "denial_comment",
+            "comment": "this could touch real data",
+        }
+        assert armed["at"] == "gate" and armed["tier"] == 0
+        # Unbounded by design: it never lifts by exhausting a counter.
+        assert armed["max_rounds"] == 0 and armed["round"] == 0
+        assert refused["verdict"] == "refused"
+        assert refused["tool"] == "run_command"
+        assert refused["round"] == 1
+        assert refused["evidence"]["armed_by_call"] == armed["call"]
+        assert refused["call"] != armed["call"]
+        assert cleared["verdict"] == "allowed"
+        assert cleared["call"] == 0  # the clearing turn ran no tool
+        assert cleared["evidence"] == {
+            "cleared_by": "text_only_turn",
+            "armed_by_call": armed["call"],
+        }
+        # The clear is LAST: nothing lifted the gate before the text-only turn.
+        assert self._gates(steps)[-1] is cleared
+        assert cleared["round"] == 2  # both refusals counted
+        assert not marker.exists()
+
+    def test_a_bare_denial_arms_nothing_and_records_nothing(self):
+        """Absence means disarmed (§3.3) — and a bare denial does not arm."""
+        steps = self._run_command_steps(lambda _cmd: False)
+        assert self._gates(steps) == []
+
+    def test_an_approval_comment_never_arms_the_stop_gate(self):
+        """Approve means CONTINUE. A record saying otherwise would state a
+        stop that never happened."""
+        steps = self._steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo a")]),
+                model_says("done"),
+            ],
+            approve=lambda _cmd: Approved("adjust it"),
+        )
+        assert self._gates(steps) == []
+
+    def test_an_edited_command_on_a_hold_still_never_runs(self, tmp_path):
+        """`Approved` may carry an edited `command`. The HOLD outranks it —
+        neither the original nor the edit runs — and the record says `held`."""
+        original = tmp_path / "original"
+        edited = tmp_path / "edited"
+        steps = self._steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {original}")]),
+                model_says("understood"),
+            ],
+            approve=lambda _cmd: Approved("use the other path", command=f"touch {edited}"),
+        )
+        assert not original.exists() and not edited.exists()
+        (step,) = self._tools(steps)
+        assert step["decision"] == "held"
+        assert step["comment"] == "use the other path"
+        assert step["command"] == f"touch {original}"  # what was PROPOSED
+
+    def test_the_stop_gate_records_are_renderless(self):
+        assert "gate" in session_module.RENDERLESS_STEPS
+
+    # ------------------------------------------------- hold -> replacement
+
+    def test_the_replacement_carries_the_call_it_replaces(self, tmp_path):
+        original = tmp_path / "original"
+        adjusted = tmp_path / "adjusted"
+
+        def approve(cmd):
+            return Approved("use the adjusted path") if cmd == f"touch {original}" else True
+
+        steps = self._steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {original}")]),
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {adjusted}")]),
+                model_says("done"),
+            ],
+            approve=approve,
+        )
+        held, replacement = self._tools(steps, "run_command")
+        assert held["decision"] == "held"
+        assert replacement["replaces"] == held["call"]
+        assert "replaces" not in held
+        # Behaviour is untouched: the original was HELD, the adjusted one ran.
+        assert not original.exists() and adjusted.exists()
+
+    def test_a_call_with_no_hold_behind_it_claims_no_replacement(self):
+        steps = self._steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo a")]),
+                model_says(tool_calls=[tool_call("run_command", command="echo b")]),
+                model_says("done"),
+            ],
+        )
+        assert all("replaces" not in s for s in self._tools(steps))
+
+    # ---------------------------------------------------------- scrub & cap
+
+    def test_a_comment_carrying_a_secret_is_scrubbed(self, monkeypatch, tmp_path):
+        """Owner-authored is not the same as safe to store: the card is a text
+        box he may have pasted a value into, and a value that reaches the log
+        is on his disk in plain text forever."""
+        token = "awov6ybawmor59a9d7u926vk1yfdsm"
+        index = tmp_path / "names.txt"
+        index.write_text("PUSHOVER_TOKEN\n", encoding="utf-8")
+        monkeypatch.setattr(secrets_module, "NAMES_INDEX", index)
+        monkeypatch.setattr(
+            secrets_module, "get", lambda name: token if name == "PUSHOVER_TOKEN" else None
+        )
+        secrets_module._invalidate()
+        try:
+            steps = self._run_command_steps(lambda _cmd: Denied(f"use {token} instead"))
+        finally:
+            secrets_module._invalidate()
+        assert token not in json.dumps(steps)
+        (step,) = self._tools(steps)
+        assert "[secret PUSHOVER_TOKEN — redacted by aish]" in step["comment"]
+
+    def test_a_long_comment_is_capped(self):
+        long = "x" * (agent_module.COMMENT_CHARS + 500)
+        steps = self._run_command_steps(lambda _cmd: Denied(long))
+        (step,) = self._tools(steps)
+        assert len(step["comment"]) == agent_module.COMMENT_CHARS
+        armed = self._gates(steps)[0]
+        assert len(armed["evidence"]["comment"]) == agent_module.COMMENT_CHARS
+
+    # ----------------------------------------------------- behaviour is fixed
+
+    def test_deny_still_stops_and_approve_still_holds(self, tmp_path):
+        """A recording change may not move a verdict. Both #81 halves, pinned
+        beside the records that now describe them."""
+        denied = tmp_path / "denied"
+        eager = tmp_path / "eager"
+        steps = self._steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {denied}")]),
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {eager}")]),
+                model_says("stopping"),
+            ],
+            approve=lambda _cmd: Denied("no"),
+        )
+        assert not denied.exists() and not eager.exists()
+        assert [s["decision"] for s in self._tools(steps)] == ["denied", "blocked"]
+
+
 class TestTurnAndCallIdentity:
     """docs/trace-contract.md §2. Correlating a record to a turn was positional
     — curate._windows pairs a knowledge step with the NEXT user message because
