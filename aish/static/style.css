@@ -2620,17 +2620,21 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .step-evidence { display: flex; flex-direction: column; }
 /* The PAGE's own console. Boxed and headed, because a block of monospace under
    an aish row would otherwise read as aish talking about itself — and these
-   are the site's words, carrying whatever the site put in them. */
+   are the site's words, carrying whatever the site put in them.
+   NEVER red: red is aish failing, and these lines are the page talking about
+   itself — reference material even on the step that surfaced them. The first
+   version drew a red-bordered box of red lines on every step with any output,
+   and a sign-in that worked end to end read as a wall of failure. */
 .step-console {
   margin-top: 8px; border-radius: 10px; padding: 6px 10px 8px;
-  background: var(--ctp-base); border: 0.5px solid var(--red-glow);
+  background: var(--ctp-base); border: 0.5px solid var(--sep);
 }
 .step-console-head {
   font-size: 11.5px; letter-spacing: 0.3px; color: var(--dim);
   text-transform: uppercase; font-family: var(--mono);
 }
 .step-console-line {
-  font-size: 12.6px; color: var(--red); margin-top: 3px;
+  font-size: 12.6px; color: var(--dim); margin-top: 3px;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 /* What was on top of the control this step pressed. Deliberately NOT boxed
@@ -2638,6 +2642,10 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
    the site's words, and the only page-authored part of it is the quoted
    element name. */
 .step-covered { margin-top: 6px; overflow-wrap: anywhere; }
+/* aish's own sentence that the action could not be carried out, and the fact
+   that an action changed nothing on the page. Both aish's own account, so they
+   take the covered block's un-boxed dim treatment, not the console's. */
+.step-problem, .step-unchanged { margin-top: 6px; overflow-wrap: anywhere; }
 /* The sign-in attempt made inside this step, on a page of its own. Indented
    under its own heading so it can never be mistaken for the page above it. */
 .step-signin { margin-top: 8px; border-left: 2px solid var(--sep); padding-left: 8px; }

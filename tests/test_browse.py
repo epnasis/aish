@@ -3468,7 +3468,8 @@ class TestTheConsoleReachesTheModelAsPageContent:
     def test_the_lines_arrive_below_the_untrusted_banner(self, monkeypatch):
         view = web_module.BrowseView()
         self._opens(monkeypatch, snapshot(
-            console=["uncaught: ReferenceError: grecaptcha is not defined"]
+            problem="could not click 'Zaloguj': the control is inert",
+            console=["uncaught: ReferenceError: grecaptcha is not defined"],
         ))
         out = str(web_module.browse("https://eon.pl/login", view=view))
         assert "grecaptcha is not defined" in out
@@ -3479,13 +3480,49 @@ class TestTheConsoleReachesTheModelAsPageContent:
         the document. The label is what stops a console line reading as aish's
         own account of what went wrong."""
         view = web_module.BrowseView()
-        self._opens(monkeypatch, snapshot(console=["error: boom"]))
+        self._opens(monkeypatch, snapshot(
+            problem="could not click 'Zaloguj'", console=["error: boom"]
+        ))
         out = str(web_module.browse("https://eon.pl/login", view=view))
         assert "BY THE PAGE" in out
         # …and it is never in the aish-voice region above the banner, which is
         # where a provenance note goes and where page text may never appear.
         above = out.split(web_module.UNTRUSTED_NOTE)[0]
         assert "boom" not in above
+
+    def test_a_noisy_but_healthy_page_keeps_its_console_off_the_model(
+        self, monkeypatch
+    ):
+        """The number of sites that log errors on every healthy page is
+        enormous. A clean open that handed the model those lines anchored it
+        on failures nothing observed — the same over-anchoring the owner
+        named on the trace, aimed at the thing deciding what to do next. The
+        criterion is aish's OWN observation of something going wrong, never
+        the page's noisiness; the record is untouched (next test)."""
+        view = web_module.BrowseView()
+        self._opens(monkeypatch, snapshot(console=["error: boom"]))
+        out = str(web_module.browse("https://eon.pl/mojeon", view=view))
+        assert "boom" not in out
+
+    def test_an_action_that_visibly_worked_reports_no_console_either(
+        self, monkeypatch
+    ):
+        """A non-empty delta is the action visibly doing something. The empty
+        delta is the one case where the console is the other half of the
+        answer — everywhere else it is the site's everyday noise."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        monkeypatch.setattr(
+            web_module.browser, "browse_act",
+            lambda *a, **kw: snapshot(
+                controls=[control(n=1), control(n=2, name="Nowy")],
+                console=["error: boom"],
+            ),
+        )
+        outcome = web_module.browse_act("Przełącz lokal", view=view)
+        assert "boom" not in str(outcome)
+        # …but the owner's copy still rides the envelope, unconditionally.
+        assert outcome.meta["console"] == ["error: boom"]
 
     def test_a_change_report_carries_it_too(self, monkeypatch):
         """A press that changed nothing and a handler that threw are ONE
@@ -3517,6 +3554,85 @@ class TestTheConsoleReachesTheModelAsPageContent:
         self._opens(monkeypatch, snapshot(frame="/store/media/abc.jpg"))
         out = web_module.browse("https://eon.pl/mojeon", view=view)
         assert "console" not in out.meta
+
+
+class TestAishsOwnAnomalyObservationsReachTheTrace:
+    """The criterion for surfacing a step's console is aish's OWN observation
+    that the step did not do what it looked like it should — and two of those
+    observations were computed and then thrown away. `Snapshot.problem` (aish
+    could not carry the action out as asked) and an action's EMPTY delta (the
+    "did that click work" fact) reached the model's turn and nothing else, so
+    a renderer had nothing to key on: a browse whose action failed still
+    returns a page and sniffs ok. Both now ride the envelope, as observations
+    and never verdicts."""
+
+    def _acts(self, monkeypatch, snap):
+        monkeypatch.setattr(
+            web_module.browser, "browse_act", lambda *a, **kw: snap
+        )
+
+    def test_a_failed_action_carries_aishs_sentence_on_the_step(
+        self, monkeypatch
+    ):
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        said = browse.STUCK_NOT_COVERED.format(action="click", address="Zaloguj")
+        self._acts(monkeypatch, snapshot(controls=[control(n=1)], problem=said))
+        out = web_module.browse_act("Zaloguj", view=view)
+        assert out.meta["problem"] == said
+
+    def test_an_action_whose_delta_came_back_empty_records_the_fact(
+        self, monkeypatch
+    ):
+        """The press that landed and was ignored: no problem, no cover, no
+        error — the empty delta is the ONLY witness on the record, and it is
+        exactly the step whose console the eon.pl day needed."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        self._acts(monkeypatch, snapshot(controls=[control(n=1)]))
+        out = web_module.browse_act("Przełącz lokal", view=view)
+        assert out.meta["unchanged"] is True
+
+    def test_an_action_that_visibly_worked_writes_neither_key(
+        self, monkeypatch
+    ):
+        """Absent in the ordinary case (corollary 2): a step saying "this went
+        fine" on every row is the noise that hides the one that did not."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        self._acts(monkeypatch, snapshot(
+            controls=[control(n=1), control(n=2, name="Nowy")]
+        ))
+        out = web_module.browse_act("Przełącz lokal", view=view)
+        meta = getattr(out, "meta", {}) or {}
+        assert "problem" not in meta
+        assert "unchanged" not in meta
+
+    def test_a_clean_open_writes_neither_key(self, monkeypatch):
+        monkeypatch.setattr(web_module, "_require_public", lambda _u: None)
+        monkeypatch.setattr(
+            web_module.browser, "browse_open",
+            lambda url, *, topic="", key="": snapshot(url=url),
+        )
+        view = web_module.BrowseView()
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        meta = getattr(out, "meta", {}) or {}
+        assert "problem" not in meta
+        assert "unchanged" not in meta
+
+    def test_a_full_page_report_observes_nothing_about_change(
+        self, monkeypatch
+    ):
+        """A first open has no "last shown" to diff against, so it must not
+        write `unchanged` — no delta was computed, and the key would claim an
+        observation nobody made (corollary 2)."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(url="https://eon.pl/inne"))
+        # Different URL: the delta path is not taken, the page comes whole.
+        self._acts(monkeypatch, snapshot(url="https://eon.pl/mojeon"))
+        out = web_module.browse_act("Przełącz lokal", view=view)
+        meta = getattr(out, "meta", {}) or {}
+        assert "unchanged" not in meta
 
 
 class TestWhatCoveredAControlReachesTheTrace:
@@ -3679,6 +3795,27 @@ class TestTheSignInAttemptIsOnTheStepItHappenedUnder:
         assert out.meta["signin"]["host"] == "eon.pl"
         assert out.meta["signin"]["frame"] == "/store/frames/login.jpg"
 
+    def test_the_outcome_travels_with_the_attempt(self, monkeypatch):
+        """`SignInResult.ok` — the session seen to come up, read afresh, and
+        nothing weaker — reaches the record. Without it every attempt rendered
+        identically, and the owner's first automatic sign-in that worked end
+        to end was painted with the same weight as a failure. Written true or
+        false for every attempt, unlike the evidence keys beside it: leaving
+        false absent would make a failed attempt in a new log unreadable from
+        an attempt in a log written before the key existed."""
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, self._Outcome())
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert out.meta["signin"]["ok"] is False
+
+    def test_a_session_seen_to_come_up_is_recorded_as_such(self, monkeypatch):
+        outcome = self._Outcome()
+        outcome.ok = True
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, outcome)
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert out.meta["signin"]["ok"] is True
+
     def test_it_is_kept_apart_from_the_page_the_model_was_shown(self, monkeypatch):
         """Two pictures of two different documents. Folding one into the other
         would state a guarantee wider than either capture enforces."""
@@ -3777,4 +3914,7 @@ class TestTheSignInAttemptIsOnTheStepItHappenedUnder:
         credential SPENT on this step, and that is worth a row of its own."""
         seen = web_module.SignInSeen()
         seen.note("eon.pl", object())
-        assert seen.record() == {"host": "eon.pl"}
+        # `ok` rides along even here, as False: a stubbed or older outcome
+        # object carries no `ok`, and "not seen to come up" is exactly what a
+        # session nobody observed coming up is.
+        assert seen.record() == {"host": "eon.pl", "ok": False}

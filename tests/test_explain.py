@@ -1572,3 +1572,89 @@ class TestTheConsoleAndTheSignInOnTheRecord:
         doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
         call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
         assert "signin" not in call
+
+    def test_the_console_is_read_back_even_for_a_clean_step(
+        self, tmp_path, monkeypatch
+    ):
+        """The OPPOSITE rule from the chat timeline, on purpose. The timeline
+        is a stream the owner scrolls past, so a clean step's console is
+        surfaced nowhere there; a dossier is opened deliberately, about one
+        turn, and hiding recorded evidence from it would re-create the eon.pl
+        gap — a load-time error on a clean open whose damage only shows on a
+        later press is readable ONLY here."""
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome(
+                "the page",
+                status=tools.STATUS_OK,
+                verdict_by=tools.VERDICT_EXIT_CODE,
+                console=["error: the site's everyday noise"],
+            ),
+        )
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "the site's everyday noise" in out
+        assert "the page's words" in out
+
+    def test_aishs_own_problem_sentence_is_read_back(
+        self, tmp_path, monkeypatch
+    ):
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome(
+                "the page", problem="could not click 'Zaloguj': it is inert"
+            ),
+        )
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert call["problem"] == "could not click 'Zaloguj': it is inert"
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "problem: could not click 'Zaloguj': it is inert" in out
+
+    def test_an_empty_delta_is_read_back_as_the_fact_it_is(
+        self, tmp_path, monkeypatch
+    ):
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome("the page", unchanged=True),
+        )
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert call["unchanged"] is True
+        assert "nothing on the page changed when aish did this" in (
+            explain_mod.explain(log.path, root=tmp_path)
+        )
+
+    def test_the_sign_in_outcome_is_read_back_in_three_states(
+        self, tmp_path, monkeypatch
+    ):
+        """True, false and absent are three facts: the session came up, it was
+        not seen to, and a log written before the outcome was recorded. The
+        dossier may say exactly as much as each one earns and no more."""
+        from aish import tools
+
+        for name, block, said, unsaid in (
+            ("up", {"host": "eon.pl", "ok": True},
+             "the session came up", "not seen to come up"),
+            ("down", {"host": "eon.pl", "ok": False},
+             "the session was not seen to come up", None),
+            ("older", {"host": "eon.pl"},
+             "attempted an automatic sign-in at eon.pl", "the session"),
+        ):
+            root = tmp_path / name
+            root.mkdir()
+            log = self._browsed(
+                root, monkeypatch,
+                tools.ToolOutcome("the page", signin=dict(block)),
+            )
+            out = explain_mod.explain(log.path, root=root)
+            assert said in out
+            if unsaid:
+                assert unsaid not in out

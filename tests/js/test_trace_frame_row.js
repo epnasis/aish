@@ -290,11 +290,14 @@ check("a frame from a log written before this grows no caption", () => {
   assert(!findByClass(rows[0], ".step-frame-where"));
 });
 
-check("the page's own console is drawn, and attributed to the page", () => {
+check("the console is drawn on a step aish itself observed going wrong", () => {
   // The whole point of the record: a day of guessing at eon.pl because a
-  // handler's ReferenceError went to a console nobody kept.
+  // handler's ReferenceError went to a console nobody kept. `unchanged` is
+  // that exact shape — the press landed, the page did not move, and the
+  // thrown handler is the other half of the answer.
   const s = makeSandbox();
   const rows = browsed(s, {
+    unchanged: true,
     console: ["uncaught: ReferenceError: grecaptcha is not defined"],
   });
   const box = findByClass(rows[0], ".step-console");
@@ -304,11 +307,95 @@ check("the page's own console is drawn, and attributed to the page", () => {
   assert(/grecaptcha is not defined/.test(box.children[1].textContent));
 });
 
+check("a clean step's console is recorded but not drawn", () => {
+  // The owner's finding, hours after this shipped: the number of sites that
+  // log errors on every healthy page is enormous, and a successful sign-in
+  // rendered covered in error blocks. The criterion is aish's OWN observation
+  // of anomaly, never the page's noisiness — a clean step draws nothing, and
+  // the record keeps the lines for `aish explain`.
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    frame: "/state/frames/abc.jpg",
+    console: ["error: the site's everyday noise", "warning: more of it"],
+  });
+  assert(!findByClass(rows[0], ".step-console"),
+         "a clean step painted the page's noise");
+});
+
+check("every recorded anomaly on the step surfaces the console", () => {
+  // Enumerable from the step alone, so hot and cold cannot disagree: the tool
+  // failed, aish said it could not act, the delta came back empty, or a click
+  // could not land and was never got through.
+  for (const extra of [
+    { ok: false },
+    { problem: "aish could not click 'Zaloguj'" },
+    { unchanged: true },
+    { covered: { by: "clb clb-container", dismissed: false } },
+  ]) {
+    const s = makeSandbox();
+    const rows = browsed(s, { console: ["error: boom"], ...extra });
+    assert(findByClass(rows[0], ".step-console"),
+           `no console for ${JSON.stringify(extra)}`);
+  }
+});
+
+check("a cover that was dismissed is a repaired step, not an anomaly", () => {
+  // Consent banners are everywhere; a dismissed one whose retry went through
+  // is the action working. Surfacing the console on those would rebuild the
+  // noise this rule exists to remove.
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    console: ["error: boom"],
+    covered: { by: "cookie-bar", dismissed: true },
+  });
+  assert(findByClass(rows[0], ".step-covered"), "the cover row still draws");
+  assert(!findByClass(rows[0], ".step-console"));
+});
+
+check("aish's own problem sentence is drawn, in aish's un-boxed style", () => {
+  // It is what explains why a console follows on a row whose tool-level
+  // status still reads ok — a browse whose action failed still returns a
+  // page, so the row shows no error of its own.
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    problem: "aish could not click 'Zaloguj' — the control may be inert",
+  });
+  const box = findByClass(rows[0], ".step-problem");
+  assert(box, "the problem sentence was not drawn");
+  assert(/could not click 'Zaloguj'/.test(box.textContent), box.textContent);
+  assert.equal(box.innerHTML, "");
+});
+
+check("a covered step draws the cover's wording, not the model's problem", () => {
+  // COVERED_STUCK and the cover are one fact worded twice — the problem text
+  // is written TO THE MODEL ("press whatever closes it and try again"), and
+  // the covered block is the owner's wording of the same thing.
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    problem: "something the page calls 'clb' is sitting on top of it",
+    covered: { by: "clb", dismissed: false },
+  });
+  assert(findByClass(rows[0], ".step-covered"));
+  assert(!findByClass(rows[0], ".step-problem"));
+});
+
+check("an action that changed nothing says so on the row", () => {
+  // The "did that click work" fact, as recorded: a fact and not a failure —
+  // worded to exactly what the writer computed.
+  const s = makeSandbox();
+  const rows = browsed(s, { unchanged: true });
+  const box = findByClass(rows[0], ".step-unchanged");
+  assert(box, "the unchanged fact was not drawn");
+  assert(/nothing on the page changed/.test(box.textContent), box.textContent);
+});
+
 check("console lines are drawn as TEXT, never as markup", () => {
   // Page-authored, so the residual attack is a line that looks like part of
   // the app. textContent is what makes that structurally impossible.
   const s = makeSandbox();
-  const rows = browsed(s, { console: ['error: <img src=x onerror="alert(1)">'] });
+  const rows = browsed(s, {
+    ok: false, console: ['error: <img src=x onerror="alert(1)">'],
+  });
   const box = findByClass(rows[0], ".step-console");
   assert.equal(box.children[1].innerHTML, "");
   assert(/onerror/.test(box.children[1].textContent));
@@ -357,6 +444,8 @@ check("a sign-in with no picture says which absence, not nothing", () => {
 });
 
 check("the sign-in page's console is drawn and attributed to THAT page", () => {
+  // No `ok` on the block — an older log, or a failed attempt — errs toward
+  // showing: an attempt with an unknown ending is exactly one worth reading.
   const s = makeSandbox();
   const rows = browsed(s, {
     signin: { host: "eon.pl", console: ["error: grecaptcha failed to load"] },
@@ -364,6 +453,40 @@ check("the sign-in page's console is drawn and attributed to THAT page", () => {
   const box = findByClass(findByClass(rows[0], ".step-signin"), ".step-console");
   assert(/the sign-in page wrote this/.test(box.children[0].textContent),
          box.children[0].textContent);
+});
+
+check("a sign-in whose session came up keeps its console off the row", () => {
+  // The owner's first successful automatic sign-in rendered covered in the
+  // login page's everyday errors. `ok` is the session seen to come up, read
+  // afresh — recorded by the writer, so the renderer may finally say it.
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    signin: { host: "eon.pl", ok: true, console: ["error: everyday noise"] },
+  });
+  const box = findByClass(rows[0], ".step-signin");
+  assert(/and the session came up/.test(box.children[0].textContent),
+         box.children[0].textContent);
+  assert(!findByClass(box, ".step-console"));
+});
+
+check("a sign-in not seen to come up shows its console and says so", () => {
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    signin: { host: "eon.pl", ok: false, console: ["error: boom"] },
+  });
+  const box = findByClass(rows[0], ".step-signin");
+  assert(/the session was not seen to come up/.test(box.children[0].textContent),
+         box.children[0].textContent);
+  assert(findByClass(box, ".step-console"), "the failure's console was hidden");
+});
+
+check("a block from an older log claims no outcome either way", () => {
+  // Absent is a third fact: a log written before the outcome was recorded.
+  // The renderer may not say more than the record does.
+  const s = makeSandbox();
+  const rows = browsed(s, { signin: { host: "eon.pl" } });
+  const head = findByClass(rows[0], ".step-signin").children[0];
+  assert(!/session/.test(head.textContent), head.textContent);
 });
 
 check("a step with a sign-in block but no host draws nothing", () => {
@@ -438,10 +561,14 @@ check("all of it renders identically live and on replay", () => {
     frame_url: "https://eon.pl/x", frame_from: "https://eon.pl/",
     console: ["error: boom"],
     covered: { by: "clb clb-container", dismissed: false },
+    problem: "aish could not click 'Zaloguj'",
+    unchanged: true,
     signin: {
       host: "eon.pl",
+      ok: false,
       frame: "/state/frames/login.jpg",
       covered: "clb clb-container",
+      console: ["error: grecaptcha failed to load"],
     },
   };
   const live = makeSandbox();

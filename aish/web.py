@@ -146,7 +146,7 @@ class SignInSeen:
     writes no block at all, rather than an empty one that reads as an attempt
     with nothing to show (trace contract corollary 2)."""
 
-    __slots__ = ("host", "frame", "frame_skipped", "console", "covered")
+    __slots__ = ("host", "frame", "frame_skipped", "console", "covered", "ok")
 
     def __init__(self) -> None:
         self.host = ""
@@ -158,6 +158,13 @@ class SignInSeen:
         # the console beside it there is no page-authored-voice question — it
         # is quoted as the page's word for the element and nothing more.
         self.covered = ""
+        # Did the session COME UP — `SignInResult.ok`, which is set only where
+        # the walled URL was read afresh and stopped asking, never anything
+        # weaker. Carried so a renderer can tell the owner's first successful
+        # automatic sign-in apart from a failed one: without it every attempt
+        # rendered identically, and a renewal that worked end to end was
+        # painted with the same weight as the failure the record exists for.
+        self.ok = False
 
     def note(self, host: str, outcome: Any) -> None:
         """An attempt happened at `host`, and this is what it left behind.
@@ -170,12 +177,17 @@ class SignInSeen:
         self.frame_skipped = str(getattr(outcome, "frame_skipped", "") or "")
         self.console = [str(line) for line in (getattr(outcome, "console", None) or [])]
         self.covered = str(getattr(outcome, "covered", "") or "")
+        self.ok = bool(getattr(outcome, "ok", False))
 
     def record(self) -> dict:
         """The trace block, or `{}` when no sign-in was attempted at all."""
         if not self.host:
             return {}
-        block: dict = {"host": self.host}
+        # `ok` is written for every attempt, true or false, unlike the evidence
+        # keys beside it: an outcome is a fact about every attempt, and leaving
+        # false absent would make a failed attempt in a new log unreadable from
+        # an attempt in a log written before the key existed (corollary 2).
+        block: dict = {"host": self.host, "ok": self.ok}
         if self.frame:
             block["frame"] = self.frame
         elif self.frame_skipped:
@@ -198,6 +210,8 @@ def sealed(
     console: "list[str] | None" = None,
     covered: "dict | None" = None,
     signin: "SignInSeen | None" = None,
+    problem: str = "",
+    unchanged: bool = False,
 ) -> str:
     """The result, with the cut and the evidence frame recorded on it — or
     unchanged when there is neither.
@@ -246,7 +260,19 @@ def sealed(
     from being lost. That is exactly how a fact Chrome had computed and named
     reached nobody who could read it afterwards, while four wrong diagnoses
     were argued from page text. Absent entirely when nothing covered anything,
-    which is the ordinary case."""
+    which is the ordinary case.
+
+    `problem` and `unchanged` are aish's OWN observations that the action did
+    not do what it looked like it should — the sentence saying it could not be
+    carried out as asked, and an action whose delta against the page last
+    shown came back empty. They are what lets a renderer surface the console
+    only where something was actually observed going wrong: the tool-level ok
+    cannot carry that (a browse whose action failed still returns a page and
+    sniffs as success), and the page's own noisiness must never be the
+    criterion. Observations, not verdicts — `unchanged` in particular is also
+    true of a press that legitimately changes nothing — and both are absent in
+    the ordinary case, so a clean step and a step from a log written before
+    them are different facts only where a writer actually observed one."""
     meta: dict = {}
     if cut is not None and cut.record is not None:
         meta.update(bytes=cut.total, truncation=cut.record)
@@ -262,6 +288,10 @@ def sealed(
         meta["console"] = list(console)
     if covered:
         meta["covered"] = dict(covered)
+    if problem:
+        meta["problem"] = problem
+    if unchanged:
+        meta["unchanged"] = True
     if signin is not None and (block := signin.record()):
         meta["signin"] = block
     if not meta:
@@ -2278,6 +2308,18 @@ class BrowseView:
         # same reason the frame is: a call that pressed nothing must not
         # inherit the last call's obstruction.
         self.covered: dict = {}
+        # aish's OWN statement that this call could not do what was asked
+        # (`Snapshot.problem`), carried out to the trace. It is what lets a
+        # renderer surface the page's console only where aish itself observed
+        # something going wrong, instead of on every page that is merely noisy
+        # — the tool-level ok cannot say it: a browse whose action failed still
+        # returns a page, so the result sniffs as success.
+        self.problem = ""
+        # The action's delta against what this chat was last shown came back
+        # EMPTY — the "did that click work" fact, delivered on the first press
+        # (`Delta.empty`). An observation and never a verdict: a press that
+        # legitimately changes nothing on the page also records it.
+        self.unchanged = False
 
     def start_call(self) -> None:
         """A new browse call begins: this chat has been shown nothing yet."""
@@ -2287,6 +2329,8 @@ class BrowseView:
         self.frame_from = ""
         self.console = []
         self.covered = {}
+        self.problem = ""
+        self.unchanged = False
 
     def remember(self, snapshot: Any) -> None:
         was = str(getattr(self.shown, "url", "") or "")
@@ -2302,6 +2346,7 @@ class BrowseView:
         self.console = [str(line) for line in (getattr(snapshot, "console", None) or [])]
         cover = getattr(snapshot, "covered", None)
         self.covered = cover.record() if cover is not None else {}
+        self.problem = str(getattr(snapshot, "problem", "") or "")
 
     def commit_evidence(self) -> str:
         """What the page this chat was last shown says it COMMITS, if anything.
@@ -2396,6 +2441,13 @@ def _present_snapshot(
             runs = seen.runs + 1
             seen.remember(snapshot)
             seen.runs = runs
+            # The delta coming back empty is recorded, not only spoken: it is
+            # the "did that click work" fact, and the one anomaly on this path
+            # that no other field carries — a press that landed and was ignored
+            # sets no problem, no cover and no error. Written only where a
+            # delta was actually computed; a full-page report observes nothing
+            # about change and writes nothing (corollary 2).
+            seen.unchanged = delta.empty()
             return _present_change(snapshot, delta)
     seen.remember(snapshot)
     seen.runs = 0
@@ -2424,16 +2476,27 @@ def _present_change(snapshot, delta) -> str:
         + head
         + "\n[what your action changed — everything else is as you last saw it]\n"
         + delta.render()
-        # Immediately after the change, because the two are one answer: an
-        # empty delta and a thrown handler on the same line is the whole
-        # diagnosis of a press that did nothing.
-        + console_note(snapshot)
+        # Only when the delta came back EMPTY, and immediately after it,
+        # because then the two are one answer: an empty delta and a thrown
+        # handler on the same line is the whole diagnosis of a press that did
+        # nothing. On an action that visibly worked the lines are the site's
+        # everyday noise — most pages log errors constantly — and handing them
+        # to the model anchors it on problems nothing observed (the recorded
+        # copy on the step keeps them either way).
+        + (console_note(snapshot) if delta.empty() else "")
         + _submit_hint(snapshot)
         + '\n[aish: use browse_act(action="read") to see the whole page again]'
     )
 
 
-# The page's own console, handed to the model INSIDE the untrusted banner.
+# The page's own console, handed to the model INSIDE the untrusted banner —
+# and only on a result that also carries aish's OWN observation of something
+# going wrong (a `problem`, or an action whose delta came back empty). The
+# number of sites that log errors on every healthy page is enormous, so an
+# unconditional copy spent tokens anchoring the model on failures nothing
+# observed; the criterion is aish's observation, never the page's noisiness,
+# and the RECORD is untouched — every line still rides the envelope to the
+# step, so `aish explain` reads it back for any action, clean or not.
 #
 # It is page-authored text and therefore exactly as attacker-controlled as the
 # visible words next to it: a page that can write a sentence into a warning has
@@ -2570,7 +2633,13 @@ def _present_page(
         + body
         + hint
         + controls
-        + console_note(snapshot)
+        # Only where aish itself observed the action going wrong: a `problem`
+        # is aish's own statement that it could not do what was asked, and the
+        # page's console is then the page's side of that story. A page that is
+        # merely noisy — most are — hands the model nothing but errors to
+        # anchor on, which is the over-anchoring this gate exists to stop; the
+        # recorded copy on the step keeps the lines either way.
+        + (console_note(snapshot) if snapshot.problem else "")
         + _submit_hint(snapshot)
     )
 
@@ -2600,6 +2669,8 @@ def browse(
         frame_from=seen.frame_from,
         console=seen.console,
         covered=seen.covered,
+        problem=seen.problem,
+        unchanged=seen.unchanged,
         signin=signin_seen,
     )
 
@@ -2713,6 +2784,8 @@ def browse_act(
         frame_from=seen.frame_from,
         console=seen.console,
         covered=seen.covered,
+        problem=seen.problem,
+        unchanged=seen.unchanged,
     )
 
 
@@ -2791,6 +2864,8 @@ def browse_fill(
         frame_from=seen.frame_from,
         console=seen.console,
         covered=seen.covered,
+        problem=seen.problem,
+        unchanged=seen.unchanged,
     )
 
 

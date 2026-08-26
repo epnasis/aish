@@ -9016,6 +9016,34 @@ class TestSecretScrub:
         assert step["covered"]["dismissed"] is False
         assert step["signin"]["host"] == "eon.pl"
 
+    def test_a_problem_sentence_is_scrubbed_the_same_way(
+        self, stored, monkeypatch
+    ):
+        """`problem` is aish's own sentence, but it quotes page-authored names
+        inside it — a control's label, a covering element — and the page can
+        put anything into those, a secret it echoed included. Same funnel,
+        same single site where the envelope is consumed."""
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("browse", url="https://eon.pl/x")]),
+                model_says("done"),
+            ],
+            step_log=steps.append,
+        )
+        agent._approved_sites.add("eon.pl")
+        monkeypatch.setattr(
+            agent_module.web, "browse",
+            lambda *a, **kw: tools_module.ToolOutcome(
+                "the page",
+                problem=f"could not click 'Zaloguj {self.TOKEN}'",
+            ),
+        )
+        agent.run_task("open the portal")
+        assert self.TOKEN not in json.dumps(steps)
+        (step,) = [s for s in steps if s.get("kind") == "tool"]
+        assert "[secret PUSHOVER_TOKEN — redacted by aish]" in step["problem"]
+
     def test_an_untouched_result_keeps_its_identity(self, stored):
         """No match must cost nothing — the same object back, envelope and all."""
         agent, _ = make_agent([model_says("hi")])
