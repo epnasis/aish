@@ -538,13 +538,131 @@ def _frame_of(step: dict) -> dict:
     }
 
 
+# ------------------------------------------- a failed sign-in, put into words
+#
+# The four observations behind a failed sign-in reach the log as a token and a
+# group of booleans (#325, trace contract §3.4.1). Those are the right things
+# to STORE and the wrong things to hand a person, so the wording lives HERE, in
+# the assembly, and travels in the document — one source both renderers read,
+# rather than a copy per renderer that drifts on the day the wording matters.
+#
+# **The wording is the risk in this feature, not the plumbing.** A token spoken
+# carelessly is the failure the record exists to prevent: `FAILED_CAPTCHA` was
+# a token once, and the sentence a renderer gave it told the owner for weeks
+# that reCAPTCHA had refused a sign-in that was never submitted (#321). So each
+# line below says what aish DID or DID NOT SEE, names aish as the observer, and
+# names no cause. `unexplained` in particular is allowed to say plainly that
+# aish does not know.
+#
+# The keys are checked against `signin.FAILURE_VERDICTS` by a test rather than
+# by an import: this reader may not import the module that holds the verdict
+# TABLE, or it could explain a recorded token by re-running the rule that
+# produced it — which is §0's whole prohibition (`test_the_reader_cannot_reach
+# _aishs_behaviour`, and `signin` is on its forbidden list for this reason).
+SIGNIN_VERDICT_WORDS = {
+    "refused": "aish read this as the site refusing the saved password",
+    "contradiction": (
+        "aish's two observers disagreed about this attempt, and aish did not "
+        "resolve it"
+    ),
+    "never_sent": (
+        "aish did not recognise anything carrying the password leaving the page"
+    ),
+    "unexplained": "aish does not know why this attempt did not get in",
+}
+
+# What each observation says, in both polarities. BOTH, deliberately: a group
+# whose five observations are all false is a real and positive set of things
+# aish looked for and did not see, and printing only the true ones would render
+# it identically to an attempt that recorded no observations at all. That
+# collapse is the one this reader exists to refuse.
+SIGNIN_OBSERVED_WORDS: dict[str, tuple[str, str]] = {
+    "credential_seen_leaving": (
+        "aish watched the saved password leave the page",
+        "aish did not see anything carrying the saved password leave the page "
+        "— its matcher has declared blind spots, so this is not proof that "
+        "nothing was sent",
+    ),
+    "refusal_status": (
+        "the site answered a request carrying the password with a refusal status",
+        "no request carrying the password came back with a refusal status",
+    ),
+    "page_said_no": (
+        "the page showed a message after the submit that was not there before",
+        "the page showed no new message after the submit",
+    ),
+    "body_to_own_origin": (
+        "the page sent something to one of the site's own addresses in the "
+        "submit window",
+        "aish saw the page send nothing to the site's own addresses in the "
+        "submit window",
+    ),
+}
+
+# The declaration is a string rather than a flag, and it is the field most able
+# to bring the retired captcha OUTCOME back — so its sentence carries its own
+# evidentiary status, in the same words the tool result uses (`browser
+# .DECLARED_WIDGET`, which this reader may not import).
+SIGNIN_WIDGET_SAID = (
+    "the page declares it is protected by {vendor} — a declaration aish "
+    "observed on the page, not something aish saw act on this attempt"
+)
+SIGNIN_NO_WIDGET_SAID = "the page declared no anti-automation widget"
+
+# A token this reader does not know. It is rendered rather than blanked, for
+# the reason `frame_skipped` still renders words no writer emits any more:
+# retiring an entry retires the WRITER, never the reading of it, and a fact a
+# reader cannot render is a fact it has erased.
+SIGNIN_UNKNOWN_VERDICT = "a verdict this reader has no words for"
+
+# `ok: false` and no verdict at all. Two meanings the RECORD cannot separate,
+# so neither may this: the attempt ended before the failure table ran (a
+# second factor, a covered button, a refusal before the submit), or the log
+# was written before the verdict was recorded at all. Said once, and only
+# where a reader is actually asking why — never over an attempt that worked.
+SIGNIN_NO_VERDICT = (
+    "no verdict was recorded for this attempt — either it ended before aish "
+    "judged it, or this log predates the record"
+)
+
+
+def _observed_said(observed: dict) -> list[str]:
+    """The observations, in the order the record writes them, as sentences.
+
+    Unknown keys are carried through as `name: value` rather than dropped. A
+    whitelist here is what kept `verdict` and `observed` themselves out of the
+    dossier for a day after they started being written, and the same silence
+    would swallow the next observation somebody adds."""
+    said = []
+    for name, value in observed.items():
+        if name == "declared_widget":
+            vendor = str(value or "")
+            said.append(
+                SIGNIN_WIDGET_SAID.format(vendor=vendor)
+                if vendor else SIGNIN_NO_WIDGET_SAID
+            )
+        elif name in SIGNIN_OBSERVED_WORDS:
+            yes, no = SIGNIN_OBSERVED_WORDS[name]
+            said.append(yes if value else no)
+        else:
+            said.append(f"{name}: {value!r}")
+    return said
+
+
 def _signin_of(step: dict) -> dict:
     """The automatic sign-in that happened inside this call, resolved.
 
     Its own block and not part of `_frame_of`, because it is about a DIFFERENT
     DOCUMENT: the login page the model never asked for, never saw and cannot
     name. Folding it into the page frame would state a guarantee the capture
-    does not make."""
+    does not make.
+
+    **The verdict and its observations are put into words HERE**, not in the
+    renderer, so that `render` and the panel print the same sentence and no
+    second author has to get a token's wording right twice (#243's rule, and
+    the answer to the two-renderers problem #325 left open). The raw `observed`
+    values travel alongside, because this reader reports what was RECORDED and
+    a machine reading the dossier wants the booleans, not the prose."""
     block = step.get("signin")
     if not isinstance(block, dict) or not block.get("host"):
         return {}
@@ -555,6 +673,15 @@ def _signin_of(step: dict) -> dict:
             state = RECORDED if Path(path).is_file() else PURGED
         except OSError:  # a path this process cannot stat is not a picture
             state = PURGED
+    # Both or neither, exactly as the writer records them: a token with no
+    # observations under it is a rendering of the verdict, which is the one
+    # thing §4 says an evidence record may not be — so a block carrying only
+    # one half is read as no judgement rather than as half a judgement.
+    raw = block.get("observed")
+    verdict = str(block.get("verdict") or "")
+    observed = dict(raw) if verdict and isinstance(raw, dict) and raw else {}
+    if not observed:
+        verdict = ""
     return {
         "host": str(block.get("host") or ""),
         # Tri-state on purpose: True is a session seen to come up, False one
@@ -567,6 +694,17 @@ def _signin_of(step: dict) -> dict:
         "frame_skipped": "" if path else str(block.get("frame_skipped") or ""),
         "console": [str(line) for line in (block.get("console") or [])],
         "covered": str(block.get("covered") or ""),
+        # The token verbatim, its one sentence, the values as recorded, and
+        # those values as sentences. Empty throughout when no failure was
+        # judged — which is a success, a second factor, an ending before the
+        # submit, or a log written before any of this.
+        "verdict": verdict,
+        "verdict_said": (
+            SIGNIN_VERDICT_WORDS.get(verdict, SIGNIN_UNKNOWN_VERDICT)
+            if verdict else ""
+        ),
+        "observed": observed,
+        "observed_said": _observed_said(observed),
     }
 
 
@@ -1530,7 +1668,21 @@ def _signin_lines(signin: dict) -> list[str]:
     it now: `SignInResult.ok`, set only where the walled URL was read afresh
     and the session was seen to come up. A block without the key is an older
     log and gets the attempt sentence alone — a dossier assembled from
-    recorded evidence may not say more than the evidence does."""
+    recorded evidence may not say more than the evidence does.
+
+    **The verdict and its five observations are printed as recorded** (#325),
+    in words the ASSEMBLY chose. This function selects nothing and words
+    nothing: the sentence it prints for a token is the sentence any other
+    renderer of this document prints, which is what stops the two from
+    disagreeing about a vocabulary whose careless wording is the failure the
+    record exists to prevent.
+
+    **All five observations print, true and false alike.** A group whose
+    observations are all false is a positive set of things aish looked for and
+    did not see; printing only the true ones would render it identically to an
+    attempt that recorded nothing, and those two route to different repairs.
+    An attempt with NO group and no session prints `SIGNIN_NO_VERDICT`, which
+    states both meanings that absence can carry and picks neither."""
     host = str(signin.get("host") or "")
     if not host:
         return []
@@ -1544,6 +1696,18 @@ def _signin_lines(signin: dict) -> list[str]:
         f"     {DIM}aish attempted an automatic sign-in at {host} "
         f"during this call{outcome}{RESET}"
     ]
+    if verdict := str(signin.get("verdict") or ""):
+        said = str(signin.get("verdict_said") or "")
+        lines.append(f"       {DIM}verdict recorded: {BOLD}{verdict}{RESET}"
+                     f"{DIM} — {said}{RESET}")
+        if observed := list(signin.get("observed_said") or []):
+            lines.append(
+                f"       {DIM}what aish observed, and what that verdict was "
+                f"decided from:{RESET}"
+            )
+            lines.extend(f"         {DIM}{line}{RESET}" for line in observed)
+    elif ok is False:
+        lines.append(f"       {DIM}{SIGNIN_NO_VERDICT}{RESET}")
     if path := str(signin.get("frame") or ""):
         gone = signin.get("frame_state") != RECORDED
         lines.append(

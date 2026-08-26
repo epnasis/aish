@@ -947,6 +947,8 @@ So the token and its inputs ride out to the trace beside the picture and the con
 
 **Why now, and what the record is FOR.** The role framework (#297) will add an isolated sign-in evaluator that takes these observations and returns one verdict, with *I do not know why* a permitted answer — and its admission exam must be built from REAL recorded failures rather than invented ones. Real sign-in failures are rare, so every week these go unrecorded is a week of exam material that never exists. That is also why the record prefers what was OBSERVED to what was derived, and why no two observations are collapsed into one field for tidiness.
 
+**Reading it back is `aish explain`'s half, and it shipped a day later** — the dossier's assembly whitelisted its keys, so both of these were recorded and dropped on the way in. The four tokens' owner-facing wording lives there, in one place both renderers read, and `docs/diagnostics.md` carries it; nothing about the wording lives in this subsystem, and nothing here may word a token itself.
+
 `TestWhatWasSEENIsWrittenDownAndNotOnlyWhatWasCONCLUDED` drives the real `_sign_in_on` for all four endings, the arguments the table was actually given, the endings that reach no table, and the credential walk; `TestTheSignInAttemptIsOnTheStepItHappenedUnder` pins the trace block, the unconditional keys inside it and the token that arrives without them; `TestTheContractSaysWhatTheCodeDoes` pins the contract against the code, both directions.
 
 ## Watching what it is doing, live (#289 slice 2)

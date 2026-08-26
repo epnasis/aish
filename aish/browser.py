@@ -2372,6 +2372,12 @@ class SignInObserved:
     # The anti-automation widget the login page declares about itself, or "".
     # An observation about the PAGE. It disqualifies `page_said_no` as a
     # judgement of the value and does nothing else — see `captcha_vendor`.
+    #
+    # Same fact as `SignInResult.captcha`, WIDER on purpose: that field carries
+    # the declaration to the two sentences that speak it, and is empty on the
+    # other two endings; this one is written for every judged ending, because a
+    # record that described only the failures whose wording happened to want it
+    # would be a selective account of what aish saw.
     declared_widget: str = ""
     # The page sent a BODY to one of the site's own origins in the submit
     # window (`signin.unrecognised_submission`, asked unconditionally here).
@@ -2410,6 +2416,17 @@ class SignInResult:
     # sentence it produced — "reCAPTCHA refused the sign-in" — was said to the
     # owner for weeks about a widget that had never been given anything to
     # refuse (#321).
+    #
+    # **It is the same fact as `observed.declared_widget`, under a narrower
+    # condition, and the two are not interchangeable.** This one is set on the
+    # two endings whose SENTENCE mentions the declaration; that one is set on
+    # every judged ending, because a record of what was observed may not be
+    # selective about which failures it describes. Nothing in production reads
+    # this field any more — the note routing that used to branch on it was
+    # removed with the captcha outcome (`web.py`, both comments there) — so it
+    # survives as the wording input it always was, plus the tests that pin it.
+    # Retiring it is a real change and a deliberate one; do not do it by
+    # noticing it here.
     captcha: str = ""
     # The form was FILLED and the submit gesture made. What separates "aish
     # got as far as pressing" from "aish stopped before typing" — the two need
