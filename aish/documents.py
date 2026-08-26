@@ -57,6 +57,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import provenance
+
 # Bumped whenever conversion output changes. It is part of the cache key, so an
 # improvement to the layout logic invalidates old renditions instead of serving
 # a stale one that a test would then pass against.
@@ -650,9 +652,17 @@ def _read_cached(path: Path, source: str) -> Rendition | None:
 
 def prune(store_dir: Path) -> list[Path]:
     """Evict least-recently-used renditions until under both caps. Best-effort:
-    a file that vanishes under us is skipped rather than raising into a call."""
+    a file that vanishes under us is skipped rather than raising into a call.
+
+    A provenance record is part of the artefact it describes and never an entry
+    of its own (#319, #314's lesson): counting one would halve the store's real
+    capacity, and evicting one alone would leave bytes nothing attributes."""
     try:
-        files = [p for p in Path(store_dir).iterdir() if p.is_file()]
+        files = [
+            p
+            for p in Path(store_dir).iterdir()
+            if p.is_file() and not provenance.is_record(p)
+        ]
     except OSError:
         return []
     entries = []
@@ -672,18 +682,30 @@ def prune(store_dir: Path) -> list[Path]:
             path.unlink()
         except OSError:
             continue
+        provenance.forget_artefact(path)
         total -= size
         removed.append(path)
     return removed
 
 
-def convert(pdf_path: Path | str, store_dir: Path | str) -> Rendition:
+def convert(
+    pdf_path: Path | str,
+    store_dir: Path | str,
+    origin: provenance.ArtefactSource | None = None,
+) -> Rendition:
     """Convert (or reuse a conversion of) `pdf_path` into a markdown rendition.
 
     Keyed on the SOURCE bytes, so the same document is converted once ever —
     across sessions, and regardless of where the file happens to sit or what it
     is called this time.
-    """
+
+    `origin` is what the rendition's reader will not be able to see: the store
+    is inside the workspace boundary so the model can grep the file this tool
+    just named, and a PDF fetched from a URL is outside content whichever door
+    reads it back (#319). Recorded on a cache HIT too, since a rendition whose
+    record was lost would otherwise stay unattributed for as long as it lives.
+    A caller with nothing to say passes None, leaving the reader its own
+    conservative answer rather than a claim nobody made."""
     source = Path(pdf_path)
     try:
         data = source.read_bytes()
@@ -699,6 +721,8 @@ def convert(pdf_path: Path | str, store_dir: Path | str) -> Rendition:
     if existing is not None:
         cached = _read_cached(existing, source.name)
         if cached is not None:
+            if origin is not None:
+                provenance.record_artefact(existing, origin)
             return cached
     path = existing or _cache_path(store, digest, source.name)
 
@@ -727,6 +751,8 @@ def convert(pdf_path: Path | str, store_dir: Path | str) -> Rendition:
     }
     header = _HEADER_PREFIX + json.dumps(meta, separators=(",", ":")) + _HEADER_SUFFIX
     path.write_text(header + "\n\n" + "\n\n".join(chunks) + "\n", encoding="utf-8")
+    if origin is not None:
+        provenance.record_artefact(path, origin)
     prune(store)
     return Rendition(source=source.name, path=path, pages=tuple(pages))
 

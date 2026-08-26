@@ -52,7 +52,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import web
+from . import provenance, web
 
 # Frames are downscaled before they are ever encoded. A model reads a 640px
 # frame as well as a 4K one and the difference is pure context cost, paid again
@@ -895,6 +895,21 @@ def load_transcript(
     else:
         path.write_text(render_transcript(cues, recording, track), encoding="utf-8")
         prune_transcripts(store)
+    # Unconditional, and stated here rather than by the caller, because there
+    # is nothing to decide: a caption track is fetched over the network and
+    # written by whoever uploaded the recording, so this rendition is outside
+    # content however it is reached (#319). Rewritten on a cache hit too — a
+    # rendition still on disk whose record was lost would otherwise read as
+    # unattributed forever.
+    provenance.record_artefact(
+        path,
+        provenance.ArtefactSource(
+            tool="read_media",
+            outside=True,
+            source=recording.source or recording.identity,
+            what="aish's rendition of a caption track published with the recording",
+        ),
+    )
     return transcript
 
 
@@ -906,9 +921,17 @@ def _fetch_captions(url: str) -> bytes:
 
 
 def prune_transcripts(store_dir: Path) -> list[Path]:
-    """Evict least-recently-used renditions until under both caps."""
+    """Evict least-recently-used renditions until under both caps.
+
+    A provenance record is part of its rendition and never an entry of its own
+    (#319, #314's lesson): counting one would halve the store's real capacity,
+    and evicting one alone would leave bytes on disk that nothing attributes."""
     try:
-        files = [p for p in Path(store_dir).iterdir() if p.is_file()]
+        files = [
+            p
+            for p in Path(store_dir).iterdir()
+            if p.is_file() and not provenance.is_record(p)
+        ]
     except OSError:
         return []
     entries = []
@@ -929,6 +952,7 @@ def prune_transcripts(store_dir: Path) -> list[Path]:
             path.unlink()
         except OSError:
             continue
+        provenance.forget_artefact(path)
         total -= size
         removed.append(path)
     return removed

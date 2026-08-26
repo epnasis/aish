@@ -107,6 +107,8 @@ This was the display-only boundary, consumed by nothing that reads. The read sid
 
 The rule the rename encodes: **every read-side consumer takes this one list**, so a fourth asymmetry cannot open quietly.
 
+**A rendition of a FETCHED document is outside content, and says so beside its bytes (#319).** "It grants no new power" holds for a rendition of a PDF the owner had on disk; it does not hold for one `_resolve_pdf` downloaded, and the store holds both — the fetched `.pdf` and the `.md` rendered from it — inside the boundary. Read through `read_file` those arrived bannerless, untainted and unattributed, which is #317's hole through a door that must stay OPEN: naming the rendition so the model can grep it, page it and search it is the whole convert-once-then-read design. So `convert` takes a `provenance.ArtefactSource` and writes it to a `<rendition>.src` sidecar (on a cache hit too), `_resolve_pdf` records the PDF it saves, and `Agent._pdf_origin` decides local-vs-fetched with `_brings_outside_content`'s existing `DUAL_SOURCE_TOOLS` rule rather than a second one — ORing in the source file's own record, so re-reading a fetched PDF by its local path cannot relabel the rendition. `prune` skips records when counting and unlinks them with the artefact. Rationale in `docs/agent-core.md`; `TestStore`, `TestARenditionCarriesWhereItCameFrom`.
+
 ---
 
 ## Dependency

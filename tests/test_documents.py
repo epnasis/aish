@@ -10,7 +10,7 @@ a real scanner produces one.
 
 import pytest
 
-from aish import documents
+from aish import documents, provenance
 
 pymupdf = pytest.importorskip("pymupdf")
 
@@ -382,6 +382,50 @@ class TestStore:
             _text_page(doc.new_page(), f"Document number {n}. " * 20)
             documents.convert(_save(doc, tmp_path, f"doc{n}.pdf"), store)
         assert len(list(store.iterdir())) <= 2
+
+    def test_the_rendition_carries_where_the_document_came_from(self, tmp_path, store):
+        """#319. The store is inside `workspace_roots` so the model can grep
+        the file `read_pdf` just named, and a PDF fetched from a URL is outside
+        content whichever door reads it back. The caller says which — this
+        module cannot know."""
+        doc = pymupdf.open()
+        _text_page(doc.new_page(), "Fetched from somewhere. " * 20)
+        path = _save(doc, tmp_path, "fetched.pdf")
+        origin = provenance.ArtefactSource(
+            tool="read_pdf", outside=True, source="https://papers.example/p.pdf"
+        )
+
+        rendition = documents.convert(path, store, origin)
+        assert provenance.artefact_source(rendition.path) == origin
+
+    def test_a_cache_hit_records_the_provenance_too(self, tmp_path, store):
+        """A rendition still on disk whose record was lost would otherwise stay
+        unattributed for as long as it lives."""
+        doc = pymupdf.open()
+        _text_page(doc.new_page(), "Convert me twice. " * 20)
+        path = _save(doc, tmp_path, "twice.pdf")
+        origin = provenance.ArtefactSource(tool="read_pdf", outside=True, source="https://x/p")
+
+        rendition = documents.convert(path, store, origin)
+        provenance.record_path(rendition.path).unlink()
+        again = documents.convert(path, store, origin)
+
+        assert again.path == rendition.path
+        assert provenance.artefact_source(again.path) == origin
+
+    def test_a_record_is_never_relaxed_to_local(self, tmp_path, store):
+        """The laundering guard: the store is keyed on the PDF's bytes, so the
+        same rendition is reachable from a URL and from a local copy. The second
+        read must not relabel the first read's source as this machine's own."""
+        doc = pymupdf.open()
+        _text_page(doc.new_page(), "Reachable twice. " * 20)
+        path = _save(doc, tmp_path, "both.pdf")
+        fetched = provenance.ArtefactSource(tool="read_pdf", outside=True, source="https://x/p")
+
+        rendition = documents.convert(path, store, fetched)
+        documents.convert(path, store, provenance.ArtefactSource(tool="read_pdf", outside=False))
+
+        assert provenance.artefact_source(rendition.path) == fetched
 
 
 class TestRefusals:
