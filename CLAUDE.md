@@ -44,6 +44,18 @@ Merge back to main after tests pass, then remove the worktree. `make ship` alway
 
 **A verification run MUST NOT send a message to a chat it did not start.** Use the isolated harness in `.claude/skills/verify/SKILL.md` (its own `state_dir`, port 8899); if a check genuinely needs the live server, click ＋ for a NEW chat first and drive only that. The port is not a defence — `scripts/aish-preview.sh` points preview at PROD's `AISH_STATE_DIR` deliberately, so :8788 writes the same sessions as :8787. On 2026-07-28 a verification run drove the live UI through Chrome while the browser was parked on the owner's own shopping chat and typed five probes into it; a chat has no way to delete a message, so they are permanent, they auto-retitled the chat, and days later they were still what the owner saw when the chat flagged itself as having something new (#201).
 
+## No evidence, no claim
+
+**Every claim carries the evidence that established it. A claim with no evidence is a guess, and a guess must not be made, shipped, or spoken in aish's own voice.** The test is mechanical: name the line of code, the command output, or the experiment that checked the thing being asserted. If you cannot name it, you do not know it — go and find out, or say you do not know.
+
+**This binds what aish SAYS, not only what you say.** *"I pressed Enter and no request left the page"* is an observation. *"reCAPTCHA refused the sign-in"* is an interpretation. Only the first may appear in a message, a log, a trace record or a push. Where a cause genuinely is evidenced — a 401 on a request carrying the credential IS the site refusing it — the causal statement is earned and belongs.
+
+**Why this is a rule and not a preference.** On 2026-08-26 a hypothesis about a failed sign-in was asserted in an issue, implemented from that issue as a named outcome, and aish then told the owner on every attempt that the page was *"protected by reCAPTCHA, which refuses a scripted sign-in."* It had never observed that. The real cause, found later by experiment, was that the code never targeted the page's login button at all. The guess became evidence for itself, survived four rounds of the owner reporting it wrong, and — worst — **removed aish's ability to report its own ignorance**. His words: *"you basically don't allow yourself even for the application to report the problem and you break the blind spot."*
+
+**"I do not know why" is an ordinary, unembarrassed outcome and must always be available.** A vocabulary that structurally forces a cause to be named is a defect: it makes guessing the path of least resistance.
+
+**When the instrumentation cannot distinguish two explanations, change the instrumentation — never reach for a more confident guess.** Artifacts (page text, a log, a fetched copy) suggest hypotheses; only an experiment that would come out differently under a rival hypothesis settles one. Hold hypotheses freely, test them, ship none of them.
+
 ## Where the knowledge lives
 
 **This file is a routing table, not the knowledge.** It holds the rules that apply to every task; the rationale for each area lives in `docs/` and is read on demand.
