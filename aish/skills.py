@@ -214,35 +214,79 @@ def _build_words(*texts: str) -> frozenset:
     ) - {""}
 
 
+# The frontmatter terminator, anchored to its OWN LINE. A naive `split("---")`
+# treats a `---` anywhere — including mid-sentence in a description — as the
+# end of the header, so every key below it becomes prose. In the rules corpus
+# that landed a compiled rule with no prohibition while the diff the owner
+# approved visibly contained `never_use: [web_search]`: the diff said one
+# thing, the card said another, and the file behaved like the card (#191).
+# Quoting cannot fix it (`"a --- b"` still contains the marker), and "empty
+# --- say so" is ordinary writing rather than an attack.
+#
+# This lives here, beside `lifecycle_active` and `parse_expiry`, because
+# skills, memory, rules and plugin tools are four artifact classes in ONE
+# md+frontmatter family, and "where does the header end" must have a single
+# reading across all four (#209). rules.py, tool_plugins.py and curate.py
+# import it; `TestOneFrontmatterReader` fails if a fifth reading appears.
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)(?:\r?\n)?^---[ \t]*\r?$\n?",
+                             re.DOTALL | re.MULTILINE)
+
+
+def split_frontmatter(text: str) -> tuple[str, str]:
+    """(header, body). ("", text) when there is no well-formed frontmatter."""
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return "", text
+    return match.group(1), text[match.end():]
+
+
+def frontmatter_value(value: str) -> str:
+    """A model-authored string collapsed to something that cannot mean more
+    than one frontmatter line.
+
+    Every writer in this family interpolates raw (`description: {text}`), so a
+    value carrying a newline does not become a broken line — it becomes EXTRA
+    KEYS. `save_memory(keywords="alpha\\nstatus: disabled\\nbeta")` wrote a
+    file that parses back `status: disabled`, so the entry was retired from
+    the index, preflight and recall, while the tool's own result line said
+    `remembered (probe): a harmless fact` with no `[disabled]` marker. Same
+    shape as the `_yaml_scalar` colon-newline bug (#191): the artifact means
+    something its confirmation does not say.
+
+    `save_memory` already flattened the FACT this way, which is the only
+    reason the description path was closed — a mitigation nobody had written
+    down as load-bearing. It is named and shared now so a writer that forgets
+    it is visible rather than merely unlucky (#209).
+    """
+    return " ".join(str(value).split())
+
+
 def _parse(path: Path, kind: str = "skill") -> Entry:
     """Entry from a markdown file — name defaults to the filename (or, for a
     folder skill's SKILL.md, its directory name), description to the first
     non-empty body line."""
     text = path.read_text(encoding="utf-8")
     default_name = path.parent.name if path.name == "SKILL.md" else path.stem
-    name, description, keywords, body = default_name, "", [], text
+    name, description, keywords = default_name, "", []
     status, expires, pinned = "", None, False
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-        if len(parts) == 3:
-            _, front, body = parts
-            for line in front.strip().splitlines():
-                key, _, value = line.partition(":")
-                key = key.strip()
-                if key == "name" and value.strip():
-                    name = value.strip()
-                elif key == "description":
-                    description = value.strip()
-                elif key == "keywords":
-                    keywords = [w.strip() for w in value.split(",") if w.strip()]
-                elif key == "status":
-                    status = value.strip().casefold()
-                elif key == "expires":
-                    expires = parse_expiry(value.strip(), path)
-                elif key in ("pinned", "kind"):  # `kind: policy` = alias for pinned
-                    pinned = pinned or value.strip().casefold() in (
-                        "yes", "true", "1", "on", "policy",
-                    )
+    front, body = split_frontmatter(text)
+    for line in front.splitlines():
+        key, _, value = line.partition(":")
+        key = key.strip()
+        if key == "name" and value.strip():
+            name = value.strip()
+        elif key == "description":
+            description = value.strip()
+        elif key == "keywords":
+            keywords = [w.strip() for w in value.split(",") if w.strip()]
+        elif key == "status":
+            status = value.strip().casefold()
+        elif key == "expires":
+            expires = parse_expiry(value.strip(), path)
+        elif key in ("pinned", "kind"):  # `kind: policy` = alias for pinned
+            pinned = pinned or value.strip().casefold() in (
+                "yes", "true", "1", "on", "policy",
+            )
     if not description:
         for line in body.strip().splitlines():
             if line.strip():
@@ -1024,7 +1068,7 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
     rather than a changed return type deliberately: the string return is what
     cli.py, curate.py and every test read, and this gate's evidence is worth
     recording without a ripple through all of them."""
-    text = " ".join(fact.split()).strip()
+    text = frontmatter_value(fact)
     if not text:
         return "ERROR: empty fact"
     slug = name.strip() or _slugify(text)
@@ -1046,10 +1090,12 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
                 return "(already remembered)"
     # Keyword hygiene (#183): keywords feed a retrieval rail, and the model
     # authors them — dedupe case-insensitively and cap the count so one
-    # entry cannot carpet-bomb the trigger space with generic words.
+    # entry cannot carpet-bomb the trigger space with generic words. A bare
+    # `.strip()` left interior newlines, which is how a keyword smuggled
+    # `status: disabled` onto its own line and retired the entry (#209).
     seen_kw: set[str] = set()
     keyword_list = []
-    for word in (w.strip() for w in keywords.split(",")):
+    for word in (frontmatter_value(w) for w in keywords.split(",")):
         if word and word.casefold() not in seen_kw:
             seen_kw.add(word.casefold())
             keyword_list.append(word)

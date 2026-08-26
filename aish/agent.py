@@ -8057,10 +8057,15 @@ class Agent:
             wrapper_body += "\n"
 
         mutating = "yes" if args.get("mutating") else "no"
+        # Every value below occupies ONE frontmatter line, and the model wrote
+        # them, so each is flattened rather than merely stripped: a newline in
+        # `description` would not break its line, it would append fresh KEYS
+        # (#209). `notes` is exempt — it is the prose body, below the header.
+        one_line = skills.frontmatter_value
         lines = [
             "---",
             f"name: {name}",
-            f"description: {str(args.get('description', '')).strip()}",
+            f"description: {one_line(args.get('description', ''))}",
             f"exec: ./{wrapper_name}",
             f"mutating: {mutating}",
         ]
@@ -8068,18 +8073,18 @@ class Agent:
         if preview not in (None, "", False):
             # A non-bool goes through verbatim so the lint below rejects a bogus
             # value instead of silently coercing it into a promised preview.
-            lines.append(f"preview: {'yes' if preview is True else str(preview).strip()}")
+            lines.append(f"preview: {'yes' if preview is True else one_line(preview)}")
         if args.get("timeout"):
             lines.append(f"timeout: {int(args['timeout'])}")
-        if str(args.get("prefer_over", "") or "").strip():
-            lines.append(f"prefer_over: {str(args['prefer_over']).strip()}")
-        if str(args.get("secrets", "") or "").strip():
-            lines.append(f"secrets: {str(args['secrets']).strip()}")
+        if one_line(args.get("prefer_over", "") or ""):
+            lines.append(f"prefer_over: {one_line(args['prefer_over'])}")
+        if one_line(args.get("secrets", "") or ""):
+            lines.append(f"secrets: {one_line(args['secrets'])}")
         # Written verbatim, and ABSENT when the model omitted it, so the lint
         # below refuses the tool rather than this inventing a contract on the
         # author's behalf — a guessed contract is indistinguishable from a
         # checked one in the log, and only one of them is true.
-        lines.append(f"returns: {str(args.get('returns', '') or '').strip()}")
+        lines.append(f"returns: {one_line(args.get('returns', '') or '')}")
         lines.append(f"schema: {json.dumps(schema_obj)}")
         lines.append("---")
         lines.append(str(args.get("notes", "")).strip() or f"{name} tool.")
