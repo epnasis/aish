@@ -39,6 +39,10 @@ from pathlib import Path
 
 from . import files
 from .paths import config_home
+
+# A TOOL.md is the same md+frontmatter family as a skill, a memory and a rule,
+# so it reads its header the same way — see skills.split_frontmatter (#209).
+from .skills import split_frontmatter
 from .tools import (
     STATUS_FAILED,
     STATUS_OK,
@@ -392,13 +396,12 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
 
     if not text.startswith("---"):
         return None, [f"{manifest}: missing YAML frontmatter"]
-    parts = text.split("---", 2)
-    if len(parts) != 3:
+    front, body = split_frontmatter(text)
+    if not front:
         return None, [f"{manifest}: malformed frontmatter"]
-    _, front, body = parts
 
     fields: dict[str, str] = {}
-    for line in front.strip().splitlines():
+    for line in front.splitlines():
         key, sep, value = line.partition(":")
         if sep:
             fields[key.strip()] = value.strip()

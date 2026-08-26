@@ -33,6 +33,12 @@ import yaml
 from . import files, skills, web
 from .paths import config_home
 
+# One reading of "where does the header end" for all four md+frontmatter
+# artifact classes; the scar that anchored it to a line is #191, and the
+# consolidation is #209. Re-exported so `rules.split_frontmatter` still
+# resolves for the readers below.
+from .skills import split_frontmatter
+
 GLOBAL_RULES_DIR = config_home() / "rules"
 
 # The SUBJECTS a `when:` block can examine — the thing being matched, named,
@@ -2823,26 +2829,6 @@ COMPILER_FIELDS = tuple(f for f in AUTHOR_FIELDS if f not in LIFECYCLE_FIELDS)
 class LintError(Exception):
     """An authoring input that cannot become a rule file. Distinct from
     RuleError, which is about a file that already exists."""
-
-
-# The frontmatter terminator, anchored to its OWN LINE. A naive `split("---")`
-# treats a `---` anywhere — including mid-sentence in a description — as the
-# end of the header, so every key below it becomes prose. The owner then
-# approves a diff that visibly contains `never_use: [web_search]` while the
-# compiled rule has no prohibition at all: the diff says one thing, the card
-# says another, and the file behaves like the card. Quoting cannot fix it
-# (`"a --- b"` still contains the marker), and "empty --- say so" is ordinary
-# writing rather than an attack.
-_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)(?:\r?\n)?^---[ \t]*\r?$\n?",
-                             re.DOTALL | re.MULTILINE)
-
-
-def split_frontmatter(text: str) -> tuple[str, str]:
-    """(header, body). ("", text) when there is no well-formed frontmatter."""
-    match = _FRONTMATTER_RE.match(text)
-    if not match:
-        return "", text
-    return match.group(1), text[match.end():]
 
 
 def _yaml_scalar(value: Any) -> str:

@@ -6,6 +6,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from aish import curate as curate_module
 from aish.curate import (
     LEDGER_DAYS,
@@ -26,6 +28,11 @@ from aish.curate import (
     scan_rules,
     update_entry_meta,
 )
+from aish.skills import frontmatter_value
+
+# The one list of values that used to change the meaning of the file holding
+# them — every writer in the md+frontmatter family is probed with it (#209).
+from tests.test_skills import SMUGGLED
 
 NOW = datetime(2026, 7, 29, 8, 30)
 
@@ -193,6 +200,52 @@ class TestUpdateEntryMeta:
 
         with pytest.raises(ValueError):
             update_entry_meta(path, disabled=True)
+
+
+class TestUpdateEntryMetaRoundTrip:
+    """The judge is a model, and its verdict fields land raw on their own
+    frontmatter lines — so this writer gets the same round-trip probe as
+    `save_memory` (#209). The envelope refuses a `disable` on a pinned entry;
+    a `repair` whose keywords carry a newline must not be able to do it
+    anyway, through the back door."""
+
+    @staticmethod
+    def _reparse(path):
+        import aish.skills as skills_module
+
+        return skills_module._parse(path, "memory")
+
+    @pytest.mark.parametrize("smuggled", SMUGGLED)
+    def test_a_repaired_description_cannot_smuggle_a_second_key(self, tmp_path, smuggled):
+        path = make_entry(tmp_path, "e", "old desc", body="precious body")
+        update_entry_meta(path, description=smuggled)
+        entry = self._reparse(path)
+        assert entry.name == "e"
+        assert entry.status == "" and entry.expires is None and not entry.pinned
+        assert entry.description == frontmatter_value(smuggled)
+        assert entry.body == "precious body"
+
+    @pytest.mark.parametrize("smuggled", SMUGGLED)
+    def test_repaired_keywords_cannot_smuggle_a_second_key(self, tmp_path, smuggled):
+        path = make_entry(tmp_path, "e", "old desc", extra="pinned: yes\n")
+        update_entry_meta(path, keywords=f"alpha, {smuggled}, beta")
+        entry = self._reparse(path)
+        assert entry.status == "", "a keyword disabled a pinned entry"
+        assert entry.expires is None and entry.pinned
+        assert entry.description == "old desc"
+        assert len(entry.keywords) == 3, entry.keywords
+
+    def test_an_entry_the_knowledge_layer_reads_can_also_be_repaired(self, tmp_path):
+        """Its own regex demanded `^---\\n` exactly, so one trailing space
+        after the opening marker — the corpus is hand-editable — raised out of
+        the judge loop while `_parse` read the entry perfectly well. Refusing
+        to repair the very file the ledger flagged is the disagreement this
+        consolidation exists to remove (#209)."""
+        path = tmp_path / "e.md"
+        path.write_text("--- \nname: e\ndescription: old\n--- \nbody\n", encoding="utf-8")
+        assert self._reparse(path).description == "old"  # the reader was always fine
+        update_entry_meta(path, description="new")
+        assert self._reparse(path).description == "new"
 
 
 class TestJudgeLoop:

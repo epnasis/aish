@@ -767,12 +767,15 @@ def update_entry_meta(
     bodies and deletion have no code path here, which is what makes the
     envelope enforcement code rather than prompt obedience."""
     text = path.read_text(encoding="utf-8")
-    match = re.match(r"^---\n(.*?)\n---\n?", text, re.S)
-    if not match:
+    # The same reading as `_parse` (#209). Its own regex was near-correct but
+    # stricter than this writer needs — no CRLF, no trailing space on either
+    # marker — so the judge loop would have raised on an entry `_parse` reads
+    # happily, i.e. refused to repair a file it had just been asked about.
+    header, body = skills.split_frontmatter(text)
+    if not header:
         raise ValueError(f"no frontmatter in {path}")
-    body = text[match.end():]
     keep: list[str] = []
-    for line in match.group(1).splitlines():
+    for line in header.splitlines():
         key = line.partition(":")[0].strip().casefold()
         if key == "description" and description is not None:
             continue
@@ -785,11 +788,14 @@ def update_entry_meta(
         keep.append(line)
     front = keep
     if description is not None:
-        front.insert(1, f"description: {' '.join(description.split())}")
+        front.insert(1, f"description: {skills.frontmatter_value(description)}")
     if keywords is not None:
         seen: set[str] = set()
         words = []
-        for word in (w.strip() for w in keywords.split(",")):
+        # Judge-authored, and interpolated onto one line: a bare `.strip()`
+        # would let `status: disabled` ride in on a keyword and retire an
+        # entry the envelope refuses to disable directly (#209).
+        for word in (skills.frontmatter_value(w) for w in keywords.split(",")):
             if word and word.casefold() not in seen:
                 seen.add(word.casefold())
                 words.append(word)

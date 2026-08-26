@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 
 import pytest
 
@@ -401,6 +402,168 @@ class TestSaveMemory:
     def test_keywords_written(self, tmp_path):
         save_memory("fact", tmp_path / "memory", name="kw", keywords="a, b")
         assert "keywords: a, b" in (tmp_path / "memory" / "kw.md").read_text()
+
+
+# Values that used to change the MEANING of the file that contained them.
+# Every one is ordinary writing somebody could type, not an exploit: a fact
+# quoting a markdown horizontal rule, a note pasted from a Windows editor, a
+# sentence that happens to end a line with a colon. Shared by the round-trip
+# probes for every writer in the md+frontmatter family (#209).
+SMUGGLED = [
+    pytest.param("a\n---\nstatus: disabled\nb", id="terminator-on-its-own-line"),
+    pytest.param("a\n--- \nstatus: disabled", id="terminator-with-trailing-space"),
+    pytest.param("a\r\nstatus: disabled\r\nb", id="crlf"),
+    pytest.param("a\nstatus:\n disabled", id="colon-newline"),
+    pytest.param("---\nstatus: disabled\n---\na", id="leading-terminator"),
+    pytest.param("a\nexpires: 2020-01-01", id="already-expired"),
+    pytest.param("a\npinned: yes", id="smuggled-standing-rule"),
+    pytest.param("a\nname: somebody-elses-slug", id="smuggled-identity"),
+]
+
+
+class TestFrontmatterRoundTrip:
+    """Render a model-authored value, parse it back, assert it means the same
+    thing. `save_memory` interpolates raw (`description: {text}`), so a value
+    carrying a newline does not break its line — it appends fresh KEYS, and
+    the entry silently leaves the index, preflight and recall while the tool's
+    own result line reports a healthy save.
+
+    The rule this pins (#209): any writer that puts a model-authored value
+    into a structured file gets this test on day one. The two bugs it comes
+    from (`_yaml_scalar`'s colon-newline, `_parse`'s naive split) were both
+    invisible to reading and caught only this way.
+    """
+
+    @staticmethod
+    def _reparse(tmp_path, slug="probe"):
+        return _parse(tmp_path / "memory" / f"{slug}.md", "memory")
+
+    @pytest.mark.parametrize("smuggled", SMUGGLED)
+    def test_a_fact_cannot_smuggle_a_second_key(self, tmp_path, smuggled):
+        save_memory(smuggled, tmp_path / "memory", name="probe")
+        entry = self._reparse(tmp_path)
+        assert entry.name == "probe", "a fact renamed the entry"
+        assert entry.status == "", "a fact retired the entry"
+        assert entry.expires is None, "a fact expired the entry"
+        assert entry.pinned is False, "a fact made itself a standing rule"
+        assert entry.description == skills_module.frontmatter_value(smuggled)
+
+    @pytest.mark.parametrize("smuggled", SMUGGLED)
+    def test_a_keyword_cannot_smuggle_a_second_key(self, tmp_path, smuggled):
+        """The path the flattening did NOT cover. `save_memory` flattened the
+        fact and only stripped each keyword, so `keywords="alpha\\nstatus:
+        disabled\\nbeta"` wrote a file that parsed back `status: disabled` —
+        while the returned line read `remembered (probe): a harmless fact`
+        with no `[disabled]` marker."""
+        save_memory("a harmless fact", tmp_path / "memory", name="probe",
+                    keywords=f"alpha,{smuggled},beta")
+        entry = self._reparse(tmp_path)
+        assert entry.description == "a harmless fact"
+        assert entry.status == "" and entry.expires is None and not entry.pinned
+        assert entry.name == "probe"
+        assert len(entry.keywords) == 3, entry.keywords
+
+    @pytest.mark.parametrize("smuggled", SMUGGLED)
+    def test_the_result_line_says_what_the_file_means(self, tmp_path, smuggled):
+        """The confirmation and the artifact are one claim. `[disabled]` in
+        the returned string must appear exactly when the file on disk parses
+        back as retired — the shape of every bug in this class is the two
+        disagreeing."""
+        result = save_memory("a harmless fact", tmp_path / "memory", name="probe",
+                             keywords=f"alpha,{smuggled}")
+        entry = self._reparse(tmp_path)
+        assert ("[disabled]" in result) is (entry.status == "disabled"), result
+
+    def test_every_written_value_occupies_exactly_one_line(self, tmp_path):
+        """The load-bearing mitigation, named. Frontmatter here is line-parsed,
+        so "one value, one line" is the whole invariant — a writer that ever
+        preserves a newline in a value fails HERE rather than in the corpus."""
+        save_memory("fact\nwith\nlines", tmp_path / "memory", name="probe",
+                    keywords="alpha\nbeta, gamma\r\ndelta", expires="2099-01-01",
+                    pinned=True)
+        text = (tmp_path / "memory" / "probe.md").read_text()
+        header, _ = skills_module.split_frontmatter(text)
+        keys = [line.partition(":")[0] for line in header.splitlines()]
+        assert keys == ["name", "description", "keywords", "pinned", "expires"], header
+
+    def test_a_marker_inside_a_value_is_not_the_end_of_the_header(self, tmp_path):
+        """The mid-line case the naive `split("---", 2)` got wrong: everything
+        below the marker became prose, so `keywords:` here was simply lost."""
+        path = write_skill(
+            tmp_path,
+            "s.md",
+            "---\nname: s\ndescription: the source came back empty --- say so\n"
+            "keywords: mail, empty\n---\nbody\n",
+        )
+        entry = _parse(path)
+        assert entry.description == "the source came back empty --- say so"
+        assert entry.keywords == ["mail", "empty"], "a key below a --- became prose"
+        assert entry.body == "body"
+
+    @pytest.mark.parametrize("text,expected_body", [
+        ("---\r\nname: s\r\ndescription: d\r\n---\r\nbody\r\n", "body"),
+        ("--- \nname: s\ndescription: d\n--- \nbody\n", "body"),
+        ("---\nname: s\ndescription: d\n---", ""),
+    ], ids=["crlf", "trailing-space", "no-body"])
+    def test_the_terminator_tolerates_real_files(self, tmp_path, text, expected_body):
+        entry = _parse(write_skill(tmp_path, "s.md", text))
+        assert entry.name == "s" and entry.description == "d"
+        assert entry.body == expected_body
+
+    @pytest.mark.parametrize("text", [
+        "---\nname: elsewhere\nstatus: disabled\nno terminator at all\n",
+        "prose first\n---\nname: elsewhere\nstatus: disabled\n---\n",
+    ], ids=["unterminated", "not-at-the-top"])
+    def test_a_malformed_header_is_body_not_fields(self, tmp_path, text):
+        """Fail-closed in the direction that costs nothing: no well-formed
+        header means no fields at all, never fields scavenged out of prose."""
+        entry = _parse(write_skill(tmp_path, "s.md", text))
+        assert entry.name == "s", "a field was read from a header that never closed"
+        assert entry.status == "" and not entry.pinned
+        assert entry.body == text.strip()
+
+
+class TestOneFrontmatterReader:
+    """One reading of "where does the header end", for all four artifact
+    classes in the md+frontmatter family. Three readers each had their own
+    (#209), and the two bugs that motivated this were both a second reading
+    disagreeing with the writer that fed it."""
+
+    # Ways to decide where a header ends. Anything here outside skills.py is a
+    # fifth reading waiting to drift from the other four.
+    NAIVE = (
+        '.split("---"', ".split('---'", '.partition("---"', ".partition('---'",
+        'r"^---', "r'^---", 'r"\\A---', "r'\\A---",
+    )
+    ALLOWED = {
+        "skills.py": "defines split_frontmatter, the one reading",
+    }
+
+    @staticmethod
+    def _offenders(sources):
+        return {
+            path.name: [n for n in TestOneFrontmatterReader.NAIVE if n in text]
+            for path, text in sources
+            if any(n in text for n in TestOneFrontmatterReader.NAIVE)
+        }
+
+    @staticmethod
+    def _sources():
+        root = pathlib.Path(skills_module.__file__).parent
+        return [(p, p.read_text(encoding="utf-8")) for p in sorted(root.rglob("*.py"))]
+
+    def test_no_module_reads_a_header_its_own_way(self):
+        found = self._offenders(self._sources())
+        assert set(found) == set(self.ALLOWED), found
+
+    def test_the_allowlist_has_no_stale_entries(self):
+        names = {p.name for p, _ in self._sources()}
+        assert set(self.ALLOWED) <= names
+
+    def test_the_sweep_would_catch_a_planted_offender(self):
+        """A guard that passes by matching nothing is not a guard."""
+        planted = [(pathlib.Path("aish/imposter.py"), 'front = text.split("---", 2)[1]')]
+        assert self._offenders(planted) == {"imposter.py": ['.split("---"']}
 
 
 class TestForgetMemory:
