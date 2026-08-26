@@ -190,10 +190,9 @@ def carries_secret(text: str, needles: Sequence[str]) -> bool:
 # and it was read as *the site refused the value*: `suspect` written onto the
 # record, which permanently stops the credential being spent, plus a message
 # telling the owner to sign in himself — which also replaces the saved sign-in.
-# eon.pl's login is reCAPTCHA-protected, so a scripted fill-and-submit is
-# scored and refused silently and the form simply comes back. The record read
-# `used: 0` on a password that works every time he types it by hand, and he
-# went round that loop twice, losing a working credential each time (#320).
+# On eon.pl the record read `used: 0` on a password that works every time he
+# types it by hand, and he went round that loop twice, losing a working
+# credential each time (#320).
 #
 # A password box means only *the session did not come up*. It is equally the
 # shape of a CAPTCHA refusing the automation, a submit that never fired, a bot
@@ -201,8 +200,19 @@ def carries_secret(text: str, needles: Sequence[str]) -> bool:
 # password on screen. So marking a credential suspect now needs a POSITIVE
 # signal that the site judged the VALUE. Absent one, the honest answer is
 # "could not sign in", not "your password is wrong" — a wrong accusation here
-# destroys something the owner cannot get back without re-recording, and on a
-# CAPTCHA site the re-record fails identically.
+# destroys something the owner cannot get back without re-recording.
+#
+# And the same discipline binds the SENTENCE, not only the record. For weeks
+# the eon.pl failure was explained as "reCAPTCHA refuses the scripted
+# sign-in" — asserted in an issue, then shipped as a named outcome, then said
+# to the owner on every attempt in aish's own voice. Experiment later showed
+# the widget never refused anything: the submit never fired at all (#321), so
+# the confident cause was a hypothesis wearing a fact's clothes, and it stood
+# BETWEEN the owner and the evidence that would have disproved it. The rule
+# that came out of that: aish reports what it OBSERVED; a cause is spoken only
+# where a line of code checked the thing being asserted, and "I did X, Y
+# happened, aish does not know why" is an ordinary outcome, never a gap to be
+# filled with the best available guess.
 
 # The vendors' own names, matched case-insensitively as substrings. They are
 # chosen because they are INVARIANT across locale: they appear in the addresses
@@ -235,9 +245,15 @@ def captcha_vendor(marks: Sequence[str], text: str = "") -> str:
     is the rendered page, searched for the brand names alone and never for a
     sentence around them.
 
-    It is not a judgement about whether the widget actually fired: it is asked
-    only once the session failed to come up, and all it decides is that aish
-    learned nothing about the password."""
+    **What comes back is an observation about the PAGE, never about the
+    failure.** A declaration is what the page loads and says about itself;
+    nothing here saw the widget act, and on eon.pl it never did — the submit
+    never fired and the widget was blamed anyway (#321). It has exactly two
+    permitted uses: it disqualifies the page's own ARIA error as a judgement
+    of the value (the widget's generic refusal renders through the same alert
+    region a wrong password does — see `judge_a_failed_sign_in`), and it may
+    be SPOKEN as the declaration it is. It never selects the outcome and it is
+    never worded as the cause."""
     haystack = "\n".join([*(str(m) for m in marks), text or ""]).lower()
     for token, vendor in _CAPTCHA_TOKENS:
         if token in haystack:
@@ -353,9 +369,16 @@ def unrecognised_submission(summaries: Sequence[str], origins: Sequence[str]) ->
 # collapse them back into a single test — which is the mistake this whole issue
 # is about, one level up: a password box standing in for a verdict.
 
+# Four verdicts, and every one is a pair of OBSERVATIONS — did it leave, and
+# did anything judge it. There is deliberately no verdict that names a cause
+# nothing checked: FAILED_CAPTCHA used to sit here, selected by a script tag
+# on the page, and it let a page decoration outrank both observations — on
+# eon.pl aish told the owner reCAPTCHA had refused a sign-in that was never
+# submitted, on every attempt, for weeks (#320, #321). A vocabulary that
+# offers a cause will be handed one; this one can only say what was seen,
+# which is what makes "aish does not know why" sayable at all.
 FAILED_REFUSED = "refused"  # it went out, and something said no to it
 FAILED_CONTRADICTION = "contradiction"  # the two observers disagree
-FAILED_CAPTCHA = "captcha"  # the page refuses automation, not this password
 FAILED_NEVER_SENT = "never_sent"  # nothing carrying it was seen leaving
 FAILED_UNEXPLAINED = "unexplained"  # it went out and the site said nothing
 
@@ -363,7 +386,6 @@ FAILURE_VERDICTS = frozenset(
     {
         FAILED_REFUSED,
         FAILED_CONTRADICTION,
-        FAILED_CAPTCHA,
         FAILED_NEVER_SENT,
         FAILED_UNEXPLAINED,
     }
@@ -378,20 +400,26 @@ def judge_a_failed_sign_in(
     Pure, and deliberately not a method on anything that can see a page: the
     whole value of this rule is that it can be read and tested as a table.
 
-    The order encodes two judgements that are not obvious:
+    **The verdict is decided by the two observations alone** — did the value
+    leave, and did anything judge it. `captcha` is here for one narrow reason
+    and it can only ever WIDEN the uncertainty, never name a cause:
 
-    **A refusal STATUS outranks a CAPTCHA declaration.** 401 means *this
-    credential was not accepted* and nothing else — 403, which is what a bot
-    wall answers, is already excluded. Meanwhile a reCAPTCHA script tag sits on
-    the login page of a large share of the commercial web, so letting the
-    declaration win unconditionally would suppress every genuine stale
-    detection on all of those sites.
+    **On a page that declares a widget, an ARIA error is not a statement about
+    the value.** A widget refusing a scripted submission renders a generic
+    *something went wrong, try again* through the same alert region a wrong
+    password does — the same reasoning that excluded 403, one level down. So
+    the declaration DISQUALIFIES `said_no`; the attempt then ends as the
+    observation it was (unexplained, or never sent), not as a captcha verdict.
+    FAILED_CAPTCHA used to be returned right here, and it was the defect: a
+    script tag — present on the login page of a large share of the commercial
+    web — became the stated cause of failures it was never observed to touch,
+    and on eon.pl it hid a submit that never fired (#321).
 
-    **An ARIA error alone does NOT outrank it.** A widget refusing a scripted
-    submission renders a generic *something went wrong, try again* through the
-    same alert region a wrong password does. That is the same reasoning that
-    excluded 403, applied one level down: on a page that declares a CAPTCHA, an
-    error appearing is not a statement about the value.
+    **A refusal STATUS is not disqualified by the declaration.** 401 means
+    *this credential was not accepted* and nothing else — 403, which is what a
+    bot wall answers, is already excluded — so it is evidence about the value
+    wherever it appears, and suppressing it on every reCAPTCHA-decorated page
+    would blind every genuine stale detection there.
 
     A disagreement — the site answered a request carrying the password, and
     nothing was recorded leaving — is reported as a CONTRADICTION rather than
@@ -409,9 +437,7 @@ def judge_a_failed_sign_in(
     """
     if refused_status:
         return FAILED_REFUSED if sent else FAILED_CONTRADICTION
-    if captcha:
-        return FAILED_CAPTCHA
-    if said_no:
+    if said_no and not captcha:
         return FAILED_REFUSED if sent else FAILED_CONTRADICTION
     return FAILED_UNEXPLAINED if sent else FAILED_NEVER_SENT
 

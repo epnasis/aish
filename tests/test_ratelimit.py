@@ -580,7 +580,7 @@ class TestGovernorAdmission:
         governor, _ = self._governed(rpm=100)
         body = {"error": {"details": [{"violations": [{"quotaId": "RequestsPerDay"}]}]}}
         governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429, body=body)))
-        with pytest.raises(ratelimit.RateLimited, match="spent rather than busy"):
+        with pytest.raises(ratelimit.RateLimited, match="cannot be waited out"):
             governor.reserve("g:m", 1)
 
     def test_the_latch_lifts_when_the_quota_resets(self):
@@ -855,7 +855,7 @@ class TestLearnedLimitsSurviveRestart:
         first.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429, body=body)))
 
         second = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1100.0, store=store)
-        with pytest.raises(ratelimit.RateLimited, match="spent rather than busy"):
+        with pytest.raises(ratelimit.RateLimited, match="cannot be waited out"):
             second.reserve("g:m", 1)
 
     def test_the_latch_still_lifts_on_schedule_across_a_restart(self, tmp_path):
@@ -996,7 +996,7 @@ class TestAnAnonymousRefusalTeachesNothing:
         body = {"error": {"details": [{"violations": [{"quotaId": "RequestsPerDay"}]}]}}
         governor, _ = self._governor()
         governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429, body=body)))
-        with pytest.raises(ratelimit.RateLimited, match="spent rather than busy"):
+        with pytest.raises(ratelimit.RateLimited, match="cannot be waited out"):
             governor.reserve("g:m", 1)
 
     def test_the_history_budget_never_moves_because_of_one(self):

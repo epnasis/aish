@@ -44,6 +44,16 @@ Merge back to main after tests pass, then remove the worktree. `make ship` alway
 
 **A verification run MUST NOT send a message to a chat it did not start.** Use the isolated harness in `.claude/skills/verify/SKILL.md` (its own `state_dir`, port 8899); if a check genuinely needs the live server, click ＋ for a NEW chat first and drive only that. The port is not a defence — `scripts/aish-preview.sh` points preview at PROD's `AISH_STATE_DIR` deliberately, so :8788 writes the same sessions as :8787. On 2026-07-28 a verification run drove the live UI through Chrome while the browser was parked on the owner's own shopping chat and typed five probes into it; a chat has no way to delete a message, so they are permanent, they auto-retitled the chat, and days later they were still what the owner saw when the chat flagged itself as having something new (#201).
 
+## No evidence, no claim
+
+**Every claim carries what established it.** The test is mechanical: name the line of code, the command output, or the experiment that checked the thing being asserted. If you cannot name one, you do not know it — find out, or say you do not know. Artifacts (a log, page text, a fetched copy) *suggest* hypotheses; only an experiment that would come out differently under a rival hypothesis *settles* one.
+
+**This binds what aish SAYS, not only what you say.** Any sentence aish emits — an outcome, a note, a push, an error string — states what was observed. A cause may be stated only where a line checked it: a 401 on a request carrying the credential IS the site refusing it, and that claim is earned. *"reCAPTCHA refused the sign-in"* was a hypothesis shipped as an outcome and repeated to the owner about a widget that was never given anything to refuse.
+
+**"I did X, Y happened, aish does not know why" must be a sayable ending in every outcome vocabulary.** A vocabulary that forces a cause will be handed a guess, and the guess then stands where the disproving evidence should be — that is the defect, not the wrong guess. When the unknown ending is too common, **improve the instrumentation; never sharpen the sentence.**
+
+This binds your own diagnoses too: a hypothesis is for designing the experiment that checks it, never for writing into code, issues or docs as fact. Law **L8** in `docs/agent-core.md`; the scar in `docs/browser.md` (#320, #321).
+
 ## Where the knowledge lives
 
 **This file is a routing table, not the knowledge.** It holds the rules that apply to every task; the rationale for each area lives in `docs/` and is read on demand.

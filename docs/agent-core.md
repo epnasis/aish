@@ -24,6 +24,8 @@ Knowledge tools are in `docs/knowledge-layer.md`, plugin tools in `docs/tools-la
 
 **L7 · The verdict travels with the value.** A tool result carries its own outcome (`ToolOutcome`) rather than being sniffed from its text downstream, and a refused action is never recorded as a green step. Both replaced string-prefix guessing that had been quietly wrong for a long time.
 
+**L8 · aish reports what it observed; a cause is spoken only where a line of code checked the thing asserted.** *"aish pressed submit and no request left the page"* is a fact; *"reCAPTCHA refused the sign-in"* was a hypothesis wearing a fact's clothes — asserted in an issue, shipped as a named outcome, and said to the owner on every eon.pl attempt about a widget that was never given anything to refuse (the submit never fired). A 401 on a request carrying the credential IS evidence the site refused it and may be said; a script tag is evidence of a script tag and may be said only as that. *"I did X, Y happened, aish does not know why"* is an ordinary, unembarrassed ending — an outcome vocabulary that has no way to say it will be handed a guess instead, and a guess written into the product stands exactly where the disproving evidence should have been. When "no reason known" is too common somewhere, the repair is better instrumentation, never a more confident sentence. Suggestions stay legitimate — *here is what was observed, here is what you might try* — it is the unverified cause stated as seen that is forbidden. The full story: `docs/browser.md`, *A CAPTCHA declaration is an observation about the PAGE*.
+
 ---
 
 ## The task loop

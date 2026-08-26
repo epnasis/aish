@@ -259,16 +259,20 @@ class TestProbe:
     @pytest.mark.parametrize(
         "message,expected",
         [
-            ("Sign in to confirm your age", "age-restricted"),
-            ("This video is private", "private"),
+            ("Sign in to confirm your age", "the extractor reports.*age-restricted"),
+            ("This video is private", "the extractor reports.*private"),
             ("No supported JavaScript runtime could be found", "brew install deno"),
-            ("Video unavailable due to DRM", "DRM-protected"),
+            ("Video unavailable due to DRM", "the extractor reports.*DRM-protected"),
         ],
     )
     def test_an_extraction_failure_says_what_to_DO(self, message, expected, monkeypatch):
         """A bare extractor traceback reads as 'this source is unavailable' and
         the model goes looking elsewhere — the substitution failure this repo
-        already has a scar from. Each of these implies a different action."""
+        already has a scar from. Each of these implies a different action.
+
+        The classified ones are ATTRIBUTED ("the extractor reports"), because
+        the classifier is a substring over an arbitrary error message: what was
+        observed is the extractor's own words, not the video's state."""
         monkeypatch.setattr(recordings.web, "require_public", lambda url: None)
 
         def boom(url):

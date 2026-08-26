@@ -292,19 +292,34 @@ def _extraction_problem(message: str) -> str:
     A bare extractor traceback reads as "this source is unavailable", and the
     model then goes looking somewhere else — the substitution failure this
     repo already has a scar from. Each of these is a different action.
+
+    Every classified line says "the extractor reports", because that is what
+    was observed: a substring in an arbitrary error message, not the video's
+    actual state. The raw excerpt rides along so a misclassification can be
+    seen for what it is instead of standing as aish's own claim.
     """
     lowered = message.lower()
     if "sign in" in lowered or "age" in lowered and "confirm" in lowered:
         return (
-            "this video is age-restricted or needs a sign-in, so its frames "
-            f"cannot be read. Tell the user that. ({message.strip()[:200]})"
+            "the extractor reports this video as age-restricted or needing a "
+            f"sign-in, so its frames cannot be read. Tell the user that. "
+            f"({message.strip()[:200]})"
         )
     if "private" in lowered or "members-only" in lowered:
-        return f"this video is private or members-only. ({message.strip()[:200]})"
+        return (
+            "the extractor reports this video as private or members-only. "
+            f"({message.strip()[:200]})"
+        )
     if "not available in your country" in lowered or "geo" in lowered:
-        return f"this video is blocked in this region. ({message.strip()[:200]})"
+        return (
+            "the extractor reports this video as not available in this "
+            f"region. ({message.strip()[:200]})"
+        )
     if "drm" in lowered:
-        return f"this video is DRM-protected and cannot be read. ({message.strip()[:200]})"
+        return (
+            "the extractor reports this video as DRM-protected, so it cannot "
+            f"be read. ({message.strip()[:200]})"
+        )
     if "javascript" in lowered or "js runtime" in lowered or "deno" in lowered:
         return (
             "YouTube extraction needs a JavaScript runtime that is not installed. "
@@ -559,8 +574,13 @@ def frame(
 def _frame_problem(stderr: str, seconds: float) -> str:
     tail = " ".join(stderr.strip().splitlines()[-3:])[:300]
     if "403" in tail or "Forbidden" in tail:
+        # A 403 here is USUALLY a signed CDN URL past its expiry — but that is
+        # the likely reading of a substring in ffmpeg's stderr, not something
+        # observed, so the sentence keeps the observation and the remedy and
+        # says the cause as the guess it is.
         return (
-            "the stream URL has expired (HTTP 403). Call read_media again for "
+            "ffmpeg reported a 403/Forbidden from the stream — the resolved "
+            "URL has probably expired. Call read_media again for "
             "this source — it will resolve a fresh one."
         )
     return f"no frame could be read at {format_time(seconds)}: {tail}"
