@@ -2633,6 +2633,11 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   font-size: 12.6px; color: var(--red); margin-top: 3px;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* What was on top of the control this step pressed. Deliberately NOT boxed
+   like the console above it: this is aish's own account of its own hands, not
+   the site's words, and the only page-authored part of it is the quoted
+   element name. */
+.step-covered { margin-top: 6px; overflow-wrap: anywhere; }
 /* The sign-in attempt made inside this step, on a page of its own. Indented
    under its own heading so it can never be mistaken for the page above it. */
 .step-signin { margin-top: 8px; border-left: 2px solid var(--sep); padding-left: 8px; }

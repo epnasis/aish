@@ -182,7 +182,24 @@ class TestTheReplayItself:
     class FakePage:
         def __init__(self, url, form, *, after=None, has_password_after=False,
                      wants_code=False, changed="", captcha=(), page_text="",
-                     alerts=(), alerts_after=None, invalid_after=False):
+                     alerts=(), alerts_after=None, invalid_after=False,
+                     covered_by="", consent_selector=""):
+            # THE OVERLAY (#321). `covered_by` is what the page has sitting on
+            # top of its SUBMIT BUTTON — the eon.pl shape exactly: the fields
+            # are reachable, the form fills, and the one control that has to be
+            # pressed is behind a cookie banner. A press on it raises the way
+            # Playwright's hit-target check does, and the cover reports the
+            # element's own name the way `_COVERED_JS` does.
+            #
+            # `consent_selector` is which entry of the word list this banner
+            # answers to, and "" is the case that matters: eon.pl's button says
+            # `Akceptuje wszystkie cookies` and the list holds `Akceptuj
+            # wszystkie`, so nothing matches and the banner stays. Modelled on
+            # THIS fake rather than a second one — two fakes for one page shape
+            # is the drift this repo has spent the night removing.
+            self._covered_by = covered_by
+            self._consent_selector = consent_selector
+            self.consent_clicks = 0
             self.url = url
             self._form = form
             self._after = after or {}
@@ -237,6 +254,39 @@ class TestTheReplayItself:
                 said = self._alerts if self._alerts_after is None else self._alerts_after
                 return {"invalid": self._invalid_after, "said": list(said)}
             return None
+
+        def covers(self, selector):
+            """What is on top of this control right now, in the page's own
+            words — what `_COVERED_JS` answers. Only the submit button is ever
+            behind the banner: on the real page the fields are perfectly
+            reachable, which is why the form fills and then nothing happens."""
+            if "submit" not in selector:
+                return ""
+            return self._covered_by
+
+        def locator(self, selector):
+            """The consent word list's one and only door into this page.
+
+            A selector the banner does not answer to finds nothing — which is
+            the whole of #321, since `Akceptuj wszystkie` is not a substring of
+            `Akceptuje wszystkie cookies`."""
+            page = self
+
+            class _Banner:
+                first = property(lambda self: self)
+
+                async def is_visible(self, timeout=0):
+                    return bool(
+                        page._consent_selector
+                        and selector == page._consent_selector
+                        and page._covered_by
+                    )
+
+                async def click(self, timeout=0):
+                    page.consent_clicks += 1
+                    page._covered_by = ""
+
+            return _Banner()
 
         async def query_selector(self, selector):
             # Only tags the enumeration actually SET can be found — a submit
@@ -682,6 +732,11 @@ class TestAPasswordBoxIsNotAVerdict:
     FakePage = TestTheReplayItself.FakePage
     OK_FORM = TestTheReplayItself.OK_FORM
 
+    def _watch(self, **kw):
+        from aish import browser
+
+        return browser._CredentialWatch(**kw)
+
     def _failed(self, **kw):
         return self._page(
             url="https://eon.pl/login", form=self.OK_FORM,
@@ -695,7 +750,10 @@ class TestAPasswordBoxIsNotAVerdict:
         assert not result.ok and not result.stale
         assert result.captcha == "reCAPTCHA"
         assert "protected by reCAPTCHA" in result.why
-        assert "refuses a scripted sign-in" in result.why
+        # The password was OBSERVED leaving (the default watch), so the widget
+        # was given a submission and the claim that it refused one is earned.
+        assert result.tried is True
+        assert "refused the sign-in" in result.why
 
     def test_the_captcha_reason_does_not_repeat_the_note_it_is_dropped_into(self):
         """The owner saw the same sentence twice in a row: the note opens with
@@ -707,11 +765,29 @@ class TestAPasswordBoxIsNotAVerdict:
             captcha=["https://www.google.com/recaptcha/api.js"],
         ))
         for template in (
-            web_module.BROWSE_SIGNIN_CAPTCHA, web_module.RENEWAL_CAPTCHA_NOTE,
+            web_module.BROWSE_SIGNIN_CAPTCHA_REFUSED,
+            web_module.RENEWAL_CAPTCHA_REFUSED,
         ):
             note = template.format(host="eon.pl", why=result.why).lower()
             assert note.count("sign in to this site automatically") == 1
             # And the note, not `why`, is where "untouched" is said — once.
+            assert note.count("untouched") == 1
+
+    def test_the_narrowed_captcha_note_does_not_repeat_itself_either(self):
+        """The pair selected when nothing was seen leaving. Same discipline:
+        the note owns the conclusion, `why` supplies only the reason."""
+        from aish import web as web_module
+
+        result = self._run(
+            self._failed(captcha=["https://www.google.com/recaptcha/api.js"]),
+            watch=self._watch(armed=True),
+        )
+        assert result.tried is False
+        for template in (
+            web_module.BROWSE_SIGNIN_CAPTCHA, web_module.RENEWAL_CAPTCHA_NOTE,
+        ):
+            note = template.format(host="eon.pl", why=result.why).lower()
+            assert note.count("could not complete the sign-in here") == 1
             assert note.count("untouched") == 1
 
     def test_the_declaration_is_matched_in_the_owners_own_language(self):
@@ -997,8 +1073,24 @@ class _FakeElement:
         self.selector = selector
 
     async def click(self, **_kw):
+        # A control something is sitting on top of does not take a click: the
+        # driver's hit-target check fails and it raises, naming the element
+        # that intercepted (#321). That raise used to propagate out of
+        # `_sign_in_on` entirely.
+        if self.page.covers(self.selector):
+            raise TimeoutError(
+                f"element is not stable / <div id={self.page.covers(self.selector)}> "
+                "intercepts pointer events"
+            )
         if "submit" in self.selector:
             self.page.submitted = True
+
+    async def evaluate(self, script, *_args):
+        from aish import browser
+
+        if script is browser._COVERED_JS:
+            return self.page.covers(self.selector)
+        return None
 
     async def focus(self):
         raises = getattr(self.page, "focus_raises", None)
@@ -1660,6 +1752,130 @@ class TestASignInIsJudgedByWhetherTheSessionCameUp:
         # note_used would have cleared the very mark being set.
         assert signin.find("https://eon.pl").suspect == text
         assert signin.find("https://eon.pl").used == 1
+
+
+class TestASignInButtonSomethingIsCovering:
+    """#321, and it is the root cause of #320 / #296.
+
+    eon.pl's cookie banner covers its login button. The press lands on the
+    overlay, the button's own `onclick` never runs, nothing is submitted — and
+    nothing anywhere said why. `_uncover` existed one module over on the browse
+    ladder; the credential replay never called it. Four confident diagnoses
+    were argued on top of that silence over a full day and all four were
+    wrong."""
+
+    _page = TestTheReplayItself._page
+    _run = TestTheReplayItself._run
+    FakePage = TestTheReplayItself.FakePage
+    OK_FORM = TestTheReplayItself.OK_FORM
+
+    def _watch(self, **kw):
+        from aish import browser
+
+        return browser._CredentialWatch(armed=True, **kw)
+
+    def _covered(self, **kw):
+        return self._page(
+            url="https://eon.pl/login", form=self.OK_FORM,
+            has_password_after=True, covered_by="clb clb-container", **kw,
+        )
+
+    def test_a_press_that_could_not_land_NAMES_what_was_in_the_way(self):
+        """The sentence the whole day did not have. It is not a timeout and it
+        is not a silent no-op: it is a distinct outcome that says which element
+        is on top of the button."""
+        result = self._run(self._covered(), watch=self._watch())
+        assert not result.ok
+        assert result.covered == "clb clb-container"
+        assert "clb clb-container" in result.why
+        assert "never submitted" in result.why
+
+    def test_it_is_not_reported_as_a_timeout_and_never_raises(self):
+        """The click raising used to propagate straight out of `_sign_in_on`.
+        A failure that escapes as an exception is a failure with no wording,
+        no record and no picture."""
+        result = self._run(self._covered(), watch=self._watch())
+        assert result.why and result.stale is False
+
+    def test_nothing_is_recorded_as_a_judgement_about_the_PASSWORD(self):
+        """The damage #320 is about, at its root. The credential was never
+        submitted, so nothing was learned about it — and the record must come
+        back untouched."""
+        result = self._run(self._covered(), watch=self._watch())
+        assert result.stale is False
+        assert result.tried is False
+        assert result.captcha == ""
+        # ...and the wording says so rather than leaving it to be inferred.
+        assert "nothing has been learned about it" in result.why
+
+    def test_a_covered_button_is_never_a_reason_to_press_something_else(self):
+        """A covered control is a REPORTED FAILURE, never a licence to widen.
+        Nothing else on the page is touched, and the only thing tried again is
+        the same button — and only once the cover is actually gone."""
+        page = self._covered()
+        self._run(page, watch=self._watch())
+        assert page.submitted is False
+        assert page.typed == ["him@x.pl", "hunter2hunter2"]
+
+    def test_the_consent_list_MISSING_is_what_makes_this_happen(self):
+        """The one-letter miss, modelled. The banner answers to a selector the
+        list does not hold, so nothing matches, the overlay stays, and the
+        press cannot land."""
+        page = self._covered(consent_selector="button:has-text('Nie ma go na liscie')")
+        result = self._run(page, watch=self._watch())
+        assert page.consent_clicks == 0
+        assert result.covered == "clb clb-container"
+
+    def test_a_list_that_DOES_match_clears_it_and_the_press_goes_through(self):
+        """The floor doing its job. The word list is not the mechanism, but
+        where it matches it still takes the banner down — and the press is
+        retried on the same button and nothing else."""
+        from aish import browser
+
+        page = self._page(
+            url="https://eon.pl/login", form=self.OK_FORM,
+            covered_by="clb clb-container",
+            consent_selector=browser._CONSENT_SELECTORS[0],
+        )
+        result = self._run(page, watch=self._watch(sent_to=["https://eon.pl"]))
+        assert page.consent_clicks == 1
+        assert page.submitted is True
+        assert result.ok and result.covered == ""
+
+    def test_the_counter_moves_when_the_list_fails_to_match(self):
+        """#295 P4: the vocabulary ships with counters, so a list that has
+        stopped matching is a number rather than silence."""
+        from aish import browse as browse_mod
+
+        before = (browse_mod.CONSENT_TALLY.asked, browse_mod.CONSENT_TALLY.missed)
+        self._run(
+            self._covered(consent_selector="button:has-text('nothing')"),
+            watch=self._watch(),
+        )
+        after = (browse_mod.CONSENT_TALLY.asked, browse_mod.CONSENT_TALLY.missed)
+        assert after == (before[0] + 1, before[1] + 1)
+
+    def test_an_uncovered_sign_in_is_completely_unaffected(self):
+        """A page with nothing over its button pays nothing: the click lands
+        first time, `_uncover` is never consulted, and no cover is recorded."""
+        page = self._page(url="https://eon.pl/login", form=self.OK_FORM)
+        result = self._run(page, watch=self._watch(sent_to=["https://eon.pl"]))
+        assert result.ok and result.covered == ""
+        assert page.consent_clicks == 0
+
+    def test_a_press_that_LANDED_and_did_nothing_records_no_cover(self):
+        """The boundary this cannot cross, pinned rather than described. Where
+        the click succeeds and the site simply does not sign in, there is no
+        interception to find — and the outcome must fall through to the endings
+        that say what was actually observed, claiming no cover at all."""
+        page = self._page(
+            url="https://eon.pl/login", form=self.OK_FORM,
+            has_password_after=True,
+        )
+        result = self._run(page, watch=self._watch())
+        assert page.submitted is True
+        assert result.covered == ""
+        assert "could not confirm the form was submitted" in result.why
 
 
 class TestEverySignInAttemptIsPhotographed:

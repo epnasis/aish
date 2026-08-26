@@ -1487,6 +1487,79 @@ class TestTheConsoleAndTheSignInOnTheRecord:
         assert call["signin"]["frame_state"] == explain_mod.PURGED
         assert "purged" in explain_mod.explain(log.path, root=tmp_path)
 
+    def test_what_covered_a_control_is_read_back_as_aishs_own_observation(
+        self, tmp_path, monkeypatch
+    ):
+        """#321. A press that never landed writes nothing to a console, because
+        nothing ran — so the driver is the only witness, and if that witness is
+        heard only by the acting model it is one restart from being lost."""
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome(
+                "the page",
+                covered={"by": "clb clb-container", "dismissed": False},
+            ),
+        )
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert call["covered"] == {"by": "clb clb-container", "dismissed": False}
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "a click could not land" in out
+        assert "'clb clb-container'" in out
+        # It is aish's own account of its own hands, so it does NOT arrive
+        # under the label a console line does — a press that never landed
+        # produces no console line to be labelled.
+        assert "wrote to its own console" not in out
+
+    def test_a_dismissed_cover_says_it_was_dismissed(self, tmp_path, monkeypatch):
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome(
+                "the page", covered={"by": "cookie-bar", "dismissed": True}
+            ),
+        )
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "aish dismissed it and clicked again" in out
+
+    def test_a_cover_block_with_no_element_is_no_cover(self, tmp_path, monkeypatch):
+        """Absence must never be the evidence. A step that names nothing says
+        nothing about coverage — which includes every step written before
+        this."""
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome("the page", covered={"by": "", "dismissed": False}),
+        )
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert "covered" not in call
+        assert "a click could not land" not in explain_mod.explain(
+            log.path, root=tmp_path
+        )
+
+    def test_the_sign_in_pages_cover_is_read_back_too(self, tmp_path, monkeypatch):
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome(
+                "the signed-out page",
+                signin={"host": "eon.pl", "covered": "clb clb-container"},
+            ),
+        )
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert call["signin"]["covered"] == "clb clb-container"
+        assert "a click could not land" in explain_mod.explain(log.path, root=tmp_path)
+
     def test_a_block_with_no_host_is_no_attempt(self, tmp_path, monkeypatch):
         """`host` is what says an attempt happened at all — an empty block must
         read as "no sign-in", never as an attempt with nothing to show."""

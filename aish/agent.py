@@ -1285,7 +1285,11 @@ REFUSED_DECISIONS = frozenset({"denied", "held", "blocked", "rejected"})
 
 
 def _scrub_page_console(step: dict) -> None:
-    """Redact stored secrets out of a browse step's recorded console lines.
+    """Redact stored secrets out of a browse step's PAGE-AUTHORED words.
+
+    Two fields today: the console lines, and the name of whatever was found
+    covering a control (#321) — an id, a class or a tag, which the site writes
+    and could therefore write anything into.
 
     A console message is whatever the page had in scope, and a login page that
     echoes a rejected password into its own error text writes it to `console`
@@ -1302,12 +1306,17 @@ def _scrub_page_console(step: dict) -> None:
     lines = step.get("console")
     if isinstance(lines, list):
         step["console"] = [secrets.scrub(str(line)) for line in lines]
+    covered = step.get("covered")
+    if isinstance(covered, dict) and covered.get("by"):
+        step["covered"] = {**covered, "by": secrets.scrub(str(covered["by"]))}
     signin = step.get("signin")
-    if isinstance(signin, dict) and isinstance(signin.get("console"), list):
-        step["signin"] = {
-            **signin,
-            "console": [secrets.scrub(str(line)) for line in signin["console"]],
-        }
+    if isinstance(signin, dict):
+        block = dict(signin)
+        if isinstance(block.get("console"), list):
+            block["console"] = [secrets.scrub(str(line)) for line in block["console"]]
+        if block.get("covered"):
+            block["covered"] = secrets.scrub(str(block["covered"]))
+        step["signin"] = block
 
 FORGET_PROHIBITED = (
     "NOT EXECUTED: forget_memory is unavailable in an automated session — "

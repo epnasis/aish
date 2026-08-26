@@ -374,13 +374,75 @@ check("a step with a sign-in block but no host draws nothing", () => {
   assert.equal(s.traceFrame({ signin: null }), null);
 });
 
+// ---------------------------------------------------------------------------
+// #321: what was SITTING ON TOP of the control this step pressed.
+//
+// A press that never landed writes nothing to a console — nothing ran — so the
+// driver is the only witness. Every one of the four wrong diagnoses of the
+// eon.pl sign-in was argued in a session where Chrome knew the click was
+// intercepted and named the element, and it reached nobody.
+
+check("what covered a control is named on the row", () => {
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    covered: { by: "clb clb-container", dismissed: false },
+  });
+  const box = findByClass(rows[0], ".step-covered");
+  assert(box, "the cover was not drawn");
+  assert(/clb clb-container/.test(box.textContent), box.textContent);
+  assert(/could not land/.test(box.textContent), box.textContent);
+});
+
+check("a cover that was taken down says so", () => {
+  const s = makeSandbox();
+  const rows = browsed(s, { covered: { by: "cookie-bar", dismissed: true } });
+  assert(/dismissed it and clicked again/.test(
+    findByClass(rows[0], ".step-covered").textContent));
+});
+
+check("the element name is drawn as TEXT, never as markup", () => {
+  // It is the PAGE's word for itself — an id or a class the site chose — so
+  // the residual attack is the same one console lines have.
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    covered: { by: '<img src=x onerror="alert(1)">', dismissed: false },
+  });
+  const box = findByClass(rows[0], ".step-covered");
+  assert(box.innerHTML === "", "the name was set as markup");
+  assert(/onerror/.test(box.textContent));
+});
+
+check("a step with nothing covering anything draws nothing", () => {
+  // Absent rather than empty: a press nothing obstructed and a step written
+  // before any of this existed are different facts, and neither grows a row.
+  const s = makeSandbox();
+  const rows = browsed(s, { covered: {}, frame: "/state/frames/abc.jpg" });
+  assert(!findByClass(rows[0], ".step-covered"));
+  assert.equal(s.traceFrame({ covered: { by: "" } }), null);
+  assert.equal(s.traceFrame({ covered: null }), null);
+});
+
+check("the sign-in page's own cover is drawn under its heading", () => {
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    signin: { host: "eon.pl", covered: "clb clb-container" },
+  });
+  const box = findByClass(findByClass(rows[0], ".step-signin"), ".step-covered");
+  assert(/clb clb-container/.test(box.textContent), box.textContent);
+});
+
 check("all of it renders identically live and on replay", () => {
   // L2, over the whole enlarged row: still a pure function of the step.
   const step = {
     frame: "/state/frames/abc.jpg",
     frame_url: "https://eon.pl/x", frame_from: "https://eon.pl/",
     console: ["error: boom"],
-    signin: { host: "eon.pl", frame: "/state/frames/login.jpg" },
+    covered: { by: "clb clb-container", dismissed: false },
+    signin: {
+      host: "eon.pl",
+      frame: "/state/frames/login.jpg",
+      covered: "clb clb-container",
+    },
   };
   const live = makeSandbox();
   const cold = makeSandbox();

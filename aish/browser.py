@@ -131,6 +131,24 @@ _STEALTH_OMIT = ["--enable-automation"]
 # under boilerplate, and on the listing this module was built for it cost about
 # a third of the extracted characters. Deliberately a short list of
 # unambiguous accept controls: a wrong click here acts as the owner.
+#
+# **A FLOOR, NEVER THE MECHANISM** (#295 P4, #321). This is a word list, and a
+# word list fails by missing: it held `Akceptuj wszystkie` while eon.pl's
+# button says *Akceptuję wszystkie cookies*, and `has-text` is a substring
+# match — so it missed by the `ę`, the banner stayed over the login button, and
+# a site the owner uses weekly quietly stopped working with no signal anywhere.
+# What generalises is the structural half — `_COVERED_JS` naming whatever is on
+# top of the control, in any language and on any site — and this list is what
+# sits UNDER it: still run speculatively when a page opens (cheap, and it keeps
+# a banner out of the extracted text), but no longer the only thing that can
+# notice one. Its HIT RATE is counted where the structural check has already
+# found an obstruction (`browse.CONSENT_TALLY`), so a list that has stopped
+# matching is a number on `/browser` rather than silence.
+#
+# Growing it is deliberately conservative, and dismissing more aggressively is
+# NOT the fix here: taking a banner down is a click on a page, and "accept all
+# cookies" is a consequence for the owner. Report first; dismiss only where it
+# is already dismissing today.
 _CONSENT_SELECTORS = (
     "[data-role='accept-consent']",
     "button#onetrust-accept-btn-handler",
@@ -1331,16 +1349,35 @@ async def _focus_info(page: Any, click: tuple[float, float] | None) -> dict | No
     return None
 
 
-async def _dismiss_consent(page: Any) -> None:
+async def _dismiss_consent(page: Any) -> str:
+    """Take a consent wall down with the word list. The selector that matched,
+    or "".
+
+    It used to return `None`, swallow every exception, and be called from six
+    places, which meant a banner it failed to dismiss was invisible at all six
+    (#322). The return value is what lets a caller say so.
+
+    **It does NOT count itself, and that is the whole design of the counter.**
+    Five of the six callers run this speculatively on a page that has just
+    opened, where no banner is the overwhelmingly common case — count there and
+    "missed" is ~100% forever and says nothing about whether the list works.
+    The tally is noted by `_uncover` instead, which asks only when the
+    structural check has ALREADY found something on top of a control: *the list
+    was handed a known obstruction, and this is whether it cleared it.* That
+    number going to zero is a list that has stopped matching.
+
+    Still best-effort by design: a page with no banner is the norm and must
+    cost nothing but the probes."""
     for selector in _CONSENT_SELECTORS:
         try:
             button = page.locator(selector).first
             if await button.is_visible(timeout=800):
                 await button.click(timeout=2_000)
                 await page.wait_for_timeout(1_200)
-                return
+                return selector
         except Exception:  # noqa: BLE001 — best effort; a missing banner is the norm
             continue
+    return ""
 
 
 def _watch_console(page: Any, log: browse_mod.ConsoleLog) -> None:
@@ -2309,6 +2346,14 @@ class SignInResult:
     # nothing was seen leaving. Evidence about that claim, never a verdict —
     # it is composed into `why` and reaches nothing else.
     requests: list[str] = field(default_factory=list)
+    # What was found sitting on top of the SIGN-IN BUTTON, when the press could
+    # not land (#321). The sign-in path never asked this question at all, which
+    # is why a banner over eon.pl's login button read as a credential replay
+    # that mysteriously did nothing — and why four wrong diagnoses were argued
+    # from page text over a day. aish's own observation, not the page's account
+    # of itself, so it is spoken in aish's voice with the element's own name
+    # quoted; and it rides out to the trace beside the picture.
+    covered: str = ""
 
 
 # What aish says when the form came back and nothing carrying the password was
@@ -2403,6 +2448,24 @@ UNWATCHED = (
     "sign-in at all — the saved sign-in is untouched"
 )
 
+# A REASON CLAUSE for the ending #321 adds: the press never reached the button
+# because something was on top of it, so the form was never submitted and the
+# site was never asked anything. It is dropped into the HELD notes, which
+# already say the saved sign-in is untouched and already name `/browser
+# <host>`, so it states the reason and stops — the discipline `why` follows
+# everywhere else here.
+#
+# The element is named because a refusal that names nothing teaches nothing:
+# "aish could not press the button" is what the old ladder effectively said,
+# and it is what a full day of wrong diagnosis was argued on top of. It is the
+# page's own word for the element, so it is quoted and attributed.
+COVERED_SUBMIT = (
+    "something the page calls {by!r} was sitting on top of the sign-in button, "
+    "so the press landed on that instead and the form was never submitted — a "
+    "cookie or consent banner is the usual cause. The saved password never "
+    "left the page, so nothing has been learned about it"
+)
+
 
 async def _signin_frame(owner: _Owner, page: Any) -> tuple[str, str]:
     """(stored path, reason there is none) for a picture of a sign-in attempt.
@@ -2468,6 +2531,15 @@ async def _press_the_button_again(
     1. **The submit was a CLICK.** With no form the submit already WAS Enter,
        and pressing it again is a repeat with no new information. Enforced by
        the caller, which only calls this when it pressed a button.
+
+       **And where it IS a click, this gesture is worth less than it looks
+       (#321).** Enter in the field submits the form the field belongs to — so
+       it is a second, different route only where a form submission is what the
+       button would have caused. A `<button type="button" onclick="…">` has no
+       form submission behind it at ALL, and eon.pl's login button is exactly
+       that: there, Enter in the field is not a weaker second attempt, it is a
+       no-op. It costs nothing and is kept for the ordinary case; what actually
+       stops that page is the covered report below, not this.
     2. **Nothing carrying the password has been let through, and nothing has
        come BACK.** The route handler records a send before `continue_`
        returns, so a request already on the wire is already in `sent_to` and an
@@ -2508,8 +2580,13 @@ async def _press_the_button_again(
             return
         # Focus the FIELD, not the button: the button already has focus from
         # the click that did not land, so Enter there would repeat the same
-        # gesture. Enter in the field is the other way a form is submitted, and
-        # it is the one that worked by hand.
+        # gesture. Enter in the field is the other way A FORM is submitted —
+        # which is the whole reach of this fallback, and narrower than the
+        # sentence that used to stand here (#321). Where the button is a
+        # `<button type="button" onclick="…">` there is no form submission
+        # behind it, so this is a no-op rather than a second attempt: it is
+        # right for an ordinary login form and it can never rescue that one.
+        # The failure it CANNOT reach is the one the covered report names.
         await field.focus()
         await page.keyboard.press("Enter")
         try:
@@ -2612,7 +2689,33 @@ async def _sign_in_on(
     # request the whole thing exists to notice is the one the press makes.
     watch.watching_traffic = True
     if submit is not None:
-        await submit.click(timeout=ACT_TIMEOUT_MS)
+        try:
+            await submit.click(timeout=ACT_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001 — a press that would not land
+            # **The press did not reach the button, and asking WHY is the whole
+            # of #321.** This path never asked: `_uncover` existed one screen
+            # over on the browse ladder and the credential replay did not call
+            # it, so a consent banner over eon.pl's login button surfaced as a
+            # sign-in that filled the form and then did nothing, with nothing
+            # anywhere naming the cause. Four confident diagnoses were argued
+            # on top of that silence and all four were wrong.
+            #
+            # A covered control is a REPORTED FAILURE and never a licence to
+            # press something else: the only thing tried again is the same
+            # button, and only after the consent list has actually cleared it.
+            cover = await _uncover(page, submit)
+            if cover.by and not cover.dismissed:
+                watch.watching_traffic = False
+                return SignInResult(
+                    why=COVERED_SUBMIT.format(by=cover.by),
+                    covered=cover.by,
+                    url=page.url,
+                )
+            # Either nothing was covering it — in which case this failed for a
+            # reason aish cannot name and the endings below say exactly that —
+            # or the cover came down and the same button gets its one retry.
+            with contextlib.suppress(Exception):
+                await submit.click(timeout=ACT_TIMEOUT_MS)
     else:
         await page.keyboard.press("Enter")
     try:
@@ -2696,10 +2799,27 @@ async def _sign_in_on(
                     UNRECOGNISED_LEFT_THE_PAGE if unrecognised
                     else NOTHING_LEFT_THE_PAGE
                 ) + _submit_window(watch.traffic)
+            # **NARROWED TO THE ATTEMPT UNLESS THE WIDGET WAS SEEN TO REFUSE
+            # ANYTHING (#321).** "which refuses a scripted sign-in" is a claim
+            # about the SITE, inferred from a script tag — and eon.pl disproves
+            # it: that page signs in perfectly once the banner over its button
+            # is gone, and its reCAPTCHA never refused a thing, because nothing
+            # was ever submitted to it. The one observation that says the widget
+            # was actually given a submission to refuse is the fence watching
+            # the password LEAVE, so that is what hardens the claim. Absent it,
+            # aish says what it can support: it could not get in here.
+            #
+            # Both stay REASON CLAUSES and neither restates its note: the
+            # narrowed note already opens with "aish could not complete the
+            # sign-in here", so a `why` saying it again is exactly the
+            # repetition `test_the_captcha_reason_does_not_repeat_the_note_it_
+            # is_dropped_into` exists for, one wording along.
             return SignInResult(
                 why=(
-                    f"the login page is protected by {vendor}, which refuses a "
-                    "scripted sign-in"
+                    f"the login page is protected by {vendor}, which refused "
+                    "the sign-in"
+                    if watch.was_tried
+                    else f"the login page is protected by {vendor}"
                 )
                 + tail,
                 captcha=vendor,
@@ -3032,7 +3152,8 @@ def _record_the_outcome(
     **A password box is not a verdict** (#320). `result.stale` arrives set only
     when the fence WATCHED the password go out AND the site positively said it
     judged the value, so that is what gets written here. A CAPTCHA-refused
-    attempt, a submit that never fired, and one that simply did not get in all
+    attempt, a submit that never fired, a press something was COVERING (#321),
+    and one that simply did not get in all
     leave the record completely alone: nothing was learned about the password,
     and marking it destroys a credential whose only repair — re-recording it —
     then fails in exactly the same way. This function does not re-derive the
@@ -3341,6 +3462,14 @@ def command(arg: str) -> str:
             # whether he is signed in right now, and the file it reads is a
             # hint that the next read will correct either way.
             "last seen signed in: " + (", ".join(hosts) if hosts else "(nothing yet)"),
+            # The consent word list, counted (#295 P4, #321). It is here rather
+            # than nowhere because a vocabulary that has stopped matching is
+            # otherwise perfectly silent: eon.pl's banner went unmatched for a
+            # year and the only symptom was a site that quietly did not work.
+            # Nothing reads this number to decide anything — it is an
+            # instrument for noticing, and it says nothing until the list has
+            # actually been asked.
+            *([line] if (line := browse_mod.CONSENT_TALLY.line()) else []),
             *_signin_lines(),
             "",
             "/browser <url>       open a real window there so you can sign in",
@@ -4314,13 +4443,19 @@ async def _snapshot(
     asked: str = "",
     match: str = "",
     started_work: bool = False,
+    covered: browse_mod.Cover | None = None,
 ) -> browse_mod.Snapshot:
     """The page as the model receives it: what it says, and what it can press.
 
     `started_work` is the caller saying it just did something that may have set
     the page going — pressed *Szukaj*, sent a form. It buys the patient bar in
     `_settle`: a read of a page that finished long ago must not pay seconds for
-    the possibility that it did not, and a read that follows a search must."""
+    the possibility that it did not, and a read that follows a search must.
+
+    `covered` is what the press found sitting on top of the control, and it is
+    the CALLER's because only the caller pressed anything: a snapshot taken for
+    a read, an open or a refusal has nothing to say about it and says nothing
+    (#321)."""
     page = session.page
     text = await _without_option_floods(
         page,
@@ -4356,6 +4491,7 @@ async def _snapshot(
         # what ties a message to the press that provoked it instead of leaving
         # it to be reported again under the next one.
         console=session.console.drain(),
+        covered=covered or browse_mod.Cover(),
         frame_skipped=frame_skipped,
         problem=problem,
         notice=notice,
@@ -4493,7 +4629,17 @@ def browse_open(
 
 
 class Stuck(Exception):
-    """Listed, still on the page, and it will not take the action."""
+    """Listed, still on the page, and it will not take the action.
+
+    Carries what the ladder found COVERING it, when anything was (#321), and
+    the caller words the refusal from that. *Press whatever closes the thing on
+    top of this* and *this control is inert, find another route* are opposite
+    instructions, and the sentence that used to cover both — "something may be
+    covering it", said on every stuck control — could only ever be a guess."""
+
+    def __init__(self, cover: browse_mod.Cover | None = None) -> None:
+        self.cover = cover or browse_mod.Cover()
+        super().__init__(self.cover.by)
 
 
 async def _reachable_now(target: Any) -> str:
@@ -4561,8 +4707,31 @@ _COVERED_JS = """(el) => {
 }"""
 
 
-async def _uncover(page: Any, target: Any) -> bool:
-    """Something is over this control. If it is a consent wall, take it down.
+async def _what_covers(target: Any) -> str:
+    """The element sitting on top of this control, in the page's own words, or
+    "" when nothing is.
+
+    One `evaluate`, and the whole structural half of #321: it needs no
+    vocabulary, so it is true of every consent wall, modal, cookie bar and
+    sticky footer in every language. An element that will not answer is not
+    coverable — the safe direction, since claiming a cover aish did not see
+    would be the wide guarantee this file keeps producing."""
+    try:
+        return browse_mod.covering_name(str(await target.evaluate(_COVERED_JS) or ""))
+    except Exception:  # noqa: BLE001 — an element that will not answer
+        return ""
+
+
+async def _uncover(page: Any, target: Any) -> browse_mod.Cover:
+    """What is over this control, and whether the consent list could clear it.
+
+    **It returns the NAME, and that is the fix in #321.** It used to reduce the
+    answer to a bool and throw the element away, so the ladder above could only
+    ever say "something may be covering it" — which is what a stuck control and
+    a covered one both said, indistinguishably, for a year. eon.pl's banner
+    covers its login button, the word list misses its label by one letter, and
+    the owner spent a day on four wrong diagnoses of a fact this function had
+    already computed.
 
     **The wall does not have to be there when the page opens.** OneTrust,
     Cookiebot and their kind load asynchronously, so on qatarairways.com the
@@ -4574,18 +4743,22 @@ async def _uncover(page: Any, target: Any) -> bool:
 
     Only ever consulted when a real click has already failed, because that is
     the only evidence worth spending four seconds of selector probing on. A
-    page with nothing over it pays one `evaluate`."""
-    try:
-        covered = str(await target.evaluate(_COVERED_JS) or "")
-    except Exception:  # noqa: BLE001 — an element that will not answer is not coverable
-        return False
+    page with nothing over it pays one `evaluate`.
+
+    `dismissed` is the CONTROL coming clear, not the banner being clicked: a
+    consent button that was pressed and left the overlay in place has dismissed
+    nothing for any purpose here."""
+    covered = await _what_covers(target)
     if not covered:
-        return False
-    await _dismiss_consent(page)
-    try:
-        return not await target.evaluate(_COVERED_JS)
-    except Exception:  # noqa: BLE001
-        return False
+        return browse_mod.Cover()
+    # The selector makes "nothing matched" a cheap early out; the second
+    # `_what_covers` is what keeps `dismissed` honest when one did.
+    cleared = bool(await _dismiss_consent(page)) and not await _what_covers(target)
+    # Counted HERE and nowhere else: this is the one place the word list is
+    # handed an obstruction that is known to exist, so it is the one place its
+    # hit rate means anything (#295 P4).
+    browse_mod.CONSENT_TALLY.note(dismissed=cleared)
+    return browse_mod.Cover(by=covered, dismissed=cleared)
 
 
 # What is observably true about a control, for telling a press that WORKED
@@ -4651,8 +4824,10 @@ async def _took(page: Any, target: Any, before: str | None) -> str:
     )
 
 
-async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
-    """Press it, escalating cheaply. Returns a note about HOW, or raises Stuck.
+async def _press(
+    page: Any, target: Any, *, mutating: bool, href: str
+) -> browse_mod.Pressed:
+    """Press it, escalating cheaply. Returns how it went, or raises Stuck.
 
     One 45-second click used to be the whole of this, and a control that would
     never become clickable cost the full timeout — three times in one session,
@@ -4674,41 +4849,54 @@ async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
     land on a control the owner never approved. A dispatched event is the
     opposite: it activates exactly the element the model named and the gate saw.
     It is still a lie about physics, so it is last, it is never used on
-    something that spends or deletes, and the snapshot says it happened."""
+    something that spends or deletes, and the snapshot says it happened.
+
+    **What was IN THE WAY travels back beside the note (#321).** Every rung
+    below the first exists because a real click did not land, and until now the
+    one fact that says why — the element sitting on top of the control — was
+    computed here, reduced to a bool, and dropped. It is carried out on
+    `Pressed.cover` so it reaches the trace as well as the model: a press that
+    never landed is precisely the failure nobody can reconstruct afterwards."""
     with contextlib.suppress(Exception):
         await target.click(timeout=ACT_TIMEOUT_MS)
-        return ""
+        return browse_mod.Pressed()
     # A real click is worth trying TWICE if the reason it failed was something
-    # lying over the page that aish is allowed to remove.
-    if await _uncover(page, target):
+    # lying over the page that aish is allowed to remove. Asked once, and the
+    # answer is kept whatever the rest of the ladder does with it.
+    cover = await _uncover(page, target)
+    if cover.dismissed:
         with contextlib.suppress(Exception):
             await target.click(timeout=ACT_TIMEOUT_MS)
-            return "something was covering it, so aish dismissed that and pressed it"
+            return browse_mod.Pressed(
+                note=browse_mod.COVERED_DISMISSED.format(by=cover.by), cover=cover
+            )
     if await _focus(target):
         before = await _activation(target)
         with contextlib.suppress(Exception):
             await page.keyboard.press("Enter")
-            return (
-                "the click would not land, so aish pressed it with the keyboard"
-                + await _took(page, target, before)
+            return browse_mod.Pressed(
+                note="the click would not land, so aish pressed it with the keyboard"
+                + await _took(page, target, before),
+                cover=cover,
             )
     if href:
         await page.goto(href, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-        return (
-            "the link would not click, so aish opened the destination the page "
-            f"declares for it ({href})"
+        return browse_mod.Pressed(
+            note="the link would not click, so aish opened the destination the "
+            f"page declares for it ({href})",
+            cover=cover,
         )
     if not mutating:
         before = await _activation(target)
         with contextlib.suppress(Exception):
             await target.dispatch_event("click")
-            return (
-                "the click would not land, so aish dispatched the event straight "
-                "to the control"
-                + (await _took(page, target, before)
-                   or ", which the page reacted to")
+            return browse_mod.Pressed(
+                note="the click would not land, so aish dispatched the event "
+                "straight to the control"
+                + (await _took(page, target, before) or ", which the page reacted to"),
+                cover=cover,
             )
-    raise Stuck()
+    raise Stuck(cover)
 
 
 class Refused(Exception):
@@ -4717,23 +4905,30 @@ class Refused(Exception):
     model, and it carries what it needs to try again."""
 
 
-async def _type(page: Any, target: Any, *, text: str, submit: bool) -> str:
+async def _type(
+    page: Any, target: Any, *, text: str, submit: bool
+) -> browse_mod.Pressed:
     """REAL KEYSTROKES, for the reason `view_act` records: fill() fires one input
     event and no key events, which breaks widgets that listen for typing — and
-    breaks a 2FA box outright. Only the way focus is obtained escalates."""
+    breaks a 2FA box outright. Only the way focus is obtained escalates.
+
+    Carries the cover out for the same reason `_press` does: a field under a
+    banner and a field that is simply inert are different problems."""
     note = ""
+    cover = browse_mod.Cover()
     try:
         await target.click(timeout=ACT_TIMEOUT_MS)
     except Exception:  # noqa: BLE001 — a field that will not click may still focus
         clicked = False
-        if await _uncover(page, target):
+        cover = await _uncover(page, target)
+        if cover.dismissed:
             with contextlib.suppress(Exception):
                 await target.click(timeout=ACT_TIMEOUT_MS)
                 clicked = True
-                note = "something was covering it, so aish dismissed that first"
+                note = browse_mod.COVERED_DISMISSED.format(by=cover.by)
         if not clicked:
             if not await _focus(target):
-                raise Stuck() from None
+                raise Stuck(cover) from None
             note = "the field would not click, so aish focused it with the keyboard"
     await page.keyboard.press("ControlOrMeta+a")
     if text:
@@ -4742,7 +4937,7 @@ async def _type(page: Any, target: Any, *, text: str, submit: bool) -> str:
         await page.keyboard.press("Delete")
     if submit:
         await page.keyboard.press("Enter")
-    return note
+    return browse_mod.Pressed(note=note, cover=cover)
 
 
 async def _choose(target: Any, value: str) -> str:
@@ -4904,29 +5099,38 @@ def browse_act(
         await _centre(target)
         before = list(page.context.pages)
         session.epoch += 1
-        notice = ""
+        pressed = browse_mod.Pressed()
         try:
             if action == "click":
-                notice = await _press(
+                pressed = await _press(
                     page, target, mutating=mutating, href=approved_href if top else ""
                 )
             elif action == "type":
-                notice = await _type(page, target, text=text, submit=submit)
+                pressed = await _type(page, target, text=text, submit=submit)
             else:
-                notice = await _choose(target, value)
+                pressed = browse_mod.Pressed(note=await _choose(target, value))
         except Refused as exc:
             return await shot(owner, session, problem=str(exc))
-        except Stuck:
+        except Stuck as stuck:
+            # The refusal NAMES what was in the way, or says plainly that
+            # nothing was found in the way (#321). Those are different facts
+            # with different repairs, and the one sentence that covered both
+            # — "something may be covering it" — was a guess offered on every
+            # stuck control, so it taught nothing on the pages where it was
+            # right and misdirected on the pages where it was wrong.
             return await shot(
                 owner,
                 session,
                 problem=(
-                    f"aish could not {action} {control.address!r} — it is on "
-                    "the page and would not take the action, by click, by "
-                    "keyboard, or otherwise. Something may be covering it. Try "
-                    "the control that closes whatever is over the page, or "
-                    "another route to the same thing."
+                    browse_mod.COVERED_STUCK.format(
+                        action=action, address=control.address, by=stuck.cover.by
+                    )
+                    if stuck.cover.by
+                    else browse_mod.STUCK_NOT_COVERED.format(
+                        action=action, address=control.address
+                    )
                 ),
+                covered=stuck.cover,
             )
         except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
             return await shot(
@@ -4946,7 +5150,13 @@ def browse_act(
         # An action is exactly the moment a page is most likely to be BUSY
         # rather than finished — this is the read that lands on the results
         # page a search is still fetching.
-        snapshot = await shot(owner, session, notice=notice, started_work=True)
+        snapshot = await shot(
+            owner,
+            session,
+            notice=pressed.note,
+            started_work=True,
+            covered=pressed.cover,
+        )
         if expect_download and not snapshot.downloads:
             # Said HERE rather than at the gate, because it is only true here:
             # the press that works says nothing, and the press that produced no
@@ -5038,6 +5248,21 @@ def browse_fill(
             except _StepFailed as exc:
                 return await _stop(
                     owner, session, ledger, index, len(steps), str(exc), dated=dated
+                )
+            except Stuck as stuck:
+                # A consent wall rendering mid-batch is a case this file
+                # already names, so the batch gets the same account of it a
+                # single action does (#321) — otherwise a covered control
+                # arrives here as a bare `Exception` with an empty message.
+                return await _stop(
+                    owner, session, ledger, index, len(steps),
+                    browse_mod.COVERED_STUCK.format(
+                        action=verb, address=control.address, by=stuck.cover.by
+                    ) if stuck.cover.by
+                    else browse_mod.STUCK_NOT_COVERED.format(
+                        action=verb, address=control.address
+                    ),
+                    dated=dated, covered=stuck.cover,
                 )
             except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
                 return await _stop(
@@ -5351,6 +5576,7 @@ async def _stop(
     *,
     after: bool = False,
     dated: bool = False,
+    covered: browse_mod.Cover | None = None,
 ) -> browse_mod.Snapshot:
     """End a batch part-way and say exactly where it got to.
 
@@ -5383,6 +5609,7 @@ async def _stop(
             f"the batch stopped at step {step} of {total} — {why}. Here is the "
             "page as it is now; carry on from what the steps below report."
         ),
+        covered=covered,
     )
     snapshot.ledger = ledger
     return snapshot
