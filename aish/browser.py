@@ -1907,12 +1907,30 @@ SIGNIN_FORM_JS = "(expected) => {" + browse_mod.DEEP_JS + """
   // Only a form's own submit button is ever pressed. With no form the submit
   // is the ENTER key, deliberately: choosing a button by its words on a login
   // page is how the model ended up pressing "Continue with Google".
+  //
+  // A genuine submit control is always preferred. Where the form has NONE,
+  // the fallback is COUNTING and never reading: a form whose only visible
+  // button is `type="button"` has exactly one thing that can be pressed, and
+  // pressing it is the only gesture that submits anything. eon.pl is that
+  // shape — `<button type="button" onclick="submitForm()">` is the whole of
+  // its `#login-form`'s buttons — and excluding it left the replay with no
+  // target at all, falling through to an Enter that is a NO-OP there: a POST
+  // form with no default button and two text-entry fields performs no
+  // implicit submission (WHATWG). Nothing was ever sent, on any attempt.
+  //
+  // The "Continue with Google" protection is preserved BY CONSTRUCTION and
+  // not by vocabulary: a form carrying an SSO button beside its login button
+  // has TWO buttons, so the count fails and the submit stays Enter, exactly
+  // as before. No word list, no button text, no test id — those are the
+  // things that made the model guess in the first place.
   let submit = null;
   if (form) {
-    submit = [...form.querySelectorAll('button, input[type=submit]')].filter((el) => {
-      const t = (el.getAttribute('type') || '').toLowerCase();
-      return vis(el) && t !== 'button' && t !== 'reset';
-    })[0] || null;
+    const pressable = [...form.querySelectorAll('button, input[type=submit]')].filter(
+      (el) => vis(el) && (el.getAttribute('type') || '').toLowerCase() !== 'reset'
+    );
+    submit = pressable.filter(
+      (el) => (el.getAttribute('type') || '').toLowerCase() !== 'button'
+    )[0] || (pressable.length === 1 ? pressable[0] : null);
   }
   if (submit) submit.setAttribute('data-aish-signin', 'submit');
   return {
@@ -2678,9 +2696,11 @@ async def _sign_in_on(
     # first time it was looked at.
     before = await _rejection_marks(page)
 
-    # Only a form's OWN submit button is ever pressed. With no form the submit
-    # is Enter — the universal gesture, and the one that cannot land on
-    # "Continue with Google", which is what choosing a button by its words did.
+    # Only a control `SIGNIN_FORM_JS` tagged is ever pressed, and it tags one
+    # only inside a form: a genuine submit control, or — where the form has
+    # none — its single visible button, counted and never read. With no form,
+    # or with more than one button to choose between, the submit is Enter,
+    # which is the gesture that cannot land on "Continue with Google".
     submit = await page.query_selector("[data-aish-signin='submit']")
     was = page.url
     # The SUBMIT WINDOW opens here and closes once the page has settled, so
