@@ -247,5 +247,154 @@ check("the row renders identically live and on replay", () => {
   assert.equal(a.children[0].alt, b.children[0].alt);
 });
 
+// ---------------------------------------------------------------------------
+// The picture as NAVIGATION EVIDENCE, and the two things that were captured
+// and drawn nowhere: the page's own console, and the sign-in attempt's page.
+
+check("the picture says where it was taken and what the press did to get there", () => {
+  // "Watching it happen" is a poor instrument — you have to be looking at the
+  // right second. The reviewable record is the answer, and a frame with no
+  // caption answers "what did this page look like" rather than "what did this
+  // press do".
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    frame: "/state/frames/abc.jpg",
+    frame_url: "https://eon.pl/mojeon/faktury",
+    frame_from: "https://eon.pl/mojeon",
+  });
+  const where = findByClass(rows[0], ".step-frame-where");
+  assert(where, "the picture carried no caption");
+  assert(/eon\.pl\/mojeon\/faktury/.test(where.textContent), where.textContent);
+  // Worded to what the writer knows: `frame_from` is the page the chat was
+  // LAST SHOWN. "Navigated here from X" would claim nothing sat between them.
+  assert(/aish was on https:\/\/eon\.pl\/mojeon before this/.test(where.textContent),
+         where.textContent);
+});
+
+check("a press that did not move the page says so, rather than nothing", () => {
+  // The dead-control signal, delivered on the FIRST press: an address that did
+  // not change is a fact about what the press did, not an absence.
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    frame: "/state/frames/abc.jpg", frame_url: "https://eon.pl/mojeon",
+  });
+  assert(/the address did not change/.test(
+    findByClass(rows[0], ".step-frame-where").textContent));
+});
+
+check("a frame from a log written before this grows no caption", () => {
+  // The renderer must never claim the writer tried and failed to record an
+  // address. No key, no caption.
+  const s = makeSandbox();
+  const rows = browsed(s, { frame: "/state/frames/abc.jpg" });
+  assert(!findByClass(rows[0], ".step-frame-where"));
+});
+
+check("the page's own console is drawn, and attributed to the page", () => {
+  // The whole point of the record: a day of guessing at eon.pl because a
+  // handler's ReferenceError went to a console nobody kept.
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    console: ["uncaught: ReferenceError: grecaptcha is not defined"],
+  });
+  const box = findByClass(rows[0], ".step-console");
+  assert(box, "the console was not drawn");
+  assert(/the page's words, not aish's/.test(box.children[0].textContent),
+         box.children[0].textContent);
+  assert(/grecaptcha is not defined/.test(box.children[1].textContent));
+});
+
+check("console lines are drawn as TEXT, never as markup", () => {
+  // Page-authored, so the residual attack is a line that looks like part of
+  // the app. textContent is what makes that structurally impossible.
+  const s = makeSandbox();
+  const rows = browsed(s, { console: ['error: <img src=x onerror="alert(1)">'] });
+  const box = findByClass(rows[0], ".step-console");
+  assert.equal(box.children[1].innerHTML, "");
+  assert(/onerror/.test(box.children[1].textContent));
+});
+
+check("a healthy action costs nothing at all", () => {
+  // Empty is the ordinary case. A row that said "the console was clean" on
+  // every step is the noise that hides the one step where it was not.
+  const s = makeSandbox();
+  const rows = browsed(s, { console: [], frame: "/state/frames/abc.jpg" });
+  assert(!findByClass(rows[0], ".step-console"));
+  assert(!findByClass(rows[0], ".step-signin"));
+});
+
+check("the sign-in attempt's own page is shown, labelled as a different page", () => {
+  // Captured since #320 and rendered nowhere: he went looking for it and could
+  // not find it. It is NOT hung on the step's `frame` key — that key claims
+  // "the page the model was SHOWN", and the model is never shown this one.
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    frame: "/state/frames/page.jpg",
+    signin: { host: "eon.pl", frame: "/state/frames/login.jpg" },
+  });
+  const box = findByClass(rows[0], ".step-signin");
+  assert(box, "the sign-in evidence was not drawn");
+  assert(/signed in again at eon\.pl/.test(box.children[0].textContent),
+         box.children[0].textContent);
+  assert(/not the one above/.test(box.children[0].textContent));
+  const shot = findByClass(box, ".step-frame");
+  assert.equal(shot.children[0].src, "/frame?path=/state/frames/login.jpg&token=t");
+  // …and the page frame above it is still the page frame, unborrowed.
+  assert.equal(
+    findByClass(rows[0], ".step-frame").children[0].src,
+    "/frame?path=/state/frames/page.jpg&token=t"
+  );
+});
+
+check("a sign-in with no picture says which absence, not nothing", () => {
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    signin: { host: "eon.pl", frame_skipped: "hands" },
+  });
+  const box = findByClass(rows[0], ".step-signin");
+  assert(/driving the browser yourself/.test(
+    findByClass(box, ".step-frame-none").textContent));
+});
+
+check("the sign-in page's console is drawn and attributed to THAT page", () => {
+  const s = makeSandbox();
+  const rows = browsed(s, {
+    signin: { host: "eon.pl", console: ["error: grecaptcha failed to load"] },
+  });
+  const box = findByClass(findByClass(rows[0], ".step-signin"), ".step-console");
+  assert(/the sign-in page wrote this/.test(box.children[0].textContent),
+         box.children[0].textContent);
+});
+
+check("a step with a sign-in block but no host draws nothing", () => {
+  // `host` is what says an attempt happened at all. An empty block must read
+  // as "no sign-in", never as "an attempt with nothing to show".
+  const s = makeSandbox();
+  assert.equal(s.traceFrame({ signin: {} }), null);
+  assert.equal(s.traceFrame({ signin: null }), null);
+});
+
+check("all of it renders identically live and on replay", () => {
+  // L2, over the whole enlarged row: still a pure function of the step.
+  const step = {
+    frame: "/state/frames/abc.jpg",
+    frame_url: "https://eon.pl/x", frame_from: "https://eon.pl/",
+    console: ["error: boom"],
+    signin: { host: "eon.pl", frame: "/state/frames/login.jpg" },
+  };
+  const live = makeSandbox();
+  const cold = makeSandbox();
+  cold.replaying = true;
+  const a = live.traceFrame(step);
+  const b = cold.traceFrame(step);
+  const shape = (node) => [
+    node.className,
+    node.textContent,
+    node.src || "",
+    (node.children || []).map(shape),
+  ];
+  assert.deepEqual(shape(a), shape(b));
+});
+
 if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }
 console.log("trace frame row: all checks passed");

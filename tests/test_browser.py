@@ -3351,6 +3351,168 @@ class TestTheEvidenceFrame:
         assert agent._is_evidence_frame(str(frame))
 
 
+class TestThePagesConsoleIsCapturedPerAction:
+    """The half of the console capture that needs a page.
+
+    `browse.ConsoleLog` holds the caps and the vocabulary with no browser
+    anywhere near it; what is pinned here is the wiring — that the page is
+    actually subscribed to, that both Playwright events are, and that what a
+    press provoked lands on the snapshot that press produced."""
+
+    class FakePage:
+        """A page that dispatches its own events, as Chrome would."""
+
+        url = "https://eon.pl/mojeon/Logowanie"
+
+        def __init__(self) -> None:
+            self.handlers: dict = {}
+
+        def on(self, event, fn):
+            self.handlers.setdefault(event, []).append(fn)
+
+        def emit(self, event, payload):
+            for fn in self.handlers.get(event, []):
+                fn(payload)
+
+        def is_closed(self):
+            return False
+
+        async def title(self):
+            return "Zaloguj"
+
+        async def screenshot(self, **_kw):
+            return b"\xff\xd8\xff\xe0" + b"frame" * 8
+
+        async def query_selector(self, _sel):
+            return None
+
+    class Message:
+        def __init__(self, type_, text):
+            self.type = type_
+            self.text = text
+
+    def _quiet(self, monkeypatch):
+        monkeypatch.setattr(
+            browser, "_settled_text", lambda p, **kw: _resolved("the page")
+        )
+        monkeypatch.setattr(
+            browser, "_without_option_floods", lambda p, t: _resolved(t)
+        )
+        monkeypatch.setattr(
+            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, ""))
+        )
+        monkeypatch.setattr(
+            browser, "_save_downloads", lambda o, **kw: _resolved([])
+        )
+
+    def test_both_events_are_subscribed_to(self):
+        """Two events because they are two things, and the second is the one
+        that matters most: a handler that THREW wrote nothing to `console` at
+        all, and that is exactly the eon.pl case."""
+        page = self.FakePage()
+        browser._Session(page)
+        assert set(page.handlers) == {"console", "pageerror"}
+
+    def test_listening_injects_NOTHING_into_the_page(self):
+        """Watch mode is careful about this for the opposite reason — its own
+        probe installs observers INTO the document — so it is worth pinning
+        that listening does not. `page.on` is a protocol subscription: no
+        script, no init script, no evaluate. The page cannot tell."""
+        touched: list = []
+
+        class Watchful(self.FakePage):
+            def __getattr__(self, name):
+                touched.append(name)
+                raise AssertionError(f"listening reached for {name}")
+
+        browser._watch_console(Watchful(), browser.browse_mod.ConsoleLog())
+        assert touched == []
+
+    def test_a_property_that_is_a_METHOD_is_still_read(self):
+        """`type` and `text` are properties in Playwright's Python API and
+        methods in its JavaScript one. A bound method stringifies to something
+        no level matches, so getting this wrong would drop every message with
+        nothing anywhere saying why."""
+        page = self.FakePage()
+        session = browser._Session(page)
+
+        class JsStyle:
+            def type(self):
+                return "error"
+
+            def text(self):
+                return "the JS-shaped message object"
+
+        page.emit("console", JsStyle())
+        assert session.console.drain() == ["error: the JS-shaped message object"]
+
+    def test_what_the_press_provoked_lands_on_the_press_that_provoked_it(
+        self, state, monkeypatch
+    ):
+        page = self.FakePage()
+        owner = _owner_on(page)
+        self._quiet(monkeypatch)
+        page.emit("console", self.Message("error", "Failed to load resource"))
+        page.emit("pageerror", RuntimeError("ReferenceError: grecaptcha is not defined"))
+        page.emit("console", self.Message("log", "rendering tile 12"))
+        snapshot = _run(browser._snapshot(owner, owner.browse_pages[""]))
+        assert snapshot.console == [
+            "error: Failed to load resource",
+            "uncaught: ReferenceError: grecaptcha is not defined",
+        ]
+
+    def test_the_next_action_starts_from_empty(self, state, monkeypatch):
+        """`_session` is the one place all three browse verbs obtain a session,
+        so it is the one place a call begins — a rule each entry point had to
+        remember is a rule one of them would not."""
+        page = self.FakePage()
+        owner = _owner_on(page)
+        self._quiet(monkeypatch)
+        page.emit("console", self.Message("error", "from the last press"))
+        again = _run(browser._session(owner, "", opening=False))
+        assert again.console.drain() == []
+
+    def test_a_page_that_cannot_be_subscribed_to_still_browses(self):
+        """A console message is an extra and must never cost the action it
+        describes. A page object with no `on` gets no console, never a failed
+        browse."""
+
+        class Deaf:
+            url = "https://eon.pl/mojeon"
+
+            def __getattr__(self, name):
+                raise AssertionError(f"nothing here answers {name}")
+
+        session = browser._Session(Deaf())
+        assert session.console.drain() == []
+
+    def test_a_handler_that_throws_never_reaches_the_page(self):
+        """It runs on the owner loop from Playwright's own dispatch, where a
+        raised exception is one nothing is waiting for."""
+        page = self.FakePage()
+        session = browser._Session(page)
+
+        class Hostile:
+            type = "error"
+
+            @property
+            def text(self):
+                raise RuntimeError("the message object is gone")
+
+        page.emit("console", Hostile())
+        assert session.console.drain() == []
+
+    def test_a_tab_the_session_moves_to_is_listened_to_as_well(self, state):
+        """A control that opens a new tab moves the session to it, and a
+        console recorded on the document nobody is driving is a console
+        recording nothing."""
+        first, second = self.FakePage(), self.FakePage()
+        session = browser._Session(first)
+        session.adopt(second)
+        second.emit("console", self.Message("error", "on the new tab"))
+        assert session.console.drain() == ["error: on the new tab"]
+
+
 class TestWatchingTheTabTheModelIsDriving:
     """#289 slice 2 — the live half of the picture slice 1 stored.
 
@@ -3405,6 +3567,12 @@ class TestWatchingTheTabTheModelIsDriving:
         every other attribute, so any verb this ever grows fails here first."""
         page, seen = self._page()
         owner = _owner_on(page)
+        # The ledger is about what WATCH MODE touched, so it starts from what
+        # the page had already been asked for by the time watching began. A
+        # session subscribes to the page's console when it adopts it, which is
+        # setup and not a watch verb — attributing it here would make the claim
+        # this test pins wider than the thing it is pinning.
+        seen["other"].clear()
         monkeypatch.setattr(browser, "_submit", run_job(owner))
         monkeypatch.setattr(browser, "_no_browser_yet", lambda: False)
         frame, why = browser.browse_watch_frame("")

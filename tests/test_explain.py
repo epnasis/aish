@@ -1366,3 +1366,136 @@ class TestTheEvidenceFrameOnTheRecord:
         lg = explain_mod.load(log.path)
         for call in explain_mod.dossier(lg.turns[-1], lg, tmp_path)["did"]["calls"]:
             assert "frame" not in call
+            assert "console" not in call and "signin" not in call
+
+    def test_the_picture_is_captioned_with_what_the_action_did(
+        self, tmp_path, monkeypatch
+    ):
+        """A frame on its own answers "what did this page look like"; the
+        question asked of a browse step is "what did this press do". The
+        caption is carried, never re-derived here — a reader guessing at a
+        navigation would be a second answer to a question with one."""
+        from aish import tools
+
+        picture = self._stored(tmp_path)
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome(
+                "the page",
+                frame=str(picture),
+                frame_url="https://eon.pl/mojeon/faktury",
+                frame_from="https://eon.pl/mojeon",
+            ),
+        )
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "taken at https://eon.pl/mojeon/faktury" in out
+        assert "aish was on https://eon.pl/mojeon before this" in out
+
+    def test_a_frame_from_an_older_log_grows_no_caption(self, tmp_path, monkeypatch):
+        """No key, no sentence. Inventing "unknown" would be this reader
+        claiming the writer tried and failed to record an address."""
+        from aish import tools
+
+        picture = self._stored(tmp_path)
+        log = self._browsed(
+            tmp_path, monkeypatch, tools.ToolOutcome("the page", frame=str(picture))
+        )
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "taken at" not in out and "the address did not change" not in out
+
+
+class TestTheConsoleAndTheSignInOnTheRecord:
+    """Reading back the two things a whole day of eon.pl diagnosis did not
+    have: what the page said, and what the sign-in attempt's own page looked
+    like. `aish explain` assembles from recorded evidence only — it may never
+    re-derive either from source."""
+
+    # Borrowed rather than subclassed: inheriting the class above would re-run
+    # every one of its tests for nothing.
+    _browsed = TestTheEvidenceFrameOnTheRecord._browsed
+    _stored = TestTheEvidenceFrameOnTheRecord._stored
+
+    def test_the_pages_console_is_read_back_as_the_pages_words(
+        self, tmp_path, monkeypatch
+    ):
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome(
+                "the page",
+                console=["uncaught: ReferenceError: grecaptcha is not defined"],
+            ),
+        )
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert call["console"] == [
+            "uncaught: ReferenceError: grecaptcha is not defined"
+        ]
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "grecaptcha is not defined" in out
+        # A dossier is read by a person and can be pasted to a model, so the
+        # same discipline applies here as in the tool result: these are the
+        # page's words and must never read as aish's account of itself.
+        assert "the page's words" in out
+
+    def test_the_sign_in_attempt_is_read_back_as_a_different_page(
+        self, tmp_path, monkeypatch
+    ):
+        from aish import tools
+
+        picture = self._stored(tmp_path)
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome(
+                "the signed-out page",
+                signin={
+                    "host": "eon.pl",
+                    "frame": str(picture),
+                    "console": ["uncaught: ReferenceError: grecaptcha is not defined"],
+                },
+            ),
+        )
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert call["signin"]["host"] == "eon.pl"
+        assert call["signin"]["frame_state"] == explain_mod.RECORDED
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "signed in again at eon.pl" in out
+        assert "picture of the sign-in page" in out
+        assert "the sign-in page wrote to its own console" in out
+
+    def test_a_sign_in_picture_the_store_dropped_reads_as_purged(
+        self, tmp_path, monkeypatch
+    ):
+        from aish import tools
+
+        picture = self._stored(tmp_path)
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome(
+                "the signed-out page",
+                signin={"host": "eon.pl", "frame": str(picture)},
+            ),
+        )
+        picture.unlink()
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert call["signin"]["frame_state"] == explain_mod.PURGED
+        assert "purged" in explain_mod.explain(log.path, root=tmp_path)
+
+    def test_a_block_with_no_host_is_no_attempt(self, tmp_path, monkeypatch):
+        """`host` is what says an attempt happened at all — an empty block must
+        read as "no sign-in", never as an attempt with nothing to show."""
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch, tools.ToolOutcome("the page", signin={})
+        )
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert "signin" not in call

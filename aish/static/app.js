@@ -3205,38 +3205,139 @@ const FRAME_ABSENT = {
 // reasoning that a frame is a picture in the transcript like any other — and
 // #318 is the finding that it is not: a frame is a picture of a page from
 // OUTSIDE, and it moved to a store of its own that `/file` does not serve.
-function traceFrame(step) {
-  if (step.frame) {
-    const src = frameSrc(step.frame);
-    if (!src) return null;
-    const wrap = document.createElement("div");
-    wrap.className = "step-frame";
-    const name = "the page as aish read it";
-    const img = document.createElement("img");
-    img.loading = "lazy";
-    img.alt = name;
-    // The bytes are a bounded LRU cache and are purgeable on their own
-    // schedule, so a record can outlive what it points at. Never let that read
-    // as though nothing was ever captured — but say only what a failed load
-    // actually proves: from here an evicted file, a stale token and a server
-    // that is not answering are the same event. `aish explain` stats the path
-    // and so is the surface that gets to use the word purged.
-    img.onerror = () => {
-      wrap.textContent =
-        "the picture of this page could not be loaded (the store may have cleared it)";
-      wrap.className = "step-sub step-frame-gone";
-    };
-    img.onclick = () => openPreview(src, name, [{ src, name, file: step.frame }], 0);
-    img.src = src;
-    wrap.appendChild(img);
-    return wrap;
+function framePicture(path, name) {
+  if (!path) return null;
+  const src = frameSrc(path);
+  if (!src) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "step-frame";
+  const img = document.createElement("img");
+  img.loading = "lazy";
+  img.alt = name;
+  // The bytes are a bounded LRU cache and are purgeable on their own
+  // schedule, so a record can outlive what it points at. Never let that read
+  // as though nothing was ever captured — but say only what a failed load
+  // actually proves: from here an evicted file, a stale token and a server
+  // that is not answering are the same event. `aish explain` stats the path
+  // and so is the surface that gets to use the word purged.
+  img.onerror = () => {
+    wrap.textContent =
+      "the picture of this page could not be loaded (the store may have cleared it)";
+    wrap.className = "step-sub step-frame-gone";
+  };
+  img.onclick = () => openPreview(src, name, [{ src, name, file: path }], 0);
+  img.src = src;
+  wrap.appendChild(img);
+  return wrap;
+}
+
+// What the picture is EVIDENCE OF, under the picture. A frame on its own
+// answers "what did this page look like"; the question actually asked of a
+// browse step is "what did this press do", and he was left reconstructing the
+// second from the first — which is the thing live watching is bad at and a
+// reviewable record is meant to fix.
+//
+// Both facts are carried on the step, never derived here: the writer is the
+// only side that held the page before AND the page after, and a renderer
+// guessing at a navigation would be a second answer to a question that already
+// has one. A step with no recorded address grows no caption at all — a frame
+// from a log written before this is still a frame, and "unknown" would be this
+// renderer claiming the writer tried.
+function frameWhere(step) {
+  if (!step.frame_url) return null;
+  const cap = document.createElement("div");
+  cap.className = "step-sub step-frame-where";
+  // Worded to exactly what the writer knows. `frame_from` is the page this
+  // chat was LAST SHOWN — which is what the delta is a delta of — so "aish was
+  // on X before this" is enforced, while "navigated here from X" would claim
+  // no other document sat between the two, which nothing checks.
+  cap.textContent = step.frame_from
+    ? `${step.frame_url} — aish was on ${step.frame_from} before this`
+    : `${step.frame_url} — the address did not change`;
+  return cap;
+}
+
+// The page's own console during this action (errors, warnings and uncaught
+// exceptions). The heading is not decoration: these are the PAGE's words, and
+// a block of red monospace under an aish row would otherwise read as aish
+// reporting on itself. It is drawn as text and never as markup — the residual
+// attack is a page writing something that looks like part of the app.
+function consoleBlock(lines, whose) {
+  const box = document.createElement("div");
+  box.className = "step-console";
+  const head = document.createElement("div");
+  head.className = "step-console-head";
+  head.textContent = `${whose} wrote this to its own console — the page's words, not aish's`;
+  box.appendChild(head);
+  for (const line of lines) {
+    const row = document.createElement("div");
+    row.className = "step-console-line mono";
+    row.textContent = String(line);
+    box.appendChild(row);
   }
-  const why = FRAME_ABSENT[step.frame_skipped];
-  if (!why) return null;
-  const note = document.createElement("span");
-  note.className = "step-sub step-frame-none";
-  note.textContent = why;
-  return note;
+  return box;
+}
+
+// The sign-in aish made INSIDE this call, on a page of its own (#320). It is
+// captured today and was rendered nowhere, so the owner went looking for it,
+// could not find it, and went on reading a failed sign-in through somebody
+// else.
+//
+// It is deliberately NOT hung on the step's `frame` key. That key claims "the
+// page at the moment the model was SHOWN it", and the model is never shown the
+// sign-in page — it is a different document the model did not ask for and
+// cannot name. Borrowing the key would be a stated guarantee wider than the
+// capture enforces, so this has its own, and says out loud which page it is.
+function signinEvidence(signin) {
+  if (!signin || !signin.host) return null;
+  const box = document.createElement("div");
+  box.className = "step-signin";
+  const head = document.createElement("div");
+  head.className = "step-sub step-signin-head";
+  head.textContent = `aish signed in again at ${signin.host} during this step — below is that page, not the one above`;
+  box.appendChild(head);
+  const shot = framePicture(signin.frame, `the sign-in page at ${signin.host}`);
+  if (shot) {
+    box.appendChild(shot);
+  } else if (FRAME_ABSENT[signin.frame_skipped]) {
+    const note = document.createElement("div");
+    note.className = "step-sub step-frame-none";
+    note.textContent = FRAME_ABSENT[signin.frame_skipped];
+    box.appendChild(note);
+  }
+  if (signin.console && signin.console.length) {
+    box.appendChild(consoleBlock(signin.console, "the sign-in page"));
+  }
+  return box;
+}
+
+function traceFrame(step) {
+  const parts = [];
+  const picture = framePicture(step.frame, "the page as aish read it");
+  if (picture) {
+    const where = frameWhere(step);
+    if (where) picture.appendChild(where);
+    parts.push(picture);
+  } else if (!step.frame && FRAME_ABSENT[step.frame_skipped]) {
+    const note = document.createElement("span");
+    note.className = "step-sub step-frame-none";
+    note.textContent = FRAME_ABSENT[step.frame_skipped];
+    parts.push(note);
+  }
+  if (step.console && step.console.length) {
+    parts.push(consoleBlock(step.console, "the page"));
+  }
+  const signin = signinEvidence(step.signin);
+  if (signin) parts.push(signin);
+  // Nothing recorded, nothing drawn. A step that carries none of this — every
+  // tool that never had a page, and every log written before any of it existed
+  // — must not grow a row implying a capture was even considered.
+  if (!parts.length) return null;
+  if (parts.length === 1) return parts[0];
+  const wrap = document.createElement("div");
+  wrap.className = "step-evidence";
+  for (const part of parts) wrap.appendChild(part);
+  return wrap;
 }
 // [TRACE-FRAME-END]
 

@@ -8944,6 +8944,44 @@ class TestSecretScrub:
         assert scrubbed.meta["status"] == tools_module.STATUS_OK
         assert scrubbed.meta["verdict_by"] == tools_module.VERDICT_EXIT_CODE
 
+    def test_a_console_line_carrying_a_secret_never_reaches_the_log(
+        self, stored, monkeypatch
+    ):
+        """A console message is whatever the page had in scope, and a login
+        page that echoes a rejected password into its own error text writes it
+        to `console` as readily as into the document.
+
+        The model's copy travels in the result BODY and is covered by the
+        `_scrub_result` funnel; this is the second copy — the one riding the
+        envelope into the durable log — and a value that reaches the log is a
+        value on his disk in plain text forever."""
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("browse", url="https://eon.pl/x")]),
+                model_says("done"),
+            ],
+            step_log=steps.append,
+        )
+        agent._approved_sites.add("eon.pl")
+        monkeypatch.setattr(
+            agent_module.web, "browse",
+            lambda *a, **kw: tools_module.ToolOutcome(
+                "the page",
+                console=[f"error: rejected password {self.TOKEN}"],
+                signin={"host": "eon.pl", "console": [f"error: {self.TOKEN}"]},
+            ),
+        )
+        agent.run_task("open the portal")
+        assert self.TOKEN not in json.dumps(steps)
+        (step,) = [s for s in steps if s.get("kind") == "tool"]
+        assert "[secret PUSHOVER_TOKEN — redacted by aish]" in step["console"][0]
+        assert "[secret PUSHOVER_TOKEN — redacted by aish]" in (
+            step["signin"]["console"][0]
+        )
+        # The rest of the sign-in block is untouched — scrubbing is not editing.
+        assert step["signin"]["host"] == "eon.pl"
+
     def test_an_untouched_result_keeps_its_identity(self, stored):
         """No match must cost nothing — the same object back, envelope and all."""
         agent, _ = make_agent([model_says("hi")])

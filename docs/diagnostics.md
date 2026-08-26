@@ -144,6 +144,16 @@ The bytes are deliberately NOT in the evidence store, which is text-only by cons
 
 **A frame proves what happened and prevents nothing.** It is a record, which #295 counts as a real control — but for anything irreversible a record is detection, not protection, so nothing in the gates may ever be relaxed on the grounds that a picture will exist. `TestTheEvidenceFrameOnTheRecord`.
 
+### What the picture is evidence OF, and what the page said (#320's follow-up)
+
+A path on its own answers *what did this page look like*. The question actually asked of a browse step is *what did this press do*, and three more recorded fields answer it. All three are read back verbatim: this reader assembles from evidence and may never re-derive any of them.
+
+- **`frame_url` / `frame_from`** — the address the shutter fired at, and the address the page came from when the action moved it. Printed as one caption under the path. `frame_from` absent beside a present `frame_url` is the positive statement *the address did not change*, not a gap; **both keys absent is the third state again** and grows no caption, because inventing *unknown* would be this reader claiming the writer tried.
+- **`console`** — what the PAGE wrote to its own console during the action. A whole day of eon.pl diagnosis argued four causes off page text and a badge, all four wrong, with nothing recorded from the page itself to argue against. It is **page-authored**, so `_console_lines` labels every block *the page's words* — a dossier is read by a person and can be pasted to a model, and this is the last place outside content may pass for aish's own account of itself. **A line here is evidence, never a verdict**: a press that never landed writes nothing at all (that witness is the driver, #321), and a site can throw a real error that has nothing to do with the failure being investigated — eon.pl throws exactly one. `docs/browser.md` states the boundary.
+- **`signin`** — the automatic sign-in that happened inside the call, on a page of its own: host, its own picture under the same three states, and its own console. Kept apart from `frame` on purpose, because the model is never shown the sign-in page and a reader that folded the two together would be claiming it was.
+
+`TestTheConsoleAndTheSignInOnTheRecord`. The capture side, the caps and the banner discipline are `docs/browser.md`.
+
 ## The channels that could make a reader wrong (#241)
 
 Everything above is about recording what happened. These four are different in kind: each let a reader reach a **confident false conclusion**, which is worse than the gap it replaced. `TestCoverageHoles`.
