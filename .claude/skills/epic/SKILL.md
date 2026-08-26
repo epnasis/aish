@@ -19,6 +19,8 @@ The epic exists because independent, individually-correct fixes produced **local
 
 So the failure this skill exists to prevent is not a bad commit. It is **six good commits that drift the system off the design**. Everything below is in service of that, and it is why conformance review (step 5) is not optional polish.
 
+The first real drive (2026-08-24→26) shipped nine issues and still drew the owner's verdict: *"we did so many unnecessary turns back and forth without solving a problem that we wasted way more time and tokens than we should."* Where a rule below cites that drive, that is what it cost to learn.
+
 ## Session zero — build the plan, post it, then work
 
 1. **Read the epic in full**, including every comment. Reviews and adversarial passes are often posted there and they carry the reasoning that stops decisions being re-litigated. Read the linked area docs before touching anything (`CLAUDE.md`'s routing table).
@@ -27,7 +29,7 @@ So the failure this skill exists to prevent is not a bad commit. It is **six goo
    - **The order** — stages, dependencies, and what the epic says must land before what, *with the epic's stated reason*. A dependency without its reason gets re-argued by the next session.
    - **The gates** — see below.
 3. **Reconcile with reality before planning any work.** The repo is often ahead of the tracker. For every issue in the epic: `git log --all --oneline | grep -E "#(NNN)"`, check `git worktree list`, and grep the code for the feature. Verify-and-close is cheaper than rebuild, and a subagent dispatched at done work is a wasted night. [[gh-issue-list-default-limit]] — always `--limit 100`.
-4. **Post the ledger as a comment on the epic**, and keep it updated there. This is the state of the drive, and it lives on the epic so a fresh session — or the user — can pick it up cold. One row per issue: stage, status (`blocked` / `ready` / `in flight` / `in review` / `merged` / `gated` / `deferred`), and for anything not `ready`, why.
+4. **Post the ledger as a comment on the epic**, and keep it updated there. This is the state of the drive, and it lives on the epic so a fresh session — or the user — can pick it up cold. One row per issue: stage, status (`blocked` / `ready` / `in flight` / `in review` / `merged` / `gated` / `deferred`), and for anything not `ready`, why. Non-trivial rows also carry the two Fable verdicts (§Fable): design before `in flight`, delivery before `merged`. An empty verdict cell is visible to the owner — that visibility, not your discipline, is what enforces §Fable.
 5. Only then start work.
 
 **Resuming:** a later session reads the epic, reads the latest ledger comment, re-runs step 3's reconciliation (things move between sessions), updates the ledger, continues. Never re-plan from scratch — if the plan looks wrong, that is a gate, not a rewrite.
@@ -36,18 +38,19 @@ So the failure this skill exists to prevent is not a bad commit. It is **six goo
 
 1. **Pick the next issue the ORDER allows.** Not the easiest, not the most interesting — the next one whose prerequisites are merged. If nothing is ready, everything remaining is behind a gate: report and stop.
 2. **Check it is still the right thing to build.** The epic was written before the code existed. If the issue's premise no longer holds, that is a gate (§Gates), not a judgement call for you.
-3. **Delegate** to a background subagent with `isolation: worktree` — but for anything non-trivial, get the design and the plan reviewed by Fable FIRST (§Fable). The spec you hand the subagent is the thing to have reviewed, because it is where a locally-correct, globally-wrong build is decided. Never two subagents on the same files. Within a stage, issues that touch one area go to one agent, sequentially. [[always-work-in-a-worktree]] [[parallelize-independent-work]]
-4. **Review the diff personally.** Correctness, concurrency, the approval-gate invariant, test quality. You are the quality gate; do not rubber-stamp a subagent's own summary.
+3. **Spec, review, delegate — and prove the isolation took.** Write the subagent spec (below); for anything non-trivial it goes to Fable for design review before dispatch (§Fable), because the spec is where a locally-correct, globally-wrong build gets decided. Launch with `isolation: worktree`, then **verify it**: the agent's first report names its working path, and the branch appears in `git worktree list` before you review anything. The first drive omitted the flag on two launches — the skill said "use worktrees" then too, so saying is not the control; checking is. Agents worked in the shared checkout, and a `git add -A` there swept one agent's in-flight work into an unrelated commit that merged to main. Stage by name in the shared checkout, never `-A` [[main-checkout-is-shared]]. Never two subagents on the same files; within a stage, issues touching one area go to one agent, sequentially. [[always-work-in-a-worktree]] [[parallelize-independent-work]]
+4. **Review the diff personally.** Correctness, concurrency, the approval-gate invariant, test quality. You are the quality gate; do not rubber-stamp a subagent's own summary. And **relay, never absorb**: anything the subagent flags as open or undone goes into the ledger and the next owner report verbatim. One absorbed flag cost a day — the owner was promised visible evidence that was captured, stored, and rendered nowhere he could reach; the subagent had said so.
 5. **Conformance review — the step that makes this skill worth having.** Separately from "is this code correct", ask: **does this diff move the system toward the epic's properties, or does it satisfy the issue while drifting off them?** Read the diff against the properties list from session zero, one at a time. Typical drifts, all of which have happened in this repo:
    - a control added whose safety argument is "the user will see it", under a property that forbids exactly that
    - a word list or per-page heuristic added under a property demanding systematic solutions
    - a permission widened by something judged, under a property saying only structure or the owner may widen
    - a claim made in the harness's own voice that the code cannot actually check
    - a fact stored that was inferred, under a property saying observe-don't-guess
+   - **a guarantee stated wider than the code enforces.** Distinct from the harness-voice drift above: there the code checks nothing; here it checks something real and the prose runs past it — "never zero" beside a line clamping TO zero, "never a sign-in page" where the test is for a password box. Eight diffs did this in one drive, all correct, tested, and green on every other gate. The check is mechanical: for each guarantee the prose states, find the line that enforces it; where the words reach further than the line, cut the words or widen the code.
 
    A diff that fails conformance is **not** merged and **not** silently reworked: state which property, and why. If the property is wrong, that is a gate.
-6. **Verify against the real path.** Unit tests are the floor. UI changes get driven in a real browser and the console read — a clean load is part of "verified" [[verify-frontend-in-a-real-browser]]. Web-surface behaviour uses the `verify` skill's isolated harness; **never type into a chat you did not create**. And verify the ordinary case, not only the new one [[verify-the-case-that-already-worked]].
-7. **Verify delivery with Fable** for anything non-trivial (§Fable): was everything that was supposed to be delivered actually delivered, without gaps? A different question from "is the diff correct", which step 4 already asked.
+6. **Verify against the real path.** Unit tests are the floor. UI changes get driven in a real browser and the console read — a clean load is part of "verified" [[verify-frontend-in-a-real-browser]]. Web-surface behaviour uses the `verify` skill's isolated harness; **never type into a chat you did not create**. Verify the ordinary case, not only the new one [[verify-the-case-that-already-worked]]. And a promise that the owner will SEE something is verified by seeing it where he would look — captured-and-stored is not rendered.
+7. **Verify delivery with Fable** for anything non-trivial (§Fable, duty 2) — a different question from "is the diff correct", which step 4 already asked. Verdict in the ledger row before `merged`.
 8. **Merge, ship, document.** Ship from the main checkout after merge, never a worktree. Comment the resolution on the issue: what changed, WHY, and what the user should test.
 9. **Update the ledger comment on the epic.** Every time something lands. The ledger is the deliverable of the drive, not a courtesy.
 
@@ -61,28 +64,26 @@ A gate is where you **stop, report, and wait**. Not a slowdown: the epic's whole
 - **A property gate.** Work that cannot be done without violating or amending one of the epic's properties. Never amend a property to make a diff fit. Report: what the work needs, which property it collides with, and what the options are.
 - **A stage boundary.** End of a stage, before starting the next. Short report: what landed, what it cost, what changed about the plan.
 - **A premise gate.** Implementation reveals the epic was wrong about something. **Amend the epic first, with the user, then build.** Quietly building the better thing is exactly the local-maxima behaviour the epic exists to stop — and it leaves a design record that no longer describes the system.
-- **A scope gate.** Work discovered that is real but not in the epic. **File it, link it to the epic, do not build it.** Say so in the ledger.
+- **A scope gate.** Work discovered that is real but not in the epic. **File it with the epic named in the issue body, and do not build it.** The epic line is not bookkeeping: `/orchestrate` claims every issue with no epic link (plus epic-linked ones tagged `nextup`), so an unlinked filing invites a parallel build [[orchestrate-skip-epic-issues]] — the first drive had one issue implemented by both drives, one implementation discarded unmerged, and still filed four issues without the line. Say so in the ledger.
 - **A cost gate.** Something turns out to be materially more expensive than the epic assumed. Report the number before spending it.
 
 **Do not stop at:** an ambiguity you can resolve from the epic, the code, or the area doc. The user delegated the process, not every decision [[work-with-critical-partnership]].
 
-## Fable — before you build, and after you deliver
+## Fable — design in, delivery out, failures immediately
 
-**This is not optional for non-trivial work, and it was added because its absence was measured.** On 2026-08-25/26 a single sign-in failure produced five confident wrong diagnoses across two days, four of them from this drive. Each was reasoned from page text while the browser driver held the answer. When Fable was finally asked, it established the cause by experiment in one pass — and killed the drive's own leading hypothesis with a second experiment. The owner's verdict: *"we did so many unnecessary turns back and forth without solving a problem that we wasted way more time and tokens than we should."*
+Fable is the drive's second pair of eyes, and the first drive measured what its absence costs: one sign-in failure, five confident wrong diagnoses over two days, four of them the drive's own. Every one was reasoned from **artifacts** — page text, a badge, a fetched copy of the HTML, a log. Fable, consulted at last, established the cause by **experiment** in one pass (the code never targeted that form's login button; its fallback gesture was a no-op on that form shape) and killed the drive's leading hypothesis with a second. One agent call, against two days.
 
-Fable costs one agent call. A wrong diagnosis costs a build, a ship, a report that has to be retracted, and the owner's time re-reporting the same failure.
+**Non-trivial** means it needed a plan, a design decision, or more than one obvious edit. A one-liner or a mechanical change is out of scope — if this section fires on everything, it will be skipped on everything.
 
-**Three moments, and they are duties rather than options:**
+Three duties. The first two leave **verdicts in the ledger** (session zero, step 4); a duty whose evidence lives in your head is a recommendation, and recommendations are what the first drive had.
 
-1. **Before building anything non-trivial — review the DESIGN and the PLAN.** Not the code: the approach, the slicing, and whether the thing being built is the thing that is needed. Anything that requires a plan, a design, or real thought qualifies; a one-line fix or an obvious mechanical change does not. **Give Fable the epic's properties and the bigger picture, not just the issue** — this drive is a co-orchestrator, and a review that cannot see the design cannot catch a locally-correct, globally-wrong plan, which is the exact failure the epic exists to prevent.
+1. **Design review, before dispatch.** Fable reviews the subagent spec — approach, slicing, whether the thing being built is the thing needed — **with the epic's properties and the surrounding design attached**, not just the issue: a review that cannot see the design cannot catch a locally-correct, globally-wrong plan. Verdict in the ledger before `in flight`.
 
-2. **After the final implementation — verify DELIVERY.** Was everything that was supposed to be delivered actually delivered, correctly, without gaps? This is a different question from "is the diff correct", and the diff review does not answer it. It is the cheapest place to catch a slice that quietly narrowed.
+2. **Delivery review, before merge of the final slice.** Did everything the issue and the epic promised arrive, reachable by the owner, with no quietly narrowed scope? Step 4 did not ask this, and it is the cheapest place to catch a slice that shrank. Verdict in the ledger before `merged`.
 
-3. **When something does not work — consult Fable immediately, without asking, and especially when the OWNER reports it.** A second report of the same failure is the signal; do not wait for a third. **Do not ask permission to do this** — asking costs a round trip on the exact axis that is already burning time.
+3. **Failure diagnosis, immediately and unasked.** The moment something you built does not work and your first look yields no cause you can demonstrate by experiment, hand it to Fable. Do not ask the owner for permission — the round trip is the waste. An owner re-reporting a failure means you are already one consultation late.
 
-**The tell that you need Fable and are not reaching for it:** you are reasoning about a failure from artifacts (page text, a log, a fetched copy) rather than from an experiment that would distinguish your hypotheses. Every one of the five wrong answers had that shape. If you cannot name the experiment that would falsify what you are about to claim, do not claim it — hand it over.
-
-**A fifth wrong confident answer is worse than an honest "unresolved".** Say so in the brief, so the reviewer knows that is an acceptable result.
+Behind duty 3 is a rule that binds the drive everywhere: **never assert a cause you have not distinguished by experiment.** Artifacts suggest hypotheses; only an experiment that would come out differently under a rival hypothesis settles one. If you cannot name that experiment, you have a guess — the first drive delivered four guesses as findings. "Unresolved, handing to Fable" beats a fifth confident answer.
 
 ## Slicing
 
@@ -96,13 +97,15 @@ Fable costs one agent call. A wrong diagnosis costs a build, a ship, a report th
 - **The epic's relevant properties, quoted.** The subagent has no context on the design and will otherwise produce a locally-correct, globally-wrong change. This is the single highest-value line in the spec.
 - Constraints: preserve the approval-gate invariant; match existing idioms; keep the change tight; comment WHY not WHAT.
 - Quality gates: `uv run pytest`, `uv run ruff check .`, `uv run mypy`, `node --check aish/static/app.js` for JS. New tests follow the FakeChat / no-model / no-network / no-real-execution pattern.
-- Workflow: work in its worktree; conventional-commit message with **NO** Claude attribution or co-author lines; `SSH_AUTH_SOCK= git commit` [[git-commit-needs-no-agent]]; do NOT deploy, do NOT merge — report the branch name, a summary, gate results, and anything risky or needing a decision.
+- Workflow: work in its worktree and **name the worktree path in the first report**; conventional-commit message with **NO** Claude attribution or co-author lines; `SSH_AUTH_SOCK= git commit` [[git-commit-needs-no-agent]]; do NOT deploy, do NOT merge — report the branch name, a summary, gate results, and anything risky, open, or needing a decision.
 
 ## Reporting
 
 The user reads architecture, not code [[talk-architecture-not-code]]. Reports name what changed *about the system*, not which functions moved. Coin names for new concepts; do not name existing symbols they have never read.
 
 A stage report answers three things: what the system can now do that it could not, what the epic said would happen and did not, and what the next stage is waiting on.
+
+**State only fresh facts.** The tracker moves under a long drive — the orchestrator, the owner, other sessions. Re-read before reporting its state or dispatching on it; the first drive reported an hours-old reading to the owner as current fact.
 
 ## Do NOT
 
@@ -111,7 +114,8 @@ A stage report answers three things: what the system can now do that it could no
 - Reorder the plan for convenience — order carries reasons.
 - Close an issue you did not genuinely resolve.
 - Merge a safety- or concurrency-relevant diff without reading the critical path yourself.
-- Build something non-trivial without having its design reviewed, or diagnose a repeated failure without consulting Fable. Both were paid for in full once already.
+- Dispatch non-trivial work without a Fable design verdict, merge it without a delivery verdict, or keep hold of a failing diagnosis Fable should have. All three were paid for in full once.
+- `git add -A` in the shared checkout, ever.
 - Let the ledger go stale. A drive with no current ledger cannot be resumed and cannot be reviewed.
 
 Improve this skill as the workflow sharpens — new drift patterns for step 5 are the most valuable additions.
