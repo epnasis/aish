@@ -1224,12 +1224,19 @@ MAIL_SIGN_IN_LINK = (
     "account is taken over. Give the user the address; they open it themselves."
 )
 
+# The two value refusals, and since #310 they are worded for the ACT rather
+# than for one tool. They used to say "nothing in this batch was done", which
+# was the tell: they were reachable only from `browse_fill`, so the same value
+# through `browse_act(action="type")` met no check at all. A refusal that reads
+# differently depending on which tool carried the value is itself a hint about
+# which tool to reach for, so both now say what is true of either — nothing was
+# done, and no approval changes that.
 BROWSE_NO_BANK_DETAILS = (
-    "NOT EXECUTED: aish never types a bank account number into a form. Step "
-    "{n} does. Nothing in this batch was done. A payment is made by the user, "
-    "and a payout address is the thing a page carrying hidden instructions "
-    "would most want changed — tell them to run /browser {host} and do it "
-    "themselves."
+    "NOT EXECUTED: aish never types a bank account number into a page, on any "
+    "site, however it is asked. The value for {n} is one, and nothing was "
+    "done. A payment is made by the user, and a payout address is the thing a "
+    "page carrying hidden instructions would most want changed — tell them to "
+    "run /browser {host} and do it themselves."
 )
 
 # The second value refusal (#304), and it is stated the way it is because the
@@ -1238,13 +1245,22 @@ BROWSE_NO_BANK_DETAILS = (
 # was seen and where — never the value — so a false positive is a step he
 # finishes himself rather than a dead end he cannot explain.
 BROWSE_NO_CARD_NUMBER = (
-    "NOT EXECUTED: the value in step {n} looks like a payment card number — "
+    "NOT EXECUTED: the value for {n} looks like a payment card number — "
     "13-19 digits carrying a card's checksum — and aish never types one into "
-    "a form, on any site, however it is asked. Nothing in this batch was done "
-    "and no approval makes it acceptable. Tell the user exactly that, and that "
-    "they can run /browser {host} and finish it themselves — the same answer "
+    "a page, on any site, however it is asked. Nothing was done, and no "
+    "approval makes it acceptable. Tell the user exactly that, and that they "
+    "can run /browser {host} and finish it themselves — the same answer "
     "whether or not that value really was a card."
 )
+
+# What each never-typed value is answered with. Keyed on `browse.refuses_to_type`
+# so the decision is made once and the wording is looked up, never re-derived:
+# a second test of the value to choose a message is a second place to disagree
+# about what the value is.
+NEVER_TYPED = {
+    browse.NO_BANK_ACCOUNT: BROWSE_NO_BANK_DETAILS,
+    browse.NO_CARD_NUMBER: BROWSE_NO_CARD_NUMBER,
+}
 
 # Origin-gated knowledge writes (#196). remember/forget_memory auto-approve, and
 # that is deliberate: capturing a fact must stay frictionless. The reasoning is
@@ -5905,32 +5921,60 @@ class Agent:
         current = self._browse_view.shown
         return browser.host_of(current.url) if current is not None else ""
 
-    def _irreversible_step(self, plan: "browse.Batch", host: str) -> str | None:
-        """Does any step of this batch produce a consequence with no yes?
+    def _never_typed(self, name: str, args: dict, host: str) -> str | None:
+        """The one fence over the act of TYPING a value into a page (#310).
 
-        Two different reads, and the second is the stronger one. A step is
-        refused when its CONTROL says it changes contact details, a payout
-        address, a credential, or closes the account — a label, which the page
-        writes and can therefore lie about. And a step is refused when its
-        VALUE is a bank account or payment card number, wherever it is being
-        typed — which the page cannot lie about, because it is what aish is
-        about to send."""
+        Asked once, at the top of the gate, before either tool's branch is
+        chosen — which is what makes it one fence rather than two that must be
+        kept in step. `browse.typed_values` says what this call would type;
+        `browse.refuses_to_type` says whether aish types it; `NEVER_TYPED` says
+        what the owner is told. The tool name reaches only the FIRST of those,
+        and only to know where in the arguments a value lives — it is not an
+        input to whether the value is refused, nor to what the refusal says. So
+        the same value at the same control comes back with the same words and
+        the same verdict whichever tool carried it.
+
+        **Why it sits above the branches and not inside them.** Both refusals
+        lived in `_irreversible_step`, which only `browse_fill` reaches, while
+        `browse_act(action="type")` tested a password field and an irreversible
+        LABEL and no value at all. `docs/browser.md` already argues this exact
+        shape against itself about the site grant — *the model chooses the
+        tool, which made the card bypassable for exactly the half it was
+        covering* — and the fix there was to move the check onto the thing
+        being done. The claim #295 §5 rests on is that aish CANNOT type these
+        values, and absence that holds for one of two tools is not absence.
+
+        It runs before the page is consulted at all, so a call that names no
+        open page or an unresolvable control is refused on the value just the
+        same. That is the safe direction: the refusal is a statement about what
+        aish would send, and nothing about the page may make it typeable.
+
+        The digits never reach the message: the refusal names the control the
+        model asked for and what was seen in the value, never the value. That
+        is the whole of what this promises — the model put the digits in the
+        call's own arguments and `_call_result` writes that record before
+        `_dispatch` reaches any gate, so a refused value is in the trace by
+        design, which is where a reader looks for it."""
+        for said, value in browse.typed_values(name, args):
+            if refused := browse.refuses_to_type(value):
+                return _gate_outcome(
+                    NEVER_TYPED[refused].format(
+                        n=repr(said), host=host or "the site"
+                    ),
+                    decision="blocked",
+                )
+        return None
+
+    def _irreversible_step(self, plan: "browse.Batch", host: str) -> str | None:
+        """Does any step of this batch press a control that SAYS it changes
+        contact details, a payout address, a credential, or closes the account?
+
+        A label, which the page writes and can therefore lie about — the weaker
+        of the two reads, and since #310 the only one made here. What a step
+        would TYPE is judged by `_never_typed`, above the gate's branches,
+        because that question is about the act and not about this tool."""
         for step in plan.steps:
             said = step.control.address if step.control is not None else step.target
-            if step.do in ("fill", "date") and browse.types_a_bank_account(step.value):
-                return _gate_outcome(
-                    BROWSE_NO_BANK_DETAILS.format(
-                        n=repr(said), host=host or "the site"
-                    ),
-                    decision="blocked",
-                )
-            if step.do in ("fill", "date") and browse.types_a_card_number(step.value):
-                return _gate_outcome(
-                    BROWSE_NO_CARD_NUMBER.format(
-                        n=repr(said), host=host or "the site"
-                    ),
-                    decision="blocked",
-                )
             if claimed := browse.irreversible(said):
                 return _gate_outcome(
                     BROWSE_IRREVERSIBLE.format(
@@ -5960,10 +6004,18 @@ class Agent:
         made the card bypassable for exactly the half it was covering and left
         the owner with a card for a read and silence for the identical read one
         tool over. Whichever way a page is READ is now free; the card is spent
-        on the thing `read_url` cannot do, which is press something."""
+        on the thing `read_url` cannot do, which is press something.
+
+        **The typing fence is asked before either branch**, deliberately, and
+        it is the same lesson one paragraph up: what may be typed is a question
+        about the ACT, so asking it inside a per-tool branch is how it came to
+        hold for `browse_fill` and not for `browse_act` (#310)."""
         if name not in BROWSE_TOOLS:
             return None
         host = self._browse_host(name, args)
+        refusal = self._never_typed(name, args, host)
+        if refusal is not None:
+            return refusal
         # Opening a page, and re-reading the one already open, are reads.
         reading = name == "browse" or (
             name == "browse_act" and str(args.get("action", "")) == "read"
@@ -6102,7 +6154,11 @@ class Agent:
         for something that cannot run — and a batch carrying a password is
         refused outright, exactly as a single action is. Filling needs no card
         at all: typing has never been mutating, so a batch with no committing
-        step rides the host grant like any other read."""
+        step rides the host grant like any other read.
+
+        What this batch would TYPE was already judged by `_never_typed`, above
+        `_browse_gate`'s branches: it is a question about the act, and it is the
+        one thing here that must not be answered per tool (#310)."""
         current = self._browse_view.shown
         if current is None:
             return _gate_outcome(BROWSE_NO_PAGE, decision="blocked")
@@ -6113,7 +6169,8 @@ class Agent:
             )
         # Checked on the WHOLE batch before any of it runs, and before the card
         # is composed: the committing press is last by construction, so a batch
-        # refused here has typed nothing and left nothing half-sent.
+        # refused here has typed nothing, pressed nothing, and left nothing
+        # half-sent.
         if refusal := self._irreversible_step(plan, host):
             return refusal
         if not host:

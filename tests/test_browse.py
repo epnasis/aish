@@ -2063,6 +2063,186 @@ class TestConsequencesWithNoYesButton:
         assert asked == []
 
 
+class TestOneFenceOverTypingWhicheverToolTypes:
+    """#310. Both value refusals lived on the batch path, so the same value on
+    the same page was refused by `browse_fill` and typed by
+    `browse_act(action="type")` — whose branch of the gate tested a password
+    field and an irreversible LABEL and no value at all.
+
+    That is the failure `docs/browser.md` records against the site grant one
+    section over: *the model chooses the tool, which made the card bypassable
+    for exactly the half it was covering.* And it is the sentence #295 §5 rests
+    on — *the line is enforced by absence* — being true of a batch rather than
+    of aish. Absence that holds for one of two tools is not absence."""
+
+    IBAN = "PL61 1090 1014 0000 0712 1981 2874"
+    CARD = "4111 1111 1111 1111"
+
+    def _agent(self, snap, approve=lambda *_a: True):
+        asked = []
+
+        def approve_tool(name, args, preview):
+            asked.append(preview)
+            return approve(name, args, preview)
+
+        agent = Agent(
+            model="fake", approve=lambda _c: True,
+            client_chat=lambda **kw: {}, approve_tool=approve_tool,
+        )
+        agent._browse_view.remember(snap)
+        agent._approved_sites.add("eon.pl")  # the driving grant is not the point
+        return agent, asked
+
+    def _page(self, field="Numer zamówienia"):
+        return snapshot(controls=[
+            control(n=1, kind=browse.FIELD, name=field),
+            control(n=2, name="Dalej", mutating=True, submits=True),
+        ])
+
+    def _through_both_tools(self, value, field="Numer zamówienia", verdict=True):
+        """The same value, at the same control, on the same page — once per
+        tool that can type it. Each gets its own Agent, so neither run can be
+        the reason the other refused."""
+        out = []
+        for name, args in (
+            ("browse_fill", {"steps": [{"target": field, "value": value}]}),
+            ("browse_act", {"target": field, "action": "type", "text": value}),
+        ):
+            agent, asked = self._agent(
+                self._page(field), approve=lambda *_a, v=verdict: v
+            )
+            out.append((agent._browse_gate(name, args), asked))
+        return out
+
+    def test_a_card_number_is_refused_the_same_way_through_either_tool(self):
+        """Identical text and identical unapprovable verdict, because a
+        difference between the two IS a hint about which tool to reach for."""
+        (fill_out, fill_asked), (act_out, act_asked) = self._through_both_tools(
+            self.CARD
+        )
+        for out in (fill_out, act_out):
+            assert "NOT EXECUTED" in out and "payment card number" in out
+            assert "Numer zamówienia" in out  # it names what it stopped at
+            assert "/browser eon.pl" in out   # the door he already has
+        assert str(fill_out) == str(act_out)
+        # A refusal with no yes button: no card was drawn on either path, and
+        # the verdict says the act did not happen.
+        assert fill_asked == [] and act_asked == []
+        assert fill_out.meta == act_out.meta
+        assert fill_out.meta["decision"] == "blocked"
+
+    def test_an_iban_is_refused_the_same_way_through_either_tool(self):
+        """The older of the two refusals, and widening it is the half of #310
+        that changes shipped coverage — it had been batch-only since it
+        shipped."""
+        (fill_out, fill_asked), (act_out, act_asked) = self._through_both_tools(
+            self.IBAN, field="Numer rachunku"
+        )
+        for out in (fill_out, act_out):
+            assert "NOT EXECUTED" in out and "bank account number" in out
+            assert out.meta["decision"] == "blocked"
+        assert str(fill_out) == str(act_out)
+        assert fill_asked == [] and act_asked == []
+
+    def test_no_approver_verdict_reaches_it_on_either_path(self):
+        """There is no yes, so there is nothing for a yes to be given to: the
+        refusal is the same with an approver that approves everything and one
+        that refuses everything."""
+        said = []
+        for verdict in (True, False):
+            for out, asked in self._through_both_tools(self.CARD, verdict=verdict):
+                assert "NOT EXECUTED" in out
+                assert asked == []
+                said.append(str(out))
+        assert len(set(said)) == 1
+
+    def test_the_digits_never_appear_in_the_refusal(self):
+        """A refusal that names nothing teaches nothing; one that names the
+        value defeats itself. This is a claim about the REFUSAL only — the
+        model put the digits in the call's own arguments and `_call_result`
+        writes that record before `_dispatch` reaches any gate, so a refused
+        value is in the trace by design."""
+        for value in (self.CARD, self.IBAN):
+            for out, _asked in self._through_both_tools(value):
+                for fragment in (
+                    value, value.replace(" ", ""), *value.split(),
+                ):
+                    assert fragment not in out, fragment
+
+    def test_an_ordinary_value_through_either_tool_is_unaffected(self):
+        """The fence reads the value and nothing else, so an ordinary one pays
+        nothing — no refusal, and no card it did not already draw."""
+        for value in ("Warszawa", "pawel@wenda.email", "2026-08-22", "1234"):
+            for out, asked in self._through_both_tools(value, field="Skąd"):
+                assert out is None, (value, out)
+                assert asked == []
+
+    def test_the_fence_asks_nothing_of_the_page(self):
+        """It runs before the control is resolved, so a value cannot become
+        typeable because the model named a control that is not there, or
+        because nothing is open at all. The refusal is a statement about what
+        aish would SEND; nothing about the page may soften it."""
+        agent, asked = self._agent(self._page())
+        out = agent._browse_gate(
+            "browse_act",
+            {"target": "a control that is not on this page", "action": "type",
+             "text": self.CARD},
+        )
+        assert "NOT EXECUTED" in out and "payment card number" in out
+        assert asked == []
+
+        blank = Agent(
+            model="fake", approve=lambda _c: True,
+            client_chat=lambda **kw: {}, approve_tool=lambda *_a: True,
+        )
+        out = blank._browse_gate(
+            "browse_act",
+            {"target": "Numer karty", "action": "type", "text": self.CARD},
+        )
+        assert "NOT EXECUTED" in out and "payment card number" in out
+
+    def test_it_reads_the_step_the_way_the_batch_planner_does(self):
+        """One reading of what a step SAYS, shared with `plan_batch` — the
+        aliases are where a second parser would drift, since `do` is also
+        spelled `action` and a step's value is also spelled `text`."""
+        assert browse.typed_values(
+            "browse_fill",
+            {"steps": [{"target": "Numer karty", "action": "fill", "text": self.CARD}]},
+        ) == [("Numer karty", self.CARD)]
+        # And a malformed batch is read without raising: the gate's own
+        # complaint about it comes later, and must still be the thing said.
+        assert browse.typed_values("browse_fill", {"steps": "not a list"}) == []
+        assert browse.typed_values("browse_fill", {"steps": ["not a step"]}) == []
+
+    def test_only_the_verbs_that_actually_TYPE_are_read(self):
+        """`choose` picks an option the page itself wrote and `click`/`check`
+        type nothing, so neither carries a model-supplied value into the page.
+        `date` does — a field that opens no picker is typed as an ISO date."""
+        for verb in ("choose", "click", "check"):
+            assert browse.typed_values(
+                "browse_fill", {"steps": [{"target": "X", "do": verb, "value": "V"}]}
+            ) == []
+        assert browse.typed_values(
+            "browse_fill", {"steps": [{"target": "X", "do": "date", "value": "V"}]}
+        ) == [("X", "V")]
+        for action in ("click", "choose", "read"):
+            assert browse.typed_values(
+                "browse_act", {"target": "X", "action": action, "value": "V"}
+            ) == []
+        assert browse.typed_values("browse", {"url": "https://eon.pl"}) == []
+
+    def test_the_never_list_is_decided_in_one_place(self):
+        """`refuses_to_type` is what both paths ask, so the wording is looked
+        up rather than re-derived: a second test of the value to choose a
+        message is a second place to disagree about what the value is."""
+        assert browse.refuses_to_type(self.CARD) == browse.NO_CARD_NUMBER
+        assert browse.refuses_to_type(self.IBAN) == browse.NO_BANK_ACCOUNT
+        assert browse.refuses_to_type("Warszawa") == ""
+        assert set(agent_module.NEVER_TYPED) == {
+            browse.NO_BANK_ACCOUNT, browse.NO_CARD_NUMBER
+        }
+
+
 class TestADrivenPageThatIsAskingForAPassword:
     """The gap the linkedin.com session found (#280 follow-up). Auto sign-in
     was wired into the READ path only, and the model drives pages through

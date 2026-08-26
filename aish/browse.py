@@ -311,6 +311,34 @@ def types_a_card_number(value: str) -> bool:
     return _checksums(stripped)
 
 
+# The two value refusals, named so one dictionary of wordings can be keyed on
+# them and the caller never re-tests the value to decide which message to show.
+NO_BANK_ACCOUNT = "bank"
+NO_CARD_NUMBER = "card"
+
+
+def refuses_to_type(value: str) -> str:
+    """Which value aish will not type this is, or "".
+
+    **The single definition of the never-list, so it cannot hold for one tool
+    and not the other (#310).** Both refusals lived on the batch path for as
+    long as they existed, which meant `browse_fill` refused a card number and
+    `browse_act(action="type")` typed it — the same value, on the same page,
+    decided by which tool the model happened to reach for. That is the failure
+    `docs/browser.md` already records against the site grant, and the fix is
+    the same one: put the check on the ACT rather than on the tool doing it.
+    `typed_values` is the other half — it is what finds the act.
+
+    Nothing about the page is consulted, deliberately. Every other test here
+    reads a LABEL, which the page writes and can therefore lie about; these
+    two read what aish is about to SEND, which it cannot."""
+    if types_a_bank_account(value):
+        return NO_BANK_ACCOUNT
+    if types_a_card_number(value):
+        return NO_CARD_NUMBER
+    return ""
+
+
 # Words that are chrome as often as they are commitments. A date picker's
 # "Confirm" and a wizard's "Accept" are these; so is the button that ends a
 # purchase, which is why they are demoted only INSIDE a widget the page has
@@ -1993,6 +2021,56 @@ def _shown(value: str) -> str:
     return f"{value[:CARD_VALUE_CHARS]!r} + {len(value) - CARD_VALUE_CHARS} more chars"
 
 
+def _step_asked(raw: dict) -> Step:
+    """One step as the MODEL wrote it, before the page is consulted.
+
+    Shared by `plan_batch` and `typed_values` so there is one reading of what a
+    step says. A fence that parsed these arguments its own way would be
+    answering about a slightly different batch than the one that runs — and the
+    aliases are exactly where that drifts: `do` is also spelled `action`, and a
+    step's value is also spelled `text`."""
+    return Step(
+        target=str(raw.get("target", "") or ""),
+        do=str(raw.get("do") or raw.get("action") or FILL).lower(),
+        value=str(raw.get("value", "") or raw.get("text", "") or ""),
+    )
+
+
+# The verbs that put a MODEL-SUPPLIED value into the page. `choose` picks an
+# option the page itself wrote, and `click`/`check` type nothing at all — so
+# neither can carry a value the never-list is about. `date` is here because a
+# field that opens no picker is typed as an ISO date like any other value.
+TYPING_VERBS = (FILL, "date")
+
+
+def typed_values(name: str, args: dict) -> list[tuple[str, str]]:
+    """Every (control as the model named it, value) this call would TYPE.
+
+    **The other half of the one fence (#310), and the half that made it one.**
+    `browse_fill` and `browse_act(action="type")` are the only two ways a
+    model-supplied value reaches a page, and they took different gate branches,
+    so the never-list was enforced on one of them. Reading both here means the
+    fence is asked once, about the ACT, before either branch is chosen —
+    identical refusal, identical unapprovable outcome, by construction rather
+    than by two call sites kept in step.
+
+    **It consults nothing about the page**, not even whether the target
+    resolves to a control. That is the property, not an economy: `refuses_to_type`
+    reads what aish is about to send, so a value must not become typeable
+    because the page moved, because a label was rewritten, or because the model
+    named a control that is no longer there. The name comes back exactly as the
+    model wrote it, which is what the refusal says out loud."""
+    if name == "browse_fill":
+        asked = args.get("steps")
+        if not isinstance(asked, list):
+            return []
+        steps = [_step_asked(raw) for raw in asked if isinstance(raw, dict)]
+        return [(step.target, step.value) for step in steps if step.do in TYPING_VERBS]
+    if name == "browse_act" and str(args.get("action", "") or "") == "type":
+        return [(str(args.get("target", "") or ""), str(args.get("text", "") or ""))]
+    return []
+
+
 def plan_batch(controls: list[Control], asked: list[Any]) -> Batch:
     """Read a batch and decide whether it may be offered at all.
 
@@ -2026,11 +2104,7 @@ def plan_batch(controls: list[Control], asked: list[Any]) -> Batch:
     for index, raw in enumerate(asked, start=1):
         if not isinstance(raw, dict):
             return Batch(problem=f"step {index} is not an object with a target")
-        step = Step(
-            target=str(raw.get("target", "") or ""),
-            do=str(raw.get("do") or raw.get("action") or FILL).lower(),
-            value=str(raw.get("value", "") or raw.get("text", "") or ""),
-        )
+        step = _step_asked(raw)
         if step.do not in BATCH_VERBS:
             return Batch(
                 problem=f"step {index}: {step.do!r} is not one of {', '.join(BATCH_VERBS)}"
