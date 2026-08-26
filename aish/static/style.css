@@ -1353,6 +1353,15 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* the user's approval note on a finished step (#3): clamp long / multi-line
    comments to a few lines with a show-more toggle, like the output box. */
 .step-note { font-style: italic; }
+/* Whose sentence it is. The row is aish's account of its own step and every
+   other dim line on it is machine-written (a skipped frame's reason is italic
+   too), so quote marks alone left his words reading as aish's — the report
+   behind #323. Upright and un-quoted, so the label is plainly not part of what
+   he said. */
+.step-note-who {
+  font-style: normal; font-size: 11.6px; font-weight: 600;
+  color: var(--dim); opacity: 0.8; margin-right: 5px;
+}
 .step-note-wrap { display: flex; flex-direction: column; align-items: flex-start; margin-top: 1px; }
 .step-note-wrap .step-note {
   display: -webkit-box;
@@ -2597,6 +2606,34 @@ body.awaiting-approval .trace.live {
    and its output (#6, and long-command wrap). */
 body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .step-cmd.struck { text-decoration: line-through; }
+/* Where a re-proposed action came from (#323): the model's next use of this
+   tool while an earlier one of its own stood held. A way BACK to the held step,
+   which is why it is a link and not a badge — and neutral, never red or amber:
+   the join is an ordering the harness observed, not a verdict about either row.
+   A partial replay renders the same sentence as a plain span (no target, no
+   offer), so the two share every rule but the colour and the cursor. */
+.step-after-held {
+  display: inline-flex; align-items: baseline; gap: 3px;
+  align-self: flex-start; max-width: 100%;
+  padding: 0; border: 0; background: none;
+  font-family: inherit; font-size: 13.2px; font-weight: 400; line-height: 1.3;
+  color: var(--dim); text-align: left; overflow-wrap: anywhere;
+}
+button.step-after-held {
+  color: var(--blue); cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+button.step-after-held:active { opacity: 0.6; }
+.step-after-held-chev { opacity: 0.5; font-size: 15px; line-height: 1; }
+/* Which row the jump landed on. A brief grey wash and nothing else: a coloured
+   flash on a held row would restate its verdict in a second vocabulary. */
+.step-flash { animation: step-flash 1.4s ease-out; border-radius: 8px; }
+@keyframes step-flash {
+  0%, 45% { background: var(--row-sel-bg); }
+  100% { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .step-flash { animation-duration: 0.01s; background: var(--row-sel-bg); }
+}
 /* The diff of an applied file edit, shown inline in the timeline (#55). Dimmed
    when the edit was denied/held so it reads as proposed-but-not-written. */
 .step-diff { margin-top: 8px; }

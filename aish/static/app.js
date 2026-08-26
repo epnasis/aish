@@ -2847,6 +2847,11 @@ function ensureTrace() {
     turnGist: null,      // first line of the turn's thinking text
     liveGist: null,      // streaming thinking gist (status channel, unrecorded)
     running: [],         // in-flight tool_starts: {name, summary, command}
+    // Rows of actions HELD for adjustment, by their `call` id, so a later step
+    // carrying `replaces` can point back at the one it followed (#323). Per
+    // card because `call` numbers restart with the turn — the same reason the
+    // agent's own hold register is per-turn. Written by toolFinish only.
+    heldRows: new Map(),
     waitingApproval: false, answering: false, stopping: false,
     userToggled: false,  // the reader took over the open/closed state
   };
@@ -3445,6 +3450,56 @@ function toolStart(t, step) {
   updateTraceHead(t);
 }
 
+const STEP_FLASH_MS = 1400;
+
+// The join between an action that was HELD and the one the model proposed next
+// (#323). Approve-with-comment never runs what was on the card: it holds it and
+// tells the model to re-propose, so without this the timeline read as two
+// unrelated proposals with a dead row between them.
+//
+// The wording is the load-bearing part. `replaces` asserts exactly one thing —
+// the first later call to the SAME tool while a hold was outstanding — so the
+// row may say the ordering and nothing else. "Reworked from", "corrected
+// version of" or "in response to your comment" would each state something no
+// line of code checked; the held step's own command is what settles whether
+// this one differs, which is why the sentence is a way BACK to it rather than a
+// verdict about it. Neutral, never red: nothing here observed a problem.
+function heldJoin(t, step) {
+  if (!step.replaces) return null;
+  const label = "Proposed after the held step";
+  const target = t.heldRows && t.heldRows.get(step.replaces);
+  if (!target) {
+    // The held row is not in this card — a partial replay, or a log whose head
+    // the first paint did not reach. A control that navigates nowhere reads as
+    // broken (L7), so the fact is still stated and only the offer is dropped.
+    const flat = document.createElement("span");
+    flat.className = "step-after-held";
+    flat.textContent = label;
+    return flat;
+  }
+  const jump = document.createElement("button");
+  jump.type = "button";
+  jump.className = "step-after-held";
+  const text = document.createElement("span");
+  text.textContent = label;
+  const chev = document.createElement("span");
+  chev.className = "step-after-held-chev";
+  chev.textContent = "›";
+  jump.append(text, chev);
+  jump.onclick = (e) => { if (e && e.stopPropagation) e.stopPropagation(); revealStep(target); };
+  return jump;
+}
+
+// Bring a row that is already in this card into view, and say WHICH one.
+// `block: "nearest"` means a row already on screen does not move at all: this
+// is a hop of a few rows inside one card, not the long animated jump [EXPLAIN]
+// rules out, and the flash is what answers "which of these did it land on".
+function revealStep(row) {
+  if (row.scrollIntoView) row.scrollIntoView({ block: "nearest", inline: "nearest" });
+  row.classList.add("step-flash");
+  setTimeout(() => row.classList.remove("step-flash"), STEP_FLASH_MS);
+}
+
 function toolFinish(t, step) {
   accountStepTime(t, step.secs);
   const meta = TOOL_META[step.name] || [step.name, "dot", "--dim"];
@@ -3486,7 +3541,18 @@ function toolFinish(t, step) {
     : step.name === "run_command" ? `${ref.manual ? "Approved" : "Auto-approved"} · ${fmtSecs(step.secs)}`
     : fmtSecs(step.secs);
   ref.titleEl.appendChild(tag);
+  // Where this row came from (#323). Onto the TITLE, not the row body: the
+  // body already holds the terminal block that command_start drew, so an
+  // append lands the provenance of the action UNDER its output, arbitrarily
+  // far from the row it is about. `.step-title` wraps, so it takes its own
+  // line under the title on a phone and sits beside the tag when there is room.
+  const after = heldJoin(t, step);
+  if (after) ref.titleEl.appendChild(after);
+  // …and, if this row IS a hold, the row a later one may point back at.
+  if (held && step.call) t.heldRows.set(step.call, ref.row);
   // The user's approval note, shown back on the step (#3), clamped when long.
+  // Not gated on the step name: since #323 every gate that refused or held
+  // because of a sentence he typed carries it here, not just the writes.
   if (step.comment) ref.main.appendChild(clampNote(step.comment));
   if (notRun) {
     // A denied/blocked/held command never runs, so no terminal block is built
@@ -3506,8 +3572,19 @@ function toolFinish(t, step) {
       skipped.textContent = "Change not applied";
       ref.main.appendChild(skipped);
     }
-    // Why it was skipped/blocked (denial comment, gate reason) — #5, #12.
-    if (step.output) {
+    // The reason, out of a log written BEFORE #323 — #5, #12. Back then
+    // `output` meant what the command PRINTED on an approved step and what the
+    // owner TYPED on a denied one, and from here the two are indistinguishable:
+    // these logs also hold gate wording in this key ("rm -rf: recursive force
+    // delete is unrecoverable"). So it keeps the neutral machine voice rather
+    // than being promoted into his; a sentence attributed to the wrong speaker
+    // is the defect #323 exists to end, not a cosmetic one.
+    //
+    // Since #323 his words arrive in `comment` — drawn above, in his voice —
+    // and this key is empty on those rows, so nothing is drawn here at all.
+    // Guarded on `comment` rather than on the empty string so a log carrying
+    // both can never say it twice.
+    if (step.output && !step.comment) {
       const why = document.createElement("span");
       why.className = "step-sub";
       why.textContent = step.output;
@@ -3590,7 +3667,19 @@ function clampNote(text) {
   wrap.className = "step-note-wrap";
   const note = document.createElement("span");
   note.className = "step-sub step-note";
-  note.textContent = `“${text}”`;
+  // ATTRIBUTED, for the same reason the approval card's reason block says
+  // "aish says": a trace row is aish's account of its own step, so an
+  // unlabelled quote in the same dim italic as the machine sub-lines beside it
+  // (a skipped frame's reason is italic too) reads as aish quoting itself —
+  // which is the styling this issue was reported about. Earned rather than
+  // assumed: `comment` is DEFINED as the sentence the owner typed on the
+  // approval card, and no path writes anything else into it (trace contract
+  // 3.4). A gate's own wording travels in other keys and is drawn in the
+  // machine voice.
+  const who = document.createElement("span");
+  who.className = "step-note-who";
+  who.textContent = "you said";
+  note.append(who, document.createTextNode(`“${text}”`));
   wrap.appendChild(note);
   const more = document.createElement("button");
   more.type = "button";
