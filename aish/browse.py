@@ -474,6 +474,121 @@ NO_FRAME_REASONS = frozenset(
 NO_FRAME_WRITTEN = frozenset({NO_FRAME_HANDS, NO_FRAME_FAILED})
 
 
+# ---------------------------------------------------------------- the console
+#
+# What the PAGE said while an action was being carried out. It is the piece of
+# evidence a day of failed diagnosis on eon.pl did not have: four causes were
+# argued confidently off page text, a badge and a fetched copy of the HTML, and
+# all four were wrong, while the one sentence that would have settled it — a
+# handler throwing — went to a console nobody records. This is not sign-in
+# specific: the same silence is what makes "the calendar would not take the
+# date" and "the dropdown never opened" unanswerable.
+#
+# EVIDENCE, NEVER A VERDICT, and the site this was built for is the proof. A
+# press that never LANDS writes nothing here at all, because nothing ran — that
+# failure's witness is the driver's actionability log, which `_uncover` reduces
+# to a bool and discards (#321), and it is a different channel from this one.
+# And eon.pl's own bundle throws a real TypeError that is not why its sign-in
+# fails, so a true line here can point at the wrong thing. `docs/browser.md`.
+#
+# A RECORD, and a record is detection and never protection (#295 P2). Nothing
+# in the browse gate, the act-time re-resolution fence, the irreversible
+# refusals or the site grant is loosened, widened or checked less carefully
+# because the console is now written down — and "he could have read it
+# afterwards" is the same violation in the past tense.
+#
+# ERRORS AND WARNINGS ONLY, plus uncaught exceptions. `console.log` is the
+# page's own chatter: a busy SPA writes thousands of lines of it a minute and
+# none of them is a reason something did not happen. An uncaught exception is
+# a different Playwright event (`pageerror`) from a console call, and it is the
+# one that matters most here — a handler that threw wrote nothing to `console`
+# at all.
+CONSOLE_ERROR = "error"
+CONSOLE_WARNING = "warning"
+CONSOLE_UNCAUGHT = "uncaught"
+# A closed vocabulary for the same reason `NO_FRAME_*` is one: these words are
+# written into a trace record and read back by two renderers, and free text
+# would drift between them.
+CONSOLE_LEVELS = frozenset({CONSOLE_ERROR, CONSOLE_WARNING, CONSOLE_UNCAUGHT})
+# What Chrome and Playwright call the levels this keeps, mapped onto the words
+# above: `warn` and `warning` are one level spelled two ways depending on which
+# end of the DevTools protocol you read it from.
+_CONSOLE_ALIASES = {"warn": CONSOLE_WARNING, "error": CONSOLE_ERROR}
+
+# Bounded twice, because a page in a render loop produces both a great many
+# lines and very long ones, and either alone would let one page fill a turn.
+# Named constants rather than literals so a record can say which cap cut
+# (trace contract §8.5).
+CONSOLE_MAX_MESSAGES = 20
+CONSOLE_MESSAGE_CHARS = 200
+
+
+class ConsoleLog:
+    """What one page said to its own console during ONE action.
+
+    Cleared when a browse call begins and drained into the snapshot that call
+    produces, so a message is tied to the press that produced it rather than
+    floating loose in the session. That binding is the whole point: "something
+    threw at some point today" is not evidence, "that click threw this" is.
+
+    Bounded, and never silently: past the cap the count of unkept messages is
+    stated, the way `MAX_CONTROLS` states what it left out. A page that could
+    quietly drop the line naming its own failure would be the one page where
+    this record is worthless.
+
+    Deliberately holds no page reference and does no I/O — it is the half of
+    the capture that needs no browser, so the caps and the vocabulary are
+    testable with no Chrome anywhere near them."""
+
+    __slots__ = ("lines", "dropped")
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.dropped = 0
+
+    def begin(self) -> None:
+        """A new action starts. Whatever the last one provoked is not this
+        one's evidence, and carrying it over would attribute a page's noise to
+        the press that merely happened to come after it."""
+        self.lines = []
+        self.dropped = 0
+
+    def note(self, level: str, text: str) -> None:
+        """One message, if it is a level worth keeping.
+
+        Never raises and never judges: this runs from a Playwright event
+        handler on the owner loop, where an exception is one nothing is
+        waiting for, and the text is copied down rather than interpreted."""
+        word = (level or "").strip().lower()
+        word = _CONSOLE_ALIASES.get(word, word)
+        if word not in CONSOLE_LEVELS:
+            return
+        message = " ".join((text or "").split())
+        if not message:
+            return
+        if len(self.lines) >= CONSOLE_MAX_MESSAGES:
+            self.dropped += 1
+            return
+        if len(message) > CONSOLE_MESSAGE_CHARS:
+            message = message[:CONSOLE_MESSAGE_CHARS] + "…"
+        self.lines.append(f"{word}: {message}")
+
+    def drain(self) -> list[str]:
+        """This action's messages, plus the count of any the cap refused.
+
+        Draining rather than reading is what stops one action's console being
+        reported twice: a snapshot is taken once per call, and the next call
+        starts from empty however it got there."""
+        lines = list(self.lines)
+        if self.dropped:
+            lines.append(
+                f"[{self.dropped} more console message(s) not kept — the cap is "
+                f"{CONSOLE_MAX_MESSAGES}]"
+            )
+        self.begin()
+        return lines
+
+
 @dataclass
 class Snapshot:
     """A page as the model receives it: what it says, and what it can press."""
@@ -549,6 +664,16 @@ class Snapshot:
     # cannot see. That store sits outside every workspace root (#318), so the
     # model cannot reach the bytes even if it learns the path.
     frame: str = ""
+    # What the PAGE wrote to its own console while this action was carried out
+    # — errors, warnings and uncaught exceptions, bounded, in the page's own
+    # words. Empty is the ordinary case and costs nothing anywhere: a healthy
+    # action grows no section and says nothing.
+    #
+    # PAGE-AUTHORED, and therefore outside content exactly like the page text
+    # beside it: presented to the model INSIDE the untrusted banner and never
+    # in aish's own voice. A page that can write a sentence into a warning has
+    # written it into the document.
+    console: list[str] = field(default_factory=list)
     # Why there is no frame, when there is none. Absence must never be the
     # evidence (trace contract corollary 2): "no picture" because a password
     # box was on the page, "no picture" because the page would not say, and

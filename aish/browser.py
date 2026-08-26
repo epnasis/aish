@@ -1343,6 +1343,48 @@ async def _dismiss_consent(page: Any) -> None:
             continue
 
 
+def _watch_console(page: Any, log: browse_mod.ConsoleLog) -> None:
+    """Record what THIS page writes to its own console.
+
+    Two Playwright events, because they are two different things and the one
+    that matters most here is the second: `console` is the page calling
+    `console.error`/`warn`, and `pageerror` is a handler THROWING, which writes
+    nothing to `console` at all. A login button whose handler died on
+    `ReferenceError: grecaptcha is not defined` produces only the second, and
+    that is precisely the sentence a day of guessing at eon.pl did not have.
+
+    Attached per PAGE and never per session, because a session's page is
+    replaced when a control opens a new tab (`_adopt_new_tab`) — handlers on
+    the old document would go on reporting a page nobody is driving.
+
+    Every handler is total: it runs on the owner loop from Playwright's own
+    dispatch, where a raised exception is one nothing is waiting for, and a
+    console message is an extra that must never cost the action it describes.
+    Attaching is suppressed for the same reason the capture is — a page object
+    that has no `on` is a page that gets no console, never a failed browse."""
+
+    def field(msg: Any, name: str) -> str:
+        # `type` and `text` are PROPERTIES in Playwright's Python API and
+        # METHODS in its JavaScript one. Reading them either way costs one
+        # `callable` check and removes a whole class of silent failure: a
+        # bound method stringifies to something no level matches, so the
+        # message would be dropped with nothing anywhere saying why.
+        value = getattr(msg, name, "")
+        return str((value() if callable(value) else value) or "")
+
+    def message(msg: Any) -> None:
+        with contextlib.suppress(Exception):
+            log.note(field(msg, "type"), field(msg, "text"))
+
+    def threw(exc: Any) -> None:
+        with contextlib.suppress(Exception):
+            log.note(browse_mod.CONSOLE_UNCAUGHT, str(exc))
+
+    with contextlib.suppress(Exception):
+        page.on("console", message)
+        page.on("pageerror", threw)
+
+
 class _Session:
     """ONE CHAT's browse page, and what is true about it.
 
@@ -1353,9 +1395,22 @@ class _Session:
     look like a page change to this one."""
 
     def __init__(self, page: Any) -> None:
-        self.page = page
+        # What the page said while the action now running was carried out.
+        # It belongs to the SESSION and not to the page, because the page is
+        # replaced mid-act when a control opens a tab and the messages either
+        # side of that are one action's evidence.
+        self.console = browse_mod.ConsoleLog()
+        self.adopt(page)
         self.epoch = 0
         self.touched = time.monotonic()
+
+    def adopt(self, page: Any) -> None:
+        """Drive `page` from now on, listening to its console.
+
+        The ONE place a session's page is assigned, so a tab this session moves
+        to cannot be one whose console nobody is recording."""
+        self.page = page
+        _watch_console(page, self.console)
 
     def live(self, now: float) -> bool:
         if now - self.touched > BROWSE_MAX_IDLE:
@@ -2236,6 +2291,19 @@ class SignInResult:
     # in the same closed vocabulary `Snapshot` uses.
     frame: str = ""
     frame_skipped: str = ""
+    # What the LOGIN PAGE wrote to its own console during the attempt, bounded
+    # and in the page's own words. A submit that never fired is a handler that
+    # threw, and this is the only channel that carries the sentence saying so.
+    #
+    # It goes to the OWNER and never to the model, and that is a fence rather
+    # than an oversight. The renewal note is aish's own voice ABOVE the
+    # untrusted banner, where page-authored text may never be spoken; and
+    # putting it below the banner instead would be a NEW INPUT SURFACE — the
+    # model already reads the driven page, so that page's console is the same
+    # document, but this is a different one it never asked for and cannot see.
+    # A record may not become a channel. Same reasoning that keeps the picture
+    # below off the browse `frame` key.
+    console: list[str] = field(default_factory=list)
     # What the page was seen doing in the submit window, on a FAILED attempt:
     # method, origin and path, bounded, and only for the endings that CLAIM
     # nothing was seen leaving. Evidence about that claim, never a verdict —
@@ -2905,6 +2973,12 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
             )
         context = await owner.context()
         page = await context.new_page()
+        # Armed BEFORE the navigation, so a script that throws while the login
+        # page is still loading is caught too — on this flow that is the most
+        # likely place for it, since the widget the form depends on is what
+        # fails to arrive.
+        console = browse_mod.ConsoleLog()
+        _watch_console(page, console)
         owner.read_pages.add(page)
         try:
             await page.goto(record.url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
@@ -2920,6 +2994,10 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
             # after every ending, on the page as it actually finished — and
             # before the `finally` below closes it.
             outcome.frame, outcome.frame_skipped = await _signin_frame(owner, page)
+            # Drained beside the shutter and for the same reason: one place,
+            # after whichever of a dozen endings happened, rather than a
+            # capture per return that somebody forgets on the thirteenth.
+            outcome.console = console.drain()
             return outcome
         finally:
             owner.read_pages.discard(page)
@@ -4274,6 +4352,10 @@ async def _snapshot(
         epoch=session.epoch,
         signin=signin,
         frame=frame,
+        # Drained, not read: a snapshot is taken once per call, and this is
+        # what ties a message to the press that provoked it instead of leaving
+        # it to be reported again under the next one.
+        console=session.console.drain(),
         frame_skipped=frame_skipped,
         problem=problem,
         notice=notice,
@@ -4303,6 +4385,10 @@ async def _session(owner: _Owner, key: str, *, opening: bool) -> _Session:
         except Exception:  # noqa: BLE001 — a page that cannot answer is gone
             closed = True
         if not closed:
+            # A new call begins here, so this is where the console starts over
+            # — one place rather than a rule each of the three entry points has
+            # to remember, since all three obtain their session through here.
+            session.console.begin()
             return session
         del owner.browse_pages[key]
     if not opening:
@@ -4315,7 +4401,7 @@ async def _session(owner: _Owner, key: str, *, opening: bool) -> _Session:
     context = await owner.context()
     session = _Session(await context.new_page())
     owner.browse_pages[key] = session
-    return session
+    return session  # a fresh session's console is already empty
 
 
 async def _evict_stale(owner: _Owner) -> None:
@@ -4378,7 +4464,7 @@ async def _adopt_new_tab(
         pass
     session = owner.browse_pages.get(key)
     if session is not None:
-        session.page = fresh
+        session.adopt(fresh)
     return fresh
 
 

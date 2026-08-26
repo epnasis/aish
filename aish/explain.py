@@ -528,7 +528,52 @@ def _frame_of(step: dict) -> dict:
         "frame": path,
         "frame_state": RECORDED if there else PURGED,
         "frame_skipped": "",
+        # What the picture is EVIDENCE OF, rather than merely what it is of:
+        # the address the shutter fired at, and the address the page came from
+        # when the action moved it. Carried through untouched — this reader may
+        # not re-derive a navigation from anything, and the writer is the only
+        # side that had both pages in front of it.
+        "frame_url": str(step.get("frame_url") or ""),
+        "frame_from": str(step.get("frame_from") or ""),
     }
+
+
+def _signin_of(step: dict) -> dict:
+    """The automatic sign-in that happened inside this call, resolved.
+
+    Its own block and not part of `_frame_of`, because it is about a DIFFERENT
+    DOCUMENT: the login page the model never asked for, never saw and cannot
+    name. Folding it into the page frame would state a guarantee the capture
+    does not make."""
+    block = step.get("signin")
+    if not isinstance(block, dict) or not block.get("host"):
+        return {}
+    path = str(block.get("frame") or "")
+    state = ""
+    if path:
+        try:
+            state = RECORDED if Path(path).is_file() else PURGED
+        except OSError:  # a path this process cannot stat is not a picture
+            state = PURGED
+    return {
+        "host": str(block.get("host") or ""),
+        "frame": path,
+        "frame_state": state,
+        "frame_skipped": "" if path else str(block.get("frame_skipped") or ""),
+        "console": [str(line) for line in (block.get("console") or [])],
+    }
+
+
+def _page_evidence(step: dict) -> dict:
+    """The page's own console and the sign-in inside this call, if either was
+    recorded. Both page-authored where they are text, and both handed on
+    verbatim: this reader reports what was RECORDED and never interprets it."""
+    out: dict = {}
+    if console := [str(line) for line in (step.get("console") or [])]:
+        out["console"] = console
+    if signin := _signin_of(step):
+        out["signin"] = signin
+    return out
 
 
 def _did(turn: Turn) -> dict:
@@ -579,6 +624,12 @@ def _did(turn: Turn) -> dict:
                 # PURGED means the record outlived the picture — which is the
                 # ordinary end for a store that is a bounded LRU cache.
                 **_frame_of(step),
+                # What the PAGE said while this call was carried out, and what
+                # an automatic sign-in inside it left behind. Spread the same
+                # way the frame is, so a key exists only where the writer wrote
+                # one: a clean page and a page nobody listened to are different
+                # facts, and an empty list would say the second about the first.
+                **_page_evidence(step),
                 "gates": gates,
                 "refused": [g for g in gates if _refused(g)],
                 "completed": True,
@@ -1401,6 +1452,64 @@ def _event_lines(event: dict, placed: bool) -> list[str]:
     return []
 
 
+def _where_the_picture_was_taken(call: dict) -> str:
+    """The caption for a page frame: the address, and the move that reached it.
+
+    Says nothing at all when the writer recorded no address — a frame from a
+    log written before this is still a frame, and inventing "unknown" for it
+    would be the reader claiming the writer tried and failed."""
+    at = str(call.get("frame_url") or "")
+    if not at:
+        return ""
+    came_from = str(call.get("frame_from") or "")
+    if came_from:
+        # Worded to exactly what was recorded: `frame_from` is the page the
+        # chat was LAST SHOWN, which is what the delta is a delta of. "It
+        # navigated here from X" would claim no other document sat between the
+        # two, and nothing checks that.
+        return f"taken at {at} — aish was on {came_from} before this"
+    return f"taken at {at} — the address did not change"
+
+
+def _console_lines(console: list, whose: str, indent: str = "     ") -> list[str]:
+    """The console, marked as the PAGE's own words wherever it is printed.
+
+    A dossier is read by a person and can be pasted to a model, so the same
+    discipline applies here as in the tool result: these lines are outside
+    content and must never read as aish's account of itself."""
+    if not console:
+        return []
+    lines = [f"{indent}{DIM}{whose} wrote to its own console (the page's words):{RESET}"]
+    lines.extend(f"{indent}  {DIM}{str(line)[:200]}{RESET}" for line in console)
+    return lines
+
+
+def _signin_lines(signin: dict) -> list[str]:
+    """The automatic sign-in that happened inside this call.
+
+    On a different page from the one the call reported, so it is labelled as
+    one. The three reference states are the frame's own (§3.4): a path that
+    resolves, a path whose bytes the bounded store has since dropped, and a
+    recorded reason there is no picture at all."""
+    host = str(signin.get("host") or "")
+    if not host:
+        return []
+    lines = [f"     {DIM}aish signed in again at {host} during this call{RESET}"]
+    if path := str(signin.get("frame") or ""):
+        gone = signin.get("frame_state") != RECORDED
+        lines.append(
+            f"       {DIM}picture of the sign-in page: {path}"
+            + (f" {BOLD}(purged){RESET}{DIM}" if gone else "")
+            + RESET
+        )
+    elif skipped := str(signin.get("frame_skipped") or ""):
+        lines.append(f"       {DIM}no picture of the sign-in page — {skipped}{RESET}")
+    lines.extend(
+        _console_lines(signin.get("console") or [], "the sign-in page", indent="       ")
+    )
+    return lines
+
+
 def _call_lines(call: dict) -> list[str]:
     """One tool call: what was asked, what governed it, what came back."""
     lines: list[str] = []
@@ -1443,10 +1552,18 @@ def _call_lines(call: dict) -> list[str]:
             + (f" {BOLD}(purged){RESET}{DIM}" if gone else "")
             + RESET
         )
+        # What the picture is evidence OF. Said on the line under it because
+        # the path alone answers "what did this page look like", and the
+        # question actually asked of a browse step is "what did this press do".
+        if where := _where_the_picture_was_taken(call):
+            lines.append(f"     {DIM}{where}{RESET}")
     elif call.get("frame_skipped"):
         lines.append(
             f"     {DIM}no picture of the page — {call['frame_skipped']}{RESET}"
         )
+    lines.extend(_console_lines(call.get("console") or [], "the page"))
+    if signin := call.get("signin"):
+        lines.extend(_signin_lines(signin))
     detail = f"     {status}, {call['secs']:.1f}s"
     if call["verdict_by"]:
         detail += f", verdict by {call['verdict_by']}"

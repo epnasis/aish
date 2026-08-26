@@ -1267,6 +1267,32 @@ TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge", "trim", "mode
 # rather than a fix at each of the (now ten) refusal sites.
 REFUSED_DECISIONS = frozenset({"denied", "held", "blocked", "rejected"})
 
+
+def _scrub_page_console(step: dict) -> None:
+    """Redact stored secrets out of a browse step's recorded console lines.
+
+    A console message is whatever the page had in scope, and a login page that
+    echoes a rejected password into its own error text writes it to `console`
+    as readily as into the document. The model's copy travels in the result
+    body and is covered by `_scrub_result`'s funnel; THIS is the second copy —
+    the one that rides the envelope into the durable log — and a value that
+    reaches the log is a value on the owner's disk in plain text forever.
+
+    Scrubbed where the envelope is consumed rather than where each line is
+    captured, which is the same rule `output` follows two functions down: one
+    site applied last, instead of a fix at every place that can produce a line.
+    In-place because `step` is being built here and nothing else has seen it.
+    """
+    lines = step.get("console")
+    if isinstance(lines, list):
+        step["console"] = [secrets.scrub(str(line)) for line in lines]
+    signin = step.get("signin")
+    if isinstance(signin, dict) and isinstance(signin.get("console"), list):
+        step["signin"] = {
+            **signin,
+            "console": [secrets.scrub(str(line)) for line in signin["console"]],
+        }
+
 FORGET_PROHIBITED = (
     "NOT EXECUTED: forget_memory is unavailable in an automated session — "
     "deleting the owner's knowledge with nobody watching is never the right "
@@ -4367,6 +4393,7 @@ class Agent:
             "call": call_no,
             **envelope,
         }
+        _scrub_page_console(step)
         if not ok and self._run_meta is None:
             # Non-run_command failure (a read_url/web_search error, a gate
             # refusal): carry the message so the trace can explain what broke.

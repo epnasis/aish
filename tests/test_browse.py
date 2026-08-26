@@ -2080,7 +2080,12 @@ class TestADrivenPageThatIsAskingForAPassword:
 
         monkeypatch.setattr(web_module.browser, "browse_open", browse_open)
         monkeypatch.setattr(web_module, "_require_public", lambda _u: None)
-        monkeypatch.setattr(web_module, "_renew_session", lambda _u: renewal)
+        # `seen` is the per-call sign-in recorder the entry point creates; a
+        # stub that swallows it keeps these tests about the NOTES, which is
+        # what they are for.
+        monkeypatch.setattr(
+            web_module, "_renew_session", lambda _u, *, seen=None: renewal
+        )
         return opens
 
     def test_with_nothing_stored_it_says_so_and_forbids_trying_doors(
@@ -2915,3 +2920,340 @@ class TestTheFrameReferenceRidesTheResult:
         out = web_module.browse("https://eon.pl/mojeon", cut=cut, view=view)
         assert out.meta["frame"] == "/store/media/abc.jpg"
         assert out.meta["truncation"]
+
+    def test_the_picture_carries_where_it_was_taken(self, monkeypatch):
+        """A frame on its own answers "what did this page look like"; the
+        question asked of a browse step is "what did this press do". The
+        address and the move are already known at this seam — `shown` is the
+        page before and the snapshot is the page after — so this is the delta
+        written down, not a second one computed."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(url="https://eon.pl/mojeon", controls=[control(n=1)]))
+        monkeypatch.setattr(
+            web_module.browser, "browse_act",
+            lambda *a, **kw: snapshot(
+                url="https://eon.pl/faktury", frame="/store/media/after.jpg"
+            ),
+        )
+        out = web_module.browse_act("Przełącz lokal", view=view)
+        assert out.meta["frame_url"] == "https://eon.pl/faktury"
+        assert out.meta["frame_from"] == "https://eon.pl/mojeon"
+
+    def test_a_press_that_did_not_move_the_page_says_no_move(self, monkeypatch):
+        """"Navigated from the page it is still on" is a sentence with no
+        content, and a caption saying it on every row is one the eye stops
+        reading. The address is still recorded; the move is not invented."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(url="https://eon.pl/mojeon", controls=[control(n=1)]))
+        monkeypatch.setattr(
+            web_module.browser, "browse_act",
+            lambda *a, **kw: snapshot(
+                url="https://eon.pl/mojeon", frame="/store/media/after.jpg"
+            ),
+        )
+        out = web_module.browse_act("Przełącz lokal", view=view)
+        assert out.meta["frame_url"] == "https://eon.pl/mojeon"
+        assert "frame_from" not in out.meta
+
+    def test_no_picture_means_no_caption_for_one(self, monkeypatch):
+        """The address is written only ALONGSIDE a frame, because the claim it
+        makes is about the picture. A lone address on a step with no picture
+        would read as a caption for one."""
+        view = web_module.BrowseView()
+        self._opens(
+            monkeypatch, snapshot(frame_skipped=browse.NO_FRAME_HANDS)
+        )
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert "frame_url" not in out.meta and "frame_from" not in out.meta
+
+
+class TestThePageSaysWhyItDidNotWork:
+    """The console, captured per action.
+
+    A day of failed diagnosis on eon.pl argued four causes off page text, a
+    badge and a fetched copy of the HTML, and all four were wrong. The sentence
+    that would have settled it — the login handler throwing — went to a console
+    nobody recorded. It is not sign-in specific: the same silence is what makes
+    a calendar that would not take a date unanswerable.
+
+    A RECORD, and a record is detection and never protection: nothing is
+    permitted, widened or checked less carefully because the console is now
+    written down."""
+
+    def test_errors_warnings_and_uncaught_exceptions_are_kept(self):
+        log = browse.ConsoleLog()
+        log.note("error", "ReferenceError: grecaptcha is not defined")
+        log.note("warning", "third-party cookie blocked")
+        log.note(browse.CONSOLE_UNCAUGHT, "TypeError: t.submit is not a function")
+        assert log.drain() == [
+            "error: ReferenceError: grecaptcha is not defined",
+            "warning: third-party cookie blocked",
+            "uncaught: TypeError: t.submit is not a function",
+        ]
+
+    def test_chatter_is_not_kept(self):
+        """`console.log` is the page's own noise: a busy SPA writes thousands
+        of lines a minute of it and none of them is a reason something did not
+        happen."""
+        log = browse.ConsoleLog()
+        for level in ("log", "info", "debug", "table", "trace", ""):
+            log.note(level, "rendering tile 4213")
+        assert log.drain() == []
+
+    def test_chromes_own_spelling_of_a_warning_is_understood(self):
+        """`warn` and `warning` are one level spelled two ways depending on
+        which end of the DevTools protocol you read it from. Dropping one of
+        them would lose half the warnings for a naming reason."""
+        log = browse.ConsoleLog()
+        log.note("WARN", "deprecated API")
+        assert log.drain() == ["warning: deprecated API"]
+
+    def test_a_page_in_a_render_loop_cannot_fill_the_turn(self):
+        """Bounded, and never silently: the count of what the cap refused is
+        stated, the way MAX_CONTROLS states what it left out. A page able to
+        quietly drop the line naming its own failure is the one page where
+        this record would be worthless."""
+        log = browse.ConsoleLog()
+        for i in range(browse.CONSOLE_MAX_MESSAGES + 7):
+            log.note("error", f"loop {i}")
+        lines = log.drain()
+        assert len(lines) == browse.CONSOLE_MAX_MESSAGES + 1
+        assert lines[-1] == (
+            f"[7 more console message(s) not kept — the cap is "
+            f"{browse.CONSOLE_MAX_MESSAGES}]"
+        )
+
+    def test_one_enormous_message_is_cut_and_says_so(self):
+        log = browse.ConsoleLog()
+        log.note("error", "x" * 5000)
+        (line,) = log.drain()
+        assert line.endswith("…")
+        assert len(line) == len("error: ") + browse.CONSOLE_MESSAGE_CHARS + 1
+
+    def test_a_new_action_starts_from_empty(self):
+        """The binding is the point: "something threw at some point today" is
+        not evidence, "that click threw this" is. Carrying a page's noise into
+        the next press would file it under the wrong action."""
+        log = browse.ConsoleLog()
+        log.note("error", "from the last press")
+        log.begin()
+        log.note("error", "from this one")
+        assert log.drain() == ["error: from this one"]
+
+    def test_draining_empties(self):
+        """A snapshot is taken once per call; a second read must not report
+        the same messages under the next action."""
+        log = browse.ConsoleLog()
+        log.note("error", "boom")
+        assert log.drain() == ["error: boom"]
+        assert log.drain() == []
+
+    def test_a_message_that_is_only_whitespace_is_not_a_message(self):
+        log = browse.ConsoleLog()
+        log.note("error", "   \n\t ")
+        log.note("error", "line one\n   line two")
+        assert log.drain() == ["error: line one line two"]
+
+    def test_the_vocabulary_is_closed(self):
+        """Written into a trace record and read back by two renderers, so it is
+        a closed vocabulary rather than free text — the same reasoning as
+        NO_FRAME_*."""
+        assert browse.CONSOLE_LEVELS == {
+            browse.CONSOLE_ERROR, browse.CONSOLE_WARNING, browse.CONSOLE_UNCAUGHT
+        }
+        log = browse.ConsoleLog()
+        log.note("catastrophe", "a level a later Chrome invented")
+        assert log.drain() == []
+
+
+class TestTheConsoleReachesTheModelAsPageContent:
+    """Console text is PAGE-AUTHORED and gets the treatment this codebase
+    already has for that — inside the untrusted banner, never in aish's voice,
+    and never above the banner where the provenance notes live."""
+
+    def _opens(self, monkeypatch, snap):
+        monkeypatch.setattr(web_module, "_require_public", lambda _u: None)
+        monkeypatch.setattr(
+            web_module.browser, "browse_open",
+            lambda url, *, topic="", key="": snap,
+        )
+
+    def test_a_healthy_action_costs_nothing(self):
+        """Empty is the ordinary case: no section, no heading, no blank line.
+        A sentence on every result saying the page was fine is the noise that
+        hides the one result where it was not."""
+        assert web_module.console_note(snapshot()) == ""
+        assert web_module.console_note(snapshot(console=[])) == ""
+
+    def test_the_lines_arrive_below_the_untrusted_banner(self, monkeypatch):
+        view = web_module.BrowseView()
+        self._opens(monkeypatch, snapshot(
+            console=["uncaught: ReferenceError: grecaptcha is not defined"]
+        ))
+        out = str(web_module.browse("https://eon.pl/login", view=view))
+        assert "grecaptcha is not defined" in out
+        assert out.index(web_module.UNTRUSTED_NOTE) < out.index("grecaptcha")
+
+    def test_the_heading_says_whose_words_these_are(self, monkeypatch):
+        """A page that can write a sentence into a warning has written it into
+        the document. The label is what stops a console line reading as aish's
+        own account of what went wrong."""
+        view = web_module.BrowseView()
+        self._opens(monkeypatch, snapshot(console=["error: boom"]))
+        out = str(web_module.browse("https://eon.pl/login", view=view))
+        assert "BY THE PAGE" in out
+        # …and it is never in the aish-voice region above the banner, which is
+        # where a provenance note goes and where page text may never appear.
+        above = out.split(web_module.UNTRUSTED_NOTE)[0]
+        assert "boom" not in above
+
+    def test_a_change_report_carries_it_too(self, monkeypatch):
+        """A press that changed nothing and a handler that threw are ONE
+        answer: the delta alone says the click did nothing and cannot say
+        why."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        monkeypatch.setattr(
+            web_module.browser, "browse_act",
+            lambda *a, **kw: snapshot(
+                controls=[control(n=1)],
+                console=["uncaught: TypeError: t.submit is not a function"],
+            ),
+        )
+        out = str(web_module.browse_act("Przełącz lokal", view=view))
+        assert "nothing on the page changed" in out
+        assert "t.submit is not a function" in out
+
+    def test_it_rides_the_envelope_to_the_trace(self, monkeypatch):
+        """The owner's copy. He reads the trace, and reading a failure through
+        somebody else is the thing this work is about."""
+        view = web_module.BrowseView()
+        self._opens(monkeypatch, snapshot(console=["error: boom"]))
+        out = web_module.browse("https://eon.pl/login", view=view)
+        assert out.meta["console"] == ["error: boom"]
+
+    def test_a_clean_page_writes_no_key_at_all(self, monkeypatch):
+        view = web_module.BrowseView()
+        self._opens(monkeypatch, snapshot(frame="/store/media/abc.jpg"))
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert "console" not in out.meta
+
+
+class TestTheSignInAttemptIsOnTheStepItHappenedUnder:
+    """#320 photographs every sign-in attempt onto `Record.last_frame`, and
+    nothing rendered it — so the owner went looking for the picture, could not
+    find it, and went on reading the failure through somebody else.
+
+    It rides the call the sign-in happened INSIDE, under a key of its own. Not
+    the step's `frame`: that key claims "the page at the moment the model was
+    SHOWN it", and the model is never shown the sign-in page."""
+
+    class _Outcome:
+        ok = False
+        why = "the site refused the automation"
+        captcha = "reCAPTCHA"
+        second_factor = False
+        stale = False
+        tried = False
+        frame = "/store/frames/login.jpg"
+        frame_skipped = ""
+        console = ["uncaught: ReferenceError: grecaptcha is not defined"]
+
+    def _driven(self, monkeypatch, outcome):
+        monkeypatch.setattr(web_module, "_require_public", lambda _u: None)
+
+        def browse_open(url, *, topic="", key=""):
+            snap = snapshot(url=url, text="Zaloguj", controls=[])
+            snap.signin = True
+            return snap
+
+        monkeypatch.setattr(web_module.browser, "browse_open", browse_open)
+        monkeypatch.setattr(web_module.browser, "sign_in", lambda _u: outcome)
+
+    def test_the_picture_of_the_attempt_reaches_the_step(self, monkeypatch):
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, self._Outcome())
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert out.meta["signin"]["host"] == "eon.pl"
+        assert out.meta["signin"]["frame"] == "/store/frames/login.jpg"
+
+    def test_it_is_kept_apart_from_the_page_the_model_was_shown(self, monkeypatch):
+        """Two pictures of two different documents. Folding one into the other
+        would state a guarantee wider than either capture enforces."""
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, self._Outcome())
+        monkeypatch.setattr(
+            web_module.browser, "browse_open",
+            lambda url, *, topic="", key="": snapshot(
+                url=url, frame="/store/frames/page.jpg"
+            ),
+        )
+        # A page that is NOT asking for a password: no sign-in, page frame only.
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert out.meta["frame"] == "/store/frames/page.jpg"
+        assert "signin" not in out.meta
+
+    def test_the_login_pages_console_travels_with_it(self, monkeypatch):
+        """The evidence the whole eon.pl day did not have. It reaches the
+        OWNER and never the renewal note — that note is aish's own voice above
+        the untrusted banner, where page-authored text may not be spoken."""
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, self._Outcome())
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert out.meta["signin"]["console"] == [
+            "uncaught: ReferenceError: grecaptcha is not defined"
+        ]
+        above = str(out).split(web_module.UNTRUSTED_NOTE)[0]
+        assert "grecaptcha" not in above
+
+    def test_the_absence_says_which_absence(self, monkeypatch):
+        outcome = self._Outcome()
+        outcome.frame = ""
+        outcome.frame_skipped = browse.NO_FRAME_HANDS
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, outcome)
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert out.meta["signin"]["frame_skipped"] == browse.NO_FRAME_HANDS
+        assert "frame" not in out.meta["signin"]
+
+    def test_a_call_with_no_sign_in_writes_no_block(self, monkeypatch):
+        """`host` is what says an attempt happened. An empty block would read
+        as an attempt with nothing to show, which is the third state the trace
+        contract forbids collapsing."""
+        view = web_module.BrowseView()
+        monkeypatch.setattr(web_module, "_require_public", lambda _u: None)
+        monkeypatch.setattr(
+            web_module.browser, "browse_open",
+            lambda url, *, topic="", key="": snapshot(url=url),
+        )
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert not hasattr(out, "meta") or "signin" not in out.meta
+
+    def test_an_act_never_claims_a_sign_in(self, monkeypatch):
+        """Renewal happens on the OPEN and never on an act, so an act carrying
+        a sign-in block would be claiming something that cannot have happened
+        inside it."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        monkeypatch.setattr(
+            web_module.browser, "browse_act",
+            lambda *a, **kw: snapshot(frame="/store/frames/after.jpg"),
+        )
+        out = web_module.browse_act("Przełącz lokal", view=view)
+        assert "signin" not in out.meta
+
+    def test_the_recorder_is_per_call_and_not_module_state(self):
+        """`read_url` runs on the parallel read path with several calls in
+        flight; a recorder on the module would file one read's sign-in under
+        another read's result. The same reasoning that shapes PageCut."""
+        one, two = web_module.SignInSeen(), web_module.SignInSeen()
+        one.note("eon.pl", self._Outcome())
+        assert two.record() == {}
+        assert one.record()["host"] == "eon.pl"
+
+    def test_an_outcome_with_no_evidence_still_says_an_attempt_happened(self):
+        """A sign-in that produced no picture and no console is still a
+        credential SPENT on this step, and that is worth a row of its own."""
+        seen = web_module.SignInSeen()
+        seen.note("eon.pl", object())
+        assert seen.record() == {"host": "eon.pl"}
