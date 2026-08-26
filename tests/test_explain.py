@@ -599,8 +599,14 @@ class TestReaderIsPureAndHonest:
         import ast
         import pathlib
 
+        # `signin` joined the list with #325: it holds the failure TABLE, so a
+        # reader that could import it could explain a recorded verdict by
+        # re-running the rule that produced it — an answer about how aish
+        # behaves today, wearing a record's clothes. The reader's words for
+        # those tokens are pinned against the vocabulary by a test instead.
         forbidden = {"backends", "ollama", "rules", "rule_compiler", "tools",
-                     "tool_plugins", "skills", "embeddings", "web", "browser"}
+                     "tool_plugins", "skills", "embeddings", "web", "browser",
+                     "signin"}
         tree = ast.parse(pathlib.Path(explain_mod.__file__).read_text())
         imported: set[str] = set()
         for node in ast.walk(tree):
@@ -1572,6 +1578,216 @@ class TestTheConsoleAndTheSignInOnTheRecord:
         doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
         call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
         assert "signin" not in call
+
+    OBSERVED = {
+        "credential_seen_leaving": False, "refusal_status": False,
+        "page_said_no": False, "declared_widget": "", "body_to_own_origin": False,
+    }
+
+    def _judged(self, tmp_path, monkeypatch, verdict, **observed):
+        """A browse whose sign-in was judged, read back through the real
+        assembly and the real renderer."""
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome("the signed-out page", signin={
+                "host": "eon.pl", "ok": False, "verdict": verdict,
+                "observed": {**self.OBSERVED, **observed},
+            }),
+        )
+        return explain_mod.explain(log.path, root=tmp_path)
+
+    def test_each_verdict_is_read_back_in_words_that_name_no_cause(
+        self, tmp_path, monkeypatch
+    ):
+        """#325's second half. The observations were recorded and this reader
+        dropped them on the way in, so the one tool built to answer *why did
+        that sign-in fail* still could not. The wording is the risk here and
+        not the plumbing: a token spoken carelessly is the failure the whole
+        record exists to prevent, so each sentence is pinned rather than
+        described."""
+        out = self._judged(
+            tmp_path, monkeypatch, "refused",
+            credential_seen_leaving=True, refusal_status=True,
+        )
+        # The token is drawn BOLD inside a dim block, so the escape sits
+        # between the label and the word — asserted as the two fragments a
+        # terminal actually shows, the way the purged caption already is.
+        assert "verdict recorded:" in out and "refused" in out
+        assert "aish read this as the site refusing the saved password" in out
+
+    def test_never_sent_is_read_back_as_a_matcher_that_saw_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """It is an absence from a matcher with declared blind spots, which is
+        why `body_to_own_origin` sits beside it. A line reading *the password
+        was never sent* would be the confident-absence claim #295 removed from
+        the owner-facing sentence, rebuilt in the reader."""
+        out = self._judged(tmp_path, monkeypatch, "never_sent")
+        assert "aish did not recognise anything carrying the password leaving" in out
+        assert "not proof that nothing was sent" in out
+        for claim in ("was never sent", "nothing was sent to", "the page sent nothing"):
+            assert claim not in out
+
+    def test_a_contradiction_is_read_back_as_two_observers_disagreeing(
+        self, tmp_path, monkeypatch
+    ):
+        """Not the site failing, and not the password being wrong. One of the
+        two observers is wrong, there is no way to tell which, and this reader
+        may not resolve what the record deliberately left open."""
+        out = self._judged(
+            tmp_path, monkeypatch, "contradiction", refusal_status=True
+        )
+        assert "two observers disagreed about this attempt" in out
+        assert "aish did not resolve it" in out
+        assert "refusing the saved password" not in out
+
+    def test_unexplained_says_aish_does_not_know_and_names_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """*I do not know why* is an ordinary, unembarrassed ending. The
+        declaration prints beside it as the page fact it is — and a reader that
+        let the two touch is `FAILED_CAPTCHA` coming back through the door it
+        was thrown out of."""
+        out = self._judged(
+            tmp_path, monkeypatch, "unexplained",
+            credential_seen_leaving=True, declared_widget="reCAPTCHA",
+        )
+        assert "aish does not know why this attempt did not get in" in out
+        assert "the page declares it is protected by reCAPTCHA" in out
+        assert "not something aish saw act on this attempt" in out
+        for cause in ("because", "refused the sign-in", "which refuses", "blocked"):
+            assert cause not in out.split("verdict recorded")[1]
+
+    def test_observations_that_are_all_FALSE_still_print_every_one(
+        self, tmp_path, monkeypatch
+    ):
+        """The collapse this reader exists to refuse. Five things aish looked
+        for and did not see is a positive set of observations; printing only
+        the true ones would render it identically to an attempt that recorded
+        none, and those two route to different repairs."""
+        out = self._judged(tmp_path, monkeypatch, "never_sent")
+        for line in (
+            "aish did not see anything carrying the saved password leave the page",
+            "no request carrying the password came back with a refusal status",
+            "the page showed no new message after the submit",
+            "the page declared no anti-automation widget",
+            "aish saw the page send nothing to the site's own addresses",
+        ):
+            assert line in out
+        assert explain_mod.SIGNIN_NO_VERDICT not in out
+
+    def test_no_verdict_on_a_session_that_did_not_come_up_says_BOTH_meanings(
+        self, tmp_path, monkeypatch
+    ):
+        """The third state, and the one that must not be a blank. An absent
+        group means the attempt ended before the failure table ran OR the log
+        predates the record — the record cannot separate them, so neither may
+        this, and it says so instead of picking."""
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome("the page", signin={"host": "eon.pl", "ok": False}),
+        )
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert explain_mod.SIGNIN_NO_VERDICT in out
+        assert "verdict recorded" not in out
+
+    def test_a_session_that_came_up_and_an_older_log_claim_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """A renewal that worked is not a failure nothing judged, and a log
+        written before any of this is not one either. Neither grows a line
+        about a verdict — this reader may not say more than the evidence."""
+        from aish import tools
+
+        for block in ({"host": "eon.pl", "ok": True}, {"host": "eon.pl"}):
+            log = self._browsed(
+                tmp_path, monkeypatch,
+                tools.ToolOutcome("the page", signin=dict(block)),
+            )
+            out = explain_mod.explain(log.path, root=tmp_path)
+            assert "attempted an automatic sign-in at eon.pl" in out
+            assert explain_mod.SIGNIN_NO_VERDICT not in out
+            assert "verdict recorded" not in out
+
+    def test_a_token_this_reader_has_no_words_for_is_still_rendered(
+        self, tmp_path, monkeypatch
+    ):
+        """Retiring an entry retires the WRITER, never the reading of it — the
+        rule `frame_skipped` already runs under. A fact a reader cannot render
+        is a fact it has erased."""
+        out = self._judged(tmp_path, monkeypatch, "something_later_on")
+        assert "verdict recorded:" in out and "something_later_on" in out
+        assert explain_mod.SIGNIN_UNKNOWN_VERDICT in out
+
+    def test_an_observation_this_reader_does_not_know_is_carried_not_dropped(
+        self, tmp_path, monkeypatch
+    ):
+        """The exact bug this change closes, one level down. `_signin_of`
+        whitelisted its keys, so `verdict` and `observed` were silently
+        dropped for a day after they started being written — and a whitelist
+        inside `observed` would swallow the next observation the same way."""
+        out = self._judged(tmp_path, monkeypatch, "never_sent", a_later_field=3)
+        assert "a_later_field: 3" in out
+
+    def test_a_token_with_no_observations_reads_as_no_judgement(
+        self, tmp_path, monkeypatch
+    ):
+        """Trace contract section 4: an evidence record holds the inputs the
+        verdict was a function of, never a rendering of the verdict. The
+        writer refuses to write one half; a reader that printed half a
+        judgement from a corrupt or hand-edited log would undo that."""
+        from aish import tools
+
+        log = self._browsed(
+            tmp_path, monkeypatch,
+            tools.ToolOutcome("the page", signin={
+                "host": "eon.pl", "ok": False, "verdict": "refused",
+            }),
+        )
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[-1], lg, tmp_path)
+        call = next(c for c in doc["did"]["calls"] if c["name"] == "browse")
+        assert call["signin"]["verdict"] == "" and call["signin"]["observed"] == {}
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "verdict recorded" not in out
+        assert explain_mod.SIGNIN_NO_VERDICT in out
+
+    def test_the_words_live_in_the_ASSEMBLY_and_the_renderer_holds_no_copy(
+        self, tmp_path, monkeypatch
+    ):
+        """The two-renderers problem, settled by a single source rather than by
+        careful duplication. The sentence travels in the document, so `render`
+        and the panel print the same one — patching the map has to change what
+        comes out, or somewhere a renderer is wording a token itself."""
+        monkeypatch.setitem(
+            explain_mod.SIGNIN_VERDICT_WORDS, "never_sent", "PATCHED WORDING"
+        )
+        out = self._judged(tmp_path, monkeypatch, "never_sent")
+        assert "PATCHED WORDING" in out
+        assert "aish did not recognise anything carrying" not in out
+
+    def test_the_reader_words_exactly_the_tokens_the_table_can_return(self):
+        """Checked by a TEST rather than by an import, because this reader may
+        not import the module that holds the verdict table — it could then
+        explain a recorded token by re-running the rule that produced it,
+        which is what section 0 forbids outright."""
+        from aish import signin
+
+        assert set(explain_mod.SIGNIN_VERDICT_WORDS) == signin.FAILURE_VERDICTS
+
+    def test_the_declaration_is_worded_the_same_here_as_in_the_tool_result(self):
+        """One fact, two surfaces, and its evidentiary status attached at both.
+        A dossier that dropped the *not something aish saw act* clause would be
+        the shortest road back to a page decoration standing in for a cause."""
+        from aish import browser
+
+        clause = "not something aish saw act on this attempt"
+        assert clause in browser.DECLARED_WIDGET
+        assert clause in explain_mod.SIGNIN_WIDGET_SAID
 
     def test_the_console_is_read_back_even_for_a_clean_step(
         self, tmp_path, monkeypatch
