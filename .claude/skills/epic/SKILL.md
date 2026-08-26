@@ -36,7 +36,7 @@ So the failure this skill exists to prevent is not a bad commit. It is **six goo
 
 1. **Pick the next issue the ORDER allows.** Not the easiest, not the most interesting — the next one whose prerequisites are merged. If nothing is ready, everything remaining is behind a gate: report and stop.
 2. **Check it is still the right thing to build.** The epic was written before the code existed. If the issue's premise no longer holds, that is a gate (§Gates), not a judgement call for you.
-3. **Delegate** to a background subagent with `isolation: worktree`. Never two subagents on the same files. Within a stage, issues that touch one area go to one agent, sequentially. [[always-work-in-a-worktree]] [[parallelize-independent-work]]
+3. **Delegate** to a background subagent with `isolation: worktree` — but for anything non-trivial, get the design and the plan reviewed by Fable FIRST (§Fable). The spec you hand the subagent is the thing to have reviewed, because it is where a locally-correct, globally-wrong build is decided. Never two subagents on the same files. Within a stage, issues that touch one area go to one agent, sequentially. [[always-work-in-a-worktree]] [[parallelize-independent-work]]
 4. **Review the diff personally.** Correctness, concurrency, the approval-gate invariant, test quality. You are the quality gate; do not rubber-stamp a subagent's own summary.
 5. **Conformance review — the step that makes this skill worth having.** Separately from "is this code correct", ask: **does this diff move the system toward the epic's properties, or does it satisfy the issue while drifting off them?** Read the diff against the properties list from session zero, one at a time. Typical drifts, all of which have happened in this repo:
    - a control added whose safety argument is "the user will see it", under a property that forbids exactly that
@@ -47,8 +47,9 @@ So the failure this skill exists to prevent is not a bad commit. It is **six goo
 
    A diff that fails conformance is **not** merged and **not** silently reworked: state which property, and why. If the property is wrong, that is a gate.
 6. **Verify against the real path.** Unit tests are the floor. UI changes get driven in a real browser and the console read — a clean load is part of "verified" [[verify-frontend-in-a-real-browser]]. Web-surface behaviour uses the `verify` skill's isolated harness; **never type into a chat you did not create**. And verify the ordinary case, not only the new one [[verify-the-case-that-already-worked]].
-7. **Merge, ship, document.** Ship from the main checkout after merge, never a worktree. Comment the resolution on the issue: what changed, WHY, and what the user should test.
-8. **Update the ledger comment on the epic.** Every time something lands. The ledger is the deliverable of the drive, not a courtesy.
+7. **Verify delivery with Fable** for anything non-trivial (§Fable): was everything that was supposed to be delivered actually delivered, without gaps? A different question from "is the diff correct", which step 4 already asked.
+8. **Merge, ship, document.** Ship from the main checkout after merge, never a worktree. Comment the resolution on the issue: what changed, WHY, and what the user should test.
+9. **Update the ledger comment on the epic.** Every time something lands. The ledger is the deliverable of the drive, not a courtesy.
 
 ## Gates — stop and ask
 
@@ -64,6 +65,24 @@ A gate is where you **stop, report, and wait**. Not a slowdown: the epic's whole
 - **A cost gate.** Something turns out to be materially more expensive than the epic assumed. Report the number before spending it.
 
 **Do not stop at:** an ambiguity you can resolve from the epic, the code, or the area doc. The user delegated the process, not every decision [[work-with-critical-partnership]].
+
+## Fable — before you build, and after you deliver
+
+**This is not optional for non-trivial work, and it was added because its absence was measured.** On 2026-08-25/26 a single sign-in failure produced five confident wrong diagnoses across two days, four of them from this drive. Each was reasoned from page text while the browser driver held the answer. When Fable was finally asked, it established the cause by experiment in one pass — and killed the drive's own leading hypothesis with a second experiment. The owner's verdict: *"we did so many unnecessary turns back and forth without solving a problem that we wasted way more time and tokens than we should."*
+
+Fable costs one agent call. A wrong diagnosis costs a build, a ship, a report that has to be retracted, and the owner's time re-reporting the same failure.
+
+**Three moments, and they are duties rather than options:**
+
+1. **Before building anything non-trivial — review the DESIGN and the PLAN.** Not the code: the approach, the slicing, and whether the thing being built is the thing that is needed. Anything that requires a plan, a design, or real thought qualifies; a one-line fix or an obvious mechanical change does not. **Give Fable the epic's properties and the bigger picture, not just the issue** — this drive is a co-orchestrator, and a review that cannot see the design cannot catch a locally-correct, globally-wrong plan, which is the exact failure the epic exists to prevent.
+
+2. **After the final implementation — verify DELIVERY.** Was everything that was supposed to be delivered actually delivered, correctly, without gaps? This is a different question from "is the diff correct", and the diff review does not answer it. It is the cheapest place to catch a slice that quietly narrowed.
+
+3. **When something does not work — consult Fable immediately, without asking, and especially when the OWNER reports it.** A second report of the same failure is the signal; do not wait for a third. **Do not ask permission to do this** — asking costs a round trip on the exact axis that is already burning time.
+
+**The tell that you need Fable and are not reaching for it:** you are reasoning about a failure from artifacts (page text, a log, a fetched copy) rather than from an experiment that would distinguish your hypotheses. Every one of the five wrong answers had that shape. If you cannot name the experiment that would falsify what you are about to claim, do not claim it — hand it over.
+
+**A fifth wrong confident answer is worse than an honest "unresolved".** Say so in the brief, so the reviewer knows that is an acceptable result.
 
 ## Slicing
 
@@ -92,6 +111,7 @@ A stage report answers three things: what the system can now do that it could no
 - Reorder the plan for convenience — order carries reasons.
 - Close an issue you did not genuinely resolve.
 - Merge a safety- or concurrency-relevant diff without reading the critical path yourself.
+- Build something non-trivial without having its design reviewed, or diagnose a repeated failure without consulting Fable. Both were paid for in full once already.
 - Let the ledger go stale. A drive with no current ledger cannot be resumed and cannot be reviewed.
 
 Improve this skill as the workflow sharpens — new drift patterns for step 5 are the most valuable additions.

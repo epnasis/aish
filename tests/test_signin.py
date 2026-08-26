@@ -5,9 +5,16 @@ jar, on the same reasoning that keeps the rest of the suite away from the live
 credential store and the real notifier.
 """
 
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from aish import approval, signin
+
+SIGNIN_DOM_JS = Path(__file__).parent / "js" / "signin_dom.js"
 
 
 @pytest.fixture(autouse=True)
@@ -429,6 +436,210 @@ class TestTheReplayItself:
                           wants_code=True)
         result = self._run(page)
         assert result.second_factor and not result.stale and not result.ok
+
+    def test_the_form_with_one_button_is_PRESSED_and_never_left_to_enter(self):
+        """The eon.pl shape, at the replay level. `TestWhichControlIsTheSUBMIT`
+        below pins that the shipped snippet tags that button at all; this pins
+        what happens once it has: the button is CLICKED, and Enter — which on
+        that form submits nothing (#321) — is never what the sign-in rests on.
+        """
+        page = self._page(
+            url="https://eon.pl/login",
+            form={**self.OK_FORM, "form": True},
+            after={"url": "https://eon.pl/mojeon"},
+        )
+        result = self._run(page)
+        assert result.ok and page.submitted is True
+        assert getattr(page, "enter_pressed", 0) == 0
+
+
+class TestWhichControlIsTheSUBMIT:
+    """WHICH control the replay presses, decided by the SHIPPED snippet.
+
+    This is the one thing about the sign-in nobody had ever run. Everything
+    else fakes `SIGNIN_FORM_JS` with a canned `{submit: true}`, which pins the
+    wiring and asserts nothing about the decision — so eon.pl's login form
+    returned `submit: false` from the real snippet and every test agreed.
+
+    What that cost: `_sign_in_on` fell through to `page.keyboard.press('Enter')`
+    on a `method="post"` form with no default button and TWO text-entry fields,
+    where the WHATWG implicit-submission rule performs no submission at all. No
+    submit event, no `submitForm()`, no reCAPTCHA call, no request. The form
+    filled, nothing was sent, and the record read `used: 0` forever.
+
+    Demonstrated on the live page: the Enter gesture produced zero requests in
+    four seconds, and a click on the button produced the reCAPTCHA call and
+    then a real POST.
+
+    The rule is STRUCTURAL and stays that way — a genuine submit control if
+    there is one, otherwise the form's single visible button, COUNTED. No word
+    list, no button text, no test id: reading a login page's words is how the
+    model came to press *Continue with Google*."""
+
+    TEXT = {"tag": "input", "attrs": {"type": "text", "name": "Email"}}
+    PASSWORD = {"tag": "input", "attrs": {"type": "password", "name": "Password"}}
+    HIDDEN = {"tag": "input", "attrs": {"type": "hidden"}, "hidden": True}
+
+    def _form(self, *children, method="post", action="/mojeon/Logowanie"):
+        return {
+            "tag": "form",
+            "attrs": {"id": "login-form", "method": method, "action": action},
+            "children": list(children),
+        }
+
+    def _tags(self, dom, *, origin="https://eon.pl"):
+        """Run the REAL `SIGNIN_FORM_JS` over a fake DOM, in node."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        from aish import browser
+
+        payload = json.dumps({
+            "js": browser.SIGNIN_FORM_JS,
+            "origin": origin,
+            "base": f"{origin}/login",
+            "dom": dom,
+        })
+        done = subprocess.run(
+            [node, str(SIGNIN_DOM_JS)],
+            input=payload, text=True, capture_output=True, timeout=60,
+        )
+        assert done.returncode == 0, done.stdout + done.stderr
+        return json.loads(done.stdout)
+
+    def test_the_eon_form_tags_its_only_button_as_the_submit(self):
+        """`<button type="button" onclick="submitForm()">` is the WHOLE of
+        eon.pl's `#login-form` buttons, and the old `type !== 'button'` filter
+        excluded it — leaving no target on a form that has exactly one thing to
+        press."""
+        seen = self._tags(self._form(
+            self.HIDDEN, self.HIDDEN, self.HIDDEN, self.TEXT, self.PASSWORD,
+            {
+                "tag": "button",
+                "attrs": {"type": "button", "data-test-id": "login-button"},
+                "label": "Zaloguj się",
+            },
+        ))
+        assert seen["result"]["ok"] is True
+        assert seen["result"]["submit"] is True
+        # The TAG is the load-bearing half: `_sign_in_on` presses
+        # `[data-aish-signin='submit']` and never reads the returned flag.
+        assert seen["tagged"]["submit"] == {
+            "tag": "BUTTON", "type": "button", "label": "Zaloguj się",
+        }
+        assert seen["tagged"]["password"]["tag"] == "INPUT"
+        assert seen["tagged"]["identifier"]["type"] == "text"
+
+    def test_a_second_button_stands_the_whole_fallback_down(self):
+        """The *Continue with Google* protection, preserved BY CONSTRUCTION.
+
+        A form holding an SSO button beside its login button has TWO buttons,
+        so the count fails, nothing is tagged, and the submit falls back to
+        Enter exactly as it did before — without anyone reading a single word
+        off either of them. Signing in THROUGH somebody else is account
+        control; aish does not choose who he is."""
+        seen = self._tags(self._form(
+            self.TEXT, self.PASSWORD,
+            {"tag": "button", "attrs": {"type": "button"}, "label": "Zaloguj się"},
+            {"tag": "button", "attrs": {"type": "button"},
+             "label": "Kontynuuj z Google"},
+        ))
+        assert seen["result"]["ok"] is True
+        assert seen["result"]["submit"] is False
+        assert "submit" not in seen["tagged"]
+
+    def test_a_genuine_submit_control_still_wins_over_an_sso_button(self):
+        """The fallback is reached only when the form has NO submit control.
+        An ordinary login form with an SSO button beside it is untouched: the
+        real submit is tagged, and the count never runs."""
+        seen = self._tags(self._form(
+            self.TEXT, self.PASSWORD,
+            {"tag": "button", "attrs": {"type": "button"},
+             "label": "Kontynuuj z Google"},
+            {"tag": "button", "attrs": {}, "label": "Zaloguj się"},
+        ))
+        assert seen["result"]["submit"] is True
+        assert seen["tagged"]["submit"]["label"] == "Zaloguj się"
+
+    def test_an_input_submit_is_still_the_submit(self):
+        seen = self._tags(self._form(
+            self.TEXT, self.PASSWORD,
+            {"tag": "input", "attrs": {"type": "submit"}, "label": "Zaloguj"},
+        ))
+        assert seen["result"]["submit"] is True
+        assert seen["tagged"]["submit"]["tag"] == "INPUT"
+
+    def test_a_reset_never_becomes_the_submit_alone_or_beside_one(self):
+        """`type="reset"` is excluded from the count as well as from the
+        preference — otherwise a form with one login button and one *Clear*
+        would read as two and lose its target, and a form whose only button is
+        *Clear* would have it pressed."""
+        beside = self._tags(self._form(
+            self.TEXT, self.PASSWORD,
+            {"tag": "button", "attrs": {"type": "reset"}, "label": "Wyczyść"},
+            {"tag": "button", "attrs": {"type": "button"}, "label": "Zaloguj się"},
+        ))
+        assert beside["tagged"]["submit"]["label"] == "Zaloguj się"
+
+        alone = self._tags(self._form(
+            self.TEXT, self.PASSWORD,
+            {"tag": "button", "attrs": {"type": "reset"}, "label": "Wyczyść"},
+        ))
+        assert alone["result"]["submit"] is False
+        assert "submit" not in alone["tagged"]
+
+    def test_an_invisible_button_is_not_one_of_the_two(self):
+        """The count is over VISIBLE buttons, so a hidden second control — a
+        template's leftover, a collapsed panel's action — does not silently
+        cost the form its only target."""
+        seen = self._tags(self._form(
+            self.TEXT, self.PASSWORD,
+            {"tag": "button", "attrs": {"type": "button"}, "label": "Zaloguj się"},
+            {"tag": "button", "attrs": {"type": "button"}, "label": "Anuluj",
+             "hidden": True},
+        ))
+        assert seen["tagged"]["submit"]["label"] == "Zaloguj się"
+
+    def test_with_no_form_nothing_is_tagged_however_few_buttons_there_are(self):
+        """The formless case is unchanged and stays that way: the fallback is
+        scoped to a `<form>`, which is what makes "the form's own single
+        button" a bounded statement. linkedin.com renders its login with no
+        form element at all, and there the submit is Enter — which on a
+        formless page is the only gesture there is."""
+        seen = self._tags(
+            {
+                "tag": "div",
+                "attrs": {},
+                "children": [
+                    self.TEXT, self.PASSWORD,
+                    {"tag": "button", "attrs": {"type": "button"},
+                     "label": "Sign in"},
+                ],
+            },
+            origin="https://www.linkedin.com",
+        )
+        assert seen["result"]["ok"] is True and seen["result"]["form"] is False
+        assert seen["result"]["submit"] is False
+        assert "submit" not in seen["tagged"]
+
+    def test_the_fake_dom_refuses_a_selector_it_cannot_parse(self):
+        """A fake that quietly matches nothing would pass every test above
+        while proving nothing — the exact shape of the bug being fixed."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        payload = json.dumps({
+            "js": "(expected) => document.querySelectorAll('div > span').length",
+            "origin": "https://eon.pl",
+            "base": "https://eon.pl/login",
+            "dom": self._form(self.PASSWORD),
+        })
+        done = subprocess.run(
+            [node, str(SIGNIN_DOM_JS)],
+            input=payload, text=True, capture_output=True, timeout=60,
+        )
+        assert done.returncode != 0
+        assert "cannot parse" in done.stderr
 
 
 class TestNothingIsStaleUntilItWasSeenToLeave:
