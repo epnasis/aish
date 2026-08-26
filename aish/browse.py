@@ -514,10 +514,10 @@ NO_FRAME_WRITTEN = frozenset({NO_FRAME_HANDS, NO_FRAME_FAILED})
 #
 # EVIDENCE, NEVER A VERDICT, and the site this was built for is the proof. A
 # press that never LANDS writes nothing here at all, because nothing ran — that
-# failure's witness is the driver's actionability log, which `_uncover` reduces
-# to a bool and discards (#321), and it is a different channel from this one.
-# And eon.pl's own bundle throws a real TypeError that is not why its sign-in
-# fails, so a true line here can point at the wrong thing. `docs/browser.md`.
+# failure's witness is the DRIVER and not the page, and it is `Cover` below,
+# on a channel of its own. And eon.pl's own bundle throws a real TypeError
+# that is not why its sign-in fails, so a true line here can point at the
+# wrong thing. `docs/browser.md`.
 #
 # A RECORD, and a record is detection and never protection (#295 P2). Nothing
 # in the browse gate, the act-time re-resolution fence, the irreversible
@@ -617,6 +617,185 @@ class ConsoleLog:
         return lines
 
 
+# ------------------------------------------------- a control something covers
+#
+# A control can be listed, visible, enabled and reachable, and still be
+# unpressable because something is lying ON TOP of it. That is not a timeout
+# and it is not "a control that would not take the action": it is a different
+# failure with a different repair, and it is the one aish could already see
+# and threw away.
+#
+# eon.pl is the specimen (#321). Its cookie banner covers the login button, so
+# the click lands on the banner, the button's own `onclick` never runs, nothing
+# is submitted — and NOTHING anywhere says why. There is no console line,
+# because no handler ran; there is no error, because as far as the page is
+# concerned a click happened. Four confident diagnoses were argued on top of
+# that silence over a full day and all four were wrong.
+#
+# THE WITNESS IS THE DRIVER, NOT THE PAGE, and it already exists twice over:
+# Playwright's actionability log names the intercepting element, and
+# `browser._COVERED_JS` computes the same fact in aish's own code by asking
+# what is at the control's own centre point. Keeping the NAME rather than
+# reducing it to a bool is what makes it reportable — and it needs no
+# vocabulary at all, so it covers every consent wall, modal, cookie bar and
+# sticky footer that will ever exist, in any language. That is the structural
+# check #295 P4 asks for, and `CONSENT_SELECTORS` is the floor under it rather
+# than the mechanism.
+#
+# WHAT IT CANNOT SEE, stated here because the silence it fixes has the same
+# shape: a press that LANDS on the right element and is then ignored — a
+# handler that is missing, broken, or returns early — produces no interception
+# and no console line either. An absent cover is not evidence that the press
+# worked, and nothing that reads this may imply it is.
+COVERED_NAME_CHARS = 60
+
+
+def covering_name(raw: str) -> str:
+    """The covering element in the PAGE's own words — id, class or tag.
+
+    PAGE-AUTHORED, exactly as a control's name is, so wherever aish says it
+    aloud it is quoted and attributed to the page. Collapsed and bounded HERE
+    rather than trusted to the snippet that read it, because the value crosses
+    into a trace record and one bound in one place is one thing to be wrong."""
+    return " ".join((raw or "").split())[:COVERED_NAME_CHARS]
+
+
+@dataclass
+class Cover:
+    """What was found sitting on top of a control aish tried to press.
+
+    `by` empty means nothing was over it, which is the ordinary case and costs
+    one `evaluate` on the rung where a real click already failed."""
+
+    by: str = ""
+    # The consent list recognised it AND the control came clear afterwards.
+    # Two different facts folded deliberately: a banner dismissed that leaves
+    # the control still covered is not a dismissal for any purpose here.
+    dismissed: bool = False
+
+    def record(self) -> dict:
+        """The trace block, or `{}` when nothing covered anything.
+
+        Absent rather than empty, for the reason `signin` is: a step saying
+        "nothing covered this" and a step written before any of this existed
+        are different facts (trace contract corollary 2)."""
+        if not self.by:
+            return {}
+        return {"by": self.by, "dismissed": self.dismissed}
+
+
+@dataclass
+class Pressed:
+    """How a press went: aish's note about the GESTURE, and what was in the way.
+
+    The note has always been the model's; the cover is the owner's, and it
+    travels separately because it goes somewhere else — onto the trace, where
+    a structural signal only the acting model sees is one restart from being
+    lost."""
+
+    note: str = ""
+    cover: Cover = field(default_factory=Cover)
+
+
+# What aish says when a cover was found and the consent list took it down. The
+# element is named even on the happy path, because "something was covering it"
+# without saying what is the sentence that taught nobody anything for a year.
+COVERED_DISMISSED = (
+    "something the page calls {by!r} was covering it, so aish dismissed that "
+    "and pressed it"
+)
+# ...and when it could not. This is the ending eon.pl produces, and it is the
+# whole point: it names the element, it says why the press achieved nothing,
+# and it gives the one instruction that works.
+COVERED_STUCK = (
+    "aish could not {action} {address!r}: something the page calls {by!r} is "
+    "sitting on top of it, so a click lands on THAT and never reaches the "
+    "control — and aish could not take it down. Press whatever closes it (a "
+    "cookie or consent banner, a dialog, a sticky bar) and try again."
+)
+# The same ending with the cover ruled OUT, and the wording is narrow on
+# purpose. The old sentence guessed — "Something may be covering it" — on
+# every stuck control, which is how a real cover and an inert control read
+# identically. This one is a statement about what aish looked for and did not
+# find, and it explicitly does not claim to know what IS wrong.
+STUCK_NOT_COVERED = (
+    "aish could not {action} {address!r} — it is on the page and would not "
+    "take the action, by click, by keyboard, or otherwise. Nothing was found "
+    "covering it, so something being in the way is not the reason: the control "
+    "may be inert, or its own handler may be broken. Try another route to the "
+    "same thing."
+)
+
+
+class ConsentTally:
+    """How often the consent list was handed a KNOWN obstruction, and how often
+    it cleared it.
+
+    #295 P4: where a vocabulary is unavoidable it is a floor under a structural
+    check, grown only from measurement, and **it ships with counters**.
+    `browser._CONSENT_SELECTORS` shipped with neither for a year. It holds
+    `button:has-text('Akceptuj wszystkie')`; eon.pl's button says *Akceptuję
+    wszystkie cookies*, and `has-text` is a substring match — so the list
+    missed by a single letter, the `ę`, in the language the owner browses in.
+    The banner stayed, it covered the login button, and the only symptom was
+    that a site he uses weekly quietly stopped working (#321).
+
+    A miss here is the failure shape #322 names as the one nobody looks for: it
+    neither permits something (fail-open) nor costs friction (fail-closed) — it
+    silently breaks a feature. So it is counted, and the count goes on the
+    owner's own door, where a list that has stopped matching reads as a number
+    instead of as nothing at all.
+
+    **It counts OBSTRUCTIONS, never pages**, and that is what makes the number
+    mean something. `_dismiss_consent` also runs speculatively on every page
+    that opens, where no banner is the overwhelmingly common case; counting
+    there would put the miss rate at ~100% forever and say nothing about the
+    list. What is counted is the case the STRUCTURAL check has already found
+    something covering a control — the list handed a known banner and asked to
+    take it down. Zero cleared out of several is a list that has stopped
+    matching the web it is pointed at.
+
+    Process-lifetime and deliberately not persisted, and NOTHING reads it to
+    decide anything: it is an instrument for noticing, never an input. A record
+    is detection and never protection (#295 P2), and a counter even less so."""
+
+    __slots__ = ("asked", "dismissed")
+
+    def __init__(self) -> None:
+        self.asked = 0
+        self.dismissed = 0
+
+    def note(self, *, dismissed: bool) -> None:
+        """One control found covered, and whether the list cleared it."""
+        self.asked += 1
+        self.dismissed += int(bool(dismissed))
+
+    @property
+    def missed(self) -> int:
+        """Obstructions the list could not take down."""
+        return self.asked - self.dismissed
+
+    def line(self) -> str:
+        """One line for `/browser`, or "" when nothing has obstructed anything.
+
+        Silent until then, for the reason an empty console grows no heading: a
+        status screen that always carries a row saying nothing happened is one
+        the eye stops reading."""
+        if not self.asked:
+            return ""
+        said = (
+            f"consent list:  cleared {self.dismissed} of {self.asked} covered "
+            "control(s) this session"
+        )
+        if self.missed:
+            said += f" — {self.missed} it could not match"
+        return said
+
+
+# One tally for the process, beside the one list it counts.
+CONSENT_TALLY = ConsentTally()
+
+
 @dataclass
 class Snapshot:
     """A page as the model receives it: what it says, and what it can press."""
@@ -702,6 +881,19 @@ class Snapshot:
     # in aish's own voice. A page that can write a sentence into a warning has
     # written it into the document.
     console: list[str] = field(default_factory=list)
+    # What was found SITTING ON TOP of the control this action pressed, when
+    # anything was (#321). aish's OWN observation and not the page's account of
+    # itself — the driver asked what is at the control's centre point and the
+    # page answered with an element — so unlike `console` it is spoken above
+    # the untrusted banner, with the element's own name quoted and attributed
+    # the way a control's name already is.
+    #
+    # It rides the snapshot so it can reach the TRACE. A press that never
+    # landed is exactly the failure nobody can reconstruct afterwards, and a
+    # structural signal only the acting model sees is one restart from being
+    # lost — which is how a day went into four wrong diagnoses of a fact Chrome
+    # had already computed and named.
+    covered: Cover = field(default_factory=Cover)
     # Why there is no frame, when there is none. Absence must never be the
     # evidence (trace contract corollary 2): "no picture" because a password
     # box was on the page, "no picture" because the page would not say, and

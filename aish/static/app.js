@@ -3278,6 +3278,29 @@ function consoleBlock(lines, whose) {
   return box;
 }
 
+// What was found SITTING ON TOP of the control this step pressed (#321).
+//
+// Not a console block and deliberately not drawn as one: a press that never
+// landed writes nothing to a console, because no handler ran — this is aish's
+// own observation about its own hands, and it is the line that explains the
+// silence rather than another entry in it. The element's name is the PAGE's
+// word for itself, so it is quoted, and it is set as text and never as markup.
+//
+// Worded to the CLICK and no wider. Nothing here knows whether a rung below
+// the click then got the press through; the row's own status and notice say
+// that, and a caption implying the action failed would be a claim this field
+// cannot make.
+function coveredBlock(covered) {
+  if (!covered || !covered.by) return null;
+  const box = document.createElement("div");
+  box.className = "step-sub step-covered";
+  const said = `a click could not land — the page had "${covered.by}" on top of the control`;
+  box.textContent = covered.dismissed
+    ? `${said} — aish dismissed it and clicked again`
+    : said;
+  return box;
+}
+
 // The sign-in aish made INSIDE this call, on a page of its own (#320). It is
 // captured today and was rendered nowhere, so the owner went looking for it,
 // could not find it, and went on reading a failed sign-in through somebody
@@ -3305,6 +3328,8 @@ function signinEvidence(signin) {
     note.textContent = FRAME_ABSENT[signin.frame_skipped];
     box.appendChild(note);
   }
+  const covered = coveredBlock(signin.covered ? { by: signin.covered } : null);
+  if (covered) box.appendChild(covered);
   if (signin.console && signin.console.length) {
     box.appendChild(consoleBlock(signin.console, "the sign-in page"));
   }
@@ -3324,6 +3349,8 @@ function traceFrame(step) {
     note.textContent = FRAME_ABSENT[step.frame_skipped];
     parts.push(note);
   }
+  const cover = coveredBlock(step.covered);
+  if (cover) parts.push(cover);
   if (step.console && step.console.length) {
     parts.push(consoleBlock(step.console, "the page"));
   }

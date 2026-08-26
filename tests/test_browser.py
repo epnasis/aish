@@ -2241,7 +2241,7 @@ class TestTheThingApprovedIsTheThingPressed:
         owner = _owner_on(page)
 
         async def snapshot(_owner, _session, *, problem="", notice="", asked="",
-                           match="", started_work=False):
+                           match="", started_work=False, covered=None):
             snaps.append(problem or notice)
             return browse_mod.Snapshot(
                 url=page.url, title="", text="", problem=problem, notice=notice
@@ -2261,7 +2261,7 @@ class TestTheThingApprovedIsTheThingPressed:
 
         async def press(_page, target, *, mutating, href):
             pressed.append((target, mutating, href))
-            return ""
+            return browse_mod.Pressed()
 
         monkeypatch.setattr(browser, "_press", press)
         monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
@@ -2321,7 +2321,8 @@ class TestFillingAFormAsOneAct:
     that did not exist when the batch was composed, so the model cannot name
     the option it will need."""
 
-    def _drive(self, monkeypatch, passes, steps, mutating=False, urls=None):
+    def _drive(self, monkeypatch, passes, steps, mutating=False, urls=None,
+               press=None):
         from aish import browse as browse_mod
 
         did = []
@@ -2348,10 +2349,12 @@ class TestFillingAFormAsOneAct:
         owner = _owner_on(page)
 
         async def snapshot(_owner, _session, *, problem="", notice="", asked="",
-                           match="", started_work=False):
+                           match="", started_work=False, covered=None):
             snaps["problem"] = problem
-            return browse_mod.Snapshot(url="https://lot.com/", title="", text="",
-                                       problem=problem)
+            return browse_mod.Snapshot(
+                url="https://lot.com/", title="", text="", problem=problem,
+                covered=covered or browse_mod.Cover(),
+            )
 
         async def enumerate_(_page, _match=""):
             return (next(rounds), 0, 0, 0, "")
@@ -2365,14 +2368,16 @@ class TestFillingAFormAsOneAct:
 
         async def typed(_page, target, *, text, submit):
             did.append(("type", target, text))
-            return ""
+            return browse_mod.Pressed()
 
         async def pressed(_page, target, *, mutating, href):
             did.append(("press", target))
-            return ""
+            return browse_mod.Pressed()
 
         monkeypatch.setattr(browser, "_type", typed)
-        monkeypatch.setattr(browser, "_press", pressed)
+        #  lets a test drive the ladder's own failure into the batch
+        # (a covered control, #321) without a second harness for it.
+        monkeypatch.setattr(browser, "_press", press or pressed)
         monkeypatch.setattr(browser, "_submit", run_job(owner))
         out = browser.browse_fill(steps, mutating=mutating)
         return out, did, snaps
@@ -2486,6 +2491,55 @@ class TestFillingAFormAsOneAct:
             ],
         )
         assert "half a range" not in "\n".join(out.ledger)
+
+    def test_a_control_something_covers_stops_the_batch_and_NAMES_it(
+        self, monkeypatch
+    ):
+        """#321. A consent wall rendering mid-batch is a case this file already
+        names, and it used to arrive here as a bare `Exception` with an empty
+        message — "could not click it (Stuck: )". The batch now gets the same
+        account of it a single action does, and the fact reaches the snapshot
+        so it can reach the trace."""
+        from aish import browse as browse_mod
+
+        async def stuck(_page, _target, *, mutating, href):
+            raise browser.Stuck(browse_mod.Cover(by="clb clb-container"))
+
+        out, _did, snaps = self._drive(
+            monkeypatch,
+            passes=[
+                [{"n": 9, "kind": "button", "name": "Zapłać"}],
+            ],
+            steps=[{"target": "Zapłać", "do": "click"}],
+            mutating=True,
+            press=stuck,
+        )
+        assert "clb clb-container" in snaps["problem"]
+        assert out.covered.record() == {"by": "clb clb-container", "dismissed": False}
+        # And the unspent approval is still stated: nothing was pressed.
+        assert "STOPPED" in "\n".join(out.ledger)
+
+    def test_a_control_that_is_stuck_with_nothing_over_it_says_so(
+        self, monkeypatch
+    ):
+        """The boundary. A press that reached the right element and achieved
+        nothing leaves no interception to report, and the batch must not imply
+        one."""
+        from aish import browse as browse_mod
+
+        async def stuck(_page, _target, *, mutating, href):
+            raise browser.Stuck()
+
+        out, _did, snaps = self._drive(
+            monkeypatch,
+            passes=[[{"n": 9, "kind": "button", "name": "Zapłać"}]],
+            steps=[{"target": "Zapłać", "do": "click"}],
+            mutating=True,
+            press=stuck,
+        )
+        assert "Nothing was found covering it" in snaps["problem"]
+        assert out.covered.record() == {}
+        assert isinstance(out.covered, browse_mod.Cover)
 
     def test_navigating_mid_batch_stops_it(self, monkeypatch):
         """The remaining steps were composed against a document that no longer
@@ -2848,14 +2902,14 @@ class TestAReadsTabIsNotAdopted:
         owner = _owner_on(page)
 
         async def snapshot(_owner, session, *, problem="", notice="", asked="",
-                           match="", started_work=False):
+                           match="", started_work=False, covered=None):
             return browse_mod.Snapshot(
                 url=session.page.url, title="", text="", problem=problem
             )
 
         async def press(_page, _target, *, mutating, href):
             during(owner, context)
-            return ""
+            return browse_mod.Pressed()
 
         live = [{"n": 1, "kind": "button", "name": "Pobierz e-fakturę"}]
         monkeypatch.setattr(
@@ -2950,7 +3004,7 @@ class TestOneDefinitionOfAFinishedPage:
         a search is still fetching."""
         source = pathlib.Path(browser.__file__).read_text()
         for site in (
-            'snapshot = await shot(owner, session, notice=notice, started_work=True)',
+            'notice=pressed.note,\n            started_work=True,',
             'snapshot = await _snapshot(owner, session, match=topic, started_work=True)',
             'return await shot(owner, session, started_work=True)',
         ):

@@ -561,16 +561,32 @@ def _signin_of(step: dict) -> dict:
         "frame_state": state,
         "frame_skipped": "" if path else str(block.get("frame_skipped") or ""),
         "console": [str(line) for line in (block.get("console") or [])],
+        "covered": str(block.get("covered") or ""),
     }
 
 
+def _covered_of(step: dict) -> dict:
+    """What was found covering the control this call pressed, or `{}`.
+
+    aish's own observation, unlike the console beside it — the driver asked
+    what sat at the control's centre point. Reported exactly as recorded and
+    never widened: a step with no block says nothing about coverage, which
+    includes every step written before #321."""
+    block = step.get("covered")
+    if not isinstance(block, dict) or not block.get("by"):
+        return {}
+    return {"by": str(block["by"]), "dismissed": bool(block.get("dismissed"))}
+
+
 def _page_evidence(step: dict) -> dict:
-    """The page's own console and the sign-in inside this call, if either was
-    recorded. Both page-authored where they are text, and both handed on
-    verbatim: this reader reports what was RECORDED and never interprets it."""
+    """The page's own console, what covered a control, and the sign-in inside
+    this call, if any were recorded. Handed on verbatim: this reader reports
+    what was RECORDED and never interprets it."""
     out: dict = {}
     if console := [str(line) for line in (step.get("console") or [])]:
         out["console"] = console
+    if covered := _covered_of(step):
+        out["covered"] = covered
     if signin := _signin_of(step):
         out["signin"] = signin
     return out
@@ -1504,10 +1520,24 @@ def _signin_lines(signin: dict) -> list[str]:
         )
     elif skipped := str(signin.get("frame_skipped") or ""):
         lines.append(f"       {DIM}no picture of the sign-in page — {skipped}{RESET}")
+    if by := str(signin.get("covered") or ""):
+        lines.append(f"       {DIM}{_covered_line(by, dismissed=False)}{RESET}")
     lines.extend(
         _console_lines(signin.get("console") or [], "the sign-in page", indent="       ")
     )
     return lines
+
+
+def _covered_line(by: str, *, dismissed: bool) -> str:
+    """One sentence naming what was on top of the control (#321).
+
+    Worded to exactly what was recorded, which is narrower than it looks: what
+    is known is that a CLICK could not land, and nothing here knows whether a
+    rung below it then got the press through. The step's own status and its
+    notice say that; a caption implying the action failed would be a claim this
+    field cannot make."""
+    said = f"a click could not land — the page had {by!r} on top of the control"
+    return said + (" — aish dismissed it and clicked again" if dismissed else "")
 
 
 def _call_lines(call: dict) -> list[str]:
@@ -1560,6 +1590,14 @@ def _call_lines(call: dict) -> list[str]:
     elif call.get("frame_skipped"):
         lines.append(
             f"     {DIM}no picture of the page — {call['frame_skipped']}{RESET}"
+        )
+    if cover := call.get("covered"):
+        # Before the console, because a press that never landed writes nothing
+        # to a console — nothing ran — so this is the line that explains the
+        # silence beneath it rather than another entry in it.
+        lines.append(
+            f"     {DIM}{_covered_line(cover['by'], dismissed=cover['dismissed'])}"
+            f"{RESET}"
         )
     lines.extend(_console_lines(call.get("console") or [], "the page"))
     if signin := call.get("signin"):

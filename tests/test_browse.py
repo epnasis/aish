@@ -7,6 +7,7 @@ verified against real Chrome by `scripts/verify_browse.py`.
 """
 
 import os
+import pathlib
 import shutil
 import subprocess
 import time
@@ -3246,6 +3247,137 @@ class TestThePageSaysWhyItDidNotWork:
         assert log.drain() == []
 
 
+class TestAControlSomethingIsCovering:
+    """#321. A control can be listed, visible, enabled and reachable and still
+    be unpressable because something is on top of it. That was computed —
+    twice, by Playwright and by aish's own `_COVERED_JS` — and thrown away, so
+    the only thing ever said about it was "something MAY be covering it", on
+    every stuck control, right or wrong.
+
+    Structural and therefore language- and site-independent: it needs no word
+    list, which is what makes it the check `_CONSENT_SELECTORS` becomes a floor
+    under (#295 P4)."""
+
+    def test_nothing_over_a_control_is_the_ordinary_case_and_records_nothing(self):
+        """Absent rather than empty, for the reason `signin` is: "nothing
+        covered this" and "written before any of this existed" are different
+        facts."""
+        assert browse.Cover().record() == {}
+        assert browse.Cover(by="", dismissed=True).record() == {}
+
+    def test_the_element_is_named_rather_than_reduced_to_a_bool(self):
+        cover = browse.Cover(by="clb clb-container")
+        assert cover.record() == {"by": "clb clb-container", "dismissed": False}
+
+    def test_dismissed_is_a_separate_fact_from_being_covered(self):
+        """A consent button that was pressed and left the overlay in place has
+        dismissed nothing for any purpose here."""
+        cleared = browse.Cover(by="onetrust-banner-sdk", dismissed=True)
+        assert cleared.record() == {"by": "onetrust-banner-sdk", "dismissed": True}
+
+    def test_the_name_is_collapsed_and_bounded(self):
+        """It crosses into a trace record, so it is bounded HERE — one bound in
+        one place is one thing to be wrong."""
+        assert browse.covering_name("  clb\n  clb-container ") == "clb clb-container"
+        assert len(browse.covering_name("x" * 500)) == browse.COVERED_NAME_CHARS
+        assert browse.covering_name("") == ""
+        assert browse.covering_name(None) == ""
+
+    def test_the_refusal_names_the_element(self):
+        """A refusal that names nothing teaches nothing — which is exactly what
+        a day of four wrong diagnoses was argued on top of."""
+        said = browse.COVERED_STUCK.format(
+            action="click", address="Zaloguj", by="clb clb-container"
+        )
+        assert "'clb clb-container'" in said
+        assert "'Zaloguj'" in said
+        # And it says the thing the model cannot work out for itself: the click
+        # went somewhere else, so it never reached the control at all.
+        assert "never reaches the control" in said
+
+    def test_the_uncovered_refusal_claims_no_cover(self):
+        """The narrow half, and the one that keeps the whole thing honest. A
+        press that LANDS on the right element and is then ignored produces no
+        interception at all, and nothing may imply it was covered."""
+        said = browse.STUCK_NOT_COVERED.format(action="click", address="Wyslij")
+        assert "Nothing was found covering it" in said
+        assert "may be inert" in said
+
+    def test_the_dismissed_note_names_it_too(self):
+        said = browse.COVERED_DISMISSED.format(by="cookie-bar")
+        assert "'cookie-bar'" in said
+
+    def test_a_snapshot_carries_it_to_the_trace(self):
+        """A structural signal only the acting model sees is one restart from
+        being lost, which is exactly how this fact reached nobody."""
+        snap = snapshot(covered=browse.Cover(by="clb", dismissed=False))
+        assert snap.covered.record() == {"by": "clb", "dismissed": False}
+        assert snapshot().covered.record() == {}
+
+
+class TestTheConsentListIsAFloorWithACounterOverIt:
+    """#295 P4: where a vocabulary is unavoidable it is a floor under a
+    structural check and it SHIPS WITH COUNTERS. `_CONSENT_SELECTORS` had
+    neither. It holds `Akceptuj wszystkie`; eon.pl's button says `Akceptuje
+    wszystkie cookies`, and `has-text` is a substring match — so it missed by
+    one letter, and the only symptom was a site that quietly stopped
+    working."""
+
+    def test_a_list_nobody_has_asked_says_nothing(self):
+        """Silent until used, for the reason an empty console grows no
+        heading."""
+        assert browse.ConsentTally().line() == ""
+
+    def test_a_match_and_a_miss_are_both_counted(self):
+        tally = browse.ConsentTally()
+        tally.note(dismissed=True)
+        tally.note(dismissed=False)
+        tally.note(dismissed=False)
+        assert (tally.asked, tally.dismissed, tally.missed) == (3, 1, 2)
+
+    def test_a_list_that_has_stopped_matching_is_a_NUMBER_and_not_silence(self):
+        """The whole point. A miss neither permits something nor costs friction
+        — it silently breaks a feature, which is the failure shape nobody looks
+        for (#322)."""
+        tally = browse.ConsentTally()
+        for _ in range(9):
+            tally.note(dismissed=False)
+        said = tally.line()
+        assert "cleared 0 of 9" in said
+        assert "9 it could not match" in said
+
+    def test_a_list_that_matches_everything_says_so_without_a_miss_clause(self):
+        tally = browse.ConsentTally()
+        tally.note(dismissed=True)
+        assert tally.line() == (
+            "consent list:  cleared 1 of 1 covered control(s) this session"
+        )
+
+    def test_it_counts_OBSTRUCTIONS_and_never_pages(self):
+        """What makes the number mean anything. `_dismiss_consent` also runs
+        speculatively on every page that opens, where no banner is the common
+        case — counting there would put the miss rate at ~100% forever. So the
+        one writer is the structural check that has ALREADY found something
+        covering a control."""
+        source = pathlib.Path(browser.__file__).read_text()
+        writers = [
+            line.strip() for line in source.splitlines()
+            if "CONSENT_TALLY.note" in line
+        ]
+        assert writers == ["browse_mod.CONSENT_TALLY.note(dismissed=cleared)"]
+        # ...and that line lives in `_uncover`, after the cover was found.
+        body = source.split("async def _uncover(")[1].split("\nasync def ")[0]
+        assert "CONSENT_TALLY.note" in body
+
+    def test_the_tally_decides_nothing(self):
+        """An instrument for noticing, never an input. A record is detection
+        and never protection (#295 P2), and a counter even less so — so nothing
+        in this module reads it back."""
+        source = pathlib.Path(browse.__file__).read_text()
+        readers = [line for line in source.splitlines() if "CONSENT_TALLY" in line]
+        assert readers == ["CONSENT_TALLY = ConsentTally()"]
+
+
 class TestTheConsoleReachesTheModelAsPageContent:
     """Console text is PAGE-AUTHORED and gets the treatment this codebase
     already has for that — inside the untrusted banner, never in aish's voice,
@@ -3319,6 +3451,122 @@ class TestTheConsoleReachesTheModelAsPageContent:
         assert "console" not in out.meta
 
 
+class TestWhatCoveredAControlReachesTheTrace:
+    """#321. The interception fact must reach the OWNER's record and not only
+    the acting model's turn.
+
+    Every one of the four wrong diagnoses of the eon.pl sign-in was argued in a
+    session where Chrome knew the click was intercepted and named the element:
+    the fact existed, was computed, and reached nobody who could read it
+    afterwards. A structural signal only the acting model sees is one restart
+    from being lost. Same pattern as the console record, on its own key because
+    it is a different kind of fact — aish's own observation about its own
+    hands, not the page's account of itself."""
+
+    def _acts(self, monkeypatch, snap):
+        monkeypatch.setattr(
+            web_module.browser, "browse_act", lambda *a, **kw: snap
+        )
+
+    def test_a_press_that_could_not_land_names_the_element_on_the_step(
+        self, monkeypatch
+    ):
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        self._acts(monkeypatch, snapshot(
+            controls=[control(n=1)],
+            problem=browse.COVERED_STUCK.format(
+                action="click", address="Zaloguj", by="clb clb-container"
+            ),
+            covered=browse.Cover(by="clb clb-container"),
+        ))
+        out = web_module.browse_act("Zaloguj", view=view)
+        assert out.meta["covered"] == {
+            "by": "clb clb-container", "dismissed": False
+        }
+        # ...and the model is told too, in aish's own voice above the banner:
+        # this is aish's observation, not the site's words.
+        above = str(out).split(web_module.UNTRUSTED_NOTE)[0]
+        assert "clb clb-container" in above
+
+    def test_a_dismissed_cover_is_recorded_as_dismissed(self, monkeypatch):
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        self._acts(monkeypatch, snapshot(
+            controls=[control(n=1)],
+            notice=browse.COVERED_DISMISSED.format(by="cookie-bar"),
+            covered=browse.Cover(by="cookie-bar", dismissed=True),
+        ))
+        out = web_module.browse_act("Zaloguj", view=view)
+        assert out.meta["covered"] == {"by": "cookie-bar", "dismissed": True}
+
+    def test_an_ordinary_press_is_completely_unaffected(self, monkeypatch):
+        """A page with nothing over it grows no key, no sentence and no cost.
+        The check runs only on the rung where a real click already failed."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        self._acts(monkeypatch, snapshot(controls=[control(n=1)]))
+        out = web_module.browse_act("Przelacz lokal", view=view)
+        assert not hasattr(out, "meta") or "covered" not in out.meta
+
+    def test_a_new_call_never_inherits_the_last_calls_obstruction(
+        self, monkeypatch
+    ):
+        """Cleared at the top of a call for the reason the frame is: a call
+        that pressed nothing must not borrow the page before it."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        self._acts(monkeypatch, snapshot(
+            controls=[control(n=1)], covered=browse.Cover(by="clb")
+        ))
+        assert web_module.browse_act("Zaloguj", view=view).meta["covered"]
+        self._acts(monkeypatch, snapshot(controls=[control(n=1)], text="moved"))
+        out = web_module.browse_act("Zaloguj", view=view)
+        assert not hasattr(out, "meta") or "covered" not in out.meta
+
+    def test_a_covered_sign_in_is_told_as_a_refusal_by_AISH(self, monkeypatch):
+        """The note has to be the one that says the saved sign-in is untouched
+        and is not the problem — never the stale note, which says the site did
+        not accept it. Nothing here judged the password, because nothing was
+        ever submitted to the site."""
+        outcome = TestTheSignInAttemptIsOnTheStepItHappenedUnder._Outcome()
+        outcome.captcha = ""
+        outcome.covered = "clb clb-container"
+        outcome.why = browser.COVERED_SUBMIT.format(by="clb clb-container")
+        view = web_module.BrowseView()
+        monkeypatch.setattr(web_module, "_require_public", lambda _u: None)
+
+        def browse_open(url, *, topic="", key=""):
+            snap = snapshot(url=url, text="Zaloguj", controls=[])
+            snap.signin = True
+            return snap
+
+        monkeypatch.setattr(web_module.browser, "browse_open", browse_open)
+        monkeypatch.setattr(web_module.browser, "sign_in", lambda _u: outcome)
+        out = str(web_module.browse("https://eon.pl/mojeon", view=view))
+        assert "aish did not use it" in out
+        assert "clb clb-container" in out
+        # Never the stale note: nothing said the site refused the value.
+        assert "was not accepted" not in out
+        assert "that also replaces the saved sign-in" not in out
+
+    def test_a_press_that_landed_and_was_ignored_records_no_cover(
+        self, monkeypatch
+    ):
+        """The boundary, pinned rather than described. A handler that is
+        missing, broken or returns early produces no interception AND no
+        console line — the press reached the right element. Nothing here may
+        report that as covered, and the trace must stay silent about it."""
+        view = web_module.BrowseView()
+        view.remember(snapshot(controls=[control(n=1)]))
+        self._acts(monkeypatch, snapshot(
+            controls=[control(n=1)],
+            notice="the click would not land, so aish pressed it with the keyboard",
+        ))
+        out = web_module.browse_act("Zaloguj", view=view)
+        assert not hasattr(out, "meta") or "covered" not in out.meta
+
+
 class TestTheSignInAttemptIsOnTheStepItHappenedUnder:
     """#320 photographs every sign-in attempt onto `Record.last_frame`, and
     nothing rendered it — so the owner went looking for the picture, could not
@@ -3338,6 +3586,7 @@ class TestTheSignInAttemptIsOnTheStepItHappenedUnder:
         frame = "/store/frames/login.jpg"
         frame_skipped = ""
         console = ["uncaught: ReferenceError: grecaptcha is not defined"]
+        covered = ""
 
     def _driven(self, monkeypatch, outcome):
         monkeypatch.setattr(web_module, "_require_public", lambda _u: None)
@@ -3385,6 +3634,25 @@ class TestTheSignInAttemptIsOnTheStepItHappenedUnder:
         ]
         above = str(out).split(web_module.UNTRUSTED_NOTE)[0]
         assert "grecaptcha" not in above
+
+    def test_what_covered_the_sign_in_button_travels_with_it(self, monkeypatch):
+        """#321. The sign-in path never asked what was in the way, so a banner
+        over eon.pl's login button read as a replay that did nothing. Now it is
+        on the step the owner is already looking at, beside the picture."""
+        outcome = self._Outcome()
+        outcome.covered = "clb clb-container"
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, outcome)
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert out.meta["signin"]["covered"] == "clb clb-container"
+
+    def test_a_sign_in_with_nothing_in_the_way_writes_no_covered_key(
+        self, monkeypatch
+    ):
+        view = web_module.BrowseView()
+        self._driven(monkeypatch, self._Outcome())
+        out = web_module.browse("https://eon.pl/mojeon", view=view)
+        assert "covered" not in out.meta["signin"]
 
     def test_the_absence_says_which_absence(self, monkeypatch):
         outcome = self._Outcome()

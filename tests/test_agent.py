@@ -8982,6 +8982,40 @@ class TestSecretScrub:
         # The rest of the sign-in block is untouched — scrubbing is not editing.
         assert step["signin"]["host"] == "eon.pl"
 
+    def test_a_covering_elements_name_is_scrubbed_the_same_way(
+        self, stored, monkeypatch
+    ):
+        """#321. The name of whatever covered a control is an id, a class or a
+        tag — the SITE writes it, so it can write anything into it, and it
+        rides the same envelope into the same durable log. One funnel, applied
+        once where the envelope is consumed, rather than a guard at each place
+        that can produce a name."""
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("browse", url="https://eon.pl/x")]),
+                model_says("done"),
+            ],
+            step_log=steps.append,
+        )
+        agent._approved_sites.add("eon.pl")
+        monkeypatch.setattr(
+            agent_module.web, "browse",
+            lambda *a, **kw: tools_module.ToolOutcome(
+                "the page",
+                covered={"by": f"clb {self.TOKEN}", "dismissed": False},
+                signin={"host": "eon.pl", "covered": f"banner {self.TOKEN}"},
+            ),
+        )
+        agent.run_task("open the portal")
+        assert self.TOKEN not in json.dumps(steps)
+        (step,) = [s for s in steps if s.get("kind") == "tool"]
+        assert "[secret PUSHOVER_TOKEN — redacted by aish]" in step["covered"]["by"]
+        assert "[secret PUSHOVER_TOKEN — redacted by aish]" in step["signin"]["covered"]
+        # Scrubbing is not editing: everything else comes back as written.
+        assert step["covered"]["dismissed"] is False
+        assert step["signin"]["host"] == "eon.pl"
+
     def test_an_untouched_result_keeps_its_identity(self, stored):
         """No match must cost nothing — the same object back, envelope and all."""
         agent, _ = make_agent([model_says("hi")])

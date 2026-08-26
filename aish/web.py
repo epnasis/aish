@@ -146,13 +146,18 @@ class SignInSeen:
     writes no block at all, rather than an empty one that reads as an attempt
     with nothing to show (trace contract corollary 2)."""
 
-    __slots__ = ("host", "frame", "frame_skipped", "console")
+    __slots__ = ("host", "frame", "frame_skipped", "console", "covered")
 
     def __init__(self) -> None:
         self.host = ""
         self.frame = ""
         self.frame_skipped = ""
         self.console: list[str] = []
+        # What was found covering the sign-in button, when the press could not
+        # land (#321). aish's own observation about its own hands, so unlike
+        # the console beside it there is no page-authored-voice question — it
+        # is quoted as the page's word for the element and nothing more.
+        self.covered = ""
 
     def note(self, host: str, outcome: Any) -> None:
         """An attempt happened at `host`, and this is what it left behind.
@@ -164,6 +169,7 @@ class SignInSeen:
         self.frame = str(getattr(outcome, "frame", "") or "")
         self.frame_skipped = str(getattr(outcome, "frame_skipped", "") or "")
         self.console = [str(line) for line in (getattr(outcome, "console", None) or [])]
+        self.covered = str(getattr(outcome, "covered", "") or "")
 
     def record(self) -> dict:
         """The trace block, or `{}` when no sign-in was attempted at all."""
@@ -176,6 +182,8 @@ class SignInSeen:
             block["frame_skipped"] = self.frame_skipped
         if self.console:
             block["console"] = list(self.console)
+        if self.covered:
+            block["covered"] = self.covered
         return block
 
 
@@ -188,6 +196,7 @@ def sealed(
     frame_url: str = "",
     frame_from: str = "",
     console: "list[str] | None" = None,
+    covered: "dict | None" = None,
     signin: "SignInSeen | None" = None,
 ) -> str:
     """The result, with the cut and the evidence frame recorded on it — or
@@ -228,7 +237,16 @@ def sealed(
     the record of an automatic sign-in that happened inside this call. Both are
     PAGE-AUTHORED where they are text, so this is a record for the owner: the
     model's copy of the console travels in the body, below the untrusted
-    banner, and never through here."""
+    banner, and never through here.
+
+    `covered` is what was found SITTING ON TOP of the control this action
+    pressed (#321). It is here for the reason the console is: a press that
+    never landed writes nothing to a console — nothing ran — so the driver is
+    the only witness, and a witness only the acting model hears is one restart
+    from being lost. That is exactly how a fact Chrome had computed and named
+    reached nobody who could read it afterwards, while four wrong diagnoses
+    were argued from page text. Absent entirely when nothing covered anything,
+    which is the ordinary case."""
     meta: dict = {}
     if cut is not None and cut.record is not None:
         meta.update(bytes=cut.total, truncation=cut.record)
@@ -242,6 +260,8 @@ def sealed(
         meta["frame_skipped"] = frame_skipped
     if console:
         meta["console"] = list(console)
+    if covered:
+        meta["covered"] = dict(covered)
     if signin is not None and (block := signin.record()):
         meta["signin"] = block
     if not meta:
@@ -1603,7 +1623,13 @@ def _browser_read(
             # a refusal by aish, and saying it when aish tried and failed is as
             # false as saying the site refused a value it never judged.
             if outcome.captcha:
-                renewal = RENEWAL_CAPTCHA_NOTE.format(host=host, why=outcome.why)
+                # The wider claim — *this SITE cannot be signed into
+                # automatically* — is earned only where the password was
+                # observed leaving, because that is the only sign the widget
+                # was ever given something to refuse (#321).
+                renewal = (
+                    RENEWAL_CAPTCHA_REFUSED if outcome.tried else RENEWAL_CAPTCHA_NOTE
+                ).format(host=host, why=outcome.why)
             elif outcome.tried or outcome.second_factor or outcome.stale:
                 renewal = RENEWAL_STOPPED_NOTE.format(
                     host=host,
@@ -1719,7 +1745,21 @@ RENEWAL_SECOND_FACTOR = (
 # The read path's twin of `BROWSE_SIGNIN_CAPTCHA`, and kept apart from
 # `RENEWAL_HELD_NOTE` for the same reason: aish used the sign-in, the site
 # refused the automation rather than the value, and re-saving it fixes nothing.
+#
+# NARROWED to a claim about the ATTEMPT (#321) — see `BROWSE_SIGNIN_CAPTCHA`
+# below for why, and `RENEWAL_CAPTCHA_REFUSED` for the version that may say
+# more.
 RENEWAL_CAPTCHA_NOTE = (
+    "[aish: {host} asked for a password, and aish could not complete the "
+    "sign-in here — {why}. Their saved sign-in is untouched and does NOT need "
+    "replacing; do not suggest saving it again. Tell them to open /browser "
+    "{host} and sign in themselves. What follows is the SIGNED-OUT page, not "
+    "their account.]\n"
+)
+# The same outcome once the password was actually OBSERVED leaving the page:
+# the widget was given a submission and the session still did not come up, so
+# the wider claim is earned.
+RENEWAL_CAPTCHA_REFUSED = (
     "[aish: {host} asked for a password, and aish CANNOT sign in to this site "
     "automatically — {why}. Their saved sign-in is untouched and does NOT need "
     "replacing; do not suggest saving it again. Tell them to open /browser "
@@ -1777,7 +1817,25 @@ BROWSE_SIGNED_OUT_STALE = (
 # "was not accepted" is a false statement in aish's own voice. Neither may
 # invite a re-record — following that invitation is what destroyed the owner's
 # eon.pl credential twice, since the next attempt fails identically.
+#
+# **NARROWED TO THE ATTEMPT (#321).** It used to say *this site cannot be
+# signed into automatically*, inferred from a script tag on the page — and
+# eon.pl disproves that: it can be, once the banner over its login button is
+# gone, and on that page the CAPTCHA never refused anything because nothing was
+# ever submitted to it. So the standing claim is about what aish could not do
+# here, and the claim about the SITE is made only from the twin below, which is
+# selected when the password was observed to LEAVE — the one observation that
+# says the widget was given a submission to refuse at all. Both stay untouched
+# in the half that matters: the credential is not marked, and neither invites a
+# re-record.
 BROWSE_SIGNIN_CAPTCHA = (
+    "[aish: {host} is asking for a password, and aish could not complete the "
+    "sign-in here — {why}. The user's saved sign-in is untouched and does "
+    "NOT need replacing; do not suggest saving it again. Tell them to run "
+    "/browser {host} and sign in themselves. Do NOT try other buttons on this "
+    "page.]\n"
+)
+BROWSE_SIGNIN_CAPTCHA_REFUSED = (
     "[aish: {host} is asking for a password, and aish CANNOT sign in to this "
     "site automatically — {why}. The user's saved sign-in is untouched and does "
     "NOT need replacing; do not suggest saving it again. Tell them to run "
@@ -2170,6 +2228,11 @@ class BrowseView:
         # The driven page's own console for the call now running, drained onto
         # the snapshot by the browser and carried out to the trace from here.
         self.console: list[str] = []
+        # What was found on top of the control this call pressed, if anything
+        # (#321). Cleared with everything else at the top of a call, for the
+        # same reason the frame is: a call that pressed nothing must not
+        # inherit the last call's obstruction.
+        self.covered: dict = {}
 
     def start_call(self) -> None:
         """A new browse call begins: this chat has been shown nothing yet."""
@@ -2178,6 +2241,7 @@ class BrowseView:
         self.frame_url = ""
         self.frame_from = ""
         self.console = []
+        self.covered = {}
 
     def remember(self, snapshot: Any) -> None:
         was = str(getattr(self.shown, "url", "") or "")
@@ -2191,6 +2255,8 @@ class BrowseView:
         # step is one the eye stops reading by the third row.
         self.frame_from = was if was and was != self.frame_url else ""
         self.console = [str(line) for line in (getattr(snapshot, "console", None) or [])]
+        cover = getattr(snapshot, "covered", None)
+        self.covered = cover.record() if cover is not None else {}
 
     def commit_evidence(self) -> str:
         """What the page this chat was last shown says it COMMITS, if anything.
@@ -2488,6 +2554,7 @@ def browse(
         frame_url=seen.frame_url,
         frame_from=seen.frame_from,
         console=seen.console,
+        covered=seen.covered,
         signin=signin_seen,
     )
 
@@ -2539,7 +2606,13 @@ def _renew_driving(url, snapshot, *, topic, view, signin_seen=None):
         return BROWSE_SIGNED_OUT_NOTE.format(host=host), snapshot
     if not outcome.ok:
         if outcome.captcha:
-            template, why = BROWSE_SIGNIN_CAPTCHA, outcome.why
+            # The claim about the SITE is earned only where the password was
+            # observed leaving; otherwise the widget refused nothing and all
+            # aish can say is that it could not get in here (#321).
+            template, why = (
+                BROWSE_SIGNIN_CAPTCHA_REFUSED if outcome.tried
+                else BROWSE_SIGNIN_CAPTCHA
+            ), outcome.why
         elif outcome.second_factor:
             template, why = BROWSE_SIGNIN_UNFINISHED, RENEWAL_SECOND_FACTOR.format(
                 host=host
@@ -2587,6 +2660,7 @@ def browse_act(
         frame_url=seen.frame_url,
         frame_from=seen.frame_from,
         console=seen.console,
+        covered=seen.covered,
     )
 
 
@@ -2664,6 +2738,7 @@ def browse_fill(
         frame_url=seen.frame_url,
         frame_from=seen.frame_from,
         console=seen.console,
+        covered=seen.covered,
     )
 
 
