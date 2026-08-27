@@ -59,6 +59,10 @@ from . import evidence, paths, ratelimit
 
 CHARTERS_DIR = Path(__file__).resolve().parent / "charters"
 
+# The one role v1 ships. Named here rather than spelled at the call site so the
+# wiring, the charter file and the caller cannot drift into three spellings.
+SNIPPET_READER = "snippet-reader"
+
 # Where the owner's own material lives: full-fidelity mined exam cases, one
 # directory per charter. ADDITIVE — absent is the normal case, and a fresh
 # install with none still loads, because the charter ships its own exam.
@@ -551,7 +555,7 @@ def _json_payload(reply: str) -> Any:
     return json.loads(text[start : end + 1])
 
 
-def _clean(value: str, cap: int) -> str:
+def capped(value: str, cap: int) -> str:
     """Bounded, capped, stripped — the enforceable half of the airlock.
 
     Control characters go because a field that can carry a newline can carry a
@@ -612,7 +616,7 @@ def validate(shape: Shape, payload: Any, rows: tuple[int, ...]) -> Rows:
                     )
                 record[declared.name] = text
             else:
-                text = _clean(str(value or ""), declared.max_chars)
+                text = capped(str(value or ""), declared.max_chars)
                 if not text and not declared.may_be_empty:
                     raise ValueError(f"row {index}: {declared.name} is required")
                 record[declared.name] = text
@@ -780,7 +784,7 @@ class Result:
         return self.status != Status.OK
 
 
-ATTEMPTS = 2  # the first answer, and one corrective. Never more — see docs.
+ROLE_ATTEMPTS = 2  # the first answer, and one corrective. Never more — see docs.
 
 RETRY_NUDGE = (
     "\n\nYour previous reply was rejected by the code that checks it: {error}\n"
@@ -854,7 +858,9 @@ def compose(
     ]
 
 
-def make_caller(model_spec: str, client: Any = None) -> tuple[Callable[[list], Any], str, str]:
+def make_caller(
+    model_spec: str, client: Any = None
+) -> tuple[Callable[..., Any], str, str]:
     """A stateless chat callable, its provider and its model name.
 
     `backends.make_chat` and nothing else. It is the seam where every provider
@@ -901,7 +907,7 @@ def run(
     rows: tuple[int, ...],
     *,
     model_spec: str,
-    chat: Callable | None = None,
+    chat: Callable[..., Any] | None = None,
     model_name: str = "",
     state_dir: os.PathLike | str | None = None,
     check_admission: bool = True,
@@ -960,7 +966,7 @@ def run(
     started = time.perf_counter()
     usage: dict[str, Any] = {}
     error = ""
-    for attempt in range(1, ATTEMPTS + 1):
+    for attempt in range(1, ROLE_ATTEMPTS + 1):
         try:
             with ratelimit.hooks(
                 should_stop=should_stop, on_wait=on_wait, ceiling=wait_ceiling
@@ -986,7 +992,7 @@ def run(
             value = validate(charter.output, _json_payload(_content(response)), rows)
         except (ValueError, TypeError) as exc:
             error = f"{exc}"
-            if attempt < ATTEMPTS:
+            if attempt < ROLE_ATTEMPTS:
                 # ONE corrective. The common failure is a model wrapping good
                 # JSON in prose, which one nudge almost always fixes; a second
                 # would spend real money re-asking a question that is not going
@@ -1012,7 +1018,7 @@ def run(
             ms=int((time.perf_counter() - started) * 1000),
             usage=usage,
         )
-    return outcome(Status.INVALID, error, model=model_spec, attempts=ATTEMPTS)
+    return outcome(Status.INVALID, error, model=model_spec, attempts=ROLE_ATTEMPTS)
 
 
 # ---------------------------------------------------------------- the exam
