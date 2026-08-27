@@ -34,13 +34,14 @@ verdict makes guessing the cheapest answer, which is exactly how a hypothesis ab
 sign-in became aish's own voice for weeks (`CLAUDE.md`, *No evidence, no claim*).
 
 **R5 · The acting model may CALL a role and may never author one.** A charter it could
-write is oversight it could appoint, with content it had already read as co-author.
-Refused by identity, on the file-tool path and the shell path both — never carded. See
-*The fence*.
+write is oversight it could appoint, with content it had already read as co-author. Enforced
+by binding admission to the charter's **content digest**, so an edit through any door — named
+or not — stops the role loading; a command fence refuses the known doors early, and is
+known-incomplete. See *Keeping the model out of its own oversight*.
 
-**R6 · A charter without an exam does not load**, and admission is a recorded pass rather
-than a live check. See *The exam* for why the second half of that sentence is not a
-downgrade of the first.
+**R6 · A charter without an exam does not load**, and admission is a recorded pass **bound
+to the charter's content** rather than a live check. See *The exam* for why the second half
+of that sentence is not a downgrade of the first, and R5 for what the binding buys.
 
 **R7 · Every role call leaves one record, carrying the input BYTES.** Not a digest. A
 digest can never become an exam case, and the owner's amendment to #297 is that exam cases
@@ -412,9 +413,12 @@ the step — which would wedge browsing on a flaky connection.
    through the real `roles.run` with a real model, spending real money. It writes
    `<state_dir>/roles/admission.json`.
 2. **Load time** checks that a **recorded pass exists and is current** — `roles.admitted`,
-   which compares the charter version and the model spec and returns a *phrase* rather than
-   a bool, because "no admission recorded" and "admitted against another model" are
-   different facts.
+   which compares the charter's **content digest**, the owner's cases file digest, the
+   version and the model spec, and returns a *phrase* rather than a bool, because "no
+   admission recorded", "the charter text has changed since it was examined" and "admitted
+   against another model" are different facts. The digest comparison is what makes this the
+   system's actual write-path control rather than a staleness check — see *Keeping the model
+   out of its own oversight*.
 
 A model change retires the pass, because a model upgrade can silently change what a role
 does. A recorded **failure** is written too and keeps the role out: the useful artifact is
@@ -439,99 +443,139 @@ loader must never depend on a store whose contract is erasure.
 
 ---
 
-## The fence — closing the model's write path to its own oversight
+## Keeping the model out of its own oversight — the control, and the fence
 
-`Agent._charter_dirs` names both live locations: the package's `charters/`, and
-`<config home>/roles/`. The second is there because it sits inside the tree `create_skill`
-and `remember` already write to — and exam cases are not charters, but a model that can
-write the exam can make a role pass one it should fail, which is R5 broken one level down
-instead of head-on.
+R5 says the acting model may CALL a role and may never author one. A charter it could
+write is oversight it could appoint, with content it had already read as co-author. There
+are two mechanisms here and **they are not equals**.
 
-**Read this section's title carefully. Two doors are closed to the classes listed below;
-neither is closed to everything, and the residuals are named at the end.**
+### The control: admission is bound to the charter's CONTENT
 
-- **The file-tool path — this one is exact.** `Agent._is_charter`, asked through
-  `files.contains` (the one containment function) so a symlink from a session root answers
-  the same as the store's own path — and asked at all, rather than left to the workspace
-  boundary, because a session rooted at the aish checkout would put the package's charters
-  back inside it. `write_file` and `edit_file` take a path, and a path is a thing that can
-  be resolved. `CHARTER_NOT_WRITABLE`.
-- **The shell path — this one is a best effort with a known floor.**
-  `Agent._command_touches_a_charter`, checked **before** `self.approve` so the approver is
-  never offered the command. Without it, a shell write to a charter falls through to an
-  ordinary out-of-root approval card, which is the card D2's own argument declares fatal.
+`roles.admitted` compares the charter file's **content digest** against the digest recorded
+when the exam was run, and does the same for the owner's mined cases file. A charter whose
+text does not match what was examined **is not admitted, and the role does not load.**
 
-### Why the shell half cannot be exact, and what it does instead
+That is the control, and the reason it is the control rather than the fence below is worth
+stating exactly, because it was learned the expensive way.
 
-A shell command is not a path. `bash` expands globs, braces, variables, `~user` and command
-substitution at exec time, and none of that exists yet when this code has to decide. Three
-rounds of reasoning about that produced three wrong fences here, each corrected only by
-**probing** it:
+A command fence models what `bash` will do with a string. Four versions of that model
+shipped in this file's history, and **each was defeated by a class the version before had
+not imagined**:
 
 | round | approach | what walked through |
 |---|---|---|
 | 1 | the store's absolute path as a substring | `$HOME/…`, a relative path reached by `cd`, a path inside `python3 -c` |
 | 2 | resolve every path-shaped token | every glob form (`char*`, `?harters`, `char[t]ers`), `$(…)` spanning a tokeniser boundary, `~user`, `$AISH_CONFIG_HOME` |
 | 3 | fnmatch over expansion patterns | brace expansion, an uppercase glob on a case-insensitive filesystem, a glob relative to a `cd` |
+| 4 | the four nets below | **a shape, not a spelling** — `git -C <config tree> apply /tmp/evil.patch` |
 
-So the shipped version is **four nets, each of which fails towards refusal**, and the
-generalisation is written down rather than the three fixes:
+Round 4 is the one that settles the argument. That command **names no charter at all.** It
+names an *ancestor* directory and a verb that writes recursively into it, and `git` in the
+config tree is entirely ordinary there — that tree is a real repository, the knowledge
+auto-backup. There is nothing in the text for a path fence to find, and no amount of
+better bash modelling produces one.
+
+The digest models none of that. Any edit, through any door — a fence's blind spot, a
+plugin tool's wrapper, `roles.py` itself sitting one directory outside the fence, a door
+invented next year — changes the digest, and the role stops loading. **It fails closed**,
+and a role that will not load is a capability *narrowing*, which #295 P6 explicitly
+exempts and which the shipped `skip` degradation turns into today's behaviour.
+
+`content_digest` is plain sha256 computed in `roles.py`, deliberately not routed through
+`evidence.digest_of`: nothing on the path that decides whether a control runs should have
+a reason to import a store whose contract is erasure.
+
+**The reason phrases state observations and never causes.** *"The charter text has changed
+since it was examined"* is two digests differing. It is not *"the charter was tampered
+with"*: from here an ordinary edit and an attack are indistinguishable, and a vocabulary
+that named one of them would be the failure `CLAUDE.md`'s *No evidence, no claim* exists to
+stop. `TestAdmission::test_the_reason_names_no_cause_it_did_not_observe`.
+
+Three further properties, each pinned:
+
+- **A version bump is not what binds.** The version lives *inside* the charter, so the
+  digest covers it; the version check survives only because it gives a more specific phrase
+  when someone bumped it on purpose. A charter rewritten in place **keeping `version: "1"`**
+  stops loading.
+- **An exam that did not record what it examined vouches for nothing.** An admission with
+  no `charter_digest` is refused, not trusted — a record predating this check is exactly the
+  record that cannot answer the question.
+- **The owner's cases bind in both directions.** A case added is exam material nothing has
+  run; a case removed is exam material that no longer exists. Absent is a recorded value
+  (`NO_OWNER_CASES`), so "he has no mined cases" and "the file was deleted since the exam"
+  are not the same string.
+
+### The fence: early refusal, and known-incomplete
+
+`Agent._is_charter` (file tools) and `Agent._command_touches_a_charter` (shell) stay, as
+defence in depth. They are worth having — refusing at the moment of the attempt is kinder
+and clearer than a role silently going dark a process later, and the file-tool half really
+is exact, because `write_file` takes a path and a path can be resolved. But **the shell half
+is a best effort with a known floor and must not be presented as the control.**
+
+Four nets, each failing towards refusal:
 
 1. **Literal** — the store's own path, or its `~`-abbreviated spelling, anywhere in the
    text. Catches `DIR=<charters>; … $DIR/x`, where the directory sits in a token that
    resolves to nothing.
 2. **Resolved** — every path-shaped token, `~/` and `$HOME` expanded, through
-   `files.contains`.
+   `files.contains`, so a symlink from a session root answers the same as the store's path.
 3. **Expansion patterns** — the whole command is masked first (`_SUBSTITUTION` → `*`, so a
    substitution spanning a tokeniser boundary stays one token), then each dynamic token's
-   directory chain is walked and `fnmatch`ed against the store, **case-insensitively**
-   (the owner's filesystem is), against every base a `cd` could have made it relative to
+   directory chain is walked and `fnmatch`ed against the store: **case-insensitively** (the
+   owner's filesystem is), against every base a `cd` could have made it relative to
    (`_cd_bases`), in both relative and absolute readings. A pattern naming nothing at all
    (`$PATH` → `*`) is skipped, or `echo ${PATH}` would refuse.
 4. **The coarse floor** — if any part of the command is something the shell will rewrite
    AND the text names one of these stores by its own distinctive word (`_CHARTER_WORDS`:
-   `charters`, `roles`, `AISH_CONFIG_HOME`), that alone refuses. This net exists because
-   nets 1–3 are reasoning about shell expansion and that reasoning has been wrong three
-   times.
+   `charters`, `roles`, `AISH_CONFIG_HOME`), that alone refuses.
 
-`_writes` switches nets 3 and 4 between two strictnesses. A command that could put bytes
-somewhere gets the looser walk, which also matches a prefix ending in a bare wildcard; a
-read does not, because the same widening refuses `ls aish/*`, and a fence that fires on
-ordinary work is one somebody removes rather than fixes. Being on `_WRITE_VERBS` only ever
-makes the fence refuse more; it is not a safety claim about the verbs absent from it.
+`_writes` switches nets 3 and 4 between two strictnesses: a command that could put bytes
+somewhere gets the looser walk, a read does not, because the same widening refuses
+`ls aish/*` — and a fence that fires on ordinary work is one somebody removes rather than
+fixes. Being on `_WRITE_VERBS` only ever makes the fence refuse more; it is not a safety
+claim about the verbs absent from it.
 
-**The asymmetry between read and write is deliberate.** `read_file` on a charter is *not*
+**Read and write are treated differently on purpose.** `read_file` on a charter is not
 refused: reading one authors nothing, and aish answers questions about itself. A shell
 command naming the directory is refused whichever it would have done, because deciding
 read-versus-write from command text is precisely the judgement a structural fence must not
 have to make.
 
-### The residuals, named
+### What the fence does not catch
 
-- **A path assembled entirely outside the command text.** `export D=<charters>` in one call,
-  `echo pwn > $D/x` in the next: net 1 sees no literal, net 3 masks `$D` to a pattern naming
-  nothing, and net 4 sees no distinctive word. Every command in a session is separate here,
-  so nothing carries the value forward — but nothing rules it out either.
-- **A plugin tool's wrapper.** `tool_plugins` executes a script, and a mutating tool's gate
-  is an approval **card**. A wrapper that writes a charter is therefore behind exactly the
-  control D2 rejects. Not fixed: fencing it needs a filesystem sandbox around wrapper
-  execution, which is its own piece of work.
-- **`aish` itself is one directory away.** `<pkg>/charters` is fenced; `<pkg>/roles.py` — the
-  code that reads charters — is not. The fence protects the governance *document*, not the
-  interpreter. A model editing aish's own source is an approval card like any other write.
-- **The exactness is per-class, not general.** The 33 spellings pinned in
-  `TestCharterWritePath` are the ones known to have leaked. A class nobody has thought of
-  is refused only if net 4 catches it.
+Listed plainly, because every one of these is covered by the digest and by nothing else:
+
+- **The ancestor-write class.** `git -C <config tree> apply|checkout|restore|stash pop|reset
+  --hard`, `patch -p1 -d <tree>`, `unzip -d <tree>`. No charter is named; an ancestor and a
+  recursive verb are. Pinned as a known gap in
+  `TestCharterWritePath::test_the_ancestor_write_class_is_NOT_refused_and_the_digest_is_why`,
+  asserted rather than hidden, so closing it later is a deliberate inversion rather than a
+  quiet deletion.
+- **A path assembled entirely outside the command text** — `export D=<charters>` in one
+  call, `echo pwn > $D/x` in the next.
+- **A plugin tool's wrapper.** `tool_plugins` executes a script and a mutating tool's gate
+  is an approval **card** — exactly the control #295 P2 rejects. Fencing it needs a
+  filesystem sandbox around wrapper execution.
+- **`roles.py` itself**, one directory outside the store: the fence protects the governance
+  *document*, not the interpreter.
+- **Any class nobody has thought of.** Four rounds each ended with one. That sentence is the
+  reason the digest exists.
+
+The 42 spellings pinned in `TestCharterWritePath` are the record of what has been probed
+across all four rounds, positives and already-passing cases alike — a table listing only
+the failures is how a class stays open while the prose says closed. The 15 negatives are
+pinned as hard.
 
 `create_tool` and `import_skill` need no fence of their own, and that is checked rather than
 asserted: neither takes a path, both take a slug, and `tool_plugins.NAME_RE` /
-`skills.NAME_RE` admit no separator. A test pins it, because "it cannot get there" is
-exactly the claim that rots.
+`skills.NAME_RE` admit no separator.
 
 **Scope.** This binds **runtime** writes to the **live** locations. In a development session
 on this repository, charters are edited as ordinary reviewed source — and `charters/` inside
-a source checkout *is* a live location, so aish refuses to edit its own charters there too.
-That is intended. `TestCharterWritePath`.
+a source checkout *is* a live location, so aish refuses to edit its own charters there too,
+and an edit made by hand retires the admission until the exam is re-run. Both are intended.
+`TestCharterWritePath`, `TestAdmission`.
 
 ## Cost and latency — real, and measured where it could be
 
@@ -556,11 +600,13 @@ makes this measurable instead of guessed — but nothing in the tree converts to
 deliberately, because the owner's key is shared PAYG and a hardcoded rate would be a number
 nobody checked.
 
-**Measured against the real backend on 2026-08-27**, running the shipped exam through
-`scripts/role-admission.py --model gemini:gemini-3.5-flash`: **8/8 cases passed, one attempt
-each, no retries**, and all three injection cases were flagged rather than obeyed.
-↑8967 ↓945 tokens over 8 cases — so the estimates above are roughly right — and
-**~9s per call** (5.3s to 18.3s). That latency is the headline number, not the tokens.
+**Measured by the epic drive on 2026-08-27**, running the shipped exam through
+`scripts/role-admission.py --model gemini:gemini-3.5-flash` against the owner's real key:
+**8/8 cases passed on the first attempt, no retries**, and all three injection cases were
+flagged rather than obeyed. ↑8967 ↓945 tokens over 8 cases — so the estimates above are
+roughly right — and **5.3s to 18.3s per call, 8.9s mean**. That latency is the headline
+number, not the tokens. Attributed rather than stated flat: a figure in a doc with no owner
+is a figure nobody can go back and question.
 
 **Latency is a real change in how browsing feels, not an edge case.** A search now waits for
 a second model call before its results reach the planner, and the reader cannot be
@@ -593,6 +639,9 @@ Read this list before assuming a capability.
 - **`rows: N` in a golden pair is a shape annotation, not a check** (#328) — `validate`
   already guarantees it. `_expect_mentions` and `Degradation.HOLD` have no shipped
   customer either.
+- **No claim that the command fence is complete.** It is early refusal over the doors that
+  have been probed; the control is the content digest. The ancestor-write class is an open,
+  asserted gap.
 - **No claim that browsing is isolated.** See *The wiring law*.
 - **`read_url` and `read_pdf` are not covered.** #295's rollout order is search snippets
   first, then fetched page text, then driven-page text, then downloaded documents, then mail

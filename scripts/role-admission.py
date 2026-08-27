@@ -152,6 +152,11 @@ def main(argv: list[str]) -> int:
             total=tally["charter"][1],
             owner_passed=tally["owner"][0],
             owner_total=tally["owner"][1],
+            # WHAT was examined, not just that something was. This is the pair
+            # `roles.admitted` binds to, and it is what makes an edit through a
+            # door nobody enumerated retire the admission instead of riding it.
+            charter_digest=charter.digest,
+            cases_digest=roles.owner_cases_digest(charter),
         )
         path = roles.write_admission(state_dir(), admission)
         # Written whether it passed or failed. A recorded FAILURE is the useful

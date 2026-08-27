@@ -78,6 +78,17 @@ def roles_state_dir(state_dir: os.PathLike | str) -> Path:
     return Path(state_dir) / "roles"
 
 
+def content_digest(text: str) -> str:
+    """The content address of a governing document.
+
+    Plain sha256 over the bytes, computed HERE rather than through
+    `evidence.digest_of`, so that nothing on the admission path — the one path
+    that decides whether a control runs at all — has any reason to import a
+    store whose contract is erasure.
+    """
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 class CharterError(ValueError):
     """A charter that does not load. Deliberately fatal at load time: an
     admission price that can be skipped is not an admission price."""
@@ -256,6 +267,10 @@ class Charter:
     task: str
     cases: tuple[Case, ...]
     path: Path | None = None
+    # The content address of the file this was parsed from. It is what
+    # admission binds to, so that a charter rewritten in place — through any
+    # door, named or not — stops being admitted. See `admitted`.
+    digest: str = ""
 
     @property
     def untrusted(self) -> bool:
@@ -364,6 +379,7 @@ def parse_charter(text: str, path: Path | None = None) -> Charter:
         task=task,
         cases=cases,
         path=path,
+        digest=content_digest(text),
     )
 
 
@@ -436,6 +452,27 @@ def load_charters(directory: Path | None = None) -> dict[str, Charter]:
             raise CharterError(f"{path.name} declares name {charter.name!r}")
         out[charter.name] = charter
     return out
+
+
+# What `owner_cases_digest` returns when the file is not there. A LITERAL, so
+# that "he has no mined cases" and "the file was deleted since the exam ran" are
+# two different recorded values rather than one empty string meaning both.
+NO_OWNER_CASES = "none"
+
+
+def owner_cases_digest(charter: Charter) -> str:
+    """The content address of the owner's own exam cases, or `NO_OWNER_CASES`.
+
+    Absent is a real, recordable state: a fresh install has no mined cases and
+    is admitted anyway. What must not be possible is for the file to CHANGE
+    between the exam and the load without that being visible, in either
+    direction — a case added is exam material nothing has run, and a case
+    removed is exam material that no longer exists.
+    """
+    try:
+        return content_digest((owner_cases_dir(charter.name) / "cases.yaml").read_text())
+    except OSError:
+        return NO_OWNER_CASES
 
 
 def owner_cases(charter: Charter) -> tuple[Case, ...]:
@@ -657,6 +694,10 @@ class Admission:
     total: int
     owner_passed: int = 0
     owner_total: int = 0
+    # What was actually examined. Empty means an exam that did not record it,
+    # which is not the same as one whose text still matches — see `admitted`.
+    charter_digest: str = ""
+    cases_digest: str = ""
 
     @property
     def ok(self) -> bool:
@@ -695,6 +736,8 @@ def read_admissions(state_dir: os.PathLike | str | None) -> dict[str, Admission]
                 total=int(entry.get("total") or 0),
                 owner_passed=int(entry.get("owner_passed") or 0),
                 owner_total=int(entry.get("owner_total") or 0),
+                charter_digest=str(entry.get("charter_digest") or ""),
+                cases_digest=str(entry.get("cases_digest") or ""),
             )
         except (TypeError, ValueError):
             continue
@@ -718,6 +761,8 @@ def write_admission(state_dir: os.PathLike | str, admission: Admission) -> Path:
         "total": admission.total,
         "owner_passed": admission.owner_passed,
         "owner_total": admission.owner_total,
+        "charter_digest": admission.charter_digest,
+        "cases_digest": admission.cases_digest,
     }
     tmp = path.with_suffix(f".tmp{os.getpid()}")
     tmp.write_text(json.dumps(current, indent=1, sort_keys=True))
@@ -728,18 +773,51 @@ def write_admission(state_dir: os.PathLike | str, admission: Admission) -> Path:
 def admitted(charter: Charter, model: str, state_dir: os.PathLike | str | None) -> str | None:
     """None when the role may run; otherwise WHY it may not, in one phrase.
 
-    A phrase rather than a bool because the record carries it: "no admission
-    recorded" and "admitted against another model" are different facts, and a
-    reader that cannot tell them apart is the absence-as-evidence failure
-    `docs/trace-contract.md` corollary 2 forbids.
+    **This is the control, and the digest checks are the reason.** The command
+    fence in `agent.py` refuses a shell command that names a charter store, and
+    it is worth having, but it is a model of what `bash` will do with a string
+    — and three successive versions of that model each let through a class the
+    version before had not imagined. The fourth was defeated by a shape rather
+    than a spelling: `git -C <config tree> apply /tmp/evil.patch` names no
+    charter at all. It names an ANCESTOR and a verb that writes recursively
+    into it, and there is nothing in it for a path fence to find.
+
+    Binding admission to the charter's CONTENT does not model any of that. Any
+    edit, through any door — a fence's blind spot, a plugin tool's wrapper, the
+    interpreter one directory outside the fence, a door invented next year —
+    changes the digest, and a charter whose digest does not match what was
+    examined is simply not admitted. It fails CLOSED: the role does not load,
+    which under the shipped `skip` degradation is today's behaviour, and which
+    is a capability narrowing rather than a widening (#295 P6 exempts those).
+
+    A phrase rather than a bool because the record carries it, and every phrase
+    here states an OBSERVATION. "The charter text has changed since it was
+    examined" is two digests differing. It is deliberately not "the charter was
+    tampered with": an ordinary edit and an attack are indistinguishable from
+    here, and a vocabulary that made this name one of them would be the failure
+    `CLAUDE.md`'s *No evidence, no claim* exists to stop.
     """
     found = read_admissions(state_dir).get(charter.name)
     if found is None:
         return "no admission recorded"
     if not found.ok:
         return f"the recorded exam did not pass ({found.passed}/{found.total})"
+    # Version first, only because it is the more specific way to say the same
+    # thing when someone bumped it on purpose. The version lives INSIDE the
+    # charter, so the digest below already covers every case this catches.
     if found.version != charter.version:
         return f"admitted at version {found.version}, charter is at {charter.version}"
+    if not found.charter_digest:
+        # An exam that did not write down what it examined cannot vouch for
+        # anything now. Refused rather than trusted: a record predating this
+        # check is exactly the record that cannot answer the question.
+        return "the recorded exam did not record which charter text it examined"
+    if found.charter_digest != charter.digest:
+        return "the charter text has changed since it was examined"
+    if found.cases_digest != owner_cases_digest(charter):
+        # In BOTH directions. A case added is exam material nothing has run; a
+        # case removed is exam material that no longer exists.
+        return "the exam cases have changed since they were examined"
     if found.model != model:
         return f"admitted against {found.model}, this session runs {model}"
     return None

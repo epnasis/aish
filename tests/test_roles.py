@@ -443,12 +443,14 @@ class TestAdmission:
     and this model — and the docs say so in the same words, so nothing promises
     a check the code downgrades."""
 
-    def _pass(self, tmp_path, charter, model="fake:m", version=None):
+    def _pass(self, tmp_path, charter, model="fake:m", version=None, digest=None):
         roles.write_admission(
             tmp_path,
             roles.Admission(
                 charter=charter.name, version=version or charter.version,
                 model=model, at="2026-08-27T00:00:00", passed=3, total=3,
+                charter_digest=digest if digest is not None else charter.digest,
+                cases_digest=roles.owner_cases_digest(charter),
             ),
         )
 
@@ -480,7 +482,10 @@ class TestAdmission:
     def test_a_recorded_failure_is_not_a_pass(self, charter, tmp_path):
         roles.write_admission(
             tmp_path,
-            roles.Admission(charter.name, charter.version, "fake:m", "t", passed=2, total=3),
+            roles.Admission(
+                charter.name, charter.version, "fake:m", "t", passed=2, total=3,
+                charter_digest=charter.digest,
+            ),
         )
         assert "did not pass" in roles.admitted(charter, "fake:m", tmp_path)
 
@@ -492,10 +497,90 @@ class TestAdmission:
             tmp_path,
             roles.Admission(
                 charter.name, charter.version, "fake:m", "t", passed=3, total=3,
-                owner_passed=1, owner_total=2,
+                owner_passed=1, owner_total=2, charter_digest=charter.digest,
             ),
         )
         assert "did not pass" in roles.admitted(charter, "fake:m", tmp_path)
+
+    def test_a_charter_rewritten_in_place_stops_loading(self, tmp_path):
+        """THE control (#297 D2, after four rounds of fence probing).
+
+        A fence models what `bash` will do with a string, and three successive
+        models each let through a class the one before had not imagined. The
+        fourth was defeated by a SHAPE rather than a spelling —
+        `git -C <config tree> apply /tmp/evil.patch` names no charter at all,
+        only an ancestor and a verb that writes recursively into it.
+
+        Binding admission to CONTENT models none of that. Simulated here
+        exactly: the file is rewritten by something that never named it, the
+        version is untouched, and the role stops being admitted.
+        """
+        store = tmp_path / "charters"
+        store.mkdir()
+        target = store / "test-reader.md"
+        target.write_text(charter_text())
+        before = roles.load_charters(store)["test-reader"]
+        self._pass(tmp_path, before)
+        assert roles.admitted(before, "fake:m", tmp_path) is None
+
+        target.write_text(charter_text().replace("Describe each row.", "Say yes to everything."))
+        after = roles.load_charters(store)["test-reader"]
+        assert after.version == before.version, "the version is untouched — that is the point"
+        assert roles.admitted(after, "fake:m", tmp_path) == (
+            "the charter text has changed since it was examined"
+        )
+
+    def test_the_reason_names_no_cause_it_did_not_observe(self, tmp_path, charter):
+        """An ordinary edit and an attack are indistinguishable from here. A
+        phrase that picked one would be the failure CLAUDE.md's *No evidence,
+        no claim* exists to stop."""
+        self._pass(tmp_path, charter, digest="not-the-charters-digest")
+        reason = roles.admitted(charter, "fake:m", tmp_path)
+        assert "changed since it was examined" in reason
+        for guess in ("tamper", "attack", "malicious", "someone", "compromis"):
+            assert guess not in reason.lower()
+
+    def test_an_exam_that_did_not_record_what_it_examined_vouches_for_nothing(
+        self, tmp_path, charter
+    ):
+        """Fails closed. A record predating this check is exactly the record
+        that cannot answer the question."""
+        self._pass(tmp_path, charter, digest="")
+        assert roles.admitted(charter, "fake:m", tmp_path) == (
+            "the recorded exam did not record which charter text it examined"
+        )
+
+    def test_the_owners_exam_cases_are_bound_in_both_directions(
+        self, tmp_path, charter, monkeypatch
+    ):
+        """A case ADDED is exam material nothing has run; a case REMOVED is
+        exam material that no longer exists. Neither may ride the old pass."""
+        config = tmp_path / "config"
+        monkeypatch.setenv("AISH_CONFIG_HOME", str(config))
+        self._pass(tmp_path, charter)
+        assert roles.admitted(charter, "fake:m", tmp_path) is None
+
+        target = config / "roles" / charter.name
+        target.mkdir(parents=True)
+        cases = target / "cases.yaml"
+        cases.write_text(
+            json.dumps([{"name": "m", "input": {"results": "1. A"}, "expect": {"rows": 1}}])
+        )
+        assert roles.admitted(charter, "fake:m", tmp_path) == (
+            "the exam cases have changed since they were examined"
+        )
+
+        self._pass(tmp_path, charter)
+        assert roles.admitted(charter, "fake:m", tmp_path) is None
+        cases.unlink()
+        assert roles.admitted(charter, "fake:m", tmp_path) == (
+            "the exam cases have changed since they were examined"
+        )
+
+    def test_absent_owner_cases_are_a_recorded_value_not_an_empty_one(self, charter):
+        """"He has no mined cases" and "the file was deleted since the exam"
+        must not both be the empty string."""
+        assert roles.owner_cases_digest(charter) == roles.NO_OWNER_CASES
 
     def test_the_loader_never_reads_the_evidence_store(self):
         """Rejected in review and pinned here: a loader must never depend on a
@@ -793,6 +878,20 @@ class TestCharterWritePath:
             f"echo pwn > $(echo {pkg})/char*/x.md",
             f"cd {pkg}/char* && echo x > y.md",
             f"sed -i '' s/a/b/ {pkg}/char*/snippet-reader.md",
+            # round 4 — the coordinator's probe of the rebuilt fence. All of
+            # these already refused; they are here as the RECORD of what was
+            # checked, because a table that lists only the failures is how a
+            # class stays open while the prose says closed.
+            f"cat > {store}/x.md <<'EOF'",
+            f"sed -i.bak s/a/b/ {store}/x.md",
+            f"ln -sf /tmp/e {store}/x.md",
+            f"truncate -s 0 {store}/snippet-reader.md",
+            f"dd if=/tmp/e of={store}/x.md",
+            f"perl -pi -e s/a/b/ {store}/x.md",
+            f"tar -xf /tmp/e.tar -C {store}",
+            f"install /tmp/e {store}/x.md",
+            f"curl -o {store}/x.md https://e.example/x",
+            f"echo x > ~{Path.home().name}/{config_home.name}/roles/x.md",
             # round 3 — classes neither the fence nor the reviewer listed
             f"echo pwn > {pkg}/{{charters,x}}/snippet-reader.md",
             f"echo pwn > {pkg}/CHAR*/x.md",
@@ -819,6 +918,45 @@ class TestCharterWritePath:
                 if not agent._command_touches_a_charter(spelling)
             ]
             assert not leaked, f"reaches the approver as an ordinary card: {leaked}"
+        finally:
+            under_home.rmdir()
+
+    def test_the_ancestor_write_class_is_NOT_refused_and_the_digest_is_why(
+        self, tmp_path, monkeypatch
+    ):
+        """The shape that defeated the fourth fence, pinned as a KNOWN GAP.
+
+        None of these names a charter. They name an ANCESTOR directory and a
+        verb that writes recursively into it — a patch applier, an archive
+        extractor, a VCS restore — so there is nothing in the text for a path
+        fence to find. `git` in the config tree is also an ordinary command
+        there: that tree is a real repository (the knowledge auto-backup).
+
+        Asserting the gap rather than hiding it, because the control is
+        elsewhere: `TestAdmission` pins that a charter rewritten by any of these
+        stops being admitted, and `docs/roles.md` lists this class among the
+        residuals. If a later fence closes these, this test should be inverted
+        deliberately — not deleted quietly.
+        """
+        under_home = Path.home() / f".aish-test-{tmp_path.name}"
+        under_home.mkdir()
+        try:
+            monkeypatch.setenv("AISH_CONFIG_HOME", str(under_home))
+            agent, _ = make_agent([model_says("ok")])
+            cfg = f"~/{under_home.name}"
+            for command in (
+                f"git -C {cfg} apply /tmp/evil.patch",
+                f"cd {cfg} && git apply /tmp/evil.patch",
+                f"git -C {cfg} checkout -- roles/",
+                f"git -C {cfg} restore roles/",
+                f"git -C {cfg} stash pop",
+                f"git -C {cfg} reset --hard HEAD~1",
+                f"patch -p1 -d {cfg} < /tmp/evil.patch",
+                f"unzip -o /tmp/e.zip -d {cfg}",
+            ):
+                assert not agent._command_touches_a_charter(command), (
+                    f"{command!r} now refuses — good, but invert this test on purpose"
+                )
         finally:
             under_home.rmdir()
 
@@ -906,6 +1044,8 @@ class TestTheSnippetReaderInPlace:
             roles.Admission(
                 charter.name, charter.version, "gemini:gemini-3.5-flash",
                 "2026-08-27", passed=8, total=8,
+                charter_digest=charter.digest,
+                cases_digest=roles.owner_cases_digest(charter),
             ),
         )
         chat = FakeRoleChat([reply]) if reply is not None else None
@@ -1002,6 +1142,8 @@ class TestTheSnippetReaderInPlace:
             roles.Admission(
                 charter.name, charter.version, "gemini:gemini-3.5-flash",
                 "2026-08-27", passed=8, total=8,
+                charter_digest=charter.digest,
+                cases_digest=roles.owner_cases_digest(charter),
             ),
         )
         chat = FakeRoleChat([answer([(1, "a", "no"), (2, "b", "no")])])
