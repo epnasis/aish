@@ -1393,9 +1393,23 @@ SEARCH_RESULTS_NOTE = UNTRUSTED_NOTE + (
 NEXT_STEP_LINE = "[call read_url on the most promising URL to read the page]"
 
 
+def _flat(text: str) -> str:
+    """One line, always.
+
+    `parse_results` treats any column-0 `N.` line as the start of a new row, so
+    a newline inside a snippet could fabricate a row that the index never
+    returned — a title and a link of the writer's choosing, arriving as one of
+    aish's own numbered results. Both index paths already join their fields
+    into a single line, so this changes nothing today; it is here so that the
+    property is enforced at the one function that renders a row rather than
+    depending on two callers upstream continuing to behave.
+    """
+    return " ".join((text or "").split())
+
+
 def _numbered(rows: list[tuple[str, str, str]]) -> str:
     lines = [
-        f"{i}. {title or '(untitled)'}\n   {url}\n   {snippet}"
+        f"{i}. {_flat(title) or '(untitled)'}\n   {_flat(url)}\n   {_flat(snippet)}"
         for i, (title, url, snippet) in enumerate(rows, 1)
     ]
     lines.append(NEXT_STEP_LINE)

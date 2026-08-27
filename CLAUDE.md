@@ -126,7 +126,9 @@ Model execution is **stateless**: every `run_command` runs in the project direct
   declared inputs, and a code-validated typed answer. Isolation is structural — a role
   composes its own two messages and calls the backend seam, so no `Agent` exists for
   history or tools to leak from. The first one reads search snippets so their sentences
-  never reach the model that decides what to do next. → `docs/roles.md`
+  do not reach the model that decides what to do next — WHEN it is admitted; unadmitted,
+  offline, or on a backend with no stateless seam, the snippets arrive exactly as before
+  and the record says so. → `docs/roles.md`
 - **`rule_compiler.py`** — the owner's plain language → rule field values (#205). Isolated because it is more accurate; safe because code validates it and the owner approves it. The acting model never learns the grammar. → `docs/rules-engine.md`
 - **`tool_plugins.py`** — droppable `TOOL.md` plugin tools, indistinguishable from native ones to the model and gated by the same `_dispatch`. → `docs/tools-layer.md`
 - **`secrets.py`** — local secret store backed by the macOS login Keychain; structurally un-committable. → `docs/tools-layer.md`

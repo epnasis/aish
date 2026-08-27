@@ -223,12 +223,32 @@ So the accounting, measured over the same 4167 parseable result sets:
   p90 1257, of text written by whoever wanted to rank.
 - **What replaces it:** at most 160 characters per row, written by a context with no tools
   and no knowledge of the task — plus the same titles and addresses as before.
-- **What is unchanged:** titles and addresses. Attacker-written, still there, now capped
-  and stripped.
+- **What is unchanged:** titles and addresses. Attacker-written, still there, now capped,
+  stripped, and with `[aish: …]` broken to `(aish: …)` so a title cannot arrive wearing
+  aish's own framing voice (`_not_aishs_voice`).
 
 That is the honest claim. It is not "the acting model no longer sees attacker text"; it is
 "the paragraph of attacker text is gone and what remains is short, capped, and structurally
 required."
+
+> **And it is conditional. The reader is OFF unless it was admitted.** On a fresh install
+> nothing is admitted, so nothing above happens. It is also off on `claude-max` (no
+> stateless seam), off on a local model (the charter declares `cloud-fast`), off whenever
+> the key fails or the provider is down, and off when two answers in a row fail validation.
+> In every one of those cases the snippet prose reaches the acting model exactly as it did
+> before this shipped, behind exactly the old banner. That is the correct degradation —
+> #295 P3 requires the worst case to be the status quo — but it means this is an
+> improvement that is *sometimes* in force, not a property of the system. The record says
+> which, on every single search; the counters are what make a chronic run of skips visible.
+
+Two defences on the copied half, both cheap and both found by review rather than by design.
+A title may not arrive wearing aish's own voice: `_not_aishs_voice` rewrites `[aish:` to
+`(aish:` in a copied title or address, keeping the words so the model can still see what the
+title said while breaking the marker. And `web._flat` guarantees a rendered row is exactly
+three lines, so a newline inside a snippet cannot fabricate a numbered result the index never
+returned — both index paths already join their fields into one line, so this enforces the
+property at the one function that renders a row rather than trusting two callers upstream.
+`TestWhatACopiedTitleMaySay`, `TestARowIsAlwaysThreeLines`.
 
 `agent.READ_RESULTS_NOTE` says exactly this to the model, including that the titles are the
 index's own words. `agent.READ_RESULTS_FLAGGED` and `agent.READ_RESULTS_UNCLEAR` report the
@@ -419,7 +439,7 @@ loader must never depend on a store whose contract is erasure.
 
 ---
 
-## The fence — the model has no write path to its own oversight
+## The fence — closing the model's write path to its own oversight
 
 `Agent._charter_dirs` names both live locations: the package's `charters/`, and
 `<config home>/roles/`. The second is there because it sits inside the tree `create_skill`
@@ -427,49 +447,91 @@ and `remember` already write to — and exam cases are not charters, but a model
 write the exam can make a role pass one it should fail, which is R5 broken one level down
 instead of head-on.
 
-Two doors, both closed, neither with a yes button:
+**Read this section's title carefully. Two doors are closed to the classes listed below;
+neither is closed to everything, and the residuals are named at the end.**
 
-- **The file-tool path.** `Agent._is_charter`, asked through `files.contains` (the one
-  containment function) so a symlink from a session root answers the same as the store's own
-  path — and asked at all, rather than left to the workspace boundary, because a session
-  rooted at the aish checkout would put the package's charters back inside it.
-  `CHARTER_NOT_WRITABLE`.
-- **The shell path.** `Agent._command_touches_a_charter`, checked **before** `self.approve`
-  so the approver is never offered the command. Without it, `echo … > <charters>/x.md` falls
-  through to an ordinary out-of-root approval card — the card D2's own argument declares
-  fatal, since the owner has said he does not read them. The precedent is
-  `approval._segment_deny_reason`'s Keychain rule, which refuses a command by what it names.
-  `CHARTER_COMMAND_REFUSED`.
+- **The file-tool path — this one is exact.** `Agent._is_charter`, asked through
+  `files.contains` (the one containment function) so a symlink from a session root answers
+  the same as the store's own path — and asked at all, rather than left to the workspace
+  boundary, because a session rooted at the aish checkout would put the package's charters
+  back inside it. `write_file` and `edit_file` take a path, and a path is a thing that can
+  be resolved. `CHARTER_NOT_WRITABLE`.
+- **The shell path — this one is a best effort with a known floor.**
+  `Agent._command_touches_a_charter`, checked **before** `self.approve` so the approver is
+  never offered the command. Without it, a shell write to a charter falls through to an
+  ordinary out-of-root approval card, which is the card D2's own argument declares fatal.
 
-  **It resolves; it does not string-match, and that distinction was found by probing rather
-  than by reading.** The first version compared the store's absolute path as a substring, and
-  three ordinary spellings walked through it: `$HOME/…`, a relative path reached by `cd`, and
-  a path inside a quoted `python3 -c` program. Now every path-shaped run in the text
-  (`_PATHISH`) has `~` and `$HOME` expanded (`_expand_home`), any shell assignment prefix
-  stripped (`_after_assignment`), and is asked through `files.contains` — so a symlink from a
-  session root answers the same as the store's own path. The literal substring net is kept
-  **alongside** it, because `DIR=<charters>; echo x > $DIR/x.md` puts the directory in a token
-  that resolves to nothing. Both spellings and the ordinary-command negatives are pinned by
-  test.
+### Why the shell half cannot be exact, and what it does instead
 
-**The asymmetry is deliberate.** `read_file` on a charter is *not* refused: reading one
-authors nothing, and aish answers questions about itself. A shell command naming the
-directory is refused whichever it would have done, because deciding read-versus-write from
-command text is precisely the judgement a structural fence must not have to make. The
-refusal says so.
+A shell command is not a path. `bash` expands globs, braces, variables, `~user` and command
+substitution at exec time, and none of that exists yet when this code has to decide. Three
+rounds of reasoning about that produced three wrong fences here, each corrected only by
+**probing** it:
 
-**The other two doors need no code, and that is checked rather than asserted.**
-`create_tool` and `import_skill` write into the config tree, but neither takes a path —
-both take a slug, and `tool_plugins.NAME_RE` / `skills.NAME_RE` admit no separator. A test
-pins it, because "it cannot get there" is exactly the claim that rots.
+| round | approach | what walked through |
+|---|---|---|
+| 1 | the store's absolute path as a substring | `$HOME/…`, a relative path reached by `cd`, a path inside `python3 -c` |
+| 2 | resolve every path-shaped token | every glob form (`char*`, `?harters`, `char[t]ers`), `$(…)` spanning a tokeniser boundary, `~user`, `$AISH_CONFIG_HOME` |
+| 3 | fnmatch over expansion patterns | brace expansion, an uppercase glob on a case-insensitive filesystem, a glob relative to a `cd` |
 
-**Scope, so the words do not outrun the code.** This binds **runtime** writes to the **live**
-locations. In a development session on this repository, charters are edited as ordinary
-reviewed source like any other file here — and `charters/` inside a source checkout *is* a
-live location, so aish will refuse to edit its own charters there too. That is correct and
-intended, not a gap. `TestCharterWritePath`.
+So the shipped version is **four nets, each of which fails towards refusal**, and the
+generalisation is written down rather than the three fixes:
 
----
+1. **Literal** — the store's own path, or its `~`-abbreviated spelling, anywhere in the
+   text. Catches `DIR=<charters>; … $DIR/x`, where the directory sits in a token that
+   resolves to nothing.
+2. **Resolved** — every path-shaped token, `~/` and `$HOME` expanded, through
+   `files.contains`.
+3. **Expansion patterns** — the whole command is masked first (`_SUBSTITUTION` → `*`, so a
+   substitution spanning a tokeniser boundary stays one token), then each dynamic token's
+   directory chain is walked and `fnmatch`ed against the store, **case-insensitively**
+   (the owner's filesystem is), against every base a `cd` could have made it relative to
+   (`_cd_bases`), in both relative and absolute readings. A pattern naming nothing at all
+   (`$PATH` → `*`) is skipped, or `echo ${PATH}` would refuse.
+4. **The coarse floor** — if any part of the command is something the shell will rewrite
+   AND the text names one of these stores by its own distinctive word (`_CHARTER_WORDS`:
+   `charters`, `roles`, `AISH_CONFIG_HOME`), that alone refuses. This net exists because
+   nets 1–3 are reasoning about shell expansion and that reasoning has been wrong three
+   times.
+
+`_writes` switches nets 3 and 4 between two strictnesses. A command that could put bytes
+somewhere gets the looser walk, which also matches a prefix ending in a bare wildcard; a
+read does not, because the same widening refuses `ls aish/*`, and a fence that fires on
+ordinary work is one somebody removes rather than fixes. Being on `_WRITE_VERBS` only ever
+makes the fence refuse more; it is not a safety claim about the verbs absent from it.
+
+**The asymmetry between read and write is deliberate.** `read_file` on a charter is *not*
+refused: reading one authors nothing, and aish answers questions about itself. A shell
+command naming the directory is refused whichever it would have done, because deciding
+read-versus-write from command text is precisely the judgement a structural fence must not
+have to make.
+
+### The residuals, named
+
+- **A path assembled entirely outside the command text.** `export D=<charters>` in one call,
+  `echo pwn > $D/x` in the next: net 1 sees no literal, net 3 masks `$D` to a pattern naming
+  nothing, and net 4 sees no distinctive word. Every command in a session is separate here,
+  so nothing carries the value forward — but nothing rules it out either.
+- **A plugin tool's wrapper.** `tool_plugins` executes a script, and a mutating tool's gate
+  is an approval **card**. A wrapper that writes a charter is therefore behind exactly the
+  control D2 rejects. Not fixed: fencing it needs a filesystem sandbox around wrapper
+  execution, which is its own piece of work.
+- **`aish` itself is one directory away.** `<pkg>/charters` is fenced; `<pkg>/roles.py` — the
+  code that reads charters — is not. The fence protects the governance *document*, not the
+  interpreter. A model editing aish's own source is an approval card like any other write.
+- **The exactness is per-class, not general.** The 33 spellings pinned in
+  `TestCharterWritePath` are the ones known to have leaked. A class nobody has thought of
+  is refused only if net 4 catches it.
+
+`create_tool` and `import_skill` need no fence of their own, and that is checked rather than
+asserted: neither takes a path, both take a slug, and `tool_plugins.NAME_RE` /
+`skills.NAME_RE` admit no separator. A test pins it, because "it cannot get there" is
+exactly the claim that rots.
+
+**Scope.** This binds **runtime** writes to the **live** locations. In a development session
+on this repository, charters are edited as ordinary reviewed source — and `charters/` inside
+a source checkout *is* a live location, so aish refuses to edit its own charters there too.
+That is intended. `TestCharterWritePath`.
 
 ## Cost and latency — real, and measured where it could be
 
