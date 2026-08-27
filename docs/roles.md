@@ -70,6 +70,25 @@ prose below is the task, addressed to the model.
 `TestCharterLoading` pins one refusal per rule. Each of them is a refusal rather than a
 default because a silently-defaulted governance field is a field nobody chose.
 
+**Where the header ends is not this file's decision.** `skills.split_frontmatter` is the ONE
+reading for every artifact class in the md+frontmatter family (#209), and a charter uses it.
+It had its own regex until 2026-08-27, which is a fifth reading waiting to disagree with the
+writer that feeds it — and a charter is the one artifact where a header misread is a security
+question, because the header is what declares tools, trust labels and the output shape.
+
+**A header that says a thing twice is refused** (#326's law, one artifact over). PyYAML
+silently takes the LAST value — `yaml.safe_load("a: 1\na: 2")` is `{"a": 2}` — so a charter
+declaring `tools:` twice would load as one of the two with nobody told which.
+
+The mechanism is a duplicate-refusing loader (`_NoDuplicateKeys`) rather than the family's
+shared `skills.frontmatter_duplicates`, and the difference is the **artifact**, not the law.
+That detector is the answer for a FLAT, line-format header and it is a line parser: run over
+this charter's nested header it returns `['- name', 'type']`, because a `name:` once per
+declared field is not a duplicate — and it cannot see inside `output:` at all, which is
+exactly where the caps that bound what leaves a role are declared. Same law, stricter
+mechanism. The loader reads the golden pairs and the owner's cases file too, so the exam
+cannot silently test one of two `expect:` blocks. `TestCharterLoading`.
+
 ### The output shape
 
 `shape: rows` and a field list. Three field types, and every one of them has a customer in

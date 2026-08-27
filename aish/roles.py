@@ -55,7 +55,7 @@ from typing import Any
 
 import yaml
 
-from . import evidence, paths, ratelimit
+from . import evidence, paths, ratelimit, skills
 
 CHARTERS_DIR = Path(__file__).resolve().parent / "charters"
 
@@ -145,6 +145,52 @@ class Shape:
 
     def field(self, name: str) -> Field | None:
         return next((f for f in self.fields if f.name == name), None)
+
+
+class _NoDuplicateKeys(yaml.SafeLoader):
+    """A YAML loader that REFUSES a mapping declaring a key twice.
+
+    PyYAML silently takes the LAST value (`yaml.safe_load("a: 1\na: 2")` is
+    `{"a": 2}`), which is #326's hole exactly: a manifest that says a thing
+    twice is read as one of the two, and nobody is told which. For a charter
+    that key may be `tools:`, a trust label, or an output cap — the fields that
+    decide what a role may do and what may leave it.
+
+    A LOADER rather than `skills.frontmatter_duplicates`, and the difference is
+    the artifact rather than the law. That detector is the family's one answer
+    for a FLAT, line-format header, and it is a line parser: run over this
+    charter's nested header it returns `['- name', 'type']`, because a `name:`
+    once per declared field is not a duplicate — and it cannot see inside
+    `output:` at all, which is where the caps live. Same law, stricter
+    mechanism, because the header is nested. `TestCharterLoading`.
+    """
+
+
+def _refuse_duplicates(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise CharterError(
+                f"the header declares {key!r} more than once — a charter that "
+                "says a thing twice is refused, never read as one of the two"
+            )
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_NoDuplicateKeys.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    lambda loader, node: _refuse_duplicates(loader, node),
+)
+
+
+def _load_yaml(text: str, where: str) -> Any:
+    """`text` as YAML, with a duplicate key refused rather than resolved."""
+    try:
+        return yaml.load(text, Loader=_NoDuplicateKeys)
+    except yaml.YAMLError as exc:
+        raise CharterError(f"{where} is not valid YAML: {exc}") from exc
 
 
 def _yaml_word(value: Any, where: str) -> str:
@@ -280,7 +326,6 @@ class Charter:
         return next((i for i in self.inputs if i.name == name), None)
 
 
-_FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?(.*)\Z", re.S)
 _CASE_BLOCK = re.compile(r"^```yaml[ \t]*\r?\n(.*?)^```[ \t]*$", re.M | re.S)
 _CASES_HEADING = re.compile(r"^##+\s*Golden pairs\s*$", re.M | re.I)
 
@@ -292,16 +337,18 @@ def parse_charter(text: str, path: Path | None = None) -> Charter:
     idiom three times over (skills, rules, plugin tools) and inheriting it
     costs nothing where a fourth convention would cost a reader.
     """
-    match = _FRONTMATTER.match(text)
-    if not match:
+    # `skills.split_frontmatter` is the ONE reading of where a markdown header
+    # ends, shared by every artifact class in this family (#209). A charter had
+    # its own regex until 2026-08-27; a second reading that disagrees with the
+    # writer feeding it is the bug that law exists to prevent, and a charter is
+    # the one artifact where a header misread is a security question — the
+    # header is what declares tools, trust labels and the output shape.
+    front, body = skills.split_frontmatter(text)
+    if not front:
         raise CharterError("no YAML frontmatter")
-    try:
-        head = yaml.safe_load(match.group(1)) or {}
-    except yaml.YAMLError as exc:
-        raise CharterError(f"frontmatter is not valid YAML: {exc}") from exc
+    head = _load_yaml(front, "frontmatter") or {}
     if not isinstance(head, dict):
         raise CharterError("frontmatter is not a mapping")
-    body = match.group(2)
 
     name = str(head.get("name") or "").strip()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
@@ -388,7 +435,7 @@ def _parse_cases(body: str, input_names: set[str], shape: Shape, source: str = "
     if len(parts) < 2:
         return ()
     return tuple(
-        _case(yaml.safe_load(block), input_names, shape, source)
+        _case(_load_yaml(block, "a golden pair"), input_names, shape, source)
         for block in _CASE_BLOCK.findall(parts[1])
     )
 
@@ -490,7 +537,7 @@ def owner_cases(charter: Charter) -> tuple[Case, ...]:
     names = {i.name for i in charter.inputs}
     return tuple(
         _case(raw, names, charter.output, "owner")
-        for raw in (yaml.safe_load(text) or ())
+        for raw in (_load_yaml(text, "the owner's cases file") or ())
     )
 
 

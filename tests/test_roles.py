@@ -211,6 +211,71 @@ class TestCharterLoading:
         with pytest.raises(roles.CharterError, match="outside the declared vocabulary"):
             roles.parse_charter(charter_text(_body=body))
 
+    def test_it_uses_the_one_reading_of_where_a_header_ends(self):
+        """#209's law: exactly one answer to "where does the header end", for
+        every artifact class in the md+frontmatter family. A charter had its own
+        regex until 2026-08-27, which is a fifth reading waiting to disagree
+        with the writer that feeds it — and a charter is the one artifact where
+        a header misread is a security question, because the header declares
+        tools, trust labels and the output shape."""
+        source = Path(roles.__file__).read_text()
+        assert "split_frontmatter" in source
+        for naive in ('.split("---"', ".split('---'", 'r"\\A---', "r'\\A---"):
+            assert naive not in source, f"a second reading: {naive}"
+
+    def test_a_header_that_says_a_thing_twice_is_refused(self):
+        """#326's law, one artifact over. PyYAML silently takes the LAST value
+        (`yaml.safe_load("a: 1\\na: 2")` is `{"a": 2}`), so without this a
+        charter declaring `tools:` twice loads as one of the two and nobody is
+        told which."""
+        base = (roles.CHARTERS_DIR / "snippet-reader.md").read_text()
+        for edit in (
+            ("tools: []", "tools: []\ntools: [run_command]"),
+            ("degradation: skip", "degradation: skip\ndegradation: hold"),
+        ):
+            with pytest.raises(roles.CharterError, match="more than once"):
+                roles.parse_charter(base.replace(*edit, 1))
+
+    def test_a_duplicate_INSIDE_the_header_is_refused_too(self):
+        """The reason this is a strict loader rather than
+        `skills.frontmatter_duplicates`: that detector is the family's answer
+        for a FLAT line-format header and is a line parser. On this charter's
+        nested header it returns `['- name', 'type']` — a `name:` once per
+        declared field is not a duplicate — and it cannot see inside `output:`
+        at all, which is where the caps that bound what leaves a role live.
+        Same law, stricter mechanism, because the header is nested."""
+        from aish import skills as skills_mod
+
+        base = (roles.CHARTERS_DIR / "snippet-reader.md").read_text()
+        front, _ = skills_mod.split_frontmatter(base)
+        assert skills_mod.frontmatter_duplicates(front) == ["- name", "type"], (
+            "the line detector false-positives here; that is why it is not used"
+        )
+        for edit in (
+            ("      max_chars: 160", "      max_chars: 160\n      max_chars: 99999"),
+            ("    trust: untrusted", "    trust: untrusted\n    trust: trusted"),
+        ):
+            with pytest.raises(roles.CharterError, match="more than once"):
+                roles.parse_charter(base.replace(*edit, 1))
+
+    def test_a_golden_pair_that_says_a_thing_twice_is_refused(self):
+        """The exam is read with the same loader as the header. A case
+        declaring `expect:` twice would otherwise silently test one of them."""
+        body = (
+            "\n## Golden pairs\n\n"
+            "```yaml\n"
+            "name: twice\n"
+            "input:\n"
+            '  results: "1. A"\n'
+            "expect:\n"
+            "  rows: 1\n"
+            "expect:\n"
+            "  rows: 2\n"
+            "```\n"
+        )
+        with pytest.raises(roles.CharterError, match="more than once"):
+            roles.parse_charter(charter_text(_body=body))
+
     def test_no_frontmatter_does_not_load(self):
         with pytest.raises(roles.CharterError, match="frontmatter"):
             roles.parse_charter("just prose")
