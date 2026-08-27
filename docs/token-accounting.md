@@ -2,9 +2,10 @@
 
 What a turn actually cost, and what filled the context that made it cost that. Issue #262.
 
-**Built:** the recording half, and `aish usage`. The per-turn contributor section inside
-`aish explain` is not built yet; the decisions that constrain it are below so it is not
-designed twice.
+**Built:** the recording half, `aish usage`, and — since #330 — the per-turn contributor
+section inside `aish explain` and the trend inside `aish usage`. The decisions that
+constrained them are below, unchanged; the last two sections say what was built on top and
+what the records still cannot support.
 
 ## The unit problem — why this was urgent
 
@@ -148,3 +149,130 @@ recorded evidence alone. The governor needs **pre-call estimates**; the report n
 The governor is therefore a **writer**: its records go to the session log, and the report
 reads them like every other record. One-way flow, the record contract the only shared
 artifact.
+
+## What filled THIS call — `aish explain <chat> <turn>` (#330)
+
+`aish usage --chat` answers *what filled this chat*, over a whole session, weighted by
+residency. It cannot answer the question #330 actually needs, which is per **call**:
+*a realistic local window is ~60,000 tokens — would this step have fitted, and what was
+using the room?* `explain._context_cost` is that answer, and it is assembled from four
+recorded things and nothing else:
+
+| what | recorded where |
+|---|---|
+| the text of every message, and **which call it was first in front of** | `message` records: `content` + the `model_call` stamp |
+| the system text's size, per part | `brief.system[].chars` |
+| the tool menu's size | `brief.tools.digest` → the evidence store (the bytes are not in the log) |
+| what a trim removed, and how much | `trim.stubbed[]` + `bytes_before - bytes_after` |
+| what the provider billed | `reasoning.usage` / `tokens` |
+
+**The stamp is what makes this possible, and its absence is a real answer.** Without
+`model_call` on a message, membership in a call's context is positional — inferred from the
+order lines happen to sit in the file — and a breakdown built on that would look like
+attribution while being arithmetic on an assumption. Such a log reports nothing here.
+Today that is most of the corpus: **41 of 786 logs** carry the stamp on 2026-08-27.
+
+### The reconstruction is checked against a number the agent wrote down
+
+This reader claims to know what was in front of each model call. That is a claim about the
+agent's own message list, so it is not left as plausible arithmetic. Two independently
+recorded totals are `sum(len(content))` over that live list — `trim.bytes_before` and
+`model_error.sent_chars` — and the reconstruction has to land on them. Across the owner's
+corpus it lands **exactly** on the clean cases and within **0–5.2%** elsewhere, with the
+message COUNT matching exactly; the one log that diverged badly is the one whose trims
+predate `stubbed[]`, which is the case the reader now reports rather than guesses through.
+`TestTheContextBreakdownIsCheckedAgainstTheRealLoop` pins it against the real loop by
+recording the char total the backend was handed at call time, and
+`TestWhatFilledEachCall` pins the rest of the assembly — the stamp's absence, the three
+states on every part, the units, and `test_the_reconstruction_matches_a_total_the_agent_measured_itself` against `sent_chars`.
+
+Two things that reconstruction taught, both now enforced in `_apply_trim`:
+
+- **The recorded total is the authority and caps the whole thing.** Applying `keep_chars`
+  per stub without it read `delivered_images` — which replaces a short `[aish: …]` note
+  with a shorter constant and leaves a picture behind — as 200-char stubbing of whole user
+  messages, and threw the reconstruction out by **31%** on a real log.
+- **A trim that named nothing is reported, never attributed.** `eager_stub` predates
+  `stubbed[]` in 282 of 322 recorded instances. Those say how much text went and not what
+  it came from, so the amount is carried as `unattributed_chars` and the breakdown is
+  stated to be an upper bound by exactly that much.
+
+### The unit rule, at the reporting surface
+
+Parts carry **chars** — measured. The call carries the provider's **tokens** — reported.
+The only bridge is `chars_per_token`: this call's own accounted chars over its own reported
+input, so **both halves are recorded numbers** and it is a measurement of that call rather
+than a constant applied to it. That matters, because the ratio is not a constant: measured
+across the corpus it spreads from **1.30 to 5.26** (median 3.16, and 4.09 for the fixed
+floor's English-plus-JSON-schema). A fixed divisor would have attributed that spread to
+missing content.
+
+So there is deliberately **no per-part token figure and no `ratelimit.estimate_tokens`
+import**. The estimator's output would be an estimate in the provider's own unit, inviting
+a reader to sum the parts and contradict `tokens[0]`; importing the governor would also put
+today's divisor in front of a log written under another one, and hand the reader a module
+that reports how aish behaves NOW (§0). The shares ARE the estimate, and they say so.
+
+**A part nothing sized is named, not zeroed.** No brief in force → *the system text* is
+`not_recorded` (a turn with no system text has never happened). Menu bytes gone → `purged`.
+Images in the context → their own row with `chars: 0` and the state `unreadable`, because
+they are char-invisible and token-huge, so an unaccounted call shows a visible reason
+rather than a silent gap. Any of those present suppresses `chars_per_token` entirely.
+
+### What it will not say, and why
+
+**Whether a role saved context.** #330 asks it directly, and the log cannot answer it. The
+`role` record carries `input.chars` (what the role read) and its structured `output` (its
+own answer), but what enters the ACTING context is the block that answer is *rendered*
+into — nothing records that size, and no field joins a role record to the tool message that
+carried it. The two numbers are therefore named `input_chars` and `answer_chars` and the
+comparison is left unmade; a row built on `answer_chars` would put the answer's own size
+where a reader would read the rendered block's.
+
+> **Proposed, additive, not built here:** a **rendered_chars** field on the `role` record — the
+> length of the text handed back into the acting turn, measured at the seam that builds it.
+> One integer, and it turns "does this role return less than it consumes" from a
+> hand-diff of two message records into a subtraction. The 97% figure in #330 was obtained
+> by hand; the fields to reproduce it do not exist.
+
+**What the panel draws.** `dossier()` carries `context_cost` and the terminal renderer
+draws it; the web panel does not yet. Under the one-assembly rule (`docs/diagnostics.md`)
+the data is already there for it — what is owed is the DOM.
+
+## The trend lives in `aish usage`, not in `explain`
+
+`aish usage [--window N]` (default 60,000, from #330) adds one table per period, built from
+**the same call grouping the tables above it use**: calls, how many exceeded the window,
+the median and p95 input, and the median **fixed floor** of the chats those calls belong
+to. Bucketing sessions by their own start date instead put 745 calls under a day the row
+directly above called 490 — two tables, one period label, two answers, and nothing on
+screen to say they were counting different things.
+
+It is here and not in `explain` because `explain` reads one turn out of one file and a
+trend is a scan across sessions, which is what this module already is. Building it in both
+would give two places to read the same fact, and they would disagree the first time one
+changed. `TestTheTrendLivesInOnePlace`.
+
+The window is a **default, not a fact about any backend** — a number invented in the
+reporting code would otherwise be reported as though the log said it.
+
+### What the fixed floor turned out to be
+
+Measured across the owner's stamped logs, at the first call of the first turn, where the
+history is a few dozen characters and the reported input is therefore almost purely the
+fixed cost:
+
+```
+sys 51,221 chars + menu 55,082 chars = 106,303 chars ≈ 25,990 reported tokens
+```
+
+Reproducible to ±0.1% across twelve consecutive sessions. **That is 43% of a 60,000-token
+window, paid on every call, before the task says a word** — and it is the single biggest
+thing #330 has to work on. Residency-weighted across every recorded call, the standing
+prompt and the tool menu together are **34%** of every character aish has ever resent;
+history carried in from EARLIER TURNS of the same chat is **57%**, and the turn's own
+messages only 8.7%. Within history, the model's own assistant messages lead at 33.9%, then
+`run_command` 18.2%, `read_url` 14.6%, `browse_act` 7.7%, `browse` 6.4%, `web_search` 4.3%.
+
+And **58.8% of all recorded model calls already exceed 60,000 input tokens**; on
+2026-08-23 it was 73%, with a median call of 196.6k.

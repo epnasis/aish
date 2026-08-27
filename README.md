@@ -325,10 +325,30 @@ To see where the tokens went:
 aish usage                      # last 7 days: spend by day and by model
 aish usage --week --all         # everything, by week
 aish usage --chat <name>        # what filled THAT chat's context, by tool
+aish usage --window 60000       # how many calls would not fit a local window
 ```
 
-It reports what was *recorded* — not a billing statement — and says plainly
-what it cannot know rather than showing a zero.
+Every period is also measured **against a window you name** — how many calls
+exceeded it, the median and the tail, and the **fixed floor**: the characters of
+standing prompt, task reminder and tool menu that every call pays before the
+task says a word.
+
+For one turn, `aish explain <chat> <turn>` now ends with **what it cost** — each
+model call's reported tokens, what was added to the context since the previous
+call, and, at the fullest call, what the context was actually made of:
+
+```
+at call 17, the fullest — the provider billed 66,147 input tokens for it
+  read_url        this turn      7    76,001 chars  35.1%
+  tool menu       every call    42    55,566 chars  25.7%
+  system text     every call     2    47,701 chars  22.0%
+  web_search      this turn      7    20,618 chars   9.5%
+```
+
+Both report what was *recorded* — not a billing statement. The parts are
+measured **characters**; the totals are the provider's reported **tokens**; the
+two are never added, and a part nothing sized reads as *not recorded* rather
+than as zero.
 
 ---
 
