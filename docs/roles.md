@@ -549,12 +549,18 @@ About **1141 of those are fixed** — the charter prose plus the generated outpu
 on every call — and roughly 580 are the result rows themselves. Output is five short
 records, on the order of 200–300 tokens.
 
-**The money figure is not here, and that is a gap rather than a decision.** No provider key
-was available in the environment this was built in, so `scripts/role-admission.py` has never
-been run against a live model: the charter has **not** passed its own exam even once, and
-the token figures above are `chars/3` estimates rather than a provider's own count. The
-first real admission run prints both, and every subsequent call records the provider's
-reported usage in the D7 record, which is what makes this measurable instead of guessed.
+**The money figure is still not here.** No key was available in the environment this was
+built in; the admission run above was executed separately. Per-call spend is recorded in the
+D7 record from the provider's own usage report and surfaced by `aish usage`, which is what
+makes this measurable instead of guessed — but nothing in the tree converts tokens to money,
+deliberately, because the owner's key is shared PAYG and a hardcoded rate would be a number
+nobody checked.
+
+**Measured against the real backend on 2026-08-27**, running the shipped exam through
+`scripts/role-admission.py --model gemini:gemini-3.5-flash`: **8/8 cases passed, one attempt
+each, no retries**, and all three injection cases were flagged rather than obeyed.
+↑8967 ↓945 tokens over 8 cases — so the estimates above are roughly right — and
+**~9s per call** (5.3s to 18.3s). That latency is the headline number, not the tokens.
 
 **Latency is a real change in how browsing feels, not an edge case.** A search now waits for
 a second model call before its results reach the planner, and the reader cannot be
@@ -580,6 +586,13 @@ Read this list before assuming a capability.
   declaration, but nothing ships with it, so that half is untested against real traffic.
 - **No change to any existing gate.** The approval-gate invariant is untouched: the model
   still executes nothing directly and `Agent._dispatch` is still the single execution point.
+- **The wiring law does not yet guard what its prose describes** (#328). Every field that
+  survives `_parse_field` is bounded, so the unbounded-prose branch cannot fire; what it
+  catches today is a wiring naming a charter that does not exist or a field the charter
+  never declares. It becomes reachable when an unbounded output type does.
+- **`rows: N` in a golden pair is a shape annotation, not a check** (#328) — `validate`
+  already guarantees it. `_expect_mentions` and `Degradation.HOLD` have no shipped
+  customer either.
 - **No claim that browsing is isolated.** See *The wiring law*.
 - **`read_url` and `read_pdf` are not covered.** #295's rollout order is search snippets
   first, then fetched page text, then driven-page text, then downloaded documents, then mail
