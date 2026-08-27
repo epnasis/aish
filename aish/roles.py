@@ -559,17 +559,19 @@ class Wiring:
     at: str  # where in the code, for a reader who has to find it
 
 
-# The one wiring v1 has. `about` and `instructs_the_reader` are the only fields the
-# reader authors that reach the acting model; `row` is an index code resolves
-# against the input itself.
-WIRINGS: tuple[Wiring, ...] = (
-    Wiring(
-        charter="snippet-reader",
-        into="acting",
-        carries=("n", "about", "instructs_the_reader"),
-        at="agent.Agent._searched",
-    ),
-)
+# **No wiring ships today, and that is a measurement rather than an oversight.**
+# v1's one edge ran every `web_search` through the snippet reader; a controlled
+# experiment retired it, and rendering a result as title and address alone
+# delivers the property the reader was justified by, for free (`docs/roles.md`,
+# *Title and address only*). The charter stays, admitted and examined, with no
+# caller.
+#
+# An empty tuple rather than an edge naming a function that no longer exists: a
+# wiring is a claim that a path is live, and a claim wider than the code is the
+# defect #328 is about. `check_wirings` runs over it unchanged, so the law is
+# in place before the wirings that need it — which was always D5's argument for
+# shipping it first.
+WIRINGS: tuple[Wiring, ...] = ()
 
 ACTING = "acting"
 
@@ -580,12 +582,20 @@ def check_wirings(
     """The wiring law: untrusted-input prose may not reach a node that proposes
     actions.
 
-    With one node the check is nearly free, which is exactly why it ships now —
-    the point is that it exists before the wirings that need it. What it
-    forbids is an UNBOUNDED string field crossing from a node with any
-    untrusted input into an acting context. Bounded, capped, stripped strings
-    still cross, and the honest claim is that they are a far worse injection
-    carrier than a page, not that they are none.
+    What it forbids is an UNBOUNDED string field crossing from a node with any
+    untrusted input into an acting context.
+
+    **What it can actually refuse today is narrower than that sentence, and
+    saying so is #328.** `_parse_field` refuses to load a `text` field without
+    a positive `max_chars`, so every field that survives parsing is bounded by
+    construction and the unbounded branch below cannot fire on anything a
+    charter FILE could produce. What it catches in practice is a wiring naming
+    a charter that does not exist, or carrying a field the charter never
+    declares — a typo guard, which is worth having and is not a regression
+    guard. The unbounded branch stays because it becomes reachable the day an
+    unbounded output type exists (an owner-facing `prose` field is the obvious
+    first one), and a law added after the type it governs is a law added after
+    the incident.
     """
     for wiring in wirings:
         charter = charters.get(wiring.charter)

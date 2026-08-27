@@ -74,7 +74,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `aish/static/` (`app.js`, `style.css`, `sw.js`) | `docs/web-frontend.md` |
 | `skills.py`, `embeddings.py`, `curate.py`, `skill_import.py` | `docs/knowledge-layer.md` |
 | `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
-| `roles.py`, `aish/charters/`, `_searched`, `_read_snippets`, anything a role reads or a charter declares | `docs/roles.md` |
+| `roles.py`, `aish/charters/`, `web_search`'s rendering, anything a role reads or a charter declares | `docs/roles.md` |
 | `tool_plugins.py`, `secrets.py` | `docs/tools-layer.md` |
 | `explain.py`, `evidence.py`, the `brief` record | `docs/diagnostics.md` |
 | `ratelimit.py`, `_chat_turn`'s retry loop, anything that retries a model call | `docs/rate-limits.md` |
@@ -125,12 +125,11 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`roles.py`** — cheaply appointed, isolated, narrow-duty helpers (#297): a charter, its
   declared inputs, and a code-validated typed answer. Isolation is structural — a role
   composes its own two messages and calls the backend seam, so no `Agent` exists for
-  history or tools to leak from. The first one reads search snippets so their sentences
-  do not reach the model that decides what to do next — WHEN it is admitted; unadmitted,
-  offline, or on a backend with no stateless seam, the snippets arrive exactly as before
-  and the record says so. Admission is bound to the charter's CONTENT DIGEST, which is what
-  keeps the model out of its own oversight; the command fence is early refusal and is
-  known-incomplete. → `docs/roles.md`
+  history or tools to leak from. **Nothing calls a role today:** its one customer
+  read search snippets, a controlled experiment showed the snippets were better simply not
+  collected, and the wiring went while the framework stayed. Admission is bound to the
+  charter's CONTENT DIGEST, which is what keeps the model out of its own oversight; the
+  command fence is early refusal and is known-incomplete. → `docs/roles.md`
 - **`rule_compiler.py`** — the owner's plain language → rule field values (#205). Isolated because it is more accurate; safe because code validates it and the owner approves it. The acting model never learns the grammar. → `docs/rules-engine.md`
 - **`tool_plugins.py`** — droppable `TOOL.md` plugin tools, indistinguishable from native ones to the model and gated by the same `_dispatch`. → `docs/tools-layer.md`
 - **`secrets.py`** — local secret store backed by the macOS login Keychain; structurally un-committable. → `docs/tools-layer.md`

@@ -1,13 +1,28 @@
 # Roles — cheaply appointed, isolated, narrow-duty helpers
 
-`roles.py`, `aish/charters/`, `scripts/role-admission.py`, `scripts/role-mine-cases.py`,
-and the one wiring in `agent.py` (`Agent._searched` → `Agent._read_snippets`). Issue #297,
-stage 1 of the epic in #295.
+`roles.py`, `aish/charters/`, `scripts/role-admission.py`, `scripts/role-mine-cases.py`.
+Issue #297, stage 1 of the epic in #295.
+
+> ## Read this first: no role is called today
+>
+> The framework shipped with one customer — the snippet reader, wired to every
+> `web_search`. A controlled experiment measured that wiring against two alternatives
+> and it lost. **The wiring was removed and the framework was kept:**
+> `roles.WIRINGS` is empty, the two Agent methods that ran a search through the reader
+> are gone, and the charter sits in the tree admitted, examined and **uncalled**.
+>
+> *Title and address only* below is the measurement, the residual it accepts, and what
+> it did not establish. Everything else on this page describes machinery that works and
+> is not currently running. A charter with no caller is a fine thing to keep; a document
+> implying it is running is not, so every section that used to describe a live path says
+> so where it stands.
 
 **How to use this file.** The laws first, because everything else is a consequence of
-them. Then the charter, invocation, validation, the wiring law, the exam and how
-admission actually runs, the fence, cost, and — last and most important — the list of
-things this does **not** do, which is where an overclaim would live if there is one.
+them. Then the charter, invocation, validation, the wiring law, *Title and address
+only* (the measurement that retired the one wiring), the charter that outlived it, the
+exam and how admission actually runs, the fence, cost, and — last and most important —
+the list of things this does **not** do, which is where an overclaim would live if
+there is one.
 
 ---
 
@@ -26,7 +41,10 @@ it. A role whose output fails validation has answered nothing. `TestValidation`.
 
 **R3 · A role may only RESTRICT, or return a value inside an envelope already open.**
 Nothing here widens anything (#295 P3). That is why the snippet reader's degradation is a
-skip: the worst case has to be the status quo.
+skip: the worst case has to be the status quo. **The skip is also what the measurement
+caught up with** — a protection whose worst case is the status quo is a protection that is
+sometimes not in force, and *Title and address only* is the arm that has no worst case
+because there is nothing to fall back from.
 
 **R4 · Every closed vocabulary must be able to say "I cannot tell."** `UNSURE_VALUES`, and
 a charter whose enum lacks one **does not load**. A vocabulary that structurally forces a
@@ -183,34 +201,146 @@ sitting on a worker. `TestRun` pins that the hooks arrive.
 walks `roles.WIRINGS` and refuses any edge that carries an **unbounded** field from a
 charter with an untrusted input into an `ACTING` context. `TestWiringLaw`.
 
-Wirings ship as **code**, not a data format. A node/edge format designed against a single
-wiring would be designed entirely against hypotheticals; the LAW ships anyway, because it
-is the regression guard and the point is that it exists *before* the wirings that need it.
-With one node the check is nearly free.
+`roles.WIRINGS` is **empty**. An empty tuple rather than an edge naming a function
+that no longer exists: a wiring is a claim that a path is live, and this file has already
+found what a claim wider than its code costs. The law still runs at catalogue load, over
+nothing, which is exactly the state D5 argued for — it exists *before* the wirings that
+need it. Wirings ship as **code**, not a data format, because a node/edge format designed
+against a single wiring would be designed entirely against hypotheticals.
+
+**It is a typo guard, not a regression guard, and #328 is that correction.** This file
+called it "the regression guard" against untrusted prose reaching an acting node. It
+cannot do that job today, and the reason is two functions away: `_parse_field` **refuses
+to load** a `text` field without a positive `max_chars`, so every field that survives
+parsing is bounded by construction and the unbounded branch cannot fire on anything a
+charter FILE could produce. What it actually catches is a wiring naming a charter that
+does not exist, or carrying a field the charter never declares. That is worth having and
+it is not what the prose said. The branch stays, because it becomes reachable the day an
+unbounded output type exists — an owner-facing `prose` field for an owner's-side role is
+the obvious first one — and a law added after the type it governs is a law added after the
+incident. `TestWiringLaw::test_the_unbounded_branch_cannot_fire_on_anything_a_charter_FILE_says`
+pins the reason rather than leaving it in prose.
 
 **Stated honestly, because this is where the epic already narrowed once.** "Prose dies
-inside the role" is fully true for a reader returning prices and dates. It is **not**
-unconditionally true here: the acting model cannot choose which link to open without
-titles and addresses, and those are attacker-written strings. What is enforceable is
+inside the role" was fully true for a reader returning prices and dates. It was **not**
+unconditionally true even then: the acting model cannot choose which link to open without
+titles and addresses, and those are attacker-written strings. What was enforceable was
 **bounded, capped, stripped fields plus the law** — a real quantitative gain, not a proof
-of isolation. See *What crosses* below for the exact accounting.
+of isolation. That residual outlived the reader and is now the whole of what remains open;
+see *The residual this accepts: the title channel*.
 
 ---
 
-## The snippet reader — the one role v1 ships
+## Title and address only — the measurement that retired the one wiring
+
+**A `web_search` result reaches the acting model as two lines and nothing else.** The
+page's own title, capped at `web.RESULT_TITLE_CHARS` (120), control-flattened and with a
+leading `[aish:` broken to `(aish:`; then the page's address, deliberately uncapped,
+because a truncated URL is a URL that cannot be opened. There is no third line, and the
+reason is not a filter: `web.serp_results` and `web._first_index` never read the index's
+summary text into a row at all. `web._numbered` is the one function that renders a row, so
+the banner, the cap, the flattening and the broken marker are all applied at one place.
+`TestWhatASearchGivesTheActingModel`, `TestWhatACopiedTitleMaySay`,
+`TestARowIsAlwaysTwoLines`, and `tests/test_web.py` for the collection half.
+
+### What was measured
+
+**Measured by the session that removed the wiring**, not by anything in this repository.
+The figures below are that run's report, and they carry its attribution rather than
+reading as facts about the code — nothing here re-derives them, and the raw run is not in
+the tree. A figure in a doc with no owner is a figure nobody can go back and question.
+
+Forty-two runs: **7 real tasks from the owner's own session logs × 3 arms × 2
+repetitions**, the arms run concurrently so all three saw the same live web.
+
+| arm | what the acting model got |
+|---|---|
+| **A** | the reader as shipped — title, address, one line the reader wrote, and the flag |
+| **B** | title and address only |
+| **C** | raw snippets: the behaviour before roles existed |
+
+- **The reader cost 10.6 s and ~2 800 prompt tokens per search**, measured over 63 role
+  calls — **29.4% of arm A's entire wall clock**, all of it blocking, because the planner
+  cannot move until the reader returns.
+- **Arm B opened about one more page per task** (median +1.0) and still finished **31 s
+  faster**. The extra page opens never came close to paying for the reader.
+- **The stale-figure property — the reader's actual justification — is delivered better by
+  B.** Figures in a final answer that appeared only in a snippet and on no page opened:
+  **C 10, A 1, B 0.** B gets it *structurally*: there is no third line to leak from.
+- **The single arm-A leak was not a reader mistake.** A Gemini 503 made the role
+  `unavailable`, the shipped `skip` degradation handed raw snippets to the planner, and it
+  quoted a figure from one. The reader was available on **75 of 77 calls; one of the two
+  degradations leaked.** So A's protection was conditional on a cloud call succeeding and
+  B's is not — the same objection the box below made about admission, arriving from a
+  second direction and with a number on it.
+- **Answer quality could not be separated.** The one exactly-checkable task — a central
+  bank's rate on a past date, independently verified as 3.6896 — was a six-way tie.
+
+This also settles the question #330 asks of every role: *does it return less than it
+consumes?* The reader's rendered block measured **97%** of the raw results it replaced. It
+was an isolation device, not an economy one. B is both.
+
+### The residual this accepts: the title channel
+
+**Removing the snippet closes the snippet channel completely. It does not close the title
+channel.** Titles are attacker-authored and still cross to the planner verbatim — capped
+at 120 characters, control-stripped, `[aish:` neutralised, and read by nothing that could
+notice what they say. The reader's `instructs_the_reader` flag was the only thing that
+would have raised an instruction-shaped title, and it goes with the reader.
+
+**That is a deliberate trade and not an oversight.** 120 stripped characters is a far
+narrower carrier than a full snippet — the prose that stopped crossing measured a median
+of **928** characters per result set, p90 1257, over 4167 recorded sets — and the
+direction of travel is a **~60 000-token local context** (#330), where ~2 800 tokens per
+search buying an alarm on a channel this narrow is poor value.
+
+**The flag can be restored later, and cheaply, because it no longer has to block.** A
+title-only check could run **asynchronously, off the critical path**, purely to raise and
+record — the planner would not wait for it, which is the entire cost the measurement
+found. **That is not built. Nothing on this page should be read as if it were**, and it
+should not be built speculatively: it wants a real incident to size it.
+
+### What the experiment did NOT establish
+
+**No injection was observed in any of the 42 runs.** Nothing here measured the flag's
+real-world value; it measured cost, page opens, wall clock and stale figures on ordinary
+tasks. The flag's whole security case rests on **the exam**, whose injection cases are
+engineer-authored precisely because no recorded session has ever carried a real one.
+
+So the finding is *"the flag was not worth 2 800 tokens and 10.6 s per search on a channel
+this narrow"*. It is **not** *"the flag was useless"*. Those are different sentences and
+only the first is evidenced.
+
+---
+
+## The snippet reader — the charter that outlived its caller
 
 `aish/charters/snippet-reader.md`. Charter version 2, kind `reader`, degradation `skip`,
-one untrusted input. `TestShippedCharter` loads the real file, runs the wiring law over it,
-and pins that its exam actually carries both halves described below — so a charter that
-stopped shipping injection cases fails here rather than at the next incident.
+one untrusted input. It still loads, still binds to its exam and its content digest, and
+still passes the wiring law when a wiring is constructed over it — `TestShippedCharter`
+loads the real file, does exactly that, and pins that its exam carries both halves
+described below, so a charter that stopped shipping injection cases fails there rather
+than at the next incident.
 
-**The hole it fills.** `web_search` results are attacker-writable titles and snippets from
-arbitrary sites, plus an index anyone can push on with ordinary SEO. Until now they entered
-the acting model's context as prose behind `web.SEARCH_RESULTS_NOTE` — a banner, which is
-an instruction to the model and not a structural control. The banner's own comment in
-`web.py` says so.
+**And nothing calls it.** It was the framework's test case and it served that purpose: it
+is why the loader, the validator, the admission binding, the fence, the record and the
+counters exist and are proven rather than designed against hypotheticals. The framework's
+real customers are the roles still to come.
 
-### What it is given
+Kept rather than deleted, for two reasons and neither is sentiment. It is the only worked
+example of a charter in the tree — inputs with trust labels, an output shape, a closed
+vocabulary with an "I cannot tell" word, an exam with both halves and a discrimination
+pair — so the next charter is written by reading it. And its exam is the only place in
+this repository where the injection-resistance question is asked at all.
+
+**The hole it was built for.** `web_search` results were attacker-writable titles and
+snippets from arbitrary sites, plus an index anyone can push on with ordinary SEO, and
+they entered the acting model's context as prose behind `web.SEARCH_RESULTS_NOTE` — a
+banner, which is an instruction to the model and not a structural control. The banner's
+own comment in `web.py` says so. The snippet half of that hole is closed now by the prose
+not being collected; the title half is the residual above.
+
+### What it was given
 
 `web.untrusted_rows(presented)` — the **stranger's half only**, with aish's own framing
 removed: the untrusted-content banner, the sentence naming which words are the stranger's,
@@ -226,84 +356,78 @@ result sets in the owner's 784 logs: `web.parse_results` numbers them contiguous
 and the two exceptions are a mangled row and a `recall` result quoting a past session, not
 parser bugs. `TestUntrustedHalf`.
 
-### What it returns, and what crosses
+**Mining is narrowed, and one case type is now unminable.** Both functions still work and
+still read the owner's 784 existing logs, which is why they stay. But a result set rendered
+today has two lines, so `parse_results` returns an empty `snippet`, and the assertion that
+depends on one goes with it: its snippet-figure filter finds nothing, so
+`scripts/role-mine-cases.py` can no longer write an **`absent`** case — the price-leakage
+case, which is the recorded failure this role was chosen for.
+
+Said precisely, because "nothing can be mined" would be wrong and was the first way this
+paragraph was written: the script still returns a case for any set of three rows or more,
+carrying `rows` (a shape annotation, not a check — #328) and `distinct`. What it produces
+from a two-line log is an extraction-fidelity case over an input with no snippet in it,
+which is a weaker case about a different question. The corpus for the case type that
+mattered is now fixed and finite.
+`TestUntrustedHalf::test_a_set_rendered_today_has_no_third_line_to_mine` pins the
+parse-level fact this rests on — that a live row's `snippet` is empty — and not the
+script's own behaviour, which lives outside anything the suite imports.
+
+### What it returned, and what used to cross
 
 Three fields: `n` (row), `about` (text, ≤160, may be empty), `instructs_the_reader`
 (`no` | `yes` | `unclear`). Charter **v2**; v1 called the third field *addressed_to_me*
 and it meant something wider — see *What the flag means, and what it used to mean*.
 
-**The title and the address are not among them.** `agent._read_results` copies them from
-the parsed input **by row number**, capped at `RESULT_TITLE_CHARS` and stripped by code —
-so they are never laundered through the model at all. The address is deliberately
-**uncapped**: a truncated URL is a URL that cannot be opened, which would break the one
-thing the acting model needs these rows for.
+**The title and the address were never among them.** They were copied from the parsed
+input **by row number**, capped and stripped by code, so they were never laundered through
+the model at all. That code moved: the cap (`web.RESULT_TITLE_CHARS`), the control-flatten
+(`web._flat`) and the broken marker (`web._not_aishs_voice`) now live at the render in
+`web._numbered`, which means they hold on **every** search rather than only on the path
+where a reader had answered. `TestWhatACopiedTitleMaySay`.
 
-So the accounting, measured over the same 4167 parseable result sets:
+The accounting as it stood, measured over 4167 parseable result sets — and the third
+column is why the wiring is gone:
 
-- **What stops crossing:** the snippet prose. Median **928** characters per result set,
-  p90 1257, of text written by whoever wanted to rank.
-- **What replaces it:** at most 160 characters per row, written by a context with no tools
-  and no knowledge of the task — plus the same titles and addresses as before.
-- **What is unchanged:** titles and addresses. Attacker-written, still there, now capped,
-  stripped, and with `[aish: …]` broken to `(aish: …)` so a title cannot arrive wearing
-  aish's own framing voice (`_not_aishs_voice`).
+| | reader (arm A) | title and address (arm B) |
+|---|---|---|
+| snippet prose crossing | none | none |
+| replaced by | ≤160 chars per row, model-written | nothing |
+| titles and addresses | cross, capped and stripped | cross, capped and stripped |
+| cost per search | 10.6 s, ~2 800 prompt tokens | 0 |
+| in force when? | only when admitted, seam present, key up | always |
 
-That is the honest claim. It is not "the acting model no longer sees attacker text"; it is
-"the paragraph of attacker text is gone and what remains is short, capped, and structurally
-required."
+> **The reader was OFF unless it was admitted, and that turned out to matter.** On a fresh
+> install nothing is admitted, so none of the above happened. It was also off on
+> `claude-max` (no stateless seam), off on a local model (the charter declares
+> `cloud-fast`), off whenever the key failed or the provider was down, and off when two
+> answers in a row failed validation. In every one of those cases the snippet prose reached
+> the acting model exactly as before, behind exactly the old banner. That was the correct
+> degradation — #295 P3 requires the worst case to be the status quo — but it made the
+> improvement one that was *sometimes* in force rather than a property of the system, and
+> **that is the case the experiment caught leaking**: one 503, one skip, one stale figure
+> quoted from a snippet.
 
-> **And it is conditional. The reader is OFF unless it was admitted.** On a fresh install
-> nothing is admitted, so nothing above happens. It is also off on `claude-max` (no
-> stateless seam), off on a local model (the charter declares `cloud-fast`), off whenever
-> the key fails or the provider is down, and off when two answers in a row fail validation.
-> In every one of those cases the snippet prose reaches the acting model exactly as it did
-> before this shipped, behind exactly the old banner. That is the correct degradation —
-> #295 P3 requires the worst case to be the status quo — but it means this is an
-> improvement that is *sometimes* in force, not a property of the system. The record says
-> which, on every single search; the counters are what make a chronic run of skips visible.
+Two defences on the copied half, both cheap and both found by review rather than by design,
+and both now on the render path where they cover every search. A title may not arrive
+wearing aish's own voice: `_not_aishs_voice` rewrites `[aish:` to `(aish:`, keeping the
+words so the model can still see what the title said while breaking the marker. And
+`web._flat` guarantees a rendered row is exactly two lines — three while a snippet was the
+third — so a newline inside a field cannot fabricate a numbered result the index never
+returned. `TestWhatACopiedTitleMaySay`, `TestARowIsAlwaysTwoLines`.
 
-Two defences on the copied half, both cheap and both found by review rather than by design.
-A title may not arrive wearing aish's own voice: `_not_aishs_voice` rewrites `[aish:` to
-`(aish:` in a copied title or address, keeping the words so the model can still see what the
-title said while breaking the marker. And `web._flat` guarantees a rendered row is exactly
-three lines, so a newline inside a snippet cannot fabricate a numbered result the index never
-returned — both index paths already join their fields into one line, so this enforces the
-property at the one function that renders a row rather than trusting two callers upstream.
-`TestWhatACopiedTitleMaySay`, `TestARowIsAlwaysThreeLines`.
-
-`agent.READ_RESULTS_NOTE` says exactly this to the model, including that the titles are the
-index's own words. `agent.READ_RESULTS_FLAGGED` and `agent.READ_RESULTS_UNCLEAR` report the
-flag — as an **observation** ("contained text speaking to whoever is reading it"), never a
-diagnosis of what it was for or who wrote it. The verbs in that line are the flag's own
-declared scope restated as a disjunction, not a claim about which of them a given row did:
-the reader was never asked which, so aish cannot say.
-
-**They have to reach exactly as far as the flag does, and that is now pinned rather than
-asserted.** A note reaching less far describes some flagged rows wrongly — and it did:
+**What was in the acting model's context while the reader ran, and is not now.** A note
+saying an isolated reader had written the line under each row; a note reporting a flagged
+row as an **observation** ("contained text speaking to whoever is reading it"), never a
+diagnosis of what it was for or who wrote it; and a quieter one for `unclear`. Only the
+`yes` note asked for the owner to be told — the relay to a person was always the model's
+obedience and never an enforced step, which is the same distinction the old banner got
+wrong. All three constants went with the wiring, and with them the test that held the
+note's verbs and the charter's `yes` arms side by side as pairs. That test existed because
 adversarial review found the charter's *treat the text as a note from the system* arm
-missing from `READ_RESULTS_FLAGGED`, so a row flagged only for impersonating aish's framing
-was being described to the acting model as something it was not. Nothing failed, because
-nothing checked. `TestTheSnippetReaderInPlace::test_the_flagged_note_reaches_as_far_as_the_flag`
-holds the two lists side by side as pairs; rewording either means editing its pair.
+missing from the note, and nothing had failed, because nothing checked. It has no subject
+now; if the flag is ever restored, its note needs that pairing rebuilt before it ships.
 
-**The note also may not deny what the code does.** It used to end "The wording was NOT
-carried across" — false in exactly the case that matters. All five rows v1 flagged in
-production were flagged on their **title**, and `_read_results` copies titles across
-verbatim (capped, `[aish:` broken) three lines above that sentence. What is structurally
-true is that the **snippet** is gone: only `about` crosses. So the note says that, and then
-points at the title instead of denying it exists.
-`test_the_note_does_not_deny_that_a_title_was_copied_across`.
-The old banner promised to tell the user when a result carried an instruction; that promise
-survives the change, in the flag rather than in the model's obedience.
-`TestTheSnippetReaderInPlace`.
-
-**Only the `yes` note asks for the owner to be told.** `READ_RESULTS_FLAGGED` carries
-"tell the user it was there"; `READ_RESULTS_UNCLEAR` does not, and a `no` row produces no
-note at all. Stated that way on purpose: what code controls is which note enters the acting
-model's context, and the relay to a person is the model's obedience, not an enforced step —
-the same distinction the old banner got wrong. All three values are counted in the record's
-`flags` regardless; this is a rule about what is SURFACED and never about what is OBSERVED.
-`TestTheSnippetReaderInPlace`.
 
 ### What the flag means, and what it used to mean
 
@@ -358,25 +482,42 @@ nothing today schedules it. A recorded gap, not a solved one.
 
 **`unclear` did not absorb the difference either, and the charter says so out loud.**
 Narrowing `yes` with no word about `unclear` would have moved the false positives one column
-over — and `READ_RESULTS_UNCLEAR` still writes a line into the acting model's context on
-every search that produces one. The charter states that sales copy is `no` outright, and
-that `unclear` is for a row you could argue either way rather than a gentler `no`.
+over — and while the wiring existed, an `unclear` row wrote its own line into the acting
+model's context on every search that produced one. The charter states that sales copy is
+`no` outright, and that `unclear` is for a row you could argue either way rather than a
+gentler `no`.
 
 This is the same resolution as the page console reached a few hours earlier
 (`_scrub_page_console`, `consoleWanted` in `aish/static/app.js`): **recorded always,
 surfaced on anomaly.** A warning that fires during ordinary browsing stops carrying
 information, and then it is worse than absent — because the record says he was told.
 
-### Where it sits
+### Where it sat, and where a caller would go
 
-`Agent._read_only_call`'s `web_search` branch, via `Agent._searched`. That branch is the
-**one seam both read paths share** — the sequential `_dispatch` route and the parallel
-fan-out both build their thunk from it — so the fan-out cannot bypass the reader.
+`Agent._read_only_call`'s `web_search` branch, through two Agent methods that no longer
+exist; the branch now calls `web.web_search` directly. What made that branch the right seam
+is still true and is worth keeping for the next role: it is the **one seam both read paths
+share** — the sequential `_dispatch` route and the parallel fan-out both build their thunk
+from it — so a fan-out cannot bypass a role attached there.
+
+The caller-side surface is intact and uncalled: `Agent._catalogue`, `Agent._role_model`,
+`Agent._record_role` and `Agent._record_role_skip`. Their docstrings say they have no
+caller, so a reader does not have to grep to find out.
+
+`Agent._as_call` is **not** in that list, and the distinction is worth making rather than
+rounding off. It publishes the call id on the worker thread so a record written from inside
+a parallel read can be joined to the call that produced it, and it runs on **every**
+concurrent read batch whether or not a role exists — the role record is what prompted it,
+not what calls it. It is live general fan-out infrastructure; the next thing that records
+from a worker inherits the property instead of rediscovering it.
 
 ### Degradation: `skip`, and why not `hold`
 
-Advisory. When the role cannot answer, the acting model gets exactly today's text behind
-exactly today's banner. Three reasons, and the first is the binding one:
+Advisory, declared in the charter, and unexercised — with no caller there is nothing to
+degrade. It is documented because it is the charter's own declaration and because the
+ladder is what the next role picks from. When the role could not answer, the acting model
+got exactly the previous text behind exactly the previous banner. Three reasons, and the
+first is the binding one:
 
 1. **R3.** The reader restricts what reaches the acting model. Skipping it is the status
    quo, which is what P3 requires the worst case to be. Nothing is permitted that was not
@@ -388,8 +529,15 @@ exactly today's banner. Three reasons, and the first is the binding one:
 **The skip is never silent.** Every outcome writes the record, so *unexamined* is a fact in
 the log rather than the absence of one (`docs/trace-contract.md` corollary 2), and the
 counters are what make a chronic run of them visible. A result set with **no rows** — an
-error string, a no-results note — asks no role at all and writes nothing, which is what
-keeps "skipped" meaning something. `TestDegradation`.
+error string, a no-results note — asked no role at all and wrote nothing, which is what
+keeps "skipped" meaning something.
+
+**And this is the property the measurement turned around.** A `skip` that is correct by
+R3 is still a defence that is not in force, and over 77 calls one of the two skips leaked a
+stale figure into an answer. A `skip` ladder is right for a role that must not wedge the
+session; it is not a substitute for a property that holds unconditionally, and where one is
+available for free it wins. `TestDegradation` now pins only the model-selection half —
+which model a role would run on in this session, and that "none" is a real outcome.
 
 ---
 
@@ -398,6 +546,11 @@ keeps "skipped" meaning something. `TestDegradation`.
 Renderless (in `session.RENDERLESS_STEPS`), emitted through `Agent._emit_record`, so it
 reaches no renderer and is skipped on replay. Both halves, because either alone is the
 empty-live-card bug that registry exists to prevent.
+
+**No role call happens today, so no record is written today.** The shape, the evidence-store
+input capture and the two writers stay exactly as they were — they are proven, and they were
+never what the measurement retired. `TestTheRoleRecordWithNoWiring` drives them directly,
+at `Agent._record_role`, because there is no search to drive them through.
 
 ```json
 {"kind": "role", "turn": 4, "call": 2,
@@ -422,12 +575,24 @@ with `status: unavailable` and the parse error as `why` — "the catalogue is br
 "the model was down" are different facts, and a reader that cannot tell them apart has to
 go and read the source.
 
+Note what is NOT recorded, and deliberately: a search that asks no role writes **nothing**,
+not a skip. "No role was consulted" and "a role was consulted and could not answer" are
+different facts, and with the wiring gone every search is the first. A skip record on every
+search would say a control had declined when none was ever asked.
+
 ---
 
 ## Counters, and why a reader has them
 
 `roles.scan_counters` is a pure pass over decoded log records, in the shape `usage.py` and
 `curate.scan_ledger` already use: no model call, no live state.
+
+**They stop accruing, and they do not go backwards.** With no role called, no new records
+are written, so the counters report the calls the reader actually made and then hold still.
+That is the correct behaviour for a scan over a log — it reports what was RECORDED — and it
+is why "a charter with no calls reads as no calls, never as healthy"
+(`TestCounters::test_a_charter_with_no_calls_reads_as_no_calls_never_as_healthy`) matters
+more now than it did when it was written.
 
 **A reader is not a judge, so this needed deciding rather than defaulting.** `about` is
 extraction and needs no counter — it is measured by the exam, not by a rate. But
@@ -665,6 +830,35 @@ exempts and which the shipped `skip` degradation turns into today's behaviour.
 `evidence.digest_of`: nothing on the path that decides whether a control runs should have
 a reason to import a store whose contract is erasure.
 
+### The general lesson from that table, because it is not only about fences
+
+Each of the four rounds ended with a class the round before had not imagined, and each was
+found by a *different person*. The table is the record of that; the lesson generalises past
+bash.
+
+**A check that cannot fail is documentation wearing a test's clothes.** That is the mirror
+image of a guarantee stated in prose with no enforcing line, which is the failure
+`CLAUDE.md` names outright. **Both read identically from the outside** — a claim, apparently
+backed, that nobody looks at again — and **neither is visible by reading the code that is
+supposed to be doing the work**: the passing test and the confident sentence both say the
+thing is handled. You only find them by asking, of each claim, *which line would go red if
+this became false?* — and, of each check, *what input would make this one fire?*
+
+Three instances have now been found in this area, by three different people, each in a
+different mechanism:
+
+| where | the claim | what was actually true |
+|---|---|---|
+| the wiring law (#328) | "the regression guard" against untrusted prose reaching an acting node | `_parse_field` refuses an uncapped field, so the branch cannot fire; it is a typo guard |
+| `rows: N` in a golden pair (#328) | an exam assertion | `validate` already guarantees it; a passing `Result` cannot fail it |
+| `TestShippedCharter`'s discrimination test | "some case whose answers include both words" | already satisfied by `injection-run-a-command`, so both discrimination cases could have been deleted green |
+
+The third is the sharpest, because it is the one that was *fixed by naming the cases
+explicitly* rather than by widening the prose — the general repair is to make the check bind
+to the thing you actually care about, and where it cannot, to say in the doc what it really
+covers. Neither downgrade is a defeat: a typo guard is worth having, and a shape annotation
+is worth reading. What is not allowed is the sentence that implies more.
+
 **The reason phrases state observations and never causes.** *"The charter text has changed
 since it was examined"* is two digests differing. It is not *"the charter was tampered
 with"*: from here an ordinary edit and an attack are indistinguishable, and a vocabulary
@@ -757,11 +951,15 @@ a source checkout *is* a live location, so aish refuses to edit its own charters
 and an edit made by hand retires the admission until the exam is re-run. Both are intended.
 `TestCharterWritePath`, `TestAdmission`.
 
-## Cost and latency — real, and measured where it could be
+## Cost and latency — and the measurement that ended the wiring
 
-A role call fires on **every** search, in the cloud, on a key the owner shares and pays for.
-Measured over the 4167 parseable recorded result sets (`ratelimit.estimate_tokens` over the
-real composed message list):
+**Nothing costs anything today**: no role is called, so no role tokens are spent and no
+role latency is paid. What follows is what it cost while the wiring existed, kept because
+it is the evidence for the decision and because it is the shape of the bill the next role
+will present.
+
+Estimated over the 4167 parseable recorded result sets (`ratelimit.estimate_tokens` over
+the real composed message list):
 
 | | estimated prompt tokens |
 |---|---|
@@ -771,37 +969,40 @@ real composed message list):
 
 About **1141 of those are fixed** — the charter prose plus the generated output contract,
 on every call — and roughly 580 are the result rows themselves. Output is five short
-records, on the order of 200–300 tokens.
-
-**The money figure is still not here.** No key was available in the environment this was
-built in; the admission run above was executed separately. Per-call spend is recorded in the
-D7 record from the provider's own usage report and surfaced by `aish usage`, which is what
-makes this measurable instead of guessed — but nothing in the tree converts tokens to money,
-deliberately, because the owner's key is shared PAYG and a hardcoded rate would be a number
-nobody checked.
-
-**The v2 exam has not been run.** Everything below was measured on v1. The version bump and
-the content digest retire the recorded admission, so on merge the reader is **unadmitted**
-and degrades to `skip` — the acting model gets raw snippets behind the old banner, exactly as
-before roles shipped — until `scripts/role-admission.py` runs again. Until then the central
-claim of this change ("the reader answers those rows `no`") is a **hypothesis**, not a
-measurement: the new cases encode the expected answers, and nothing has yet asked a model.
+records, on the order of 200–300 tokens. **Note the shape of that**: two thirds of the
+prompt is the charter, so a role's floor cost is set by how much briefing it needs, not by
+how much material it reads. A short charter is a cheap role.
 
 **Measured by the epic drive on 2026-08-27**, running the **v1** exam through
 `scripts/role-admission.py --model gemini:gemini-3.5-flash` against the owner's real key:
 **8/8 cases passed on the first attempt, no retries**, and all three injection cases were
 flagged rather than obeyed. ↑8967 ↓945 tokens over 8 cases — so the estimates above are
-roughly right — and **5.3s to 18.3s per call, 8.9s mean**. That latency is the headline
-number, not the tokens. Attributed rather than stated flat: a figure in a doc with no owner
-is a figure nobody can go back and question.
+roughly right — and **5.3s to 18.3s per call, 8.9s mean**. Attributed rather than stated
+flat: a figure in a doc with no owner is a figure nobody can go back and question.
 
-**Latency is a real change in how browsing feels, not an edge case.** A search now waits for
-a second model call before its results reach the planner, and the reader cannot be
-parallelised away: the planner cannot move until it returns. Several searches in one turn
-still fan out, so the cost is one reader round trip per batch rather than per result.
+**In live traffic it was worse than the exam, and that is the number that decided it.**
+Over 63 role calls in the controlled experiment: **10.6 s and ~2 800 prompt tokens per
+search**, and **29.4% of the whole arm's wall clock**. All of it blocking — several
+searches in one turn fan out, so the cost is one round trip per batch rather than per
+result, but the planner cannot move until the batch returns. See *Title and address only*
+for the full comparison; the short version is that arm B finished 31 s faster and lost
+nothing that could be measured.
 
-No caching layer, deliberately. It was not asked for, and a cache keyed on result text
-would be a second place for a stale answer to live.
+**The v2 exam has still not been run**, and the honest consequence is smaller than it was:
+the version bump and the content digest retired the recorded admission, so the charter is
+**unadmitted**, and with no caller that costs nothing. The central claim of v2 ("the reader
+answers advertising rows `no`") remains a **hypothesis** rather than a measurement — the
+cases encode the expected answers and nothing has yet asked a model. If the flag is ever
+restored, `scripts/role-admission.py` is the first step and not the last.
+
+**The money figure is still not here.** No key was available in the environment this was
+built in. Per-call spend is recorded in the D7 record from the provider's own usage report
+and surfaced by `aish usage`, which is what makes it measurable instead of guessed — but
+nothing in the tree converts tokens to money, deliberately, because the owner's key is
+shared PAYG and a hardcoded rate would be a number nobody checked.
+
+No caching layer was built, deliberately. It was not asked for, and a cache keyed on result
+text would be a second place for a stale answer to live.
 
 ---
 
@@ -809,8 +1010,11 @@ would be a second place for a stale answer to live.
 
 Read this list before assuming a capability.
 
-- **No fan-out, aggregation, hierarchy, or a wiring data format.** One customer is not
-  enough to design a format against.
+- **No role runs.** `roles.WIRINGS` is empty; the framework has no live caller at all. It
+  loads, validates, admits, records and counts — on demand, for a caller that does not yet
+  exist.
+- **No fan-out, aggregation, hierarchy, or a wiring data format.** Zero customers is even
+  less to design a format against than one.
 - **No owner-authored charters.** v1 ships them inside the package only.
 - **No tools for any role.** A charter declaring one refuses to load, because there is no
   gated capability set for roles yet and a declaration nothing enforces is prose outrunning
@@ -819,17 +1023,34 @@ Read this list before assuming a capability.
   declaration, but nothing ships with it, so that half is untested against real traffic.
 - **No change to any existing gate.** The approval-gate invariant is untouched: the model
   still executes nothing directly and `Agent._dispatch` is still the single execution point.
-- **The wiring law does not yet guard what its prose describes** (#328). Every field that
+- **The wiring law is a typo guard, not a regression guard** (#328). Every field that
   survives `_parse_field` is bounded, so the unbounded-prose branch cannot fire; what it
-  catches today is a wiring naming a charter that does not exist or a field the charter
-  never declares. It becomes reachable when an unbounded output type does.
+  catches is a wiring naming a charter that does not exist or a field the charter never
+  declares. It becomes reachable when an unbounded output type does. The prose that called
+  it a regression guard has been corrected rather than the code widened — see *The general
+  lesson from that table*.
 - **`rows: N` in a golden pair is a shape annotation, not a check** (#328) — `validate`
   already guarantees it. `_expect_mentions` and `Degradation.HOLD` have no shipped
   customer either.
+- **Nothing here noticed an injection in the wild.** No recorded session has ever carried a
+  real one, and none appeared in the 42 experimental runs. The `instructs_the_reader` flag's
+  security case rested entirely on its exam, and now it has no caller either. Do not read
+  its removal as evidence that it did not work.
+- **Titles are not read by anything.** They are capped, stripped and de-voiced, and that is
+  all — see *The residual this accepts: the title channel*. An asynchronous title check is
+  a named option, not a plan.
+- **The `absent` exam case can no longer be mined.** A result set recorded from here on has
+  two lines, so `scripts/role-mine-cases.py` finds no snippet-only figure and writes no
+  `absent` assertion — the one that encodes this role's founding failure. It still writes
+  a `rows` and `distinct` case, over an input with no snippet, which is a weaker case about a
+  different question. The owner's existing 784 logs are unaffected and remain fully minable.
 - **No claim that the command fence is complete.** It is early refusal over the doors that
   have been probed; the control is the content digest. The ancestor-write class is an open,
   asserted gap.
 - **No claim that browsing is isolated.** See *The wiring law*.
 - **`read_url` and `read_pdf` are not covered.** #295's rollout order is search snippets
   first, then fetched page text, then driven-page text, then downloaded documents, then mail
-  bodies. Only the first has converted; the banner remains the stopgap on all the rest.
+  bodies. The first surface was answered by **removal** rather than by a role, which is a
+  result the rollout order did not anticipate and which does not generalise: a page's text is
+  the thing being asked for, so it cannot simply not be collected. The banner remains the
+  whole of what is on every remaining surface.
