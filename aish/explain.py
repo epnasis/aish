@@ -1014,6 +1014,9 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
             "calls": [],
             "peak": None,
             "unattributed_chars": 0,
+            "steering_chars": sum(
+                len(str(step.get("text") or "")) for step in turn.of_kind("injected")
+            ),
             "roles": _role_calls(turn),
             "failed": _failed_calls(turn),
         }
@@ -1021,6 +1024,7 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
     live: list[dict] = []
     brief: dict | None = None
     unattributed = 0
+    steering = 0
     calls: list[dict] = []
     parts_at: dict[int, list[dict]] = {}
 
@@ -1047,6 +1051,23 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
                 continue
             if step.get("kind") == "brief":
                 brief = step
+            elif step.get("kind") == "injected":
+                # Text typed while the task ran. `_inject_pending_messages`
+                # appends it straight to `self.messages` — NOT through the
+                # recorder — so it writes no `message` record and this walk
+                # cannot see it. The rendered `injected` step is the only place
+                # it exists, and its SIZE is read from there.
+                #
+                # **Counted apart, never folded in.** Folding it in was tried
+                # and made every anchor in the owner's corpus WORSE: at each of
+                # 13 recorded totals in one long chat the reconstruction went
+                # from 336 chars short to 941 long, and 336 + 941 is exactly
+                # the steering typed in that chat's earlier turns. So the text
+                # was not in front of those calls — a restart or resume rebuilds
+                # `self.messages` from the log, and the log is where this text
+                # is not. The record cannot say which happened, so the reader
+                # states the amount and does not place it.
+                steering += len(str(step.get("text") or ""))
             elif step.get("kind") == "trim":
                 unattributed += _apply_trim(live, step)
             elif step.get("kind") == "reasoning" and here:
@@ -1103,6 +1124,10 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         # below are an upper bound, and hiding it inside one of them would make
         # a guess look like a measurement.
         "unattributed_chars": unattributed,
+        # Steering typed during this chat, which the log sizes but cannot place
+        # (see the walk above). Reported so the reader knows the parts are a
+        # lower bound by at most this much, and by nothing it can name.
+        "steering_chars": steering,
         "roles": _role_calls(turn),
         "failed": _failed_calls(turn),
     }
@@ -2013,12 +2038,32 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
                 f"{DIM}  {peak['chars_per_token']} chars per reported token, and that ratio "
                 f"moves with the content.{RESET}"
             )
+        lines.append(
+            f"{DIM}  the parts are what the log CAN size. Three things enter the model's "
+            f"messages{RESET}"
+        )
+        lines.append(
+            f"{DIM}  without a message record — steering, a held proposal's answer, and the "
+            f"guidance{RESET}"
+        )
+        lines.append(
+            f"{DIM}  form of an attachment — so this total is a LOWER bound by an amount "
+            f"nothing records.{RESET}"
+        )
         for missing in peak["unmeasured"]:
             lines.append(f"  {BOLD}not measured here:{RESET} {missing}")
     if context["unattributed_chars"]:
         lines.append(
             f"  {BOLD}{context['unattributed_chars']:,} chars{RESET} were removed by a trim "
             f"that did not record which results they came from"
+        )
+    if context["steering_chars"]:
+        lines.append(
+            f"  {BOLD}{context['steering_chars']:,} chars{RESET} were typed while a task ran "
+            f"and are sized but not placed — the log records the text and not"
+        )
+        lines.append(
+            f"  {DIM}  whether it was still in front of any particular call{RESET}"
         )
     if context["roles"]:
         # Collapsed per charter. A role's fire rate and its trade are properties

@@ -521,6 +521,46 @@ class TestWhatFilledEachCall:
         assert role["answer_chars"] == len('[{"n": 1, "about": "a page"}]')
         assert role["reported"] == {"input": 2513, "output": 427}
 
+    def test_steering_is_sized_but_never_placed(self, tmp_path):
+        """`_inject_pending_messages` appends the text straight to
+        `self.messages`, so it writes no `message` record. Folding it in was
+        tried and made every anchor in the owner's corpus WORSE — the text was
+        not in front of those calls, because a restart rebuilds `self.messages`
+        from the log and the log is where this text is not. The record cannot
+        say which happened, so the size is stated and not placed."""
+        context = self._doc(tmp_path, [
+            {"kind": "task_start", "prompt": "hi", "ts": "2026-08-21T19:14:19"},
+            self._brief(),
+            message("user", "hi", model_call=0),
+            call_record(1, (100, 5)),
+            {"ts": "2026-08-21T19:15:30", "kind": "trace",
+             "step": {"kind": "injected", "text": "x" * 40}},
+            call_record(2, (110, 5)),
+        ])
+        assert context["steering_chars"] == 40
+        # …and it moved no bucket and no total.
+        assert all(p["origin"] != "steering" for p in context["peak"]["parts"])
+        assert context["calls"][1]["accounted_chars"] == context["calls"][0]["accounted_chars"]
+
+    def test_the_total_is_said_to_be_a_lower_bound(self, tmp_path):
+        """Three things reach `self.messages` with no message record: steering,
+        a held proposal's answer, and the guidance form of an attachment. On
+        every valid anchor in the owner's corpus the reader is SHORT by 0.0-2.1%
+        because of them, so the block must not read as exact."""
+        from aish import evidence, explain
+
+        digest = evidence.put("[]", tmp_path)
+        path = write_log(tmp_path, [
+            {"kind": "task_start", "prompt": "hi", "ts": "2026-08-21T19:14:19"},
+            self._brief(digest=digest),
+            message("user", "hi", model_call=0),
+            call_record(1, (100, 5)),
+        ])
+        log = explain.load(path)
+        text = explain.render(log.turns[0], log, tmp_path)
+        assert "LOWER bound" in text
+        assert "steering, a held proposal's answer" in text
+
     def test_images_get_a_row_because_they_carry_no_characters(self, tmp_path):
         """Char-invisible and token-huge. A row makes an unaccounted call show a
         visible reason instead of a silent gap."""

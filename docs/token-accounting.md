@@ -175,16 +175,56 @@ Today that is most of the corpus: **41 of 786 logs** carry the stamp on 2026-08-
 ### The reconstruction is checked against a number the agent wrote down
 
 This reader claims to know what was in front of each model call. That is a claim about the
-agent's own message list, so it is not left as plausible arithmetic. Two independently
-recorded totals are `sum(len(content))` over that live list — `trim.bytes_before` and
-`model_error.sent_chars` — and the reconstruction has to land on them. Across the owner's
-corpus it lands **exactly** on the clean cases and within **0–5.2%** elsewhere, with the
-message COUNT matching exactly; the one log that diverged badly is the one whose trims
-predate `stubbed[]`, which is the case the reader now reports rather than guesses through.
+agent's own message list, so it is not left as plausible arithmetic. One independently
+recorded total is `sum(len(content))` over that live list at a NAMED call —
+`model_error.sent_chars` — and the reconstruction has to land on it. Across the owner's
+corpus it lands within **0.0–2.1%**, with the message COUNT matching exactly.
+
+`trim.bytes_before` looks like a second anchor and **is not one**: it is measured before
+`_expire_delivered_images` and `_trim_history_to_budget` run, and every snapshot here is
+from after them, so the two are not the same quantity. A comparison that cannot come out
+right under the correct hypothesis is not evidence, and reading its 55% gap as a reader
+defect is exactly the confident-wrong-cause this file exists to prevent.
 `TestTheContextBreakdownIsCheckedAgainstTheRealLoop` pins it against the real loop by
 recording the char total the backend was handed at call time, and
 `TestWhatFilledEachCall` pins the rest of the assembly — the stamp's absence, the three
 states on every part, the units, and `test_the_reconstruction_matches_a_total_the_agent_measured_itself` against `sent_chars`.
+
+It is short in ONE direction, by three named mechanisms, and the block says so.
+
+### The log does not hold everything the model held
+
+`sum(len(content))` over the log's `message` records is **not** `sum(len(content))` over
+`self.messages`. Three paths put text in front of the model without writing a message
+record, and every one of them makes this reader UNDER-count:
+
+| what | where | why it is not recorded |
+|---|---|---|
+| **steering** typed while a task ran | `agent._inject_pending_messages` appends straight to `self.messages` | a `message` record would replay as a turn-splitting second user bubble; the text survives on the rendered `injected` step |
+| **a held proposal's answer** | `self.messages.append(entry)` on the `proposal` branch, deliberately not `_append` | a rules-held answer the owner never saw must not come back as an assistant bubble on the next page load; it is logged only if released |
+| **the guidance form of an attachment** | `session.to_record_form` via `_append(record_content=…)` | the log keeps the **record form** (`![[…]]`) the owner reads; the model was handed the **guidance form**, a sentence per file saying what it may do with each |
+
+Measured against the 23 valid anchors in the owner's corpus — a `model_error.sent_chars` at
+a call the reader also has a snapshot for — the reconstruction is short by **0.0% to 2.1%**,
+a constant 336 characters for twenty consecutive turns of one chat and then growing. It is
+never long except by a trim it already reports.
+
+**Steering was tried as a fix and made it worse, which is the evidence that settles it.**
+Folding the `injected` text in moved every one of those anchors from 336 chars short to 941
+chars long, and 336 + 941 is exactly the steering typed in that chat's earlier turns — so
+that text was *not* in front of those calls. A restart rebuilds `self.messages` from the
+log, and the log is where steering is not; the record cannot say whether that is what
+happened. So `steering_chars` is **sized and not placed**: reported as its own figure, in no
+bucket and in no total.
+
+> **Proposed, additive, and the one change that would close all three at once:**
+> `sent_chars` on the **`reasoning`** record — `self._total_chars()`, the same integer
+> `model_error` already writes, written on every call and not only on the failed ones. One
+> int per call, reusing a method that exists. It turns this reconstruction from *assembled
+> and short by an amount nothing records* into *checkable against a measured total on every
+> call*, and lets the reader state the residual exactly rather than naming mechanisms. That
+> is the "change the instrumentation rather than reach for a more confident guess" move,
+> and it is why the reader does not estimate around the gap today.
 
 Two things that reconstruction taught, both now enforced in `_apply_trim`:
 
