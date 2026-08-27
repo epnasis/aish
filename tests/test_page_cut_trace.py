@@ -216,6 +216,9 @@ class TestExplainCanTellTheTwoIncidentsApart:
                 "thought": {"calls": []},
                 "flow": {"rounds": [], "loose": []},
                 "given": {"briefs": [], "trims": [], "rules": {"groups": {}}},
+                "context_cost": {"state": explain.EMPTY, "stamped": True, "calls": [],
+                                 "peak": None, "unattributed_chars": 0,
+                                 "roles": [], "failed": []},
                 "produced": {"status": "ok", "error": "",
                              "verify": {"stopped": [], "advised": []}}}
 

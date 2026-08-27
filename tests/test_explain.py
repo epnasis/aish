@@ -1025,6 +1025,8 @@ class TestWorthALook:
                          "verify": {"stopped": [], "advised": [], "passed": 0}},
             "steering": [], "trim": [],
             "flow": {"grouping": "none", "rounds": [], "unplaced": [], "loose": []},
+            "context_cost": {"state": explain_mod.EMPTY, "stamped": True, "calls": [],
+                        "peak": None, "unattributed_chars": 0, "roles": [], "failed": []},
         }
 
         def rows_for(options, tokens):
@@ -1874,3 +1876,57 @@ class TestTheConsoleAndTheSignInOnTheRecord:
             assert said in out
             if unsaid:
                 assert unsaid not in out
+
+
+class TestTheContextBreakdownIsCheckedAgainstTheRealLoop:
+    """The reader reconstructs what was in front of each model call. That is a
+    claim about the agent's own message list, so it is checked against the agent
+    itself — driving the real entry point and comparing with what the real chat
+    callable was actually handed, rather than against records this test wrote.
+    """
+
+    class Recording(FakeChat):
+        """Every call's live char total, taken AT CALL TIME. `messages` is the
+        agent's own list and keeps mutating, so a snapshot after the fact would
+        compare the reader against the end state and pass regardless."""
+
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.chars: list[int] = []
+
+        def __call__(self, **kwargs):
+            self.chars.append(
+                sum(len(m.get("content") or "") for m in kwargs.get("messages") or [])
+            )
+            return super().__call__(**kwargs)
+
+    def test_each_call_accounts_for_exactly_what_the_backend_was_handed(self, tmp_path):
+        from aish.agent import Agent
+
+        log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+        chat = self.Recording([
+            model_says(tool_calls=[tool_call("read_docs", topic="aliases")]),
+            model_says("done"),
+        ])
+        agent = Agent(
+            model="fake",
+            approve=lambda _cmd: True,
+            client_chat=chat,
+            on_message=log.message,
+            step_log=log.step,
+            state_dir=tmp_path,
+        )
+        agent.run_task("what are aliases")
+
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)["context_cost"]
+        assert doc["stamped"] is True
+        menu = [
+            p for p in doc["peak"]["parts"] if p["origin"] == "tool menu"
+        ][0]
+        assert menu["state"] == explain_mod.RECORDED, "the menu blob must be resolvable"
+        # The menu travels BESIDE the messages (`tools=`), so it is subtracted
+        # before comparing with the char total the backend's `messages` held.
+        assert len(doc["calls"]) == len(chat.chars)
+        for call, live in zip(doc["calls"], chat.chars, strict=True):
+            assert call["accounted_chars"] - menu["chars"] == live
