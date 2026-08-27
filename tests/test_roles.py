@@ -604,6 +604,55 @@ class TestCounters:
         assert roles.scan_counters([]) == {}
 
 
+class TestUsageAttribution:
+    """Per-charter attribution cannot travel through the quota governor —
+    `reserve_for_call` takes a provider:model key and nothing else — so it lives
+    in the D7 record and `usage.py` reads it from there."""
+
+    def _log(self, tmp_path):
+        from aish import usage
+
+        path = tmp_path / "session-20260827-120000-000001.jsonl"
+        lines = [
+            {"ts": "2026-08-27T12:00:00", "kind": "model", "model": "gemini:gemini-3.5-flash"},
+            {"ts": "2026-08-27T12:00:01", "kind": "trace", "step": {
+                "kind": "role", "charter": "snippet-reader", "status": "ok",
+                "model": "gemini:gemini-3.5-flash", "attempts": 1, "ms": 700,
+                "input": {"chars": 1600}, "usage": {"input": 520, "output": 55},
+                "flags": {"addressed_to_me": {"no": 4, "yes": 1}}}},
+            {"ts": "2026-08-27T12:00:09", "kind": "trace", "step": {
+                "kind": "role", "charter": "snippet-reader", "status": "unadmitted",
+                "why": "no admission recorded", "attempts": 0}},
+        ]
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+        return usage, usage.scan_session(path)
+
+    def test_role_spend_is_reported_beside_the_acting_model_never_inside_it(self, tmp_path):
+        usage, session = self._log(tmp_path)
+        assert len(session.role_calls) == 2
+        assert session.calls == [], "a role call is not one of the loop's calls"
+        text = usage.render([session])
+        assert "isolated roles" in text
+        assert "snippet-reader" in text
+        assert "1 unadmitted" in text
+
+    def test_the_counters_reach_the_json_report(self, tmp_path):
+        usage, session = self._log(tmp_path)
+        report = json.loads(usage.json_report([session]))
+        counters = report["roles"]["snippet-reader"]
+        assert counters["calls"] == 2
+        assert counters["by_status"] == {"ok": 1, "unadmitted": 1}
+        assert counters["input"] == 520
+        assert counters["flags"]["addressed_to_me"] == {"no": 4, "yes": 1}
+
+    def test_a_log_with_no_role_records_renders_no_role_section(self, tmp_path):
+        from aish import usage
+
+        path = tmp_path / "session-20260827-120000-000002.jsonl"
+        path.write_text(json.dumps({"kind": "model", "model": "gemini:x"}) + "\n")
+        assert "isolated roles" not in usage.render([usage.scan_session(path)])
+
+
 # --------------------------------------------------------------- the fence
 
 
