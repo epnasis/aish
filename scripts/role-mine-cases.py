@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402
 
-from aish import paths, roles, secrets, web  # noqa: E402
+from aish import roles, secrets, web  # noqa: E402
 
 # A figure worth refusing to restate: a currency amount, or a bare number with a
 # unit-ish suffix. Deliberately narrow — a broad "any digit" rule would forbid a
