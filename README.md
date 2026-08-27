@@ -329,16 +329,17 @@ aish usage --window 60000       # how many calls would not fit a local window
 ```
 
 Every period is also measured **against a window you name** — how many calls
-exceeded it, the median and the tail, and the **fixed floor**: the characters of
-standing prompt, task reminder and tool menu that every call pays before the
-task says a word.
+exceeded it, the median and the tail, and **sys+menu**: the characters every call
+carries besides the conversation. The tool menu half is the same on every task;
+the system half is composed per task, from the prompt, aish's own usage notes,
+the knowledge index, and the rules and skills that task selected.
 
-For one turn, `aish explain <chat> <turn>` now ends with **what it cost** — each
-model call's reported tokens, what was added to the context since the previous
-call, and, at the fullest call, what the context was actually made of:
+For one turn, `aish explain <chat> <turn>` gained a **what it cost** section —
+each model call's reported tokens, what was added to the context since the
+previous call, and, at the fullest call, what the context was actually made of:
 
 ```
-at call 17, the fullest — the provider billed 66,147 input tokens for it
+at call 17, the fullest — the provider reported 66,147 input tokens
   read_url        this turn      7    76,001 chars  35.1%
   tool menu       every call    42    55,566 chars  25.7%
   system text     every call     2    47,701 chars  22.0%

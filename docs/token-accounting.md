@@ -100,7 +100,13 @@ carries the provider's **token** report (a reported fact); the reader computes s
 labels them estimated, and **displays the residual** ("actual exceeds char-estimate by 58%
 — 3 images in context are uncounted") rather than silently normalising. `docs/diagnostics.md`
 already got burned once comparing against `num_ctx`; that bug must not be rebuilt by
-baking chars/3 into records. This is also why the `model_error` record measures
+baking chars/3 into records.
+
+**What got built is a RATIO, not the residual sentence this paragraph imagined.** *"actual
+exceeds char-estimate by 58%"* needs a chars→tokens divisor to subtract across, and the
+measured spread (2.01–4.11) means such a sentence would report divisor error as missing
+content. The built surface shows `chars_per_token` for the call instead — both halves
+recorded — and names the parts it could not size. Same purpose, no invented constant. This is also why the `model_error` record measures
 `sent_chars` and not an estimated token count (`docs/rate-limits.md`).
 
 **Context residency, never "cost".** Because every call resends the whole history, a 20k
@@ -178,7 +184,9 @@ This reader claims to know what was in front of each model call. That is a claim
 agent's own message list, so it is not left as plausible arithmetic. One independently
 recorded total is `sum(len(content))` over that live list at a NAMED call —
 `model_error.sent_chars` — and the reconstruction has to land on it. Across the owner's
-corpus it lands within **0.0–2.1%**, with the message COUNT matching exactly.
+corpus it lands within **−3.85% to +0.68%** (median −0.08%, n=23), with the message COUNT
+matching exactly. It is short far more often than long, and the one positive is inside the
+upper-bound allowance the reader states for itself.
 
 `trim.bytes_before` looks like a second anchor and **is not one**: it is measured before
 `_expire_delivered_images` and `_trim_history_to_budget` run, and every snapshot here is
@@ -195,36 +203,61 @@ It is short in ONE direction, by three named mechanisms, and the block says so.
 ### The log does not hold everything the model held
 
 `sum(len(content))` over the log's `message` records is **not** `sum(len(content))` over
-`self.messages`. Three paths put text in front of the model without writing a message
-record, and every one of them makes this reader UNDER-count:
+`self.messages`. **At least four** paths put text in front of the model without a full
+message record, every one of them makes this reader UNDER-count, and the list is not known
+to be closed:
 
 | what | where | why it is not recorded |
 |---|---|---|
+| **a tool call's own arguments** — and provider-native `raw_blocks` | `agent._serialize` keeps only `role, content, tool_name, images, documents, interim`; `tool_calls` and `raw_blocks` are dropped | nothing decided to drop them; the record was shaped for the transcript, and these are not transcript |
 | **steering** typed while a task ran | `agent._inject_pending_messages` appends straight to `self.messages` | a `message` record would replay as a turn-splitting second user bubble; the text survives on the rendered `injected` step |
 | **a held proposal's answer** | `self.messages.append(entry)` on the `proposal` branch, deliberately not `_append` | a rules-held answer the owner never saw must not come back as an assistant bubble on the next page load; it is logged only if released |
 | **the guidance form of an attachment** | `session.to_record_form` via `_append(record_content=…)` | the log keeps the **record form** (`![[…]]`) the owner reads; the model was handed the **guidance form**, a sentence per file saying what it may do with each |
+
+**The first one dwarfs the other three by two orders of magnitude.** Every assistant message
+that called a tool carries its arguments, and they are resent in front of every later call
+of the turn. Measured from the `call` trace records, which do hold the args (capped at
+`CALL_ARG_CHARS` = 8000, so this is itself a floor): **418,459 chars across the stamped
+sessions, 5.8% of all message content** — and in `session-20260822-141044` alone, 344,630
+chars. The other three run 99–1,966 chars. An earlier draft of this section named three
+mechanisms and read as exhaustive; that was itself a confident wrong claim of the kind this
+file exists to stop, and it is why the rendered footnote now says *at least four* and *not
+known to be closed*.
 
 Measured against the 23 valid anchors in the owner's corpus — a `model_error.sent_chars` at
 a call the reader also has a snapshot for — the reconstruction is short by **0.0% to 2.1%**,
 a constant 336 characters for twenty consecutive turns of one chat and then growing. It is
 never long except by a trim it already reports.
 
-**Steering was tried as a fix and made it worse, which is the evidence that settles it.**
-Folding the `injected` text in moved every one of those anchors from 336 chars short to 941
-chars long, and 336 + 941 is exactly the steering typed in that chat's earlier turns — so
-that text was *not* in front of those calls. A restart rebuilds `self.messages` from the
-log, and the log is where steering is not; the record cannot say whether that is what
-happened. So `steering_chars` is **sized and not placed**: reported as its own figure, in no
-bucket and in no total.
+**Steering was tried as a fix and made it worse, which is what settles the decision.**
+Folding the `injected` text in moved a run of anchors from 336 chars short to 941 chars
+long, and 336 + 941 is exactly the 1,277 chars of steering typed in that chat's earlier
+turns. What that shows is that **most of it was not in front of those calls** — not that
+none of it was: 336 of the 1,277 could have been resident and the arithmetic would look the
+same. A restart rebuilds `self.messages` from the log, and the log is where steering is not;
+the record cannot say whether that is what happened, nor how much survived. So
+`steering_chars` is **sized and not placed**: its own figure, in no bucket and no total.
 
-> **Proposed, additive, and the one change that would close all three at once:**
-> `sent_chars` on the **`reasoning`** record — `self._total_chars()`, the same integer
-> `model_error` already writes, written on every call and not only on the failed ones. One
-> int per call, reusing a method that exists. It turns this reconstruction from *assembled
-> and short by an amount nothing records* into *checkable against a measured total on every
-> call*, and lets the reader state the residual exactly rather than naming mechanisms. That
-> is the "change the instrumentation rather than reach for a more confident guess" move,
-> and it is why the reader does not estimate around the gap today.
+The same treatment now covers a second unplaceable text. `agent._log_held_entry` writes a
+released hold's answer by calling `on_message` directly instead of going through `_append`,
+so that record carries **no `model_call` stamp**. Reading the absent key as `0` stood it in
+front of every call of its turn, including calls made before it existed — verbatim the
+failure this reader's own docstring warns about, found in `session-20260824-210909` turn 4.
+It is counted as `unstamped_chars` and placed nowhere.
+
+> **Proposed, additive, TWO ints and not one.** A `sent_chars` on the **`reasoning`**
+> record — `self._total_chars()`, the same integer `model_error` already writes, on every
+> call and not only the failed ones — is most of the answer. But `_total_chars` sums
+> `content` alone, so it shares the blindness above: validating against it would read as
+> *fully accounted* while still short by up to 39% of a session's content. `model_error`'s
+> existing `sent_chars` carries the same blindness, which is why the anchors in this file
+> are short and not exact.
+>
+> So the proposal is **two** ints: `sent_chars` as it stands, and a second for the
+> serialized `tool_calls` + `raw_blocks` beside it. **`_total_chars` itself must not be
+> widened** — it drives trim budgeting, and moving it would move what gets trimmed. That is
+> the "change the instrumentation rather than reach for a more confident guess" move, and
+> it is why the reader does not estimate around the gap today.
 
 Two things that reconstruction taught, both now enforced in `_apply_trim`:
 
@@ -243,8 +276,9 @@ Parts carry **chars** — measured. The call carries the provider's **tokens** �
 The only bridge is `chars_per_token`: this call's own accounted chars over its own reported
 input, so **both halves are recorded numbers** and it is a measurement of that call rather
 than a constant applied to it. That matters, because the ratio is not a constant: measured
-across the corpus it spreads from **1.30 to 5.26** (median 3.16, and 4.09 for the fixed
-floor's English-plus-JSON-schema). A fixed divisor would have attributed that spread to
+across the corpus it runs **2.01 to 4.11** (median 3.44, n=866 calls with both halves
+recorded; 4.09 at a first call, where the English-plus-JSON-schema of the system text and
+tool menu is nearly all of it). A fixed divisor would have attributed that spread to
 missing content.
 
 So there is deliberately **no per-part token figure and no `ratelimit.estimate_tokens`
@@ -296,23 +330,68 @@ changed. `TestTheTrendLivesInOnePlace`.
 The window is a **default, not a fact about any backend** — a number invented in the
 reporting code would otherwise be reported as though the log said it.
 
-### What the fixed floor turned out to be
+### What every call carries besides the conversation
 
-Measured across the owner's stamped logs, at the first call of the first turn, where the
-history is a few dozen characters and the reported input is therefore almost purely the
-fixed cost:
+**The method, so the numbers can be re-run.** Corpus: every `session-*.jsonl` under
+`AISH_STATE_DIR`. Calls: `usage.scan_session(path).calls` — exactly what `aish usage`
+counts, the provider's `usage` detail where a call recorded one and `tokens[0]` where it
+did not, no subset. Turns: every turn for which `explain._context_cost` returns a peak.
+Unit: each such turn's **peak call**, the one whose reported input is largest, because that
+is the call that decides whether the turn would have fitted a window. Shares are of the sum
+of measured chars across those peak calls.
+
+At the first call of the first turn the history is a few dozen characters, so the reported
+input is almost purely what the call carried besides the conversation:
 
 ```
-sys 51,221 chars + menu 55,082 chars = 106,303 chars ≈ 25,990 reported tokens
+system text 51,221 chars + tool menu 55,082 chars = 106,303 chars ≈ 25,990 reported tokens
 ```
 
-Reproducible to ±0.1% across twelve consecutive sessions. **That is 43% of a 60,000-token
-window, paid on every call, before the task says a word** — and it is the single biggest
-thing #330 has to work on. Residency-weighted across every recorded call, the standing
-prompt and the tool menu together are **34%** of every character aish has ever resent;
-history carried in from EARLIER TURNS of the same chat is **57%**, and the turn's own
-messages only 8.7%. Within history, the model's own assistant messages lead at 33.9%, then
-`run_command` 18.2%, `read_url` 14.6%, `browse_act` 7.7%, `browse` 6.4%, `web_search` 4.3%.
+Reproducible to ±0.1% across twelve consecutive sessions; over all 192 measurable turns the
+same sum runs 101,187–112,333 (median 106,692). **That is about 43% of a 60,000-token
+window, carried on every call before the task says a word.**
 
-And **58.8% of all recorded model calls already exceed 60,000 input tokens**; on
-2026-08-23 it was 73%, with a median call of 196.6k.
+**But only one of those two halves is fixed, and it is the smaller word that matters.** The
+tool menu — 55,082 chars, ≈13.5k tokens, the largest single item in the whole picture — is
+the same on every task. The system text is **composed per task**. Splitting one real
+brief's parts out of the evidence store (`session-20260827-173307`) gives:
+
+| part | chars | fixed? |
+|---|---|---|
+| the prompt proper | 21,762 | yes |
+| aish's own "About aish" usage context | 15,588 | yes |
+| the live skills / memory index | 8,895 | grows with the corpus |
+| the rules in force (part 1) | ~5,097 | **selected by the task** |
+| preloaded knowledge (part 1) | ~5,068 | **selected by the task** |
+
+So calling the whole thing a standing prompt would aim someone cutting for a 60k window at
+the wrong component: a third of the "prompt" is aish's self-documentation, and ~10k chars
+are what *this task* pulled in. **This reader does not make that split** — it would mean
+parsing inside a recorded digest, which is re-derivation. The split above is a measurement
+of the stored bytes, made once, by hand, and stated here.
+
+Composition at the peak call, over 192 turns (43,269,501 chars of conversation in all):
+
+| where | chars | share |
+|---|---|---|
+| carried in from EARLIER TURNS of the same chat | 37,479,738 | 58.7% |
+| the tool menu | 10,553,736 | 16.5% |
+| the system text | 9,975,579 | 15.6% |
+| the turn's own messages | 5,789,763 | 9.1% |
+
+Within the conversation: the model's own assistant messages 29.0%, `read_url` 18.7%,
+`run_command` 17.2%, `browse` 8.8%, `browse_act` 7.1%, `web_search` 4.5%, `recall` 4.0%,
+`read_file` 2.5%.
+
+**That ordering is unit-dependent and the doc says so rather than picking a winner.**
+Weighting by every call instead of by each turn's peak — which counts a long turn once per
+resend — an independent pass measured `run_command` above `read_url` (assistant 34.0,
+`run_command` 22.2, `read_url` 13.4). Neither is wrong; they answer *what filled the
+fullest call* and *what got resent most*. The peak-call set is the one published because it
+is what the shipped `dossier()` exposes and can therefore be re-derived from the tool.
+
+And **51.2% of all recorded model calls already exceed 60,000 input tokens** (1,165 of
+2,275, median 61,275). Restricting to the calls that recorded a provider `usage` detail
+gives 58.8% (842 of 1,431, median 80,023) — a **newer, larger-context subset**, so quoting
+that figure as the corpus rate biases it upward. Per day, on 2026-08-23 it was 73% with a
+median call of 196.6k.
