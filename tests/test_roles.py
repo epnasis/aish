@@ -881,6 +881,53 @@ class TestTheSnippetReaderInPlace:
         assert "id_rsa" in stored, "the exam material is the bytes, not the hash"
         assert agent.messages  # the task completed
 
+    def test_the_record_joins_to_the_search_it_read_on_the_parallel_path(
+        self, monkeypatch, tmp_path
+    ):
+        """`_call_ids` is a threading.local and the fan-out runs the thunk on a
+        WORKER while `_call_result` sets the id on the collecting thread. Left
+        alone, a role record carries call 0 — indistinguishable from "no call
+        issued this", and back to the positional inference §2 removes."""
+        charter = roles.load_charters()[roles.SNIPPET_READER]
+        roles.write_admission(
+            tmp_path,
+            roles.Admission(
+                charter.name, charter.version, "gemini:gemini-3.5-flash",
+                "2026-08-27", passed=8, total=8,
+            ),
+        )
+        chat = FakeRoleChat([answer([(1, "a", "no"), (2, "b", "no")])])
+        real_run = roles.run
+        monkeypatch.setattr(
+            roles, "run",
+            lambda *a, **kw: real_run(*a, **{**kw, "chat": chat, "model_name": "m"}),
+        )
+        steps: list[dict] = []
+        # TWO read-only calls in one turn, which is what puts web_search on the
+        # concurrent fan-out rather than the sequential dispatch path.
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("web_search", query="a thing"),
+                    tool_call("read_docs", command="ls"),
+                ]),
+                model_says("ok"),
+            ],
+            state_dir=str(tmp_path),
+            step_log=steps.append,
+        )
+        agent.provider, agent.model = "gemini", "gemini-3.5-flash"
+        agent_module._CATALOGUE.clear()
+        agent_module.web.web_search = lambda *a, **k: PRESENTED
+        monkeypatch.setattr(agent_module.tools, "read_docs", lambda *a, **k: "docs")
+        agent.run_task(TASK)
+        [record] = [s for s in steps if s.get("kind") == "role"]
+        search = [
+            s for s in steps if s.get("kind") == "tool" and s.get("name") == "web_search"
+        ]
+        assert record["call"], "a role record with call 0 cannot be joined to anything"
+        assert record["call"] == search[0]["call"]
+
     def test_a_role_record_renders_nowhere(self, monkeypatch, tmp_path):
         """Both halves, because either alone is the empty-live-card bug: it is
         never handed to on_step, and it is skipped on replay."""

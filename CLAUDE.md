@@ -74,6 +74,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `aish/static/` (`app.js`, `style.css`, `sw.js`) | `docs/web-frontend.md` |
 | `skills.py`, `embeddings.py`, `curate.py`, `skill_import.py` | `docs/knowledge-layer.md` |
 | `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
+| `roles.py`, `aish/charters/`, `_searched`, `_read_snippets`, anything a role reads or a charter declares | `docs/roles.md` |
 | `tool_plugins.py`, `secrets.py` | `docs/tools-layer.md` |
 | `explain.py`, `evidence.py`, the `brief` record | `docs/diagnostics.md` |
 | `ratelimit.py`, `_chat_turn`'s retry loop, anything that retries a model call | `docs/rate-limits.md` |
@@ -121,6 +122,11 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`curate.py`** — the retrieval self-curation loop; the orchestration lives in the script, not in a model session. → `docs/knowledge-layer.md`
 - **`skill_import.py` + `import_skill`** — import a skill from a git repo or local path under ONE consolidated review. Safety is enforced in code, not by asking the model. → `docs/knowledge-layer.md`
 - **`rules.py`** — the rules engine (#191): owner-authored turn contracts the harness enforces. Rules only ever RESTRICT, so a bug over-restricts and can never under-restrict. → `docs/rules-engine.md`
+- **`roles.py`** — cheaply appointed, isolated, narrow-duty helpers (#297): a charter, its
+  declared inputs, and a code-validated typed answer. Isolation is structural — a role
+  composes its own two messages and calls the backend seam, so no `Agent` exists for
+  history or tools to leak from. The first one reads search snippets so their sentences
+  never reach the model that decides what to do next. → `docs/roles.md`
 - **`rule_compiler.py`** — the owner's plain language → rule field values (#205). Isolated because it is more accurate; safe because code validates it and the owner approves it. The acting model never learns the grammar. → `docs/rules-engine.md`
 - **`tool_plugins.py`** — droppable `TOOL.md` plugin tools, indistinguishable from native ones to the model and gated by the same `_dispatch`. → `docs/tools-layer.md`
 - **`secrets.py`** — local secret store backed by the macOS login Keychain; structurally un-committable. → `docs/tools-layer.md`
