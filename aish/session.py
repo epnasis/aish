@@ -592,6 +592,11 @@ RENDERLESS_STEPS = frozenset(
         "brief",  # #239
         "reasoning",  # #240
         "call",  # #240
+        # #297. A role call is governance evidence about a step, not a step the
+        # owner watches: what he sees is the tool result the role shaped. It
+        # renders nowhere live and is skipped on replay, which is the pair
+        # `_emit_record` requires — either half alone is the empty-live-card bug.
+        "role",  # #297
     }
 )
 

@@ -98,6 +98,10 @@ class SessionUsage:
     origin: str = "user"
     title: str = ""
     calls: list[Call] = field(default_factory=list)
+    # Raw `role` records (#297), kept as written. `roles.scan_counters` turns
+    # them into counters; this module only carries them, so the two readers
+    # cannot disagree about what a role call was.
+    role_calls: list[dict] = field(default_factory=list)
     contributors: list[Contributor] = field(default_factory=list)
     failures: list[dict] = field(default_factory=list)
     trims: int = 0
@@ -190,6 +194,15 @@ def scan_session(path: Path) -> SessionUsage:
                 session.trims += 1
                 session.unattributed_trims += int(step.get("stubbed_truncated") or 0)
                 _close_stubbed(live, buckets, step, last_call)
+            elif skind == "role":
+                # Per-charter attribution (#297). It cannot travel through the
+                # governor — `reserve_for_call` takes a provider:model key and
+                # nothing else — so it lives in the role's own record and is
+                # read here. Kept OUT of `session.calls`, deliberately: those
+                # are the acting loop's calls, and folding a role's spend into
+                # them would make every existing per-model figure move for a
+                # reason no reader could see. It is reported beside them.
+                session.role_calls.append(dict(step))
 
     if session.stamped:
         for origin, entries in live.items():
@@ -338,9 +351,33 @@ def json_report(sessions: list[SessionUsage]) -> str:
                     ],
                 }
                 for s in sessions
-            ]
+            ],
+            # Per-charter, across the whole window rather than per session: a
+            # role's fire rate is a property of the charter, and a per-session
+            # count of two calls says nothing about it (#297, contract §7).
+            "roles": {
+                name: {
+                    "calls": c.calls,
+                    "by_status": c.by_status,
+                    "retries": c.retries,
+                    "input": c.input_tokens,
+                    "output": c.output_tokens,
+                    "input_chars": c.input_chars,
+                    "ms_p50": c.ms_p50,
+                    "flags": c.flags,
+                }
+                for name, c in sorted(_role_counters(sessions).items())
+            },
         },
         indent=2,
+    )
+
+
+def _role_counters(sessions: list[SessionUsage]):
+    from . import roles as roles_mod
+
+    return roles_mod.scan_counters(
+        {"step": step} for session in sessions for step in session.role_calls
     )
 
 
@@ -398,9 +435,49 @@ def render(sessions: list[SessionUsage], period: str = "day") -> str:
         f"  {BOLD}context{RESET} peaked at {peak:,} tokens in one call"
         f" {DIM}(spend counts each resend; context does not){RESET}"
     )
+    lines += _role_rows(sessions)
     lines += [""] + _caveats(sessions)
     lines.append(f"{DIM}  measures RECORDED usage — not a billing statement{RESET}")
     return "\n".join(lines)
+
+
+def _role_rows(sessions: list[SessionUsage]) -> list[str]:
+    """What the isolated roles spent, and what they actually did (#297).
+
+    The counters #295 P4 makes the admission price for a scored answer, in the
+    one place the owner already looks at spend. Reported BESIDE the acting
+    model's figures rather than inside them: a role's tokens are real money on
+    the same key, but folding them in would silently move every per-model
+    number that existed before roles did.
+
+    It says what was RECORDED. A charter with no calls does not appear at all —
+    which is not the same as a charter that behaved well, and the absence of a
+    section is the honest rendering of "nothing was asked".
+    """
+    counters = _role_counters(sessions)
+    if not counters:
+        return []
+    lines = ["", f"  {BOLD}isolated roles{RESET}"]
+    for name, c in sorted(counters.items()):
+        answered = c.examined
+        other = {k: v for k, v in c.by_status.items() if k != "ok"}
+        lines.append(
+            f"    {name:<18} {c.calls:>5} call{'' if c.calls == 1 else 's'}"
+            f" · {answered} answered"
+            + (f" · {', '.join(f'{v} {k}' for k, v in sorted(other.items()))}" if other else "")
+            + (f" · {c.retries} retried" if c.retries else "")
+        )
+        if c.input_tokens or c.output_tokens:
+            per = c.input_tokens // c.calls if c.calls else 0
+            lines.append(
+                f"      {DIM}spend{RESET} {human(c.input_tokens)} in + "
+                f"{human(c.output_tokens)} out {DIM}(~{per} in per call){RESET}"
+                + (f" {DIM}· {c.ms_p50} ms median{RESET}" if c.ms else "")
+            )
+        for field_name, tally in sorted(c.flags.items()):
+            counted = ", ".join(f"{v} {k}" for k, v in sorted(tally.items()))
+            lines.append(f"      {DIM}{field_name}{RESET} {counted}")
+    return lines
 
 
 def _caveats(sessions: list[SessionUsage]) -> list[str]:

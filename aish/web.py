@@ -24,7 +24,7 @@ import urllib.request
 import uuid
 from collections.abc import Callable
 from html.parser import HTMLParser
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import browse as browse_mod
 from . import browser, tools
@@ -1387,15 +1387,106 @@ SEARCH_RESULTS_NOTE = UNTRUSTED_NOTE + (
 )
 
 
+# The line that closes a rendered result set. Named because two things now
+# depend on it: the render below writes it, and `untrusted_rows` uses it to
+# find where the stranger's half of the text ends.
+NEXT_STEP_LINE = "[call read_url on the most promising URL to read the page]"
+
+
+def _flat(text: str) -> str:
+    """One line, always.
+
+    `parse_results` treats any column-0 `N.` line as the start of a new row, so
+    a newline inside a snippet could fabricate a row that the index never
+    returned — a title and a link of the writer's choosing, arriving as one of
+    aish's own numbered results. Both index paths already join their fields
+    into a single line, so this changes nothing today; it is here so that the
+    property is enforced at the one function that renders a row rather than
+    depending on two callers upstream continuing to behave.
+    """
+    return " ".join((text or "").split())
+
+
 def _numbered(rows: list[tuple[str, str, str]]) -> str:
     lines = [
-        f"{i}. {title or '(untitled)'}\n   {url}\n   {snippet}"
+        f"{i}. {_flat(title) or '(untitled)'}\n   {_flat(url)}\n   {_flat(snippet)}"
         for i, (title, url, snippet) in enumerate(rows, 1)
     ]
-    lines.append("[call read_url on the most promising URL to read the page]")
+    lines.append(NEXT_STEP_LINE)
     # Marked HERE rather than at the call sites: this is the one function that
     # renders a row, so a third rendering path cannot forget the banner.
     return SEARCH_RESULTS_NOTE + truncate("\n".join(lines))
+
+
+_ROW_START = re.compile(r"^(\d+)\.[ \t]*(.*)$")
+
+
+class SearchRow(NamedTuple):
+    """One numbered result, taken back out of the presented text.
+
+    `title` and `url` are the page's own words. `snippet` is too, and it is the
+    part the snippet reader exists to stop forwarding.
+    """
+
+    n: int
+    title: str
+    url: str
+    snippet: str
+
+
+def untrusted_rows(presented: str) -> str:
+    """The STRANGER'S half of a presented result set, with aish's own framing
+    removed.
+
+    aish's framing — the untrusted-content banner, the sentence naming which
+    words below are the stranger's, the `[aish: …]` provenance line, the
+    next-step line — is aish talking. Handing it to an isolated reader would
+    put aish's own instructions inside the block that reader is told to treat
+    as material, which is the one confusion the whole arrangement exists to
+    prevent.
+
+    Bounded by the numbered rows rather than by counting known framing lines,
+    so adding or removing a framing line later cannot silently change what a
+    role receives. It is also what makes the ROWS the thing a recorded session
+    can be mined for: every session log written before the banner shipped holds
+    exactly this text and nothing else.
+    """
+    lines = (presented or "").splitlines()
+    start = next((i for i, line in enumerate(lines) if _ROW_START.match(line)), None)
+    if start is None:
+        return ""
+    end = len(lines)
+    for i in range(len(lines) - 1, start, -1):
+        if lines[i].strip() == NEXT_STEP_LINE:
+            end = i
+            break
+    return "\n".join(lines[start:end]).strip()
+
+
+def parse_results(presented: str) -> list[SearchRow]:
+    """The numbered rows as records.
+
+    Deliberately a parse of the PRESENTED text rather than a second return
+    value from `web_search`: what a session log recorded is this text, so a
+    parser that works on it works on the mined material and on a live call
+    identically — and a golden pair mined from a log is then genuinely an
+    exam case for the live path rather than for a shape nothing produces.
+    """
+    out: list[SearchRow] = []
+    lines = untrusted_rows(presented).splitlines()
+    for i, line in enumerate(lines):
+        match = _ROW_START.match(line)
+        if not match:
+            continue
+        follow = [
+            lines[j].strip()
+            for j in (i + 1, i + 2)
+            if j < len(lines) and not _ROW_START.match(lines[j])
+        ]
+        url = follow[0] if follow else ""
+        snippet = follow[1] if len(follow) > 1 else ""
+        out.append(SearchRow(int(match.group(1)), match.group(2).strip(), url, snippet))
+    return out
 
 
 def _url_key(url: str) -> str:
