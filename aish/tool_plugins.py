@@ -37,12 +37,12 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import files
+from . import files, provenance
 from .paths import config_home
 
 # A TOOL.md is the same md+frontmatter family as a skill, a memory and a rule,
 # so it reads its header the same way — see skills.split_frontmatter (#209).
-from .skills import split_frontmatter
+from .skills import frontmatter_duplicates, split_frontmatter
 from .tools import (
     STATUS_FAILED,
     STATUS_OK,
@@ -384,6 +384,38 @@ def resolve_executable(tool_dir: Path, executable: str) -> str | None:
     return None
 
 
+# Keys where ONE of two declarations restricts what the tool may do, and the
+# other widens it. A manifest that restates any key is refused outright by
+# _parse_tool, so this decides nothing today — it is what a reader that ever
+# reaches these fields WITHOUT the refusal sees, and it must see the fence:
+# `mutating: yes` is the approval card (#326), `content_from: email` is the
+# mail-link gate (#279, provenance.MAIL). Both are one-directional, so the
+# strictest reading is well defined; `exec`, `schema` and `returns` are not
+# orderable that way, which is why the refusal and not this is the fix.
+def _restricting(key: str, first: str, later: str) -> str:
+    """The occurrence that RESTRICTS, when a key is declared more than once.
+    Any other key keeps the format's long-standing last-one-wins reading."""
+    if key == "mutating":
+        return first if _parse_bool(first) else later
+    if key == "content_from":
+        return first if first.strip().lower() == provenance.MAIL else later
+    return later
+
+
+def _parse_fields(front: str) -> dict[str, str]:
+    """Frontmatter lines as key -> value. Duplicate keys are an ERROR in a tool
+    manifest (see _parse_tool); this merge only decides what the fields say
+    while those errors are being collected."""
+    fields: dict[str, str] = {}
+    for line in front.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        fields[key] = _restricting(key, fields[key], value) if key in fields else value
+    return fields
+
+
 def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
     """Parse+validate one TOOL.md. Returns (tool, errors); a non-empty errors
     list means the tool is skipped. The linter is deterministic and pure."""
@@ -400,11 +432,14 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
     if not front:
         return None, [f"{manifest}: malformed frontmatter"]
 
-    fields: dict[str, str] = {}
-    for line in front.splitlines():
-        key, sep, value = line.partition(":")
-        if sep:
-            fields[key.strip()] = value.strip()
+    fields = _parse_fields(front)
+    duplicates = frontmatter_duplicates(front)
+    if duplicates:
+        named = ", ".join(repr(key) for key in duplicates)
+        errors.append(
+            f"{manifest}: frontmatter declares {named} more than once — the tool is "
+            "skipped rather than loaded from one of the declarations"
+        )
 
     tool_dir = manifest.parent
     name = fields.get("name", "") or tool_dir.name

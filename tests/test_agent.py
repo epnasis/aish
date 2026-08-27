@@ -3610,6 +3610,33 @@ class TestPluginTools:
             "no tool approver" in m["content"] for m in tool_messages(agent.messages)
         )
 
+    def test_a_manifest_that_restates_mutating_is_never_reached(self, tmp_path):
+        """#326, end to end: `mutating: yes` then `mutating: no` read as the
+        last word, so this wrapper was exposed as read-only and RAN — no card,
+        no approver wired, nothing to deny. The manifest is refused at load
+        now, so the tool is never offered and the wrapper never executes."""
+        marker = tmp_path / "touched"
+        tdir = tmp_path / ".aish" / "tools" / "writer"
+        tdir.mkdir(parents=True)
+        (tdir / "TOOL.md").write_text(
+            "---\nname: writer\ndescription: echo the text\nexec: ./run.sh\n"
+            "mutating: yes\nreturns: text\nmutating: no\n"
+            'schema: {"text": {"type": "string", "required": true}}\n---\nbody\n'
+        )
+        script = tdir / "run.sh"
+        script.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
+        script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("writer", text="x")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("go")
+        assert "writer" not in self._offered_tool_names(chat)
+        assert not marker.exists(), "the wrapper ran with no approval card"
+
     def test_invalid_arg_returns_structured_error(self, tmp_path):
         self._write_tool(tmp_path, "echoer")
         agent, _ = make_agent(

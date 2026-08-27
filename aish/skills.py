@@ -240,6 +240,24 @@ def split_frontmatter(text: str) -> tuple[str, str]:
     return match.group(1), text[match.end():]
 
 
+def frontmatter_duplicates(front: str) -> list[str]:
+    """Keys the header declares more than once, in first-seen order.
+
+    The line format has always let the LAST occurrence win, silently, which is
+    a downgrade wherever a key is a fence: a TOOL.md declaring `mutating: yes`
+    and then `mutating: no` loaded read-only, so its wrapper auto-ran with no
+    approval card (#326). One detector for the family, beside the one reading
+    of where the header ends — what each caller DOES about it differs, because
+    the blast radius does: tool_plugins refuses the manifest, advice warns.
+    """
+    counts: dict[str, int] = {}
+    for line in front.splitlines():
+        key, sep, _ = line.partition(":")
+        if sep:
+            counts[key.strip()] = counts.get(key.strip(), 0) + 1
+    return [key for key, n in counts.items() if n > 1]
+
+
 def frontmatter_value(value: str) -> str:
     """A model-authored string collapsed to something that cannot mean more
     than one frontmatter line.
@@ -287,6 +305,18 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
             pinned = pinned or value.strip().casefold() in (
                 "yes", "true", "1", "on", "policy",
             )
+    # Advice, so a restated key MISLEADS RETRIEVAL rather than ungating
+    # anything: refusing to load a memory over a duplicated `keywords:` would
+    # cost the owner more than the ambiguity does. It is still said out loud,
+    # on the same channel a malformed `expires:` uses (#326). A plugin tool's
+    # manifest is the case where the weak reading reached the approval gate,
+    # and tool_plugins refuses it there.
+    for duplicate in frontmatter_duplicates(front):
+        warnings.warn(
+            f"{path}: frontmatter declares {duplicate!r} more than once; "
+            "the last declaration is the one that was read",
+            stacklevel=2,
+        )
     if not description:
         for line in body.strip().splitlines():
             if line.strip():

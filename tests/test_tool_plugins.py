@@ -117,6 +117,84 @@ class TestParse:
         assert tool is None
 
 
+class TestARestatedKeyIsRefused:
+    """#326 — the reader half of #209. The line parser let the LAST occurrence
+    of a key win, so a manifest declaring `mutating: yes` and then
+    `mutating: no` parsed to `errors: []`, `mutating: False`: the tool loaded
+    read-only and its wrapper auto-ran with no approval card. #209 stopped
+    `create_tool` from EMITTING that shape; a manifest still arrives by
+    import, by hand, or from the next writer that forgets to flatten, so the
+    reader refuses it — once, for every writer there will ever be.
+    """
+
+    # The manifest from the issue, verbatim.
+    RESTATED = (
+        "---\nname: probe\ndescription: a probe\nexec: ./run.sh\n"
+        "mutating: yes\nreturns: text\nmutating: no\n"
+        'schema: {"text": {"type": "string"}}\n---\nbody\n'
+    )
+
+    def test_the_manifest_from_the_issue_is_refused(self, tmp_path):
+        manifest = write_tool(tmp_path / "probe", self.RESTATED)
+        tool, errors = _parse_tool(manifest)
+        assert tool is None, "a manifest that declares mutating twice loaded"
+        assert any("'mutating'" in e and "more than once" in e for e in errors), errors
+
+    def test_any_restated_key_is_refused_not_only_the_fenced_ones(self, tmp_path):
+        """`exec` is the sharper version of the same shape — a reviewer's eye
+        reads the first line and the runtime runs the second — and it has no
+        strictest reading to fall back on, which is why the refusal is the fix
+        and the merge below is only the belt."""
+        manifest = write_tool(
+            tmp_path / "t",
+            "---\nname: t\ndescription: d\nexec: ./run.sh\nmutating: no\n"
+            "returns: text\nexec: ./run.sh\n---\nb",
+        )
+        tool, errors = _parse_tool(manifest)
+        assert tool is None
+        assert any("'exec'" in e for e in errors), errors
+
+    def test_a_tool_declaring_mutating_once_still_loads_mutating(self, tmp_path):
+        manifest = write_tool(
+            tmp_path / "writer",
+            VALID.replace("name: echoer", "name: writer").replace(
+                "mutating: no", "mutating: yes"
+            ),
+        )
+        tool, errors = _parse_tool(manifest)
+        assert errors == []
+        assert tool.mutating is True, "the gate's own flag"
+
+    def test_mutating_cannot_be_downgraded_if_the_refusal_is_bypassed(self):
+        """Belt and braces UNDER the refusal (#326): whichever way round the
+        two declarations sit, the fields a reader that skipped the error list
+        would go on to use say `yes`."""
+        assert tp._parse_fields("mutating: yes\nreturns: text\nmutating: no")[
+            "mutating"
+        ] == "yes"
+        assert tp._parse_fields("mutating: no\nmutating: yes")["mutating"] == "yes"
+
+    def test_a_restated_content_from_keeps_the_mail_marking(self):
+        """The other one-directional fence: `content_from: email` marks a
+        result as mail, so aish records its links and will not navigate one by
+        itself (#279). Dropping it is a widening, exactly as `mutating: no` is."""
+        assert tp._parse_fields("content_from: email\ncontent_from: web")[
+            "content_from"
+        ] == "email"
+        assert tp._parse_fields("content_from: web\ncontent_from: email")[
+            "content_from"
+        ] == "email"
+
+    def test_an_unfenced_key_still_reads_as_the_last_one(self):
+        """Nothing else changes reading: only the keys where one declaration
+        restricts and the other widens have a strictest answer at all."""
+        assert tp._parse_fields("description: a\ndescription: b")["description"] == "b"
+
+    def test_a_manifest_saying_each_key_once_is_unaffected(self, tmp_path):
+        tool, errors = _parse_tool(write_tool(tmp_path / "echoer", VALID))
+        assert errors == [] and tool.mutating is False
+
+
 class TestResolveExecutable:
     def test_bare_name_on_path(self, tmp_path):
         assert resolve_executable(tmp_path, "sh") is not None
