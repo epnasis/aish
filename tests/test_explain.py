@@ -604,9 +604,16 @@ class TestReaderIsPureAndHonest:
         # re-running the rule that produced it — an answer about how aish
         # behaves today, wearing a record's clothes. The reader's words for
         # those tokens are pinned against the vocabulary by a test instead.
+        # `ratelimit` joined the list with #330's contributor breakdown. It
+        # owns `estimate_tokens`, whose chars/3 is the GOVERNOR's convention
+        # today — importing it would put today's divisor in front of a log
+        # written under another one, and hand this reader a module that reports
+        # how aish behaves NOW. The reader's refusal to estimate had no
+        # enforcing line until this one; a guarantee stated only in prose is the
+        # shape this repository keeps finding broken.
         forbidden = {"backends", "ollama", "rules", "rule_compiler", "tools",
                      "tool_plugins", "skills", "embeddings", "web", "browser",
-                     "signin"}
+                     "signin", "ratelimit"}
         tree = ast.parse(pathlib.Path(explain_mod.__file__).read_text())
         imported: set[str] = set()
         for node in ast.walk(tree):

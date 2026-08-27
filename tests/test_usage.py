@@ -237,7 +237,11 @@ class TestScanIsContained:
         """Same law as `aish explain`: a report that could consult a live model
         or today's config would stop being a reading of what happened."""
         source = (usage.__file__ and open(usage.__file__).read()) or ""
-        for forbidden in ("import ollama", "backends.make_chat", "requests", "urllib"):
+        # `ratelimit` is on the list for the reason `aish explain`'s fence has
+        # it: its chars/3 is the governor's convention TODAY, and a report that
+        # imported it would silently re-price a log written under another one.
+        for forbidden in ("import ollama", "backends.make_chat", "requests", "urllib",
+                          "ratelimit"):
             assert forbidden not in source
 
 
@@ -543,10 +547,12 @@ class TestWhatFilledEachCall:
         assert context["calls"][1]["accounted_chars"] == context["calls"][0]["accounted_chars"]
 
     def test_the_total_is_said_to_be_a_lower_bound(self, tmp_path):
-        """Three things reach `self.messages` with no message record: steering,
-        a held proposal's answer, and the guidance form of an attachment. On
-        every valid anchor in the owner's corpus the reader is SHORT by 0.0-2.1%
-        because of them, so the block must not read as exact."""
+        """At least FOUR things reach `self.messages` with no message record,
+        and the largest by two orders of magnitude is a tool call's own
+        arguments — `_serialize` drops `tool_calls` and `raw_blocks`, and they
+        are resent in front of every later call. The block must not read as
+        exact, and must not present its list as closed: an exhaustive-sounding
+        list of three was itself a confident wrong claim."""
         from aish import evidence, explain
 
         digest = evidence.put("[]", tmp_path)
@@ -559,7 +565,54 @@ class TestWhatFilledEachCall:
         log = explain.load(path)
         text = explain.render(log.turns[0], log, tmp_path)
         assert "LOWER bound" in text
-        assert "steering, a held proposal's answer" in text
+        assert "AT LEAST four" in text
+        assert "not known to be closed" in text
+        assert "arguments" in text
+        # …and the system row is not sold as a standing prompt: about a third of
+        # it is aish's own usage notes and a further slice is what THIS TASK
+        # selected, so a reader cutting for a 60k window aims correctly.
+        assert "COMPOSED PER TASK" in text
+        # REPORTED, never billed: most of that number can be a cache read.
+        assert "the provider reported" in text and "billed" not in text
+
+    def test_an_unstamped_message_in_a_stamped_turn_is_not_placed_at_call_zero(self, tmp_path):
+        """`agent._log_held_entry` calls `on_message` directly instead of going
+        through `_append`, so a released hold's answer carries no `model_call`.
+        Reading the absent key as 0 would stand it in front of every call of its
+        turn — including the calls made before it existed. Seen in the wild in
+        `session-20260824-210909` turn 4."""
+        context = self._doc(tmp_path, [
+            {"kind": "task_start", "prompt": "hi", "ts": "2026-08-21T19:14:19"},
+            self._brief(),
+            message("user", "hi", model_call=0),
+            call_record(1, (100, 5)),
+            # the released hold: logged, and never stamped
+            {"ts": "2026-08-21T19:15:20", "kind": "message", "role": "assistant",
+             "content": "h" * 700},
+            call_record(2, (110, 5)),
+        ])
+        assert context["unstamped_chars"] == 700
+        # It moved no bucket and no total, in either direction.
+        assert context["calls"][0]["accounted_chars"] == context["calls"][1]["accounted_chars"]
+        assert all(p["chars"] != 700 for p in context["peak"]["parts"])
+
+    def test_a_role_that_never_ran_does_not_report_reading_zero_chars(self, tmp_path):
+        """A SKIP record writes no `input` block. "read 0 chars" would be a
+        measurement of something that never happened."""
+        from aish import explain
+
+        context = self._doc(tmp_path, [
+            {"kind": "task_start", "prompt": "hi", "ts": "2026-08-21T19:14:19"},
+            self._brief(),
+            message("user", "hi", model_call=0),
+            call_record(1, (100, 5)),
+            {"ts": "2026-08-21T19:15:10", "kind": "trace", "step": {
+                "kind": "role", "charter": "snippet-reader", "turn": 1, "call": 1,
+                "status": "skip"}},
+        ])
+        role = context["roles"][0]
+        assert role["input_state"] == explain.MISSING
+        assert role["answer_state"] == explain.MISSING
 
     def test_images_get_a_row_because_they_carry_no_characters(self, tmp_path):
         """Char-invisible and token-huge. A row makes an unaccounted call show a

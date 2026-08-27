@@ -1009,14 +1009,22 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
     stamped = any("model_call" in m for m in turn.messages)
     if not stamped:
         return {
-            "state": MISSING if not log.wrote("reasoning") else EMPTY,
+            # MISSING and never EMPTY. "Recorded, and it was empty" would say
+            # this turn put nothing in front of the model, which has never
+            # happened; what is absent is the STAMP, so the honest machine value
+            # is "not recorded". The rendered text always said this; the KEY is
+            # what a panel reads, and it must not say something else.
+            "state": MISSING,
             "stamped": False,
             "calls": [],
             "peak": None,
             "unattributed_chars": 0,
+            # Turn-only here and chat-cumulative in the stamped branch below,
+            # because that walk crosses turns and this one does not.
             "steering_chars": sum(
                 len(str(step.get("text") or "")) for step in turn.of_kind("injected")
             ),
+            "unstamped_chars": 0,
             "roles": _role_calls(turn),
             "failed": _failed_calls(turn),
         }
@@ -1025,6 +1033,7 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
     brief: dict | None = None
     unattributed = 0
     steering = 0
+    unstamped = 0
     calls: list[dict] = []
     parts_at: dict[int, list[dict]] = {}
 
@@ -1033,10 +1042,22 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         for record in past.records:
             kind = record.get("kind")
             if kind == "message":
+                chars = len(str(record.get("content") or ""))
+                if here and "model_call" not in record:
+                    # A message in THIS turn with no stamp cannot be placed.
+                    # `agent._log_held_entry` writes one: it calls `on_message`
+                    # directly rather than going through `_append`, so the stamp
+                    # is never attached. Reading the absent key as 0 would put a
+                    # released hold's answer in front of every call of its turn
+                    # — including calls made before it existed, which is
+                    # verbatim the failure this reader's own docstring warns
+                    # about. Sized and set aside, like steering.
+                    unstamped += chars
+                    continue
                 live.append(
                     {
                         "origin": origin_of(record),
-                        "chars": len(str(record.get("content") or "")),
+                        "chars": chars,
                         "ordinal": past.ordinal,
                         "stamp": int(record.get("model_call") or 0),
                         "image_count": len(record.get("images") or []),
@@ -1126,8 +1147,12 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         "unattributed_chars": unattributed,
         # Steering typed during this chat, which the log sizes but cannot place
         # (see the walk above). Reported so the reader knows the parts are a
-        # lower bound by at most this much, and by nothing it can name.
+        # lower bound by at least this much. Chat-cumulative here because this
+        # walk crosses turns; the unstamped branch above can only count its own.
         "steering_chars": steering,
+        # Chars in this turn's own messages carrying no stamp, so this reader
+        # cannot say which calls they stood in front of. Same treatment.
+        "unstamped_chars": unstamped,
         "roles": _role_calls(turn),
         "failed": _failed_calls(turn),
     }
@@ -1148,7 +1173,7 @@ def _snapshot(
     every call of this one.
     """
     buckets: dict[tuple[str, str], dict] = {}
-    images = 0
+    images: dict[str, int] = {FROM_CARRIED: 0, FROM_TURN: 0}
     for entry in live:
         if entry["ordinal"] < ordinal:
             where = FROM_CARRIED
@@ -1165,7 +1190,10 @@ def _snapshot(
         part["chars"] += entry["chars"]
         part["items"] += 1
         part["trimmed"] += 1 if entry["trimmed"] else 0
-        images += entry["image_count"]
+        # Counted per SIDE, because an image riding carried history is not a
+        # picture attached to this turn and a single row saying "this turn"
+        # would say it was.
+        images[where] += entry["image_count"]
 
     parts = list(buckets.values())
     unmeasured: list[str] = []
@@ -1205,17 +1233,19 @@ def _snapshot(
             "the tool menu (its bytes are purged)" if menu_state == PURGED
             else "the tool menu"
         )
-    if images:
+    for side, count in sorted(images.items()):
+        if not count:
+            continue
         # Char-invisible and token-huge: an image occupies the window and
         # contributes nothing this reader can measure. It gets a row so an
         # unaccounted call has a visible reason rather than a silent gap.
-        parts.append({"origin": f"{images} image(s)", "where": FROM_TURN, "chars": 0,
-                      "items": images, "trimmed": 0, "state": UNREADABLE})
-        unmeasured.append(f"{images} image(s), which carry no characters at all")
+        parts.append({"origin": f"{count} image(s)", "where": side, "chars": 0,
+                      "items": count, "trimmed": 0, "state": UNREADABLE})
+        unmeasured.append(f"{count} image(s), which carry no characters at all")
     return {
         "parts": parts,
         "accounted_chars": sum(p["chars"] for p in parts),
-        "image_count": images,
+        "image_count": sum(images.values()),
         "unmeasured": unmeasured,
     }
 
@@ -1284,7 +1314,12 @@ def _role_calls(turn: Turn) -> list[dict]:
                 "status": str(step.get("status") or ""),
                 "reported": {k: v for k, v in (step.get("usage") or {}).items()
                              if v not in (None, "")},
+                # A SKIP record — a charter that never loaded, a role that was
+                # not asked — writes no `input` block at all. Rendering that as
+                # "read 0 chars" states a measurement of something that never
+                # happened, so the size and its state travel together.
                 "input_chars": int(given.get("chars") or 0),
+                "input_state": RECORDED if "chars" in given else MISSING,
                 "answer_chars": len(json.dumps(step.get("output"), ensure_ascii=False))
                 if step.get("output") is not None else 0,
                 "answer_state": RECORDED if step.get("output") is not None else MISSING,
@@ -2009,8 +2044,19 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
     if peak:
         head = f"{BOLD}at call {peak['model_call']}, the fullest{RESET}"
         if peak["reported_state"] != MISSING:
-            head += f" — the provider billed {int(peak['reported'].get('input') or 0):,} " \
-                    f"input tokens for it"
+            # REPORTED, never "billed": on a caching backend most of this number
+            # is a cache read priced at a fraction of base input, so "billed"
+            # states a cost nothing here measured. The split rides with it for
+            # the same reason — it is the difference between the two.
+            head += (
+                f" — the provider reported "
+                f"{int(peak['reported'].get('input') or 0):,} input tokens"
+            )
+            cached = int(
+                peak["reported"].get("cached") or peak["reported"].get("cache_read") or 0
+            )
+            if cached:
+                head += f", {cached:,} of them served from cache"
         lines.append("")
         lines.append(head)
         for part in peak["parts"]:
@@ -2029,6 +2075,23 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
             lines.append(f"  {DIM}… {peak['parts_dropped']} smaller contributor(s){RESET}")
         # The bridge between the two units, said once and only where both halves
         # of it were recorded. It is this call's own ratio, not a constant.
+        #
+        # And the system row is NOT a standing prompt: it is composed per task,
+        # and about a third of it is aish's own usage notes while a further
+        # slice is rules and preloaded skills THIS TASK selected. Calling it
+        # fixed would aim a reader cutting for a 60k window at the wrong thing.
+        lines.append(
+            f"{DIM}  the system text is COMPOSED PER TASK — the prompt, aish's own usage "
+            f"notes, the{RESET}"
+        )
+        lines.append(
+            f"{DIM}  knowledge index, and the rules and preloaded skills this task selected. "
+            f"Only the tool{RESET}"
+        )
+        lines.append(
+            f"{DIM}  menu is the same on every task. The brief sizes the parts and does not "
+            f"split them.{RESET}"
+        )
         if peak["chars_per_token"]:
             lines.append(
                 f"{DIM}  shares are of MEASURED CHARS and are an ESTIMATE of token share: "
@@ -2039,16 +2102,20 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
                 f"moves with the content.{RESET}"
             )
         lines.append(
-            f"{DIM}  the parts are what the log CAN size. Three things enter the model's "
-            f"messages{RESET}"
+            f"{DIM}  the parts are what the log CAN size, and this total is a LOWER bound: "
+            f"AT LEAST four{RESET}"
         )
         lines.append(
-            f"{DIM}  without a message record — steering, a held proposal's answer, and the "
-            f"guidance{RESET}"
+            f"{DIM}  things reach the model's messages with no message record. The largest "
+            f"by far is a{RESET}"
         )
         lines.append(
-            f"{DIM}  form of an attachment — so this total is a LOWER bound by an amount "
-            f"nothing records.{RESET}"
+            f"{DIM}  tool call's own arguments, resent on every later call; then steering, a "
+            f"held answer,{RESET}"
+        )
+        lines.append(
+            f"{DIM}  and the guidance form of an attachment. The list is not known to be "
+            f"closed.{RESET}"
         )
         for missing in peak["unmeasured"]:
             lines.append(f"  {BOLD}not measured here:{RESET} {missing}")
@@ -2056,6 +2123,11 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
         lines.append(
             f"  {BOLD}{context['unattributed_chars']:,} chars{RESET} were removed by a trim "
             f"that did not record which results they came from"
+        )
+    if context["unstamped_chars"]:
+        lines.append(
+            f"  {BOLD}{context['unstamped_chars']:,} chars{RESET} are in this turn's messages "
+            f"with no record of which call they stood in front of"
         )
     if context["steering_chars"]:
         lines.append(
@@ -2081,16 +2153,20 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
                 f"{_human(sum(int(s.get('output') or 0) for s in spend))} out"
                 if spend else NOT_RECORDED
             )
-            given = sum(r["input_chars"] for r in group)
+            read = [r for r in group if r["input_state"] == RECORDED]
+            given = sum(r["input_chars"] for r in read)
             answered = [r for r in group if r["answer_state"] == RECORDED]
             # "read N chars, answered in M" and NOT "returned M": what reaches
             # the acting context is the block the answer is rendered into, and
             # nothing records its size.
+            what_read = f"read {given:,} chars" if len(read) == len(group) else (
+                f"read {given:,} chars in {len(read)} of {len(group)} call(s); the rest "
+                f"recorded no input"
+            )
             traded = (
-                f"read {given:,} chars, answered in "
-                f"{sum(r['answer_chars'] for r in answered):,}"
+                f"{what_read}, answered in {sum(r['answer_chars'] for r in answered):,}"
                 if len(answered) == len(group)
-                else f"read {given:,} chars, answer {NOT_RECORDED}"
+                else f"{what_read}, answer {NOT_RECORDED}"
             )
             lines.append(f"  {charter:<24} {len(group):>3} call(s) · {billed} · {traded}")
         lines.append(

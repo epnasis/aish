@@ -120,12 +120,21 @@ class SessionUsage:
     # and is arithmetic on an assumption. A log written before the stamp says so
     # instead of showing it.
     stamped: bool = False
-    # The FIXED floor: what every call of this chat paid before the task said a
-    # word — the standing prompt plus the per-task reminder (`brief.system`),
-    # and the tool menu (`brief.tools`, whose bytes are in the evidence store).
+    # The PER-CALL floor: what every call of this chat carried besides the
+    # conversation — the system text (`brief.system`) and the tool menu
+    # (`brief.tools`, whose bytes are in the evidence store).
+    #
+    # **Only the menu half is fixed.** The system text is COMPOSED PER TASK: the
+    # prompt, aish's own usage notes, the live knowledge index, and the rules
+    # and preloaded skills that task selected. Calling the whole thing a
+    # standing prompt would aim someone cutting for a 60k window at the one
+    # component that is not the problem. The brief sizes the parts and does not
+    # split them, and this reader may not split them either — that would mean
+    # parsing inside a recorded digest, which is re-derivation.
+    #
     # Taken from the LAST brief in the file, i.e. what was in force at the end.
-    # Their states are separate from their sizes: a log with no brief and a chat
-    # handed no tools are different facts (docs/diagnostics.md, three states).
+    # States are separate from sizes: a log with no brief and a chat handed no
+    # tools are different facts (docs/diagnostics.md, three states).
     system_chars: int = 0
     system_state: str = MISSING
     menu_chars: int = 0
@@ -239,13 +248,15 @@ _MENU_SIZES: dict[str, int | None] = {}
 
 
 def _fixed_floor(session: SessionUsage, step: dict, path: Path) -> None:
-    """What this chat paid on every call before the task said a word (#330).
+    """What this chat carried on every call besides the conversation (#330).
 
-    The system halves are sized by the brief itself. The tool menu is not in the
+    The system parts are sized by the brief itself. The tool menu is not in the
     log at all — the brief records its digest and the bytes live once in the
     evidence store — so this is a lookup of recorded bytes, cached per digest
     because one menu serves hundreds of sessions. A digest whose bytes are gone
     is `purged`, never 0.
+
+    Only the MENU is constant across tasks; see the note on the fields.
     """
     system = step.get("system")
     if system is not None:
@@ -504,7 +515,8 @@ def _trend_rows(
         "",
         f"{BOLD}against a {window:,}-token window{RESET} "
         f"{DIM}(#330 — what a local model will have){RESET}",
-        f"  {'':<26} {'calls':>7} {'over':>10} {'median in':>10} {'p95 in':>9} {'fixed':>9}",
+        f"  {'':<26} {'calls':>7} {'over':>10} {'median in':>10} {'p95 in':>9} "
+        f"{'sys+menu':>9}",
     ]
     for label, group in grouped.items():
         inputs = [c.input for c in group]
@@ -521,20 +533,25 @@ def _trend_rows(
         )
     unmeasured = sum(1 for s in sessions if s.calls and not s.fixed_measured)
     out.append(
-        f"{DIM}  fixed = chars of standing prompt + task reminder + tool menu, paid on EVERY"
-        f" call{RESET}"
+        f"{DIM}  sys+menu = chars carried on EVERY call besides the conversation. The MENU"
+        f" half is{RESET}"
     )
     out.append(
-        f"{DIM}  before the task says a word. Chars are measured; the window is in tokens,"
-        f" and the{RESET}"
+        f"{DIM}  the same on every task; the system half is composed per task — the prompt,"
+        f" aish's own{RESET}"
     )
     out.append(
-        f"{DIM}  two are not added — `aish explain <chat> <turn>` gives one turn's own"
-        f" ratio.{RESET}"
+        f"{DIM}  usage notes, the knowledge index, and the rules and skills that task"
+        f" selected.{RESET}"
     )
+    out.append(
+        f"{DIM}  Chars are measured; the window is in tokens, and the two are not added —"
+        f" `aish explain{RESET}"
+    )
+    out.append(f"{DIM}  <chat> <turn>` gives one turn's own ratio.{RESET}")
     if unmeasured:
         out.append(
-            f"{DIM}  {unmeasured} chat(s) recorded no brief, so their fixed floor is "
+            f"{DIM}  {unmeasured} chat(s) recorded no brief, so their sys+menu is "
             f"{NOT_RECORDED} rather than 0{RESET}"
         )
     return out
@@ -660,15 +677,15 @@ def render_session(session: SessionUsage) -> str:
         )
     if session.fixed_measured:
         lines.append(
-            f"  fixed floor {session.system_chars:,} chars of system text + "
-            f"{session.menu_chars:,} of tool menu ({session.tool_count} tools) "
-            f"{DIM}— paid on every call{RESET}"
+            f"  on every call {session.system_chars:,} chars of system text "
+            f"{DIM}(composed per task){RESET} + {session.menu_chars:,} of tool menu "
+            f"({session.tool_count} tools) {DIM}(the same on every task){RESET}"
         )
     elif session.calls:
         lines.append(
-            f"  fixed floor {BOLD}{NOT_RECORDED}{RESET} — this log wrote no brief"
+            f"  on every call {BOLD}{NOT_RECORDED}{RESET} — this log wrote no brief"
             if session.system_state != RECORDED
-            else f"  fixed floor {session.system_chars:,} chars of system text; the tool "
+            else f"  on every call {session.system_chars:,} chars of system text; the tool "
                  f"menu's bytes are {BOLD}purged{RESET}"
         )
     lines += ["", f"{BOLD}what filled the context{RESET}"]
