@@ -559,14 +559,14 @@ class Wiring:
     at: str  # where in the code, for a reader who has to find it
 
 
-# The one wiring v1 has. `about` and `addressed_to_me` are the only fields the
+# The one wiring v1 has. `about` and `instructs_the_reader` are the only fields the
 # reader authors that reach the acting model; `row` is an index code resolves
 # against the input itself.
 WIRINGS: tuple[Wiring, ...] = (
     Wiring(
         charter="snippet-reader",
         into="acting",
-        carries=("n", "about", "addressed_to_me"),
+        carries=("n", "about", "instructs_the_reader"),
         at="agent.Agent._searched",
     ),
 )
