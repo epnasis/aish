@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import warnings
 
 import pytest
 
@@ -521,6 +522,43 @@ class TestFrontmatterRoundTrip:
         assert entry.name == "s", "a field was read from a header that never closed"
         assert entry.status == "" and not entry.pinned
         assert entry.body == text.strip()
+
+
+class TestARestatedKeyInAdvice:
+    """#326 — the advice half. The line format lets the LAST occurrence of a
+    key win, silently. In a TOOL.md that reached the approval gate, so the
+    manifest is refused there; here it misleads RETRIEVAL, and refusing to
+    load a memory over a duplicated `keywords:` would cost the owner more
+    than the ambiguity does. So: still loaded, and said out loud."""
+
+    HEADER = ("---\nname: s\ndescription: d\nkeywords: alpha\n"
+              "keywords: beta\n---\nbody\n")
+
+    def test_it_warns_and_still_loads(self, tmp_path):
+        path = write_skill(tmp_path, "s.md", self.HEADER)
+        with pytest.warns(UserWarning, match="'keywords' more than once"):
+            entry = _parse(path)
+        assert entry.name == "s" and entry.body == "body"
+        assert entry.keywords == ["beta"], "the last declaration is what is read"
+
+    def test_a_header_saying_each_key_once_warns_about_nothing(self, tmp_path):
+        path = write_skill(
+            tmp_path, "s.md", "---\nname: s\ndescription: d\nkeywords: alpha\n---\nb"
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert _parse(path).keywords == ["alpha"]
+
+    def test_the_detector_reads_only_the_header(self, tmp_path):
+        """A body line that looks like a key is prose, not a restatement —
+        the detector is fed `split_frontmatter`'s header, nothing else."""
+        path = write_skill(
+            tmp_path, "s.md",
+            "---\nname: s\ndescription: d\n---\nname: not a field\nname: still not\n",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert _parse(path).name == "s"
 
 
 class TestOneFrontmatterReader:
