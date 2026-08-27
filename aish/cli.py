@@ -1548,7 +1548,12 @@ quota that is SPENT rather than busy cannot be waited out; say so instead of \
 suggesting a retry. The user sets their own tier with \
 AISH_RATE_LIMIT_<PROVIDER>="rpm=..,tpm=..", and sees where the tokens went \
 with `aish usage` (add --chat <name> to see which tool filled a chat's \
-context). Long pages and images are what fill it fastest.
+context, or --window N to count the calls that would not fit a window that \
+size). For ONE turn, `aish explain <chat> <turn>` ends with what it cost: \
+each model call's reported tokens, what each step added, and what the fullest \
+call's context was made of. Long pages and images are what fill it fastest, \
+and the standing prompt plus the tool menu are paid on every call before the \
+task starts.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` is an alias for /cd — it moves the project directory and \
 re-anchors this chat's root. Ctrl-C cancels only the \
@@ -1818,8 +1823,11 @@ def _usage_cli(args: list[str]) -> int:
     from . import explain as explain_mod
     from . import usage as usage_mod
 
-    usage_line = "usage: aish usage [--days N] [--week] [--chat NAME] [--json]"
+    usage_line = (
+        "usage: aish usage [--days N] [--week] [--chat NAME] [--window N] [--json]"
+    )
     days: int | None = 7
+    window = usage_mod.LOCAL_WINDOW_TOKENS
     target = ""
     as_json = "--json" in args
     period = "week" if "--week" in args else "day"
@@ -1832,6 +1840,12 @@ def _usage_cli(args: list[str]) -> int:
                 print(usage_line)
                 return 2
             days = int(value)
+        elif flag == "--window" and rest:
+            value = rest.pop(0)
+            if not value.isdigit():
+                print(usage_line)
+                return 2
+            window = int(value)
         elif flag == "--all":
             days = None
         # --session is the pre-#260 spelling and stays accepted (#260).
@@ -1855,7 +1869,10 @@ def _usage_cli(args: list[str]) -> int:
         print(usage_mod.json_report([one]) if as_json else usage_mod.render_session(one))
         return 0
     sessions = usage_mod.scan(days=days)
-    print(usage_mod.json_report(sessions) if as_json else usage_mod.render(sessions, period))
+    print(
+        usage_mod.json_report(sessions) if as_json
+        else usage_mod.render(sessions, period, window)
+    )
     return 0
 
 

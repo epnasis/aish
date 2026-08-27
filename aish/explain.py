@@ -308,6 +308,8 @@ CHECKS: tuple[tuple[str, str], ...] = (
     ("brief_changed", "what the model was handed changed mid-turn"),
     ("stop_unusual", "the model stopped for an unusual reason"),
     ("context_full", "the prompt nearly filled the context window"),
+    ("context_fixed_cost", "most of the context was aish's own fixed overhead"),
+    ("context_unattributed", "a trim removed text it did not say which results came from"),
     ("task_unfinished", "the task did not end normally"),
 )
 
@@ -868,6 +870,480 @@ def _produced(turn: Turn, did: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# What filled the context (#262 / #330)
+# ---------------------------------------------------------------------------
+#
+# Per-model-call SPEND has been recorded since #262 and is already on the round
+# headers. What was missing is the ATTRIBUTION: which tool result, which
+# injected block, which piece of history is responsible for the context a call
+# was billed for. That is the instrument #330 needs, because a realistic local
+# window is ~60,000 tokens and nothing in aish is designed against that number.
+#
+# Two units, kept apart on purpose (docs/token-accounting.md):
+#
+#   chars   — MEASURED. Every message record carries its content, every brief
+#             part carries its own char count, and the tool menu's bytes are in
+#             the evidence store. Nothing here is modelled.
+#   tokens  — REPORTED, by the provider, for the whole call. Never split across
+#             the parts below: a per-part token figure is a modelled number in
+#             the provider's own unit, inviting a reader to sum the parts and
+#             contradict a number the provider actually reported.
+#
+# So the parts carry chars, the call carries tokens, and the only bridge between
+# them is `chars_per_token` — this call's own accounted chars divided by its own
+# reported input. Both halves of that ratio are recorded, so it is a
+# measurement of THIS call and not a constant applied to it. The corpus it was
+# built against spreads from 1.30 to 5.26 (median 3.16), which is exactly why
+# no per-part token number is offered.
+
+# How much of the parts list to keep. Ordered biggest-first, so what a cap drops
+# is the tail that could not have mattered.
+CONTEXT_PARTS_MAX = 14
+
+# When the fixed cost — the standing prompt, the per-task reminder and the tool
+# menu — is worth saying out loud on its own. It is paid on EVERY call whatever
+# the task, so a turn where it dominates is a turn that spent its window on
+# overhead. A fact, not a verdict: the note states the share and names nothing
+# as the cause.
+FIXED_SHARE_NOTABLE = 0.5
+
+# Where a part of the context came from. `carried` is history from earlier turns
+# in this same chat, which is invisible in a per-turn view and is the single
+# biggest resident across the owner's corpus.
+FROM_SYSTEM = "system"
+FROM_TOOLS = "tools"
+FROM_CARRIED = "carried"
+FROM_TURN = "turn"
+
+
+def origin_of(record: dict) -> str:
+    """Which bucket a message record belongs to. A tool result is named by its
+    tool; everything else by its role. Shared with `usage.py` so the two reports
+    cannot disagree about what a contributor IS."""
+    role = str(record.get("role") or "")
+    if role == "tool":
+        return str(record.get("tool_name") or "tool")
+    return role or "other"
+
+
+def _menu_chars(step: dict | None, root: os.PathLike | str | None) -> tuple[str, int]:
+    """(state, chars) for the tool menu the model was handed.
+
+    The menu is not in the log — the brief records its digest and the bytes live
+    once in the evidence store. So this is a lookup of recorded bytes, not a
+    re-derivation: the reader never asks what the tool table looks like TODAY,
+    only how big the one that was handed over was. A purged blob is `purged`
+    and never 0, because a menu nobody can size and a model handed no tools are
+    different facts."""
+    digest = str(((step or {}).get("tools") or {}).get("digest") or "")
+    if not digest:
+        return MISSING, 0
+    blob = evidence.get(digest, root)
+    if blob is None:
+        return PURGED, 0
+    return RECORDED, len(blob)
+
+
+def _apply_trim(live: list[dict], step: dict) -> int:
+    """Shrink the entries a trim stubbed, and return what it could not attribute.
+
+    Two recorded facts do the work. `stubbed[{at, tool}]` names WHICH results
+    were cut, and `bytes_before - bytes_after` is how much text actually went —
+    a total the trimmer measured itself. Matching is by tool NAME, oldest-first:
+    `stubbed[].at` indexes the live message list, which does not map 1:1 to log
+    order across resume, redact or rewind, so claiming per-instance identity
+    would be a false precision. That is `usage.py`'s rule, unchanged.
+
+    The recorded total is the AUTHORITY and caps the whole thing. Without that
+    cap, `delivered_images` — which replaces a short `[aish: …]` note with a
+    shorter constant and leaves a picture behind — read as 200-char stubbing of
+    whole user messages, and threw the reconstruction out by 31% on a real log.
+
+    What the record does not name, this returns: a trim written before
+    `stubbed[]` existed (#241) says how much went and not what, and that
+    remainder must be reported rather than attributed to a guess.
+    """
+    keep = int(step.get("keep_chars") or 0)
+    budget = max(0, int(step.get("bytes_before") or 0) - int(step.get("bytes_after") or 0))
+    for stub in step.get("stubbed") or []:
+        if budget <= 0:
+            break
+        name = str(stub.get("tool") or "")
+        for entry in live:
+            if entry["origin"] == name and entry["chars"] > keep:
+                cut = min(entry["chars"] - keep, budget)
+                entry["chars"] -= cut
+                entry["trimmed"] = True
+                budget -= cut
+                break
+    return budget
+
+
+def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
+    """What filled the context of each model call in this turn, and by how much.
+
+    Reconstructed from four recorded things and nothing else: `message` records
+    (their text, and the `model_call` stamp saying which call they were first in
+    front of), the `brief`'s per-part system char counts and menu digest, the
+    `trim` records that ended a result's residency, and the `reasoning` record's
+    provider usage.
+
+    **The stamp is what makes this possible, and its absence is a real answer.**
+    Without `model_call` on a message, membership in a call's context is
+    positional — inferred from the order lines happen to sit in the file — and a
+    breakdown built on that would look like attribution while being arithmetic
+    on an assumption. A turn without it says so and reports nothing here.
+
+    The check is per TURN and not per file, for the same reason `_rounds` picks
+    its grouping per turn: one long chat spans an upgrade, and its early turns
+    carry no stamp while its later ones do. A file-level answer would read every
+    unstamped message in an early turn as `model_call: 0` — present from the
+    first call — and quietly attribute a result to calls that never saw it.
+
+    History from EARLIER TURNS is counted, and needs no stamp: everything
+    written before this turn began was in front of every call of it. It is
+    resent on every one of them and is the largest resident in the owner's
+    corpus, which is why this takes the whole `Log` and not just the turn.
+    """
+    stamped = any("model_call" in m for m in turn.messages)
+    if not stamped:
+        return {
+            # MISSING and never EMPTY. "Recorded, and it was empty" would say
+            # this turn put nothing in front of the model, which has never
+            # happened; what is absent is the STAMP, so the honest machine value
+            # is "not recorded". The rendered text always said this; the KEY is
+            # what a panel reads, and it must not say something else.
+            "state": MISSING,
+            "stamped": False,
+            "calls": [],
+            "peak": None,
+            "unattributed_chars": 0,
+            # Turn-only here and chat-cumulative in the stamped branch below,
+            # because that walk crosses turns and this one does not.
+            "steering_chars": sum(
+                len(str(step.get("text") or "")) for step in turn.of_kind("injected")
+            ),
+            "unstamped_chars": 0,
+            "roles": _role_calls(turn),
+            "failed": _failed_calls(turn),
+        }
+
+    live: list[dict] = []
+    brief: dict | None = None
+    unattributed = 0
+    steering = 0
+    unstamped = 0
+    calls: list[dict] = []
+    parts_at: dict[int, list[dict]] = {}
+
+    for past in log.turns[: turn.ordinal]:
+        here = past.ordinal == turn.ordinal
+        for record in past.records:
+            kind = record.get("kind")
+            if kind == "message":
+                chars = len(str(record.get("content") or ""))
+                if here and "model_call" not in record:
+                    # A message in THIS turn with no stamp cannot be placed.
+                    # `agent._log_held_entry` writes one: it calls `on_message`
+                    # directly rather than going through `_append`, so the stamp
+                    # is never attached. Reading the absent key as 0 would put a
+                    # released hold's answer in front of every call of its turn
+                    # — including calls made before it existed, which is
+                    # verbatim the failure this reader's own docstring warns
+                    # about. Sized and set aside, like steering.
+                    unstamped += chars
+                    continue
+                live.append(
+                    {
+                        "origin": origin_of(record),
+                        "chars": chars,
+                        "ordinal": past.ordinal,
+                        "stamp": int(record.get("model_call") or 0),
+                        "image_count": len(record.get("images") or []),
+                        "trimmed": False,
+                    }
+                )
+                continue
+            if kind != "trace":
+                continue
+            step = record.get("step")
+            if not isinstance(step, dict):
+                continue
+            if step.get("kind") == "brief":
+                brief = step
+            elif step.get("kind") == "injected":
+                # Text typed while the task ran. `_inject_pending_messages`
+                # appends it straight to `self.messages` — NOT through the
+                # recorder — so it writes no `message` record and this walk
+                # cannot see it. The rendered `injected` step is the only place
+                # it exists, and its SIZE is read from there.
+                #
+                # **Counted apart, never folded in.** Folding it in was tried
+                # and made every anchor in the owner's corpus WORSE: at each of
+                # 13 recorded totals in one long chat the reconstruction went
+                # from 336 chars short to 941 long, and 336 + 941 is exactly
+                # the steering typed in that chat's earlier turns. So the text
+                # was not in front of those calls — a restart or resume rebuilds
+                # `self.messages` from the log, and the log is where this text
+                # is not. The record cannot say which happened, so the reader
+                # states the amount and does not place it.
+                steering += len(str(step.get("text") or ""))
+            elif step.get("kind") == "trim":
+                unattributed += _apply_trim(live, step)
+            elif step.get("kind") == "reasoning" and here:
+                number = int(step.get("model_call") or len(calls) + 1)
+                snapshot = _snapshot(live, turn.ordinal, number, brief, root)
+                parts_at[number] = snapshot.pop("parts")
+                snapshot["model_call"] = number
+                snapshot.update(_reported(step))
+                # The ONE bridge between the two units, and both halves of it
+                # are recorded: this call's own measured chars over this call's
+                # own reported input. Absent when either half is — never a
+                # default divisor, which would make a constant look like a
+                # measurement of this call.
+                billed = int(snapshot["reported"].get("input") or 0)
+                snapshot["chars_per_token"] = (
+                    round(snapshot["accounted_chars"] / billed, 2)
+                    if billed and not snapshot["unmeasured"] else None
+                )
+                calls.append(snapshot)
+
+    for index, call in enumerate(calls):
+        before = calls[index - 1]["accounted_chars"] if index else 0
+        call["added_chars"] = call["accounted_chars"] - before
+        call["added_by"] = _added_by(parts_at, calls, index)
+
+    peak = max(calls, key=lambda c: (c["reported"].get("input") or 0), default=None)
+    if peak is None:
+        peak_out = None
+    else:
+        parts = sorted(parts_at[peak["model_call"]], key=lambda p: -p["chars"])
+        total = sum(p["chars"] for p in parts)
+        for part in parts:
+            part["share"] = round(part["chars"] / total, 4) if total else 0.0
+        fixed = sum(p["chars"] for p in parts if p["where"] in (FROM_SYSTEM, FROM_TOOLS))
+        peak_out = {
+            "model_call": peak["model_call"],
+            "reported": peak["reported"],
+            "reported_state": peak["reported_state"],
+            "accounted_chars": peak["accounted_chars"],
+            "chars_per_token": peak["chars_per_token"],
+            "image_count": peak["image_count"],
+            "unmeasured": peak["unmeasured"],
+            "fixed_share": round(fixed / total, 4) if total else 0.0,
+            "parts": parts[:CONTEXT_PARTS_MAX],
+            "parts_dropped": max(0, len(parts) - CONTEXT_PARTS_MAX),
+        }
+    return {
+        "state": RECORDED if calls else EMPTY,
+        "stamped": True,
+        "calls": calls,
+        "peak": peak_out,
+        # Text a trim removed that no record attributes to an origin. Never
+        # folded into a bucket: it is exactly the amount by which the parts
+        # below are an upper bound, and hiding it inside one of them would make
+        # a guess look like a measurement.
+        "unattributed_chars": unattributed,
+        # Steering typed during this chat, which the log sizes but cannot place
+        # (see the walk above). Reported so the reader knows the parts are a
+        # lower bound by at least this much. Chat-cumulative here because this
+        # walk crosses turns; the unstamped branch above can only count its own.
+        "steering_chars": steering,
+        # Chars in this turn's own messages carrying no stamp, so this reader
+        # cannot say which calls they stood in front of. Same treatment.
+        "unstamped_chars": unstamped,
+        "roles": _role_calls(turn),
+        "failed": _failed_calls(turn),
+    }
+
+
+def _snapshot(
+    live: list[dict],
+    ordinal: int,
+    number: int,
+    brief: dict | None,
+    root: os.PathLike | str | None,
+) -> dict:
+    """The context as it stood for one model call: every part, measured.
+
+    A message is in front of call N when it was appended before call N started —
+    which is what the stamp says, since it records the call that was in flight
+    when the message was written. Everything from an earlier turn is in front of
+    every call of this one.
+    """
+    buckets: dict[tuple[str, str], dict] = {}
+    images: dict[str, int] = {FROM_CARRIED: 0, FROM_TURN: 0}
+    for entry in live:
+        if entry["ordinal"] < ordinal:
+            where = FROM_CARRIED
+        elif entry["ordinal"] == ordinal and entry["stamp"] < number:
+            where = FROM_TURN
+        else:
+            continue
+        key = (where, entry["origin"])
+        part = buckets.setdefault(
+            key,
+            {"origin": entry["origin"], "where": where, "chars": 0, "items": 0,
+             "trimmed": 0, "state": RECORDED},
+        )
+        part["chars"] += entry["chars"]
+        part["items"] += 1
+        part["trimmed"] += 1 if entry["trimmed"] else 0
+        # Counted per SIDE, because an image riding carried history is not a
+        # picture attached to this turn and a single row saying "this turn"
+        # would say it was.
+        images[where] += entry["image_count"]
+
+    parts = list(buckets.values())
+    unmeasured: list[str] = []
+    system = (brief or {}).get("system")
+    if system is None:
+        # No brief in force: what the model was TOLD was never recorded, so its
+        # size is unknown. Not zero — a turn with no system text has never
+        # happened, and reporting 0 would put a confident falsehood at the top
+        # of the breakdown.
+        parts.append({"origin": "system text", "where": FROM_SYSTEM, "chars": 0,
+                      "items": 0, "trimmed": 0, "state": MISSING})
+        unmeasured.append("the system text")
+    else:
+        parts.append(
+            {
+                "origin": "system text",
+                "where": FROM_SYSTEM,
+                "chars": sum(int(p.get("chars") or 0) for p in system),
+                "items": len(system),
+                "trimmed": 0,
+                "state": RECORDED,
+            }
+        )
+    menu_state, menu_chars = _menu_chars(brief, root)
+    parts.append(
+        {
+            "origin": "tool menu",
+            "where": FROM_TOOLS,
+            "chars": menu_chars,
+            "items": int(((brief or {}).get("tools") or {}).get("count") or 0),
+            "trimmed": 0,
+            "state": menu_state,
+        }
+    )
+    if menu_state != RECORDED:
+        unmeasured.append(
+            "the tool menu (its bytes are purged)" if menu_state == PURGED
+            else "the tool menu"
+        )
+    for side, count in sorted(images.items()):
+        if not count:
+            continue
+        # Char-invisible and token-huge: an image occupies the window and
+        # contributes nothing this reader can measure. It gets a row so an
+        # unaccounted call has a visible reason rather than a silent gap.
+        parts.append({"origin": f"{count} image(s)", "where": side, "chars": 0,
+                      "items": count, "trimmed": 0, "state": UNREADABLE})
+        unmeasured.append(f"{count} image(s), which carry no characters at all")
+    return {
+        "parts": parts,
+        "accounted_chars": sum(p["chars"] for p in parts),
+        "image_count": sum(images.values()),
+        "unmeasured": unmeasured,
+    }
+
+
+def _reported(step: dict) -> dict:
+    """The provider's own usage for one call, verbatim, with its semantics label.
+
+    `usage` is authoritative where it exists: `tokens[0]` means three different
+    things across the three backends and only the label says which. A call whose
+    backend reported nothing gets no numbers at all — claude-max drives its own
+    loop and reports no input tokens, and reading that as 0 would be a confident
+    lie about a day of real spend.
+    """
+    detail = step.get("usage") or {}
+    tokens = step.get("tokens") or []
+    reported: dict = {}
+    if detail:
+        reported = {k: v for k, v in detail.items() if v not in (None, "")}
+    elif tokens:
+        reported = {"input": int(tokens[0] or 0),
+                    "output": int(tokens[1] or 0) if len(tokens) > 1 else 0}
+    return {"reported": reported, "reported_state": RECORDED if reported else MISSING}
+
+
+def _added_by(parts_at: dict[int, list[dict]], calls: list[dict], index: int) -> list[dict]:
+    """Which origins grew between the previous call and this one — the per-STEP
+    answer. Measured by differencing two snapshots, so an origin that shrank
+    (a trim fired between the two) shows as a negative and is not hidden."""
+    number = calls[index]["model_call"]
+    before = {}
+    if index:
+        before = {(p["where"], p["origin"]): p["chars"]
+                  for p in parts_at[calls[index - 1]["model_call"]]}
+    moved = []
+    for part in parts_at[number]:
+        delta = part["chars"] - before.get((part["where"], part["origin"]), 0)
+        if delta:
+            moved.append({"origin": part["origin"], "where": part["where"], "chars": delta})
+    return sorted(moved, key=lambda p: -abs(p["chars"]))[:3]
+
+
+def _role_calls(turn: Turn) -> list[dict]:
+    """Model calls an isolated role made inside this turn (#297).
+
+    Reported BESIDE the acting loop's calls and never folded into them: a role's
+    spend is real money on the same key, but it is a different context — the
+    whole point of the mechanism is that the role's transcript never enters the
+    acting one.
+
+    **`answer_chars` is the role's own recorded answer, NOT what the acting
+    model was handed.** #330 asks whether a role returns less than it consumes,
+    and this reader cannot answer that: the block the answer is RENDERED into is
+    what enters the acting context, nothing records its size, and no field joins
+    a role record to the tool message that carried it. So the two numbers are
+    given the names of what they actually measure and the comparison is left
+    unmade. Naming it "what it returned" would have made an unjoined guess read
+    as the measurement the issue asked for.
+    """
+    out = []
+    for step in turn.of_kind("role"):
+        given = step.get("input") or {}
+        out.append(
+            {
+                "charter": str(step.get("charter") or ""),
+                "model": str(step.get("model") or ""),
+                "status": str(step.get("status") or ""),
+                "reported": {k: v for k, v in (step.get("usage") or {}).items()
+                             if v not in (None, "")},
+                # A SKIP record — a charter that never loaded, a role that was
+                # not asked — writes no `input` block at all. Rendering that as
+                # "read 0 chars" states a measurement of something that never
+                # happened, so the size and its state travel together.
+                "input_chars": int(given.get("chars") or 0),
+                "input_state": RECORDED if "chars" in given else MISSING,
+                "answer_chars": len(json.dumps(step.get("output"), ensure_ascii=False))
+                if step.get("output") is not None else 0,
+                "answer_state": RECORDED if step.get("output") is not None else MISSING,
+            }
+        )
+    return out
+
+
+def _failed_calls(turn: Turn) -> list[dict]:
+    """Model calls that never returned. `sent_chars` is what the agent measured
+    itself at the moment it tried, which is the one context size in the log that
+    is not a reconstruction of anything."""
+    return [
+        {
+            "model_call": step.get("model_call"),
+            "sent_chars": int(step.get("sent_chars") or 0),
+            "sent_messages": int(step.get("sent_messages") or 0),
+            "action": str(step.get("action") or ""),
+            "text": str(step.get("text") or "")[:200],
+        }
+        for step in turn.of_kind("model_error")
+    ]
+
+
 # Which model call issued a tool call, and whether that is RECORDED or merely
 # inferred from the order the log was written in. Chosen per TURN, not per file:
 # one session can hold both local turns (which record it) and claude-max turns
@@ -1191,6 +1667,35 @@ def notes(doc: dict) -> dict:
               f"{window}-token window",
               section="flow", model_call=fullest["model_call"])
 
+    # What filled the context, and what that says about a 60,000-token window.
+    # Facts only: each row states a measured share and names nothing as a cause.
+    #
+    # They cite the FLOW, and the round they are about where there is one. The
+    # context block is a reading of the model calls, and `flow` is the section
+    # both renderers already anchor — a row citing a section no panel draws is
+    # a tap that does nothing, which reads exactly like a broken reader.
+    context = doc["context_cost"]
+    peak = context["peak"]
+    if peak and peak["fixed_share"] >= FIXED_SHARE_NOTABLE and not peak["unmeasured"]:
+        _note(rows, "context_fixed_cost",
+              f"at the fullest call the standing prompt, the task reminder and the tool "
+              f"menu were {peak['fixed_share'] * 100:.0f}% of the measured context "
+              f"({peak['accounted_chars']:,} chars in all)",
+              section="flow", model_call=peak["model_call"])
+    if context["unattributed_chars"]:
+        _note(rows, "context_unattributed",
+              f"{context['unattributed_chars']:,} characters were removed by a trim that "
+              "did not record which results they came from, so the breakdown below is an "
+              "upper bound",
+              section="flow")
+    # There is deliberately NO row about whether a role saved context. #330 asks
+    # it, and the log cannot answer it: what enters the acting context is the
+    # block a role's answer is RENDERED into, nothing records that size, and no
+    # field joins a role record to the tool message that carried it. A row built
+    # on `answer_chars` would put the answer's own size where the reader would
+    # read the rendered block's — the shape of confident-wrong this file exists
+    # to prevent. The numbers are reported; the comparison is not made.
+
     status = doc["produced"]["status"]
     if status is None:
         _note(rows, "task_unfinished",
@@ -1242,6 +1747,10 @@ def dossier(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
             {"text": str(r.get("text") or "")} for r in turn.of_kind("injected")
         ],
         "trim": [dict(r) for r in turn.of_kind("trim")],
+        # What filled the context of each model call, and what it was billed
+        # (#262/#330). Takes the whole log, not just the turn: history from
+        # earlier turns is resent on every call of this one.
+        "context_cost": _context_cost(turn, log, root),
     }
     # After `given`/`thought`/`did` exist, because it references into them.
     doc["flow"] = _rounds(turn, doc)
@@ -1465,6 +1974,217 @@ def _produced_lines(produced: dict, out: list[str]) -> None:
         if verify["passed"]:
             vlines.append(f"{DIM}{verify['passed']} check(s) passed{RESET}")
         _block(out, "verify", vlines)
+
+
+def _by_charter(roles: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for role in roles:
+        grouped.setdefault(role["charter"] or "?", []).append(role)
+    return grouped
+
+
+def _human(count: int) -> str:
+    for limit, suffix in ((1_000_000, "M"), (1_000, "k")):
+        if abs(count) >= limit:
+            return f"{count / limit:.1f}{suffix}"
+    return str(count)
+
+
+# What a part's origin says about WHEN it is paid for. The two fixed rows say
+# "every call" because that is the whole point of them: they are rent, charged
+# again on every step whatever the task does, and a reader who sees them beside
+# a tool result without that word reads them as one-off costs.
+WHERE_WORDS = {
+    FROM_SYSTEM: "every call",
+    FROM_TOOLS: "every call",
+    FROM_CARRIED: "earlier turns",
+    FROM_TURN: "this turn",
+}
+
+
+def _context_cost_lines(context: dict, out: list[str]) -> None:
+    """What filled the context of each call, and what the provider billed for it.
+
+    Two columns in two different units, and the header says which is which,
+    because the whole risk in this section is a reader adding a measured char
+    count to a reported token count. Chars are measured; tokens are reported;
+    the shares are of chars and are labelled an estimate of token share.
+    """
+    lines: list[str] = []
+    if not context["stamped"]:
+        lines.append(
+            f"{DIM}this log does not stamp its messages with the model call they were "
+            f"first in front of,{RESET}"
+        )
+        lines.append(
+            f"{DIM}so WHAT filled each call's context is not recorded — the totals on "
+            f"each round still stand{RESET}"
+        )
+    for call in context["calls"]:
+        reported = call["reported"]
+        if call["reported_state"] == MISSING:
+            billed = f"{DIM}{NOT_RECORDED}{RESET}"
+        else:
+            billed = (
+                f"{_human(int(reported.get('input') or 0)):>7} in"
+                f" {_human(int(reported.get('output') or 0)):>6} out"
+            )
+            if cached := int(reported.get("cached") or reported.get("cache_read") or 0):
+                billed += f" {DIM}({_human(cached)} cached){RESET}"
+        moved = ", ".join(
+            f"{p['origin']} {'+' if p['chars'] > 0 else ''}{_human(p['chars'])}"
+            for p in call["added_by"]
+        )
+        lines.append(
+            f"call {call['model_call']:<3} {billed}"
+            f" · {_human(call['accounted_chars']):>7} chars accounted"
+            + (f" · {moved}" if moved else "")
+        )
+    peak = context["peak"]
+    if peak:
+        head = f"{BOLD}at call {peak['model_call']}, the fullest{RESET}"
+        if peak["reported_state"] != MISSING:
+            # REPORTED, never "billed": on a caching backend most of this number
+            # is a cache read priced at a fraction of base input, so "billed"
+            # states a cost nothing here measured. The split rides with it for
+            # the same reason — it is the difference between the two.
+            head += (
+                f" — the provider reported "
+                f"{int(peak['reported'].get('input') or 0):,} input tokens"
+            )
+            cached = int(
+                peak["reported"].get("cached") or peak["reported"].get("cache_read") or 0
+            )
+            if cached:
+                head += f", {cached:,} of them served from cache"
+        lines.append("")
+        lines.append(head)
+        for part in peak["parts"]:
+            if part["state"] != RECORDED:
+                size = _state_note(part["state"], "")
+                share = ""
+            else:
+                size = f"{part['chars']:,} chars"
+                share = f"{part['share'] * 100:5.1f}%"
+            count = f"{part['items']:>3}" if part["items"] else "  —"
+            lines.append(
+                f"  {part['origin'][:24]:<24} {DIM}{WHERE_WORDS[part['where']]:<13}{RESET}"
+                f" {count} {size:>16} {share:>6}"
+            )
+        if peak["parts_dropped"]:
+            lines.append(f"  {DIM}… {peak['parts_dropped']} smaller contributor(s){RESET}")
+        # The bridge between the two units, said once and only where both halves
+        # of it were recorded. It is this call's own ratio, not a constant.
+        #
+        # And the system row is NOT a standing prompt: it is composed per task,
+        # and about a third of it is aish's own usage notes while a further
+        # slice is rules and preloaded skills THIS TASK selected. Calling it
+        # fixed would aim a reader cutting for a 60k window at the wrong thing.
+        lines.append(
+            f"{DIM}  the system text is COMPOSED PER TASK — the prompt, aish's own usage "
+            f"notes, the{RESET}"
+        )
+        lines.append(
+            f"{DIM}  knowledge index, and the rules and preloaded skills this task selected. "
+            f"Only the tool{RESET}"
+        )
+        lines.append(
+            f"{DIM}  menu is the same on every task. The brief sizes the parts and does not "
+            f"split them.{RESET}"
+        )
+        if peak["chars_per_token"]:
+            lines.append(
+                f"{DIM}  shares are of MEASURED CHARS and are an ESTIMATE of token share: "
+                f"this call ran at{RESET}"
+            )
+            lines.append(
+                f"{DIM}  {peak['chars_per_token']} chars per reported token, and that ratio "
+                f"moves with the content.{RESET}"
+            )
+        lines.append(
+            f"{DIM}  the parts are what the log CAN size, and this total is a LOWER bound: "
+            f"AT LEAST four{RESET}"
+        )
+        lines.append(
+            f"{DIM}  things reach the model's messages with no message record. The largest "
+            f"by far is a{RESET}"
+        )
+        lines.append(
+            f"{DIM}  tool call's own arguments, resent on every later call; then steering, a "
+            f"held answer,{RESET}"
+        )
+        lines.append(
+            f"{DIM}  and the guidance form of an attachment. The list is not known to be "
+            f"closed.{RESET}"
+        )
+        for missing in peak["unmeasured"]:
+            lines.append(f"  {BOLD}not measured here:{RESET} {missing}")
+    if context["unattributed_chars"]:
+        lines.append(
+            f"  {BOLD}{context['unattributed_chars']:,} chars{RESET} were removed by a trim "
+            f"that did not record which results they came from"
+        )
+    if context["unstamped_chars"]:
+        lines.append(
+            f"  {BOLD}{context['unstamped_chars']:,} chars{RESET} are in this turn's messages "
+            f"with no record of which call they stood in front of"
+        )
+    if context["steering_chars"]:
+        lines.append(
+            f"  {BOLD}{context['steering_chars']:,} chars{RESET} were typed while a task ran "
+            f"and are sized but not placed — the log records the text and not"
+        )
+        lines.append(
+            f"  {DIM}  whether it was still in front of any particular call{RESET}"
+        )
+    if context["roles"]:
+        # Collapsed per charter. A role's fire rate and its trade are properties
+        # of the CHARTER, and seven identical rows each repeating the same
+        # caveat is the wall of evidence a summary exists to replace.
+        lines.append("")
+        lines.append(
+            f"{BOLD}isolated roles{RESET} {DIM}— spent beside this turn's context, never "
+            f"inside it{RESET}"
+        )
+        for charter, group in sorted(_by_charter(context["roles"]).items()):
+            spend = [r["reported"] for r in group if r["reported"]]
+            billed = (
+                f"{_human(sum(int(s.get('input') or 0) for s in spend))} in + "
+                f"{_human(sum(int(s.get('output') or 0) for s in spend))} out"
+                if spend else NOT_RECORDED
+            )
+            read = [r for r in group if r["input_state"] == RECORDED]
+            given = sum(r["input_chars"] for r in read)
+            answered = [r for r in group if r["answer_state"] == RECORDED]
+            # "read N chars, answered in M" and NOT "returned M": what reaches
+            # the acting context is the block the answer is rendered into, and
+            # nothing records its size.
+            what_read = f"read {given:,} chars" if len(read) == len(group) else (
+                f"read {given:,} chars in {len(read)} of {len(group)} call(s); the rest "
+                f"recorded no input"
+            )
+            traded = (
+                f"{what_read}, answered in {sum(r['answer_chars'] for r in answered):,}"
+                if len(answered) == len(group)
+                else f"{what_read}, answer {NOT_RECORDED}"
+            )
+            lines.append(f"  {charter:<24} {len(group):>3} call(s) · {billed} · {traded}")
+        lines.append(
+            f"{DIM}  what the acting model was handed is the block each answer was rendered "
+            f"into,{RESET}"
+        )
+        lines.append(
+            f"{DIM}  and no record carries its size — so whether a role SAVED context is not "
+            f"said here.{RESET}"
+        )
+    for failed in context["failed"]:
+        lines.append(
+            f"  {BOLD}call {failed['model_call']} did not return{RESET} — "
+            f"{failed['sent_chars']:,} chars in {failed['sent_messages']} messages had been "
+            f"sent ({failed['action'] or 'no action recorded'})"
+        )
+    if lines:
+        _block(out, "what it cost", lines)
 
 
 def _thought_lines(thought: dict, out: list[str]) -> None:
@@ -1864,6 +2584,7 @@ def render(
 
     _given_lines(doc["given"], show_tools, show_context, out)
     _flow_lines(doc, out)
+    _context_cost_lines(doc["context_cost"], out)
     _produced_lines(doc["produced"], out)
 
     produced = doc["produced"]

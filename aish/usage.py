@@ -37,15 +37,20 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .explain import _records, state_dir
-
-# Roles that are not a tool, bucketed under their own name.
-_PLAIN_ROLES = ("user", "assistant", "system")
+from . import evidence
+from .explain import MISSING, PURGED, RECORDED, _records, origin_of, state_dir
 
 # What a session whose model calls left no usage record is called. NEVER 0: a
 # day of heavy claude-max use reading "0 tokens" is a confident lie, and the
 # three-states discipline in docs/diagnostics.md exists for exactly this.
 NOT_RECORDED = "not recorded"
+
+# The window to measure a call against, from #330: the owner has ordered a
+# machine to run inference locally and the realistic local context is ~60,000
+# tokens, against a cloud window a hundred times larger. It is a DEFAULT and not
+# a fact about any backend — `--window` overrides it — because a number invented
+# here would otherwise be reported as though the log said it.
+LOCAL_WINDOW_TOKENS = 60_000
 
 
 @dataclass
@@ -115,6 +120,34 @@ class SessionUsage:
     # and is arithmetic on an assumption. A log written before the stamp says so
     # instead of showing it.
     stamped: bool = False
+    # The PER-CALL floor: what every call of this chat carried besides the
+    # conversation — the system text (`brief.system`) and the tool menu
+    # (`brief.tools`, whose bytes are in the evidence store).
+    #
+    # **Only the menu half is fixed.** The system text is COMPOSED PER TASK: the
+    # prompt, aish's own usage notes, the live knowledge index, and the rules
+    # and preloaded skills that task selected. Calling the whole thing a
+    # standing prompt would aim someone cutting for a 60k window at the one
+    # component that is not the problem. The brief sizes the parts and does not
+    # split them, and this reader may not split them either — that would mean
+    # parsing inside a recorded digest, which is re-derivation.
+    #
+    # Taken from the LAST brief in the file, i.e. what was in force at the end.
+    # States are separate from sizes: a log with no brief and a chat handed no
+    # tools are different facts (docs/diagnostics.md, three states).
+    system_chars: int = 0
+    system_state: str = MISSING
+    menu_chars: int = 0
+    menu_state: str = MISSING
+    tool_count: int = 0
+
+    @property
+    def fixed_chars(self) -> int:
+        return self.system_chars + self.menu_chars
+
+    @property
+    def fixed_measured(self) -> bool:
+        return self.system_state == RECORDED and self.menu_state == RECORDED
 
     @property
     def recorded(self) -> bool:
@@ -131,13 +164,6 @@ class SessionUsage:
     @property
     def peak_context(self) -> int:
         return max((call.input for call in self.calls), default=0)
-
-
-def _origin_of(record: dict) -> str:
-    role = str(record.get("role") or "")
-    if role == "tool":
-        return str(record.get("tool_name") or "tool")
-    return role if role in _PLAIN_ROLES else role or "other"
 
 
 def scan_session(path: Path) -> SessionUsage:
@@ -173,7 +199,7 @@ def scan_session(path: Path) -> SessionUsage:
                 session.stamped = True
             stamp = int(record.get("model_call") or 0)
             chars = len(str(record.get("content") or ""))
-            origin = _origin_of(record)
+            origin = origin_of(record)
             entry = [stamp + 1, chars, None]
             live[origin].append(entry)
             item = bucket(origin)
@@ -194,6 +220,8 @@ def scan_session(path: Path) -> SessionUsage:
                 session.trims += 1
                 session.unattributed_trims += int(step.get("stubbed_truncated") or 0)
                 _close_stubbed(live, buckets, step, last_call)
+            elif skind == "brief":
+                _fixed_floor(session, step, path)
             elif skind == "role":
                 # Per-charter attribution (#297). It cannot travel through the
                 # governor — `reserve_for_call` takes a provider:model key and
@@ -214,6 +242,37 @@ def scan_session(path: Path) -> SessionUsage:
         buckets.values(), key=lambda c: (c.char_calls, c.chars), reverse=True
     )
     return session
+
+
+_MENU_SIZES: dict[str, int | None] = {}
+
+
+def _fixed_floor(session: SessionUsage, step: dict, path: Path) -> None:
+    """What this chat carried on every call besides the conversation (#330).
+
+    The system parts are sized by the brief itself. The tool menu is not in the
+    log at all — the brief records its digest and the bytes live once in the
+    evidence store — so this is a lookup of recorded bytes, cached per digest
+    because one menu serves hundreds of sessions. A digest whose bytes are gone
+    is `purged`, never 0.
+
+    Only the MENU is constant across tasks; see the note on the fields.
+    """
+    system = step.get("system")
+    if system is not None:
+        session.system_chars = sum(int(p.get("chars") or 0) for p in system)
+        session.system_state = RECORDED
+    menu = step.get("tools") or {}
+    digest = str(menu.get("digest") or "")
+    session.tool_count = int(menu.get("count") or session.tool_count)
+    if not digest:
+        return
+    if digest not in _MENU_SIZES:
+        blob = evidence.get(digest, path.parent)
+        _MENU_SIZES[digest] = None if blob is None else len(blob)
+    size = _MENU_SIZES[digest]
+    session.menu_chars = size or 0
+    session.menu_state = PURGED if size is None else RECORDED
 
 
 def _call_from(session: SessionUsage, record: dict, step: dict, number: int) -> Call:
@@ -336,6 +395,16 @@ def json_report(sessions: list[SessionUsage]) -> str:
                     "rewritten": s.rewritten,
                     "failures": len(s.failures),
                     "residency_recorded": s.stamped,
+                    # Absent rather than 0 when no brief was written: a consumer
+                    # must not read "never recorded" as "cost nothing".
+                    **({"system_chars": s.system_chars}
+                       if s.system_state == RECORDED else {}),
+                    **({"menu_chars": s.menu_chars, "tools": s.tool_count}
+                       if s.menu_state == RECORDED else {}),
+                    "fixed_floor_state": (
+                        RECORDED if s.fixed_measured
+                        else PURGED if s.menu_state == PURGED else MISSING
+                    ),
                     "contributors": [
                         {
                             "origin": c.origin,
@@ -411,7 +480,88 @@ def _rows(title: str, grouped: dict[str, list[Call]]) -> list[str]:
     return out
 
 
-def render(sessions: list[SessionUsage], period: str = "day") -> str:
+def _percentile(values: list[int], fraction: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * fraction))]
+
+
+def _trend_rows(
+    sessions: list[SessionUsage], grouped: dict[str, list[Call]], window: int
+) -> list[str]:
+    """The same figures over time, against the window that will actually exist.
+
+    #330's constraint: inference is moving local and a realistic local context
+    is ~60,000 tokens. The totals above cannot answer "would this have fit" — a
+    period of small calls and a period of three enormous ones sum alike. So this
+    counts CALLS over the window and reports the distribution rather than a
+    mean, because the tail is the thing that breaks.
+
+    **It takes the SAME grouping the tables above were built from.** Bucketing
+    sessions by their own start date instead put 745 calls under a day the row
+    directly above called 490 — two tables, one period label, two answers, with
+    nothing on screen to say they were counting different things.
+
+    It lives HERE and not in `aish explain` deliberately. `explain` reads one
+    turn out of one file; a trend is a scan across sessions, which is what this
+    module already is. Building it in both would give the owner two places to
+    read the same fact, and they would disagree the first time one changed.
+    """
+    if not grouped:
+        return []
+    floors = {s.name: s.fixed_chars for s in sessions if s.fixed_measured}
+    out = [
+        "",
+        f"{BOLD}against a {window:,}-token window{RESET} "
+        f"{DIM}(#330 — what a local model will have){RESET}",
+        f"  {'':<26} {'calls':>7} {'over':>10} {'median in':>10} {'p95 in':>9} "
+        f"{'sys+menu':>9}",
+    ]
+    for label, group in grouped.items():
+        inputs = [c.input for c in group]
+        over = sum(1 for value in inputs if value > window)
+        share = f"{over} ({over / len(inputs) * 100:.0f}%)" if inputs else "—"
+        # The floor of the chats these calls belong to — measured where a brief
+        # was written, and simply absent where none was.
+        measured = [floors[c.session] for c in group if c.session in floors]
+        fixed = human(_percentile(measured, 0.5)) if measured else f"{DIM}—{RESET}"
+        out.append(
+            f"  {label:<26} {len(inputs):>7} {share:>10} "
+            f"{human(_percentile(inputs, 0.5)):>10} {human(_percentile(inputs, 0.95)):>9} "
+            f"{fixed:>9}"
+        )
+    unmeasured = sum(1 for s in sessions if s.calls and not s.fixed_measured)
+    out.append(
+        f"{DIM}  sys+menu = chars carried on EVERY call besides the conversation. The MENU"
+        f" half is{RESET}"
+    )
+    out.append(
+        f"{DIM}  the same on every task; the system half is composed per task — the prompt,"
+        f" aish's own{RESET}"
+    )
+    out.append(
+        f"{DIM}  usage notes, the knowledge index, and the rules and skills that task"
+        f" selected.{RESET}"
+    )
+    out.append(
+        f"{DIM}  Chars are measured; the window is in tokens, and the two are not added —"
+        f" `aish explain{RESET}"
+    )
+    out.append(f"{DIM}  <chat> <turn>` gives one turn's own ratio.{RESET}")
+    if unmeasured:
+        out.append(
+            f"{DIM}  {unmeasured} chat(s) recorded no brief, so their sys+menu is "
+            f"{NOT_RECORDED} rather than 0{RESET}"
+        )
+    return out
+
+
+def render(
+    sessions: list[SessionUsage],
+    period: str = "day",
+    window: int = LOCAL_WINDOW_TOKENS,
+) -> str:
     """The summary. Spend and context are reported separately and never added:
     summing prompt tokens across calls double-counts the resent history."""
     calls = calls_of(sessions)
@@ -435,6 +585,7 @@ def render(sessions: list[SessionUsage], period: str = "day") -> str:
         f"  {BOLD}context{RESET} peaked at {peak:,} tokens in one call"
         f" {DIM}(spend counts each resend; context does not){RESET}"
     )
+    lines += _trend_rows(sessions, grouped, window)
     lines += _role_rows(sessions)
     lines += [""] + _caveats(sessions)
     lines.append(f"{DIM}  measures RECORDED usage — not a billing statement{RESET}")
@@ -523,6 +674,19 @@ def render_session(session: SessionUsage) -> str:
             f"  spend {human(tin)} in + {human(tout)} out"
             + (f" ({human(cached)} cached)" if cached else "")
             + f" · context peaked at {session.peak_context:,} tokens"
+        )
+    if session.fixed_measured:
+        lines.append(
+            f"  on every call {session.system_chars:,} chars of system text "
+            f"{DIM}(composed per task){RESET} + {session.menu_chars:,} of tool menu "
+            f"({session.tool_count} tools) {DIM}(the same on every task){RESET}"
+        )
+    elif session.calls:
+        lines.append(
+            f"  on every call {BOLD}{NOT_RECORDED}{RESET} — this log wrote no brief"
+            if session.system_state != RECORDED
+            else f"  on every call {session.system_chars:,} chars of system text; the tool "
+                 f"menu's bytes are {BOLD}purged{RESET}"
         )
     lines += ["", f"{BOLD}what filled the context{RESET}"]
     # The resident column is dropped rather than filled with "not recorded" on
