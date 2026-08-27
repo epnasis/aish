@@ -749,6 +749,62 @@ class TestCharterWritePath:
         [tool_step] = [s for s in steps if s.get("kind") == "tool"]
         assert tool_step["ok"] is False
 
+    def test_the_spellings_that_walked_through_the_first_version(self, tmp_path):
+        """Found by probing rather than by reading. The first fence matched the
+        store's absolute path as a SUBSTRING, and three ordinary spellings went
+        straight through it: a home-relative path, a relative path reached by
+        `cd`, and a path sitting inside a quoted `python3 -c` program. A fence a
+        rename of the home directory defeats is not a fence."""
+        agent, _ = make_agent([model_says("ok")])
+        store = roles.CHARTERS_DIR
+        for command in (
+            f"echo x > {store}/snippet-reader.md",
+            f"cat {store}/snippet-reader.md",
+            "cd aish/charters && echo x > y.md",
+            "python3 -c \"open('aish/charters/x.md','w')\"",
+            f"D={store}; echo x > $D/x.md",
+            f"echo x > {store}/../charters/x.md",
+            f"printf x > '{store}'/x.md",
+        ):
+            assert agent._command_touches_a_charter(command), command
+
+    def test_home_relative_spellings_of_the_owners_case_store(self, tmp_path, monkeypatch):
+        """`~` and `$HOME` are expanded because they are deterministic and are
+        how a path is usually written. Nothing else is: a fence that evaluated
+        `$(…)` would be running the command it is deciding about."""
+        under_home = Path.home() / f".aish-test-{tmp_path.name}"
+        under_home.mkdir()
+        try:
+            monkeypatch.setenv("AISH_CONFIG_HOME", str(under_home))
+            agent, _ = make_agent([model_says("ok")])
+            rel = under_home.name
+            for command in (
+                f"echo x > $HOME/{rel}/roles/snippet-reader/cases.yaml",
+                f"echo x > ${{HOME}}/{rel}/roles/x/cases.yaml",
+                f"echo x > ~/{rel}/roles/x/cases.yaml",
+                f"echo x > {under_home}/roles/x/cases.yaml",
+            ):
+                assert agent._command_touches_a_charter(command), command
+        finally:
+            under_home.rmdir()
+
+    def test_it_does_not_refuse_ordinary_commands(self):
+        """The fence over-refuses on purpose, in one direction only. A fence
+        that fired on `git status` would be uninstalled within a day."""
+        agent, _ = make_agent([model_says("ok")])
+        for command in ("ls -la", "git status", "echo x > /tmp/unrelated.md", "cat README.md"):
+            assert not agent._command_touches_a_charter(command), command
+
+    def test_a_symlink_into_the_store_answers_the_same(self, tmp_path):
+        """`files.contains` is the one containment function (#309), so a symlink
+        from a session root into the store cannot be a second answer."""
+        link = tmp_path / "link"
+        link.symlink_to(roles.CHARTERS_DIR)
+        agent, _ = make_agent([model_says("ok")], cwd=str(tmp_path))
+        assert agent._is_charter(str(link / "snippet-reader.md"))
+        assert agent._command_touches_a_charter(f"echo x > {link}/snippet-reader.md")
+        assert agent._command_touches_a_charter("echo x > link/x.md")
+
     def test_the_authoring_tools_cannot_name_a_path_into_the_store(self):
         """`create_tool` and `import_skill` write into the config tree, so they
         are the other doors. Neither takes a PATH: both take a slug, and the

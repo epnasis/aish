@@ -711,6 +711,35 @@ def _gate_outcome(text: str, decision: str, comment: str = "") -> tools.ToolOutc
     return tools.ToolOutcome(text, **meta)
 
 
+# A run of characters that could be a path, for the charter fence below. Split
+# on whitespace and the shell metacharacters that cannot appear inside one, so a
+# path embedded in a quoted program (`python3 -c "open('a/b.md','w')"`) is still
+# found — the first version tokenised with shlex and missed exactly that.
+_PATHISH = re.compile(r"[^\s;|&<>()\"'`]+")
+
+
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _after_assignment(text: str) -> str:
+    """`DIR=/a/b` → `/a/b`. A shell assignment is the one prefix that turns a
+    real path into a token no resolver recognises."""
+    return _ASSIGNMENT.sub("", text)
+
+
+def _expand_home(text: str) -> str:
+    """`~` and `$HOME` expanded, and nothing else.
+
+    Both are deterministic and are how a path is usually written. No other
+    expansion happens here on purpose: evaluating `$(…)` to decide whether a
+    command may run would be running the command.
+    """
+    home = str(Path.home())
+    if text.startswith("~/") or text == "~":
+        text = home + text[1:]
+    return text.replace("${HOME}", home).replace("$HOME", home)
+
+
 def _display_path(path: Path) -> str:
     """A path with $HOME abbreviated to ~ — so a global-config destination
     reads clearly as ~/.config/aish/… rather than a bare absolute path."""
@@ -6910,19 +6939,40 @@ class Agent:
         closing it is `approval._segment_deny_reason`'s Keychain rule, which
         refuses a command by what it NAMES rather than by what it is.
 
-        Matched on the resolved directory path appearing anywhere in the
-        command text, deliberately coarse: a fence that tried to parse which
-        operand of an arbitrary shell line is a write target would be a parser
-        with an exploit surface, and over-refusing costs a sentence.
+        **Every path-shaped run in the text is RESOLVED and asked**, rather than
+        the store's absolute path being string-matched. The first version did
+        the latter and three ordinary spellings walked straight through it:
+        `$HOME/dev/aish/aish/charters/x.md`, a relative `cd aish/charters && …`,
+        and the path sitting inside a `python3 -c` program. A fence a rename of
+        the home directory defeats is not a fence.
+
+        Deliberately coarse in the other direction: any mention refuses the
+        command, whether it would have read, written or merely echoed. Deciding
+        which operand of an arbitrary shell line is a write target needs a shell
+        parser, and a parser is an exploit surface where over-refusing is a
+        sentence of explanation.
+
+        `~` and `$HOME`/`${HOME}` are expanded because they are deterministic
+        and are how a path is usually written. Nothing else is: a fence that
+        evaluated `$(…)` would be running the command it is deciding about.
         """
-        for store in self._charter_dirs():
-            try:
-                resolved = str(store.resolve())
-            except OSError:  # noqa: PERF203 — a missing store still has a name
-                resolved = str(store)
-            for spelling in {resolved, str(store), _display_path(store)}:
+        stores = self._charter_dirs()
+        for store in stores:
+            # The literal net, kept alongside the resolving one below. It is
+            # what catches a spelling no path extractor sees as a path —
+            # `D=<charters>; echo x > $D/x.md` assigns the directory to a
+            # variable, and the token carrying it is `D=<charters>`, which
+            # resolves to nothing.
+            for spelling in {str(store), _display_path(store)}:
                 if spelling and spelling in command:
-                    return _display_path(Path(resolved))
+                    return _display_path(store)
+        for raw in set(_PATHISH.findall(command)):
+            candidate = _expand_home(_after_assignment(raw.strip("\"'`,;()")))
+            if not candidate or "/" not in candidate:
+                continue
+            for store in stores:
+                if files.contains(store, candidate, self.cwd):
+                    return _display_path(store)
         return ""
 
     def _outside_populated_stores(self) -> list[Path]:

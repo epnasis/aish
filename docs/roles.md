@@ -441,6 +441,17 @@ Two doors, both closed, neither with a yes button:
   `approval._segment_deny_reason`'s Keychain rule, which refuses a command by what it names.
   `CHARTER_COMMAND_REFUSED`.
 
+  **It resolves; it does not string-match, and that distinction was found by probing rather
+  than by reading.** The first version compared the store's absolute path as a substring, and
+  three ordinary spellings walked through it: `$HOME/…`, a relative path reached by `cd`, and
+  a path inside a quoted `python3 -c` program. Now every path-shaped run in the text
+  (`_PATHISH`) has `~` and `$HOME` expanded (`_expand_home`), any shell assignment prefix
+  stripped (`_after_assignment`), and is asked through `files.contains` — so a symlink from a
+  session root answers the same as the store's own path. The literal substring net is kept
+  **alongside** it, because `DIR=<charters>; echo x > $DIR/x.md` puts the directory in a token
+  that resolves to nothing. Both spellings and the ordinary-command negatives are pinned by
+  test.
+
 **The asymmetry is deliberate.** `read_file` on a charter is *not* refused: reading one
 authors nothing, and aish answers questions about itself. A shell command naming the
 directory is refused whichever it would have done, because deciding read-versus-write from
