@@ -10,6 +10,15 @@ life as the validation, because that's the closest one can get."* An exam
 authored by the same judgement that shipped the bug tests only what that
 judgement already thought of.
 
+**The `absent` case can no longer be mined.** A search result is rendered as
+title and address only, so a session log written from here on has no snippet
+line, `figures_only_in_snippets` finds nothing, and no `absent` assertion is
+written — which is the case type this script exists for. `case_for` still
+returns a `rows`/`distinct` case for such a set; that is an extraction case over
+an input with no snippet in it, and a weaker thing. The owner's existing logs
+are untouched and remain fully minable. `docs/roles.md`, *Title and address
+only*.
+
 **Where the output goes and why.** `~/.config/aish/roles/snippet-reader/cases.yaml`
 — outside the package, because `epnasis/aish` is public and these are his real
 searches. That tree is already backed up to a private repository. The charter's
