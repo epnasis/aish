@@ -11262,9 +11262,7 @@ class TestWhatCanBecomeModelVisibleImageContent:
     # Named with a reason each, both directions pinned — the shape #308's and
     # #309's sweeps use, because a guard that cannot fail is decoration.
     ATTACH_SITES = {
-        # The owner's own attachment. `_run_task` and not `run_task` since #336:
-        # the public name is now a thin wrapper that arms the stall watchdog.
-        ("agent.py", "_run_task"),
+        ("agent.py", "run_task"),  # the owner's own attachment
         ("agent.py", "_deliver_tool_media"),  # a tool's own pictures (#215)
     }
     # rules.past_turns builds a REPLAYED TURN RECORD for the rules engine, not

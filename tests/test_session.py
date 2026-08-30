@@ -1231,60 +1231,30 @@ def test_pending_task_in_flight_uses_command_for_shell_steps(tmp_path):
     assert SessionLog.pending_task(log.path)["in_flight"] == ["run_command: make release"]
 
 
-# #336: a task_start means two things — "a turn began" and "a process died" —
-# and nothing in the record shape tells them apart. A stall record says which of
-# the two it was; the start stays pending either way, because a hung task whose
-# process is then killed really is a crash. No hang has been observed leaving a
-# stranded start (the ones that prompted #336 were #338's retries), so these pin
-# a policy that has never fired on real data.
+# #336 attempted a `stall` record here so a hung start would not spend the crash
+# budget. Withdrawn: the stranded starts it was filed for were #338's Retry
+# rewind, no hang has ever been observed leaving one, and an exemption that can
+# never fire reads as a live safeguard. `attempts` is the raw count again.
 
 
-def test_a_hung_start_does_not_spend_the_crash_budget(tmp_path):
+def test_every_stranded_start_spends_the_crash_budget(tmp_path):
     log = SessionLog.new(tmp_path)
     for _ in range(4):
-        log.task_start("keeps hanging")
-        log.step({"kind": "stall", "silent_s": 300.0, "where": "agent.py:1 in x"})
+        log.task_start("keeps dying")
     pending = SessionLog.pending_task(log.path)
     log.close()
-    assert pending["attempts"] == 0  # none of them was a crash
-    assert pending["starts"] == 4  # and the raw count still says what happened
-    assert pending["prompt"] == "keeps hanging"  # still recoverable
+    assert pending["attempts"] == 4
+    assert pending["prompt"] == "keeps dying"  # still recoverable
 
 
-def test_a_killed_process_still_spends_it(tmp_path):
-    # The mix that has to come apart: two hangs, two deaths, one budget.
+def test_a_finished_task_clears_the_count(tmp_path):
     log = SessionLog.new(tmp_path)
-    log.task_start("hung")
-    log.step({"kind": "stall", "silent_s": 300.0, "where": "agent.py:1 in x"})
-    log.task_start("died")
-    log.task_start("hung again")
-    log.step({"kind": "stall", "silent_s": 300.0, "where": "agent.py:1 in x"})
-    log.task_start("died again")
-    pending = SessionLog.pending_task(log.path)
-    log.close()
-    assert pending["attempts"] == 2 and pending["starts"] == 4
-
-
-def test_a_stall_exemption_belongs_to_the_start_that_earned_it(tmp_path):
-    # It must not carry forward: the next start died in silence and counts.
-    log = SessionLog.new(tmp_path)
-    log.task_start("hung")
-    log.step({"kind": "stall", "silent_s": 300.0, "where": "agent.py:1 in x"})
-    log.task_start("died")
-    pending = SessionLog.pending_task(log.path)
-    log.close()
-    assert pending["attempts"] == 1
-
-
-def test_a_finished_task_clears_the_stall_bookkeeping_too(tmp_path):
-    log = SessionLog.new(tmp_path)
-    log.task_start("hung, then recovered")
-    log.step({"kind": "stall", "silent_s": 300.0, "where": "agent.py:1 in x"})
+    log.task_start("recovered")
     log.task_end()
     log.task_start("and then this one died")
     pending = SessionLog.pending_task(log.path)
     log.close()
-    assert pending["attempts"] == 1 and pending["starts"] == 1
+    assert pending["attempts"] == 1
 
 
 # ---- auto-titling (#175) ---------------------------------------------------
@@ -2771,41 +2741,6 @@ class TestModelErrorReplaysLikeItRendered:
         from aish.session import RENDERLESS_STEPS
 
         assert "model_error" not in RENDERLESS_STEPS
-
-
-class TestStallReplaysLikeItRendered:
-    """A stall is transcript content, not governance evidence (#336).
-
-    The turn it marks is the one the owner watched do nothing, so the record has
-    to be there when he opens the chat again — a stall visible only live would
-    reproduce the exact hole it was built to close.
-    """
-
-    def _log(self, tmp_path, step):
-        path = tmp_path / "session-20260830-000000-000000.jsonl"
-        path.write_text("\n".join(json.dumps(r) for r in [
-            {"ts": "2026-08-30T00:00:00", "kind": "message", "role": "user", "content": "go"},
-            {"ts": "2026-08-30T00:00:01", "kind": "trace", "step": step},
-        ]) + "\n")
-        return SessionLog.reconstruct_events(path)
-
-    def test_a_stall_survives_replay(self, tmp_path):
-        events = self._log(tmp_path, {
-            "kind": "stall", "silent_s": 151.0, "threshold_s": 150.0, "turn": 2,
-            "where": "agent.py:3138 in _run_task", "frames": "aish",
-            "stack": ["agent.py:3138 in _run_task"], "model_call": 0,
-        })
-        stalls = [e for e in events
-                  if e.get("type") == "step" and e.get("kind") == "stall"]
-        assert len(stalls) == 1, events
-        # The two facts the row is made of, and the one the reader acts on.
-        assert stalls[0]["silent_s"] == 151.0
-        assert stalls[0]["where"] == "agent.py:3138 in _run_task"
-
-    def test_it_is_not_registered_renderless(self):
-        from aish.session import RENDERLESS_STEPS
-
-        assert "stall" not in RENDERLESS_STEPS
 
 
 class TestTheRecordSaysWhatHeWasAsked:

@@ -515,36 +515,6 @@ The incident that named it: a session answered a question about a sick child wit
 
 ---
 
-### 3.11 · `stall` — a turn that stopped producing records and never ended (#336)
-
-**BUILT (2026-08-30).** Emitted by `Agent._stall_watchdog`, a daemon thread armed for the whole of `run_task` (and explicitly by `ClaudeMaxAgent`, whose SDK loop never enters it). **Rendered**, on `trim`'s terms — see §1.2.
-
-The gap it closes is the one shape this document did not have a record for: not a decision made badly, but **nothing happening at all**. On 2026-08-30 one chat wrote five `task_start` records for one question; four of them emitted `rule_eval` and `context` and then stopped — no user `message`, no `brief`, no `task_end` — while the owner watched an idle screen and re-sent four times over 45 minutes. Twenty-eight such turns across a month of logs, and not one can say where it stopped, because **the only evidence a stall leaves is the absence of everything after it**. That is §0 corollary 2 arriving by a route no record shape anticipated: every kind here describes something that happened, and this one has to describe something that did not.
-
-```json
-{"kind": "stall", "turn": 2, "silent_s": 151.4, "threshold_s": 150.0, "model_call": 0,
- "where": "agent.py:3138 in _run_task", "frames": "aish",
- "stack": ["server.py:3241 in _in_worker", "agent.py:3138 in _run_task"]}
-```
-
-| field | why |
-|---|---|
-| `silent_s` / `threshold_s` | How long since this turn last produced ANY record, and the bar that made it reportable. Both, because a threshold living only as a constant in source cannot be re-read after someone moves it — §3.8's `floors` reason. |
-| `where` | The innermost aish frame: the answer to the only question the logs could not answer. **Absent (empty) when the stack could not be read at all** — that is its own fact and must never be filled in with a plausible frame. |
-| `stack` | Up to `STALL_FRAMES` frames as `file:line in function`. Filenames only, never paths: the record is read on a screen. |
-| `frames` | `aish` \| `raw` — whether the stack was filtered to this codebase or is whatever the thread happened to hold. A reader must not mistake a filtered stack for the top of the real one. |
-| `worker` | `"gone"` only, and only when the thread no longer exists. That is a HARDER fact than a stall — the worker died without the task ending — and must not be recorded as a stall that merely could not be read. |
-
-**No cause field, and that is the point.** A stack is an *observation*; why the turn is sitting there was never established for any of the 28. A schema with a `reason` slot would be handed a guess, and the guess would then stand exactly where the disproving evidence should be (§0, and L8 in `docs/agent-core.md`). The record says *"nothing for 151s, still inside this line"* and stops.
-
-**Re-reported on `STALL_REPEAT_S`**, and the watchdog's own record is excluded from the liveness stamp (`_sink_step`) — otherwise the first report would silence the watchdog that found it. *"Stuck at 13:13"* and *"still stuck at 13:35"* are different facts, and the second is the one that says nobody recovered it.
-
-`TestStallWatchdog` (`tests/test_ratelimit.py`) covers the agent side — that it fires, that it never fires on working turns, that it disarms, and that it names no cause; `TestStallReplaysLikeItRendered` (`tests/test_session.py`) pins hot/cold parity, and `tests/js/test_model_error_row.js` runs the real `traceStep` against the row.
-
-**It is now read by restart recovery, and only in the safe direction (#336).** An unmatched `task_start` is still the interruption signal, so a stalled start is still PENDING and a hang followed by a real kill resumes exactly as before. What this record buys is that such a start no longer *spends* `RESUME_MAX_ATTEMPTS`, the allowance kept for processes that actually died — see `docs/session-log.md` and `docs/web-server.md`. A consumer of this record therefore may not repurpose it: emitting a `stall` where nothing was observed to go quiet would exempt a real crash loop from its bound.
-
----
-
 ## 4 · Evidence, not conclusions
 
 Every `evidence` object in this document follows one rule:

@@ -19,24 +19,6 @@ A kind that must not render therefore needs both halves:
 
 ---
 
-## A record for nothing happening
-
-Every other kind in the contract describes something that happened. `stall` (§3.11) had to describe something that did **not**, and that is why it took a month of occurrences to notice.
-
-On 2026-08-30 one chat wrote five `task_start` records for one question. Four of them emitted `rule_eval` and `context` and then stopped — no user `message`, no `brief`, no `task_end` — while the owner watched an idle screen and re-sent four times over 45 minutes. Twenty-eight turns across a month of logs have that exact shape. **Not one can say where it stopped**, because the only evidence a stall leaves is the absence of everything after it. §0 corollary 2 by a route no record shape anticipated.
-
-Three things make the watchdog honest rather than merely present:
-
-**It reads liveness from RECORDS, never from the thread.** `_mark_alive` is called by `_sink_step` and `_emit_record`; a thread existing proves nothing, because a wedged thread exists too. The cost is that a turn legitimately sitting in one long call looks silent, which is what the threshold is for and why it sits above both a slow model call and a slow browser step.
-
-**Its own record is excluded from that stamp**, or the first report would silence the watchdog that found it. Re-reporting matters because *"stuck at 13:13"* and *"still stuck at 13:35"* are different facts, and only the second says nobody recovered it.
-
-**It states no cause, and the schema has nowhere to put one.** A stack is an observation; why any of the 28 turns were sitting there is still unknown. A `reason` field would be handed a guess on the first occurrence, and the guess would then stand exactly where the disproving evidence should be — L8, and the whole point of building an instrument instead of sharpening a sentence. When the next one fires it will name a line, and *then* there is something to fix.
-
-What it deliberately does **not** do is disambiguate `task_start`. An unmatched one is still the restart-recovery signal, so a live stall still spends `RESUME_MAX_ATTEMPTS` as though the process had died — the record makes that visible without pretending to have fixed it (#336).
-
----
-
 ## Turn and call identity (contract §2)
 
 `Agent._turn` advances in `_reset_task_state`, so claude-max — whose SDK loop never enters `run_task` — counts turns too. A per-turn `call` counter is assigned in `_call_result` and carried as a **LOCAL, never read back off the agent**: read-only tools run in parallel, and an attribute would hand two concurrent calls the same id.

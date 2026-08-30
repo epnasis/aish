@@ -7496,13 +7496,9 @@ class TestRestartResume:
 
     @staticmethod
     def _interrupted_log(app_env, prompt="answer the mail", *, with_history=True,
-                         attempts=1, origin="email", stalled=False):
+                         attempts=1, origin="email"):
         """A session log in the state the OS leaves behind when the process is
-        killed mid-task: a task_start with no task_end.
-
-        `stalled` writes the watchdog's own record inside each start (#336) —
-        the log a LIVE process that went quiet leaves, which is identical
-        without it."""
+        killed mid-task: a task_start with no task_end."""
         state_dir = Path(app_env["state_dir"])
         log = SessionLog(state_dir / "session-20260101-120000-000000.jsonl")
         log.model("fake")
@@ -7510,9 +7506,6 @@ class TestRestartResume:
             log.origin(origin)
         for _ in range(attempts):
             log.task_start(prompt)
-            if stalled:
-                log.step({"kind": "stall", "silent_s": 300.0, "threshold_s": 150.0,
-                          "where": "agent.py:1 in _chat_turn", "stack": []})
             if with_history:
                 log.message({"role": "user", "content": prompt})
         log.close()
@@ -7639,36 +7632,6 @@ class TestRestartResume:
     def test_repeatedly_interrupted_task_is_abandoned(self, app_env):
         # A task that keeps killing the server must not crash-loop it.
         path = self._interrupted_log(app_env, attempts=server_module.RESUME_MAX_ATTEMPTS)
-        client, chat = make_client(app_env, [])
-        with client:
-            time.sleep(0.3)
-            assert path.name not in client.app.state.server.sessions
-        assert chat.calls == []
-
-    def test_a_hung_turn_does_not_spend_the_crash_allowance(self, app_env):
-        """#336. Past the attempts bound and resumed anyway, because none of
-        those starts was a death: a live process going quiet was consuming the
-        budget kept for dead ones, and the chat it happened in was excluded
-        from recovery permanently."""
-        path = self._interrupted_log(
-            app_env, "read msg 42", with_history=False,
-            attempts=server_module.RESUME_MAX_ATTEMPTS + 1, stalled=True,
-        )
-        client, chat = make_client(app_env, [model_says("read it")])
-        with client:
-            server = client.app.state.server
-            assert self._wait(lambda: path.name in server.sessions)
-            assert self._wait(lambda: not server.sessions[path.name].busy)
-        assert self._resumed_prompt(chat) == "read msg 42"
-
-    def test_a_task_that_hangs_and_then_dies_every_time_is_still_bounded(self, app_env):
-        """The hole the exemption would otherwise open. A start the watchdog
-        reported on is exempt from the attempts bound — so the RAW start count
-        is capped too, or a task that hangs AND takes the process down would be
-        exempt from the very check that stops crash loops."""
-        path = self._interrupted_log(
-            app_env, attempts=server_module.RESUME_MAX_STARTS, stalled=True
-        )
         client, chat = make_client(app_env, [])
         with client:
             time.sleep(0.3)

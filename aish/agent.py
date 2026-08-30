@@ -6,7 +6,6 @@ run_command cannot be reached there unless the approve() callback returns
 the command to run (possibly edited by the user).
 """
 
-import contextlib
 import dataclasses
 import datetime
 import fnmatch
@@ -24,7 +23,6 @@ import sys
 import tempfile
 import threading
 import time
-import traceback
 import urllib.error
 import urllib.parse
 import weakref
@@ -425,20 +423,6 @@ MODEL_CALL_ATTEMPT_CAP = 8
 # what went wrong is at the front of all of them.
 MODEL_ERROR_CHARS = 700
 
-# The stall watchdog (#336). A turn that produces no record for this long is
-# reported, WITH the worker thread's stack, so the next occurrence names its own
-# line instead of leaving the log to be read by elimination. Measured against
-# what the owner actually waits through: model calls on a large history run tens
-# of seconds and a browser step can run past a minute, so this must sit above
-# both or it reports working turns.
-STALL_WATCHDOG_S = 150.0
-# How often the watchdog re-reports a stall that has not moved. Once is not
-# enough — "it was stuck at 13:13" and "it was still stuck at 13:35" are
-# different facts, and the second is what says nobody recovered it.
-STALL_REPEAT_S = 300.0
-# Frames kept from the stalled thread's stack. Deep enough to cross the two or
-# three aish frames that matter, short enough that a record is readable.
-STALL_FRAMES = 12
 
 
 class TaskCancelled(Exception):
@@ -1579,9 +1563,7 @@ KNOWLEDGE_WRITE_TOOLS = frozenset({"remember", "forget_memory"})
 # an answer always needs the tool steps and the knowledge step alongside the
 # gate records. `thinking` is deliberately left out: it is the high-volume kind
 # and buys nothing #197 asks for. Renderless kinds are stamped by _emit_record.
-TURN_STAMPED_STEPS = frozenset(
-    {"tool_start", "tool", "knowledge", "trim", "model_error", "stall"}
-)
+TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge", "trim", "model_error"})
 
 # Decisions meaning THE ACTION DID NOT HAPPEN. A step carrying one is never
 # green, whichever path set it — see _emit_tool_step for why this is one rule
@@ -2366,11 +2348,6 @@ class Agent:
         # carry this stamp, so a counter that only exists once a task has begun
         # makes the very first append raise.
         self._model_call = 0
-        # When this agent last produced a record — the stall watchdog's one
-        # signal (#336). Bound here as well as armed per task, because records
-        # are emitted outside a task too and a watchdog must never be the thing
-        # that raises.
-        self._last_record_at = time.perf_counter()
         self._call_seq = itertools.count(1)
         # The call id currently being dispatched, so a `gate` verdict joins to
         # the `tool` step for the action it governed (§2). Thread-local rather
@@ -2782,28 +2759,10 @@ class Agent:
         concerns — durable logging vs live rendering — stay independent."""
         if step.get("kind") in TURN_STAMPED_STEPS:
             self._turn_stamp(step)
-        if step.get("kind") != "stall":
-            # The watchdog's own record must not count as the turn being alive,
-            # or a stall would silence the watchdog that found it.
-            self._mark_alive()
         if self.step_log is not None:
             self.step_log(step)
         if self.on_step is not None:
             self.on_step(step)
-
-    def _mark_alive(self) -> None:
-        """This turn just produced a record — the one signal the stall watchdog
-        reads (#336).
-
-        Deliberately "produced a record" and not "is executing": a turn CAN sit
-        legitimately in one long call, and the watchdog's threshold is what
-        covers that. What it must never do is call a turn alive because a thread
-        exists, since a wedged thread exists too.
-
-        `perf_counter` and not `monotonic`, to travel on the same clock as every
-        other duration this file measures — including the one the tests fake.
-        """
-        self._last_record_at = time.perf_counter()
 
     def _emit_command_start(self, command: str, user: bool = False) -> None:
         # `user` marks a command the user typed directly (! prefix): the web UI
@@ -2840,7 +2799,6 @@ class Agent:
         Every kind emitted here must be in that set — asserted by test.
         """
         self._turn_stamp(fields)
-        self._mark_alive()  # governance evidence is progress too (#336)
         if self.step_log is not None:
             self.step_log(fields)
 
@@ -3043,25 +3001,6 @@ class Agent:
         self._model_call = 0
 
     def run_task(
-        self,
-        task: str,
-        images: list[str] | None = None,
-        documents: list[str] | None = None,
-        *,
-        keep_history: bool = False,
-    ) -> str:
-        """One turn, under the stall watchdog (#336).
-
-        A thin wrapper and not a `with` inside the body, because the body
-        returns from a dozen places and every one of them must disarm. The
-        watchdog is armed OUTSIDE the body so it also covers the run-up — the
-        knowledge scan, the preflight, the rule seed — which is precisely the
-        stretch the 28 recorded stalls died in.
-        """
-        with self._stall_watchdog():
-            return self._run_task(task, images, documents, keep_history=keep_history)
-
-    def _run_task(
         self,
         task: str,
         images: list[str] | None = None,
@@ -3649,101 +3588,6 @@ class Agent:
                 self._record_reasoning(turn)
                 return turn
         raise ModelUnavailable(_unavailable_text(last, attempt))
-
-    @contextlib.contextmanager
-    def _stall_watchdog(self):
-        """Report a turn that stops producing records but never ends (#336).
-
-        The defect this exists for: five turns in one chat wrote `task_start`,
-        indexed their knowledge, and then emitted NOTHING — no user message, no
-        model call, no ending — while the owner watched an idle screen and
-        re-sent four times over 45 minutes. 28 such turns across a month of
-        logs, and not one of them can say where it stopped, because the only
-        evidence a stall leaves is the absence of everything after it. That is
-        the absence-as-evidence failure contract §0 exists to stop, arriving by
-        a route no record shape anticipated.
-
-        So the watchdog reports what it can OBSERVE and nothing more: how long
-        the turn has been silent, and where the worker thread's own stack says
-        it is. No cause is named. A stack in `ssl.read` and a stack in
-        `queue.get` are different worlds, and either is a fact; which of them
-        holds is exactly what nobody could establish afterwards.
-
-        A daemon thread, so it can never hold the process open, and it only ever
-        READS the worker's frames — `sys._current_frames()` is a snapshot and
-        touches nothing. It re-reports on `STALL_REPEAT_S` because "still stuck
-        22 minutes later" is a different fact from "stuck", and the second is
-        what says nobody recovered it.
-        """
-        worker = threading.get_ident()
-        done = threading.Event()
-        self._mark_alive()
-
-        def watch() -> None:
-            reported = 0.0
-            while not done.wait(min(STALL_WATCHDOG_S, STALL_REPEAT_S) / 2):
-                silent = time.perf_counter() - self._last_record_at
-                if silent < STALL_WATCHDOG_S:
-                    reported = 0.0
-                    continue
-                if reported and silent - reported < STALL_REPEAT_S:
-                    continue
-                reported = silent
-                try:
-                    self._record_stall(worker, silent)
-                except Exception:  # noqa: BLE001 — a watchdog must never be the failure
-                    return
-
-        thread = threading.Thread(target=watch, name="aish-stall-watchdog", daemon=True)
-        thread.start()
-        try:
-            yield
-        finally:
-            done.set()
-
-    def _record_stall(self, worker: int, silent: float) -> None:
-        """Where the stalled turn is, as observed — never why (L8).
-
-        RENDERED, on `trim`'s terms: it is a record about something the reader
-        can SEE. The screen says the turn is thinking and it has done nothing
-        for minutes, so the correction belongs on the timeline he is watching,
-        not only in a log he would have to know to go and read.
-        """
-        frame = sys._current_frames().get(worker)
-        stack = traceback.extract_stack(frame) if frame is not None else []
-        # aish's own frames only: the answer to "where is it" is a line in this
-        # codebase, and forty frames of asyncio and SSL bury it.
-        here = str(Path(__file__).resolve().parent)
-        mine = [f for f in stack if str(Path(f.filename).resolve()).startswith(here)]
-        shown = (mine or list(stack))[-STALL_FRAMES:]
-        step: dict = {
-            "kind": "stall",
-            "silent_s": round(silent, 1),
-            "threshold_s": STALL_WATCHDOG_S,
-            "model_call": self._model_call,
-            # The innermost aish frame IS the answer when there is one. Absent
-            # when the stack could not be read at all, which is its own fact and
-            # must not be filled in with a plausible frame.
-            "where": f"{Path(shown[-1].filename).name}:{shown[-1].lineno} in {shown[-1].name}"
-            if shown
-            else "",
-            "stack": [
-                f"{Path(f.filename).name}:{f.lineno} in {f.name}" for f in shown
-            ],
-            # Whether the frames are aish's or whatever the stack happened to
-            # hold — a reader must not mistake a filtered stack for the top of
-            # the real one.
-            "frames": "aish" if mine else "raw",
-        }
-        if frame is None:
-            # The thread is gone. That is a HARDER fact than a stall — the
-            # worker died without the task ending — and it must not be recorded
-            # as a stall that merely could not be read.
-            step["worker"] = "gone"
-        self._emit_step(**step)
-        self._note(
-            f"⚑ nothing for {silent:.0f}s — still inside {step['where'] or 'an unreadable frame'}"
-        )
 
     def _retry_wait_budget(self) -> float:
         """Seconds of waiting one model call may spend across its retries (#337).

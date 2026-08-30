@@ -217,41 +217,4 @@ check("an unrecognised failure still draws a legible row", () => {
   assert(subOf(row).length > 0, "no subtitle");
 });
 
-// ---- the stall row (#336) -----------------------------------------------
-
-function stallRow(s, step) {
-  s.traceStep(step);
-  const row = rows(s).find((r) => titleOf(r).startsWith("Nothing for"));
-  assert(row, "no stall row drawn");
-  return row;
-}
-
-check("a stalled turn draws a row saying how long and where", () => {
-  // The record's whole purpose: the screen says the turn is thinking and it has
-  // done nothing for minutes. A kind with no renderer here would instead open
-  // an EMPTY live trace card (docs/trace-contract.md §1.2).
-  const s = makeSandbox();
-  const row = stallRow(s, {
-    kind: "stall", silent_s: 151.4, threshold_s: 150,
-    where: "agent.py:3138 in _run_task", frames: "aish",
-    stack: ["agent.py:3138 in _run_task"],
-  });
-  assert(titleOf(row).includes("151s"), titleOf(row));
-  assert(subOf(row).includes("still inside agent.py:3138"), subOf(row));
-});
-
-check("a stall whose stack could not be read says that, not a guess", () => {
-  // L8: the missing frame is its own fact. Filling it with a plausible one is
-  // exactly how a guess becomes evidence for itself.
-  const s = makeSandbox();
-  const row = stallRow(s, { kind: "stall", silent_s: 160, where: "", stack: [] });
-  assert(subOf(row).includes("could not be read"), subOf(row));
-});
-
-check("a worker that is gone is not reported as merely silent", () => {
-  const s = makeSandbox();
-  const row = stallRow(s, { kind: "stall", silent_s: 160, worker: "gone", where: "" });
-  assert(subOf(row).includes("worker thread is gone"), subOf(row));
-});
-
 process.exit(failures ? 1 : 0);

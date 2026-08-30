@@ -1119,29 +1119,19 @@ class SessionLog:
         with no matching `task_end` after it IS the interruption signal — a
         killed process cannot write anything, so absence is the evidence.
 
-        Two counts come back, because `task_start` says two different things
-        (#336). `starts` is the raw number since the last `task_end`. `attempts`
-        subtracts the starts carrying a `stall` trace record: the watchdog
-        observing a turn alive-and-quiet is aish saying "this one was not a
-        death", which is the only thing that distinguishes a hang from a kill —
-        a killed process writes nothing at all. The exemption belongs to the
-        start that earned it and is cleared by the next `task_start` or any
-        `task_end`, so it cannot carry forward onto a start that really did die.
+        `attempts` counts the `task_start` records since the last `task_end`, so
+        a task that keeps killing the server is resumed a bounded number of
+        times instead of crash-looping it forever.
 
-        The ambiguity is structural and was reasoned from the record shapes, not
-        from an observed hang: the stranded starts #336 was filed for turned out
-        to be #338's Retry rewind, and no `stall` record has yet been seen
-        beside one. So this policy has never fired on real data. It cannot make
-        recovery more likely to be wrong — a start with no `stall` behaves
-        exactly as before — but that is the whole of its case today.
-
-        A stalled start is still PENDING, which is what keeps this from
-        recovering less: a task that hangs and whose process is THEN killed is a
-        crash and resumes exactly as before. Only which starts spend the budget
-        changed. `starts` is what stops the exemption becoming a hole — the
-        server caps the raw count too (`RESUME_MAX_STARTS`), or a task that
-        hangs AND takes the process down every time would be exempt from the
-        very check that stops crash loops.
+        **`task_start` does say two things** — "a turn began" and "a process
+        died" — and #336 tried to tell them apart with a `stall` record from a
+        watchdog. That was withdrawn: the stranded starts it was filed for were
+        #338's Retry rewind, which walks back to the `task_start` now, and no
+        hang has ever been observed leaving one. The owner's account is that a
+        turn only ends without an answer when he stops it, and a stop records
+        itself. An exemption that can never fire reads as a live safeguard, so
+        it is better absent than inert; if a real hang ever appears, it arrives
+        with a case to design against.
 
         `in_flight` names the steps that had STARTED but never reported back —
         a `tool_start` trace record with no matching `tool`. That is the one
@@ -1149,9 +1139,7 @@ class SessionLog:
         but an in-flight one may or may not have taken effect (a send, a write),
         and only the model re-checking reality can tell."""
         pending: dict | None = None
-        starts = 0  # every task_start since the last task_end
-        hung = 0  # ...of which the watchdog reported alive-and-quiet (#336)
-        stalled = False  # does THIS start carry a stall record
+        attempts = 0
         started: list[dict] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
@@ -1159,21 +1147,17 @@ class SessionLog:
                 continue
             kind = record.get("kind")
             if kind == "task_start":
-                hung += stalled  # settle the start this one replaces
-                starts += 1
-                stalled = False
+                attempts += 1
                 started = []
                 pending = {
                     "prompt": record.get("prompt") or "",
                     "ts": record.get("ts") or "",
                 }
             elif kind == "task_end":
-                pending, starts, hung, stalled, started = None, 0, 0, False, []
+                pending, attempts, started = None, 0, []
             elif kind == "trace" and pending is not None:
                 step = record.get("step") or {}
-                if step.get("kind") == "stall":
-                    stalled = True
-                elif step.get("kind") == "tool_start":
+                if step.get("kind") == "tool_start":
                     started.append(step)
                 elif step.get("kind") == "tool":
                     # Read-only calls run in parallel, so match by name rather
@@ -1183,9 +1167,7 @@ class SessionLog:
                             del started[i]
                             break
         if pending is not None:
-            hung += stalled  # ...and the one still open when the log ran out
-            pending["attempts"] = starts - hung
-            pending["starts"] = starts
+            pending["attempts"] = attempts
             pending["in_flight"] = [SessionLog._describe_step(s) for s in started]
         return pending
 
