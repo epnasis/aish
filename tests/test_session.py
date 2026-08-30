@@ -2495,41 +2495,6 @@ class TestModelErrorReplaysLikeItRendered:
         assert "model_error" not in RENDERLESS_STEPS
 
 
-class TestStallReplaysLikeItRendered:
-    """A stall is transcript content, not governance evidence (#336).
-
-    The turn it marks is the one the owner watched do nothing, so the record has
-    to be there when he opens the chat again — a stall visible only live would
-    reproduce the exact hole it was built to close.
-    """
-
-    def _log(self, tmp_path, step):
-        path = tmp_path / "session-20260830-000000-000000.jsonl"
-        path.write_text("\n".join(json.dumps(r) for r in [
-            {"ts": "2026-08-30T00:00:00", "kind": "message", "role": "user", "content": "go"},
-            {"ts": "2026-08-30T00:00:01", "kind": "trace", "step": step},
-        ]) + "\n")
-        return SessionLog.reconstruct_events(path)
-
-    def test_a_stall_survives_replay(self, tmp_path):
-        events = self._log(tmp_path, {
-            "kind": "stall", "silent_s": 151.0, "threshold_s": 150.0, "turn": 2,
-            "where": "agent.py:3138 in _run_task", "frames": "aish",
-            "stack": ["agent.py:3138 in _run_task"], "model_call": 0,
-        })
-        stalls = [e for e in events
-                  if e.get("type") == "step" and e.get("kind") == "stall"]
-        assert len(stalls) == 1, events
-        # The two facts the row is made of, and the one the reader acts on.
-        assert stalls[0]["silent_s"] == 151.0
-        assert stalls[0]["where"] == "agent.py:3138 in _run_task"
-
-    def test_it_is_not_registered_renderless(self):
-        from aish.session import RENDERLESS_STEPS
-
-        assert "stall" not in RENDERLESS_STEPS
-
-
 class TestTheRecordSaysWhatHeWasAsked:
     """The command string is what aish INTENDED; the preview is what the owner
     was actually asked (#284).

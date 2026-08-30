@@ -3075,23 +3075,6 @@ function traceStep(step) {
     updateTraceHead(t);
     return;
   }
-  if (step.kind === "stall") {
-    // Draws a row for `trim`'s reason (#336): it contradicts what is in front
-    // of you. The screen says the turn is thinking; it has produced nothing for
-    // minutes. Says WHERE it is and never why — a stack is an observation, and
-    // the whole point of this record is that the cause was never established.
-    t.started += 1;
-    const secs = Math.round(step.silent_s || 0);
-    const where = step.worker === "gone"
-      ? "the worker thread is gone"
-      : step.where ? `still inside ${step.where}` : "its stack could not be read";
-    traceRow(
-      t, traceSvg("thinking", "var(--red)"),
-      `Nothing for ${secs}s`, where
-    );
-    updateTraceHead(t);
-    return;
-  }
   if (step.kind === "trim") {
     // The one governance record that draws a row (#243). Every other one
     // describes a decision you can look up; this one CONTRADICTS what is in
