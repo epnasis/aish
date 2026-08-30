@@ -1544,10 +1544,10 @@ class TestWriteLock:
         }
         assert seen == expected
 
-    def test_rewind_racing_writers_never_errors_or_tears(self, tmp_path):
-        # The other write shape: rewind_last_turn closes and rewrites the file
-        # while another thread appends. Lock-less this raises ("I/O operation
-        # on closed file") or tears; locked it just serializes.
+    def test_supersede_racing_writers_never_errors_or_tears(self, tmp_path):
+        # The other write shape: supersede_last_turn closes and rewrites the
+        # file while another thread appends. Lock-less this raises ("I/O
+        # operation on closed file") or tears; locked it just serializes.
         log = SessionLog.new(tmp_path)
         log.message({"role": "user", "content": "seed"})
         stop = threading.Event()
@@ -1564,7 +1564,7 @@ class TestWriteLock:
         thread.start()
         try:
             for _ in range(50):
-                log.rewind_last_turn()
+                log.supersede_last_turn()
         finally:
             stop.set()
             thread.join(timeout=30)
@@ -2209,7 +2209,7 @@ class TestEveryCutWalksBackToTaskStart:
     def test_the_sweep_is_not_empty(self):
         """A rename that empties the sweep must fail loudly, not pass."""
         source = (Path(__file__).resolve().parents[1] / "aish/session.py").read_text()
-        for name in ("rewind_last_turn", "redact_turn", "_cut_after_answer"):
+        for name in ("supersede_last_turn", "redact_turn", "_cut_after_answer"):
             assert f"def {name}(" in source, name
         assert source.count("def _turn_opens_at(") == 1
 
@@ -2270,8 +2270,24 @@ class TestEveryCutWalksBackToTaskStart:
         log.message({"role": "assistant", "content": answer})
         log.task_end()
 
+    def _live_kinds(self, log):
+        """What a reader that reconstructs the chat's state sees — i.e. what
+        the pre-#339 delete left behind, since every such reader skips a
+        superseded record."""
+        out = []
+        for line in log.path.read_text().splitlines():
+            record = json.loads(line)
+            if record.get("superseded"):
+                continue
+            out.append(
+                record["step"].get("kind") if record.get("kind") == "trace"
+                else record.get("kind")
+            )
+        return out
+
     def test_a_retry_does_not_leave_a_completed_turn_pending(self, tmp_path):
-        """The reproduction from #338, at 8 records and no server."""
+        """The reproduction from #338, at 8 records and no server — and the
+        same guarantee after #339 stopped paying for it with the records."""
         log = SessionLog.new(tmp_path)
         self._completed_turn(log)
         assert self._kinds(log) == [
@@ -2279,49 +2295,57 @@ class TestEveryCutWalksBackToTaskStart:
             "message", "thinking", "message", "task_end",
         ]
         assert SessionLog.pending_task(log.path) is None
-        log.rewind_last_turn()
+        log.supersede_last_turn()
         log.close()
-        # The whole turn went, its opening record included — so the log that
-        # ran to completion is still not a task anyone should resume.
-        assert self._kinds(log) == []
+        # The whole turn is marked, its opening record included — so nothing a
+        # reader of chat state can see, and no task anyone should resume.
+        assert self._live_kinds(log) == ["retry"]
         assert SessionLog.pending_task(log.path) is None
+        # ...and every record of it is still on disk, which is the change.
+        assert self._kinds(log) == [
+            "task_start", "rule_eval", "binding", "context",
+            "message", "thinking", "message", "task_end", "retry",
+        ]
 
     def test_a_retry_leaves_the_earlier_turns_and_their_endings_alone(self, tmp_path):
         log = SessionLog.new(tmp_path)
         log.model("fake")
         self._completed_turn(log, "first", "first answer")
         self._completed_turn(log, "second", "second answer")
-        log.rewind_last_turn()
+        log.supersede_last_turn()
         log.close()
-        assert self._kinds(log) == [
+        assert self._live_kinds(log) == [
             "model",
             "task_start", "rule_eval", "binding", "context",
             "message", "thinking", "message", "task_end",
+            "retry",
         ]
         assert SessionLog.pending_task(log.path) is None
 
     def test_a_retry_still_discards_the_attempt_it_is_for(self, tmp_path):
-        """The feature must still work: the prompt and its answer are gone, so
-        the rerun re-logs them and a cold replay shows one turn, not two."""
+        """The feature must still work: the discarded prompt and answer reach
+        no reader of chat state, so a cold replay shows one turn, not two."""
         log = SessionLog.new(tmp_path)
         self._completed_turn(log, "first", "first answer")
         self._completed_turn(log, "second", "the wrong answer")
-        assert log.rewind_last_turn() is True
-        text = log.path.read_text()
+        assert log.supersede_last_turn() is not None
         log.close()
-        assert "the wrong answer" not in text and "second" not in text
-        assert "first answer" in text
+        events = json.dumps(SessionLog.reconstruct_events(log.path))
+        assert "the wrong answer" not in events and "second" not in events
+        assert "first answer" in events
+        # Discarded from the chat, kept as evidence — the whole of #339.
+        assert "the wrong answer" in log.path.read_text()
 
-    def test_a_cli_rewind_still_cuts_at_the_message(self, tmp_path):
+    def test_a_cli_rewind_still_marks_from_the_message(self, tmp_path):
         """No task markers (every CLI session), so there is nothing to walk
         back to and the preamble records are left where they are."""
         log = SessionLog.new(tmp_path)
         log.model("fake")
         log.message({"role": "user", "content": "hello"})
         log.message({"role": "assistant", "content": "hi"})
-        assert log.rewind_last_turn() is True
+        assert log.supersede_last_turn() is not None
         log.close()
-        assert self._kinds(log) == ["model"]
+        assert self._live_kinds(log) == ["model", "retry"]
 
     def test_a_fork_does_not_carry_the_next_turns_task_start(self, tmp_path):
         """The same defect at the other end of a range: cutting up to the NEXT
@@ -2352,6 +2376,296 @@ class TestEveryCutWalksBackToTaskStart:
         kept = [e for e in events if e["type"] in ("user", "done")]
         assert [e["type"] for e in kept] == ["user", "done"]
         assert kept[0]["text"] == "q one" and kept[1]["result"] == "a one"
+
+
+class TestSupersedeInsteadOfDelete:
+    """Retry keeps what it discards (#339).
+
+    Rewinding the MODEL's context and deleting from the LOG are different acts.
+    Only the first was ever justified; the second was a presentation choice —
+    "so a cold replay shows one turn" — paid for with the evidence. The bill
+    arrived twice: the quota failure that made the owner press the button four
+    times was gone, and #336 then read the residue as a stall, reasoning from an
+    absence nothing in the log explained.
+
+    So the records stay, marked, and every reader that reconstructs the chat's
+    CURRENT STATE behaves exactly as it did when they were deleted. That
+    equivalence is what makes this safe, and it is what these pin.
+    """
+
+    def _failed_turn(self, log, prompt="what is 2+2?"):
+        """A turn the quota killed, in the order the server writes it."""
+        log.task_start(prompt)
+        log.step({"kind": "context", "turn": 4})
+        log.message({"role": "user", "content": prompt})
+        log.step({
+            "kind": "model_error", "turn": 4, "class": "rate_limit", "status": 429,
+            "attempt": 5, "attempts": 8, "action": "give_up", "retryable": True,
+            "bound": "wait_budget", "text": "RESOURCE_EXHAUSTED",
+        })
+        log.task_end("failed", "model unavailable: 429 RESOURCE_EXHAUSTED")
+
+    def _records(self, path, kind):
+        """The whole log record — the mark lives on it, the step inside it."""
+        out = []
+        for line in path.read_text().splitlines():
+            record = json.loads(line)
+            if record.get("kind") == "trace" and record["step"].get("kind") == kind:
+                out.append(record)
+        return out
+
+    def test_the_failure_that_caused_the_retry_survives_it(self, tmp_path):
+        """The headline. Four Retries on quota errors, and afterwards the log
+        could not say that any of it had happened."""
+        log = SessionLog.new(tmp_path)
+        self._failed_turn(log)
+        log.supersede_last_turn()
+        log.close()
+        errors = self._records(log.path, "model_error")
+        assert len(errors) == 1
+        assert errors[0]["step"]["class"] == "rate_limit"
+        assert errors[0]["step"]["status"] == 429
+        assert errors[0]["superseded"] is True, "kept, and saying it was discarded"
+
+    def test_the_retry_record_names_what_was_observed(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._failed_turn(log)
+        step = log.supersede_last_turn()
+        log.close()
+        assert step["kind"] == "retry"
+        assert step["by"] == "owner"
+        assert step["attempt"] == 2
+        assert step["turn"] == 4, "the join key of the attempt it is evidence about"
+        assert step["previous"]["ended"] == "failed"
+        assert step["previous"]["failure"] == "rate_limit"
+        assert "429" in step["previous"]["error"]
+        assert step["previous"]["records"] == 5
+        # And it is on disk, in the same rewrite as the marks — a hidden record
+        # with nothing saying why is the absence this exists to stop.
+        written = self._records(log.path, "retry")
+        assert [r["step"] for r in written] == [step]
+        assert "superseded" not in written[0], "the tombstone is not hidden too"
+
+    def test_an_unknown_ending_is_said_out_loud(self, tmp_path):
+        """L8: the vocabulary must be able to say aish does not know. A turn
+        killed before it wrote a `task_end` has no recorded ending, and a
+        schema that could not say so would be handed a guess."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("what is 2+2?")
+        log.message({"role": "user", "content": "what is 2+2?"})
+        step = log.supersede_last_turn()
+        log.close()
+        assert step["previous"]["ended"] == "unknown"
+        assert "failure" not in step["previous"] and "error" not in step["previous"]
+
+    def test_a_recovered_model_error_is_not_named_as_the_cause(self, tmp_path):
+        """A call that failed and then RETRIED did not end the turn. Naming it
+        would put a hypothesis where the evidence goes."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("q")
+        log.message({"role": "user", "content": "q"})
+        log.step({"kind": "model_error", "class": "transport", "action": "retry"})
+        log.message({"role": "assistant", "content": "a"})
+        log.task_end()
+        step = log.supersede_last_turn()
+        log.close()
+        assert step["previous"]["ended"] == "ok"
+        assert "failure" not in step["previous"]
+
+    def test_a_pre_contract_turn_gets_no_invented_join_key(self, tmp_path):
+        """A log written before #191 has no turn ids. Stamping one would join
+        this record to somebody else's turn."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hi"})
+        log.message({"role": "assistant", "content": "hello"})
+        step = log.supersede_last_turn()
+        log.close()
+        assert "turn" not in step
+
+    def test_attempts_are_numbered_across_repeated_retries(self, tmp_path):
+        """The owner pressed it four times. Each press names the attempt it
+        starts, counted from the chain of discarded turns on disk."""
+        log = SessionLog.new(tmp_path)
+        numbers = []
+        for _ in range(3):
+            self._failed_turn(log)
+            numbers.append(log.supersede_last_turn()["attempt"])
+        log.close()
+        assert numbers == [2, 3, 4]
+
+    def test_a_superseded_turn_is_not_a_pending_crash(self, tmp_path):
+        """Defect 2. The mark is applied from `_turn_opens_at`, so the
+        `task_start` goes with the turn instead of being stranded (L6)."""
+        log = SessionLog.new(tmp_path)
+        self._failed_turn(log)
+        log.supersede_last_turn()
+        log.close()
+        assert SessionLog.pending_task(log.path) is None
+
+    def test_a_real_crash_after_a_retry_still_resumes(self, tmp_path):
+        """Stricter-or-equal, in the direction that matters: recovery may see
+        fewer things only where they are provably not crashes. A process that
+        really died still is one, and it is the FIRST attempt, not the fourth —
+        the retries did not spend the budget."""
+        log = SessionLog.new(tmp_path)
+        for _ in range(3):
+            self._failed_turn(log)
+            log.supersede_last_turn()
+        log.task_start("and then the process died")
+        log.step({"kind": "tool_start", "name": "run_command", "command": "make release"})
+        log.close()
+        pending = SessionLog.pending_task(log.path)
+        assert pending is not None
+        assert pending["prompt"] == "and then the process died"
+        assert pending["attempts"] == 1
+        assert pending["in_flight"] == ["run_command: make release"]
+
+    def test_the_rerun_is_not_informed_by_the_discarded_attempt(self, tmp_path):
+        """#60's intent, on the path that reopens a chat. The live agent's own
+        rewind is `Agent.rewind_last_task`; a chat opened cold rebuilds its
+        context from the log instead, so the mark has to hold there too."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("what is 2+2?")
+        log.message({"role": "user", "content": "what is 2+2?"})
+        log.message({"role": "assistant", "content": "five"})
+        log.task_end()
+        log.supersede_last_turn()
+        log.task_start("what is 2+2?")
+        log.message({"role": "user", "content": "what is 2+2?"})
+        log.message({"role": "assistant", "content": "four"})
+        log.task_end()
+        log.close()
+        contents = [m["content"] for m in SessionLog.load_messages(log.path)]
+        assert contents == ["what is 2+2?", "four"]
+
+    def test_a_cold_replay_shows_one_turn(self, tmp_path):
+        """Defect 1's other half: hidden, not absent."""
+        log = SessionLog.new(tmp_path)
+        self._failed_turn(log)
+        log.supersede_last_turn()
+        log.task_start("what is 2+2?")
+        log.step({"kind": "context", "turn": 5})
+        log.message({"role": "user", "content": "what is 2+2?"})
+        log.message({"role": "assistant", "content": "four"})
+        log.task_end()
+        log.close()
+        events = SessionLog.reconstruct_events(log.path)
+        assert [e["type"] for e in events] == ["user", "step", "done"]
+        # The press renders on the turn it opened, not on the one before it.
+        assert events[1]["kind"] == "retry"
+        assert events[-1]["result"] == "four"
+        # The discarded attempt's own steps render nowhere; what the reader is
+        # told about it is the one row the press wrote.
+        assert [e.get("kind") for e in events if e["type"] == "step"] == ["retry"]
+
+    def test_repeated_presses_land_on_one_turn_in_order(self, tmp_path):
+        """The reported case was four presses on one question. Every one of
+        them belongs to the turn that finally answered, in the order they were
+        made — that is the timeline the owner would have been reading."""
+        log = SessionLog.new(tmp_path)
+
+        def turn(answer):
+            log.task_start("what is 2+2?")
+            log.step({"kind": "context", "turn": 1})
+            log.message({"role": "user", "content": "what is 2+2?"})
+            log.message({"role": "assistant", "content": answer})
+            log.task_end()
+
+        turn("wrong one")
+        log.supersede_last_turn()
+        turn("wrong two")
+        log.supersede_last_turn()
+        turn("right")
+        log.close()
+        events = SessionLog.reconstruct_events(log.path)
+        assert [e.get("kind") if e["type"] == "step" else e["type"] for e in events] == [
+            "user", "retry", "retry", "done",
+        ]
+        assert [e["attempt"] for e in events if e.get("kind") == "retry"] == [2, 3]
+        assert SessionLog.pending_task(log.path) is None
+        assert [m["content"] for m in SessionLog.load_messages(log.path)] == [
+            "what is 2+2?", "right",
+        ]
+        raw = log.path.read_text()
+        assert "wrong one" in raw and "wrong two" in raw
+
+    def test_a_retry_whose_rerun_never_started_is_still_shown(self, tmp_path):
+        """The press happens before the rerun writes anything, so a process
+        killed in that window leaves a record with no turn after it. Dropping
+        it would be an owner decision vanishing because the work after it did."""
+        log = SessionLog.new(tmp_path)
+        self._failed_turn(log)
+        log.supersede_last_turn()
+        log.close()
+        events = SessionLog.reconstruct_events(log.path)
+        assert [e["type"] for e in events] == ["step"]
+        assert events[0]["kind"] == "retry"
+
+    def test_a_discarded_grant_and_fetch_do_not_outlive_the_attempt(self, tmp_path):
+        """The equivalence that makes this safe: these readers used to be
+        looking at a deleted record. Keeping the bytes must not quietly hand a
+        surviving answer a host grant or a page-read it never made."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("read it")
+        log.message({"role": "user", "content": "read it"})
+        log.workspace({"kind": "cwd", "path": "/tmp/elsewhere", "cwd": "/tmp/elsewhere"})
+        log._record("site_grant", host="imdb.com")
+        log.step({"kind": "call", "turn": 4, "call": 1, "name": "read_url",
+                  "args": {"url": "https://example.com"}})
+        log.step({"kind": "tool", "turn": 4, "call": 1, "name": "read_url", "status": "ok"})
+        log.task_end()
+        log.supersede_last_turn()
+        log.close()
+        assert SessionLog.site_grants(log.path) == []
+        assert SessionLog.calls_that_ran(log.path) == []
+        assert SessionLog.restore_state(log.path) == (None, [])
+
+    def test_a_discarded_attempt_is_not_the_chat(self, tmp_path):
+        """A chat whose only turn was discarded holds no conversation — the
+        same answer an emptied log gave, and what keeps the unread stamp off a
+        turn no reader can see (#203)."""
+        log = SessionLog.new(tmp_path)
+        self._failed_turn(log)
+        log.supersede_last_turn()
+        log.close()
+        assert SessionLog.info(log.path) is None
+        assert SessionLog.list_sessions(tmp_path) == []
+
+    def test_evidence_readers_still_see_it(self, tmp_path):
+        """The point of the whole change: `aish explain` and `aish usage` read
+        the raw lines, so what a UI hides they still find."""
+        log = SessionLog.new(tmp_path)
+        self._failed_turn(log)
+        log.supersede_last_turn()
+        log.close()
+        raw = log.path.read_text()
+        assert "RESOURCE_EXHAUSTED" in raw
+        assert '"kind": "task_start"' in raw
+        # ...and #339's own reproduction: the log can now say a rewrite happened.
+        assert '"kind": "retry"' in raw
+
+    def test_a_pre_change_log_reads_exactly_as_before(self, tmp_path):
+        """Additive: a log written before the mark has none, so every new
+        branch is inert on it. Verified against the owner's whole 799-log
+        corpus during the build; this is the regression form."""
+        path = tmp_path / "session-20260101-000000-000000.jsonl"
+        path.write_text(
+            "\n".join(
+                json.dumps(r) for r in [
+                    {"kind": "task_start", "prompt": "hi"},
+                    {"kind": "message", "role": "user", "content": "hi"},
+                    {"kind": "trace", "step": {"kind": "tool", "name": "read_file", "ok": True}},
+                    {"kind": "message", "role": "assistant", "content": "hello"},
+                    {"kind": "task_end", "status": "ok"},
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+        assert [e["type"] for e in SessionLog.reconstruct_events(path)] == [
+            "user", "step", "done",
+        ]
+        assert SessionLog.pending_task(path) is None
+        assert [m["content"] for m in SessionLog.load_messages(path)] == ["hi", "hello"]
 
 
 class TestRedaction:
@@ -2391,6 +2705,40 @@ class TestRedaction:
         log.task_end()
         log.message({"role": "user", "content": "third question"})
         log.message({"role": "assistant", "content": "third answer"})
+
+    def test_a_removal_takes_the_discarded_attempts_at_the_same_turn(self, tmp_path):
+        """#339 made Retry KEEP what it discards, and a retried turn asks the
+        same question — so a pasted secret is in every attempt at it, and the
+        one case #202 exists for would have left copies behind.
+
+        The occurrence counter must also ignore them: the live agent's context
+        was rewound of the discarded attempts, so counting them would name the
+        wrong "ok" there and drop the wrong turn from the model."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "first question"})
+        log.message({"role": "assistant", "content": "first answer"})
+        log.task_start("the SECRET token is hunter2")
+        log.message({"role": "user", "content": "the SECRET token is hunter2"})
+        log.message({"role": "assistant", "content": "I saw hunter2"})
+        log.task_end()
+        log.supersede_last_turn()
+        log.task_start("the SECRET token is hunter2")
+        log.message({"role": "user", "content": "the SECRET token is hunter2"})
+        log.message({"role": "assistant", "content": "I saw hunter2 again"})
+        log.task_end()
+
+        removed = log.redact_turn(self._turns(log)[-1])
+        log.close()
+
+        assert removed is not None
+        # ONE, not two: the model holds a single copy of that sentence, because
+        # Retry rewound the other one out of its context. Counting the discarded
+        # copy would name the second occurrence there and remove the wrong turn.
+        assert removed.occurrence == 1
+        raw = log.path.read_text(encoding="utf-8")
+        assert "hunter2" not in raw, "a discarded attempt is still a copy"
+        assert "first answer" in raw
+        assert raw.count('"kind": "redact"') == 1
 
     def test_the_text_actually_leaves_the_file(self, tmp_path):
         log = SessionLog.new(tmp_path)

@@ -2,7 +2,7 @@
 
 `session.py`: one JSONL file per session in `~/.local/state/aish/`, holding the conversation (for `--resume`), the audit trail of every command decision, and the structured activity-trace records both UIs render.
 
-**How to use this file.** The laws are the ones every reader and writer of a log depends on; violating one is how a chat comes back unread forever, or how a line goes missing that no reader will ever report. Then the record kinds, replay, activity, the caches, and the one operation that is not append-only.
+**How to use this file.** The laws are the ones every reader and writer of a log depends on; violating one is how a chat comes back unread forever, or how a line goes missing that no reader will ever report. Then the record kinds, replay, activity, the caches, and the two operations that are not append-only.
 
 ---
 
@@ -22,6 +22,8 @@
 
 This was not a habit until it was checked. `redact_turn` had the walk-back and wrote the reason in its own docstring; the two cuts written beside it did not read it. **A lesson in one function's docstring is not a lesson the codebase knows** — hence a law, a shared helper, and a source guard rather than a third correct implementation.
 
+**L7 · Discarding is not deleting.** Retry rewinds the MODEL's context and marks the log SUPERSEDED; nothing leaves the file. Every reader that reconstructs the chat's current state — replay, restored history, restart recovery, the fetch ledger, the activity and unread stamps, the fork's ordinal — skips a superseded record, so it behaves exactly as it did when these records were deleted. `explain`, `usage` and a person with grep still see them. `_is_superseded`, and the section at the bottom of this file.
+
 ---
 
 ## Records
@@ -40,6 +42,8 @@ Written by `_write_line`, each stamped with an ISO timestamp — since the first
 | `task_start` / `task_end` | the restart-recovery bracket |
 | `render_error` | a client-reported image failure |
 | `redact` | a positioned tombstone |
+
+`superseded` is a KEY, not a kind: any record can carry it, and it means the record belongs to a Retry's discarded attempt (L7). The `retry` trace step beside it says who discarded it and why — `docs/trace-contract.md` §3.11.
 
 `step_log` and `command_log` are the log sinks; they are **orthogonal** to the agent's `on_step`/`on_command_*` rich-renderer hooks. The CLI wires only the log sinks, so it logs without changing its inline output — which is what makes the trace UI-agnostic and lets it survive eviction and restart.
 
@@ -160,15 +164,35 @@ Four, and the guard is the enumeration:
 | writer | what it cuts | verdict |
 |---|---|---|
 | `redact_turn` | a named turn, replaced by a tombstone | walks back at both ends since #202 |
-| `rewind_last_turn` | the last turn, for web Retry | **was the defect** — cut at the user message until #338 |
+| `supersede_last_turn` | nothing any more — it MARKS the last turn (L7) | **was the defect twice**: it cut at the user message until #338, then deleted the whole turn until #339 |
 | `_cut_after_answer` (`truncate_at_answer`, `truncate_at_answer_id`) | everything past a fork point; the server writes the result as a NEW log | **was a defect** — the fork kept the NEXT turn's `task_start`, so a fork of a two-turn log answered `pending_task` with the second turn's prompt |
 | deleting a session | the whole file | needs no walk-back: nothing is left to strand |
 
-`_append`/`_write_line` are append-only and never in scope. The fork's *deciders* (`truncate_at_answer`, `truncate_at_answer_id`) pick a line and delegate the cut, so the walk-back stays in one place; `server.py`'s fork handler writes the text it is handed and computes no boundary of its own.
+`_append`/`_write_line` are append-only and never in scope. The fork's *deciders* (`truncate_at_answer`, `truncate_at_answer_id`) pick a line and delegate the cut, so the walk-back stays in one place; `server.py`'s fork handler writes the text it is handed and computes no boundary of its own. `supersede_last_turn` no longer cuts anything, and still calls `_turn_opens_at` for the same reason: a mark applied from the user message would leave the `task_start` above it looking live.
+
+## Superseding — Retry keeps what it discards (#339)
+
+Retry does two things and only one of them was ever justified. Rewinding the **model's context** so the rerun is not informed by the attempt it replaces is #60's point and is sound. Deleting from the **log** is a different act, and the reason on record — *"so a cold replay shows one turn, not the discarded attempt"* — is a **presentation** choice paid for with the evidence.
+
+The bill arrived twice in one week. The owner hit a quota, pressed Retry four times, and afterwards the log could not say that any of it had happened: the `model_error` records naming the quota were gone, and so was the `task_end`. #336 then investigated the residue, reasoned from absence — no `task_end`, no user message — and concluded a stall. Wrong, and undiagnosable, **because nothing in the log said a rewrite had happened.** A log that can be rewritten in place makes absence unreadable *everywhere*, not only where the rewrite landed (contract §0 corollary 2).
+
+#338 closed the recovery half of that by deleting MORE — the `task_start` too — which was correct for the defect it targeted and wrong for the larger one. This is the answer it was a stopgap for.
+
+**Nothing leaves the file.** Every record from `_turn_opens_at` the last live user message to the end gains `superseded: true`, and one `retry` trace step is appended saying who asked, which attempt now begins, and how the discarded one ended. **Both halves land in the same rewrite**, because a hidden record with nothing on disk explaining why it is hidden is precisely the unreadable absence this exists to stop.
+
+The reader rule is L7, and it is what makes the change safe to reason about: **superseding is behaviour-identical to deleting for every consumer of chat state.** Each of those readers was previously looking at a record that was not there, so skipping one now is not a new policy — it is the old outcome without the destruction. Concretely: `reconstruct_events` (one turn on screen), `_parse` (the model's restored context, the title, the workspace, the activity and output stamps), `pending_task` (a discarded turn is not a dead process), `calls_that_ran` (a discarded fetch must not vouch for a link the surviving answer never opened), `site_grants`, `restore_state`, and the fork's ordinal. `last_turn` is the one deliberate exception: it takes a `max`, an id that was handed out must not be reissued, and counting them can only move the count forward.
+
+**Three consequences worth knowing.**
+
+1. **The `retry` step is RENDERED**, on `trim`'s and `model_error`'s terms — an owner decision that changes what runs is a step on the turn's timeline, not a row beside it. On disk it sits *before* the rerun's own `task_start`, because the press happens before the prompt is re-logged; live it lands under the user bubble the rollback kept. So `reconstruct_events` **holds it until the turn it opens** — replaying it in file order would hang it off the previous turn's card, which is L1 breaking on the one record whose whole job is to be visible. A press whose rerun never wrote anything is still shown, at the end: an owner decision vanishing because the work after it did is the same absence again.
+2. **A redaction takes the discarded attempts with it.** A retried turn asks the *same question*, so a pasted secret is in every attempt at it — and #202 exists for exactly that case. `_discarded_before` walks back over the chain of superseded turns and the unmarked `retry` records that punctuate them. The occurrence counter excludes superseded copies for the mirror-image reason: the live agent's context does not hold them, so counting them would name the wrong turn there.
+3. **`explain` and `usage` read the raw lines and are untouched**, which is the whole point. `usage` now sees spend that used to be deleted; that spend was real.
+
+`TestSupersedeInsteadOfDelete`, `TestEveryCutWalksBackToTaskStart` (unchanged in mechanism), `TestRetry` in `tests/test_server.py`, `tests/js/test_model_error_row.js`.
 
 `TestEveryCutWalksBackToTaskStart` sweeps `session.py` by AST for functions that slice a log's line or record list and requires each to call `_turn_opens_at` or be named in `ALLOWED` with the reason it need not — plus a planted offender, so the sweep cannot pass by matching nothing.
 
-## Redaction — the one non-append-only operation (#202)
+## Redaction — the other non-append-only operation (#202)
 
 The transcript was append-only and replayed whole, so anything that landed in it was permanent short of deleting the chat or hand-editing JSONL with the server stopped: a probe fired at the wrong chat, a message an autocorrect Return sent half-typed, a secret pasted into the composer.
 

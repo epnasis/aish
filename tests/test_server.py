@@ -4003,9 +4003,11 @@ class TestHistoryMore:
 
 class TestRetry:
     def test_retry_discards_previous_answer_everywhere(self, app_env):
-        # #60: retry re-runs the prompt AND erases the previous attempt from the
-        # model's context, the transcript, and the on-disk log — so nothing about
-        # the regeneration is anchored to the discarded answer.
+        # #60: retry re-runs the prompt AND drops the previous attempt from the
+        # model's context and the transcript — so nothing about the regeneration
+        # is anchored to the discarded answer. Since #339 the LOG keeps it,
+        # marked superseded, and replay hides it: the events below are the
+        # unchanged half, `test_a_retry_keeps_its_evidence` the new one.
         client, chat = make_client(
             app_env,
             [model_says("first wrong answer"), model_says("second clean answer")],
@@ -4045,12 +4047,17 @@ class TestRetry:
             assert sum(1 for e in replay["events"] if e["type"] == "user") == 1
 
     def test_retries_do_not_spend_the_crash_recovery_budget(self, app_env):
-        """#338, end to end. The rewind cut at the user message, so every Retry
-        left the retried turn's `task_start` behind with its `task_end` gone.
-        Three retries left three stranded starts, and the NEXT genuine crash in
-        that chat therefore counted as a FOURTH interrupted attempt —
-        `RESUME_MAX_ATTEMPTS` is 3, so an ordinary UI button excluded the chat
-        from restart recovery permanently."""
+        """#338, end to end, and #339's version of the same guarantee. The
+        rewind cut at the user message, so every Retry left the retried turn's
+        `task_start` behind with its `task_end` gone. Three retries left three
+        stranded starts, and the NEXT genuine crash in that chat therefore
+        counted as a FOURTH interrupted attempt — `RESUME_MAX_ATTEMPTS` is 3, so
+        an ordinary UI button excluded the chat from restart recovery
+        permanently.
+
+        #338 bought that by deleting more. Now the three discarded starts are
+        still on disk and recovery cannot see them, which is the property that
+        has to hold either way."""
         client, _ = make_client(
             app_env, [model_says(f"answer {i}") for i in range(4)]
         )
@@ -4062,13 +4069,82 @@ class TestRetry:
                 ws.send_json({"type": "retry", "text": "what is 2+2?"})
                 recv_until(ws, "done")
         assert SessionLog.pending_task(path) is None
-        kinds = [json.loads(line).get("kind") for line in path.read_text().splitlines()]
-        assert kinds.count("task_start") == 1, "one surviving turn, one task_start"
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        starts = [r for r in records if r.get("kind") == "task_start"]
+        assert len(starts) == 4, "every attempt still has its opening record"
+        assert sum(1 for r in starts if not r.get("superseded")) == 1
         # Now a real crash on top of that history: the first attempt, not the fourth.
         crashed = SessionLog(path)
         crashed.task_start("and then the process died")
         crashed.close()
         assert SessionLog.pending_task(path)["attempts"] == 1
+
+    def test_a_retry_keeps_its_evidence(self, app_env):
+        """#339's defect 1 and 4 through the real server.
+
+        The owner hit a quota, pressed Retry, and afterwards the log could not
+        say that any of it had happened — the failing attempt was deleted by the
+        button he pressed, and the press left no record either. An investigation
+        then reasoned from the absence and got the cause wrong (#336).
+        """
+        client, _ = make_client(
+            app_env, [model_says("first wrong answer"), model_says("second clean answer")]
+        )
+        with client, connected(client) as (ws, hello, _):
+            path = Path(app_env["state_dir"]) / hello["session"]
+            ws.send_json({"type": "task", "text": "what is 2+2?"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "retry", "text": "what is 2+2?"})
+            recv_until(ws, "done")
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        # The discarded attempt is still there, and says it is discarded.
+        discarded = [r for r in records if r.get("superseded")]
+        assert any(
+            r.get("kind") == "message" and r.get("content") == "first wrong answer"
+            for r in discarded
+        )
+        # And the press itself is on the record, with what was observed.
+        retries = [
+            r["step"] for r in records
+            if r.get("kind") == "trace" and r.get("step", {}).get("kind") == "retry"
+        ]
+        assert len(retries) == 1
+        assert retries[0]["by"] == "owner"
+        assert retries[0]["attempt"] == 2
+        assert retries[0]["previous"]["ended"] == "ok"  # it answered; he disliked it
+        assert retries[0]["previous"]["records"] > 0
+
+    def test_a_retry_renders_on_the_turn_it_opened(self, app_env):
+        """Hot and cold agree on WHERE the press sits (L1). On disk the record
+        precedes the rerun's own `task_start`, because he pressed the button
+        before the prompt was re-logged; live it lands under the user bubble the
+        rollback kept."""
+        client, _ = make_client(
+            app_env, [model_says("first"), model_says("second")]
+        )
+        with client, connected(client) as (ws, hello, _):
+            session_name = hello["session"]
+            ws.send_json({"type": "task", "text": "what is 2+2?"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "retry", "text": "what is 2+2?"})
+            live = recv_until(ws, "replay")["events"]
+            recv_until(ws, "done")
+
+        def shape(events):
+            return [
+                e.get("kind") if e.get("type") == "step" else e.get("type")
+                for e in events
+            ]
+
+        assert shape(live) == ["user", "retry"], shape(live)
+        client2, _ = make_client(app_env, [])
+        with client2, connected(client2) as (ws2, _, _):
+            ws2.send_json({"type": "resume", "path": session_name})
+            recv_until(ws2, "hello")
+            cold = recv_until(ws2, "replay")["events"]
+        assert shape(cold)[:2] == ["user", "retry"], shape(cold)
+        assert sum(1 for e in cold if e.get("type") == "user") == 1
+        assert json.dumps(cold).count("first") == 0
 
     def test_retry_keeps_earlier_turns(self, app_env):
         # Only the LAST turn is rolled back; earlier answers stay in context.
