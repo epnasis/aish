@@ -32,6 +32,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import vocab
+
 # A link, as it appears in a mail body or a JSON field holding one. Trailing
 # punctuation is stripped because a URL at the end of a sentence collects it.
 _URL_RE = re.compile(r"https?://[^\s<>\"'\\\]}]+", re.I)
@@ -42,7 +44,16 @@ MAIL = "email"  # the one `content_from` value that means anything so far
 # What a sign-in or recovery mail says, in the two languages the owner's mail
 # arrives in. Matched against ONE message, never the whole search result, so a
 # single reset mail among ten hits does not refuse everybody's links.
-_SIGN_IN_PHRASES = (
+_SIGN_IN_PHRASES = vocab.declare(
+    "provenance._SIGN_IN_PHRASES",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    note="A miss labels a reset or magic-link mail as an ordinary LINK, so the "
+    "mail-link gate never treats it as a door into an account. There is no "
+    "structural half and there cannot easily be one: a reset link is routinely "
+    "a bare tracking redirect with nothing readable in it, which is exactly why "
+    "the WORDS around it are what is read.",
+    entries=(
     # reset / recovery
     "reset your password", "reset password", "password reset",
     "resetowanie hasla", "resetuj haslo", "zresetuj haslo", "zmiana hasla",
@@ -58,6 +69,7 @@ _SIGN_IN_PHRASES = (
     "confirm your email", "potwierdz swoj adres", "potwierdz adres e-mail",
     "verify your email", "zweryfikuj swoj adres", "activate your account",
     "aktywuj konto", "aktywacja konta", "finish setting up your account",
+    ),
 )
 
 
@@ -106,7 +118,7 @@ def _fold(text: str) -> str:
 def looks_like_sign_in_mail(message: str) -> bool:
     """Does this one message read like a sign-in, reset or activation mail?"""
     folded = _fold(message)
-    return any(phrase in folded for phrase in _SIGN_IN_PHRASES)
+    return vocab.hit("provenance._SIGN_IN_PHRASES", _SIGN_IN_PHRASES, folded)
 
 
 # What each recorded link is: a link that merely arrived by mail, or one from a

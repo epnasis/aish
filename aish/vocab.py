@@ -42,7 +42,9 @@ from __future__ import annotations
 import math
 import threading
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TypeVar
 
 # ------------------------------------------------------------------ verdicts
 #
@@ -83,41 +85,57 @@ class Vocabulary:
     #: were deleted, or "" where there is none. `is_challenge`'s `BLOCK_STATUS`
     #: is the worked example the epic points at.
     structural: str = ""
+    #: False for a list that is INVENTORIED but whose call sites are not yet
+    #: instrumented. It must be a field rather than an omission: a list left out
+    #: of the catalogue entirely would be invisible, and one listed as counted
+    #: while nothing counts it would read as "never consulted" forever — a
+    #: confident lie about a list that runs on every command.
+    counted: bool = True
     note: str = ""
 
 
 CATALOGUE: dict[str, Vocabulary] = {}
 
+_Entries = TypeVar("_Entries")
+
 
 def declare(
     name: str,
-    entries: Sequence[str],
+    entries: _Entries,
     *,
     languages: str,
     on_miss: str,
     structural: str = "",
+    counted: bool = True,
     note: str = "",
-) -> tuple[str, ...]:
-    """Register a list and hand back its entries unchanged.
+) -> _Entries:
+    """Register a list in the catalogue and hand back **the same object**.
 
-    Returns the SAME strings, as a tuple, so a declaration cannot alter what is
-    matched — that is the whole point of this slice, and a wrapper object that
-    could subtly change iteration or membership would destroy the before-picture
-    it exists to take.
+    Identity, not a copy and not a wrapper: a `frozenset` stays a frozenset (so
+    membership stays O(1) and set algebra keeps working) and a tuple stays a
+    tuple in its original order. This slice's whole value is a before-picture of
+    the matching this repository already shipped, and a declaration that could
+    subtly change iteration, ordering or membership would destroy it.
     """
     if on_miss not in VERDICTS:
         raise ValueError(f"{name}: on_miss must be one of {VERDICTS}, got {on_miss!r}")
-    if name in CATALOGUE:
-        raise ValueError(f"{name}: already declared")
-    CATALOGUE[name] = Vocabulary(
+    entry = Vocabulary(
         name=name,
-        size=len(entries),
+        size=len(entries),  # type: ignore[arg-type]
         languages=languages,
         on_miss=on_miss,
         structural=structural,
+        counted=counted,
         note=note,
     )
-    return tuple(entries)
+    # Re-declaring the SAME list is a no-op, because a module reload is not a
+    # mistake — `importlib.reload` runs the module body again and several tests
+    # do exactly that. Re-declaring a DIFFERENT list under a name already taken
+    # is, because it would silently merge two lists' counts into one number.
+    if (already := CATALOGUE.get(name)) is not None and already != entry:
+        raise ValueError(f"{name}: already declared as something else ({already})")
+    CATALOGUE[name] = entry
+    return entries
 
 
 # -------------------------------------------------------------------- tallies
@@ -175,6 +193,19 @@ def hit(
     matched = any(needle in text for needle in needles)
     note(name, matched=matched, candidates=candidates)
     return matched
+
+
+def looked_up(name: str, table: dict, key: str):
+    """`table.get(key)`, counted.
+
+    For the lists that are DICTS keyed on a vocabulary — a lookup is a
+    consultation exactly as a substring scan is, and a key that has drifted
+    (a standard renaming a value, a site publishing the URL form of an enum)
+    is the same silent miss with the same silent cost.
+    """
+    found = table.get(key)
+    note(name, matched=found is not None, candidates=len(table))
+    return found
 
 
 def drain() -> dict[str, dict[str, int]]:
@@ -246,6 +277,42 @@ class Counters:
         return self.candidates / self.candidates_asked
 
 
+def scan(root=None, days: int | None = None) -> dict[str, Counters]:
+    """Every chat log's `vocab` records, summed per list.
+
+    Per LIST across the window and never per chat, for the reason
+    `usage._role_counters` gives about charters: a match rate is a property of
+    the list, and one chat's two consultations say nothing about it. That is
+    also what makes the per-task record's attribution unimportant — a
+    consultation made between tasks lands on the next record, and no number
+    here depends on which one that was.
+
+    One unreadable file must not take the report down with it (the containment
+    rule a single corrupt session log taught the web server)."""
+    from .explain import _records, state_dir
+    from .usage import _within
+
+    directory = Path(root) if root is not None else state_dir()
+    if not directory.is_dir():
+        return {}
+    out: dict[str, Counters] = {}
+    for path in sorted(directory.glob("session-*.jsonl")):
+        if days is not None and not _within(path.stem, days):
+            continue
+        try:
+            found = scan_counters(_records(path))
+        except OSError:
+            continue
+        for name, c in found.items():
+            into = out.setdefault(name, Counters(vocabulary=name))
+            into.records += c.records
+            into.asked += c.asked
+            into.matched += c.matched
+            into.candidates += c.candidates
+            into.candidates_asked += c.candidates_asked
+    return out
+
+
 def scan_counters(records) -> dict[str, Counters]:
     """`records` is any iterable of decoded log lines (see `explain._records`)."""
     out: dict[str, Counters] = {}
@@ -272,21 +339,31 @@ def scan_counters(records) -> dict[str, Counters]:
 # learns to skip — which would cost more than no counter at all.
 
 
-def floor(counters: dict[str, Counters]) -> float | None:
-    """The rarest match rate any list in this window actually achieved.
+def floor(counters: dict[str, Counters], over: int = 0) -> float | None:
+    """The rarest match rate achieved by a list observed at least as often as
+    `over` — the rate a working list in THIS window managed at comparable
+    exposure.
 
-    None when NO list matched anything, and that is the honest answer rather
-    than a default: a window in which nothing ever matched cannot tell you which
-    list is broken — it might be a window with no browsing in it. Nothing is
-    flagged from a floor that could not be derived.
+    None when no such list exists, and that is the honest answer rather than a
+    default. Two ways to get None, and both mean "no claim can be made":
+
+    - **No list matched anything at all.** A window in which nothing ever
+      matched cannot tell you which list is broken; it is as likely to be a
+      window with no browsing in it.
+    - **Nothing comparable was observed.** Judging a list asked 400 times
+      against one asked twice is what over-flagging is made of, and the owner
+      has twice rejected reporting that fires on ordinary use. A list that is
+      the most-consulted thing in the window therefore has nothing to be
+      measured against, and is not flagged — an absent comparison, never a
+      free pass invented to fill it.
 
     Derived from the window's own data rather than chosen, because a constant
-    picked here would be the guess this whole file exists to stop making. It IS
-    a weak instrument and the docstring says so: it is the rate of the least
-    successful list that still works, which is a property of whatever happened
-    to be consulted, not of the web.
+    picked here would be the guess this whole file exists to stop making. It is
+    still a WEAK instrument, and the weakness is stated rather than smoothed
+    over: it is the rate of the least successful list that still works, which is
+    a property of whatever happened to be consulted and not of the web.
     """
-    rates = [c.rate for c in counters.values() if c.matched]
+    rates = [c.rate for c in counters.values() if c.matched and c.asked >= over]
     return min(rates) if rates else None
 
 
@@ -294,34 +371,41 @@ def quiet(counters: dict[str, Counters]) -> list[Counters]:
     """Lists that matched NOTHING, where the window's own data says they should
     have matched something.
 
-    The test, and it has exactly one number in it: at the rarest rate any
-    working list in this window achieved, this list would have been expected to
-    match **at least once**, and it matched zero. Ordered by how many expected
-    matches it is missing, so the list asked 200 times with nothing to show is
-    first.
+    The test, and it has exactly one number in it: at the rarest rate a
+    COMPARABLY-CONSULTED working list in this window achieved, this list would
+    have been expected to match **at least once**, and it matched zero. Ordered
+    by how many expected matches it is missing, so the list asked 200 times with
+    nothing to show is first.
+
+    "Comparably consulted" is what keeps this from crying wolf. A list asked
+    twice that happened to match once has a 50% rate and no business setting the
+    bar for one asked four hundred times; the floor for each candidate is
+    therefore taken over working lists asked at least as often as it was
+    (`floor(counters, over=c.asked)`), and a candidate with nothing comparable
+    is not flagged at all.
 
     What this does NOT claim, stated because the temptation is to read it as a
     verdict: it is not "this list is broken". A list can be legitimately silent
     — `_CLOSE_ACCOUNT_PHRASES` should match nothing on almost every page there
     is. What it says is that a list was asked more often than the corpus's own
-    worst working rate needs, and did not fire; whether that is correct is read
-    off the catalogue's `on_miss` verdict and the code, never off this number.
+    worst comparable working rate needs, and did not fire; whether that is
+    correct is read off the catalogue's `on_miss` verdict and the code, never
+    off this number.
     """
-    rarest = floor(counters)
-    if rarest is None:
-        return []
-    missing = [
-        (c.asked * rarest, c)
-        for c in counters.values()
-        if not c.matched and c.asked * rarest >= 1
-    ]
+    missing = []
+    for c in counters.values():
+        if c.matched:
+            continue
+        rarest = floor(counters, over=c.asked)
+        if rarest is not None and c.asked * rarest >= 1:
+            missing.append((c.asked * rarest, c))
     return [c for _, c in sorted(missing, key=lambda pair: -pair[0])]
 
 
 def expected_at_floor(counters: dict[str, Counters], one: Counters) -> float | None:
-    """How many matches `one` would have had at the window's rarest working
-    rate. None when no floor could be derived."""
-    rarest = floor(counters)
+    """How many matches `one` would have had at the rarest rate a comparably
+    consulted working list achieved. None when no such list exists."""
+    rarest = floor(counters, over=one.asked)
     return None if rarest is None else one.asked * rarest
 
 
@@ -330,8 +414,22 @@ def never_consulted(counters: dict[str, Counters]) -> list[Vocabulary]:
 
     Not zero — absent. The repair is different: a list nobody asked has a code
     path that did not run (or a window with none of that work in it), and no
-    amount of editing its strings would change the number."""
-    return [v for name, v in sorted(CATALOGUE.items()) if name not in counters]
+    amount of editing its strings would change the number.
+
+    Only COUNTED lists can be here. An inventoried-but-uninstrumented list is
+    consulted constantly and simply not counted, and reporting it as "not
+    consulted" would be the exact confident lie this module exists to stop —
+    `not_counted` is where those are named."""
+    return [v for name, v in sorted(CATALOGUE.items()) if v.counted and name not in counters]
+
+
+def not_counted() -> list[Vocabulary]:
+    """Declared lists that are INVENTORIED but not instrumented.
+
+    They are consulted; nothing counts them. Named separately and never mixed
+    with the measured rows, because a reader who cannot see which is which
+    cannot tell a silent list from an uncounted one."""
+    return [v for _, v in sorted(CATALOGUE.items()) if not v.counted]
 
 
 def summary_line(counters: dict[str, Counters]) -> str:
@@ -397,18 +495,23 @@ def render(counters: dict[str, Counters], days: int | None) -> str:
                     f"    {DIM}chose among {mean:.1f} candidate(s) on average, over "
                     f"{c.candidates_asked} consultation(s){RESET}"
                 )
-        if quieted and rarest is not None:
+        if quieted:
             lines += [
                 "",
-                f"  {BOLD}⚑ matched nothing{RESET}, where the rarest rate any working list in "
-                f"this window achieved ({rarest:.1%})",
-                f"    expected at least one match:",
+                f"  {BOLD}⚑ matched nothing{RESET}, where a working list consulted at least as "
+                "often did match",
+                "    — so at that rate, this one expected at least one:",
             ]
             for c in quiet(counters):
-                expected = c.asked * rarest
+                # Per candidate, not one figure for the table: the rate a list
+                # is judged against is the rate of the lists observed as often
+                # as IT was, and a single headline number would quietly compare
+                # a 400-consultation list against a 2-consultation one.
+                expected = expected_at_floor(counters, c) or 0.0
+                at = floor(counters, over=c.asked) or 0.0
                 lines.append(
                     f"      {c.vocabulary}: {c.asked} consultation(s), "
-                    f"~{math.floor(expected)} expected, 0 matched"
+                    f"~{math.floor(expected)} expected at {at:.0%}, 0 matched"
                 )
             lines.append(
                 f"{DIM}    This is a pointer, not a verdict. A list can be correctly silent"

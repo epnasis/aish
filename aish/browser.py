@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Any
 
 from . import browse as browse_mod
-from . import media, notify
+from . import media, notify, vocab
 from . import signin as signin_mod
 
 # A launch is ~2s, so the context is kept warm; an idle Chrome is ~400 MB, so
@@ -149,19 +149,37 @@ _STEALTH_OMIT = ["--enable-automation"]
 # NOT the fix here: taking a banner down is a click on a page, and "accept all
 # cookies" is a consequence for the owner. Report first; dismiss only where it
 # is already dismissing today.
-_CONSENT_SELECTORS = (
+_CONSENT_SELECTORS = vocab.declare(
+    "browser._CONSENT_SELECTORS",
+    languages="Polish + English, plus vendor-specific ids",
+    on_miss=vocab.BREAKS,
+    structural="`_COVERED_JS` / `browse.Cover` — the page is asked what sits at "
+    "the control's own centre point, which needs no words and is what finds the "
+    "banner in the first place",
+    note="#321 itself: `Akceptuj wszystkie` against the page's `Akceptuje "
+    "wszystkie cookies`, missed by one letter, and the sign-in under it failed "
+    "for days. Counted at `_uncover` only — where the structural check has "
+    "ALREADY found something covering a control.",
+    entries=(
     "[data-role='accept-consent']",
     "button#onetrust-accept-btn-handler",
     "button[aria-label='Accept all']",
     "button:has-text('Akceptuj wszystkie')",
     "button:has-text('Zaakceptuj wszystkie')",
     "button:has-text('Accept all')",
-)
+))
 
 
 # A profile Chrome died inside keeps these; every later launch then fails.
 _LOCK_FILES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
-_LOCK_MARKERS = ("singletonlock", "processsingleton", "profile appears to be in use")
+_LOCK_MARKERS = vocab.declare(
+    "browser._LOCK_MARKERS",
+    languages="English — Chrome's own error text",
+    on_miss=vocab.BREAKS,
+    note="A miss leaves a dead Chrome's lock in place, so every later launch "
+    "fails. Loud at the next launch, not silent.",
+    entries=("singletonlock", "processsingleton", "profile appears to be in use"),
+)
 
 
 def _clear_stale_lock(exc: BaseException) -> bool:
@@ -169,7 +187,7 @@ def _clear_stale_lock(exc: BaseException) -> bool:
 
     Deliberately narrow: only for errors that NAME a lock, and only the lock
     files — never the profile, which is the owner's logins."""
-    if not any(m in str(exc).lower() for m in _LOCK_MARKERS):
+    if not vocab.hit("browser._LOCK_MARKERS", _LOCK_MARKERS, str(exc).lower()):
         return False
     cleared = False
     for name in _LOCK_FILES:
@@ -188,7 +206,16 @@ def _clear_stale_lock(exc: BaseException) -> bool:
 # one through here would re-introduce that failure one layer up — the model
 # would report a challenge screen's contents as the shop's, and invent from it.
 CHALLENGE_MAX_CHARS = 3000
-_CHALLENGE_MARKERS = (
+_CHALLENGE_MARKERS = vocab.declare(
+    "browser._CHALLENGE_MARKERS",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    structural="`BLOCK_STATUS` (401/403/405/429/503) and `CHALLENGE_MAX_CHARS` — "
+    "the epic's own worked example of a word list that is a floor under a "
+    "check needing no words",
+    note="A miss hands the model a wall as if it were the page. The status test "
+    "beside it catches every wall that answers with one.",
+    entries=(
     "verify you are human",
     "are you a human",
     "checking your browser",
@@ -209,7 +236,7 @@ _CHALLENGE_MARKERS = (
     "solve the challenge",
     "unusual traffic from your computer network",
     "nietypowy ruch z twojej sieci",
-)
+))
 # The statuses that mean "refused", not "not here" — the ONE authority on that
 # question, shared with `web.read_url`, whose escalation to this browser fires
 # on exactly this set. It was two lists for a while, and they drifted: this one
@@ -236,7 +263,7 @@ def is_challenge(text: str, status: int | None) -> bool:
     if len(body) >= CHALLENGE_MAX_CHARS:
         return False
     lowered = body.lower()
-    if any(marker in lowered for marker in _CHALLENGE_MARKERS):
+    if vocab.hit("browser._CHALLENGE_MARKERS", _CHALLENGE_MARKERS, lowered):
         return True
     return status in BLOCK_STATUS
 
@@ -282,12 +309,19 @@ def asks_to_sign_in(html: str) -> bool:
 #
 # `cf_clearance` is deliberately absent: it is a PASS token, evidence a
 # challenge was already solved. Dropping it would throw away a good thing.
-_REPUTATION_COOKIES = (
+_REPUTATION_COOKIES = vocab.declare(
+    "browser._REPUTATION_COOKIES",
+    languages="vendor cookie names — locale-invariant",
+    on_miss=vocab.BREAKS,
+    note="A miss leaves the bot-scoring token in place, so a warm profile keeps "
+    "reading zero characters where a cold one read thousands. Never widened to "
+    "the host's whole jar: that holds the owner's logins.",
+    entries=(
     "datadome",        # DataDome — what allegro.pl uses
     "__cf_bm",         # Cloudflare bot management (not cf_clearance)
     "_px", "_pxhd", "_pxvid",   # PerimeterX
     "ak_bmsc", "bm_sz", "bm_sv",  # Akamai Bot Manager
-)
+))
 
 
 async def _shed_reputation(context: Any, url: str) -> bool:
@@ -312,6 +346,10 @@ async def _shed_reputation(context: Any, url: str) -> bool:
                 shed = True
             except Exception:  # noqa: BLE001 — best effort, per name
                 continue
+    # One consultation per jar, not per cookie name, and the jar's size is the
+    # candidate count the call site already holds (#322). A vendor that renames
+    # its token reads here as a jar full of cookies and nothing shed.
+    vocab.note("browser._REPUTATION_COOKIES", matched=shed, candidates=len(present))
     return shed
 
 

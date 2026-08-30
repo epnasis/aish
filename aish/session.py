@@ -608,6 +608,12 @@ RENDERLESS_STEPS = frozenset(
         # renders nowhere live and is skipped on replay, which is the pair
         # `_emit_record` requires — either half alone is the empty-live-card bug.
         "role",  # #297
+        # #322. How often each word list was asked and how often it matched:
+        # governance evidence about the harness's own matching, never a step the
+        # owner watches. One per task, log-only, skipped on replay — the pair
+        # `_emit_record` requires, since either half alone is the empty live
+        # trace card this set exists to prevent.
+        "vocab",  # #322
     }
 )
 
