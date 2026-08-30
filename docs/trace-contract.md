@@ -541,7 +541,7 @@ The gap it closes is the one shape this document did not have a record for: not 
 
 `TestStallWatchdog` (`tests/test_ratelimit.py`) covers the agent side — that it fires, that it never fires on working turns, that it disarms, and that it names no cause; `TestStallReplaysLikeItRendered` (`tests/test_session.py`) pins hot/cold parity, and `tests/js/test_model_error_row.js` runs the real `traceStep` against the row.
 
-**It does not resolve the `task_start` ambiguity, and must not be read as doing so.** An unmatched `task_start` is still the restart-recovery signal (`session.pending_task`), so a stall still consumes `RESUME_MAX_ATTEMPTS` as though the process had died. This record makes the difference *visible*; wiring it into recovery is open on #336.
+**It is now read by restart recovery, and only in the safe direction (#336).** An unmatched `task_start` is still the interruption signal, so a stalled start is still PENDING and a hang followed by a real kill resumes exactly as before. What this record buys is that such a start no longer *spends* `RESUME_MAX_ATTEMPTS`, the allowance kept for processes that actually died — see `docs/session-log.md` and `docs/web-server.md`. A consumer of this record therefore may not repurpose it: emitting a `stall` where nothing was observed to go quiet would exempt a real crash loop from its bound.
 
 ---
 

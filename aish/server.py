@@ -435,6 +435,14 @@ BROWSE_WATCH_MAX_BACKLOG = 8
 RESUME_WINDOW = 12 * 3600  # how far back an interrupted task is still resumed
 RESUME_MAX_ATTEMPTS = 3    # interrupted starts before a task is left alone
 RESUME_MAX_SESSIONS = 3    # tasks resumed per startup
+# The second bound, and the one that keeps the first honest (#336). A start the
+# stall watchdog reported on does not count toward RESUME_MAX_ATTEMPTS: it was
+# a live process going quiet, not a dead one. But "does not count" applied to a
+# task that hangs AND takes the process down every time would exempt a crash
+# loop from the very check that stops crash loops, so the RAW number of starts
+# is capped too. Higher than the attempts bound because it is the backstop, not
+# the policy.
+RESUME_MAX_STARTS = 10
 # Sent as the resumed turn when the interrupted run got far enough to log its
 # prompt: the request and the partial work are both already in the history, so
 # repeating the prompt would invite the model to redo side effects it may have
@@ -1995,6 +2003,10 @@ class WebServer:
             if info["attempts"] >= RESUME_MAX_ATTEMPTS:
                 print(f"[resume] {path.name}: left alone after {info['attempts']} "
                       "interrupted attempts", file=sys.stderr)
+                continue
+            if info["starts"] >= RESUME_MAX_STARTS:
+                print(f"[resume] {path.name}: left alone after {info['starts']} "
+                      "starts with no ending", file=sys.stderr)
                 continue
             try:
                 # The same cold open a user's session-switch performs, so the
