@@ -1881,7 +1881,7 @@ class SessionLog:
         holding a stale line-index id. Idempotent by that miss.
 
         This is the second in-place rewrite of an otherwise append-only file
-        (rewind_last_turn is the first): the handle is closed here and reopened
+        (supersede_last_turn is the first): the handle is closed here and reopened
         lazily on the next record.
         """
         with self._write_lock:

@@ -3,26 +3,33 @@
 `roles.py`, `aish/charters/`, `scripts/role-admission.py`, `scripts/role-mine-cases.py`.
 Issue #297, stage 1 of the epic in #295.
 
-> ## Read this first: no role is called today
+> ## Read this first: no role is called today, and the thing that replaced one was reverted
 >
 > The framework shipped with one customer — the snippet reader, wired to every
 > `web_search`. A controlled experiment measured that wiring against two alternatives
 > and it lost. **The wiring was removed and the framework was kept:**
 > `roles.WIRINGS` is empty, the two Agent methods that ran a search through the reader
-> are gone, and the charter sits in the tree admitted, examined and **uncalled**.
+> are gone, and the charter sits in the tree admitted, examined and **uncalled**. That
+> part stands.
 >
-> *Title and address only* below is the measurement, the residual it accepts, and what
-> it did not establish. Everything else on this page describes machinery that works and
-> is not currently running. A charter with no caller is a fine thing to keep; a document
-> implying it is running is not, so every section that used to describe a live path says
-> so where it stands.
+> **What does not stand is what was shipped in its place.** For two days a search
+> result reached the acting model as a title and an address, with the index's summary
+> line not collected at all. That was reverted on 2026-08-30. `web._numbered` renders
+> three lines again, and the summary line is collected again — *Title and address
+> only* below is now the record of a change that was made, measured against the
+> behaviour it replaced, and undone.
+>
+> Everything else on this page describes machinery that works and is not currently
+> running. A charter with no caller is a fine thing to keep; a document implying it is
+> running is not, so every section that used to describe a live path says so where it
+> stands.
 
 **How to use this file.** The laws first, because everything else is a consequence of
 them. Then the charter, invocation, validation, the wiring law, *Title and address
-only* (the measurement that retired the one wiring), the charter that outlived it, the
-exam and how admission actually runs, the fence, cost, and — last and most important —
-the list of things this does **not** do, which is where an overclaim would live if
-there is one.
+only* (the measurement that retired the one wiring, and the reversal of what it shipped
+instead), the charter that outlived it, the exam and how admission actually runs, the
+fence, cost, and — last and most important — the list of things this does **not** do,
+which is where an overclaim would live if there is one.
 
 ---
 
@@ -43,8 +50,10 @@ it. A role whose output fails validation has answered nothing. `TestValidation`.
 Nothing here widens anything (#295 P3). That is why the snippet reader's degradation is a
 skip: the worst case has to be the status quo. **The skip is also what the measurement
 caught up with** — a protection whose worst case is the status quo is a protection that is
-sometimes not in force, and *Title and address only* is the arm that has no worst case
-because there is nothing to fall back from.
+sometimes not in force, and that is a real objection to a judged layer. It is not,
+however, an argument for the arm that replaced it: not collecting the summary line had no
+worst case because there was nothing to fall back from, and it was reverted anyway, on
+cost. *Title and address only*.
 
 **R4 · Every closed vocabulary must be able to say "I cannot tell."** `UNSURE_VALUES`, and
 a charter whose enum lacks one **does not load**. A vocabulary that structurally forces a
@@ -226,90 +235,155 @@ inside the role" was fully true for a reader returning prices and dates. It was 
 unconditionally true even then: the acting model cannot choose which link to open without
 titles and addresses, and those are attacker-written strings. What was enforceable was
 **bounded, capped, stripped fields plus the law** — a real quantitative gain, not a proof
-of isolation. That residual outlived the reader and is now the whole of what remains open;
-see *The residual this accepts: the title channel*.
+of isolation. That residual outlived the reader, and after the revert it is joined again by
+the summary-line channel it briefly closed; see *The residual this accepts*.
 
 ---
 
-## Title and address only — the measurement that retired the one wiring
+## Title and address only — the change that was measured, shipped, and reversed
 
-**A `web_search` result reaches the acting model as two lines and nothing else.** The
-page's own title, capped at `web.RESULT_TITLE_CHARS` (120), control-flattened and with a
-leading `[aish:` broken to `(aish:`; then the page's address, deliberately uncapped,
-because a truncated URL is a URL that cannot be opened. There is no third line, and the
-reason is not a filter: `web.serp_results` and `web._first_index` never read the index's
-summary text into a row at all. `web._numbered` is the one function that renders a row, so
-the banner, the cap, the flattening and the broken marker are all applied at one place.
-`TestWhatASearchGivesTheActingModel`, `TestWhatACopiedTitleMaySay`,
-`TestARowIsAlwaysTwoLines`, and `tests/test_web.py` for the collection half.
+**This section was, for two days, the description of live behaviour. It is now a record
+of a reversal, kept whole.** Between 2026-08-28 and 2026-08-30 a `web_search` result
+reached the acting model as two lines — the page's title and its address — and the
+index's own summary line was not collected at all. It is collected again.
+`web._numbered` renders three lines; `web.serp_results` and `web._first_index` read the
+summary text into the row. What survived the reversal, and what did not, is below.
+`TestWhatASearchGivesTheActingModel` is what the acting model actually receives, end to
+end through a real search dispatch; `tests/test_web.py` covers the collection half.
 
-### What was measured
+Nothing about the **snippet reader** changed here: it stayed retired and stays retired,
+`roles.WIRINGS` is still empty, and the measurement that retired it is still good. The
+reversal is only of what shipped in its place.
 
-**Measured by the session that removed the wiring**, not by anything in this repository.
-The figures below are that run's report, and they carry its attribution rather than
-reading as facts about the code — nothing here re-derives them, and the raw run is not in
-the tree. A figure in a doc with no owner is a figure nobody can go back and question.
+### What the change claimed, and why both claims were wrong
+
+**Claim 1: it is safer.** *Overstated, and the overstatement was mine — the session that
+shipped it (`40ff792`), not the owner's.* The owner's argument settles it in one line: a
+snippet is a **SUBSET of the page**. If aish opens the page, it reads everything the
+snippet said and more. So not collecting a snippet does not reduce exposure to
+attacker-authored text — it **postpones** it, and then delivers more of it, because the
+model opens more pages to make up the difference. The property that was really bought is
+narrower and worth naming precisely: *a figure cannot reach an answer unless a page
+carrying it was opened*. That is about **staleness**, not injection, and the commit
+message and this page both let it read as an injection win.
+
+**Claim 2: it is cheaper.** *False, and the comparison that would have shown it was never
+made.* The experiment that retired the reader compared three arms, and the write-up
+compared the reader against titles-only. It never compared **titles-only against the
+pre-change behaviour it was actually replacing**. Paired by task and repetition from the
+surviving 42-run experiment (`~/.cache/aish-snippet-experiment/runs.jsonl`), n = 14:
+
+| titles-only MINUS raw-snippets | median | direction |
+|---|---|---|
+| wall clock | **−9.4 s** | faster in 10/14 |
+| prompt tokens | **+34 840** | cheaper in only 6/14 |
+| pages opened | **+1.5** | fewer in only 4/14 |
+
+The owner predicted exactly this before the numbers existed: with no summary to judge by,
+aish opens more pages, and **a page read costs far more than a snippet**. The small
+wall-clock gain is bought with a large token loss, and #330 — a local machine with a
+~60 000-token window, with 51% of recorded calls already over it — is what makes tokens
+the binding constraint rather than seconds.
+
+**The honest caveat, carried rather than summarised away.** n = 14, and a previous
+analysis of this same corpus established that **run-to-run noise within one arm exceeds
+the differences between arms**. These medians are **directional, not conclusive**. What
+IS solid is the negative: there is no token saving to be had here, and that is the claim
+the change was defended with.
+
+### What the original measurement did establish, and still does
+
+Unchanged by the revert, because it is about the reader and not about the third line:
+
+- **The reader cost 10.6 s and ~2 800 prompt tokens per search**, measured over 63 role
+  calls — **29.4% of its arm's entire wall clock**, all of it blocking, because the
+  planner cannot move until the reader returns. Its rendered block measured **97%** of
+  the raw results it replaced: an isolation device, not an economy one. #330's question
+  of every role — *does it return less than it consumes?* — it answered *no*.
+- **The single arm-A leak was not a reader mistake.** A Gemini 503 made the role
+  `unavailable`, the shipped `skip` degradation handed raw snippets to the planner, and
+  it quoted a figure from one. The reader was available on **75 of 77 calls; one of the
+  two degradations leaked.** A protection conditional on a cloud call succeeding is
+  sometimes not in force.
+- **Answer quality could not be separated** in any arm. The one exactly-checkable task —
+  a central bank's rate on a past date, independently verified as 3.6896 — was a six-way
+  tie.
 
 Forty-two runs: **7 real tasks from the owner's own session logs × 3 arms × 2
 repetitions**, the arms run concurrently so all three saw the same live web.
+**Measured by the session that removed the wiring**, not by anything in this repository;
+the raw run is not in the tree and nothing here re-derives it. A figure in a doc with no
+owner is a figure nobody can go back and question.
 
 | arm | what the acting model got |
 |---|---|
-| **A** | the reader as shipped — title, address, one line the reader wrote, and the flag |
+| **A** | the reader — title, address, one line the reader wrote, and the flag |
 | **B** | title and address only |
-| **C** | raw snippets: the behaviour before roles existed |
+| **C** | raw snippets: the behaviour before roles existed, and the behaviour today |
 
-- **The reader cost 10.6 s and ~2 800 prompt tokens per search**, measured over 63 role
-  calls — **29.4% of arm A's entire wall clock**, all of it blocking, because the planner
-  cannot move until the reader returns.
-- **Arm B opened about one more page per task** (median +1.0) and still finished **31 s
-  faster**. The extra page opens never came close to paying for the reader.
-- **The stale-figure property — the reader's actual justification — is delivered better by
-  B.** Figures in a final answer that appeared only in a snippet and on no page opened:
-  **C 10, A 1, B 0.** B gets it *structurally*: there is no third line to leak from.
-- **The single arm-A leak was not a reader mistake.** A Gemini 503 made the role
-  `unavailable`, the shipped `skip` degradation handed raw snippets to the planner, and it
-  quoted a figure from one. The reader was available on **75 of 77 calls; one of the two
-  degradations leaked.** So A's protection was conditional on a cloud call succeeding and
-  B's is not — the same objection the box below made about admission, arriving from a
-  second direction and with a number on it.
-- **Answer quality could not be separated.** The one exactly-checkable task — a central
-  bank's rate on a past date, independently verified as 3.6896 — was a six-way tie.
+### The stale-figure problem is real, and this revert does not solve it
 
-This also settles the question #330 asks of every role: *does it return less than it
-consumes?* The reader's rendered block measured **97%** of the raw results it replaced. It
-was an isolation device, not an economy one. B is both.
+The one number that argued for arm B is the one the revert gives up. Figures in a final
+answer that appeared **only in a snippet and on no page opened**: **C 10, A 1, B 0.** B
+got it structurally — there was no third line to leak from. Today that property is
+delivered by nothing but a sentence in `web.SEARCH_RESULTS_NOTE` asking the model to take
+a figure only from a page it read, and a banner is guidance, not a control.
 
-### The residual this accepts: the title channel
+**The intended fix is a check at the ANSWER, not a restriction on the input** — does a
+figure aish reports appear on a page this task actually read? It is **#340**, and it is
+deliberately not built here. The hard part is recorded there: a check at answer time
+cannot distinguish a figure aish **computed** (a VAT total, a currency conversion, a sum
+of line items) from one it invented, and roughly **25 such derived figures per task** were
+counted, so it must flag rather than block.
 
-**Removing the snippet closes the snippet channel completely. It does not close the title
-channel.** Titles are attacker-authored and still cross to the planner verbatim — capped
-at 120 characters, control-stripped, `[aish:` neutralised, and read by nothing that could
-notice what they say. The reader's `instructs_the_reader` flag was the only thing that
-would have raised an instruction-shaped title, and it goes with the reader.
+### The residual this accepts
 
-**That is a deliberate trade and not an oversight.** 120 stripped characters is a far
-narrower carrier than a full snippet — the prose that stopped crossing measured a median
-of **928** characters per result set, p90 1257, over 4167 recorded sets — and the
-direction of travel is a **~60 000-token local context** (#330), where ~2 800 tokens per
-search buying an alarm on a channel this narrow is poor value.
+**Every field of a row is attacker-authored and crosses to the planner verbatim** — the
+title, the address, and again the summary line. What is enforceable, and what is enforced,
+is that each is **bounded**: the title capped at `web.RESULT_TITLE_CHARS` (120), the
+summary at `web.RESULT_SUMMARY_CHARS` (300), both control-flattened by `web._flat` and both
+run through `web._not_aishs_voice` so neither can arrive wearing `[aish:`. The address is
+**deliberately uncapped**, because a truncated URL cannot be opened, which would break the
+one thing these rows are for. Nothing reads what any of them *says*: the
+`instructs_the_reader` flag went with the reader.
+
+The prose that crosses again measured a median of **928** characters per result set, p90
+1257, over 4167 recorded sets — so this is a materially wider carrier than 120 stripped
+characters, and that is the cost of the revert, stated rather than buried. It is the cost
+the pre-change system carried for its whole life.
 
 **The flag can be restored later, and cheaply, because it no longer has to block.** A
-title-only check could run **asynchronously, off the critical path**, purely to raise and
-record — the planner would not wait for it, which is the entire cost the measurement
-found. **That is not built. Nothing on this page should be read as if it were**, and it
-should not be built speculatively: it wants a real incident to size it.
+check over the rendered rows could run **asynchronously, off the critical path**, purely
+to raise and record — the planner would not wait for it, which is the entire cost the
+measurement found. **That is not built. Nothing on this page should be read as if it
+were**, and it should not be built speculatively: it wants a real incident to size it.
 
 ### What the experiment did NOT establish
 
-**No injection was observed in any of the 42 runs.** Nothing here measured the flag's
+**No injection was observed in any of the 42 runs.** Nothing measured the flag's
 real-world value; it measured cost, page opens, wall clock and stale figures on ordinary
 tasks. The flag's whole security case rests on **the exam**, whose injection cases are
 engineer-authored precisely because no recorded session has ever carried a real one.
 
-So the finding is *"the flag was not worth 2 800 tokens and 10.6 s per search on a channel
-this narrow"*. It is **not** *"the flag was useless"*. Those are different sentences and
-only the first is evidenced.
+So the finding is *"the flag was not worth 2 800 tokens and 10.6 s per search"*. It is
+**not** *"the flag was useless"*. Those are different sentences and only the first is
+evidenced.
+
+### Why this section is kept rather than deleted
+
+Because the repo keeps its scars, and a reversal quietly erased is how the same mistake
+gets made twice. Two of them are worth carrying forward by name:
+
+- **A safety claim that is not the safety property.** "Fewer stranger's words reach the
+  model" and "a stale figure cannot reach the answer" are different guarantees, and the
+  second was delivered while the first was announced. `CLAUDE.md`'s *check that a claim's
+  words do not outrun its code* applies to a commit message exactly as it applies to a
+  docstring.
+- **A comparison made against the wrong baseline.** Three arms were run and only two were
+  compared. The arm that shipped was never measured against the behaviour it replaced,
+  and the number that would have stopped it — **+34 840 prompt tokens** — was sitting in
+  the same file the whole time.
+
 
 ---
 
@@ -333,12 +407,14 @@ vocabulary with an "I cannot tell" word, an exam with both halves and a discrimi
 pair — so the next charter is written by reading it. And its exam is the only place in
 this repository where the injection-resistance question is asked at all.
 
-**The hole it was built for.** `web_search` results were attacker-writable titles and
-snippets from arbitrary sites, plus an index anyone can push on with ordinary SEO, and
-they entered the acting model's context as prose behind `web.SEARCH_RESULTS_NOTE` — a
-banner, which is an instruction to the model and not a structural control. The banner's
-own comment in `web.py` says so. The snippet half of that hole is closed now by the prose
-not being collected; the title half is the residual above.
+**The hole it was built for, and which is open again.** `web_search` results are
+attacker-writable titles and snippets from arbitrary sites, plus an index anyone can push
+on with ordinary SEO, and they enter the acting model's context as prose behind
+`web.SEARCH_RESULTS_NOTE` — a banner, which is an instruction to the model and not a
+structural control. The banner's own comment in `web.py` says so. The snippet half was
+closed for two days by the prose not being collected, and the revert reopened it; both
+halves are now the residual above, bounded by the caps and the flatten and by nothing
+else.
 
 ### What it was given
 
@@ -356,21 +432,16 @@ result sets in the owner's 784 logs: `web.parse_results` numbers them contiguous
 and the two exceptions are a mangled row and a `recall` result quoting a past session, not
 parser bugs. `TestUntrustedHalf`.
 
-**Mining is narrowed, and one case type is now unminable.** Both functions still work and
-still read the owner's 784 existing logs, which is why they stay. But a result set rendered
-today has two lines, so `parse_results` returns an empty `snippet`, and the assertion that
-depends on one goes with it: its snippet-figure filter finds nothing, so
-`scripts/role-mine-cases.py` can no longer write an **`absent`** case — the price-leakage
-case, which is the recorded failure this role was chosen for.
-
-Said precisely, because "nothing can be mined" would be wrong and was the first way this
-paragraph was written: the script still returns a case for any set of three rows or more,
-carrying `rows` (a shape annotation, not a check — #328) and `distinct`. What it produces
-from a two-line log is an extraction-fidelity case over an input with no snippet in it,
-which is a weaker case about a different question. The corpus for the case type that
-mattered is now fixed and finite.
-`TestUntrustedHalf::test_a_set_rendered_today_has_no_third_line_to_mine` pins the
-parse-level fact this rests on — that a live row's `snippet` is empty — and not the
+**Mining works again, and there is a two-day hole in the corpus.** While rows were
+rendered without a third line, `parse_results` returned an empty `snippet` and
+`scripts/role-mine-cases.py` could not write an **`absent`** case — the price-leakage
+case, which is the recorded failure this role was chosen for. The revert restored that:
+a live row is three lines again, so a set recorded today mines exactly as one from before
+2026-08-28 does. Sets recorded **between 2026-08-28 and 2026-08-30** have no third line
+and never will; they yield an extraction-fidelity case over an input with no snippet in
+it, which is a weaker case about a different question.
+`TestUntrustedHalf::test_a_set_rendered_today_carries_its_summary_line` pins the
+parse-level fact this rests on — that a live row's `snippet` is populated — and not the
 script's own behaviour, which lives outside anything the suite imports.
 
 ### What it returned, and what used to cross
@@ -381,21 +452,24 @@ and it meant something wider — see *What the flag means, and what it used to m
 
 **The title and the address were never among them.** They were copied from the parsed
 input **by row number**, capped and stripped by code, so they were never laundered through
-the model at all. That code moved: the cap (`web.RESULT_TITLE_CHARS`), the control-flatten
-(`web._flat`) and the broken marker (`web._not_aishs_voice`) now live at the render in
-`web._numbered`, which means they hold on **every** search rather than only on the path
-where a reader had answered. `TestWhatACopiedTitleMaySay`.
+the model at all. That code moved and the move survived both the reader's retirement and
+the revert: the cap (`web.RESULT_TITLE_CHARS`), the control-flatten (`web._flat`) and the
+broken marker (`web._not_aishs_voice`) live at the render in `web._numbered`, which means
+they hold on **every** search rather than only on the path where a reader had answered —
+and `web.RESULT_SUMMARY_CHARS` now caps the restored summary line beside them.
+`TestWhatACopiedTitleMaySay`.
 
-The accounting as it stood, measured over 4167 parseable result sets — and the third
-column is why the wiring is gone:
+The accounting, measured over 4167 parseable result sets. The third column is why the
+wiring is gone; the fourth is what actually ships, and the last row is why:
 
-| | reader (arm A) | title and address (arm B) |
-|---|---|---|
-| snippet prose crossing | none | none |
-| replaced by | ≤160 chars per row, model-written | nothing |
-| titles and addresses | cross, capped and stripped | cross, capped and stripped |
-| cost per search | 10.6 s, ~2 800 prompt tokens | 0 |
-| in force when? | only when admitted, seam present, key up | always |
+| | reader (arm A) | title and address (arm B) | raw snippets (arm C, today) |
+|---|---|---|---|
+| snippet prose crossing | none | none | crosses, capped at 300 and stripped |
+| replaced by | ≤160 chars per row, model-written | nothing | — |
+| titles and addresses | cross, capped and stripped | cross, capped and stripped | cross, capped and stripped |
+| cost per search | 10.6 s, ~2 800 prompt tokens | 0 | 0 |
+| in force when? | only when admitted, seam present, key up | always | n/a — nothing to be in force |
+| prompt tokens vs C (n=14) | — | **+34 840 median** | baseline |
 
 > **The reader was OFF unless it was admitted, and that turned out to matter.** On a fresh
 > install nothing is admitted, so none of the above happened. It was also off on
@@ -409,12 +483,13 @@ column is why the wiring is gone:
 > quoted from a snippet.
 
 Two defences on the copied half, both cheap and both found by review rather than by design,
-and both now on the render path where they cover every search. A title may not arrive
-wearing aish's own voice: `_not_aishs_voice` rewrites `[aish:` to `(aish:`, keeping the
-words so the model can still see what the title said while breaking the marker. And
-`web._flat` guarantees a rendered row is exactly two lines — three while a snippet was the
-third — so a newline inside a field cannot fabricate a numbered result the index never
-returned. `TestWhatACopiedTitleMaySay`, `TestARowIsAlwaysTwoLines`.
+and both now on the render path where they cover every search **and every field of a row**.
+A title or a summary line may not arrive wearing aish's own voice: `_not_aishs_voice`
+rewrites `[aish:` to `(aish:`, keeping the words so the model can still see what the field
+said while breaking the marker. And `web._flat` guarantees a rendered row is exactly three
+lines — two for the two days there was no snippet — so a newline inside a field cannot
+fabricate a numbered result the index never returned. `TestWhatACopiedTitleMaySay`,
+`TestARowIsAlwaysThreeLines`.
 
 **What was in the acting model's context while the reader ran, and is not now.** A note
 saying an isolated reader had written the line under each row; a note reporting a flagged
@@ -986,7 +1061,9 @@ search**, and **29.4% of the whole arm's wall clock**. All of it blocking — se
 searches in one turn fan out, so the cost is one round trip per batch rather than per
 result, but the planner cannot move until the batch returns. See *Title and address only*
 for the full comparison; the short version is that arm B finished 31 s faster and lost
-nothing that could be measured.
+nothing that could be measured against arm A. **It was never compared against arm C**,
+which is what it actually replaced, and that comparison — made later — is why arm B was
+reverted and arm C is what ships.
 
 **The v2 exam has still not been run**, and the honest consequence is smaller than it was:
 the version bump and the content digest retired the recorded admission, so the charter is

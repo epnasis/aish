@@ -137,21 +137,26 @@ class TestWebSearch:
         assert "2. Real Python" in result
         assert "read_url" in result  # nudge to open a page next
 
-    def test_a_result_is_a_title_and_an_address_and_nothing_else(self):
-        """The whole of the change: the pages' own summary text does not reach the
-        acting model, because it is never collected. Two lines per row, and the
-        index's `body` appears nowhere."""
+    def test_a_result_is_a_title_an_address_and_the_indexs_summary_line(self):
+        """Three lines per row, and the index's `body` is the third.
+
+        It was two for two days: the summary line was not collected at all, on
+        the grounds that it was safer and cheaper. Both were overturned — a
+        snippet is a SUBSET of the page, so skipping it postpones exposure
+        rather than reducing it, and paired over 14 runs titles-only cost a
+        median +34 840 prompt tokens because the model opened more pages to
+        make up for what it could not see. `docs/roles.md`, *Title and address
+        only*."""
         self.install(
             [{"title": "Python docs", "href": "https://docs.python.org",
               "body": "Official documentation, updated Tuesday, 3.14 released."}]
         )
         result = web.web_search("python")
-        assert "Official documentation" not in result
-        assert "3.14 released" not in result
         rows = result[result.index("1. "):].splitlines()
         assert rows[0] == "1. Python docs"
         assert rows[1] == "   https://docs.python.org"
-        assert rows[2] == web.NEXT_STEP_LINE
+        assert rows[2] == "   Official documentation, updated Tuesday, 3.14 released."
+        assert rows[3] == web.NEXT_STEP_LINE
 
     def test_results_reach_the_model_marked_as_untrusted_content(self):
         """Titles and snippets are page-authored text, ranked by an index anyone
@@ -175,14 +180,21 @@ class TestWebSearch:
         assert web.SEARCH_RESULTS_NOTE.startswith(web.UNTRUSTED_NOTE)
         assert "MUST" in web.SEARCH_RESULTS_NOTE
         assert "TITLE" in web.SEARCH_RESULTS_NOTE
+        assert "summary line" in web.SEARCH_RESULTS_NOTE
 
-    def test_the_marking_does_not_describe_words_that_are_not_there(self):
-        """The note used to tell the model how to read the pages' own snippets.
-        There are none, and a banner describing text that is absent is the
-        overclaim this repo keeps finding — one that also teaches the model to
-        stop reading the parts that ARE true."""
-        assert "snippet" not in web.SEARCH_RESULTS_NOTE
-        assert "not collected" in web.SEARCH_RESULTS_NOTE
+    def test_the_marking_describes_exactly_the_words_that_are_there(self):
+        """It has been wrong in both directions. It once told the model how to
+        read summary text that was not collected; before that it described a
+        snippet channel while claiming a control that did not exist. A banner
+        describing text that is absent is the overclaim this repo keeps
+        finding — it teaches the model to stop reading the parts that ARE true.
+
+        So: the note may not say the summary text is absent, and it must carry
+        the one instruction that stands in for the property the render does not
+        enforce — a figure comes from a page that was READ. That is guidance,
+        not a control (#340)."""
+        assert "not collected" not in web.SEARCH_RESULTS_NOTE
+        assert "actually READ" in web.SEARCH_RESULTS_NOTE
 
     def test_no_results(self):
         self.install([])
@@ -1249,35 +1261,39 @@ class TestStripTracking:
 class TestTheSecondIndex:
     """Reading a search engine's OWN results page, as nobody (#263)."""
 
-    def test_a_real_results_page_becomes_titles_and_urls(self):
+    def test_a_real_results_page_becomes_titles_urls_and_snippets(self):
         raw, page = serp_page()
         rows = web.serp_results(page, raw["url"])
         assert len(rows) == 10
-        title, url = rows[0]
+        title, url, snippet = rows[0]
         assert title == "Product Manager, Wear"
         assert url.startswith("https://careers.google.com/jobs/results/")
+        assert "Bachelor's degree" in snippet
 
-    def test_the_engines_summary_text_under_a_result_is_not_collected(self):
-        """It used to be, as the third line of a rendered row. A controlled
-        experiment retired it (`docs/roles.md`, *Title and address only*), and
-        NOT COLLECTING it is what makes that structural: the text is on the
-        captured page, and no row carries it anywhere."""
+    def test_the_engines_summary_text_under_a_result_reaches_the_render(self):
+        """It did not, for two days: a controlled experiment retired the
+        snippet reader and the same change stopped collecting the summary line
+        as well. The reader stays retired; not collecting the summary line was
+        reverted, because it cost a median +34 840 prompt tokens against the
+        behaviour it replaced. `docs/roles.md`, *Title and address only*."""
         raw, page = serp_page()
         assert "Bachelor's degree" in page.text, "the fixture still has the text"
         rendered = web._numbered(web.serp_results(page, raw["url"]))
-        assert "Bachelor's degree" not in rendered
+        assert "Bachelor's degree" in rendered
 
     def test_a_result_is_listed_once_though_the_page_links_it_twice(self):
         """Google renders every result a second time as its "translate this
         page" link, on the same href."""
         raw, page = serp_page()
-        urls = [url for _, url in web.serp_results(page, raw["url"])]
+        urls = [url for _, url, _ in web.serp_results(page, raw["url"])]
         assert len(urls) == len(set(urls))
-        assert "Tłumaczenie strony" not in [t for t, _ in web.serp_results(page, raw["url"])]
+        assert "Tłumaczenie strony" not in [
+            t for t, _, _ in web.serp_results(page, raw["url"])
+        ]
 
     def test_the_engines_own_furniture_is_not_a_result(self):
         raw, page = serp_page()
-        urls = [url for _, url in web.serp_results(page, raw["url"])]
+        urls = [url for _, url, _ in web.serp_results(page, raw["url"])]
         assert not [u for u in urls if "support.google.com" in u]
         assert not [u for u in urls if "/search?" in u]
 
@@ -1288,7 +1304,7 @@ class TestTheSecondIndex:
         correct result is a google.com subdomain. The first version of the probe
         that produced this fixture scored that perfect page as ZERO results."""
         raw, page = serp_page()
-        urls = [url for _, url in web.serp_results(page, raw["url"])]
+        urls = [url for _, url, _ in web.serp_results(page, raw["url"])]
         assert all("careers.google.com" in u for u in urls)
 
     def test_a_page_of_that_engines_own_pages_is_still_readable(self):
@@ -1303,21 +1319,21 @@ class TestTheSecondIndex:
         )
 
     def test_an_unmet_constraint_is_a_fact_about_the_results(self):
-        rows = [("A", "https://example.com/a")]
+        rows = [("A", "https://example.com/a", "")]
         assert "site:python.org" in web.unmet_constraint("site:python.org x", rows)
         assert web.unmet_constraint(
-            "site:python.org x", [("B", "https://docs.python.org/3/")]
+            "site:python.org x", [("B", "https://docs.python.org/3/", "")]
         ) == ""
         assert "filetype:pdf" in web.unmet_constraint("filetype:pdf x", rows)
         assert web.unmet_constraint("plain query", rows) == ""
 
     def test_one_page_cited_by_both_indexes_is_one_result(self):
         rows = web._merge(
-            [("Docs — browser", "https://Example.com/a/")],
-            [("Docs — other index", "https://www.example.com/a")],
+            [("Docs", "https://Example.com/a/", "from the browser")],
+            [("Docs", "https://www.example.com/a", "from the other index")],
         )
         assert len(rows) == 1
-        assert rows[0][0] == "Docs — browser"  # the better-ranked one wins
+        assert rows[0][2] == "from the browser"  # the better-ranked one wins
 
 
 class TestWhereTheSearchLanded:
