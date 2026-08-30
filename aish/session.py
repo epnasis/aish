@@ -111,6 +111,17 @@ def record_epoch(record: dict) -> int | None:
 # itself on every read and could never be cleared at all.
 REDACT_KIND = "redact"
 
+# The turn's own account of a Retry (#339, docs/trace-contract.md §3.11): who
+# asked, which attempt this is, and how the one before it ended. RENDERED, on
+# `trim`'s and `model_error`'s terms — an owner decision that changes what runs
+# is a step on the timeline, not a row beside it, and the four Retries that
+# produced #339 left the log with nothing at all to say they had happened.
+#
+# It is also the tombstone half of superseding: `supersede_last_turn` writes
+# the mark and this record in ONE rewrite, so records can never be hidden with
+# nothing on disk explaining why they are.
+RETRY_STEP = "retry"
+
 
 def _turn_id(record: dict, index: int) -> str:
     """The name a message record answers to when something wants to point at
@@ -727,6 +738,55 @@ def _record_or_none(line: str) -> dict | None:
     return record if isinstance(record, dict) else None
 
 
+def _step_kind(record: dict) -> str:
+    """The trace step kind a record carries, or "" for anything else."""
+    step = record.get("step")
+    return str(step.get("kind") or "") if isinstance(step, dict) else ""
+
+
+def _is_superseded(record: dict) -> bool:
+    """Is this record part of a DISCARDED Retry attempt (#339)?
+
+    Retry does two different things under one name: it rewinds the MODEL's
+    context so the rerun is not informed by the attempt it replaces (#60, and
+    that half is sound), and it used to delete the attempt from the LOG. Only
+    the first was ever justified. The second was a presentation choice — "so a
+    cold replay shows one turn" — and it was paid for with the evidence: the
+    quota failure that made the owner press the button went with it, and #336
+    then read the residue as a stall, reasoning from an absence that nothing in
+    the log explained.
+
+    So the records stay and carry this mark instead. The rule every reader
+    follows is one sentence: **a superseded record is read by evidence, and by
+    nothing that reconstructs the chat's current state.** Replay, the model's
+    restored context, restart recovery, the fetch ledger and the unread stamps
+    therefore behave EXACTLY as they did when these records were deleted — the
+    only difference is that `aish explain`, `aish usage` and a person with grep
+    can still see them.
+    """
+    return bool(record.get("superseded"))
+
+
+def _discarded_before(records: list[dict], first: int) -> int:
+    """Where the discarded attempts at a turn begin, given where the turn does.
+
+    A retried question leaves a run of superseded turns, each closed by the
+    unmarked `retry` record that discarded it (which is the tombstone and must
+    stay visible). Walking back over both is how the chain is found: it is what
+    numbers the attempts, and what makes a redaction take the discarded copies
+    of the very text being removed (#202's pasted secret is in every one of
+    them). Returns `first` when nothing precedes the turn.
+    """
+    start = first
+    for i in range(first - 1, -1, -1):
+        record = records[i]
+        if _step_kind(record) == RETRY_STEP or _is_superseded(record):
+            start = i
+            continue
+        break
+    return start
+
+
 def _turn_opens_at(records: list[dict], user_index: int) -> int:
     """Where a turn's records really begin, given its user message (#202, #338).
 
@@ -825,7 +885,10 @@ class SessionLog:
         pending_cmd: str | None = None  # a user ! command awaiting its exit status
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
-            if record is None:
+            if record is None or _is_superseded(record):
+                # A discarded Retry attempt is not this chat's conversation,
+                # its title, its workspace or its last activity — everything
+                # here would have been reading a deleted record before #339.
                 continue
             kind = record.get("kind")
             if SessionLog._is_activity(record):
@@ -987,8 +1050,8 @@ class SessionLog:
         trusted: list[str] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
-            if record is None:
-                continue
+            if record is None or _is_superseded(record):
+                continue  # a discarded attempt's workspace moves went with it
             kind = record.get("kind")
             if kind == "cwd":
                 cwd = record.get("cwd") or cwd
@@ -1018,7 +1081,11 @@ class SessionLog:
         hosts: list[str] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
-            if record is None or record.get("kind") not in SessionLog.GRANT_KINDS:
+            if (
+                record is None
+                or _is_superseded(record)  # granted inside a discarded attempt
+                or record.get("kind") not in SessionLog.GRANT_KINDS
+            ):
                 continue
             host = record.get("host")
             if host and host not in hosts:
@@ -1043,6 +1110,11 @@ class SessionLog:
         Read from `step.turn` only. Ratings carry a top-level `turn` that is the
         CLIENT's event id, a string naming a different thing; the isinstance
         check is what keeps the two namespaces apart.
+
+        Superseded records are the one place a reader deliberately DOES count
+        them (#339): a discarded attempt's id was handed out, and this counter
+        exists to stop an id being reused. `max` means including them can only
+        move the count forward, which is the safe direction.
         """
         last = 0
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -1078,7 +1150,12 @@ class SessionLog:
         ran: list[tuple[dict, int]] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
-            if record is None:
+            if record is None or _is_superseded(record):
+                # A discarded attempt's fetches really happened, but the page
+                # they read is not in the rerun's context — and this ledger is
+                # what tells the rule engine a link was OPENED (#267). Counting
+                # them would let a discarded read vouch for a link the surviving
+                # answer never looked at; before #339 they were deleted.
                 continue
             step = record.get("step")
             if not isinstance(step, dict):
@@ -1143,7 +1220,11 @@ class SessionLog:
         started: list[dict] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
-            if record is None:
+            if record is None or _is_superseded(record):
+                # A turn the owner discarded with Retry is not a dead process
+                # (#339). Its `task_start` stays on disk as evidence and is
+                # invisible here — the same answer the delete gave, now without
+                # destroying the record to get it.
                 continue
             kind = record.get("kind")
             if kind == "task_start":
@@ -1239,6 +1320,13 @@ class SessionLog:
         origin = "user"
         failure = ""  # a recorded task failure, replayed as the turn's `error`
         first_user = True  # the opening turn of a triggered session is its trigger
+        # `retry` records, held until the turn they open (#339). On disk one
+        # sits BEFORE the rerun's `task_start`, because the press happens before
+        # the prompt is re-logged; live it lands under the user bubble the
+        # rollback kept. Replaying it in file order would hang it off the
+        # PREVIOUS turn's card, which is L1 breaking on the one record whose
+        # whole job is to be visible.
+        pending_retries: list[dict] = []
 
         def flush() -> None:
             nonlocal steps, answer, open_turn, running_steps, failure, deliveries
@@ -1365,6 +1453,15 @@ class SessionLog:
             if record is None:
                 continue
             kind = record.get("kind")
+            if _is_superseded(record):
+                # A Retry's discarded attempt (#339). Kept on disk as evidence,
+                # hidden here so a cold replay shows the one turn a live viewer
+                # saw — the presentation this used to buy by deleting. Marked
+                # BEFORE the kind dispatch, and `has_trace` still set by a trace
+                # record, so a log whose only steps were discarded reconstructs
+                # rather than falling back to a flat history blob (§8.2).
+                has_trace = has_trace or kind == "trace"
+                continue
             if kind == REDACT_KIND:
                 # A turn the user removed (#202). It sits where the turn used to
                 # be, so it closes the previous turn like a user message does and
@@ -1438,6 +1535,9 @@ class SessionLog:
                     # records still reconstructs rather than falling back to a
                     # flat history blob.
                     continue
+                if sk == RETRY_STEP:
+                    pending_retries.append({"type": "step", **step})
+                    continue
                 if sk == "tool" and step.get("name") == "run_command":
                     emit_command(step)
                 else:
@@ -1467,6 +1567,8 @@ class SessionLog:
                     if pending_start is not None:
                         has_trace = True
                     open_turn = True
+                    steps.extend(pending_retries)
+                    pending_retries = []
                     emit_bang(bang.group(1), content)
                     flush()  # a ! command is its own closed turn (no model answer)
                 else:
@@ -1494,6 +1596,9 @@ class SessionLog:
                         event["at"] = at
                     events.append(event)
                     open_turn = True
+                    # The presses that produced this turn, on its own timeline.
+                    steps.extend(pending_retries)
+                    pending_retries = []
             elif kind == "message" and record.get("role") == "assistant":
                 # Every non-empty assistant text is a DELIVERY (#212): the
                 # prose a step said alongside its tool calls was already shown
@@ -1508,6 +1613,11 @@ class SessionLog:
                     steps.append({"type": "token", "text": content})
                     steps.append({"type": "delivery", "text": content})
         flush()
+        # A Retry whose rerun never wrote a record — the process died between
+        # the press and the fresh `task_start`. The record is still shown: an
+        # owner decision that vanished because the work after it did is the
+        # exact absence #339 exists to stop.
+        events.extend(pending_retries)
         # Decorations last: every turn they name now exists in the stream.
         events.extend(ratings)
         return events if has_trace else None
@@ -1534,7 +1644,10 @@ class SessionLog:
         msgs: list[tuple[int, str, bool]] = []
         for i, line in enumerate(lines):
             record = _record_or_none(line)
-            if record is None:
+            if record is None or _is_superseded(record):
+                # An ordinal counts what the browser RENDERED, and a discarded
+                # attempt renders nowhere (#339) — counting it here would put
+                # the fork one answer off per Retry, which is the #229 defect.
                 continue
             if record.get("kind") == "message" and record.get("role") in (
                 "user", "assistant", "tool",
@@ -1575,6 +1688,7 @@ class SessionLog:
             if (
                 record.get("kind") == "message"
                 and record.get("role") == "assistant"
+                and not _is_superseded(record)  # a discarded answer names nothing (#339)
                 and _turn_id(record, i) == answer
             ):
                 return SessionLog._cut_after_answer(lines, i)
@@ -1602,40 +1716,148 @@ class SessionLog:
                 break
         return "\n".join(lines[:end]) + "\n"
 
-    def rewind_last_turn(self) -> bool:
-        """Drop the most recent user turn from the log in place: the turn's
-        opening record and every record after it (assistant/tool messages,
-        traces, command framing). Web retry (#60) re-runs the prompt, which
-        re-logs it and the fresh answer, so a cold replay shows one turn, not
-        the discarded attempt. Append-only otherwise, so this is one of the two
-        rewrites: the handle is closed and reopened lazily on the next record.
-        Returns False when there is no file yet or no user turn to drop.
+    def supersede_last_turn(self, by: str = "owner") -> dict | None:
+        """Mark the most recent user turn SUPERSEDED and say so, in one write.
 
-        The cut is `_turn_opens_at` the last user message, not the message
-        itself. Cutting at the message kept the turn's `task_start`,
-        `rule_eval`, `binding` and `context` — all written before it — and
-        dropped its `task_end`, so **every** Retry left an unmatched
-        `task_start` behind: a turn that ran to completion read back as a
-        pending crash, with the recovery budget kept for dead processes being
-        spent by a UI button (#338)."""
+        Web Retry (#60) calls this before re-running the prompt. Until #339 it
+        DELETED that turn — the opening record and everything after it — and
+        #338 widened the delete to take the `task_start` too, so a retried
+        attempt left the log with nothing at all. Both were the same mistake:
+        rewinding the model's context and deleting from the log are different
+        acts, and only the first has a justification. The second was a
+        presentation choice ("a cold replay shows one turn") paid for with the
+        evidence, and the bill arrived as #336 — a residue misread as a stall,
+        because nothing in the log said a rewrite had happened.
+
+        So nothing leaves the file. Every record from `_turn_opens_at` the last
+        live user message to the end gains `superseded`, and one `retry` trace
+        record is appended saying who asked, which attempt now begins, and how
+        the discarded one ENDED — read off its own `task_end` and `model_error`
+        records, never inferred (L8). Both halves land in the SAME rewrite:
+        marked-but-unexplained records would be exactly the unreadable absence
+        this is fixing.
+
+        `_turn_opens_at` still decides where the turn begins — a mark applied
+        from the user message would leave the `task_start` above it looking
+        live, which is what restart recovery reads as a killed process (#338,
+        L6). Readers skip superseded records, so recovery, replay, the restored
+        model context and the fetch ledger behave exactly as they did when
+        these records were deleted (`_is_superseded`).
+
+        Returns the `retry` step that was written — the caller shows it live —
+        or None when there is no file yet or no live user turn to discard. One
+        of the two in-place rewrites: the handle is closed here and reopened
+        lazily on the next record.
+        """
         with self._write_lock:
             if not self.path.exists():
-                return False
+                return None
             lines = self.path.read_text(encoding="utf-8").splitlines()
             records = [_record_or_none(line) or {} for line in lines]
-            cut: int | None = None
+            last_user: int | None = None
             for i, record in enumerate(records):
-                if record.get("kind") == "message" and record.get("role") == "user":
-                    cut = i
-            if cut is None:
-                return False
-            cut = _turn_opens_at(records, cut)
+                # The last LIVE one: retrying twice must discard the second
+                # attempt, not re-discard the first.
+                if (
+                    record.get("kind") == "message"
+                    and record.get("role") == "user"
+                    and not _is_superseded(record)
+                ):
+                    last_user = i
+            if last_user is None:
+                return None
+            first = _turn_opens_at(records, last_user)
+            marked = 0
+            kept = list(lines)
+            for i in range(first, len(records)):
+                record = records[i]
+                # A line that did not parse is left byte-for-byte alone: there
+                # is nothing to mark, and rewriting it would be a reader
+                # inventing a record (`_record_or_none`).
+                if not record or _is_superseded(record):
+                    continue
+                record = {**record, "superseded": True}
+                records[i] = record
+                kept[i] = json.dumps(record, ensure_ascii=False)
+                marked += 1
+            step = self._retry_step(records, first, marked, by)
             if self._fh is not None:
                 self._fh.close()
                 self._fh = None
-            kept = lines[:cut]
-            self.path.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
-            return True
+            kept.append(json.dumps(
+                {
+                    "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                    "kind": "trace",
+                    "step": step,
+                },
+                ensure_ascii=False,
+            ))
+            self.path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            return step
+
+    @staticmethod
+    def _retry_step(records: list[dict], first: int, marked: int, by: str) -> dict:
+        """The `retry` record for the turn opening at `first` (#339).
+
+        Every field is read off the discarded turn's own records. `ended` is its
+        `task_end` status verbatim and `"unknown"` when it never wrote one —
+        said out loud rather than omitted, because a vocabulary that cannot say
+        "aish does not know how that ended" gets handed a guess, and the guess
+        then stands where the disproving evidence should be (L8, contract §0).
+        `failure` is named only by a `model_error` that gave up; a call that
+        failed and then recovered did not end the turn.
+        """
+        ended = ""
+        error = ""
+        failure = ""
+        turn: int | None = None
+        # By index, never a slice: L6's sweep reads a slice of a log's records
+        # as a CUT, and this one only reads. Keeping `ALLOWED` empty is worth
+        # more than the shorter loop.
+        for i in range(first, len(records)):
+            record = records[i]
+            if record.get("kind") == "task_end":
+                ended = str(record.get("status") or "")
+                error = str(record.get("error") or "")
+            step = record.get("step")
+            if not isinstance(step, dict):
+                continue
+            if isinstance(step.get("turn"), int):
+                turn = step["turn"]
+            if step.get("kind") == "model_error" and step.get("action") == "give_up":
+                failure = str(step.get("class") or "")
+        # Attempts already discarded for this prompt, plus the one being
+        # discarded now — so the number names the attempt about to START.
+        chain = _discarded_before(records, first)
+        attempt = 2 + sum(
+            1
+            for i in range(chain, first)
+            if _is_superseded(records[i])
+            and records[i].get("kind") == "message"
+            and records[i].get("role") == "user"
+        )
+        previous: dict = {
+            "records": marked,
+            "at": str(records[first].get("ts") or ""),
+            "ended": ended or "unknown",
+        }
+        if error:
+            previous["error"] = error[:TASK_ERROR_CAP]
+        if failure:
+            previous["failure"] = failure
+        step_out: dict = {
+            "kind": RETRY_STEP,
+            "by": by,
+            "attempt": attempt,
+            "previous": previous,
+        }
+        if turn is not None:
+            # The join key of the attempt this record is evidence ABOUT
+            # (contract §2). Omitted, never invented, when the discarded turn
+            # carried none — a log written before #191 has no turn ids at all,
+            # and a fabricated one would join this record to somebody else's.
+            step_out["turn"] = turn
+        return step_out
 
     def redact_turn(self, turn: str) -> "Redaction | None":
         """Take a turn out of the log for good (#202): its user message, every
@@ -1670,7 +1892,14 @@ class SessionLog:
                 return record.get("kind") == "message" and record.get("role") == "user"
 
             start = next(
-                (i for i, rec in enumerate(records) if is_user(rec) and _turn_id(rec, i) == turn),
+                (
+                    i
+                    for i, rec in enumerate(records)
+                    # A discarded attempt is not a turn anyone can point at
+                    # (#339): it renders nowhere, so no client holds its id, and
+                    # a stale one must miss rather than remove half a chain.
+                    if is_user(rec) and not _is_superseded(rec) and _turn_id(rec, i) == turn
+                ),
                 None,
             )
             if start is None:
@@ -1682,14 +1911,24 @@ class SessionLog:
             # same turn there by text — and two turns saying "ok" would otherwise
             # be indistinguishable, dropping the wrong one from the model's
             # context, which is the one thing this feature must not do.
+            # Superseded copies are excluded because the model's context does
+            # not hold them either — Retry rewound them out of it — so counting
+            # them would name the wrong occurrence there (#339).
             occurrence = sum(
                 1
                 for i, rec in enumerate(records[: start + 1])
-                if is_user(rec) and (rec.get("content") or "") == text
+                if is_user(rec)
+                and not _is_superseded(rec)
+                and (rec.get("content") or "") == text
             )
             # BOTH ends walk back: cutting up to the NEXT message would take
             # that turn's task_start with it.
             first = _turn_opens_at(records, start)
+            # And back again over this turn's DISCARDED attempts (#339). They
+            # are copies of the very text being removed — a retried turn asks
+            # the same question, so a pasted secret is in every one of them, and
+            # #202 exists for exactly that case.
+            first = _discarded_before(records, first)
             next_user = next(
                 (i for i in range(start + 1, len(records)) if is_user(records[i])),
                 None,
@@ -1758,6 +1997,8 @@ class SessionLog:
         auto = False
         messages: list[dict] = []
         for record in kept:
+            if _is_superseded(record):
+                continue  # a discarded attempt never named the chat (#339)
             if record.get("kind") == "title":
                 title = (record.get("title") or "").strip()
                 if title:

@@ -8,6 +8,7 @@
 
 **The surfacing correction (2026-08-26, hours after #320's record shipped) added `problem` and `unchanged` to §3.4, and `ok` inside `signin`** — aish's own observations that a step did not do what it looked like it should, and the sign-in attempt's outcome. All three were already computed and reached only the acting model's turn; carrying them is what lets a renderer surface the recorded console on anomaly instead of on every page that is merely noisy — the owner's first successful automatic sign-in rendered covered in error blocks, a failure claim nothing had checked. Additive on the existing `tool` step, observations and never verdicts.
 **#325 (2026-08-27) added `verdict` and `observed` inside `signin`** — the token the failure table returned for an attempt where the session did not come up, and the four observations it was composed from. They were computed in memory and discarded: what survived was the owner-facing SENTENCE, into the tool result and into `signins.json` as `suspect`, prose both times. A grep of every session log on the owner's machine for the observation names matched zero of 786 files on 2026-08-27, so *why did that sign-in fail* has never once been answerable from a log. Additive keys inside the existing block, no new kind, and §8.6 is untouched: every one of them is aish's OWN observation, four booleans and one canonical brand name, with nothing page-authored among them.
+**#339 (2026-08-30) added `retry` as §3.11, and with it the `superseded` KEY** — the first record in this document about the log being rewritten rather than about a decision inside a turn. It exists because Retry deleted what it discarded, so a §0-corollary-2 absence could be created *after the fact*, which no record shape here anticipated. Rendered, and the one record whose PLACEMENT is a reader rule.
 **Scope:** what #191, #192, #193, #194 and #196 must write to the session log so that #197 can answer *"what governed this turn, what fired, what didn't, and why?"* from the log alone.
 **Gate:** phase 1 of #190's build order. A binding that ships without logging its evidence, or a gate that ships without logging which tier decided, makes that question unanswerable forever for everything built before someone notices. Retrofitting it is how #183's calibration problem ended up costing a 481-call audit.
 
@@ -512,6 +513,42 @@ The incident that named it: a session answered a question about a sick child wit
 `TestContextRecord` (agent side, emit discipline), `TestIndexSelectionRecord` (skills side, payload).
 
 > **Known second-order defect, not fixed here.** A memory's `description` is both the **retrieval key** `recall` ranks on and the **payload** injected into every task. So an entry written to be findable necessarily becomes a fact in every unrelated conversation — a question about Python gets the holiday address too. The record makes this measurable (`chars`, `items[]`); it does not fix it. The fix is descriptions that say what an entry is *about*, with specifics in the body behind `recall`, which is a corpus migration plus a `remember` prompt change.
+
+---
+
+### 3.11 · `retry` — the owner discarded an attempt (#339)
+
+**BUILT (2026-08-30).** Emitted by `SessionLog.supersede_last_turn`, called from `server.py`'s `_launch_retry`. **Rendered**, on `trim`'s terms — see §1.2. (This section number was `stall` until #336's watchdog was withdrawn on 2026-08-30; an older reference to §3.11 means that record, which no longer exists.)
+
+Retry rewinds the model's context (#60, sound) and used to DELETE the turn from the log as well. That second act was never justified: the reason on record — *"so a cold replay shows one turn, not the discarded attempt"* — is a **presentation** choice, and it was paid for with the evidence. The owner pressed Retry four times on quota failures and the log afterwards held neither the `model_error` records that named the quota nor any sign the button had been pressed; #336 then read the residue as a stall, **because nothing in the log said a rewrite had happened.** That is corollary 2 arriving through a route the document did not anticipate: not a record that was never written, but records that were *unwritten afterwards*, which makes absence unreadable everywhere rather than only where the rewrite landed.
+
+So nothing leaves the file. Every record of the discarded turn gains a `superseded: true` key, this record is appended **in the same rewrite**, and every reader that reconstructs the chat's state skips the marked records — `docs/session-log.md` L7 holds that rule and the list.
+
+```json
+{"kind": "retry", "turn": 4, "by": "owner", "attempt": 2,
+ "previous": {"records": 23, "at": "2026-08-30T13:13:23", "ended": "failed",
+              "error": "model unavailable: 429 RESOURCE_EXHAUSTED",
+              "failure": "rate_limit"}}
+```
+
+| field | why |
+|---|---|
+| `by` | Who asked. `owner` is the only value today and it is a fact, not a default: both paths into `_launch_retry` are a `retry` message on a viewer's socket, and nothing else in the server calls it. |
+| `attempt` | Which attempt now BEGINS — 2 for the first Retry. Counted from the chain of superseded turns already on disk, so it survives a restart between presses and needs no in-memory counter to be right. |
+| `previous.ended` | How the discarded attempt ended, read from its own `task_end.status`: `ok` \| `failed` \| **`unknown`**. The third value is said OUT LOUD rather than omitted — a vocabulary that cannot say *"aish does not know how that ended"* gets handed a guess, and the guess then stands exactly where the disproving evidence should be (§0, L8). A turn killed before it wrote a `task_end` is that case. |
+| `previous.failure` | The `class` of a `model_error` that **gave up**, and only that one. A call that failed and then recovered did not end the turn; naming it would be a hypothesis shipped as a cause. Absent when no such record exists. |
+| `previous.error` | The `task_end` failure text, capped at `TASK_ERROR_CAP`. aish's own sentence, already in the log. |
+| `previous.records` | How many records were marked — the same "how much went" the `redact` tombstone carries, and what makes the hiding auditable rather than merely done. |
+| `previous.at` | When the discarded attempt opened, so the record sits in the transcript's own timeline. |
+| `turn` | The join key of the attempt this record is evidence ABOUT (§2), read off that turn's own steps. **Omitted, never invented, when the discarded turn carried none** — a log written before #191 has no turn ids at all, and a fabricated one would join this record to somebody else's turn. Corollary 1's reason, in the one direction the contract's "every record carries `turn`" cannot be met honestly. |
+
+**No `cause` field, and that is deliberate**: this record says what the log said about the previous attempt, and stops. *Why* the owner pressed the button is not an observation aish has.
+
+**Placement is a reader rule, not a writer one.** On disk this record precedes the rerun's own `task_start`, because the press happens before the prompt is re-logged; live it lands under the user bubble the transcript rollback kept. `reconstruct_events` therefore holds it until the next `user` event and emits it there, so hot and cold render it in the same place (L1). A press whose rerun never wrote a record is emitted at the end rather than dropped.
+
+**Additive, and verified as such**: superseding adds a key and a kind, both absent from every log written before it. The owner's whole corpus — 799 session logs, nine readers each — was replayed under the pre-change and post-change modules and produced identical output. `TestSupersedeInsteadOfDelete`, `TestRetry` (`tests/test_server.py`), `tests/js/test_model_error_row.js`.
+
+**It is read by restart recovery only through the mark.** A superseded `task_start` is invisible to `pending_task`, which is the same answer deleting the turn gave; a start that is NOT marked is still the killed-process signal and still resumes. A consumer may not repurpose the mark: superseding a turn that was never discarded would exempt a real crash from the check that bounds crash loops.
 
 ---
 

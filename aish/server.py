@@ -2899,11 +2899,12 @@ class WebServer:
 
     async def _retry_task(self, client: Client, text: str) -> None:
         """Regenerate the last answer from scratch (#60): the previous attempt is
-        discarded from the model's context, the on-disk log, AND the transcript
-        so the rerun is not informed by it. While a turn is still running (or
-        wedged on an approval), the rollback can't touch agent.messages under the
-        worker thread — cancel first and defer the rerun to _finish_turn, exactly
-        how Retry already recovers a stuck turn."""
+        dropped from the model's context and from the transcript so the rerun is
+        not informed by it, and marked superseded in the log so the record of it
+        survives (#339). While a turn is still running (or wedged on an
+        approval), the rollback can't touch agent.messages under the worker
+        thread — cancel first and defer the rerun to _finish_turn, exactly how
+        Retry already recovers a stuck turn."""
         session = client.viewing
         if session is None:
             return
@@ -2914,16 +2915,29 @@ class WebServer:
         await self._launch_retry(session, text)
 
     async def _launch_retry(self, session: Session, client_text: str) -> None:
-        # Roll the last user turn out of the model's context and the log; run_task
-        # re-adds and re-logs the prompt fresh, so neither the model nor a later
-        # cold replay sees the discarded answer. The transcript keeps the user
-        # bubble and drops only the answer/trace after it, then a fresh replay
-        # re-renders the shortened transcript so the browser matches.
+        # Two acts, and only one of them removes anything (#339). The MODEL's
+        # context is rewound — #60's intent, and the rerun must not be informed
+        # by the attempt it replaces. The LOG keeps every record and marks them
+        # superseded, so the failure that made him press the button survives;
+        # replay hides them, so a cold reload still shows one turn. The
+        # transcript keeps the user bubble and drops only the answer/trace after
+        # it, then a fresh replay re-renders it so the browser matches.
         prompt = session.agent.rewind_last_task() or client_text
         if not prompt:
             return
-        session.logref.rewind_last_turn()
+        # Every path here is the owner pressing Retry in his own UI: this call
+        # and the deferred one in _finish_turn, both from a `retry` message on a
+        # viewer's socket. Nothing else in the server calls it.
+        retried = session.logref.supersede_last_turn("owner")
         self._rollback_transcript_to_last_user(session)
+        if retried is not None:
+            # Recorded into the live transcript BEFORE the replay snapshot below
+            # (`record`, not `emit` — a deferred put would race it), so the row
+            # sits under the user bubble on every viewer and on a reconnect. A
+            # cold replay lands it in the same place: `reconstruct_events` holds
+            # the record until the turn it opens, because on disk it precedes
+            # the rerun's own `task_start`.
+            session.bridge.record({"type": "step", **retried})
         # Routed through the outbox (not a direct ws send) so it serializes behind
         # any still-draining events from the cancelled turn — the replay wipes
         # their transient render — and ahead of the rerun's fresh events.

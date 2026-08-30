@@ -258,6 +258,14 @@ Two things arrive on a `tool` step since #323's agent half: `comment`, the sente
 
 **The empty why-line is guarded on `comment`, not on the empty string.** `output` used to mean *what the command printed* on an approved step and *what the owner typed* on a denied one; it is `""` on a refusal now, so the sub-line simply does not draw. Old logs still carry the sentence there and still render it — verified by opening a real July session in the harness: six struck rows, five reasons drawn, no `comment` key on any of them. Those rows keep the MACHINE voice deliberately: the same logs hold gate wording in that key (*"rm -rf: recursive force delete is unrecoverable"*), so promoting `output` into his voice would attribute aish's own sentence to the owner — the defect this issue exists to end, not a cosmetic one. Across the 780 session logs on this machine, 196 refused rows carry `output`, and **none** carries both keys, so the guard can never suppress a reason that would otherwise have drawn. — `tests/js/test_held_join.js`
 
+### The Retry you pressed is a row on the turn it opened (#339)
+
+A `retry` step draws *"You retried — attempt 2"* with what the log said about the attempt it replaced. It is here for the same reason `trim` and `model_error` are: an owner decision that changes what runs contradicts the screen, which shows one turn and nothing about the two before it. The owner pressed Retry four times on quota failures and neither the presses nor the failures survived; #336 then diagnosed the leftovers as a stall.
+
+- **Only where a line checked it.** *"the attempt before it failed — rate limit"* is drawn from `previous.ended` and `previous.failure`, both read off the discarded turn's own `task_end` and `model_error` records. A turn that never wrote an ending renders *"aish did not record how the attempt before it ended"* — the unknown has to be sayable, or the row gets a guess (L8, `docs/trace-contract.md` §3.11).
+- **It says the records are kept.** *"its records are kept, superseded"* is the visible half of the change: what the timeline hides is still on disk, which is what makes the hiding a presentation choice rather than a deletion.
+- **Its POSITION is a reader rule, not a writer one.** On disk the record precedes the rerun's own `task_start`; live it lands under the user bubble the transcript rollback kept. `reconstruct_events` holds it until the next `user` event so hot and cold draw it in the same place (L2). — `tests/js/test_model_error_row.js`
+
 ### `[ANSWERING-COLLAPSE]` — collapse the timeline when the reply starts
 Fires once at the transition so the answer isn't buried under a tall step list, and never fights a manual re-expand (`t.userToggled`) — which, since the card became collapsed-by-default, is the ONLY way an open live trace comes about. — `test_answering_collapse.js`
 

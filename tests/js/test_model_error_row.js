@@ -1,4 +1,8 @@
-// Node-only, dependency-free check for the model_error trace row (#261).
+// Node-only, dependency-free checks for the trace rows that report a turn's own
+// trouble: `model_error` (#261) and `retry` (#339). One sandbox, because they
+// share the real ensureTrace/traceStep/traceRow.
+//
+// The model_error row (#261).
 // A failed model call used to be a grey echo bubble: live transport only,
 // never written to the session log. So a call that failed and then RECOVERED
 // left the trace with an unexplained gap, and a cold reload erased even the
@@ -214,6 +218,67 @@ check("an unrecognised failure still draws a legible row", () => {
   const s = makeSandbox();
   const row = errorRow(s, { kind: "model_error", attempt: 1, attempts: 3, action: "give_up" });
   assert(titleOf(row).includes("error"), titleOf(row));
+  assert(subOf(row).length > 0, "no subtitle");
+});
+
+// ---- the retry row (#339) -----------------------------------------------
+// The owner pressed Retry four times and the log recorded none of them, which
+// is what made the deleted attempts invisible. The press is a step on the turn
+// it opened now — and a rendered kind with no renderer here opens an EMPTY live
+// trace card (docs/trace-contract.md §1.2), so the row ships with the record.
+
+function retryRow(s, step) {
+  s.traceStep(step);
+  const row = rows(s).find((r) => titleOf(r).includes("retried"));
+  assert(row, "no retry row drawn");
+  return row;
+}
+
+check("a retry says which attempt, and that the records are kept", () => {
+  const s = makeSandbox();
+  const row = retryRow(s, {
+    kind: "retry", by: "owner", attempt: 2, turn: 4,
+    previous: { records: 23, ended: "failed", failure: "rate_limit",
+                error: "model unavailable: 429" },
+  });
+  assert(titleOf(row).includes("attempt 2"), titleOf(row));
+  assert(subOf(row).includes("failed — rate limit"), subOf(row));
+  assert(subOf(row).includes("kept, superseded"), subOf(row));
+});
+
+check("a failure the log did not classify is not given a name", () => {
+  const s = makeSandbox();
+  const row = retryRow(s, {
+    kind: "retry", by: "owner", attempt: 2, previous: { records: 4, ended: "failed" },
+  });
+  assert(subOf(row).includes("the attempt before it failed"), subOf(row));
+  assert(!subOf(row).includes("—  ·"), subOf(row));
+});
+
+check("an unrecorded ending says aish does not know", () => {
+  // L8: the unknown ending has to be sayable, or the row gets handed a guess.
+  const s = makeSandbox();
+  const row = retryRow(s, {
+    kind: "retry", by: "owner", attempt: 2, previous: { records: 4, ended: "unknown" },
+  });
+  assert(subOf(row).includes("did not record how"), subOf(row));
+});
+
+check("retrying an answer that finished does not call it a failure", () => {
+  const s = makeSandbox();
+  const row = retryRow(s, {
+    kind: "retry", by: "owner", attempt: 3, previous: { records: 9, ended: "ok" },
+  });
+  assert(subOf(row).includes("had finished"), subOf(row));
+  assert(!subOf(row).includes("failed"), subOf(row));
+});
+
+check("a record from a newer aish still draws a legible row", () => {
+  const s = makeSandbox();
+  s.traceStep({ kind: "retry", attempt: 7 });
+  const row = rows(s).find((r) => titleOf(r).includes("Retried"));
+  assert(row, "no retry row drawn");
+  assert(titleOf(row).includes("attempt 7"), titleOf(row));
   assert(subOf(row).length > 0, "no subtitle");
 });
 

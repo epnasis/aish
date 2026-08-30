@@ -3172,6 +3172,33 @@ function traceStep(step) {
     updateTraceHead(t);
     return;
   }
+  if (step.kind === "retry") {
+    // You pressed Retry (#339). The four presses that produced that issue left
+    // the log with nothing to say they had happened — and the attempt each one
+    // discarded was DELETED, so an investigation reasoning from the gap called
+    // it a stall. Both halves are on screen now: the press is a step on the
+    // turn it opened, and it says the records are still there.
+    t.started += 1;
+    const prev = step.previous || {};
+    const ended = prev.ended === "failed"
+      // Named only where the log named it: a call that gave up says which
+      // failure it was, one that never wrote a reason must not be given one.
+      ? (prev.failure
+          ? `the attempt before it failed — ${String(prev.failure).replace(/_/g, " ")}`
+          : "the attempt before it failed")
+      : prev.ended === "ok"
+        ? "the attempt before it had finished"
+        : "aish did not record how the attempt before it ended";
+    traceRow(
+      // The same icon "You added" uses: both rows are the owner reaching into
+      // a turn, and they should read as the same kind of thing.
+      t, traceSvg("chat", "var(--blue)"),
+      step.by === "owner" ? `You retried — attempt ${step.attempt}` : `Retried — attempt ${step.attempt}`,
+      `${ended} · its records are kept, superseded`
+    );
+    updateTraceHead(t);
+    return;
+  }
   if (step.kind === "tool_start") { toolStart(t, step); return; }
   if (step.kind === "tool") { toolFinish(t, step); return; }
 }
