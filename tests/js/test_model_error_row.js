@@ -183,6 +183,21 @@ check("giving up after every attempt says how many were spent", () => {
   assert(subOf(row).includes("gave up after 3 of 3"), subOf(row));
 });
 
+check("a spent wait budget says so instead of an unexplained early stop", () => {
+  // Since #337 the retry is bounded by TIME, so the attempt count is usually
+  // not what ended it. "gave up after 5 of 8 attempts" reads as a count that
+  // stopped three short for no stated reason.
+  const s = makeSandbox();
+  const row = errorRow(s, {
+    kind: "model_error", class: "rate_limit", status: 429, attempt: 5,
+    attempts: 8, action: "give_up", retryable: true,
+    bound: "wait_budget", waited_total_s: 75, wait_budget_s: 120,
+  });
+  assert(subOf(row).includes("waited 75s"), subOf(row));
+  assert(subOf(row).includes("gave up after 5 attempts"), subOf(row));
+  assert(!subOf(row).includes("of 8"), subOf(row));
+});
+
 check("a retry with no stated wait does not claim one", () => {
   // "Retry-After: 0" is legal. Rendering "retrying in 0s" would be noise
   // dressed as a fact.
@@ -200,6 +215,43 @@ check("an unrecognised failure still draws a legible row", () => {
   const row = errorRow(s, { kind: "model_error", attempt: 1, attempts: 3, action: "give_up" });
   assert(titleOf(row).includes("error"), titleOf(row));
   assert(subOf(row).length > 0, "no subtitle");
+});
+
+// ---- the stall row (#336) -----------------------------------------------
+
+function stallRow(s, step) {
+  s.traceStep(step);
+  const row = rows(s).find((r) => titleOf(r).startsWith("Nothing for"));
+  assert(row, "no stall row drawn");
+  return row;
+}
+
+check("a stalled turn draws a row saying how long and where", () => {
+  // The record's whole purpose: the screen says the turn is thinking and it has
+  // done nothing for minutes. A kind with no renderer here would instead open
+  // an EMPTY live trace card (docs/trace-contract.md §1.2).
+  const s = makeSandbox();
+  const row = stallRow(s, {
+    kind: "stall", silent_s: 151.4, threshold_s: 150,
+    where: "agent.py:3138 in _run_task", frames: "aish",
+    stack: ["agent.py:3138 in _run_task"],
+  });
+  assert(titleOf(row).includes("151s"), titleOf(row));
+  assert(subOf(row).includes("still inside agent.py:3138"), subOf(row));
+});
+
+check("a stall whose stack could not be read says that, not a guess", () => {
+  // L8: the missing frame is its own fact. Filling it with a plausible one is
+  // exactly how a guess becomes evidence for itself.
+  const s = makeSandbox();
+  const row = stallRow(s, { kind: "stall", silent_s: 160, where: "", stack: [] });
+  assert(subOf(row).includes("could not be read"), subOf(row));
+});
+
+check("a worker that is gone is not reported as merely silent", () => {
+  const s = makeSandbox();
+  const row = stallRow(s, { kind: "stall", silent_s: 160, worker: "gone", where: "" });
+  assert(subOf(row).includes("worker thread is gone"), subOf(row));
 });
 
 process.exit(failures ? 1 : 0);

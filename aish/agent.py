@@ -6,6 +6,7 @@ run_command cannot be reached there unless the approve() callback returns
 the command to run (possibly edited by the user).
 """
 
+import contextlib
 import dataclasses
 import datetime
 import fnmatch
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import weakref
@@ -408,16 +410,35 @@ class ModelUnavailable(RuntimeError):
     """The model call failed after every attempt it was entitled to."""
 
 
-# How many times one model call may be issued before the task gives up. Three,
-# not the old two, because the attempts are now SPACED (ratelimit.backoff_delay)
-# and CLASSIFIED — a permanent failure spends one attempt instead of two, so a
-# transient one can afford three. `docs/rate-limits.md`.
-MODEL_CALL_ATTEMPTS = 3
+# The BACKSTOP on how many times one model call may be issued — not the bound
+# that normally ends a retry. What ends it is a wait BUDGET (`_retry_wait_budget`):
+# an attempt count cannot outlast a quota window, because the two are measured in
+# different units. Three attempts spaced 5s and 10s spend fifteen seconds against
+# a per-minute quota and then destroy a turn that had already done its work
+# (#337). This cap exists only for the case a budget cannot bound — a provider
+# answering `Retry-After: 0` forever — so it sits far above any real retry.
+# `docs/rate-limits.md`.
+MODEL_CALL_ATTEMPT_CAP = 8
 
 # How much of a provider's error text a `model_error` record keeps. A quota
 # error carries a documentation URL and a details array; the sentence that says
 # what went wrong is at the front of all of them.
 MODEL_ERROR_CHARS = 700
+
+# The stall watchdog (#336). A turn that produces no record for this long is
+# reported, WITH the worker thread's stack, so the next occurrence names its own
+# line instead of leaving the log to be read by elimination. Measured against
+# what the owner actually waits through: model calls on a large history run tens
+# of seconds and a browser step can run past a minute, so this must sit above
+# both or it reports working turns.
+STALL_WATCHDOG_S = 150.0
+# How often the watchdog re-reports a stall that has not moved. Once is not
+# enough — "it was stuck at 13:13" and "it was still stuck at 13:35" are
+# different facts, and the second is what says nobody recovered it.
+STALL_REPEAT_S = 300.0
+# Frames kept from the stalled thread's stack. Deep enough to cross the two or
+# three aish frames that matter, short enough that a record is readable.
+STALL_FRAMES = 12
 
 
 class TaskCancelled(Exception):
@@ -1558,7 +1579,9 @@ KNOWLEDGE_WRITE_TOOLS = frozenset({"remember", "forget_memory"})
 # an answer always needs the tool steps and the knowledge step alongside the
 # gate records. `thinking` is deliberately left out: it is the high-volume kind
 # and buys nothing #197 asks for. Renderless kinds are stamped by _emit_record.
-TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge", "trim", "model_error"})
+TURN_STAMPED_STEPS = frozenset(
+    {"tool_start", "tool", "knowledge", "trim", "model_error", "stall"}
+)
 
 # Decisions meaning THE ACTION DID NOT HAPPEN. A step carrying one is never
 # green, whichever path set it — see _emit_tool_step for why this is one rule
@@ -2035,7 +2058,11 @@ def _safe_args(args: dict, cap: int) -> tuple[dict, int]:
 
 
 def _model_error_line(
-    failure: ratelimit.CallFailure, attempt: int, delay: float, final: bool
+    failure: ratelimit.CallFailure,
+    attempt: int,
+    delay: float,
+    final: bool,
+    bound: str = "",
 ) -> str:
     """The terminal's one line about a failed call. Says what kind of failure it
     was and what happens next, because "model call failed" answered neither."""
@@ -2050,10 +2077,14 @@ def _model_error_line(
         return f"✕ {what}: the wait the provider asked for is too long to sit out — not retrying"
     if not failure.retryable:
         return f"✕ {what} — retrying cannot change this, not retrying"
+    if bound == "wait_budget":
+        # WHY it stopped, not just that it did: "gave up after 5 attempts" reads
+        # like a count was reached, and the count was not the bound (#337).
+        return f"✕ {what} — waited as long as this turn may, gave up after {attempt} attempts"
     return f"✕ {what} — gave up after {attempt} attempts"
 
 
-def _unavailable_text(failure: ratelimit.CallFailure | None) -> str:
+def _unavailable_text(failure: ratelimit.CallFailure | None, attempts: int = 1) -> str:
     """What the user is told when every attempt is spent.
 
     A raw provider traceback answered the wrong question. Whether waiting helps
@@ -2078,7 +2109,10 @@ def _unavailable_text(failure: ratelimit.CallFailure | None) -> str:
         )
     if not failure.retryable:
         return f"{failure.kind.replace('_', ' ')} (not retryable): {failure.text}"
-    return f"{failure.kind.replace('_', ' ')} after {MODEL_CALL_ATTEMPTS} attempts: {failure.text}"
+    # The attempts actually SPENT, not the cap. Since #337 the retry is bounded
+    # by a wait budget, so the cap is usually not what ended it and printing it
+    # would state a bound that did not bind.
+    return f"{failure.kind.replace('_', ' ')} after {attempts} attempts: {failure.text}"
 
 
 def _capped(text: str, cap: int) -> tuple[str, int]:
@@ -2332,6 +2366,11 @@ class Agent:
         # carry this stamp, so a counter that only exists once a task has begun
         # makes the very first append raise.
         self._model_call = 0
+        # When this agent last produced a record — the stall watchdog's one
+        # signal (#336). Bound here as well as armed per task, because records
+        # are emitted outside a task too and a watchdog must never be the thing
+        # that raises.
+        self._last_record_at = time.perf_counter()
         self._call_seq = itertools.count(1)
         # The call id currently being dispatched, so a `gate` verdict joins to
         # the `tool` step for the action it governed (§2). Thread-local rather
@@ -2743,10 +2782,28 @@ class Agent:
         concerns — durable logging vs live rendering — stay independent."""
         if step.get("kind") in TURN_STAMPED_STEPS:
             self._turn_stamp(step)
+        if step.get("kind") != "stall":
+            # The watchdog's own record must not count as the turn being alive,
+            # or a stall would silence the watchdog that found it.
+            self._mark_alive()
         if self.step_log is not None:
             self.step_log(step)
         if self.on_step is not None:
             self.on_step(step)
+
+    def _mark_alive(self) -> None:
+        """This turn just produced a record — the one signal the stall watchdog
+        reads (#336).
+
+        Deliberately "produced a record" and not "is executing": a turn CAN sit
+        legitimately in one long call, and the watchdog's threshold is what
+        covers that. What it must never do is call a turn alive because a thread
+        exists, since a wedged thread exists too.
+
+        `perf_counter` and not `monotonic`, to travel on the same clock as every
+        other duration this file measures — including the one the tests fake.
+        """
+        self._last_record_at = time.perf_counter()
 
     def _emit_command_start(self, command: str, user: bool = False) -> None:
         # `user` marks a command the user typed directly (! prefix): the web UI
@@ -2783,6 +2840,7 @@ class Agent:
         Every kind emitted here must be in that set — asserted by test.
         """
         self._turn_stamp(fields)
+        self._mark_alive()  # governance evidence is progress too (#336)
         if self.step_log is not None:
             self.step_log(fields)
 
@@ -2985,6 +3043,25 @@ class Agent:
         self._model_call = 0
 
     def run_task(
+        self,
+        task: str,
+        images: list[str] | None = None,
+        documents: list[str] | None = None,
+        *,
+        keep_history: bool = False,
+    ) -> str:
+        """One turn, under the stall watchdog (#336).
+
+        A thin wrapper and not a `with` inside the body, because the body
+        returns from a dozen places and every one of them must disarm. The
+        watchdog is armed OUTSIDE the body so it also covers the run-up — the
+        knowledge scan, the preflight, the rule seed — which is precisely the
+        stretch the 28 recorded stalls died in.
+        """
+        with self._stall_watchdog():
+            return self._run_task(task, images, documents, keep_history=keep_history)
+
+    def _run_task(
         self,
         task: str,
         images: list[str] | None = None,
@@ -3505,7 +3582,17 @@ class Agent:
             think=self.think,
         )
         last: ratelimit.CallFailure | None = None
-        for attempt in range(1, MODEL_CALL_ATTEMPTS + 1):
+        # The retry is bounded by TIME, not by a count (#337). `budget` is the
+        # seconds of waiting this turn may spend on a provider that keeps
+        # refusing; `waited` is what it has spent. An attempt count was the
+        # wrong unit: a quota window is measured in seconds, so three attempts
+        # spaced 5s and 10s could never outlast one, whatever the number was
+        # set to. `docs/rate-limits.md`.
+        budget = self._retry_wait_budget()
+        waited = 0.0
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 # The governor's cancel and status wiring, for the span of one
                 # call. It cannot ride on the arguments: every backend is
@@ -3526,11 +3613,30 @@ class Agent:
                 raise TaskCancelled from exc
             except Exception as exc:  # noqa: BLE001 — surface, don't crash the REPL
                 last = ratelimit.classify(exc)
-                final = attempt >= MODEL_CALL_ATTEMPTS or not last.retryable
-                delay = 0.0 if final else ratelimit.backoff_delay(last, attempt)
-                self._record_model_error(last, attempt, delay, final)
+                # The next wait is priced BEFORE the decision, because the
+                # decision is about affording it. Which bound ended the retry is
+                # recorded rather than left to be re-derived: "gave up after 5
+                # attempts" and "gave up with 8 attempts left, out of patience"
+                # are different facts, and the number alone tells them apart
+                # from neither — the same provenance discipline `_history_budget`
+                # applies to the three bounds on a page.
+                delay = ratelimit.backoff_delay(last, attempt) if last.retryable else 0.0
+                bound = ""
+                if not last.retryable:
+                    bound = "not_retryable"
+                elif waited + delay > budget:
+                    bound = "wait_budget"
+                elif attempt >= MODEL_CALL_ATTEMPT_CAP:
+                    bound = "attempt_cap"
+                final = bool(bound)
+                if final:
+                    delay = 0.0
+                self._record_model_error(
+                    last, attempt, delay, final, waited=waited, budget=budget, bound=bound
+                )
                 if final:
                     break
+                waited += delay
                 if ratelimit.wait(delay, self._cancel, self.status.note):
                     # A Stop during the wait is a stop, not a failed call: the
                     # user is owed the cancel path, not a ModelUnavailable that
@@ -3542,7 +3648,121 @@ class Agent:
                 # the text-only path and the final no-tools turn alike.
                 self._record_reasoning(turn)
                 return turn
-        raise ModelUnavailable(_unavailable_text(last))
+        raise ModelUnavailable(_unavailable_text(last, attempt))
+
+    @contextlib.contextmanager
+    def _stall_watchdog(self):
+        """Report a turn that stops producing records but never ends (#336).
+
+        The defect this exists for: five turns in one chat wrote `task_start`,
+        indexed their knowledge, and then emitted NOTHING — no user message, no
+        model call, no ending — while the owner watched an idle screen and
+        re-sent four times over 45 minutes. 28 such turns across a month of
+        logs, and not one of them can say where it stopped, because the only
+        evidence a stall leaves is the absence of everything after it. That is
+        the absence-as-evidence failure contract §0 exists to stop, arriving by
+        a route no record shape anticipated.
+
+        So the watchdog reports what it can OBSERVE and nothing more: how long
+        the turn has been silent, and where the worker thread's own stack says
+        it is. No cause is named. A stack in `ssl.read` and a stack in
+        `queue.get` are different worlds, and either is a fact; which of them
+        holds is exactly what nobody could establish afterwards.
+
+        A daemon thread, so it can never hold the process open, and it only ever
+        READS the worker's frames — `sys._current_frames()` is a snapshot and
+        touches nothing. It re-reports on `STALL_REPEAT_S` because "still stuck
+        22 minutes later" is a different fact from "stuck", and the second is
+        what says nobody recovered it.
+        """
+        worker = threading.get_ident()
+        done = threading.Event()
+        self._mark_alive()
+
+        def watch() -> None:
+            reported = 0.0
+            while not done.wait(min(STALL_WATCHDOG_S, STALL_REPEAT_S) / 2):
+                silent = time.perf_counter() - self._last_record_at
+                if silent < STALL_WATCHDOG_S:
+                    reported = 0.0
+                    continue
+                if reported and silent - reported < STALL_REPEAT_S:
+                    continue
+                reported = silent
+                try:
+                    self._record_stall(worker, silent)
+                except Exception:  # noqa: BLE001 — a watchdog must never be the failure
+                    return
+
+        thread = threading.Thread(target=watch, name="aish-stall-watchdog", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            done.set()
+
+    def _record_stall(self, worker: int, silent: float) -> None:
+        """Where the stalled turn is, as observed — never why (L8).
+
+        RENDERED, on `trim`'s terms: it is a record about something the reader
+        can SEE. The screen says the turn is thinking and it has done nothing
+        for minutes, so the correction belongs on the timeline he is watching,
+        not only in a log he would have to know to go and read.
+        """
+        frame = sys._current_frames().get(worker)
+        stack = traceback.extract_stack(frame) if frame is not None else []
+        # aish's own frames only: the answer to "where is it" is a line in this
+        # codebase, and forty frames of asyncio and SSL bury it.
+        here = str(Path(__file__).resolve().parent)
+        mine = [f for f in stack if str(Path(f.filename).resolve()).startswith(here)]
+        shown = (mine or list(stack))[-STALL_FRAMES:]
+        step: dict = {
+            "kind": "stall",
+            "silent_s": round(silent, 1),
+            "threshold_s": STALL_WATCHDOG_S,
+            "model_call": self._model_call,
+            # The innermost aish frame IS the answer when there is one. Absent
+            # when the stack could not be read at all, which is its own fact and
+            # must not be filled in with a plausible frame.
+            "where": f"{Path(shown[-1].filename).name}:{shown[-1].lineno} in {shown[-1].name}"
+            if shown
+            else "",
+            "stack": [
+                f"{Path(f.filename).name}:{f.lineno} in {f.name}" for f in shown
+            ],
+            # Whether the frames are aish's or whatever the stack happened to
+            # hold — a reader must not mistake a filtered stack for the top of
+            # the real one.
+            "frames": "aish" if mine else "raw",
+        }
+        if frame is None:
+            # The thread is gone. That is a HARDER fact than a stall — the
+            # worker died without the task ending — and it must not be recorded
+            # as a stall that merely could not be read.
+            step["worker"] = "gone"
+        self._emit_step(**step)
+        self._note(
+            f"⚑ nothing for {silent:.0f}s — still inside {step['where'] or 'an unreadable frame'}"
+        )
+
+    def _retry_wait_budget(self) -> float:
+        """Seconds of waiting one model call may spend across its retries (#337).
+
+        The same number as `_wait_ceiling`, and deliberately so: both answer
+        "how long may this session sit waiting on the provider", and an owner
+        who wants a turn to hold on longer means both. They are separate methods
+        because they bound different phases — queueing for headroom BEFORE a
+        call, versus backing off BETWEEN calls — and a future reason to size
+        them apart should not have to first prise them out of one constant.
+
+        Attended, this buys 5+10+20+40 seconds across five attempts, which
+        crosses a per-minute quota window; the old three-attempt count spent
+        fifteen seconds and could not. Unattended it lands back on three
+        attempts, and that is not a compromise: an unattended session holds a
+        thread from the server's bounded worker pool, which is the whole reason
+        its ceiling is low.
+        """
+        return self._wait_ceiling()
 
     def _wait_ceiling(self) -> float:
         """How long this session will queue for rate-limit headroom.
@@ -3557,7 +3777,15 @@ class Agent:
         return ratelimit.UNATTENDED_WAIT_CEILING_S
 
     def _record_model_error(
-        self, failure: ratelimit.CallFailure, attempt: int, delay: float, final: bool
+        self,
+        failure: ratelimit.CallFailure,
+        attempt: int,
+        delay: float,
+        final: bool,
+        *,
+        waited: float = 0.0,
+        budget: float = 0.0,
+        bound: str = "",
     ) -> None:
         """A failed model call, as evidence (#261).
 
@@ -3576,6 +3804,11 @@ class Agent:
         `sent_chars` and not an estimated token count, deliberately: chars are a
         measured fact, tokens here would be a model of one, and the two must not
         wear the same unit as the provider's own number (#262).
+
+        `attempts` is the CAP, and since #337 it is rarely what ends a retry —
+        the wait budget usually does. So the budget travels with the record and
+        the ending names which bound it hit. Without that, a reader sees "gave
+        up on attempt 5 of 8" and cannot tell a spent budget from a bug.
         """
         step: dict = {
             "kind": "model_error",
@@ -3583,7 +3816,9 @@ class Agent:
             "provider": self.provider,
             "model": self.model,
             "attempt": attempt,
-            "attempts": MODEL_CALL_ATTEMPTS,
+            "attempts": MODEL_CALL_ATTEMPT_CAP,
+            "wait_budget_s": round(budget, 3),
+            "waited_total_s": round(waited, 3),
             # Passed in, never re-derived from `delay`: a provider may
             # legitimately answer "Retry-After: 0", and the last attempt of a
             # retryable failure also waits zero. Both would read as the opposite
@@ -3595,6 +3830,8 @@ class Agent:
         }
         if delay:
             step["waited_s"] = round(delay, 3)
+        if bound:
+            step["bound"] = bound
         text, dropped = _capped(failure.text, MODEL_ERROR_CHARS)
         step["text"] = text
         if dropped:
@@ -3603,7 +3840,7 @@ class Agent:
         self._emit_step(**step)
         # The terminal has no trace timeline to draw the row on, so it gets the
         # sentence instead — `_note` is silent wherever `on_step` renders.
-        self._note(_model_error_line(failure, attempt, delay, final))
+        self._note(_model_error_line(failure, attempt, delay, final, bound))
 
     def _record_reasoning(self, turn: tuple) -> None:
         """Everything the model produced on one call, in full (#240).

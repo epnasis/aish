@@ -358,17 +358,84 @@ class TestModelErrorRecord:
         assert len(errors) == 1
         assert errors[0]["action"] == "give_up"
 
-    def test_a_transient_failure_spends_every_attempt(self):
-        from aish.agent import MODEL_CALL_ATTEMPTS, ModelUnavailable
+    def test_a_transient_failure_retries_until_the_wait_budget_is_spent(self):
+        """The bound is TIME, not a count (#337), so the attempts are however
+        many fit — and the last record says which bound ended it."""
+        from aish.agent import MODEL_CALL_ATTEMPT_CAP, ModelUnavailable
 
         RAISE_TIMES["n"] = 99
         agent, steps = self.agent_with(OSError("connection reset"))
         with pytest.raises(ModelUnavailable):
             agent.run_task("hi")
         errors = [s for s in steps if s.get("kind") == "model_error"]
-        assert len(errors) == MODEL_CALL_ATTEMPTS
-        assert [e["attempt"] for e in errors] == list(range(1, MODEL_CALL_ATTEMPTS + 1))
+        assert [e["attempt"] for e in errors] == list(range(1, len(errors) + 1))
         assert errors[-1]["action"] == "give_up"
+        assert errors[-1]["bound"] == "wait_budget"
+        # The cap is a backstop, not the bound: it must not be what stopped this.
+        assert len(errors) < MODEL_CALL_ATTEMPT_CAP
+        # Every retry's wait, and nothing beyond the budget.
+        assert errors[-1]["waited_total_s"] <= errors[-1]["wait_budget_s"]
+
+    def test_a_quota_is_retried_long_enough_to_outlast_a_per_minute_window(self):
+        """The defect #337 names: three attempts spaced 5s and 10s spend fifteen
+        seconds against a window that lasts sixty, and then destroy a turn that
+        had already done its work. An attempt count cannot express "long enough"
+        — only a duration can."""
+        from aish.agent import ModelUnavailable
+
+        RAISE_TIMES["n"] = 99
+        agent, steps = self.agent_with(FakeAPIError("quota", status=429))
+        with pytest.raises(ModelUnavailable):
+            agent.run_task("hi")
+        errors = [s for s in steps if s.get("kind") == "model_error"]
+        assert sum(e.get("waited_s", 0) for e in errors) > 60.0
+        assert errors[-1]["bound"] == "wait_budget"
+
+    def test_an_unattended_session_still_gives_up_early(self):
+        """Not politeness: it holds a thread from the server's bounded worker
+        pool, which exists so a parked session cannot starve short user actions.
+        Its low ceiling is the reason, and it must survive the wider budget."""
+        from aish.agent import ModelUnavailable
+
+        RAISE_TIMES["n"] = 99
+        agent, steps = self.agent_with(FakeAPIError("quota", status=429))
+        agent.origin = "trigger"
+        with pytest.raises(ModelUnavailable):
+            agent.run_task("hi")
+        errors = [s for s in steps if s.get("kind") == "model_error"]
+        assert sum(e.get("waited_s", 0) for e in errors) <= ratelimit.UNATTENDED_WAIT_CEILING_S
+
+    def test_the_ending_names_the_bound_it_hit(self):
+        """"Gave up on attempt 5 of 8" cannot be read: a spent budget and a bug
+        that stopped early look the same. The bound is recorded, never
+        re-derived from the numbers around it."""
+        from aish.agent import ModelUnavailable
+
+        RAISE_TIMES["n"] = 99
+        agent, steps = self.agent_with(FakeAPIError("bad key", status=401))
+        with pytest.raises(ModelUnavailable):
+            agent.run_task("hi")
+        errors = [s for s in steps if s.get("kind") == "model_error"]
+        assert errors[-1]["bound"] == "not_retryable"
+        # Only the ending carries one — a retry has not hit any bound yet.
+        RAISE_TIMES["n"] = 1
+        agent, steps = self.agent_with(FakeAPIError("quota", status=429))
+        agent.run_task("hi")
+        retried = next(s for s in steps if s.get("kind") == "model_error")
+        assert retried["action"] == "retry"
+        assert "bound" not in retried
+
+    def test_the_message_counts_the_attempts_spent_not_the_cap(self):
+        """A bound that did not bind must not be stated as the reason."""
+        from aish.agent import MODEL_CALL_ATTEMPT_CAP, ModelUnavailable
+
+        RAISE_TIMES["n"] = 99
+        agent, steps = self.agent_with(FakeAPIError("quota", status=429))
+        with pytest.raises(ModelUnavailable) as caught:
+            agent.run_task("hi")
+        spent = len([s for s in steps if s.get("kind") == "model_error"])
+        assert spent < MODEL_CALL_ATTEMPT_CAP
+        assert f"after {spent} attempts" in str(caught.value)
 
     def test_a_spent_daily_quota_says_so_instead_of_a_traceback(self):
         """Whether waiting helps is the only thing the reader can act on."""
@@ -1019,3 +1086,103 @@ class TestAnAnonymousRefusalTeachesNothing:
         governor.observe("gemini:gemini-3.5-flash", self.anonymous())
         assert agent._history_budget() == before
         assert "ratelimit" not in before[1]
+
+
+class TestStallWatchdog:
+    """A turn that stops producing records but never ends (#336).
+
+    Five turns in one chat wrote `task_start`, indexed their knowledge, and then
+    emitted NOTHING — no user message, no model call, no ending — while the
+    owner watched an idle screen and re-sent four times over 45 minutes. 28 such
+    turns across a month of logs, and not one can say where it stopped: the only
+    evidence a stall leaves is the absence of everything after it, which is the
+    absence-as-evidence failure `docs/trace-contract.md` §0 exists to stop.
+    """
+
+    def agent_that(self, chat, steps, monkeypatch, threshold=0.05):
+        from aish import agent as agent_module
+        from tests.test_agent import Agent
+
+        monkeypatch.setattr(agent_module, "STALL_WATCHDOG_S", threshold)
+        monkeypatch.setattr(agent_module, "STALL_REPEAT_S", threshold)
+        return Agent(model="fake", approve=lambda _c: True, client_chat=chat,
+                     step_log=steps.append)
+
+    def test_a_stalled_turn_says_where_it_is(self, monkeypatch):
+        """The record answers the one question the logs could not: which line."""
+        from tests.test_agent import model_says
+
+        def chat(**kwargs):
+            time.sleep(0.4)
+            return model_says("done")
+
+        steps: list[dict] = []
+        agent = self.agent_that(chat, steps, monkeypatch)
+        agent.run_task("hi")
+        stalls = [s for s in steps if s.get("kind") == "stall"]
+        assert stalls, "a turn silent past the threshold reported nothing"
+        first = stalls[0]
+        assert first["silent_s"] >= first["threshold_s"]
+        assert "agent.py" in first["where"]
+        assert first["frames"] == "aish"
+        # The stack is the evidence, and it must reach aish's own frames rather
+        # than stopping at whatever library the thread is parked in.
+        assert any("_chat_turn" in frame for frame in first["stack"])
+        assert "turn" in first  # it belongs to the turn, not beside it
+
+    def test_a_working_turn_is_never_called_stalled(self, monkeypatch):
+        """A threshold that fires on ordinary work is worse than none: it
+        teaches the reader to ignore the one record that matters."""
+        from tests.test_agent import model_says
+
+        steps: list[dict] = []
+        agent = self.agent_that(
+            chat=lambda **kw: model_says("done"), steps=steps, monkeypatch=monkeypatch,
+            threshold=30.0,
+        )
+        agent.run_task("hi")
+        assert not [s for s in steps if s.get("kind") == "stall"]
+
+    def test_the_watchdog_disarms_when_the_turn_ends(self, monkeypatch):
+        """A turn that finished is not silent, it is over. Reporting it would
+        make the record mean two things and neither would be actionable."""
+        from tests.test_agent import model_says
+
+        steps: list[dict] = []
+        agent = self.agent_that(lambda **kw: model_says("done"), steps, monkeypatch)
+        agent.run_task("hi")
+        before = len([s for s in steps if s.get("kind") == "stall"])
+        time.sleep(0.3)
+        assert len([s for s in steps if s.get("kind") == "stall"]) == before
+
+    def test_a_stall_that_does_not_move_is_reported_again(self, monkeypatch):
+        """"Stuck at 13:13" and "still stuck at 13:35" are different facts, and
+        the second is the one that says nobody recovered it. The watchdog's own
+        record must therefore not count as the turn being alive."""
+        from tests.test_agent import model_says
+
+        def chat(**kwargs):
+            time.sleep(0.5)
+            return model_says("done")
+
+        steps: list[dict] = []
+        agent = self.agent_that(chat, steps, monkeypatch, threshold=0.05)
+        agent.run_task("hi")
+        stalls = [s for s in steps if s.get("kind") == "stall"]
+        assert len(stalls) >= 2
+        assert stalls[-1]["silent_s"] > stalls[0]["silent_s"]
+
+    def test_the_record_states_no_cause(self, monkeypatch):
+        """L8: a stack is an observation. WHY the turn is there was never
+        established, and a field inviting a guess is how a guess gets shipped."""
+        from tests.test_agent import model_says
+
+        def chat(**kwargs):
+            time.sleep(0.4)
+            return model_says("done")
+
+        steps: list[dict] = []
+        agent = self.agent_that(chat, steps, monkeypatch)
+        agent.run_task("hi")
+        stall = next(s for s in steps if s.get("kind") == "stall")
+        assert not (set(stall) & {"cause", "reason", "why", "likely"})

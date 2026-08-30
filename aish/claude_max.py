@@ -341,6 +341,16 @@ class ClaudeMaxAgent:
         return result
 
     def run_task(self, task: str) -> str:
+        # The SDK owns the loop, so the inner Agent's run_task never runs here —
+        # and neither would its stall watchdog (#336). Armed explicitly, for the
+        # same reason the state reset below is: a per-task mechanism that lives
+        # only inside run_task is a mechanism this backend silently does not
+        # have, and a turn wedged inside the SDK looks exactly like one wedged
+        # anywhere else to the person watching it.
+        with self.inner._stall_watchdog():
+            return self._run_task(task)
+
+    def _run_task(self, task: str) -> str:
         # The SDK owns the loop, so the inner Agent's run_task — where per-task
         # state normally resets — never runs here. Reset it explicitly or a
         # denial's stop gate (and stale _run_meta/skill gates/cancel) would
