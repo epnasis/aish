@@ -727,6 +727,36 @@ def _record_or_none(line: str) -> dict | None:
     return record if isinstance(record, dict) else None
 
 
+def _turn_opens_at(records: list[dict], user_index: int) -> int:
+    """Where a turn's records really begin, given its user message (#202, #338).
+
+    A turn does not start at its user message. `task_start` is written FIRST
+    and carries the prompt VERBATIM, with the knowledge/model preamble
+    (`rule_eval`, `binding`, `context`, `model`) in between. Every cut that
+    keeps `lines[:i]` or drops `lines[i:]` therefore has to walk back over it,
+    at BOTH ends of a range: cutting from the message alone leaves a copy of
+    exactly what was removed, and it strands an unmatched `task_start`, which
+    restart recovery reads as an interrupted task to resume (`pending_task`).
+
+    That is not a hypothetical. `redact_turn` walked back and `rewind_last_turn`
+    did not, so a Retry left the completed turn's `task_start` behind with
+    nothing after it: a turn that ran to `task_end` came back as a pending
+    crash, spending the `RESUME_MAX_ATTEMPTS` budget kept for dead processes
+    (#338, reproduced at 8 records with no server). One walk-back, so the next
+    cut inherits it instead of re-learning it.
+
+    A log with no `task_start` before the message (every CLI session) opens at
+    the message and the preamble records are left where they are — they carry
+    no user text and no recovery meaning.
+    """
+    for i in range(user_index - 1, -1, -1):
+        kind = records[i].get("kind")
+        if kind in ("trace", "model"):
+            continue  # this turn's own preamble, or the last one's tail
+        return i if kind == "task_start" else user_index
+    return user_index
+
+
 class SessionLog:
     def __init__(self, path: Path):
         self.path = path
@@ -1089,9 +1119,19 @@ class SessionLog:
         with no matching `task_end` after it IS the interruption signal — a
         killed process cannot write anything, so absence is the evidence.
 
-        `attempts` counts the task_start records since the last task_end, so a
-        task that keeps killing the server is resumed a bounded number of times
-        instead of crash-looping it forever.
+        `attempts` counts the `task_start` records since the last `task_end`, so
+        a task that keeps killing the server is resumed a bounded number of
+        times instead of crash-looping it forever.
+
+        **`task_start` does say two things** — "a turn began" and "a process
+        died" — and #336 tried to tell them apart with a `stall` record from a
+        watchdog. That was withdrawn: the stranded starts it was filed for were
+        #338's Retry rewind, which walks back to the `task_start` now, and no
+        hang has ever been observed leaving one. The owner's account is that a
+        turn only ends without an answer when he stops it, and a stop records
+        itself. An exemption that can never fire reads as a live safeguard, so
+        it is better absent than inert; if a real hang ever appears, it arrives
+        with a case to design against.
 
         `in_flight` names the steps that had STARTED but never reported back —
         a `tool_start` trace record with no matching `tool`. That is the one
@@ -1112,7 +1152,6 @@ class SessionLog:
                 pending = {
                     "prompt": record.get("prompt") or "",
                     "ts": record.get("ts") or "",
-                    "attempts": attempts,
                 }
             elif kind == "task_end":
                 pending, attempts, started = None, 0, []
@@ -1128,6 +1167,7 @@ class SessionLog:
                             del started[i]
                             break
         if pending is not None:
+            pending["attempts"] = attempts
             pending["in_flight"] = [SessionLog._describe_step(s) for s in started]
         return pending
 
@@ -1544,40 +1584,52 @@ class SessionLog:
     def _cut_after_answer(lines: list[str], cut: int) -> str:
         """The log through line `cut` (an assistant answer), plus the rest of
         that turn's trailing records (thinking_cancel, model, framing …) up to
-        the NEXT user message — so the fork replays the complete turn instead of
-        orphaning a trace record logged after the answer, which would otherwise
-        reconstruct as a dangling step."""
+        where the NEXT turn opens — so the fork replays the complete turn
+        instead of orphaning a trace record logged after the answer, which would
+        otherwise reconstruct as a dangling step.
+
+        The end is `_turn_opens_at` the next user message, not the message
+        itself: a fork cut at the message kept the NEXT turn's `task_start`,
+        and a forked log ending on an unmatched `task_start` is a task restart
+        recovery will resume — verified before the fix, a fork of a two-turn log
+        answered `pending_task` with the second turn's prompt (#338)."""
         end = len(lines)
+        records = [_record_or_none(line) or {} for line in lines]
         for i in range(cut + 1, len(lines)):
-            record = _record_or_none(lines[i])
-            if record is None:
-                continue
+            record = records[i]
             if record.get("kind") == "message" and record.get("role") == "user":
-                end = i
+                end = _turn_opens_at(records, i)
                 break
         return "\n".join(lines[:end]) + "\n"
 
     def rewind_last_turn(self) -> bool:
-        """Drop the most recent user turn from the log in place: the last
-        `message`/`user` record and every record after it (assistant/tool
-        messages, traces, command framing). Web retry (#60) re-runs the prompt,
-        which re-logs it and the fresh answer, so a cold replay shows one turn,
-        not the discarded attempt. Append-only otherwise, so this is the one
-        rewrite: the handle is closed and reopened lazily on the next record.
-        Returns False when there is no file yet or no user turn to drop."""
+        """Drop the most recent user turn from the log in place: the turn's
+        opening record and every record after it (assistant/tool messages,
+        traces, command framing). Web retry (#60) re-runs the prompt, which
+        re-logs it and the fresh answer, so a cold replay shows one turn, not
+        the discarded attempt. Append-only otherwise, so this is one of the two
+        rewrites: the handle is closed and reopened lazily on the next record.
+        Returns False when there is no file yet or no user turn to drop.
+
+        The cut is `_turn_opens_at` the last user message, not the message
+        itself. Cutting at the message kept the turn's `task_start`,
+        `rule_eval`, `binding` and `context` — all written before it — and
+        dropped its `task_end`, so **every** Retry left an unmatched
+        `task_start` behind: a turn that ran to completion read back as a
+        pending crash, with the recovery budget kept for dead processes being
+        spent by a UI button (#338)."""
         with self._write_lock:
             if not self.path.exists():
                 return False
             lines = self.path.read_text(encoding="utf-8").splitlines()
+            records = [_record_or_none(line) or {} for line in lines]
             cut: int | None = None
-            for i, line in enumerate(lines):
-                record = _record_or_none(line)
-                if record is None:
-                    continue
+            for i, record in enumerate(records):
                 if record.get("kind") == "message" and record.get("role") == "user":
                     cut = i
             if cut is None:
                 return False
+            cut = _turn_opens_at(records, cut)
             if self._fh is not None:
                 self._fh.close()
                 self._fh = None
@@ -1592,14 +1644,9 @@ class SessionLog:
         the turn, counting what went — so the removal is itself auditable while
         the text is gone from disk.
 
-        The range is [the turn's task_start, the next user message). Walking
-        back over the `task_start` matters: it is written before the user
-        message and holds the prompt in full, so cutting from the message alone
-        would leave a copy of exactly what was being removed — and it would
-        strand an unmatched task_start, which restart recovery reads as an
-        interrupted task to resume. The knowledge/model records that can also
-        precede a user message carry no user text, so a log with no task_start
-        (every CLI session) simply cuts from the message and leaves them.
+        The range is [the turn's task_start, the next turn's task_start), both
+        ends found by `_turn_opens_at` — the shared walk-back, whose docstring
+        holds the reason.
 
         Returns what was removed, or None when no such turn is in this log —
         an id that named a turn someone else already removed, or a client
@@ -1640,26 +1687,14 @@ class SessionLog:
                 for i, rec in enumerate(records[: start + 1])
                 if is_user(rec) and (rec.get("content") or "") == text
             )
-            def turn_opens_at(user_index: int) -> int:
-                """Where a turn's records really begin. A turn does not start at
-                its user message: `task_start` is written first and carries the
-                prompt VERBATIM, with the knowledge/model preamble in between.
-                Used at BOTH ends — cutting from the message alone would leave a
-                copy of exactly what was removed, and cutting up to the NEXT
-                message would take that turn's task_start with it."""
-                for i in range(user_index - 1, -1, -1):
-                    kind = records[i].get("kind")
-                    if kind in ("trace", "model"):
-                        continue  # this turn's own preamble, or the last one's tail
-                    return i if kind == "task_start" else user_index
-                return user_index
-
-            first = turn_opens_at(start)
+            # BOTH ends walk back: cutting up to the NEXT message would take
+            # that turn's task_start with it.
+            first = _turn_opens_at(records, start)
             next_user = next(
                 (i for i in range(start + 1, len(records)) if is_user(records[i])),
                 None,
             )
-            end = len(records) if next_user is None else turn_opens_at(next_user)
+            end = len(records) if next_user is None else _turn_opens_at(records, next_user)
 
             tombstone = {
                 "ts": datetime.datetime.now().isoformat(timespec="seconds"),

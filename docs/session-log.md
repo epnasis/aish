@@ -18,6 +18,10 @@
 
 **L5 · Read caches hand out SHARED objects.** They are for consumers that never mutate what they read. Resume paths stay on the raw parse by design.
 
+**L6 · Every cut walks back to the turn's `task_start`.** A turn does not begin at its user message: `task_start` is written first — carrying the prompt verbatim — with `rule_eval`, `binding`, `context` and `model` in between. So a cut taken at the message keeps that preamble and drops the `task_end` after it, and a log ending on an unmatched `task_start` is what restart recovery reads as a killed process (`pending_task`). `_turn_opens_at` is the one walk-back; every writer that shortens or rewrites a log calls it, at BOTH ends of a range. `TestEveryCutWalksBackToTaskStart`.
+
+This was not a habit until it was checked. `redact_turn` had the walk-back and wrote the reason in its own docstring; the two cuts written beside it did not read it. **A lesson in one function's docstring is not a lesson the codebase knows** — hence a law, a shared helper, and a source guard rather than a third correct implementation.
+
 ---
 
 ## Records
@@ -115,7 +119,11 @@ Consequences, each a false unread that is now gone: renaming or redacting a turn
 
 `user_command_history()` aggregates the user's OWN successful `!` commands across recent sessions — only `decision:"user-direct"` records whose `cmd_end` reports exit 0, so model tool-loop commands never pollute the palette — and feeds the web terminal-mode autocomplete. Its command/exit pairing lives in `_parse` (`ParsedLog.user_cmds`) so it rides the parse cache.
 
-`task_start`/`task_end` bracket a web task on disk. `pending_task()` returns the unfinished one, with an `attempts` count = starts since the last end, and `interrupted_sessions()` lists them newest-first inside an age window — the durable half of restart recovery (`docs/web-server.md`).
+`task_start`/`task_end` bracket a web task on disk. `pending_task()` returns the unfinished one and `interrupted_sessions()` lists them newest-first inside an age window — the durable half of restart recovery (`docs/web-server.md`).
+
+**`task_start` means two things, and telling them apart is unsolved (#336).** It says "a turn began"; the recovery scan reads it as "a process died", and nothing in the record shape tells the two apart. A `stall` record from a watchdog was built for this and **withdrawn**: the stranded starts #336 was filed for were #338's Retry rewind, which walks back to the `task_start` now, and no hang has ever been observed leaving one — the owner's account is that a turn only ends without an answer when he stops it, and a stop records itself. An exemption that can never fire reads as a live safeguard, so it is better absent than inert. `attempts` is the raw count of starts since the last `task_end`. If a real hang ever appears it arrives with a case to design against, which this never had.
+
+**The start stays PENDING regardless**, which is what keeps recovery no less capable than before: a task that hangs and whose process is *then* killed is a crash, and is resumed exactly as it always was.
 
 ---
 
@@ -145,6 +153,21 @@ They hand out SHARED objects, so resume paths (`load_messages`, the CLI's own pa
 
 ---
 
+## The writers that shorten a log (L6)
+
+Four, and the guard is the enumeration:
+
+| writer | what it cuts | verdict |
+|---|---|---|
+| `redact_turn` | a named turn, replaced by a tombstone | walks back at both ends since #202 |
+| `rewind_last_turn` | the last turn, for web Retry | **was the defect** — cut at the user message until #338 |
+| `_cut_after_answer` (`truncate_at_answer`, `truncate_at_answer_id`) | everything past a fork point; the server writes the result as a NEW log | **was a defect** — the fork kept the NEXT turn's `task_start`, so a fork of a two-turn log answered `pending_task` with the second turn's prompt |
+| deleting a session | the whole file | needs no walk-back: nothing is left to strand |
+
+`_append`/`_write_line` are append-only and never in scope. The fork's *deciders* (`truncate_at_answer`, `truncate_at_answer_id`) pick a line and delegate the cut, so the walk-back stays in one place; `server.py`'s fork handler writes the text it is handed and computes no boundary of its own.
+
+`TestEveryCutWalksBackToTaskStart` sweeps `session.py` by AST for functions that slice a log's line or record list and requires each to call `_turn_opens_at` or be named in `ALLOWED` with the reason it need not — plus a planted offender, so the sweep cannot pass by matching nothing.
+
 ## Redaction — the one non-append-only operation (#202)
 
 The transcript was append-only and replayed whole, so anything that landed in it was permanent short of deleting the chat or hand-editing JSONL with the server stopped: a probe fired at the wrong chat, a message an autocorrect Return sent half-typed, a secret pasted into the composer.
@@ -153,7 +176,7 @@ The transcript was append-only and replayed whole, so anything that landed in it
 
 Three details are load-bearing (`TestRedaction`):
 
-1. **The cut starts at the turn's `task_start`, not its user message.** `task_start` is written FIRST and carries the prompt VERBATIM, so cutting from the message would leave a copy of exactly what was removed — and would strand an unmatched `task_start`, which restart recovery reads as a task to resume. The same walk-back decides the END, or the removal takes the NEXT turn's `task_start` with it.
+1. **The cut starts at the turn's `task_start`, not its user message** (L6). `task_start` is written FIRST and carries the prompt VERBATIM, so cutting from the message would leave a copy of exactly what was removed. The same walk-back decides the END, or the removal takes the NEXT turn's `task_start` with it.
 2. **Turns are NAMED.** `SessionLog.message` mints a `turn` id on every user record and `reconstruct_events` carries it on the `user` event, with `_turn_id` falling back to the record's LINE INDEX for logs written before ids existed — which is every chat holding a message someone wants gone. The id is minted by the SERVER so a LIVE turn is removable too: the message you most want back is the one you just sent, and a log-minted id would only exist after a cold replay.
 3. **`Redaction.occurrence` says WHICH identically-worded turn it was**, because the live Agent's messages hold no ids — its dicts go straight to the backends — and two turns saying "ok" would otherwise be indistinguishable. Dropping the wrong one from the model's context is the one thing this must not do.
 

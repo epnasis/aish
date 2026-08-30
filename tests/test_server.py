@@ -4044,6 +4044,32 @@ class TestRetry:
             assert "second clean answer" in dumped
             assert sum(1 for e in replay["events"] if e["type"] == "user") == 1
 
+    def test_retries_do_not_spend_the_crash_recovery_budget(self, app_env):
+        """#338, end to end. The rewind cut at the user message, so every Retry
+        left the retried turn's `task_start` behind with its `task_end` gone.
+        Three retries left three stranded starts, and the NEXT genuine crash in
+        that chat therefore counted as a FOURTH interrupted attempt —
+        `RESUME_MAX_ATTEMPTS` is 3, so an ordinary UI button excluded the chat
+        from restart recovery permanently."""
+        client, _ = make_client(
+            app_env, [model_says(f"answer {i}") for i in range(4)]
+        )
+        with client, connected(client) as (ws, hello, _):
+            path = Path(app_env["state_dir"]) / hello["session"]
+            ws.send_json({"type": "task", "text": "what is 2+2?"})
+            recv_until(ws, "done")
+            for _ in range(3):
+                ws.send_json({"type": "retry", "text": "what is 2+2?"})
+                recv_until(ws, "done")
+        assert SessionLog.pending_task(path) is None
+        kinds = [json.loads(line).get("kind") for line in path.read_text().splitlines()]
+        assert kinds.count("task_start") == 1, "one surviving turn, one task_start"
+        # Now a real crash on top of that history: the first attempt, not the fourth.
+        crashed = SessionLog(path)
+        crashed.task_start("and then the process died")
+        crashed.close()
+        assert SessionLog.pending_task(path)["attempts"] == 1
+
     def test_retry_keeps_earlier_turns(self, app_env):
         # Only the LAST turn is rolled back; earlier answers stay in context.
         client, chat = make_client(

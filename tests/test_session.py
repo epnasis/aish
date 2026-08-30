@@ -1231,6 +1231,32 @@ def test_pending_task_in_flight_uses_command_for_shell_steps(tmp_path):
     assert SessionLog.pending_task(log.path)["in_flight"] == ["run_command: make release"]
 
 
+# #336 attempted a `stall` record here so a hung start would not spend the crash
+# budget. Withdrawn: the stranded starts it was filed for were #338's Retry
+# rewind, no hang has ever been observed leaving one, and an exemption that can
+# never fire reads as a live safeguard. `attempts` is the raw count again.
+
+
+def test_every_stranded_start_spends_the_crash_budget(tmp_path):
+    log = SessionLog.new(tmp_path)
+    for _ in range(4):
+        log.task_start("keeps dying")
+    pending = SessionLog.pending_task(log.path)
+    log.close()
+    assert pending["attempts"] == 4
+    assert pending["prompt"] == "keeps dying"  # still recoverable
+
+
+def test_a_finished_task_clears_the_count(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.task_start("recovered")
+    log.task_end()
+    log.task_start("and then this one died")
+    pending = SessionLog.pending_task(log.path)
+    log.close()
+    assert pending["attempts"] == 1
+
+
 # ---- auto-titling (#175) ---------------------------------------------------
 
 
@@ -2104,6 +2130,228 @@ class TestAttachmentForms:
         assert "you can read it" in attachment_guidance("p.pdf", "/u/p.pdf", "document")
         # No kind means the bytes did not go: the model must open the file.
         assert attachment_guidance("x.zip", "/u/x.zip", "") == "[attached file: /u/x.zip]"
+
+
+class TestEveryCutWalksBackToTaskStart:
+    """L6, and the reason it is a law rather than a habit (#338).
+
+    A turn does not begin at its user message — `task_start` is written first
+    and carries the prompt verbatim, with `rule_eval`/`binding`/`context` in
+    between — so a cut taken at the message keeps that preamble and drops the
+    `task_end` after it. What is left is an unmatched `task_start`, which
+    restart recovery reads as a killed process.
+
+    `redact_turn` knew this and said so in its own docstring. `rewind_last_turn`
+    and the fork cut, written beside it, did not: EVERY web Retry stranded a
+    start, so a turn that ran to completion came back as a pending crash and
+    four retries of one prompt excluded the chat from recovery for good. A
+    lesson in one function's docstring is not a lesson the codebase knows —
+    hence one walk-back, and a sweep that says who calls it.
+    """
+
+    # A slice of a log's lines or records, taken by a function in session.py.
+    # Name-independent on purpose: the previous defect would have survived any
+    # check spelled as a list of function names to keep an eye on.
+    ALLOWED: dict[str, str] = {
+        # Empty today, and that is the finding, not an omission: all three
+        # cutters walk back. An entry here must say why a cut CANNOT strand a
+        # start — "deletes the whole file", not "looked fine when I read it".
+    }
+
+    def _cutters(self, sources=None) -> dict[str, set[str]]:
+        """Functions that slice a list holding a log's lines or records.
+
+        A list qualifies when it is bound from `.splitlines()` (the log read
+        off disk) or arrives as a `list[str]`/`list[dict]` parameter — which is
+        how the fork's cut receives one."""
+        import ast
+
+        if sources is None:
+            sources = [Path(__file__).resolve().parents[1] / "aish/session.py"]
+        found: dict[str, set[str]] = {}
+        for path in sources:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                log_lists = {
+                    target.id
+                    for sub in ast.walk(node)
+                    if isinstance(sub, ast.Assign)
+                    and isinstance(sub.value, ast.Call)
+                    and isinstance(sub.value.func, ast.Attribute)
+                    and sub.value.func.attr == "splitlines"
+                    for target in sub.targets
+                    if isinstance(target, ast.Name)
+                }
+                log_lists |= {
+                    arg.arg
+                    for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+                    if arg.annotation
+                    and ast.unparse(arg.annotation).startswith("list[")
+                }
+                cuts = {
+                    ast.unparse(sub)
+                    for sub in ast.walk(node)
+                    if isinstance(sub, ast.Subscript)
+                    and isinstance(sub.slice, ast.Slice)
+                    and isinstance(sub.value, ast.Name)
+                    and sub.value.id in log_lists
+                }
+                if not cuts:
+                    continue
+                body = ast.unparse(node)
+                if "_turn_opens_at" in body or node.name in self.ALLOWED:
+                    continue
+                found[node.name] = cuts
+        return found
+
+    def test_the_sweep_is_not_empty(self):
+        """A rename that empties the sweep must fail loudly, not pass."""
+        source = (Path(__file__).resolve().parents[1] / "aish/session.py").read_text()
+        for name in ("rewind_last_turn", "redact_turn", "_cut_after_answer"):
+            assert f"def {name}(" in source, name
+        assert source.count("def _turn_opens_at(") == 1
+
+    def test_no_cut_skips_the_walk_back(self):
+        offenders = self._cutters()
+        assert not offenders, (
+            "these shorten a session log without walking back over the turn's "
+            "task_start — call _turn_opens_at, or name the function in ALLOWED "
+            f"with why it cannot strand one: {offenders}"
+        )
+
+    def test_the_allow_list_has_no_stale_entries(self):
+        source = (Path(__file__).resolve().parents[1] / "aish/session.py").read_text()
+        gone = sorted(name for name in self.ALLOWED if f"def {name}(" not in source)
+        assert not gone, f"named in ALLOWED but no longer exists: {gone}"
+
+    def test_the_sweep_actually_catches_one(self, tmp_path):
+        """A guard that cannot fail is decoration. This plants the exact shape
+        `rewind_last_turn` had — cut at the user message, keep lines[:cut]."""
+        planted = tmp_path / "rogue.py"
+        planted.write_text(
+            "def rewind(self):\n"
+            "    lines = self.path.read_text().splitlines()\n"
+            "    cut = 0\n"
+            "    for i, line in enumerate(lines):\n"
+            "        if _record_or_none(line).get('role') == 'user':\n"
+            "            cut = i\n"
+            "    self.path.write_text('\\n'.join(lines[:cut]))\n"
+            "def fork(lines: list[str], cut: int) -> str:\n"
+            "    return '\\n'.join(lines[cut:])\n"
+        )
+        assert self._cutters([planted]) == {
+            "rewind": {"lines[:cut]"},
+            "fork": {"lines[cut:]"},
+        }
+
+    # ---- the behaviour the sweep is a proxy for --------------------------
+
+    def _kinds(self, log):
+        out = []
+        for line in log.path.read_text().splitlines():
+            record = json.loads(line)
+            out.append(
+                record["step"].get("kind") if record.get("kind") == "trace"
+                else record.get("kind")
+            )
+        return out
+
+    def _completed_turn(self, log, prompt="what is the weather", answer="sunny"):
+        """One web turn, in the order the server writes it: the bracket and the
+        preamble come BEFORE the user message reaches _append."""
+        log.task_start(prompt)
+        log.step({"kind": "rule_eval", "turn": 1})
+        log.step({"kind": "binding", "turn": 1, "id": "b1"})
+        log.step({"kind": "context", "turn": 1})
+        log.message({"role": "user", "content": prompt})
+        log.step({"kind": "thinking", "secs": 1})
+        log.message({"role": "assistant", "content": answer})
+        log.task_end()
+
+    def test_a_retry_does_not_leave_a_completed_turn_pending(self, tmp_path):
+        """The reproduction from #338, at 8 records and no server."""
+        log = SessionLog.new(tmp_path)
+        self._completed_turn(log)
+        assert self._kinds(log) == [
+            "task_start", "rule_eval", "binding", "context",
+            "message", "thinking", "message", "task_end",
+        ]
+        assert SessionLog.pending_task(log.path) is None
+        log.rewind_last_turn()
+        log.close()
+        # The whole turn went, its opening record included — so the log that
+        # ran to completion is still not a task anyone should resume.
+        assert self._kinds(log) == []
+        assert SessionLog.pending_task(log.path) is None
+
+    def test_a_retry_leaves_the_earlier_turns_and_their_endings_alone(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.model("fake")
+        self._completed_turn(log, "first", "first answer")
+        self._completed_turn(log, "second", "second answer")
+        log.rewind_last_turn()
+        log.close()
+        assert self._kinds(log) == [
+            "model",
+            "task_start", "rule_eval", "binding", "context",
+            "message", "thinking", "message", "task_end",
+        ]
+        assert SessionLog.pending_task(log.path) is None
+
+    def test_a_retry_still_discards_the_attempt_it_is_for(self, tmp_path):
+        """The feature must still work: the prompt and its answer are gone, so
+        the rerun re-logs them and a cold replay shows one turn, not two."""
+        log = SessionLog.new(tmp_path)
+        self._completed_turn(log, "first", "first answer")
+        self._completed_turn(log, "second", "the wrong answer")
+        assert log.rewind_last_turn() is True
+        text = log.path.read_text()
+        log.close()
+        assert "the wrong answer" not in text and "second" not in text
+        assert "first answer" in text
+
+    def test_a_cli_rewind_still_cuts_at_the_message(self, tmp_path):
+        """No task markers (every CLI session), so there is nothing to walk
+        back to and the preamble records are left where they are."""
+        log = SessionLog.new(tmp_path)
+        log.model("fake")
+        log.message({"role": "user", "content": "hello"})
+        log.message({"role": "assistant", "content": "hi"})
+        assert log.rewind_last_turn() is True
+        log.close()
+        assert self._kinds(log) == ["model"]
+
+    def test_a_fork_does_not_carry_the_next_turns_task_start(self, tmp_path):
+        """The same defect at the other end of a range: cutting up to the NEXT
+        user message kept that turn's task_start, so a fork of a two-turn log
+        answered pending_task with the second turn's prompt and would have been
+        resumed on the next restart."""
+        log = SessionLog.new(tmp_path)
+        self._completed_turn(log, "q one", "a one")
+        self._completed_turn(log, "q two", "a two")
+        log.close()
+        text = log.path.read_text()
+        forked = tmp_path / "forked.jsonl"
+        forked.write_text(SessionLog.truncate_at_answer(text, 1))
+        assert SessionLog.pending_task(forked) is None
+        kinds = [
+            json.loads(line).get("kind") for line in forked.read_text().splitlines()
+        ]
+        assert kinds[-1] == "task_end" and kinds.count("task_start") == 1
+
+    def test_a_fork_still_replays_the_whole_turn_it_kept(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._completed_turn(log, "q one", "a one")
+        self._completed_turn(log, "q two", "a two")
+        log.close()
+        forked = tmp_path / "forked.jsonl"
+        forked.write_text(SessionLog.truncate_at_answer(log.path.read_text(), 1))
+        events = SessionLog.reconstruct_events(forked)
+        kept = [e for e in events if e["type"] in ("user", "done")]
+        assert [e["type"] for e in kept] == ["user", "done"]
+        assert kept[0]["text"] == "q one" and kept[1]["result"] == "a one"
 
 
 class TestRedaction:
