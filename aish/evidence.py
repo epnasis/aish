@@ -16,10 +16,20 @@ addressing makes removal a real operation — `purge(digest)` drops the bytes
 once, everywhere that referenced them, and every reader then honestly says
 "purged" instead of "not recorded".
 
-**The log is not append-only.** `redact_turn` and `rewind_last_turn` (which
-fires on every web Retry) both rewrite it in place, so a blob written inside
-one turn can be deleted while later turns still reference it. Blobs kept
-outside the rewritten file cannot be lost that way.
+**The log is not append-only.** `redact_turn` rewrites it in place and removes
+records, so a blob written inside one turn can be deleted while later turns
+still reference it. Blobs kept outside the rewritten file cannot be lost that
+way.
+
+The other in-place rewrite, `supersede_last_turn` (web Retry), no longer takes
+anything away: since #339 it MARKS the discarded turn's records `superseded`
+and nothing leaves the file, replacing `rewind_last_turn`, which deleted them.
+So Retry is not a reason for this store — `redact_turn` alone is, and one
+in-place deleter is reason enough. Retry does still say what the store may not
+be keyed on: `session._is_superseded` states the rule as *a superseded record
+is read by evidence, and by nothing that reconstructs the chat's current
+state*, so a blob's lifetime cannot follow whether its turn is still live. It
+follows the digest, and `purge` is what ends it.
 
 Deduplication is the third benefit and the least important one: the tool menu
 is ~31 KB and near-constant, so one copy serves hundreds of sessions.

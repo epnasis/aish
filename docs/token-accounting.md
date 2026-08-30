@@ -138,10 +138,14 @@ Both are worth reporting; conflating them makes every report wrong in the same d
    in `docs/diagnostics.md`. Reading it as `0` would be a confident lie.
 2. **Model calls outside `run_task` are uncounted** — `server._model_session_title` calls
    `agent.chat` directly, and `curate`'s judges run in a separate process entirely.
-3. **The log is not the billing truth.** `rewind_last_turn` (web Retry) rewrites the log in
-   place and `redact_turn` deletes records; those calls were billed but their records are
-   gone. The report measures **recorded** usage and must say so, or the first
-   reconciliation against a provider console discredits it.
+3. **The log is not the billing truth.** `redact_turn` rewrites the log in place and
+   deletes records; those calls were billed but their records are gone. The report
+   measures **recorded** usage and must say so, or the first reconciliation against a
+   provider console discredits it. **Web Retry used to be the bigger half of this bullet
+   and no longer is:** `rewind_last_turn` deleted the discarded turn, and
+   `supersede_last_turn` replaced it (#339) — the records are MARKED and stay, `usage.py`
+   has no superseded filter, so a retried turn's calls are counted rather than lost, and
+   nothing sets `session.rewritten` for them.
 
 ## Seam with the rate governor
 

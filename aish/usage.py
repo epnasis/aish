@@ -193,8 +193,11 @@ def scan_session(path: Path) -> SessionUsage:
         elif kind == "title":
             session.title = str(record.get("title") or "")
         elif kind == "redaction" or record.get("redacted"):
-            # The log is not the billing truth: a redaction (and a web Retry's
-            # rewind) removes records for calls that were still billed.
+            # The log is not the billing truth: a redaction removes records for
+            # calls that were still billed. Web Retry no longer belongs in this
+            # sentence — `supersede_last_turn` MARKS the discarded turn instead
+            # of deleting it (#339), so its calls are still here to be counted
+            # and nothing sets this flag for them.
             session.rewritten = True
         elif kind == "message":
             if "model_call" in record:
