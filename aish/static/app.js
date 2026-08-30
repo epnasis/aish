@@ -3075,6 +3075,23 @@ function traceStep(step) {
     updateTraceHead(t);
     return;
   }
+  if (step.kind === "stall") {
+    // Draws a row for `trim`'s reason (#336): it contradicts what is in front
+    // of you. The screen says the turn is thinking; it has produced nothing for
+    // minutes. Says WHERE it is and never why — a stack is an observation, and
+    // the whole point of this record is that the cause was never established.
+    t.started += 1;
+    const secs = Math.round(step.silent_s || 0);
+    const where = step.worker === "gone"
+      ? "the worker thread is gone"
+      : step.where ? `still inside ${step.where}` : "its stack could not be read";
+    traceRow(
+      t, traceSvg("thinking", "var(--red)"),
+      `Nothing for ${secs}s`, where
+    );
+    updateTraceHead(t);
+    return;
+  }
   if (step.kind === "trim") {
     // The one governance record that draws a row (#243). Every other one
     // describes a decision you can look up; this one CONTRADICTS what is in
@@ -3159,6 +3176,12 @@ function traceStep(step) {
       tail = "this quota is spent, not busy — retrying will not help";
     } else if (step.retryable === false) {
       tail = "retrying cannot change this";
+    } else if (step.bound === "wait_budget") {
+      // WHICH bound ended it (#337). The retry is bounded by a wait budget, so
+      // "5 of 8 attempts" reads as a count that stopped early for no stated
+      // reason — the count was never the thing that bound.
+      const waited = Math.round(step.waited_total_s || 0);
+      tail = `waited ${waited}s, as long as this turn may — gave up after ${step.attempt} attempts`;
     } else {
       tail = `gave up after ${step.attempt} of ${step.attempts} attempts`;
     }

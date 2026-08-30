@@ -142,9 +142,44 @@ runs the real `traceStep` against it, and `TestModelErrorReplaysLikeItRendered`
 (`tests/test_ratelimit.py`) covers the agent side — including the case that motivated all
 of it, a failure that **recovered** and must still leave evidence.
 
-`MODEL_CALL_ATTEMPTS` is three, not the old two, because the attempts are now spaced and
-classified: a permanent failure spends one attempt instead of two, so a transient one can
-afford three.
+### The bound is a duration, and it was a count for one release too long
+
+The attempt count was three, on the reasoning that the attempts are now spaced and
+classified — a permanent failure spends one instead of two, so a transient one can afford
+three. That is sound about the *classification* and wrong about the *unit*.
+
+On 2026-08-30 a Gemini 429 in `session-20260830-124807-752582.jsonl` was retried at 5s and
+10s and given up on at 13:59:29 — **fifteen seconds of waiting against a per-minute quota
+window.** The turn had already found its answer four tool calls earlier; `task_end: failed`
+threw all of it away. An attempt count cannot express "long enough to outlast a quota",
+because a quota window is measured in seconds and an attempt count is not. Whatever number
+it is set to, the arithmetic that matters is invisible in it.
+
+So `MODEL_CALL_ATTEMPT_CAP` is now a **backstop** (eight, far above any real retry, there
+only for a provider answering `Retry-After: 0` forever) and the bound is
+`Agent._retry_wait_budget()` — the seconds of waiting one call may spend. It is the same
+number as `_wait_ceiling`, deliberately: both answer *"how long may this session sit
+waiting on the provider"*, and an owner who wants a turn to hold on longer means both.
+They are separate methods because they bound different phases — queueing for headroom
+BEFORE a call versus backing off BETWEEN calls — so sizing them apart later needs no
+excavation.
+
+Attended (`DEFAULT_WAIT_CEILING_S`, 120s) that buys 5+10+20+40 across five attempts, which
+crosses a minute. **Unattended (`UNATTENDED_WAIT_CEILING_S`, 20s) it lands back on three
+attempts, and that is not a compromise**: an unattended session holds a thread from the
+server's bounded worker pool, which is the entire reason its ceiling is low.
+
+`bound` on the record names which limit ended the retry — `wait_budget`, `attempt_cap` or
+`not_retryable` — alongside `wait_budget_s` and `waited_total_s`. Without it a reader sees
+*"gave up on attempt 5 of 8"* and cannot tell a spent budget from a bug that stopped early;
+the same provenance discipline §6 applies to the three bounds on a page. `attempts` still
+carries the cap, and is now rarely what bound. `TestModelErrorRecord`.
+
+**The measurement in §5 that this replaced is falsified, and the sentence is corrected
+below.** It said every 429 in every log recovered on the first 5s retry; this one recovered
+on none of three. The same session had already spent a full retry cycle at 12:52 (recovered
+on attempt 3), so the key had been under pressure for an hour — which is the condition the
+old measurement never contained.
 
 ## 5 · The governor
 
@@ -202,8 +237,13 @@ the hour because it has neighbours. Inferring a hard number from an anonymous re
 such a key does not model the quota. It models the traffic of strangers at one instant,
 and then enforces it for as long as the belief survives.
 
-**The trade is measured, not assumed.** Across every session log this owner has: **21
-rate-limit 429s, all recovered on the first 5s retry, none ever needing a second.** Against
+**The trade is measured, not assumed.** As measured to 2026-08-21, across every session log
+this owner had: **21 rate-limit 429s, all recovered on the first 5s retry, none ever needing
+a second.** That is no longer unconditional — on 2026-08-30 one recovered on none of three
+attempts and killed its turn (#337, §4) — so read it as *what a single 5s retry usually buys
+on a quiet key*, not as a bound on what a 429 can cost. It still supports the conclusion it
+is used for here, which is about the relative price of the two mistakes rather than about
+any 429 always recovering. Against
 that, a ceiling inferred from one of them cost **30 calls of ~55s each in a single session —
 23% of all time spent in model calls** — and the number it enforced swung
 987k → 511k → 1076k tokens/min inside 45 minutes, because it is a snapshot of whatever the
