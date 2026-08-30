@@ -62,7 +62,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 
 | Touching… | Read first |
 |---|---|
-| `agent.py`, `claude_max.py`, `approval.py`, `tools.py`, `files.py`, `web.py`, `backends.py`, `provenance.py` | `docs/agent-core.md` |
+| `agent.py`, `claude_max.py`, `approval.py`, `tools.py`, `files.py`, `web.py`, `backends.py`, `provenance.py`, `model_fit.py` | `docs/agent-core.md` |
 | `browser.py`, `browse.py`, `signin.py`, `_browser_read`, `_login_gate`, `_browse_gate`, anything that renders or drives a page in Chrome | `docs/browser.md` |
 | `cli.py`, `prompt.py`, `aliases.py`, `dir_ignore.py`, `notify.py` | `docs/cli.md` |
 | `media.py`, `show_image`, anything that renders an image | `docs/media-and-images.md` |
@@ -95,6 +95,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 
 - **`agent.py`** — the loop and the single execution point (`_dispatch`); approval verdicts, the stop gate, the progress-gated step budget. → `docs/agent-core.md`
 - **`backends.py`** — routes `--model` strings to a chat callable. Every backend (Ollama, Gemini, Claude API, OpenAI) is adapted to the *exact* `ollama.chat` calling convention (`chat(model, messages, tools, options, think, stream)`), so `agent.py` never knows which provider it's on. New backends must preserve this shape.
+- **`model_fit.py`** — whether a local model can actually RUN here, not just whether it is installed. Ollama does not refuse one that is too large; it runs the surplus layers on the CPU and takes the machine down. One fence, in `make_chat`. → `docs/agent-core.md`
 - **`claude_max.py`** — the exception: routes through the Claude Agent SDK / local `claude` CLI login, stripping Claude Code to bare inference and injecting aish's own tools so the approval gate still applies. → `docs/agent-core.md`
 - **`approval.py`** — conservative parser classifying commands as read-only for auto-approval, scoped to session roots. When touching this file, err toward prompting. → `docs/agent-core.md`
 - **`tools.py`** — `run_command` (approval-gated shell), `read_docs`, the denylist, and the `ToolOutcome` result envelope. → `docs/agent-core.md`

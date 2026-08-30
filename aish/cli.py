@@ -14,7 +14,7 @@ import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import aliases, backends, browser, term_image, tools
+from . import aliases, backends, browser, model_fit, term_image, tools
 from .agent import (
     Agent,
     ModelUnavailable,
@@ -923,7 +923,13 @@ def available_models(agent, state_dir: Path | None = None) -> list[tuple[str, st
     """(name, description) pairs for the /model picker: installed Ollama
     models, the cloud providers, and — when credentials + network allow —
     each provider's actual model catalog. Ollama being down just hides the
-    local ones."""
+    local ones.
+
+    Installed is not the same as runnable: a local model whose weights and KV
+    cache overrun what this machine can give it is left OUT (#324), because
+    Ollama will start it anyway with half its layers on the CPU. The model
+    still exists and `/model <name>` still names it — that path refuses with
+    the arithmetic, which is where "why is it gone" gets answered."""
     provider_now = getattr(agent, "provider", "ollama")
     models = []
     try:
@@ -932,12 +938,19 @@ def available_models(agent, state_dir: Path | None = None) -> list[tuple[str, st
         listed = ollama.list().models
     except Exception:
         listed = []
+    fit = model_fit.verdicts(getattr(agent, "num_ctx", model_fit.DEFAULT_NUM_CTX))
     for m in listed:
         name = getattr(m, "model", None)
         if not name:
             continue
+        current_model = provider_now == "ollama" and agent.model == name
+        verdict = fit.get(name)
+        # The model in use is listed whatever the verdict says — a picker that
+        # hides what you are running is describing a machine you are not on.
+        if verdict is not None and not verdict.fits and not current_model:
+            continue
         size = (getattr(m, "size", 0) or 0) / 1e9
-        current = " · current" if provider_now == "ollama" and agent.model == name else ""
+        current = " · current" if current_model else ""
         models.append((name, f"local · {size:.0f} GB{current}"))
     for pname, provider in backends.PROVIDERS.items():
         current = " · current" if provider_now == pname else ""
@@ -1007,7 +1020,9 @@ def switch_model(agent, arg: str, saving: bool = False) -> bool:
               f"(aish --model {arg}) to switch{RESET}")
         return False
     try:
-        chat, provider, name = backends.make_chat(arg)
+        chat, provider, name = backends.make_chat(
+            arg, num_ctx=getattr(agent, "num_ctx", model_fit.DEFAULT_NUM_CTX)
+        )
     except backends.BackendError as exc:
         print(f"{RED}{exc}{RESET}")
         return False
@@ -1890,6 +1905,7 @@ def main() -> int:
         os.environ.get("AISH_CONFIG", str(config_home() / "config.toml"))
     )
     config = load_config(config_path)
+    model_fit.configure(config.get("model_memory_gb"))
 
     parser = argparse.ArgumentParser(
         prog="aish",
@@ -1949,7 +1965,9 @@ def main() -> int:
         chat, provider, model_name = None, "claude-max", args.model.partition(":")[2]
     else:
         try:
-            chat, provider, model_name = backends.make_chat(args.model)
+            chat, provider, model_name = backends.make_chat(
+                args.model, num_ctx=args.num_ctx
+            )
         except backends.BackendError as exc:
             print(f"{RED}error:{RESET} {exc}", file=sys.stderr)
             return 1

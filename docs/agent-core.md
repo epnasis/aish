@@ -405,6 +405,33 @@ The lint is the half that closes the class rather than the instance. `TestOneGua
 
 **Gemini thinking (compat layer).** `OpenAICompatBackend` requests `include_thoughts` for provider gemini; the compat API returns thought summaries INSIDE content delimited by `<thought>…</thought>`, so `_ThoughtFilter`/`split_thoughts` split them into `ChatMessage.thinking` on both the streaming path (stateful — tags can split across deltas, trailing partials are held back and flushed) and the non-streaming one. Unfiltered they would stream straight into the answer bubble and the history. Known gap, probed against the live API: streaming TOOL-CALL turns omit thoughts entirely while non-streaming includes them, so on Gemini the tool phase falls back to the deterministic status line.
 
+### `model_fit.py` — installed is not runnable (#324)
+
+**Ollama does not refuse a model that is too large for the machine.** It computes the fit, finds it does not fit, and starts anyway with the surplus layers on the CPU. From its own log on 2026-08-27, loading qwen3:14b on a 16 GB M4 that also carries a Home Assistant VM and Colima:
+
+```
+msg="model requires more gpu memory than is currently available, evicting a model to make space"
+msg="offloaded 35/41 layers to GPU"
+msg="model weights" device=CPU size="2.0 GiB"
+msg="llama runner started in 15.47 seconds"
+```
+
+Then nothing for seventeen minutes, and a restarted Ollama. The chat's first model call failed with `[Errno 61] Connection refused` after three retries, having sat unanswered the whole time. aish's own picker had offered the model, because it offered everything `ollama list` returned. So the guard is here; there is no upstream one to lean on.
+
+**The quantity that decides is whether the model fits ENTIRELY in the GPU working set** — weights plus KV cache, where the KV cache is `layers × kv_heads × (key_len + value_len) × num_ctx × 2` and grows with the context aish will actually request. `TestFootprintArithmetic` pins that arithmetic against what Ollama's runner logged for the same model and context (5.0 GiB), because an estimate nobody has ever compared to the thing it predicts is a guess with a decimal point.
+
+**Free memory does not decide it, and a rule built on it would be worse than none.** Across every load Ollama has logged on that machine, `system memory free` reads 3.8–4.8 GiB whether the load is a 4B model that works or the 14B one that took the machine down — the crash reading, 3.0 GiB, sits inside the normal band. macOS compresses on demand rather than leaving memory idle, so the number is flat regardless of what is about to happen; sizing a budget from it hides qwen3:8b on a healthy box.
+
+**What ongoing processes contribute is what Ollama already has resident** (`ollama ps` reports `size_vram` per model), which is measured and subtracted — aish runs an embedding model of its own during retrieval, so "nothing else is loaded" is not the usual case. A resident model is not charged for its own residency, or the model you are running would report that it does not fit (`TestOngoingProcesses`). Ordinary process memory is deliberately NOT subtracted on top: macOS exposes no number that predicts what another process truly needs resident — the VM guests on that machine hold theirs as ordinary swappable anonymous pages, indistinguishable from a browser's — and subtracting the one figure that IS unswappable (wired, ~2 GB) on top of the 28% `GPU_SHARE` already reserves double-counts it. `model_memory_gb` in `config.toml` is the override for a machine that knows better (`TestConfiguredCeiling`).
+
+`GPU_SHARE` is 0.72 because Metal reports the real ceiling as `recommendedMaxWorkingSetSize` — 12713 MB of 16384 MB, or 77.6% — and reading it needs pyobjc. Being wrong-low hides a model that would have run; being wrong-high is the crash.
+
+**There is ONE fence and it is `make_chat`,** not the picker. The picker is not the only way in: `--model` at launch, `/model <name>`, the web model card, a trigger's model override and the saved startup default all arrive through `backends.make_chat`, which raises `BackendError` — a refusal every caller already handles, including the resume path, which falls back to the startup model rather than failing (`TestTheFence`). A call that passes no `num_ctx` is checked at `DEFAULT_NUM_CTX` rather than waved through, so the fence is never silently off for a path that forgot to thread it.
+
+**`None` means "not measured", never "yes".** Hardware this rule has no evidence for (anything but Apple Silicon — a discrete GPU's budget is VRAM, which is not a fraction of system RAM), an Ollama that is not running, a model that is not installed, one whose GGUF metadata does not carry the attention shape: all return no verdict, and the model stays offered. A fit check that could not measure must not refuse, and one unreadable model must not blank the picker (`TestNoOpinion`). The picker drops what does not fit but always lists the model in use whatever the verdict says, since hiding what you are running describes a machine the owner is not on (`TestPicker`, `TestVerdicts`).
+
+The refusal carries the arithmetic that produced it — what the model needs, split into weights and context, against what the machine has — and names the context at which it *would* fit, because the footprint is aish's own `num_ctx` as much as the model's size. It says what Ollama would DO (run the surplus layers on the CPU), not how that would feel, which varies with what else the machine is carrying.
+
 ### `claude_max.py` — the exception
 Routes through the Claude Agent SDK / local `claude` CLI login, stripping Claude Code to bare inference and injecting aish's own tools so the approval gate still applies (L1). Keeps its own session state. Three invariants:
 

@@ -581,7 +581,7 @@ def test_resume_adopts_the_session_model_and_workspace(tmp_path, monkeypatch):
     logref = LogRef(SessionLog.new(tmp_path))
     monkeypatch.setattr(
         backends, "make_chat",
-        lambda spec: (lambda **_k: None, "gemini", "gemini-3.5-flash"),
+        lambda spec, **_kw: (lambda **_k: None, "gemini", "gemini-3.5-flash"),
     )
 
     handle_slash("/resume", agent, logref, tmp_path)  # only one session: auto-selects
@@ -1587,7 +1587,7 @@ class TestLaunchResume:
         return state
 
     @staticmethod
-    def fake_backend(spec):
+    def fake_backend(spec, **_kw):
         provider, _, name = spec.partition(":")
         if not name:  # bare Ollama model name
             return (lambda **_kw: None), "ollama", provider

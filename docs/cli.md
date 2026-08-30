@@ -54,6 +54,8 @@ Three things a find-and-replace would have got wrong, which is why `tests/test_c
 
 `available_models` merges local Ollama models with the cloud catalog; `cloud_model_catalog` caches provider API results for `CATALOG_TTL` and will only wait `CATALOG_FETCH_WAIT` for them, so the picker never hangs on a slow network. `rank_models` orders them, `switch_model` swaps the backend live, `model_spec` parses the `--model` string, and `save_default_model` persists the choice. `TestModels`, `TestModelPicker`, `TestModelAndJobs`, `TestModelSave`.
 
+**The picker offers what the machine can RUN, not what is installed (#324).** A local model whose weights plus KV cache overrun what this machine can give it is left out, because Ollama will start it anyway with half its layers on the CPU and take the machine down with it. The model still exists and `/model <name>` still names it — that path refuses with the arithmetic, which is where "why is it gone" gets answered. The rule, the incident and why free memory cannot decide it are in `docs/agent-core.md`.
+
 A new web chat inherits the model the client is currently using; the saved default applies only at process start.
 
 ---

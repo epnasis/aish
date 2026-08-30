@@ -276,6 +276,14 @@ The default is local-only. When a task needs a stronger model, the *same* agent
 in that conversation then leaves your machine, so it's an explicit choice
 (`--model` at launch or `/model` mid-chat).
 
+The picker offers the local models this machine can actually **run**, which is
+not the same as the ones `ollama list` shows. A model whose weights plus its
+context cache overrun the memory available to it is left out: Ollama does not
+refuse such a model — it loads what fits on the GPU and runs the rest on the
+CPU, which can make the whole machine unresponsive. Naming one explicitly
+(`/model qwen3:14b`) says what it needs, what there is, and the context size at
+which it *would* fit.
+
 | `--model` | Runs on | Cost |
 |---|---|---|
 | _(default)_ | local Ollama model | free — nothing leaves the machine |
@@ -774,7 +782,8 @@ detaches it into a background job that survives aish exiting (`/jobs` lists them
 older `/session` still works), `/help`, `/quit`.
 
 **Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
-`vi_mode`, and an `[aliases]` table (aish-level aliases, since commands run
+`vi_mode`, `model_memory_gb` (what a local model may occupy here; defaults to a
+share of RAM), and an `[aliases]` table (aish-level aliases, since commands run
 through a non-interactive shell that never sources your `~/.zshrc`). CLI flags
 override config; `$AISH_MODEL` overrides the model. Paths override via
 `$AISH_CONFIG`, `$AISH_STATE_DIR`, `$AISH_ALLOWLIST`, `$AISH_DENYLIST`.

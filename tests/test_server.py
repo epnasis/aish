@@ -27,6 +27,7 @@ from uvicorn.protocols.utils import ClientDisconnected
 
 import aish.browse as browse_module
 import aish.browser as browser_module
+import aish.model_fit as model_fit
 import aish.notify as notify_module
 import aish.server as server_module
 import aish.session as session_module
@@ -3002,7 +3003,7 @@ class TestSessions:
         monkeypatch.setattr(
             server_module.backends,
             "make_chat",
-            lambda spec: (switched, "gemini", "gemini-3-pro"),
+            lambda spec, **_kw: (switched, "gemini", "gemini-3-pro"),
         )
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, hello, _):
@@ -4115,7 +4116,7 @@ class TestModels:
         monkeypatch.setattr(
             server_module.backends,
             "make_chat",
-            lambda spec: (new_chat, "gemini", "gemini-3-pro"),
+            lambda spec, **_kw: (new_chat, "gemini", "gemini-3-pro"),
         )
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
@@ -4136,7 +4137,7 @@ class TestModels:
         monkeypatch.setattr(
             server_module.backends,
             "make_chat",
-            lambda spec: (new_chat, "gemini", "gemini-3-pro"),
+            lambda spec, **_kw: (new_chat, "gemini", "gemini-3-pro"),
         )
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
@@ -4154,6 +4155,27 @@ class TestModels:
             # so skip to the error rather than reading the raw next frame (#102).
             error = recv_until(ws, "error")
             assert "restart" in error["text"]
+
+    def test_set_model_refuses_a_model_too_large_for_the_machine(
+        self, app_env, monkeypatch
+    ):
+        """#324: the web model card is one of the ways into make_chat, and the
+        fence there must reach the owner as a refusal carrying the numbers —
+        not a chat that then hangs on its first turn."""
+        verdict = model_fit.Verdict(
+            model="qwen3:14b", fits=False, weights=9_276_198_565, kv=5_368_709_120,
+            budget=12_369_505_812, num_ctx=32768, largest_num_ctx=16384,
+        )
+        monkeypatch.setattr(server_module.backends.model_fit, "check",
+                            lambda *a, **k: verdict)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "set_model", "spec": "qwen3:14b"})
+            error = recv_until(ws, "error")
+            assert "does not fit" in error["text"]
+            assert "14.6 GB" in error["text"]
+            # and the session is still on the model it was already running
+            assert client.app.state.server.active.agent.model != "qwen3:14b"
 
 
 class TestWorkspace:
@@ -7082,7 +7104,7 @@ class TestTriggerHardening:
         override = FakeChat([model_says("done locally")])
         monkeypatch.setattr(
             server_module.backends, "make_chat",
-            lambda spec: (override, "ollama", spec),
+            lambda spec, **_kw: (override, "ollama", spec),
         )
         client, _ = make_client(app_env, [], token="secret")
         with client:
@@ -7100,7 +7122,7 @@ class TestTriggerHardening:
         # An unbuildable override must refuse — silently running the prompt on
         # the (possibly cloud) default is the leak the override prevents. And
         # the refusal happens before any session log exists.
-        def broken(spec):
+        def broken(spec, **_kw):
             raise server_module.backends.BackendError("no such model")
 
         monkeypatch.setattr(server_module.backends, "make_chat", broken)

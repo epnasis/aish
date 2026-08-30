@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import ratelimit
+from . import model_fit, ratelimit
 
 
 @dataclass
@@ -267,14 +267,27 @@ def parse_model(model_arg: str) -> tuple[str, str]:
     return "ollama", model_arg
 
 
-def make_chat(model_arg: str, client=None) -> tuple[Callable, str, str]:
+def make_chat(
+    model_arg: str, client=None, num_ctx: int = model_fit.DEFAULT_NUM_CTX
+) -> tuple[Callable, str, str]:
     """Resolve a --model string to (chat_callable, provider_name, model_name).
 
-    ``client`` injects a pre-built provider client (tests)."""
+    ``client`` injects a pre-built provider client (tests). ``num_ctx`` is the
+    context the caller will actually request, which is what a local model's
+    KV cache is sized from — see the fit check below.
+    """
     provider_name, model_name = parse_model(model_arg)
     if provider_name == "ollama":
         import ollama
 
+        # The one fence for local models (#324). It lives here rather than in
+        # the picker because the picker is not the only way in: `--model` at
+        # launch, `/model <name>`, the web model card and the saved startup
+        # default all arrive through make_chat, and a model that would take
+        # the machine down must not be reachable from any of them.
+        verdict = model_fit.check(model_name, num_ctx)
+        if verdict is not None and not verdict.fits:
+            raise BackendError(model_fit.refusal(verdict))
         return governed(ollama.chat, "ollama"), "ollama", model_name
     provider = PROVIDERS[provider_name]
     if provider.kind == "anthropic":

@@ -60,7 +60,17 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from uvicorn.protocols.utils import ClientDisconnected
 
-from . import backends, browser, dir_ignore, explain, export, files, notify, tools
+from . import (
+    backends,
+    browser,
+    dir_ignore,
+    explain,
+    export,
+    files,
+    model_fit,
+    notify,
+    tools,
+)
 from .agent import (
     CANCELLED_RESULT,
     FEEDBACK_SWITCH_NOTE,
@@ -4179,7 +4189,9 @@ class WebServer:
                 )
             return
         try:
-            chat, provider, name = await asyncio.to_thread(backends.make_chat, spec)
+            chat, provider, name = await asyncio.to_thread(
+                backends.make_chat, spec, num_ctx=session.agent.num_ctx
+            )
         except backends.BackendError as exc:
             await self._refuse(client, str(exc))
             return
@@ -5812,7 +5824,7 @@ def create_app(
     elif model == "claude-max" or model.startswith("claude-max:"):
         chat, provider, model_name = None, "claude-max", model.partition(":")[2]
     else:
-        chat, provider, model_name = backends.make_chat(model)
+        chat, provider, model_name = backends.make_chat(model, num_ctx=num_ctx)
 
     context = "\n\n".join(
         part
@@ -5864,7 +5876,7 @@ def create_app(
                 )
             # Build (and thereby validate) BEFORE SessionLog.new so a bad
             # model can't leave an orphan log file behind.
-            override_chat = backends.make_chat(model_override)
+            override_chat = backends.make_chat(model_override, num_ctx=num_ctx)
         if path is not None:
             # Parse BEFORE anything is appended: the last model record in
             # the file is the model this session must resume with.
@@ -6192,6 +6204,7 @@ def main() -> int:
         os.environ.get("AISH_CONFIG", str(config_home() / "config.toml"))
     )
     config = load_config(config_path)
+    model_fit.configure(config.get("model_memory_gb"))
     # Seed config.toml with the default folder-browser ignore list on first use,
     # so the user can see and edit it (#87). Best-effort; never blocks startup.
     dir_ignore.seed_config(config_path)
