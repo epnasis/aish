@@ -79,6 +79,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `explain.py`, `evidence.py`, the `brief` record | `docs/diagnostics.md` |
 | `ratelimit.py`, `_chat_turn`'s retry loop, anything that retries a model call | `docs/rate-limits.md` |
 | `usage.py`, `aish usage`, anything that reports or attributes token spend | `docs/token-accounting.md` |
+| `vocab.py`, `aish vocab`, **any list of words matched against page text, a control label, error text or a command name** | `docs/vocabularies.md` |
 | `export.py` | `docs/export-pdf.md` |
 
 **New rationale goes in the area's doc, never here.** This file spent a year as a decision log — a paragraph per issue — and grew past the 150k-char limit Claude Code warns at, which is the point where the whole thing stops being reliable context. `tests/test_claude_md_size.py` fails if it passes 40k. Add a line here only for a rule that applies to *every* task; everything else belongs in `docs/`.
@@ -139,6 +140,9 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`ratelimit.py`** — what a failed model call WAS (quota vs blip vs permanent), how long to
   wait, and the record that says it happened. There must be exactly one retry policy and aish
   owns it; a 429 that recovered still leaves evidence. → `docs/rate-limits.md`
+- **`vocab.py`** — the counters on every word list, and the inventory of what a miss costs
+  for each. Measures only; it decides nothing, and no list was changed by its arrival. →
+  `docs/vocabularies.md`
 - **`usage.py`** — what was spent and what filled the context that made it cost that. A pure
   scan over the logs, under the same reader law as `explain`; it reports what was RECORDED
   and says plainly what it cannot know. → `docs/token-accounting.md`

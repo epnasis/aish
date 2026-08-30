@@ -39,6 +39,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import vocab
+
 # How many controls one snapshot may carry. A portal page runs to a few hundred
 # interactive elements once every nav link and footer link is counted, and a
 # list that long is both a context bill and unreadable. The cap is reported when
@@ -89,7 +91,15 @@ CHECK = "check"
 # guarantee: a button called "Dalej" that completes a purchase is caught by the
 # form-submit rule below, or by nothing at all, which is why the driving grant is
 # per host per task and every action is echoed as it happens.
-_MUTATING_WORDS = (
+_MUTATING_WORDS = vocab.declare(
+    "browse._MUTATING_WORDS",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    structural="the form-submit half of `is_mutating` — a non-GET submit draws a "
+    "card whatever the button is called",
+    note="Only the WORDED half fails open; a nondescript POST submit is gated "
+    "structurally beside it.",
+    entries=(
     # money
     "zapłać", "zaplac", "płatnoś", "platnos", "opłać", "oplac", "kup", "zamów",
     "zamow", "przelew", "doładuj", "doladuj", "pay", "buy", "order", "checkout",
@@ -107,7 +117,7 @@ _MUTATING_WORDS = (
     "sign", "activate", "deactivate", "upgrade", "downgrade",
     # identity
     "wyloguj", "logout", "sign out", "zaloguj", "login", "log in", "sign in",
-)
+))
 
 
 # --------------------------------------------- consequences with no yes button
@@ -132,35 +142,61 @@ _MUTATING_WORDS = (
 # this is not a wall: he is handed `/browser <host>` and does it himself. The
 # capability is not removed from HIM, it is removed from aish's hands.
 
-_CHANGE_VERBS = (
+_CHANGE_VERBS = vocab.declare(
+    "browse._CHANGE_VERBS",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    note="Half of the payout/contact pair: a miss here drops the whole "
+    "unapprovable verdict back to an ordinary approval card.",
+    entries=(
     "zmien", "zmiana", "edytuj", "edycja", "ustaw", "aktualizuj", "aktualizacja",
     "popraw", "podmien", "dodaj", "change", "update", "edit", "set", "modify",
     "replace", "add new",
-)
-_CONTACT_NOUNS = (
+))
+_CONTACT_NOUNS = vocab.declare(
+    "browse._CONTACT_NOUNS",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    entries=(
     "e-mail", "email", "mail", "adres e", "telefon", "tel.", "numer telefonu",
     "komork", "phone", "mobile", "contact detail", "dane kontaktowe",
     "recovery", "odzyskiwan",
-)
-_PAYOUT_NOUNS = (
+))
+_PAYOUT_NOUNS = vocab.declare(
+    "browse._PAYOUT_NOUNS",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    structural="`types_a_bank_account` — an IBAN is refused as a VALUE wherever "
+    "it is typed, with no label consulted",
+    entries=(
     "konto bankow", "rachunek", "numer konta", "iban", "bank account",
     "payout", "payment method", "metoda platnosci", "karta platnicz",
     "billing address", "dane do przelewu",
-)
+))
 # Some labels need no verb: the noun IS the act on these pages, and "nowe haslo"
 # carries no verb at all.
-_CONTACT_PHRASES = (
+_CONTACT_PHRASES = vocab.declare(
+    "browse._CONTACT_PHRASES",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    entries=(
     "nowy adres e-mail", "nowy e-mail", "nowy email", "nowy numer telefonu",
     "nowy numer", "nowy telefon", "new e-mail address", "new email address",
     "new email", "new phone number", "new phone", "new mobile number",
     "zmien adres e-mail", "change email address", "change e-mail address",
-)
-_CREDENTIAL_PHRASES = (
+))
+_CREDENTIAL_PHRASES = vocab.declare(
+    "browse._CREDENTIAL_PHRASES",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    structural="`NO_PASSWORDS` — aish never types a stored password on the browse "
+    "path at all",
+    entries=(
     "zmien haslo", "zmiana hasla", "nowe haslo", "ustaw haslo", "resetuj haslo",
     "reset hasla", "przypomnij haslo", "change password", "new password",
     "set password", "reset password", "update password", "change pin",
     "zmien pin",
-)
+))
 # Deliberately ACCOUNT-scoped, and this is the one place the plan was narrowed
 # on purpose. Blanket "delete" is already word-matched into a card; making every
 # delete unapprovable would stop aish throwing away a draft, a reminder or a
@@ -176,30 +212,54 @@ _CREDENTIAL_PHRASES = (
 # again, and there is no yes for it: aish does not choose who he is. The
 # generic verbs ("continue", "kontynuuj") are matched only WITH a provider
 # name, so an ordinary "Continue" button on a checkout is untouched.
-_IDP_PROVIDERS = (
+_IDP_PROVIDERS = vocab.declare(
+    "browse._IDP_PROVIDERS",
+    languages="brand names — locale-invariant",
+    on_miss=vocab.PERMITS,
+    entries=(
     "google", "apple", "facebook", "microsoft", "github", "linkedin",
     "twitter", " x ", "amazon", "okta", "auth0", "saml", "sso",
-)
-_IDP_VERBS = (
+))
+_IDP_VERBS = vocab.declare(
+    "browse._IDP_VERBS",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    entries=(
     "continue with", "sign in with", "sign up with", "log in with",
     "login with", "zaloguj sie przez", "zaloguj przez", "zaloguj sie z",
     "kontynuuj z", "kontynuuj przez", "polacz z", "connect with",
-)
-_IDP_ALONE = (
+))
+_IDP_ALONE = vocab.declare(
+    "browse._IDP_ALONE",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    entries=(
     "kontynuuj jako", "continue as", "single sign-on", "use another account",
     "uzyj innego konta",
-)
+))
 # "Continue as <name>" is an account chooser; "Continue as guest" is a checkout
 # and blocking it would cost real work. The exception is the narrow one, not a
 # general softening of the rule.
-_NOT_AN_IDENTITY = ("guest", "gosc", "goscia", "anonim", "visitor")
+_NOT_AN_IDENTITY = vocab.declare(
+    "browse._NOT_AN_IDENTITY",
+    languages="Polish + English",
+    on_miss=vocab.FRICTION,
+    note="Inverted: this list EXEMPTS. A miss refuses a guest checkout, which "
+    "costs work the owner finishes himself — the only list here whose miss is "
+    "safe in the opposite direction.",
+    entries=("guest", "gosc", "goscia", "anonim", "visitor"),
+)
 
-_CLOSE_ACCOUNT_PHRASES = (
+_CLOSE_ACCOUNT_PHRASES = vocab.declare(
+    "browse._CLOSE_ACCOUNT_PHRASES",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    entries=(
     "usun konto", "usuniecie konta", "skasuj konto", "zamknij konto",
     "likwidacja konta", "zlikwiduj konto", "delete account", "close account",
     "delete my account", "terminate account", "deactivate account",
     "usun profil", "delete profile",
-)
+))
 
 # What the owner is told, in his words, about what aish just refused to do.
 IRREVERSIBLE = {
@@ -211,8 +271,14 @@ IRREVERSIBLE = {
 }
 
 
-def _has(folded: str, needles: tuple[str, ...]) -> bool:
-    return any(needle in folded for needle in needles)
+def _has(folded: str, needles: tuple[str, ...], name: str) -> bool:
+    """One consultation of `name`, counted (#322).
+
+    The name is passed rather than derived, because these lists are plain
+    tuples on purpose — a wrapper object that could know its own name would
+    also be a wrapper that could change what is matched, and this slice's whole
+    value is that nothing about the matching moved."""
+    return vocab.hit(name, needles, folded)
 
 
 def irreversible(text: str) -> str:
@@ -224,21 +290,24 @@ def irreversible(text: str) -> str:
     folded = fold(text)
     if not folded:
         return ""
-    if _has(folded, _CLOSE_ACCOUNT_PHRASES):
+    if _has(folded, _CLOSE_ACCOUNT_PHRASES, "browse._CLOSE_ACCOUNT_PHRASES"):
         return "account"
-    if not _has(folded, _NOT_AN_IDENTITY) and (
-        _has(folded, _IDP_ALONE)
-        or (_has(folded, _IDP_VERBS) and _has(folded, _IDP_PROVIDERS))
+    if not _has(folded, _NOT_AN_IDENTITY, "browse._NOT_AN_IDENTITY") and (
+        _has(folded, _IDP_ALONE, "browse._IDP_ALONE")
+        or (
+            _has(folded, _IDP_VERBS, "browse._IDP_VERBS")
+            and _has(folded, _IDP_PROVIDERS, "browse._IDP_PROVIDERS")
+        )
     ):
         return "identity"
-    if _has(folded, _CREDENTIAL_PHRASES):
+    if _has(folded, _CREDENTIAL_PHRASES, "browse._CREDENTIAL_PHRASES"):
         return "credential"
-    if _has(folded, _CONTACT_PHRASES):
+    if _has(folded, _CONTACT_PHRASES, "browse._CONTACT_PHRASES"):
         return "contact"
-    if _has(folded, _CHANGE_VERBS):
-        if _has(folded, _PAYOUT_NOUNS):
+    if _has(folded, _CHANGE_VERBS, "browse._CHANGE_VERBS"):
+        if _has(folded, _PAYOUT_NOUNS, "browse._PAYOUT_NOUNS"):
             return "payout"
-        if _has(folded, _CONTACT_NOUNS):
+        if _has(folded, _CONTACT_NOUNS, "browse._CONTACT_NOUNS"):
             return "contact"
     return ""
 
@@ -343,9 +412,17 @@ def refuses_to_type(value: str) -> str:
 # "Confirm" and a wizard's "Accept" are these; so is the button that ends a
 # purchase, which is why they are demoted only INSIDE a widget the page has
 # just opened and never on a control that submits a form.
-CHROME_WORDS = (
+CHROME_WORDS = vocab.declare(
+    "browse.CHROME_WORDS",
+    languages="Polish + English",
+    on_miss=vocab.FRICTION,
+    structural="`submits` and `in_widget` — the demotion cannot reach a control "
+    "that submits a form",
+    note="A miss means a date picker's Confirm keeps its card. Costs a prompt, "
+    "never a consequence.",
+    entries=(
     "confirm", "potwierdź", "potwierdz", "accept", "akceptuj", "zaakceptuj",
-)
+))
 
 
 @dataclass
@@ -769,6 +846,11 @@ class ConsentTally:
         """One control found covered, and whether the list cleared it."""
         self.asked += 1
         self.dismissed += int(bool(dismissed))
+        # The same single event, also persisted (#322). This tally is the LIVE
+        # line on `/browser` and is process-lifetime by design; the catalogue
+        # needs the same consultation to survive the process. One writer still
+        # — the caller writes here and nowhere else.
+        vocab.note("browser._CONSENT_SELECTORS", matched=dismissed)
 
     @property
     def missed(self) -> int:
@@ -943,7 +1025,7 @@ def is_worded(name: str) -> bool:
     a name that says "Zapłać" draws a card whatever else is true, while a
     nondescript form submit is something the owner can grant a site once."""
     lowered = f" {name.lower()} "
-    return any(word in lowered for word in _MUTATING_WORDS)
+    return vocab.hit("browse._MUTATING_WORDS", _MUTATING_WORDS, lowered)
 
 
 def _only_chrome(name: str) -> bool:
@@ -951,7 +1033,14 @@ def _only_chrome(name: str) -> bool:
     a commitment — so the name says nothing on its own."""
     lowered = f" {name.lower()} "
     hits = [word for word in _MUTATING_WORDS if word in lowered]
-    return bool(hits) and all(word in CHROME_WORDS for word in hits)
+    vocab.note("browse._MUTATING_WORDS", matched=bool(hits))
+    if not hits:
+        return False
+    only = all(word in CHROME_WORDS for word in hits)
+    # The candidate count here is real and free: how many mutating words this
+    # name matched is exactly what the demotion is choosing among.
+    vocab.note("browse.CHROME_WORDS", matched=only, candidates=len(hits))
+    return only
 
 
 def says_it_commits(name: str, *, submits: bool = False, in_widget: bool = False) -> bool:
@@ -1023,14 +1112,26 @@ def is_mutating(
 # What a control that is supposed to produce a FILE is called, and what its
 # destination looks like. Polish first, like the mutating list, for the same
 # reason: this is the owner's web.
-_DOWNLOAD_WORDS = (
+_DOWNLOAD_WORDS = vocab.declare(
+    "browse._DOWNLOAD_WORDS",
+    languages="Polish + English",
+    on_miss=vocab.BREAKS,
+    structural="the `/download` and `/export` path test beside it, and the fact "
+    "that no file arrived — which is what gates the consultation at all",
+    note="Advisory only: a miss drops one sentence telling the model an export "
+    "may be preparing in the background. #271 is what that silence cost.",
+    entries=(
     "pobierz", "pobieranie", "ściągnij", "sciagnij", "zapisz", "eksport",
     "eksportuj", "wyeksportuj", "download", "export", "save as", "get csv",
     "get pdf",
-)
-_DOWNLOAD_SUFFIXES = (
+))
+_DOWNLOAD_SUFFIXES = vocab.declare(
+    "browse._DOWNLOAD_SUFFIXES",
+    languages="file suffixes — locale-invariant",
+    on_miss=vocab.BREAKS,
+    entries=(
     ".csv", ".pdf", ".xls", ".xlsx", ".zip", ".json", ".txt", ".ics", ".xml",
-)
+))
 
 
 def wants_download(name: str, href: str = "") -> bool:
@@ -1043,10 +1144,12 @@ def wants_download(name: str, href: str = "") -> bool:
     a download button that is broken. It abandoned IMDb's own Export and went
     off to write a scraper that a WAF then refused."""
     lowered = f" {(name or '').lower()} "
-    if any(word in lowered for word in _DOWNLOAD_WORDS):
+    if vocab.hit("browse._DOWNLOAD_WORDS", _DOWNLOAD_WORDS, lowered):
         return True
     path = (href or "").lower().split("?", 1)[0].split("#", 1)[0]
-    if any(path.endswith(suffix) for suffix in _DOWNLOAD_SUFFIXES):
+    by_suffix = any(path.endswith(suffix) for suffix in _DOWNLOAD_SUFFIXES)
+    vocab.note("browse._DOWNLOAD_SUFFIXES", matched=by_suffix)
+    if by_suffix:
         return True
     return "/download" in path or "/export" in path
 
@@ -2593,16 +2696,27 @@ MONTH_HOPS = 14
 # screen. Still a CLOSED list matched on the WHOLE name: the fence that makes
 # this safe is that a name not on it refuses rather than guesses, and the next
 # site's phrasing is one probe run away.
-_FORWARD = (
+_FORWARD = vocab.declare(
+    "browse._FORWARD",
+    languages="Polish + English + arrow glyphs",
+    on_miss=vocab.BREAKS,
+    structural="none — and the fence is that a name not on the list REFUSES "
+    "rather than guesses, so the break is loud at the call site",
+    entries=(
     "next month", "next", "next dates", "later", "later dates", "forward",
     "calendar page forward", "nastepny miesiac", "nastepny", "pozniejsze daty",
     "→", "›", "»", "▶",
-)
-_BACKWARD = (
+))
+_BACKWARD = vocab.declare(
+    "browse._BACKWARD",
+    languages="Polish + English + arrow glyphs",
+    on_miss=vocab.BREAKS,
+    structural="none — see `browse._FORWARD`",
+    entries=(
     "previous month", "previous", "prev", "previous dates", "earlier",
     "earlier dates", "back", "calendar page back", "poprzedni miesiac",
     "poprzedni", "wczesniejsze daty", "←", "‹", "«", "◀",
-)
+))
 
 
 def month_step(name: str, *, forward: bool) -> bool:
@@ -2613,7 +2727,11 @@ def month_step(name: str, *, forward: bool) -> bool:
     and this is a control aish presses with nobody looking."""
     folded = fold(name)
     words = _FORWARD if forward else _BACKWARD
-    if any(fold(word) == folded for word in words):
+    exact = any(fold(word) == folded for word in words)
+    # The two-phrase prefix fallback below is a separate, uncatalogued check —
+    # see docs/vocabularies.md. What is counted here is the LIST.
+    vocab.note("browse._FORWARD" if forward else "browse._BACKWARD", matched=exact)
+    if exact:
         return True
     phrases = ("next month", "nastepny miesiac") if forward else (
         "previous month", "poprzedni miesiac"

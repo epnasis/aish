@@ -55,6 +55,7 @@ from . import (
     skills,
     tool_plugins,
     tools,
+    vocab,
     web,
 )
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
@@ -651,8 +652,21 @@ def _with_feedback(base: str, comment: str) -> str:
 # preferred and checked first; this is the floor under the ones that predate
 # them, and it is enumerated in ONE place so the eleventh refusal site inherits
 # it instead of being forgotten.
-REFUSAL_OPENINGS = (
+REFUSAL_OPENINGS = vocab.declare(
+    "agent.REFUSAL_OPENINGS",
+    languages="English — aish's own wording, not a page's",
+    on_miss=vocab.PERMITS,
+    structural="`_gate_outcome` and `ToolOutcome.meta` — the structural carriers "
+    "are checked FIRST and this only runs when a path returned a bare string",
+    note="A miss reads a refusal as a SUCCESS, which satisfies a rule's "
+    "`must_first` and logs a verify PASS for a call the harness stopped. Unlike "
+    "every other list here it matches aish's OWN sentences, so it goes stale by "
+    "an aish refactor rather than by a site — which is precisely why it is only "
+    "ever reached when the structural carrier is absent, and why the number "
+    "worth watching is how often it is reached at all.",
+    entries=(
     "ERROR", "NOT EXECUTED", "(not executed", "USER DENIED", "NOT RUN", "BLOCKED",
+    ),
 )
 
 
@@ -669,7 +683,16 @@ def _call_facts(result: str, run_meta: dict | None) -> tuple[str, str]:
     decision = str(meta.get("decision") or (run_meta or {}).get("decision") or "")
     status = meta.get("status")
     if status is None:
-        failed = decision in REFUSED_DECISIONS or result.startswith(REFUSAL_OPENINGS)
+        # Counted only where it is actually reached — `status is None` (no
+        # structural carrier) AND no refused decision, which is the whole
+        # condition under which this list is load-bearing. The short-circuit is
+        # preserved exactly: counting the calls the envelope already answered
+        # would bury the number that matters in their volume.
+        if decision in REFUSED_DECISIONS:
+            failed = True
+        else:
+            failed = result.startswith(REFUSAL_OPENINGS)
+            vocab.note("agent.REFUSAL_OPENINGS", matched=failed)
         status = tools.STATUS_FAILED if failed else tools.STATUS_OK
     return str(status), decision
 
@@ -2802,6 +2825,30 @@ class Agent:
         if self.step_log is not None:
             self.step_log(fields)
 
+    def _flush_vocab(self) -> None:
+        """Drain this task's word-list consultations onto the log (#322).
+
+        ONE record per task rather than per consultation, and that is a volume
+        decision with a real number behind it: a page of sixty controls asks
+        `browse.irreversible` sixty times and `is_worded` sixty more, so a
+        record each would be thousands of lines for one browse. The counters are
+        sums either way — `scan_counters` adds them back up — so the aggregation
+        costs the reader nothing it could otherwise have had.
+
+        **Nothing is written when nothing was consulted.** A task that browsed
+        no page and ran no command asks no list, and a record of zeros would say
+        a set of controls had been consulted and found nothing. That is the
+        distinction the whole module turns on (`vocab.never_consulted`).
+
+        Called from a `finally` at both entry points, so a cancelled or failed
+        task still records what it asked. A consultation made outside any task —
+        the `/browser` status line, a server thread — lands on the next task
+        that flushes; the counters are per LIST across a window, never per
+        chat, so no reported number depends on which record it landed in.
+        """
+        if counted := vocab.drain():
+            self._emit_record(kind="vocab", lists=counted)
+
     def _turn_stamp(self, step: dict) -> dict:
         """Stamp turn identity on a record (§2, design fork 1 = option b: new
         kinds plus tool_start/tool/knowledge; `thinking` is left alone)."""
@@ -3001,6 +3048,28 @@ class Agent:
         self._model_call = 0
 
     def run_task(
+        self,
+        task: str,
+        images: list[str] | None = None,
+        documents: list[str] | None = None,
+        *,
+        keep_history: bool = False,
+    ) -> str:
+        """The task loop, with this task's word-list consultations recorded.
+
+        A thin wrapper rather than a `finally` buried in `_run_task`'s three
+        hundred lines: that method has a dozen `return`s across the loop, the
+        stop paths and the cancel path, and a flush attached to any subset of
+        them would silently lose the rest. `ClaudeMaxAgent.run_task` — which
+        never enters this loop at all — carries its own, for the same reason
+        `_reset_task_state` is shared.
+        """
+        try:
+            return self._run_task(task, images, documents, keep_history=keep_history)
+        finally:
+            self._flush_vocab()
+
+    def _run_task(
         self,
         task: str,
         images: list[str] | None = None,

@@ -107,6 +107,8 @@ class SessionUsage:
     # them into counters; this module only carries them, so the two readers
     # cannot disagree about what a role call was.
     role_calls: list[dict] = field(default_factory=list)
+    # Raw `vocab` records (#322), likewise kept as written.
+    vocab_calls: list[dict] = field(default_factory=list)
     contributors: list[Contributor] = field(default_factory=list)
     failures: list[dict] = field(default_factory=list)
     trims: int = 0
@@ -231,6 +233,13 @@ def scan_session(path: Path) -> SessionUsage:
                 # them would make every existing per-model figure move for a
                 # reason no reader could see. It is reported beside them.
                 session.role_calls.append(dict(step))
+            elif skind == "vocab":
+                # #322, carried the same way and for the same reason: this
+                # module holds the raw records and `vocab.scan_counters` is the
+                # single reading of them, so `aish usage`'s pointer and
+                # `aish vocab`'s table can never disagree about what a
+                # consultation was.
+                session.vocab_calls.append(dict(step))
 
     if session.stamped:
         for origin, entries in live.items():
@@ -656,6 +665,17 @@ def _caveats(sessions: list[SessionUsage]) -> list[str]:
     out.append(
         f"{DIM}  calls outside a task (session retitling, curate) are not counted{RESET}"
     )
+    # The word-list pointer (#322), here and nowhere else in this report. It is
+    # the one place he already looks, and it is SILENT unless something is
+    # anomalous — a row that appears on every ordinary browse is a row he learns
+    # to skip, which would cost more than no counter at all. It names the lists
+    # and points at `aish vocab`; it never prints the table.
+    from . import vocab as vocab_mod
+
+    if line := vocab_mod.summary_line(vocab_mod.scan_counters(
+        {"step": step} for s in sessions for step in s.vocab_calls
+    )):
+        out.append(f"  ⚑ {line}")
     return out
 
 

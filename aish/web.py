@@ -27,7 +27,7 @@ from html.parser import HTMLParser
 from typing import Any, NamedTuple
 
 from . import browse as browse_mod
-from . import browser, tools
+from . import browser, tools, vocab
 from .tools import DOCS_MAX_CHARS, _filter_topic, truncate
 
 SEARCH_MAX_RESULTS = 5
@@ -620,7 +620,16 @@ _SCHEMA_PREFIX = "https://schema.org/"
 # that on a page which declared NO availability at all. A borrowed word became
 # a badge of verification for a fact nobody had. A phrase cannot be quoted
 # that way because it is already the sentence the answer would have to write.
-_AVAILABILITY = {
+_AVAILABILITY = vocab.declare(
+    "web._AVAILABILITY",
+    languages="schema.org enum values — a machine vocabulary, not prose",
+    on_miss=vocab.BREAKS,
+    note="A miss drops the availability line entirely, so an OUT OF STOCK offer "
+    "reads to the model as an ordinary one — which is the failure this block "
+    "exists for: it abandoned Allegro and invented an access block rather than "
+    "say the thing was out of stock. Keyed on a published standard, so it goes "
+    "stale by the standard moving rather than by a language.",
+    entries={
     "InStock": "in stock",
     "OnlineOnly": "in stock, online only",
     "InStoreOnly": "in stock in shops only",
@@ -630,13 +639,23 @@ _AVAILABILITY = {
     "OutOfStock": "OUT OF STOCK",
     "SoldOut": "SOLD OUT",
     "Discontinued": "DISCONTINUED",
-}
+    },
+)
 # The states in which the thing cannot be bought today. This is the most
 # valuable field on the block and it was the quietest: on the offer behind
 # this, `OutOfStock` was the real reason the model abandoned Allegro — and it
 # never told the owner, inventing an access block instead and switching shops.
 # So it goes FIRST and says what to do with it.
-_NOT_BUYABLE = frozenset({"OutOfStock", "SoldOut", "Discontinued"})
+_NOT_BUYABLE = vocab.declare(
+    "web._NOT_BUYABLE",
+    languages="schema.org enum values",
+    on_miss=vocab.BREAKS,
+    counted=False,
+    note="INVENTORIED, NOT COUNTED — a strict subset of `web._AVAILABILITY`, "
+    "tested one line below it at the same call site, so its consultations are "
+    "already in that list's number.",
+    entries=frozenset({"OutOfStock", "SoldOut", "Discontinued"}),
+)
 
 
 _LD_SCRIPT_RE = re.compile(
@@ -765,7 +784,7 @@ def page_facts(blocks: list[str], visible: str, url: str) -> str:
                 f"{currency}".rstrip()
             )
     state = _declared_text(offer.get("availability"), 80).removeprefix(_SCHEMA_PREFIX)
-    if phrase := _AVAILABILITY.get(state):
+    if phrase := vocab.looked_up("web._AVAILABILITY", _AVAILABILITY, state):
         if state in _NOT_BUYABLE:
             lines.insert(0, f"the page says this is {phrase} — TELL THE USER THAT. "
                             "Do not present it as something to buy, and do not "

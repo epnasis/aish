@@ -346,6 +346,16 @@ class ClaudeMaxAgent:
         # denial's stop gate (and stale _run_meta/skill gates/cancel) would
         # wedge every later tool call in this AND future tasks (#178 P0-4).
         self.inner._reset_task_state()
+        try:
+            return self._run_task_body(task)
+        finally:
+            # Same reason as the reset above: the loop that flushes word-list
+            # counters (#322) never runs on this backend, so a claude-max
+            # session would record none of its consultations and every list
+            # would read as "not consulted" on the days he worked here.
+            self.inner._flush_vocab()
+
+    def _run_task_body(self, task: str) -> str:
         self._refresh_server()  # plugin tools created since last task
         prompt = task
         if self._pending_notes:

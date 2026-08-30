@@ -48,7 +48,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from . import secrets
+from . import secrets, vocab
 
 # Metadata lives beside the browser profile, not in ~/.config/aish: that tree is
 # auto-committed to a git remote on a timer, and while this file holds no
@@ -221,7 +221,16 @@ def carries_secret(text: str, needles: Sequence[str]) -> bool:
 # strona chroniona jest przez reCAPTCHA" — and the brand is the only stable
 # token in that sentence, so matching English prose would find nothing on most
 # of the owner's pages.
-_CAPTCHA_TOKENS: tuple[tuple[str, str], ...] = (
+_CAPTCHA_TOKENS: tuple[tuple[str, str], ...] = vocab.declare(
+    "signin._CAPTCHA_TOKENS",
+    languages="vendor brand names — locale-invariant by design",
+    on_miss=vocab.FRICTION,
+    note="A miss means the page's own ARIA error is NOT disqualified as a "
+    "judgement of the value, so a widget's generic refusal can be read as a "
+    "wrong password. The credential is still only retired on a positive signal, "
+    "so this fails closed — but the cost of being wrong is a working credential "
+    "the owner has to re-record.",
+    entries=(
     ("recaptcha", "reCAPTCHA"),
     ("hcaptcha", "hCaptcha"),
     ("h-captcha", "hCaptcha"),
@@ -233,6 +242,7 @@ _CAPTCHA_TOKENS: tuple[tuple[str, str], ...] = (
     ("smartcaptcha", "Yandex SmartCaptcha"),
     ("friendlycaptcha", "Friendly Captcha"),
     ("mtcaptcha", "MTCaptcha"),
+    ),
 )
 
 
@@ -257,7 +267,9 @@ def captcha_vendor(marks: Sequence[str], text: str = "") -> str:
     haystack = "\n".join([*(str(m) for m in marks), text or ""]).lower()
     for token, vendor in _CAPTCHA_TOKENS:
         if token in haystack:
+            vocab.note("signin._CAPTCHA_TOKENS", matched=True, candidates=len(marks))
             return vendor
+    vocab.note("signin._CAPTCHA_TOKENS", matched=False, candidates=len(marks))
     return ""
 
 
@@ -445,8 +457,16 @@ def judge_a_failed_sign_in(
 # Enough of a public-suffix rule for the FALLBACK below, and no more. A real
 # PSL would be a dependency and a monthly update for a question asked only
 # about records saved before destinations were recorded.
-_SECOND_LEVEL = frozenset(
-    {"co", "com", "net", "org", "edu", "gov", "mil", "ac", "biz", "info"}
+_SECOND_LEVEL = vocab.declare(
+    "signin._SECOND_LEVEL",
+    languages="second-level public suffixes — locale-invariant",
+    on_miss=vocab.FRICTION,
+    counted=False,
+    note="INVENTORIED, NOT COUNTED. A miss narrows a fallback origin by one "
+    "label, which can only ever refuse a replay, never permit one.",
+    entries=frozenset(
+        {"co", "com", "net", "org", "edu", "gov", "mil", "ac", "biz", "info"}
+    ),
 )
 
 

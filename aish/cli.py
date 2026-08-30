@@ -1876,6 +1876,48 @@ def _usage_cli(args: list[str]) -> int:
     return 0
 
 
+def _vocab_cli(args: list[str]) -> int:
+    """`aish vocab` — which word lists matched, and which went quiet (#322).
+
+    **Its own subcommand rather than a section of `aish usage`, and the reason
+    is what `usage` IS.** That report answers *what did this cost* — spend,
+    context, residency, all in tokens on a bill. The isolated roles are in it
+    because a role call is real money on the same key. A word-list consultation
+    costs nothing and is not about spend at all; folding it in would make the
+    one report two, and the `--json` document a spend document holding something
+    that is not spend.
+
+    What DOES belong in `usage` is the one-line anomaly pointer, because that is
+    where he already looks — `vocab.summary_line`, silent unless something is
+    anomalous.
+    """
+    from . import vocab as vocab_mod
+
+    usage_line = "usage: aish vocab [--days N | --all] [--json]"
+    days: int | None = 30
+    as_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    while rest:
+        flag = rest.pop(0)
+        if flag == "--days" and rest:
+            value = rest.pop(0)
+            if not value.isdigit():
+                print(usage_line)
+                return 2
+            days = int(value)
+        elif flag == "--all":
+            days = None
+        else:
+            print(usage_line)
+            return 2
+    counters = vocab_mod.scan(days=days)
+    if as_json:
+        print(json.dumps(vocab_mod.json_report(counters, days), indent=2))
+    else:
+        print(vocab_mod.render(counters, days))
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "secret":
         return _secret_cli(sys.argv[2:])
@@ -1885,6 +1927,8 @@ def main() -> int:
         return _explain_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "usage":
         return _usage_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "vocab":
+        return _vocab_cli(sys.argv[2:])
 
     config_path = Path(
         os.environ.get("AISH_CONFIG", str(config_home() / "config.toml"))

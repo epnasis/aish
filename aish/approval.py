@@ -23,6 +23,7 @@ import shutil
 from collections.abc import Collection
 from pathlib import Path
 
+from . import vocab
 from .files import contains, is_sensitive_path, resolved, within_roots
 
 DEFAULT_ALLOWLIST = Path.home() / ".config" / "aish" / "allow.txt"
@@ -66,7 +67,18 @@ class Approved:
         self.comment = comment
         self.command = command
 
-SAFE_COMMANDS = frozenset(
+SAFE_COMMANDS = vocab.declare(
+    "approval.SAFE_COMMANDS",
+    languages="program names — locale-invariant",
+    on_miss=vocab.FRICTION,
+    structural="the root scoping and `UNSAFE_FLAGS` beside it — being ON this "
+    "list is necessary and never sufficient",
+    note="The one list here that is safe by CONSTRUCTION rather than by "
+    "judgement: it is an allowlist, so a miss can only ever put a card in front "
+    "of the owner. `approval.py`'s standing doctrine — err toward prompting — "
+    "is the same statement. Its counter is therefore a use-rate and not a "
+    "health check, and it is the highest-volume list in the tree.",
+    entries=frozenset(
     {
         "basename",
         "cat",
@@ -107,6 +119,7 @@ SAFE_COMMANDS = frozenset(
         "which",
         "whoami",
     }
+    ),
 )
 
 # Otherwise-safe commands with flags that write or execute.
@@ -314,7 +327,12 @@ def _segment_is_safe(segment: str) -> bool:
         return False
     tokens = _canonical_tokens(tokens)
     name = tokens[0]
-    if name not in SAFE_COMMANDS:
+    # Counted here rather than at `is_read_only`, because THIS is the question
+    # the list answers: one segment, one verdict. The candidate count is the
+    # segment's own token count — what the classifier had in front of it.
+    known = name in SAFE_COMMANDS
+    vocab.note("approval.SAFE_COMMANDS", matched=known, candidates=len(tokens))
+    if not known:
         return False
     return not _has_unsafe_flag(name, tokens)
 
@@ -711,7 +729,18 @@ def check_denied(command: str, extra_prefixes: list[str] | None = None) -> str |
     return None
 
 
-_DESTRUCTIVE_COMMANDS = {
+_DESTRUCTIVE_COMMANDS = vocab.declare(
+    "approval._DESTRUCTIVE_COMMANDS",
+    languages="program names — locale-invariant",
+    on_miss=vocab.BREAKS,
+    structural="none, and none is needed — the GATE is `check_denied` and the "
+    "approval card itself, neither of which consults this list",
+    note="ADVISORY ONLY: it decides whether the prompt carries a red "
+    "'destructive' marker, never whether the command runs. So a miss removes a "
+    "warning from a card the owner still has to approve — it permits nothing, "
+    "and it costs no friction either. The counter is the only thing that would "
+    "say it had stopped firing.",
+    entries={
     "chmod",
     "chown",
     "dd",
@@ -724,7 +753,8 @@ _DESTRUCTIVE_COMMANDS = {
     "rm",
     "shutdown",
     "truncate",
-}
+    },
+)
 
 
 def looks_destructive(command: str) -> bool:
@@ -732,22 +762,40 @@ def looks_destructive(command: str) -> bool:
     substitute for the gate. Keyed on command VERBS (rm, mv, kill, sudo, …),
     NOT on redirects: `2>/dev/null` and a `>` inside a quoted awk/sed program
     are not destructive, and flagging them just breeds approval fatigue."""
+    verdict, by_list, verbs = _destructive_verdict(command)
+    # One consultation per COMMAND, not per segment, so a pipeline does not read
+    # as ten questions; `verbs` is how many command verbs the scan actually got
+    # to look at. `by_list` and not `verdict`: `sudo` and `--force` mark a
+    # command destructive without this list matching anything, and folding them
+    # in would credit the list with catches it did not make.
+    vocab.note("approval._DESTRUCTIVE_COMMANDS", matched=by_list, candidates=verbs)
+    return verdict
+
+
+def _destructive_verdict(command: str) -> tuple[bool, bool, int]:
+    """(destructive, the LIST said so, how many verbs were examined).
+
+    Split out from `looks_destructive` so the counter can tell the list's own
+    catches apart from the two tests beside it, without a flag threaded through
+    the loop."""
+    verbs = 0
     for segment in _deny_segments(command):
         try:
             tokens = shlex.split(segment)
         except ValueError:
             continue  # can't parse → don't cry wolf
         if tokens and tokens[0].rsplit("/", 1)[-1] == "sudo":
-            return True
+            return True, False, verbs
         tokens = _strip_wrappers(tokens)
         if not tokens:
             continue
+        verbs += 1
         name = tokens[0].rsplit("/", 1)[-1]
         if name in _DESTRUCTIVE_COMMANDS:
-            return True
+            return True, True, verbs
         if "--force" in tokens[1:]:  # explicit only; bare -f means "file" too often
-            return True
-    return False
+            return True, False, verbs
+    return False, False, verbs
 
 
 # CLIs whose static command path nests deeper than one subcommand level:
