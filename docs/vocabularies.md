@@ -100,7 +100,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `browse._DOWNLOAD_SUFFIXES` | file suffixes | breaks | yes | — | 9 |
 | `browse._FORWARD` | PL + EN + arrows | breaks | yes | `month_arrow` + `month_table` — an arrow whose whole name IS a month, in the PAGE's language, checked against the grid | 14 |
 | `browse._BACKWARD` | PL + EN + arrows | breaks | yes | `month_arrow` — as above | 15 |
-| `browser._CONSENT_SELECTORS` | PL + EN + vendor ids | breaks | yes | `_COVERED_JS` / `browse.Cover` — asks the page what sits at the control's own centre point | 6 |
+| `browser._CONSENT_SELECTORS` | PL + EN + vendor ids | breaks | yes | `_COVERED_JS` / `browse.Cover` — asks the page what sits at the control's centre point AND what can be pressed on it | 6 |
 | `browser._CHALLENGE_MARKERS` | PL + EN | permits | yes | `BLOCK_STATUS` + `CHALLENGE_MAX_CHARS` — **the epic's worked example** | 13 |
 | `browser._REPUTATION_COOKIES` | vendor cookie names | breaks | yes | — | 8 |
 | `browser._LOCK_MARKERS` | EN (Chrome's own text) | breaks | yes | — | 3 |

@@ -1005,6 +1005,22 @@ class Cover:
     # Two different facts folded deliberately: a banner dismissed that leaves
     # the control still covered is not a dismissal for any purpose here.
     dismissed: bool = False
+    #: What can be PRESSED on the thing that is covering, in its own words.
+    #: Structural and wordless, so it is as true of a paywall or a newsletter
+    #: modal as of a cookie bar, in any language — which is the point, because
+    #: the consent word list is neither.
+    controls: list[str] = field(default_factory=list)
+
+    def named(self) -> str:
+        """The wall's own controls as the refusal quotes them, or "".
+
+        Bounded where it is BUILT rather than at each caller, for the reason
+        `covering_name` is: the value crosses into a trace record."""
+        if not self.controls:
+            return ""
+        shown = ", ".join(repr(one) for one in self.controls[:COVER_CONTROLS_MAX])
+        more = len(self.controls) - COVER_CONTROLS_MAX
+        return shown + (f" (+{more} more)" if more > 0 else "")
 
     def record(self) -> dict:
         """The trace block, or `{}` when nothing covered anything.
@@ -1014,7 +1030,10 @@ class Cover:
         are different facts (trace contract corollary 2)."""
         if not self.by:
             return {}
-        return {"by": self.by, "dismissed": self.dismissed}
+        said = {"by": self.by, "dismissed": self.dismissed}
+        if self.controls:
+            said["controls"] = self.controls[:COVER_CONTROLS_MAX]
+        return said
 
 
 @dataclass
@@ -1040,11 +1059,27 @@ COVERED_DISMISSED = (
 # ...and when it could not. This is the ending eon.pl produces, and it is the
 # whole point: it names the element, it says why the press achieved nothing,
 # and it gives the one instruction that works.
+# How many of the wall's own controls a refusal quotes. A consent bar has two
+# or three; anything much longer is a page rendered as a dialog, and the model
+# should read it rather than be handed a list.
+COVER_CONTROLS_MAX = 6
+
 COVERED_STUCK = (
     "aish could not {action} {address!r}: something the page calls {by!r} is "
     "sitting on top of it, so a click lands on THAT and never reaches the "
     "control — and aish could not take it down. Press whatever closes it (a "
     "cookie or consent banner, a dialog, a sticky bar) and try again."
+)
+# The same, with the wall's OWN controls named. "Press whatever closes it" is a
+# fact plus a withheld instruction: aish had walked the overlay and knew what
+# was on it. lot.com's button says `I Agree`, which no consent list here holds
+# and no list ever reliably will — but the page will say it, in whatever
+# language it is written in, if anyone asks.
+COVERED_STUCK_NAMED = (
+    "aish could not {action} {address!r}: something the page calls {by!r} is "
+    "sitting on top of it, so a click lands on THAT and never reaches the "
+    "control — and aish could not take it down. What can be pressed ON IT: "
+    "{controls}. Press whichever closes it, then try again."
 )
 # The same ending with the cover ruled OUT, and the wording is narrow on
 # purpose. The old sentence guessed — "Something may be covering it" — on
@@ -1058,6 +1093,23 @@ STUCK_NOT_COVERED = (
     "may be inert, or its own handler may be broken. Try another route to the "
     "same thing."
 )
+
+
+def stuck_reason(cover: Cover, *, action: str, address: str) -> str:
+    """Why a press achieved nothing, in ONE place.
+
+    Three endings — covered and named, covered and nameless, not covered — and
+    the choice between them was made at two call sites that had to be kept in
+    step by hand. A single action and a batch step describe the same failure,
+    and #321's whole lesson is that a wall reported one way here and another
+    way there is how four wrong diagnoses got argued on top of it."""
+    if not cover.by:
+        return STUCK_NOT_COVERED.format(action=action, address=address)
+    if named := cover.named():
+        return COVERED_STUCK_NAMED.format(
+            action=action, address=address, by=cover.by, controls=named
+        )
+    return COVERED_STUCK.format(action=action, address=address, by=cover.by)
 
 
 class ConsentTally:
