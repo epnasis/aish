@@ -156,8 +156,9 @@ _CONSENT_SELECTORS = vocab.declare(
     languages="Polish + English, plus vendor-specific ids",
     on_miss=vocab.BREAKS,
     structural="`_COVERED_JS` / `browse.Cover` — the page is asked what sits at "
-    "the control's own centre point, which needs no words and is what finds the "
-    "banner in the first place",
+    "the control's own centre point AND what can be pressed on it, which needs "
+    "no words: a miss here now costs one round trip (the model presses the "
+    "button aish named) instead of stopping the page dead",
     note="#321 itself: `Akceptuj wszystkie` against the page's `Akceptuje "
     "wszystkie cookies`, missed by one letter, and the sign-in under it failed "
     "for days. Counted at `_uncover` only — where the structural check has "
@@ -5061,7 +5062,7 @@ async def _focus(target: Any) -> bool:
 # shadow boundary either — so the naive "is the top element my ancestor" test
 # calls a control covered by its own host. The ancestor chain is walked through
 # hosts instead.
-_COVERED_JS = """(el) => {
+_COVERED_JS = r"""(el) => {
   const b = el.getBoundingClientRect();
   if (!b.width || !b.height) return "";
   const top = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
@@ -5074,23 +5075,58 @@ _COVERED_JS = """(el) => {
     node = node.parentElement || (root && root.host) || null;
   }
   if (chain.has(top) || el.contains(top)) return "";
-  return String(top.id || top.className || top.tagName || "").slice(0, 60);
+  // WHAT IS ON THE WALL, not just what the wall is called. Knowing a banner
+  // covers the button and saying only "press whatever closes it" leaves the
+  // model to guess where "whatever" is; naming the wall's own buttons costs one
+  // walk of a subtree that is already in hand and needs no words, so it is true
+  // of a cookie bar, a paywall, a newsletter modal and an app interstitial
+  // alike, in any language. Measured on lot.com, whose button says `I Agree` —
+  // a phrase no consent list here holds.
+  //
+  // The DIALOG rather than the topmost node: `elementFromPoint` returns the
+  // overlay's dark filter, whose own subtree is empty, while the buttons live
+  // in the panel beside it.
+  const wall = top.closest('[role=dialog], [role=alertdialog], dialog, [id*=onsent],'
+                         + ' [class*=onsent], [id*=anner], [class*=anner]') || top;
+  const said = [];
+  for (const one of wall.querySelectorAll(
+      'button, a[href], [role=button], input[type=submit], input[type=button]')) {
+    const r = one.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const name = (one.getAttribute('aria-label') || one.innerText
+                  || one.textContent || one.value || '').replace(/\s+/g, ' ').trim();
+    if (name && !said.includes(name)) said.push(name.slice(0, 60));
+    if (said.length >= 8) break;
+  }
+  return {by: String(top.id || top.className || top.tagName || "").slice(0, 60),
+          controls: said};
 }"""
 
 
-async def _what_covers(target: Any) -> str:
-    """The element sitting on top of this control, in the page's own words, or
-    "" when nothing is.
+async def _what_covers(target: Any) -> tuple[str, list[str]]:
+    """The element sitting on top of this control, in the page's own words, and
+    what can be PRESSED on it. `("", [])` when nothing is covering it.
 
     One `evaluate`, and the whole structural half of #321: it needs no
     vocabulary, so it is true of every consent wall, modal, cookie bar and
     sticky footer in every language. An element that will not answer is not
     coverable — the safe direction, since claiming a cover aish did not see
-    would be the wide guarantee this file keeps producing."""
+    would be the wide guarantee this file keeps producing.
+
+    The controls are the other half of the same idea (#321 again, and the month
+    arrow's refusal for the same reason): naming the obstruction and then saying
+    only *"press whatever closes it"* hands back a fact and withholds the one
+    thing that acts on it."""
     try:
-        return browse_mod.covering_name(str(await target.evaluate(_COVERED_JS) or ""))
+        said = await target.evaluate(_COVERED_JS)
     except Exception:  # noqa: BLE001 — an element that will not answer
-        return ""
+        return ("", [])
+    if not isinstance(said, dict):
+        return (browse_mod.covering_name(str(said or "")), [])
+    return (
+        browse_mod.covering_name(str(said.get("by") or "")),
+        [browse_mod.covering_name(str(one)) for one in (said.get("controls") or [])],
+    )
 
 
 async def _uncover(page: Any, target: Any) -> browse_mod.Cover:
@@ -5119,17 +5155,17 @@ async def _uncover(page: Any, target: Any) -> browse_mod.Cover:
     `dismissed` is the CONTROL coming clear, not the banner being clicked: a
     consent button that was pressed and left the overlay in place has dismissed
     nothing for any purpose here."""
-    covered = await _what_covers(target)
+    covered, on_it = await _what_covers(target)
     if not covered:
         return browse_mod.Cover()
     # The selector makes "nothing matched" a cheap early out; the second
     # `_what_covers` is what keeps `dismissed` honest when one did.
-    cleared = bool(await _dismiss_consent(page)) and not await _what_covers(target)
+    cleared = bool(await _dismiss_consent(page)) and not (await _what_covers(target))[0]
     # Counted HERE and nowhere else: this is the one place the word list is
     # handed an obstruction that is known to exist, so it is the one place its
     # hit rate means anything (#295 P4).
     browse_mod.CONSENT_TALLY.note(dismissed=cleared)
-    return browse_mod.Cover(by=covered, dismissed=cleared)
+    return browse_mod.Cover(by=covered, dismissed=cleared, controls=on_it)
 
 
 # What is observably true about a control, for telling a press that WORKED
@@ -5496,14 +5532,8 @@ def browse_act(
             return await shot(
                 owner,
                 session,
-                problem=(
-                    browse_mod.COVERED_STUCK.format(
-                        action=action, address=control.address, by=stuck.cover.by
-                    )
-                    if stuck.cover.by
-                    else browse_mod.STUCK_NOT_COVERED.format(
-                        action=action, address=control.address
-                    )
+                problem=browse_mod.stuck_reason(
+                    stuck.cover, action=action, address=control.address
                 ),
                 covered=stuck.cover,
             )
@@ -5631,11 +5661,8 @@ def browse_fill(
                 # arrives here as a bare `Exception` with an empty message.
                 return await _stop(
                     owner, session, ledger, index, len(steps),
-                    browse_mod.COVERED_STUCK.format(
-                        action=verb, address=control.address, by=stuck.cover.by
-                    ) if stuck.cover.by
-                    else browse_mod.STUCK_NOT_COVERED.format(
-                        action=verb, address=control.address
+                    browse_mod.stuck_reason(
+                        stuck.cover, action=verb, address=control.address
                     ),
                     dated=dated, covered=stuck.cover,
                 )

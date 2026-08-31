@@ -299,6 +299,22 @@ The page table is **added to the built-in floor, never swapped for it**, so ever
 
 **The instrument had two holes that are why this went unmeasured for a week.** `scripts/probe_calendars.py` listed lot.pl and pointed at the ENGLISH url, where it found no date field at all and printed that instead of a finding; and its end-to-end leg asked for the field by the name it had *before* pressing it, which the picker renames — so on the one site whose walk was broken, the leg reported a probe artefact. It now points at the page the owner books on, presses past the consent wall (re-reading first, because lot.com's OneTrust banner is on no control list at load and owns the whole page a second later), and re-opens before the end-to-end leg. `aish vocab` had meanwhile shown `browse._FORWARD` at **7 asked, 0 matched, 0%** against `on_miss=BREAKS` for a month, and nothing read it. A BREAKS-class list sitting at zero over its window is a defect report; it belongs somewhere that is read.
 
+### A wall says what can be pressed on it
+
+`_what_covers` has always been the structural half of #321: it asks the page what sits at the control's own centre point, needs no words, and is therefore as true of a paywall or a newsletter modal as of a cookie bar, in any language. Then it said *"Press whatever closes it (a cookie or consent banner, a dialog, a sticky bar)"* — a fact plus a withheld instruction, because aish had the overlay in hand and knew what was on it.
+
+Measured on lot.com: `_uncover` could not take the banner down, and `browser._CONSENT_SELECTORS` stood at **1 asked, 0 matched** — the one call site where an ask means a press is already blocked. Its button says **`I Agree`**, which none of the six selectors hold. The tempting fix is a seventh; the list is Polish and English against a web that is neither, and this would be the third time the same shape got another entry.
+
+So `_COVERED_JS` now walks the wall's own subtree and returns its pressable controls, and `stuck_reason` quotes them. Live, on that page:
+
+> …something the page calls `'onetrust-pc-dark-filter ot-fade-in'` is sitting on top of it… **What can be pressed ON IT: `'More information about your privacy'`, `'LOT Privacy Policy'`, `'Manage'`, `'I Agree'`.** Press whichever closes it, then try again.
+
+**The DIALOG rather than the topmost node**, because `elementFromPoint` returns the overlay's dark filter, whose own subtree is empty while the buttons live in the panel beside it.
+
+**Deliberately NOT auto-pressed.** Choosing between `Accept all`, `Reject all` and `Manage` is a decision about the owner's privacy, and it is the same trap the date-picker rehearsal was: a wordless tier that presses on a guess. The model reads any language and is already the right place for the choice; what was missing was not judgement but the list of options. A miss on `_CONSENT_SELECTORS` now costs one round trip instead of stopping the page dead — which is what demotes it from a gate to a fast path.
+
+`stuck_reason` also collapses a three-way branch that two call sites were keeping in step by hand. A single action and a batch step describe the same failure, and #321's whole lesson is that a wall reported one way here and another way there is how four wrong diagnoses got argued on top of it. `TestAControlSomethingIsCovering`.
+
 ### A batch is no more confident than the single act it is made of
 
 `_press` escalates below a real click, and `_took` reads the control before and after to say whether the page took it. `browse_act` reports that note. A `fill` step **dropped it** and returned a flat `pressed 'X'`.

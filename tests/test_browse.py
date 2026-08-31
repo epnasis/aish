@@ -4433,6 +4433,46 @@ class TestAControlSomethingIsCovering:
         cleared = browse.Cover(by="onetrust-banner-sdk", dismissed=True)
         assert cleared.record() == {"by": "onetrust-banner-sdk", "dismissed": True}
 
+    def test_the_wall_says_what_can_be_pressed_ON_it(self):
+        """Naming the obstruction and then saying only *"press whatever closes
+        it"* hands back a fact and withholds the thing that acts on it — aish
+        has walked the overlay and knows what is on it.
+
+        Measured on lot.com: the button says `I Agree`, which no consent list
+        here holds and no list reliably will. The page says it, in whatever
+        language it is written in, if anyone asks."""
+        cover = browse.Cover(
+            by="onetrust-pc-dark-filter ot-fade-in",
+            controls=["Manage", "I Agree"],
+        )
+        said = browse.stuck_reason(cover, action="press", address="Wylot")
+        assert "'I Agree'" in said and "'Manage'" in said
+        assert "What can be pressed ON IT" in said
+        assert "press whatever closes it" not in said.lower()
+
+    def test_a_nameless_wall_still_gets_the_old_ending(self):
+        """An overlay with no pressable control of its own — a scroll lock, a
+        transparent shim — is a different fact from one aish could enumerate,
+        and folding them together is what #321 is about."""
+        said = browse.stuck_reason(
+            browse.Cover(by="scroll-lock"), action="press", address="Szukaj"
+        )
+        assert "'scroll-lock'" in said
+        assert "Press whatever closes it" in said
+
+    def test_nothing_covering_it_is_a_third_ending_not_a_weaker_second(self):
+        said = browse.stuck_reason(browse.Cover(), action="press", address="Szukaj")
+        assert "Nothing was found covering it" in said
+
+    def test_the_walls_controls_reach_the_trace_bounded(self):
+        """They cross into a trace record, so they are bounded where they are
+        BUILT — one bound in one place is one thing to be wrong."""
+        many = [f"button {i}" for i in range(20)]
+        cover = browse.Cover(by="wall", controls=many)
+        assert len(cover.record()["controls"]) == browse.COVER_CONTROLS_MAX
+        assert f"+{20 - browse.COVER_CONTROLS_MAX} more" in cover.named()
+        assert browse.Cover(by="wall").record() == {"by": "wall", "dismissed": False}
+
     def test_the_name_is_collapsed_and_bounded(self):
         """It crosses into a trace record, so it is bounded HERE — one bound in
         one place is one thing to be wrong."""
