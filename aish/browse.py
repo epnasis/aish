@@ -308,6 +308,12 @@ _CLOSE_ACCOUNT_PHRASES = vocab.declare(
 # "contains these letters". Measured over 3,002 recorded control labels, bare
 # substrings also refuse `facebook`, `Books`, `Kontynuuj zakupy`,
 # `SZCZEGÓŁY ZAKUPU #1`, `Manage booking` and the surname `Tamara Kuprianowicz`.
+#
+# **A GUARD THAT MISSES FALLS BACK TO A CARD, NEVER TO SILENCE**, and that is
+# what makes every narrowing below safe. Because the words stayed in
+# `_MUTATING_WORDS`, a label these lists do not catch still draws an approval
+# card — exactly what it did before this issue. Narrowing a guard here can move
+# a label from REFUSAL back to CARD; it can never move one to FREE.
 _COMMIT_MONEY = vocab.declare(
     "browse._COMMIT_MONEY",
     languages="Polish + English",
@@ -358,11 +364,48 @@ _COMMIT_BOOKING = vocab.declare(
     "rezerwuje z obowiazkiem zaplaty", "potwierdz rezerwacje",
     "zarezerwuj i zaplac",
 ))
-_COMMIT_CONTRACT = vocab.declare(
-    "browse._COMMIT_CONTRACT",
+# ENDING A CONTRACT NEEDS THE CONTRACT, and this is the one guard here that is
+# not about breadth but about HOMONYMS. `wypowiedz`, `rozwiąż` and `zerwij` are
+# not narrow-or-broad versions of the same verb — they are DIFFERENT WORDS that
+# fold to the same string. Measured against the census: `Rozwiąż quiz` and
+# `Rozwiąż test` (rozwiązać = to SOLVE), `Dodaj wypowiedź` (a COMMENT, which
+# folds to `wypowiedz` exactly) and `Zerwij z nałogiem` (break a habit) were all
+# refused by the bare word. Refusing those removes a capability with no way to
+# grant it back in the moment, so they take the verb+noun shape the
+# account-scoped refusals in this file already use.
+#
+# `wypowiedzenie` is here as its own entry, not as a prefix: word boundaries
+# mean `wypowiedz` does not reach inside it, and `Wypowiedzenie umowy` is
+# exactly what a Polish provider calls that button. `Wypowiedzi` (comments)
+# stays free because the noun is what fires it, not the verb.
+_END_CONTRACT_VERBS = vocab.declare(
+    "browse._END_CONTRACT_VERBS",
+    languages="Polish",
+    on_miss=vocab.PERMITS,
+    structural="none — but a miss here is a CARD, not silence: every one of "
+    "these is also in `_MUTATING_WORDS`",
+    entries=("wypowiedz", "wypowiedzenie", "rozwiaz", "zerwij"),
+)
+# Matched as a PREFIX (plain substring, unlike everything else in this block),
+# because Polish declines the noun: `umow` has to find "umowa", "umowę" and
+# "umowy", and a word boundary after `umow` finds none of them.
+_CONTRACT_NOUNS = vocab.declare(
+    "browse._CONTRACT_NOUNS",
     languages="Polish + English",
     on_miss=vocab.PERMITS,
-    entries=("wypowiedz", "rozwiaz", "zerwij", "terminate"),
+    note="Half of the end-a-contract pair: a miss drops the refusal back to an "
+    "ordinary approval card.",
+    entries=(
+    "umow", "kontrakt", "abonament", "subskrypcj",
+    "contract", "agreement", "subscription", "plan",
+))
+# `terminate` keeps the bare form: it has no benign Polish or English homonym,
+# and `Terminate instance` is destructive on its own terms anyway.
+_COMMIT_CONTRACT = vocab.declare(
+    "browse._COMMIT_CONTRACT",
+    languages="English",
+    on_miss=vocab.PERMITS,
+    entries=("terminate",),
 )
 # Every delete, not an account delete — the owner's overrule, above. `wyczyść`
 # and `clear` are NOT here: the issue's prose moved one and left its English
@@ -463,6 +506,10 @@ def commits(name: str, *, navigates: bool = False) -> str:
     if _has(folded, _COMMIT_BOOKING, "browse._COMMIT_BOOKING", whole_words=True):
         return "booking"
     if _has(folded, _COMMIT_CONTRACT, "browse._COMMIT_CONTRACT", whole_words=True):
+        return "contract"
+    if _has(
+        folded, _END_CONTRACT_VERBS, "browse._END_CONTRACT_VERBS", whole_words=True
+    ) and _has(folded, _CONTRACT_NOUNS, "browse._CONTRACT_NOUNS"):
         return "contract"
     if _has(folded, _COMMIT_DELETE, "browse._COMMIT_DELETE", whole_words=True):
         return "delete"

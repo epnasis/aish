@@ -92,7 +92,9 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `browse._COMMIT_MONEY` | PL + EN | permits | yes | none — an unworded *Jetzt kaufen* rides the grant (#299 owns the miss) | 22 |
 | `browse._COMMIT_SUBSCRIPTION` | EN | permits | yes | — | 1 |
 | `browse._COMMIT_BOOKING` | PL + EN | permits | yes | — | 7 |
-| `browse._COMMIT_CONTRACT` | PL + EN | permits | yes | — | 4 |
+| `browse._END_CONTRACT_VERBS` | PL | permits | yes | — (needs `_CONTRACT_NOUNS` adjacent) | 4 |
+| `browse._CONTRACT_NOUNS` | PL + EN | permits | yes | — (the other half of that pair; matched as a PREFIX) | 8 |
+| `browse._COMMIT_CONTRACT` | EN | permits | yes | — | 1 |
 | `browse._COMMIT_DELETE` | PL + EN | permits | yes | — | 6 |
 | `browse._DOWNLOAD_WORDS` | PL + EN | breaks | yes | the `/download` and `/export` path test beside it | 13 |
 | `browse._DOWNLOAD_SUFFIXES` | file suffixes | breaks | yes | — | 9 |
@@ -128,13 +130,24 @@ the card read `Control.mutating`, and a word that merely moved would turn a stal
 press onto a live `Kup teraz` from a refusal into a buy. So this list is unchanged, its
 count is unchanged, and its size is what it was when the before-picture was taken.
 
-**The `browse._COMMIT_*` five (40 entries across five lists) are the one place the MATCHING
-differs.** Everything else in this table is `vocab.hit` — a bare substring scan, right for a
-list whose false positive costs a prompt. A false positive on these removes the capability
-outright with no way to grant it back in the moment, so they go through
+**The seven commit-verb lists (49 entries) are the one place the MATCHING differs.**
+Everything else in this table is `vocab.hit` — a bare substring scan, right for a list whose
+false positive costs a prompt. A false positive on these removes the capability outright
+with no way to grant it back in the moment, so they go through
 `_has(..., whole_words=True)`, which matches at word boundaries after the fold. Measured
 over 3,002 recorded control labels, a bare scan of the same words also refuses `facebook`,
 `Books`, `SZCZEGÓŁY ZAKUPU #1` and the surname `Tamara Kuprianowicz`.
+**`browse._CONTRACT_NOUNS` is the exception inside the exception** — a plain substring, and
+deliberately, because Polish declines the noun: `umow` has to find *umowa*, *umowę* and
+*umowy*, and a word boundary after `umow` finds none of the three. It is never consulted
+alone; it is the second half of a verb+noun pair, which is what stops `Rozwiąż quiz` (to
+SOLVE), `Dodaj wypowiedź` (a COMMENT, folding to `wypowiedz` exactly) and `Zerwij z
+nałogiem` from being read as ending a contract. Those are not narrow-versus-broad — they are
+different words that fold to the same string.
+**A miss on any of these is a CARD, not silence.** Every commit verb is also in
+`_MUTATING_WORDS`, so a guard that fails to fire drops the label back onto the incumbent
+list and it draws an approval card — exactly what it did before #342. That is what makes
+narrowing any of these guards safe, and it is the second reason the dual membership exists.
 **Could a structural check replace them?** No, for the same reason as above, and the entry
 says so: `browse._COMMIT_MONEY` declares **no** structural half. #299 owns the miss.
 **They are also the shape the change fence cannot see.** `TestTheCountingChangedNoMatching`
@@ -243,10 +256,11 @@ themselves. `vocab.looked_up` is the dict form.
 lists in order and returns at the first match, so a label caught by the first leaves the
 other nine **absent** from the record rather than at zero. That is what makes
 `never_consulted` mean anything at all. `browse.commits` is a second ladder of the same
-shape over the five `_COMMIT_*` lists, so `_COMMIT_MONEY` is asked for every control it sees
-and `_COMMIT_DELETE`, last on the ladder, only for the ones the four above it missed. A
+shape over the seven commit-verb lists, so `_COMMIT_MONEY` is asked for every control it
+sees and `_COMMIT_DELETE`, last on the ladder, only for the ones above it missed. A
 `_COMMIT_DELETE` count far below `_COMMIT_MONEY`'s is the ladder working, not a list going
-unconsulted.
+unconsulted — and `_CONTRACT_NOUNS` is asked only when `_END_CONTRACT_VERBS` already
+matched, so its `asked` count is that verb list's `matched` count and nothing else.
 
 **`candidates` is recorded only where the call site already knows it** — how many mutating
 words a name matched (`_only_chrome`), how many cookies were in the jar

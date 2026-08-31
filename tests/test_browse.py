@@ -2130,6 +2130,42 @@ class TestTheCommitVerbsLeaveTheApprovableSet:
         ):
             assert browse.commits(innocent) == "", innocent
 
+    #: Ending a contract, both directions. Not illustrations — this is the
+    #: evidence that settled the guard, measured against the census.
+    ENDS_A_CONTRACT = (
+        "Wypowiedz umowę", "Rozwiąż umowę", "Zerwij umowę",
+        "Wypowiedzenie umowy", "Terminate contract", "Terminate subscription",
+    )
+    #: The same folded strings, meaning something else entirely.
+    NOT_A_CONTRACT = (
+        "Rozwiąż quiz", "Rozwiąż test", "Dodaj wypowiedź", "Wypowiedzi",
+        "Zerwij z nałogiem", "Rozwiązania",
+    )
+
+    def test_ending_a_contract_needs_the_contract(self):
+        """The one guard here that is about HOMONYMS and not about breadth.
+        `rozwiązać` is to SOLVE, `wypowiedź` is a COMMENT and folds to
+        `wypowiedz` exactly, and `zerwij z nałogiem` is breaking a habit —
+        different words that fold to the same string, so the bare verb refused
+        a quiz, a comment box and a stop-smoking button. They take the
+        verb+noun shape the account-scoped refusals in this file already use.
+
+        `Wypowiedzenie umowy` is in the refuse list because word boundaries
+        mean `wypowiedz` does not reach inside it, and that noun form is
+        exactly what a Polish provider calls the button."""
+        for label in self.ENDS_A_CONTRACT:
+            assert browse.commits(label) == "contract", label
+        for label in self.NOT_A_CONTRACT:
+            assert browse.commits(label) == "", label
+
+    def test_a_guard_that_misses_falls_back_to_a_card_and_not_to_silence(self):
+        """Why narrowing here is safe, and the reason the words stayed in
+        `_MUTATING_WORDS`. A contract label these guards do not catch does not
+        go free — it lands on the incumbent list and draws a card, which is
+        exactly what it did before this issue."""
+        for label in self.ENDS_A_CONTRACT:
+            assert browse.is_worded(label), label
+
     def test_wyczysc_and_clear_stay_carded_together(self):
         """The issue's prose moved `wyczyść` and left its English twin behind,
         and moved "transfers" while `transfer` was never in its list. The list
