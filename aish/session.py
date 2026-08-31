@@ -1099,6 +1099,35 @@ class SessionLog:
         return hosts
 
     @staticmethod
+    def egress_vouches(path: Path) -> list[str]:
+        """Hosts this chat has already agreed data may ride an address to.
+
+        Deliberately a SECOND reader over a SECOND kind rather than another
+        entry in `GRANT_KINDS`. That tuple feeds `site_grants`, whose output is
+        restored into `_approved_sites` — a set matched by suffix and licensing
+        aish to press things on a site as the owner. An egress vouch is a yes
+        to READING, matched exactly; routing it through the shared reader would
+        promote every "yes, read allegro.pl" already on disk into "yes, drive
+        allegro.pl and everything under it".
+
+        Superseded-aware for the same reason `site_grants` is, and it matters
+        more here: Retry rewrites the log (#338/#339), so a vouch given inside
+        an attempt the owner discarded must go with that attempt."""
+        hosts: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = _record_or_none(line)
+            if (
+                record is None
+                or _is_superseded(record)
+                or record.get("kind") != "egress_vouch"
+            ):
+                continue
+            host = record.get("host")
+            if host and host not in hosts:
+                hosts.append(host)
+        return hosts
+
+    @staticmethod
     def last_turn(path: Path) -> int:
         """The highest turn counter this log has already used (0 for a log
         written before the trace contract, or by a session that never reached

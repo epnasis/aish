@@ -6106,6 +6106,11 @@ def create_app(
             # transcript it just replayed (#267).
             agent.restore_opened_links(SessionLog.calls_that_ran(path))
             agent.restore_site_grants(SessionLog.site_grants(path))
+            # ...and the hosts this chat vouched for on an egress card (#341).
+            # Two readers and two setters, never one: the sets they fill mean
+            # different things (read here, press there) and are matched
+            # differently (exact here, suffix there).
+            agent.restore_egress_vouches(SessionLog.egress_vouches(path))
             # Resume with the model this session last used (the drawer shows
             # it); fall back to the startup model when it can't be built.
             if (

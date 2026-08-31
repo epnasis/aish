@@ -11658,6 +11658,186 @@ class TestSearchingIsReading:
         assert agent._egress_novel_hosts("read_url", {"url": "https://eon.pl/faktury"}) is None
 
 
+class TestTheEgressVouchOutlivesTheAgent:
+    """#341. `_egress_gate`'s own comment says the owner's answer LASTS, and
+    for the agent's lifetime it did — but a chat outlives the agent holding it:
+    every ship rebuilds one underneath an open chat.
+
+    Replayed from `session-20260830-124807-752582`, records 816 and 1093 — two
+    cards for allegro.pl in ONE session, the second after the first had been
+    approved. The log below is that session minimized to the records the
+    readers actually consult; the owner's own state dir is never read."""
+
+    #: The two searches the recorded session ran, in order.
+    SEARCHES = [
+        "https://allegro.pl/listing?string=okularki+plywackie+Arena",
+        "https://allegro.pl/listing?string=TYR%20Special%20Ops",
+    ]
+
+    def _chat_log(self, tmp_path):
+        """One chat's log, as the web writes it: a task, a page read that
+        tainted it, and the vouch the approved card recorded."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("find me swimming goggles")
+        log.message({"role": "user", "content": "find me swimming goggles"})
+        log.step({"kind": "call", "turn": 1, "call": 1, "name": "read_url",
+                  "args": {"url": "https://share.gemini.google/niX1J3p1agFn"}})
+        log.workspace({"kind": "egress_vouch", "host": "allegro.pl"})
+        log.task_end()
+        log.close()
+        return log
+
+    def _fresh_agent_on(self, log, restore=True):
+        """The agent the next attach builds — a NEW object, as create_app makes
+        one, holding nothing the approved card put in the old one."""
+        fresh, _ = make_agent([])
+        fresh._tainted = True  # the chat had read the open web before the card
+        if restore:
+            fresh.restore_egress_vouches(SessionLog.egress_vouches(log.path))
+        return fresh
+
+    def test_the_second_identical_call_draws_no_card_after_a_rebuild(self, tmp_path):
+        """The measured failure, end to end: card, restart, same shop, no
+        second card."""
+        log = self._chat_log(tmp_path)
+        fresh = self._fresh_agent_on(log)
+        assert fresh._egress_novel_hosts("read_url", {"url": self.SEARCHES[1]}) is None
+
+    def test_without_the_restore_it_asks_again(self, tmp_path):
+        """The control arm. Same log, same agent, restore skipped — the card
+        the owner saw twice."""
+        log = self._chat_log(tmp_path)
+        fresh = self._fresh_agent_on(log, restore=False)
+        assert fresh._egress_novel_hosts(
+            "read_url", {"url": self.SEARCHES[1]}
+        ) == ["allegro.pl"]
+
+    def test_the_card_writes_the_record_the_restore_reads(self):
+        """The two halves have to be one mechanism, not two that agree today:
+        an approved card writes it, and the reader gets exactly that back."""
+        written: list[dict] = []
+        agent, _ = make_agent(
+            [],
+            approve_tool=lambda name, args, preview=None: True,
+            state_log=written.append,
+        )
+        agent._tainted = True
+        assert agent._egress_gate("read_url", {"url": self.SEARCHES[0]}) is None
+        assert written == [{"kind": "egress_vouch", "host": "allegro.pl"}]
+
+    def test_a_held_adjustment_vouches_nothing(self):
+        """`Approved(comment)` is a HOLD — the call never ran. Recording a
+        permission for an action the owner asked to have reworked would make
+        the log say yes to something nobody did."""
+        written: list[dict] = []
+        agent, _ = make_agent(
+            [],
+            approve_tool=lambda name, args, preview=None: Approved("use the other shop"),
+            state_log=written.append,
+        )
+        agent._tainted = True
+        assert agent._egress_gate("read_url", {"url": self.SEARCHES[0]}) is not None
+        assert written == []
+        assert agent._approved_hosts == set()
+
+    def test_a_denial_vouches_nothing(self):
+        written: list[dict] = []
+        agent, _ = make_agent(
+            [],
+            approve_tool=lambda name, args, preview=None: False,
+            state_log=written.append,
+        )
+        agent._tainted = True
+        assert agent._egress_gate("read_url", {"url": self.SEARCHES[0]}) is not None
+        assert written == []
+
+    def test_a_vouch_inside_a_discarded_attempt_does_not_survive_it(self, tmp_path):
+        """Retry REWRITES the log (#338/#339), so a yes given inside an attempt
+        the owner threw away must go with that attempt — the same rule
+        `site_grants` follows, for the same reason."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("find me swimming goggles")
+        log.message({"role": "user", "content": "find me swimming goggles"})
+        log.workspace({"kind": "egress_vouch", "host": "allegro.pl"})
+        log.task_end()
+        log.supersede_last_turn()
+        log.close()
+        assert SessionLog.egress_vouches(log.path) == []
+
+    def test_a_read_vouch_never_licenses_driving(self, tmp_path):
+        """The trap this slice exists to avoid. `_approved_sites` is matched by
+        SUFFIX and licenses pressing things as the owner; `_approved_hosts` is
+        matched exactly and licenses data riding an address. A yes to reading
+        allegro.pl must not become a yes to driving it — nor to every subdomain
+        under it."""
+        log = self._chat_log(tmp_path)
+        fresh = self._fresh_agent_on(log)
+        assert fresh._approved_hosts == {"allegro.pl"}
+        assert fresh._approved_sites == set()
+        assert fresh._site_granted("allegro.pl") is False
+        # ...and the vouch itself does not widen downward either.
+        assert fresh._egress_novel_hosts(
+            "read_url", {"url": "https://sub.allegro.pl/listing?string=x"}
+        ) == ["sub.allegro.pl"]
+
+    def test_a_press_grant_never_licenses_egress(self, tmp_path):
+        """And the other direction, which is the one that would leak: a site
+        grant covers subdomains, so restoring one into the egress set would
+        vouch for hosts no card ever named."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("book it")
+        log.workspace({"kind": "site_grant", "host": "allegro.pl"})
+        log.task_end()
+        log.close()
+        assert SessionLog.egress_vouches(log.path) == []
+        fresh, _ = make_agent([])
+        fresh._tainted = True
+        fresh.restore_site_grants(SessionLog.site_grants(log.path))
+        fresh.restore_egress_vouches(SessionLog.egress_vouches(log.path))
+        assert fresh._approved_hosts == set()
+        assert fresh._egress_novel_hosts(
+            "read_url", {"url": self.SEARCHES[1]}
+        ) == ["allegro.pl"]
+
+    def test_the_round_trip_vouches_exactly_the_hosts_the_card_named(self, tmp_path):
+        """Residual (c) has to survive the log. A multi-host search card
+        vouches every host it NAMED and no others; a restore that added one, or
+        dropped one, would make the grant less legible than the card."""
+        written: list[dict] = []
+        agent, _ = make_agent(
+            [],
+            origin="email",
+            approve_tool=lambda name, args, preview=None: True,
+            state_log=written.append,
+        )
+        query = "invoice site:eon.pl OR site:pge.pl OR site:tauron.pl"
+        assert agent._egress_gate("web_search", {"query": query}) is None
+        named = {"eon.pl", "pge.pl", "tauron.pl"}
+        assert agent._approved_hosts == named
+
+        log = SessionLog.new(tmp_path)
+        for record in written:
+            log.workspace(record)
+        log.close()
+        fresh, _ = make_agent([])
+        fresh.restore_egress_vouches(SessionLog.egress_vouches(log.path))
+        assert fresh._approved_hosts == named
+
+    def test_claude_max_forwards_the_restore(self):
+        """#311's lesson, and the reason this is asserted rather than assumed:
+        that backend owns its own loop and delegates by hand, so a seam
+        server.py appears to cover generically covers it only if it is
+        forwarded. An omission is the owner answering the card again on every
+        claude-max chat."""
+        from aish.claude_max import ClaudeMaxAgent
+
+        inner, _ = make_agent([])
+        wrapper = ClaudeMaxAgent.__new__(ClaudeMaxAgent)
+        wrapper.inner = inner
+        wrapper.restore_egress_vouches(["allegro.pl"])
+        assert inner._approved_hosts == {"allegro.pl"}
+
+
 class TestALinkThatArrivedByMail:
     """#279. Mail is the delivery mechanism for every account-recovery flow
     there is, so aish following a link by itself hands an injected turn the

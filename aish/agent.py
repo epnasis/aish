@@ -6530,8 +6530,39 @@ class Agent:
         # the payload branch returns the host list itself when nothing was
         # novel, which is what `shown` puts on the card. So a yes here is the
         # vouch `_searching_a_vouched_site` reads, on both paths.
-        self._approved_hosts.update(novel)
+        #
+        # Only HERE, and deliberately not on the `Approved(comment)` branch
+        # above: that one is a HOLD — the call never ran — so writing a vouch
+        # there would record a permission for an action the owner asked to have
+        # reworked.
+        self._vouch_hosts(novel)
         return None
+
+    def _vouch_hosts(self, hosts: list[str]) -> None:
+        """Record an egress vouch, in memory and in the chat's log (#341).
+
+        The comment above claimed his answer LASTS, and for the agent's
+        lifetime it did — but a chat outlives the agent holding it, since every
+        ship rebuilds one underneath an open chat. Measured:
+        `session-20260830-124807-752582` drew two cards for allegro.pl in one
+        session, records 816 and 1093, the second after the first was approved.
+
+        **Its own record kind, and never `GRANT_KINDS`.** Site grants are read
+        back into `_approved_sites`, which `_site_granted` matches by SUFFIX
+        and which licenses PRESSING things as the owner. These two sets answer
+        different questions and must stay disjoint by construction: a yes to
+        *read* allegro.pl is not a yes to drive it and every subdomain under
+        it. Folding this into the existing kind would have made it exactly
+        that, silently, for every chat already on disk.
+
+        What is vouched is exactly the hosts the card NAMED — residual (c) in
+        `docs/agent-core.md` — so the round trip through the log must not grow
+        the set either."""
+        self._approved_hosts.update(hosts)
+        if self.state_log is None:
+            return
+        for host in hosts:
+            self.state_log({"kind": "egress_vouch", "host": host})
 
     def _mail_link_url(self, name: str, args: dict) -> str:
         """The e-mailed URL this call would open, or "".
@@ -7886,6 +7917,24 @@ class Agent:
         chat, from that chat's own log, which is what keeps it a SESSION grant
         (L4) rather than a machine-wide one."""
         self._approved_sites.update(hosts)
+
+    def restore_egress_vouches(self, hosts: list[str]) -> None:
+        """Re-arm the egress vouches this chat already gave (#341).
+
+        EXACT hosts, into `_approved_hosts` and nowhere else. The two grants
+        this agent holds are deliberately not interchangeable:
+
+        - `_approved_hosts` is exact-match and answers *may data ride this
+          address* — `_egress_novel_hosts`, `_searching_a_vouched_site`;
+        - `_approved_sites` is suffix-match and answers *may aish press things
+          here* — `_site_granted`, `_grant_host`.
+
+        A read-vouch must not license driving, and a press grant must not
+        silently cover subdomain egress, so neither set is ever filled from the
+        other's card or the other's record. Restored per chat, from that chat's
+        own log, exactly as the site grants are — which is what keeps it a
+        SESSION grant (L4)."""
+        self._approved_hosts.update(hosts)
 
     def restore_opened_links(self, calls: list[tuple[dict, int]]) -> None:
         """Refill the ledger from a reopened chat's own log (#267).

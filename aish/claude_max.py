@@ -242,6 +242,14 @@ class ClaudeMaxAgent:
         # whose `_approved_sites` decides.
         self.inner.restore_site_grants(hosts)
 
+    def restore_egress_vouches(self, hosts: list[str]) -> None:
+        # Delegated by hand like every line above it, and #311 is why that
+        # sentence is worth writing down: this backend owns its own loop, so a
+        # seam server.py appears to cover generically covers it only if it is
+        # forwarded here. An omission is not a slower gate, it is the owner
+        # answering the same egress card again on every claude-max chat.
+        self.inner.restore_egress_vouches(hosts)
+
     @staticmethod
     def _load_sdk():
         try:
