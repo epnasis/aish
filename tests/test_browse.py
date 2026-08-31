@@ -2508,6 +2508,265 @@ class TestTheMeasuredComparisonAgainstTheIncumbent:
             assert browse.commits(label) == "", label       # the shipped one
 
 
+
+class TestALinkThatGoesSomewhereIsNotAPressThatCommits:
+    """#295 M2, and Law B's measured comparison for it.
+
+    `commits()` has exempted navigation since #342, on the ground `is_mutating`
+    stood on for longer: an `<a>` with a real http href is a GET to another
+    page, which is what `read_url` does unasked, so it cannot itself be the
+    commit — the commit is a button on the destination. `says_it_commits` never
+    consulted it, and that asymmetry is what carded `Faktury i płatności`
+    (26 sightings) three times in one week: the Polish word for *payment* is in
+    its name, it navigates, `is_mutating` called it harmless on exactly that
+    ground, and the worded half carded it anyway.
+
+    **The material is the owner's own recorded controls**, carried here as
+    labels and shapes only — no test reads `~/.local/state/aish`. Each row is
+    the fate the INCUMBENT gave that label in that shape, measured before the
+    change; the replacement's fate is computed by driving the real gate, so
+    every move is checked and none is assumed.
+
+    **What the corpus said that the issue's summary did not.** Only ONE of the
+    labels named as a worded navigating link is one: `Przełącz lokal` and
+    `Przełącz lokal/umowę` match nothing in `_MUTATING_WORDS` and were already
+    free in BOTH shapes, so the cards they drew in his log were not theirs —
+    they were the site-grant card, which is #295 M1's subject and not this
+    one. The same is true of `Search`, `Select a model:`, `przeszukaj Moje
+    Allegro`, `1 passenger, change number of passengers.`, `Dokąd Wybierz
+    lotnisko przylotu`, `Dodaj + — Dorośli` and `Numer przesyłki`: every one of
+    them is free here, submitting or not. They are kept in the corpus because a
+    fate that must NOT move is worth pinning exactly as much as one that must.
+    """
+
+    #: The four shapes a recorded label was seen in. `navigates` is the
+    #: enumeration's own destination signal and never the kind: measured,
+    #: `Faktury i płatności` appears 17 times WITH a destination and 9 times
+    #: without, and the second is a JavaScript button wearing a link's clothes.
+    SHAPES = {
+        "link to a page": {"kind": browse.LINK, "href": "https://eon.pl/faktury"},
+        "link with no destination": {"kind": browse.LINK},
+        "button": {"kind": browse.BUTTON},
+        "button that posts a form": {"kind": browse.BUTTON, "submits": True},
+    }
+
+    #: Every row: (label, shape, the fate the INCUMBENT gave it). Measured on
+    #: the shipped gate immediately before this change.
+    CORPUS = (
+        ('Faktury i płatności', 'link to a page', 'card'),
+        ('Faktury i płatności', 'link with no destination', 'card'),
+        ('Przełącz lokal', 'link to a page', 'free'),
+        ('Przełącz lokal', 'link with no destination', 'free'),
+        ('Przełącz lokal/umowę', 'link to a page', 'free'),
+        ('Przełącz lokal/umowę', 'link with no destination', 'free'),
+        ("Accept Jai Paliwal's invitation", 'button', 'card'),
+        ("Accept Jai Paliwal's invitation", 'button that posts a form', 'card'),
+        ('Search', 'button', 'free'),
+        ('Search', 'button that posts a form', 'free'),
+        ('1 passenger, change number of passengers.', 'button', 'free'),
+        ('1 passenger, change number of passengers.',
+         'button that posts a form', 'free'),
+        ('Select a model:', 'button', 'free'),
+        ('Select a model:', 'button that posts a form', 'free'),
+        ('przeszukaj Moje Allegro', 'button', 'free'),
+        ('przeszukaj Moje Allegro', 'button that posts a form', 'free'),
+        ('Dokąd Wybierz lotnisko przylotu', 'button', 'free'),
+        ('Dokąd Wybierz lotnisko przylotu', 'button that posts a form', 'free'),
+        ('Dodaj + — Dorośli', 'button', 'free'),
+        ('Dodaj + — Dorośli', 'button that posts a form', 'free'),
+        ('Numer przesyłki', 'button', 'free'),
+        ('Numer przesyłki', 'button that posts a form', 'free'),
+        ('Kup teraz', 'button', 'refused'),
+        ('Kup teraz', 'link to a page', 'card'),
+        ('Zapłać wybrane', 'button', 'refused'),
+        ('Zapłać wybrane', 'link to a page', 'card'),
+        ('Usuń przedmiot BOSCH Wycieraczka AreoTwin Retro 650mm',
+         'button', 'refused'),
+        ('Usuń przedmiot BOSCH Wycieraczka AreoTwin Retro 650mm',
+         'link to a page', 'card'),
+        ('Zamawiam z obowiązkiem zapłaty', 'button', 'refused'),
+        ('Zamawiam z obowiązkiem zapłaty', 'link to a page', 'card'),
+        ('Complete booking', 'button', 'refused'),
+        ('Complete booking', 'link to a page', 'card'),
+        ('Wypowiedz umowę', 'button', 'refused'),
+        ('Wypowiedz umowę', 'link to a page', 'card'),
+        ('Kontynuuj zakupy', 'button', 'card'),
+        ('Kontynuuj zakupy', 'link to a page', 'card'),
+        ('Moje zamówienia', 'button', 'card'),
+        ('Moje zamówienia', 'link to a page', 'card'),
+        ('facebook', 'button', 'card'),
+        ('facebook', 'link to a page', 'card'),
+        ('Rozwiąż quiz', 'button', 'card'),
+        ('Rozwiąż quiz', 'link to a page', 'card'),
+        ('Book a flight', 'button', 'card'),
+        ('Book a flight', 'link to a page', 'card'),
+    )
+
+    #: What `commits()` answers for every recorded label, plain and navigating.
+    #: `commits()` is not touched by this change and its refusal set must come
+    #: out byte-identical, so it is pinned as the exact consequence key rather
+    #: than as "something was refused".
+    REFUSALS = (
+        ('Faktury i płatności', '', ''),
+        ('Przełącz lokal', '', ''),
+        ('Przełącz lokal/umowę', '', ''),
+        ("Accept Jai Paliwal's invitation", '', ''),
+        ('Search', '', ''),
+        ('1 passenger, change number of passengers.', '', ''),
+        ('Select a model:', '', ''),
+        ('przeszukaj Moje Allegro', '', ''),
+        ('Dokąd Wybierz lotnisko przylotu', '', ''),
+        ('Dodaj + — Dorośli', '', ''),
+        ('Numer przesyłki', '', ''),
+        ('Kup teraz', 'money', ''),
+        ('Zapłać wybrane', 'money', ''),
+        ('Usuń przedmiot BOSCH Wycieraczka AreoTwin Retro 650mm', 'delete', ''),
+        ('Zamawiam z obowiązkiem zapłaty', 'money', ''),
+        ('Complete booking', 'booking', ''),
+        ('Wypowiedz umowę', 'contract', ''),
+        ('Kontynuuj zakupy', '', ''),
+        ('Moje zamówienia', '', ''),
+        ('facebook', '', ''),
+        ('Rozwiąż quiz', '', ''),
+        ('Book a flight', '', ''),
+    )
+
+    HOST = "eon.pl"
+
+    def _fate(self, label, shape):
+        """What the SHIPPED gate does with this control — driven, not modelled.
+
+        The site is already granted, which is the steady state the census was
+        measured in: the corpus is a week of driving sites he uses, not a week
+        of first presses. A card here is therefore the control's own."""
+        raw = {"n": 1, "kind": browse.BUTTON, "name": label}
+        raw.update(self.SHAPES[shape])
+        controls = browse.controls_from([raw])
+        asked = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+        )
+        agent._browse_view.remember(
+            snapshot(url=f"https://{self.HOST}/mojeon", controls=controls)
+        )
+        agent._approved_sites.add(self.HOST)
+        out = agent._browse_gate("browse_act", {"target": controls[0].address})
+        if out is not None:
+            return "refused"
+        return "card" if asked else "free"
+
+    def test_every_fate_change_is_a_card_becoming_free_on_a_navigating_link(self):
+        """The whole permitted direction, and the whole of it. Any other move
+        — a refusal going anywhere, a button changing, a link with no
+        destination losing its card — is a defect, so the corpus is ITERATED
+        and each difference is checked against the one shape allowed to move.
+
+        Measured: 12 of the 44 rows move, all of them `card` → `free`, all of
+        them on a link with a real destination."""
+        moved = []
+        for label, shape, before in self.CORPUS:
+            after = self._fate(label, shape)
+            if after == before:
+                continue
+            moved.append((label, shape, before, after))
+            assert (before, after) == ("card", "free"), (label, shape, before, after)
+            assert "href" in self.SHAPES[shape], (
+                f"{label!r} moved in a shape that does not navigate: {shape}"
+            )
+        # The COUNT is pinned too: a direction check alone passes happily
+        # while a widened exemption frees ten more labels in the right
+        # direction, and the cost of a change is how many, not only which
+        # way.
+        assert len(moved) == 12, moved
+        assert len(self.CORPUS) == 44
+
+    def test_no_recorded_label_changes_what_it_is_refused_for(self):
+        """`commits()` shipped yesterday and nothing here may move a refusal.
+        Pinned as the exact consequence key, both ways, over every label."""
+        for label, plain, navigating in self.REFUSALS:
+            assert browse.commits(label) == plain, label
+            assert browse.commits(label, navigates=True) == navigating, label
+
+    def test_the_refusal_lists_still_refuse_entry_by_entry(self):
+        """The `zamawiam` lesson: a guard over a set ITERATES the set. Every
+        entry of every commit list, swept from the module so a list added later
+        cannot slip past by not being mentioned."""
+        incumbent = TestTheCommitVerbsLeaveTheApprovableSet()
+        for name, entries in sorted(incumbent._commit_lists().items()):
+            kind = incumbent.LIST_KINDS[name]
+            for entry in entries:
+                if kind == "refuses":
+                    assert browse.commits(entry) != "", f"{name}: {entry!r}"
+                else:
+                    assert browse.commits(entry) == "", f"{name}: {entry!r}"
+
+    def test_a_link_with_no_destination_keeps_its_card(self):
+        """An `<a href="#">` is a JavaScript button wearing a link's clothes.
+        Measured, `Faktury i płatności` is that 9 times out of 26."""
+        assert self._fate("Faktury i płatności", "link with no destination") == "card"
+        assert browse.says_it_commits("Faktury i płatności", navigates=False)
+
+    def test_the_exemption_reads_the_href_and_never_the_kind(self):
+        """The two halves must agree about what "goes somewhere" means, and
+        both must read the enumeration's own answer. A kind check would free
+        every `<a href="#">` on the Polish web."""
+        dead = browse.controls_from(
+            [{"n": 1, "kind": browse.LINK, "name": "Faktury i płatności"}]
+        )[0]
+        live = browse.controls_from([{
+            "n": 1, "kind": browse.LINK, "name": "Faktury i płatności",
+            "href": "https://eon.pl/faktury",
+        }])[0]
+        assert dead.kind == live.kind == browse.LINK
+        assert dead.navigates is False and live.navigates is True
+        assert dead.worded is True and live.worded is False
+        assert dead.mutating is True and live.mutating is False
+
+    def test_a_control_that_submits_a_form_is_never_exempted(self):
+        """Whatever else it claims to be. A page is free to describe its own
+        controls however it likes, and the nondescript button that posts the
+        form is the dangerous one — so the exemption stops at `submits`,
+        exactly where the widget demotion beside it stops."""
+        assert browse.says_it_commits("Wyślij", navigates=True, submits=True)
+        assert browse.says_it_commits("Faktury i płatności", navigates=True,
+                                      submits=True)
+        both = browse.controls_from([{
+            "n": 1, "kind": browse.LINK, "name": "Faktury i płatności",
+            "href": "https://eon.pl/faktury", "submits": True,
+        }])[0]
+        assert both.worded is True
+
+    def test_the_demotion_is_structural_and_not_a_gate_special_case(self):
+        """`says_it_commits` is the single owner of the judgement, so the
+        answer moved once and every reader of `Control.worded` sees it — the
+        gate was not taught a new exception of its own."""
+        control = browse.controls_from([{
+            "n": 1, "kind": browse.LINK, "name": "Faktury i płatności",
+            "href": "https://eon.pl/faktury",
+        }])[0]
+        assert control.worded is False
+        assert browse.says_it_commits(
+            "Faktury i płatności", navigates=True
+        ) is False
+
+    def test_the_fill_fence_is_unchanged_for_everything_that_is_not_a_link(self):
+        """`Control.mutating` is read by three fences besides the card, and a
+        navigating control was already non-mutating before this change — so
+        `mutating` moves for nothing at all here, which is what keeps the
+        stale-snapshot press fence exactly as strict as it was."""
+        for label, shape, _before in self.CORPUS:
+            raw = {"n": 1, "kind": browse.BUTTON, "name": label}
+            raw.update(self.SHAPES[shape])
+            control = browse.controls_from([raw])[0]
+            expected = browse.is_mutating(
+                label,
+                control.kind,
+                submits=control.submits,
+                navigates=control.navigates,
+            )
+            assert control.mutating is expected, (label, shape)
+
 class TestOneFenceOverTypingWhicheverToolTypes:
     """#310. Both value refusals lived on the batch path, so the same value on
     the same page was refused by `browse_fill` and typed by

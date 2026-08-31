@@ -1299,7 +1299,13 @@ def _only_chrome(name: str) -> bool:
     return only
 
 
-def says_it_commits(name: str, *, submits: bool = False, in_widget: bool = False) -> bool:
+def says_it_commits(
+    name: str,
+    *,
+    submits: bool = False,
+    in_widget: bool = False,
+    navigates: bool = False,
+) -> bool:
     """Does this control's NAME commit something, given where it sits?
 
     ONE place decides this, because two things read it and they must not
@@ -1307,7 +1313,37 @@ def says_it_commits(name: str, *, submits: bool = False, in_widget: bool = False
     sight-unseen) and the GATE (which uses it to decide what the driving grant
     cannot cover). The date picker's "Confirm" is demoted here — scoped to a
     widget the page opened, and never to something that submits a form, so the
-    demotion cannot reach the button that ends a purchase."""
+    demotion cannot reach the button that ends a purchase.
+
+    **A link that goes somewhere is not a press that commits (#295 M2).**
+    `commits()` has exempted navigation since #342, on the ground `is_mutating`
+    had already stood on for longer: an `<a>` with a real http href is a GET to
+    another page, which is what `read_url` does unasked, so it cannot itself be
+    the commit — the commit is a button on the destination. This function never
+    consulted it, and that asymmetry is what carded `Faktury i płatności` three
+    times in one week: the Polish word for *payment* is in its name, it
+    navigates, `is_mutating` called it harmless on exactly that ground, and the
+    worded half carded it anyway. A card that fires on reading an invoice list
+    is the false positive that teaches the tap waiting on the purchase.
+
+    **From the real destination, never from `kind == "link"`.** Measured in the
+    owner's corpus, `Faktury i płatności` appears 17 times WITH a destination
+    and 9 times without. An `<a href="#">` is a JavaScript button wearing a
+    link's clothes and it keeps its card; only the enumeration's own
+    `goesElsewhere` signal tells the two apart, which is why `Control.navigates`
+    is carried rather than re-derived from the kind.
+
+    **A control that submits a form is never exempted by this**, whatever else
+    it claims to be — the same fence `_only_chrome` sits behind, and for the
+    same reason: the nondescript button that posts the form is the dangerous
+    one, and a page is free to describe it however it likes.
+
+    `is_mutating` reaches the same answer through its own earlier `navigates`
+    return, which is deliberately left where it is: removing it would let a
+    navigating control that ALSO posts a form become mutating, which it is not
+    today."""
+    if navigates and not submits:
+        return False
     if in_widget and not submits and _only_chrome(name):
         return False
     return is_worded(name)
@@ -2334,6 +2370,10 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                     name,
                     submits=bool(raw.get("submits")),
                     in_widget=bool(raw.get("in_widget")),
+                    # The same `href` `mutating` reads, one line up: the
+                    # enumeration's own answer to "does pressing this GO
+                    # somewhere", never the kind the page called it.
+                    navigates=bool(raw.get("href")),
                 ),
                 disabled=bool(raw.get("disabled")),
                 submits=bool(raw.get("submits")),
