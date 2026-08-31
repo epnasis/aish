@@ -118,6 +118,20 @@ _MUTATING_WORDS = vocab.declare(
     "sign", "activate", "deactivate", "upgrade", "downgrade",
     # identity
     "wyloguj", "logout", "sign out", "zaloguj", "login", "log in", "sign in",
+    # Out of its group ON PURPOSE (#342). `zamawiam` belongs with the money
+    # words above, and it sits here because `TestTheCountingChangedNoMatching`
+    # matches a declared change as `before − removed + added` EXACTLY — an
+    # entry spliced into the middle reads as a reordering of the whole list and
+    # destroys the before-picture the fence exists to hold. It was ADDED, not
+    # moved: nothing here covers it (`zamow` is not a substring of `zamawiam`,
+    # unlike `kupuje`/`kupie`, which ride `kup`), so `Zamawiam z obowiązkiem
+    # zapłaty` — the statutory Polish checkout wording — classified as NOT
+    # mutating while the gate refused it. The gate is not the only reader:
+    # `browser.browse_act`'s act-time re-resolution and the batch runner's
+    # sight-unseen fence both read `Control.mutating`, and a stale snapshot
+    # landing on that live label would have been PRESSED where `Kup teraz` is
+    # refused. That is the exact hole dual membership exists to close.
+    "zamawiam",
 ))
 
 

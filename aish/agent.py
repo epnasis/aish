@@ -1616,11 +1616,17 @@ BROWSE_IRREVERSIBLE = (
 # owner decided the last press is his: there is no future in which aish pressing
 # "Zapłać" was wanted, so a card offering a yes for it protects nothing and
 # trains the tap that is waiting on the purchase.
+# The sentence stops exactly where the code does. It opened "aish will never
+# {what}, on any site, however it is asked", which is wider than anything here
+# enforces: an unworded "Jetzt kaufen" rides the site grant, and #299 owns that
+# miss. What a line actually checked is the control's WORDS, so that is what
+# the refusal claims — and it matters more than usual because the model reads
+# this sentence and repeats it to the owner as aish's own account of itself.
 BROWSE_COMMITS = (
-    "NOT EXECUTED: aish will never {what}, on any site, however it is asked. "
-    "The control {n} says that is what pressing it does, and that press is the "
-    "user's own — no approval changes it. Tell the user to run /browser {host} "
-    "and do it themselves."
+    "NOT EXECUTED: aish does not press a control whose words say it would "
+    "{what} — on any site, and no approval changes that. {n} says that is what "
+    "pressing it does, and that press is the user's own. Tell the user to run "
+    "/browser {host} and do it themselves."
 )
 
 # A link that arrived by e-mail (#279). Structural, and it needs no classifier:

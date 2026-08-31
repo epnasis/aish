@@ -77,7 +77,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 
 | list | languages | on a miss | counted | structural check under it | size |
 |---|---|---|---|---|---:|
-| `browse._MUTATING_WORDS` | PL + EN | permits | yes | the form-submit half of `is_mutating`: a non-GET submit draws a card whatever the button is called | 77 |
+| `browse._MUTATING_WORDS` | PL + EN | permits | yes | the form-submit half of `is_mutating`: a non-GET submit draws a card whatever the button is called | 78 |
 | `browse.CHROME_WORDS` | PL + EN | friction | yes | `submits` / `in_widget` — the demotion cannot reach a control that submits a form | 6 |
 | `browse._CHANGE_VERBS` | PL + EN | permits | yes | — | 17 |
 | `browse._CONTACT_NOUNS` | PL + EN | permits | yes | — | 14 |
@@ -115,7 +115,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 
 ### The entries worth arguing about
 
-**`browse._MUTATING_WORDS` (77, still the largest).** Fail-open, and the file says so out loud —
+**`browse._MUTATING_WORDS` (78, still the largest).** Fail-open, and the file says so out loud —
 *"it costs a prompt when it is wrong and costs a paid bill when it is missing"*. But only the
 WORDED half fails open: a nondescript `Dalej` that POSTs a form is gated by
 `is_mutating`'s structural half regardless. The residual is a button that neither says a
@@ -123,12 +123,20 @@ mutating word nor submits a form — a JavaScript control on an SPA — and for 
 nothing but the per-host, per-task driving grant.
 **Could a structural check replace it?** No, and it should not try. Whether pressing a thing
 spends money is not a property of the DOM.
-**#342 changed what a hit COSTS without changing one word of it.** The commit verbs
-(`kup`, `zapłać`, `usuń`, `subscribe` …) now also sit in the `_COMMIT_*` lists, where a hit is
-a refusal rather than a card. They stayed here as well, deliberately: three fences besides
-the card read `Control.mutating`, and a word that merely moved would turn a stale-snapshot
-press onto a live `Kup teraz` from a refusal into a buy. So this list is unchanged, its
-count is unchanged, and its size is what it was when the before-picture was taken.
+**#342 changed what a hit COSTS, and added exactly one word.** The commit verbs (`kup`,
+`zapłać`, `usuń`, `subscribe` …) now also sit in the commit-verb lists, where a hit is a
+refusal rather than a card. They stayed here as well, deliberately: three fences besides the
+card read `Control.mutating`, and a word that merely moved would turn a stale-snapshot press
+onto a live `Kup teraz` from a refusal into a buy. **`zamawiam` (77 → 78) is the one entry
+that had to be ADDED**, and finding out why is the reason to keep reading: it was carried
+into the refusal list as an inflection, and nothing here covered it — `zamow` is not a
+substring of `zamawiam`, unlike `kupuje`/`kupie`, which ride `kup`. So `Zamawiam z
+obowiązkiem zapłaty`, the statutory Polish checkout wording and about the most load-bearing
+buy label on the Polish web, was refused by the gate and classified NOT mutating by the two
+live fences — pressable on a stale snapshot where `Kup teraz` is refused. It is declared in
+`TestTheCountingChangedNoMatching.DELIBERATE`, which is the second entry that mechanism has
+ever carried, and the sampled guard that let it through is now a property over every entry
+of every commit list.
 
 **The seven commit-verb lists (49 entries) are the one place the MATCHING differs.**
 Everything else in this table is `vocab.hit` — a bare substring scan, right for a list whose
@@ -281,7 +289,7 @@ will one day follow one of them.
 
 ### What it costs
 
-Measured on this machine, on `browse._MUTATING_WORDS` (77 entries) at a real control name:
+Measured on this machine, on `browse._MUTATING_WORDS` (77 entries at the time; it is 78 since #342) at a real control name:
 the bare scan is **0.38 µs**, the counted scan **0.44 µs** — **0.06 µs of overhead per
 consultation**. A page of sixty controls making roughly eight consultations each therefore
 pays about **0.027 ms**, against a page render measured in hundreds of milliseconds. The

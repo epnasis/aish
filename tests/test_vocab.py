@@ -111,6 +111,16 @@ class TestTheCountingChangedNoMatching:
         # read_url and nothing through browse: the model's choice of tool was
         # deciding a permission.
         "aish/agent.py:EGRESS_TOOLS": {"added": ["browse"], "removed": []},
+        # #342: the commit verbs became refusals rather than cards, and the
+        # words STAYED here so the three fences that read `Control.mutating`
+        # keep working. `zamawiam` is the one entry that had to be ADDED: it
+        # was carried into the refusal list as an inflection, and nothing here
+        # covered it — `zamow` is not a substring of `zamawiam`, unlike
+        # `kupuje`/`kupie`, which ride `kup`. So `Zamawiam z obowiązkiem
+        # zapłaty`, the statutory Polish checkout wording, classified as not
+        # mutating, and a stale snapshot landing on it live would have been
+        # pressed where `Kup teraz` is refused. Not one other word moved.
+        "aish/browse.py:_MUTATING_WORDS": {"added": ["zamawiam"], "removed": []},
     }
 
     @staticmethod

@@ -2200,6 +2200,23 @@ class TestTheCommitVerbsLeaveTheApprovableSet:
         ):
             assert mechanism not in out.lower(), mechanism
 
+    def test_the_refusal_never_claims_aish_cannot_buy(self):
+        """The claim has to stop where the code does, and this string is read
+        by the MODEL, which then repeats it to the owner as aish's own account
+        of itself. It opened "aish will never buy something or pay money from
+        your account, on any site, however it is asked" — wider than anything
+        enforced, since an unworded "Jetzt kaufen" rides the site grant and
+        #299 owns that miss. What a line checked is the control's WORDS."""
+        snap = snapshot(controls=[control(n=1, name="Kup teraz")])
+        agent, _ = self._agent(snap)
+        out = agent._browse_gate("browse_act", {"target": "Kup teraz"})
+        assert "words say it would buy" in out
+        for wider in (
+            "will never buy", "never buy something", "aish cannot buy",
+            "will never spend", "never pays",
+        ):
+            assert wider not in out, wider
+
     def test_the_refusal_does_not_claim_the_press_was_irreversible(self):
         """A cart row removed is undone by adding it back, and
         `BROWSE_IRREVERSIBLE`'s "it cannot be undone" would be a claim wider
@@ -2315,17 +2332,85 @@ class TestTheCommitVerbsLeaveTheApprovableSet:
         assert "NOT EXECUTED" in out and "buy something" in out
         assert asked == []
 
-    def test_the_moved_words_did_not_leave_the_mutating_list(self):
-        """**The load-bearing half of the change.** `Control.mutating` is read
-        by three fences besides the card: `browser.browse_act`'s act-time
-        re-resolution, and `plan_batch`'s mid-step and sight-unseen fences. Had
-        `kup` simply MOVED lists, a stale-snapshot press landing on a live
-        JavaScript "Kup teraz" would classify as not-mutating and RUN. So the
-        words are in both, and the FATE moves while the structure holds."""
-        for moved in ("Kup teraz", "Usuń", "Subscribe", "Zapłać", "Zamów"):
-            assert browse.is_worded(moved), moved
-            assert browse.is_mutating(moved, browse.BUTTON), moved
-            assert browse.commits(moved) != "", moved
+    #: Every commit-verb list, and which of three kinds it is. A list added
+    #: later and left out of this map FAILS the sweep below rather than being
+    #: skipped — an invariant this load-bearing must not depend on somebody
+    #: remembering to extend a tuple.
+    #:
+    #: `refuses` — an entry ALONE draws the refusal.
+    #: `needs a noun` — the verb half of a guarded pair; alone it refuses
+    #:   nothing, and the noun is what fires it.
+    #: `is a noun` — the other half. Never a commit verb on its own, so
+    #:   `is_worded` says nothing about it and must not be asserted.
+    LIST_KINDS = {
+        "_COMMIT_MONEY": "refuses",
+        "_COMMIT_SUBSCRIPTION": "refuses",
+        "_COMMIT_BOOKING": "refuses",
+        "_COMMIT_CONTRACT": "refuses",
+        "_COMMIT_DELETE": "refuses",
+        "_END_CONTRACT_VERBS": "needs a noun",
+        "_CONTRACT_NOUNS": "is a noun",
+    }
+
+    def _commit_lists(self):
+        """Swept from the module, not typed out, so a new list cannot slip
+        past by not being mentioned."""
+        found = {
+            name: value for name, value in vars(browse).items()
+            if ("_COMMIT_" in name or "_CONTRACT_" in name)
+            and isinstance(value, tuple)
+        }
+        assert found, "the sweep itself is broken — no commit lists found"
+        unclassified = sorted(set(found) - set(self.LIST_KINDS))
+        assert not unclassified, (
+            "a commit list nothing classifies is a list this property skips "
+            f"in silence: {unclassified}"
+        )
+        return found
+
+    def test_every_moved_word_is_still_in_the_mutating_list(self):
+        """**The load-bearing half of the change, checked over every entry
+        rather than a sample.**
+
+        `Control.mutating` is read by three fences besides the card:
+        `browser.browse_act`'s act-time re-resolution, and `plan_batch`'s
+        mid-step and sight-unseen fences. A word that only MOVED lists leaves a
+        stale-snapshot press landing on that live label classified as
+        not-mutating, and it RUNS — where the same word on a fresh snapshot is
+        refused.
+
+        This test sampled five labels until `zamawiam` got through it: carried
+        into the refusal list as an inflection, covered by nothing here
+        (`zamow` is not a substring of it, unlike `kupuje`/`kupie`, which ride
+        `kup`), so `Zamawiam z obowiązkiem zapłaty` — the statutory Polish
+        checkout wording — was refused by the gate and pressable by the live
+        fences. A sampled guard on an invariant this load-bearing is not a
+        guard, so it is every entry now."""
+        for name, entries in sorted(self._commit_lists().items()):
+            if self.LIST_KINDS[name] == "is a noun":
+                continue
+            for entry in entries:
+                assert browse.is_worded(entry), f"{name}: {entry!r}"
+                assert browse.is_mutating(entry, browse.BUTTON), f"{name}: {entry!r}"
+
+    def test_every_entry_that_refuses_alone_actually_does(self):
+        """The other direction of the same sweep: a list declared as refusing
+        on its own must, or the classification above is decoration."""
+        lists = self._commit_lists()
+        for name, entries in sorted(lists.items()):
+            for entry in entries:
+                kind = self.LIST_KINDS[name]
+                if kind == "refuses":
+                    assert browse.commits(entry) != "", f"{name}: {entry!r}"
+                else:
+                    # A contract verb alone, or a bare noun, refuses nothing —
+                    # that IS the guard, and it is why the homonyms are free.
+                    assert browse.commits(entry) == "", f"{name}: {entry!r}"
+
+    def test_the_contract_pair_refuses_only_together(self):
+        for verb in browse._END_CONTRACT_VERBS:
+            for noun in browse._CONTRACT_NOUNS:
+                assert browse.commits(f"{verb} {noun}") == "contract", (verb, noun)
 
     def test_a_committing_step_in_the_middle_of_a_batch_is_still_refused(self):
         """The other consumer of `mutating`: only ONE step may need approval
