@@ -37,6 +37,7 @@ import difflib
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from functools import cache
 from typing import Any
 
 from . import vocab
@@ -122,21 +123,34 @@ _MUTATING_WORDS = vocab.declare(
 
 # --------------------------------------------- consequences with no yes button
 #
-# A short list of things aish may never do to one of his accounts, whoever
-# approves. It is NOT a bigger `_MUTATING_WORDS`: that list decides what draws a
-# CARD, and under the owner's own constraint — "there's this decision fatigue if
-# I have to please click approve for every action, it's not gonna happen" — a
-# card he taps through is worse than none, because it records a consent he never
-# gave. Moving a consequence from approvable to UNAPPROVABLE removes a decision
-# instead of adding one, which is the only kind of control that survives him not
-# reading cards.
+# The things aish may never do to one of his accounts, whoever approves. It is
+# NOT a bigger `_MUTATING_WORDS`: that list decides what draws a CARD, and under
+# the owner's own constraint — "there's this decision fatigue if I have to
+# please click approve for every action, it's not gonna happen" — a card he taps
+# through is worse than none, because it records a consent he never gave. Moving
+# a consequence from approvable to UNAPPROVABLE removes a decision instead of
+# adding one, which is the only kind of control that survives him not reading
+# cards.
 #
-# Where the word lists above are deliberately broad and dumb, these are
-# deliberately NARROW, and the asymmetry is the reason: a false positive on
-# `_MUTATING_WORDS` costs a prompt, and a false positive here removes the
-# capability outright with no way to grant it back in the moment. So a contact
-# or payout match needs a change VERB and the thing being changed, adjacent in
-# one label — never a bare noun, which would take "e-mail" in a nav bar.
+# THE SET IS IN TWO HALVES, AND THEY ARE MATCHED DIFFERENTLY ON PURPOSE (#342).
+# It was one half and "deliberately narrow" for as long as it held only the
+# account-control acts, where a match needs a change VERB and the thing being
+# changed adjacent in one label — never a bare noun, which would take "e-mail"
+# in a nav bar. The commit verbs that joined it are whole verb CLASSES, and
+# broad ones: a control whose own words say it buys, pays, orders, subscribes,
+# ends a contract or deletes. So "narrow" is no longer the description. What
+# holds instead is that every entry is read as a WORD and not as a run of
+# letters — the surname "Kuprianowicz" contains `kup` and `SZCZEGÓŁY ZAKUPU`
+# contains it twice — and that the broad classes are exempted where the page's
+# own structure says pressing cannot commit: a link that navigates, and a read.
+#
+# The asymmetry that set the calibration is unchanged and now cuts harder: a
+# false positive on `_MUTATING_WORDS` costs a prompt, and a false positive here
+# removes the capability outright with no way to grant it back in the moment.
+# That is why the commit verbs are boundaried and why `order`, `purchase`,
+# `book` and `reserve` moved as PHRASES — measured over 3,002 recorded control
+# labels, the bare words live in `Order history`, `Purchase history` and
+# `Book a flight`, which are read surfaces and a search box, not commitments.
 #
 # The escape hatch is the one `NO_PASSWORDS` already established and the reason
 # this is not a wall: he is handed `/browser <host>` and does it himself. The
@@ -197,13 +211,18 @@ _CREDENTIAL_PHRASES = vocab.declare(
     "set password", "reset password", "update password", "change pin",
     "zmien pin",
 ))
-# Deliberately ACCOUNT-scoped, and this is the one place the plan was narrowed
-# on purpose. Blanket "delete" is already word-matched into a card; making every
-# delete unapprovable would stop aish throwing away a draft, a reminder or a
-# single message — far more capability than it protects, because a delete on a
-# page is nearly always a row and not an account. Blanket destruction is a
-# REVERSIBILITY problem (a trash that empties later, #177), not a consequence
-# class, and it wants that mechanism rather than this one.
+# ACCOUNT-scoped, and the narrowing this comment used to argue for was
+# OVERRULED by the owner (#342). It said: blanket "delete" is already
+# word-matched into a card, and making every delete unapprovable would stop
+# aish throwing away a draft, a reminder or a single message — far more
+# capability than it protects, because a delete on a page is nearly always a row
+# and not an account. He decided against it in his own words: the escape is
+# `/browser`, and if a real task breaks, the softening comes back WITH THAT TASK
+# as its evidence. So `_COMMIT_DELETE` below refuses every delete, and this list
+# survives only because "close your account" is a narrower thing to be told than
+# "delete something". Blanket destruction is still a REVERSIBILITY problem (a
+# trash that empties later, #177); that mechanism would be what lets the
+# softening return.
 # Signing in THROUGH somebody else. Measured on linkedin.com 2026-08-22: asked
 # to sign in with stored credentials and having none, the model pressed "Sign
 # in", then "Continue with Google", then "Kontynuuj jako Sage" — two clicks
@@ -261,6 +280,102 @@ _CLOSE_ACCOUNT_PHRASES = vocab.declare(
     "usun profil", "delete profile",
 ))
 
+# --------------------------------------------------------- the commit verbs
+#
+# A control whose OWN WORDS say it buys, pays, orders, books, reserves,
+# subscribes, tops up or ends a contract — and a control that deletes (#342).
+# These used to draw a card, and the card was the whole problem: measured this
+# period, the owner's median tap on one is 4.3 seconds and 11 of 34 were under
+# 3. There is no future in which aish pressing "Zapłać" was wanted, so a popup
+# offering a yes for it protects nothing and trains the tap that is waiting on
+# the purchase.
+#
+# **THEY DID NOT LEAVE `_MUTATING_WORDS`, THEY JOINED THIS AS WELL, AND THAT
+# DUAL MEMBERSHIP IS LOAD-BEARING.** `Control.mutating` is read by three fences
+# besides the card: `browser.browse_act` refuses when the LIVE control needs
+# approval and the approved snapshot did not ("the page moved between the card
+# and the press"), and `plan_batch` uses it for the mid-step and sight-unseen
+# fences. Had `kup` simply moved lists, a stale-snapshot press landing on a
+# live JavaScript "Kup teraz" would have classified as not-mutating and RUN —
+# a path that ends in a refusal today would have ended in a buy. The gate
+# consults these lists before it draws a card, so the FATE moves while the
+# structural fences keep working by construction.
+#
+# Matched as WORDS (`whole_words`), unlike everything above. `vocab.hit` is a
+# bare substring scan, calibrated for a list whose false positive costs a
+# prompt; these cost the capability outright, so the matching has to implement
+# the owner's sentence — *a control whose own words SAY it buys* — rather than
+# "contains these letters". Measured over 3,002 recorded control labels, bare
+# substrings also refuse `facebook`, `Books`, `Kontynuuj zakupy`,
+# `SZCZEGÓŁY ZAKUPU #1`, `Manage booking` and the surname `Tamara Kuprianowicz`.
+_COMMIT_MONEY = vocab.declare(
+    "browse._COMMIT_MONEY",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    structural="none — and the epic says so out loud: an unworded 'Jetzt kaufen' "
+    "rides the site grant. #299 owns the miss; this list owns the hit.",
+    note="A miss drops back to `_MUTATING_WORDS`, which still holds every one "
+    "of these words — so a miss is a CARD, never silence.",
+    entries=(
+    # Folded forms only: `commits()` folds its input, so `zaplac` finds
+    # "Zapłać". The ASCII twins stay in `_MUTATING_WORDS` for the card path.
+    "zaplac", "oplac", "kup", "kupuje", "kupie", "zamow", "zamawiam",
+    "przelew", "doladuj", "pay", "buy", "checkout",
+    # `order` and `purchase` move as PHRASES ONLY. Both survive word
+    # boundaries in `Order history`, `Track order` and `Purchase history` —
+    # read surfaces, and refusing them would cost the owner his own receipts.
+    "place order", "place your order", "order now", "complete order",
+    "submit order", "order and pay", "zloz zamowienie",
+    "complete purchase", "purchase now", "confirm purchase",
+))
+_COMMIT_SUBSCRIPTION = vocab.declare(
+    "browse._COMMIT_SUBSCRIPTION",
+    languages="English",
+    on_miss=vocab.PERMITS,
+    note="Its own consequence rather than a money word: a newsletter costs "
+    "nothing, so 'buy something' would be a claim the label does not support.",
+    entries=("subscribe",),
+)
+# PHRASES ONLY, and this one is a DRIVE decision recorded on #295 — the owner
+# may overrule it. Measured, the bare word's real occurrences in his corpus are
+# `Book a flight` (44 sightings), `Book` (36) and `Book your flight from Krakow`
+# (3): search-start buttons on a booking site's front page. Refusing them means
+# aish cannot begin a flight or hotel search at all, which is the epic's own
+# flagship flow — do the whole job, stop one step short.
+#
+# THE RESIDUAL, WRITTEN DOWN RATHER THAN LEFT TO BE DISCOVERED: a payment-free
+# binding — a restaurant table, a doctor's appointment — labelled bare `Reserve`
+# stays a CARD, and P2 says a card is not a control. #299's judge is the
+# systemic cover, and this is one of the misses it is scoped to catch.
+_COMMIT_BOOKING = vocab.declare(
+    "browse._COMMIT_BOOKING",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    note="A miss is a card, not silence — `book`/`reserve`/`rezerwuj` are all "
+    "still in `_MUTATING_WORDS`.",
+    entries=(
+    "complete booking", "confirm booking", "book and pay", "reserve and pay",
+    "rezerwuje z obowiazkiem zaplaty", "potwierdz rezerwacje",
+    "zarezerwuj i zaplac",
+))
+_COMMIT_CONTRACT = vocab.declare(
+    "browse._COMMIT_CONTRACT",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    entries=("wypowiedz", "rozwiaz", "zerwij", "terminate"),
+)
+# Every delete, not an account delete — the owner's overrule, above. `wyczyść`
+# and `clear` are NOT here: the issue's prose moved one and left its English
+# twin behind, and both are the vocabulary of clearing a FILTER rather than of
+# destroying data, so the list is what shipped and not the prose.
+_COMMIT_DELETE = vocab.declare(
+    "browse._COMMIT_DELETE",
+    languages="Polish + English",
+    on_miss=vocab.PERMITS,
+    note="A miss is a card: every one of these is also in `_MUTATING_WORDS`.",
+    entries=("usun", "skasuj", "kasuj", "delete", "remove", "erase"),
+)
+
 # What the owner is told, in his words, about what aish just refused to do.
 IRREVERSIBLE = {
     "contact": "change the e-mail or phone number on your account",
@@ -270,15 +385,88 @@ IRREVERSIBLE = {
     "identity": "sign you in through Google, Apple or another provider",
 }
 
+# The same, for the commit verbs. Named by the CONSEQUENCE and never by the
+# mechanism (#295 P1): the owner is told what pressing it would have done to
+# him, not which list caught it or which tool asked.
+COMMITS = {
+    "money": "buy something or pay money from your account",
+    "subscription": "start a subscription in your name",
+    "booking": "commit you to a booking",
+    "contract": "end a contract in your name",
+    "delete": "delete something",
+}
 
-def _has(folded: str, needles: tuple[str, ...], name: str) -> bool:
+
+@cache
+def _boundaried(needles: tuple[str, ...]) -> re.Pattern[str]:
+    """One alternation over `needles`, matching only at word edges.
+
+    Cached on the tuple itself — these are module constants, so the compile
+    happens once per list and a page of sixty controls pays nothing for it."""
+    return re.compile(
+        r"(?<!\w)(?:" + "|".join(re.escape(n) for n in needles) + r")(?!\w)"
+    )
+
+
+def _has(
+    folded: str, needles: tuple[str, ...], name: str, *, whole_words: bool = False
+) -> bool:
     """One consultation of `name`, counted (#322).
 
     The name is passed rather than derived, because these lists are plain
     tuples on purpose — a wrapper object that could know its own name would
     also be a wrapper that could change what is matched, and this slice's whole
-    value is that nothing about the matching moved."""
+    value is that nothing about the matching moved.
+
+    `whole_words` is the one calibration that ever moved, and only for lists
+    added after it (#342): a substring scan is right for a list whose false
+    positive costs a prompt and wrong for one whose false positive removes a
+    capability. Every list that predates it still reaches `vocab.hit` on the
+    default, unchanged."""
+    if whole_words:
+        matched = bool(_boundaried(needles).search(folded))
+        vocab.note(name, matched=matched)
+        return matched
     return vocab.hit(name, needles, folded)
+
+
+def commits(name: str, *, navigates: bool = False) -> str:
+    """Which commitment this control's OWN WORDS claim, or "" (#342).
+
+    **The control's NAME, not its address.** `address_controls` appends up to
+    44 characters of ROW text when duplicate labels need telling apart, so a
+    plain `Wybierz` button is addressed `Wybierz — Zamówienie nr 123, dostawa
+    jutro` — and a refusal read off that fires on the row's words rather than
+    the button's. The owner's sentence is *a control whose own words say it
+    buys*. The caller falls back to the address only when there is no name, and
+    an unnamed control is addressed by its number, which says nothing.
+
+    **A link that navigates is exempt**, on the structural ground `is_mutating`
+    already stands on: an `<a>` with a real http href is a GET to another page,
+    which is what `read_url` does unasked, so it cannot itself commit — the
+    commit is a button on the destination. Measured, without this exemption
+    `Allegro Pay`, `Kup ponownie`, `Remove all filters`, `Purchase insurance`
+    and `Book now` all become dead ends while pressing nothing.
+
+    Order matters only in that the narrowest true consequence is named first."""
+    if navigates:
+        return ""
+    folded = fold(name)
+    if not folded:
+        return ""
+    if _has(folded, _COMMIT_MONEY, "browse._COMMIT_MONEY", whole_words=True):
+        return "money"
+    if _has(
+        folded, _COMMIT_SUBSCRIPTION, "browse._COMMIT_SUBSCRIPTION", whole_words=True
+    ):
+        return "subscription"
+    if _has(folded, _COMMIT_BOOKING, "browse._COMMIT_BOOKING", whole_words=True):
+        return "booking"
+    if _has(folded, _COMMIT_CONTRACT, "browse._COMMIT_CONTRACT", whole_words=True):
+        return "contract"
+    if _has(folded, _COMMIT_DELETE, "browse._COMMIT_DELETE", whole_words=True):
+        return "delete"
+    return ""
 
 
 def irreversible(text: str) -> str:
@@ -463,6 +651,13 @@ class Control:
     # `n` stays the tag that finds the element; this is the address, and
     # `address_controls` is where it is worked out. Empty only until then.
     address: str = ""
+    # Does pressing this just GO somewhere — a real http href to another page?
+    # Carried rather than re-derived from `kind`/`detail` because `<a href="#">`
+    # is a JavaScript button wearing a link's clothes, and only the enumeration
+    # (`goesElsewhere`) can tell the two apart. It is what exempts a nav link
+    # from the commit refusal: a GET to another page is what `read_url` does
+    # unasked, so it cannot itself be the commit.
+    navigates: bool = False
 
     def row_note(self) -> str:
         """The row this control sits in, bounded — and saying what it left out.
@@ -2082,6 +2277,7 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                 disabled=bool(raw.get("disabled")),
                 submits=bool(raw.get("submits")),
                 option=bool(raw.get("option")),
+                navigates=bool(raw.get("href")),
                 form=str(raw.get("form") or ""),
                 row=[str(line) for line in (raw.get("row") or [])][:ROW_LINES_MAX],
             )

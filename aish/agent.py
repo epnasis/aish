@@ -1599,6 +1599,20 @@ BROWSE_IRREVERSIBLE = (
     "Tell the user to run /browser {host} and do it themselves."
 )
 
+# The commit verbs (#342). The same shape and a DIFFERENT sentence, because the
+# reason is different. BROWSE_IRREVERSIBLE says "it cannot be undone", which is
+# true of closing an account and would be a claim wider than anything checked
+# about a `Usuń` that empties a cart. What is true of all of these is that the
+# owner decided the last press is his: there is no future in which aish pressing
+# "Zapłać" was wanted, so a card offering a yes for it protects nothing and
+# trains the tap that is waiting on the purchase.
+BROWSE_COMMITS = (
+    "NOT EXECUTED: aish will never {what}, on any site, however it is asked. "
+    "The control {n} says that is what pressing it does, and that press is the "
+    "user's own — no approval changes it. Tell the user to run /browser {host} "
+    "and do it themselves."
+)
+
 # A link that arrived by e-mail (#279). Structural, and it needs no classifier:
 # mail is the delivery mechanism for every account-recovery flow there is, so
 # aish following one by itself hands an injected turn the password-reset button
@@ -7077,6 +7091,49 @@ class Agent:
                 )
         return None
 
+    def _commits_here(self, control, args: dict, host: str) -> str | None:
+        """Does this press commit the owner to something (#342)?
+
+        Read off the control's own NAME — never its address, which carries row
+        text a page wrote about the row and not about the button. A link that
+        navigates is exempt, on the ground `is_mutating` already stands on.
+
+        **An unresolvable target is classified on the model's own words**, the
+        way `_committing_step` already does with `step.target`. It is the same
+        answer whichever way the sentence is reached, it is strictly the safe
+        direction — an unresolvable name presses nothing either way, so the
+        refusal costs a round trip and never a consequence — and it closes the
+        one gap the gate cannot cover from the page: when the snapshot cannot
+        resolve the target, the gate has nothing to read and the live fence in
+        `browser.browse_act` is all that is left."""
+        asked = str(args.get("target") if args.get("target") is not None else "")
+        said = (control.name or control.address) if control is not None else asked
+        claimed = browse.commits(
+            said, navigates=bool(control is not None and control.navigates)
+        )
+        if not claimed:
+            return None
+        return _gate_outcome(
+            BROWSE_COMMITS.format(
+                what=browse.COMMITS[claimed],
+                n=repr(control.address if control is not None else asked),
+                host=host or "the site",
+            ),
+            decision="blocked",
+        )
+
+    def _committing_step(self, plan: "browse.Batch", host: str) -> str | None:
+        """The same question over a whole batch, before any of it runs.
+
+        Beside `_irreversible_step` rather than inside it, because the two name
+        different consequences and each method's name has to stay true: a cart
+        row removed is not irreversible, and it is refused all the same."""
+        for step in plan.steps:
+            refusal = self._commits_here(step.control, {"target": step.target}, host)
+            if refusal is not None:
+                return refusal
+        return None
+
     def _browse_gate(self, name: str, args: dict) -> str | None:
         """Approval gate for driving a page (#237): None = proceed, else the
         refusal text.
@@ -7136,6 +7193,8 @@ class Agent:
                     ),
                     decision="blocked",
                 )
+            if not reading and (refusal := self._commits_here(control, args, host)):
+                return refusal
         if not host or reading:
             return None
         if self.approve_tool is None:
@@ -7263,6 +7322,8 @@ class Agent:
         # refused here has typed nothing, pressed nothing, and left nothing
         # half-sent.
         if refusal := self._irreversible_step(plan, host):
+            return refusal
+        if refusal := self._committing_step(plan, host):
             return refusal
         if not host:
             return None

@@ -6275,11 +6275,11 @@ class TestApprovalCommentIsARecordedField:
             browse_mod.Snapshot(
                 url="https://b.test/x", title="", text="t",
                 controls=browse_mod.controls_from(
-                    [{"n": 0, "kind": "button", "name": "Zaplac"}]
+                    [{"n": 0, "kind": "button", "name": "Wyslij"}]
                 ),
             )
         )
-        out = agent._browse_gate("browse_act", {"target": "Zaplac"})
+        out = agent._browse_gate("browse_act", {"target": "Wyslij"})
         assert out.meta["comment"] == "not that site"
         assert out.meta["decision"] == "denied"
 
