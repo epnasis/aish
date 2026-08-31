@@ -5700,6 +5700,12 @@ async def _press_in_picker(page: Any, tag: int) -> None:
     await _press(page, target, mutating=False, href="")
 
 
+# How many of a picker's own controls a refusal names. Enough to identify the
+# widget's shape, bounded because the refusal is read by a model that then has
+# to do something else.
+_ARROWS_NAMED = 6
+
+
 async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
     """Set a date by pressing the day in the picker the field opens.
 
@@ -5760,7 +5766,12 @@ async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
     while True:
         cells = _cells_of(grid)
         heading = str(grid.get("heading") or "")
-        pick = browse_mod.pick_day(cells, wanted, heading)
+        # What THIS PAGE calls its months, asked of the browser in the page's
+        # own locale. Re-read every hop because a picker may re-render, and a
+        # table read once from a widget that has since been replaced is the
+        # same class of stale as a tag read once.
+        months = browse_mod.month_table(grid.get("months") or {})
+        pick = browse_mod.pick_day(cells, wanted, heading, months)
         if pick.tag is not None:
             await _press_in_picker(page, pick.tag)
             await _settle(page)
@@ -5773,7 +5784,7 @@ async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
         if "not in the month" not in pick.problem:
             raise _StepFailed(f"{control.address!r}: {pick.problem}")
         # The heading first; failing that, the span the CELLS themselves state.
-        on_show = browse_mod.months_on_show(cells, heading)
+        on_show = browse_mod.months_on_show(cells, heading, months)
         if not on_show:
             raise _StepFailed(
                 f"{control.address!r}: that date is not on the picker's open "
@@ -5791,18 +5802,27 @@ async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
                 "already showing, but that day cannot be chosen on this page"
             )
         shown_year, shown_month = on_show[0] if not forward else on_show[-1]
-        arrow = next(
-            (
-                one for one in (grid.get("nav") or [])
-                if browse_mod.month_step(str(one.get("name") or ""), forward=forward)
-            ),
-            None,
+        nav = list(grid.get("nav") or [])
+        arrow = browse_mod.choose_arrow(
+            nav, on_show, forward=forward, months=months
         )
         if arrow is None:
+            # NAME what was rejected. "aish cannot find its next-month arrow"
+            # is a dead end for the model and was a dead end for the person
+            # diagnosing it: the cells are deliberately not in the page's
+            # control list, so a date step that refuses here leaves no second
+            # way to press a day, and the one fact that would explain it — what
+            # the picker's own controls are actually CALLED — was computed here
+            # and thrown away. On lot.com they were called 'October 2026'.
+            saw = ", ".join(
+                repr(str(one.get("name") or "")) for one in nav[:_ARROWS_NAMED]
+            ) or "nothing that could move it"
+            more = f" (+{len(nav) - _ARROWS_NAMED} more)" if len(nav) > _ARROWS_NAMED else ""
             raise _StepFailed(
                 f"{control.address!r}: the picker is showing "
                 f"{heading or 'another month'} and aish cannot find its "
-                f"{'next' if forward else 'previous'}-month arrow"
+                f"{'next' if forward else 'previous'}-month arrow. Its own "
+                f"controls are: {saw}{more}"
             )
         if arrow.get("submits"):
             raise _StepFailed(
@@ -5856,8 +5876,16 @@ async def _run_step(
         await _choose(target, value)
         return f"{control.address!r} ← {value!r} (from its list)"
     if verb in ("click", "check"):
-        await _press(page, target, mutating=control.mutating, href="")
-        return f"pressed {control.address!r}"
+        # The note travels. `_press` escalates below a real click and `_took`
+        # says whether the page took it — and a batch used to DROP that, so the
+        # same disabled 'Potwierdź' reported "the click would not land … aish
+        # could not check whether the page took it" through `browse_act` and a
+        # flat "pressed 'Potwierdź'" inside a fill. The model believed the
+        # batch, said the dates were set, and they were not. A batch must never
+        # be more confident than the single act it is made of.
+        pressed = await _press(page, target, mutating=control.mutating, href="")
+        said = f"pressed {control.address!r}"
+        return f"{said} — {pressed.note}" if pressed.note else said
     await _type(page, target, text=value, submit=False)
     return await _commit_suggestion(page, control, value, before)
 

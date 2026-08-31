@@ -98,8 +98,8 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `browse._COMMIT_DELETE` | PL + EN | permits | yes | — | 6 |
 | `browse._DOWNLOAD_WORDS` | PL + EN | breaks | yes | the `/download` and `/export` path test beside it | 13 |
 | `browse._DOWNLOAD_SUFFIXES` | file suffixes | breaks | yes | — | 9 |
-| `browse._FORWARD` | PL + EN + arrows | breaks | yes | none — but a name not on the list REFUSES rather than guesses | 14 |
-| `browse._BACKWARD` | PL + EN + arrows | breaks | yes | none — as above | 15 |
+| `browse._FORWARD` | PL + EN + arrows | breaks | yes | `month_arrow` + `month_table` — an arrow whose whole name IS a month, in the PAGE's language, checked against the grid | 14 |
+| `browse._BACKWARD` | PL + EN + arrows | breaks | yes | `month_arrow` — as above | 15 |
 | `browser._CONSENT_SELECTORS` | PL + EN + vendor ids | breaks | yes | `_COVERED_JS` / `browse.Cover` — asks the page what sits at the control's own centre point | 6 |
 | `browser._CHALLENGE_MARKERS` | PL + EN | permits | yes | `BLOCK_STATUS` + `CHALLENGE_MAX_CHARS` — **the epic's worked example** | 13 |
 | `browser._REPUTATION_COOKIES` | vendor cookie names | breaks | yes | — | 8 |
@@ -210,6 +210,24 @@ not on the list makes `month_step` REFUSE rather than guess, so the failure surf
 call site instead of pressing the wrong thing. That fence is why a closed list is right here.
 `month_step` also has a two-phrase prefix fallback that is not separately counted; what the
 counter reports is the LIST.
+
+**And this is the first row where the counter was read and acted on.** It stood at **7 asked,
+0 matched** — a list consulted seven times over thirty days that had never once matched
+anything, against `breaks`, the column that costs nothing and reports nothing. The cause was
+lot.com, which labels its calendar arrows with the month they go to (`October 2026`), a shape
+no list of words for "next" can hold. The answer was not a fifteenth word: `browse.month_arrow`
+reads the month off the arrow and checks it against the months the grid is showing, so the
+list is now a floor under a structural check rather than the whole of the decision — which is
+what the sentence at the top of this document asks of every one of these.
+
+**And the month names themselves stopped being a list aish maintains.** `_MONTH_STEMS` is
+Polish and English, so the structural check would have needed a hand-written row per language
+— the same unsustainable loop one layer down, in a less visible place. `CALENDAR_JS` asks
+`Intl` for the months in the page's own locale and `month_stems` derives the shortest prefixes
+that tell them apart, so the LANGUAGE decides the stem length (three for Polish, four for
+French, where `juin`/`juillet` collide). The built-in table stays as the floor and the page's
+is added to it; where the two disagree, `month_of` returns None and every caller refuses.
+That is the shape this document argues for, applied to itself. `docs/browser.md`.
 
 ### Where a structural check already replaced the words entirely
 
