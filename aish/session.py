@@ -7,6 +7,7 @@ import json
 import re
 import threading
 import time
+import urllib.parse
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1115,6 +1116,11 @@ class SessionLog:
         an attempt the owner discarded must go with that attempt."""
         hosts: list[str] = []
         for line in path.read_text(encoding="utf-8").splitlines():
+            # Equivalent by construction to the kind test below, and it is what
+            # makes the one-time seeding scan over the whole corpus (#295 M3)
+            # an I/O cost rather than a JSON-parse of every line ever written.
+            if "egress_vouch" not in line:
+                continue
             record = _record_or_none(line)
             if (
                 record is None
@@ -1123,6 +1129,62 @@ class SessionLog:
             ):
                 continue
             host = record.get("host")
+            if host and host not in hosts:
+                hosts.append(host)
+        return hosts
+
+    #: A tool approval, as `server.py` and `cli.py` write it into the audit
+    #: trail: `tool read_url(url='https://…')`. Both quote styles, because
+    #: `repr()` switches to double quotes for a value holding an apostrophe.
+    _URL_ARG = re.compile(r"""\burl=(?:'([^']*)'|"([^"]*)")""")
+
+    @staticmethod
+    def approved_read_hosts(path: Path) -> list[str]:
+        """Hosts of URLs the owner APPROVED a read of, in this chat's log.
+
+        Read by the machine-wide vouch store's one-time seeding (#295 M3), and
+        the rule it implements is *only his own acts count*: a `command` record
+        whose decision starts with `approved` and whose command string names a
+        URL. No heuristics, no external list, nothing inferred from what he
+        happened to READ — an auto-approved fetch is not an answer he gave, and
+        a denial is the opposite of one.
+
+        A third reader over a third question rather than a widening of either
+        of the two above, for the reason `egress_vouches` records: `site_grants`
+        licenses PRESSING and is suffix-matched, `egress_vouches` licenses data
+        riding an address and is exact-matched, and folding a new source into
+        the wrong one promotes a permission nobody was shown.
+
+        Superseded-aware for the same reason both of those are: Retry rewrites
+        the log (#338/#339), so an approval given inside an attempt the owner
+        discarded goes with that attempt. Erring toward FEWER hosts costs a
+        card and can never grant one."""
+        hosts: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            # Equivalent by construction to the regex below — it cannot match a
+            # command string without these three characters in it — and it is
+            # what keeps the one-time seeding scan from parsing every line the
+            # owner has ever written.
+            if "url=" not in line:
+                continue
+            record = _record_or_none(line)
+            if (
+                record is None
+                or _is_superseded(record)
+                or record.get("kind") != "command"
+                or not str(record.get("decision", "")).startswith("approved")
+            ):
+                continue
+            match = SessionLog._URL_ARG.search(str(record.get("command", "")))
+            if match is None:
+                continue
+            try:
+                host = (
+                    urllib.parse.urlsplit(match.group(1) or match.group(2) or "").hostname
+                    or ""
+                ).lower()
+            except ValueError:
+                continue
             if host and host not in hosts:
                 hosts.append(host)
         return hosts

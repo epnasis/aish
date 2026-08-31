@@ -56,6 +56,7 @@ from . import (
     tool_plugins,
     tools,
     vocab,
+    vouches,
     web,
 )
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
@@ -246,7 +247,9 @@ Rules:
    the site together, so a no there means the press was refused AND the site was not granted —
    do not try a different control to get around it. The same is true of the prompt you
    may see before an address at a host nobody has named yet — it is asked once for that exact
-   host, and it covers read_url and browse alike. In a web chat it lasts even if aish restarts.
+   host, and it covers read_url and browse alike. It is asked ONCE, EVER — it survives aish
+   restarting, the next chat, and the terminal as well as the web — so never warn the user
+   that they will be asked again.
    Pressing a control that SENDS A FORM carrying values you typed asks that same question, at a
    host nobody has agreed to send anything to yet, and a yes there covers addresses too — so do
    not avoid a form for fear of it. Filling a form in is never asked about; only sending it is.
@@ -2481,7 +2484,17 @@ class Agent:
         # web is gated too, and without provenance every host he named himself
         # would come back novel.
         self._owner_hosts: set[str] = set()
-        self._approved_hosts: set[str] = set()
+        # MACHINE-WIDE and PERMANENT since #295 M3, seeded on first use from
+        # his own recorded approvals. An answer he has given once is not asked
+        # again — not in the next chat, not on the other client, not after a
+        # ship. Measured: the same yes for allegro.pl was collected in three
+        # separate chats in one week while this was per chat.
+        #
+        # Read once, HERE, rather than on every gate call. A vouch another
+        # process records while this agent is alive is not seen until the next
+        # one is built, which costs one card and can never grant one — the same
+        # bargain `_approved_sites` makes with its own restore.
+        self._approved_hosts: set[str] = set(vouches.hosts())
         # Has content from outside this machine entered the task? Set by
         # _execute_tool_calls, reset per task. It is what replaces "who started
         # the session?" as the question the egress and knowledge gates ask —
@@ -6719,9 +6732,11 @@ class Agent:
         about a search term and not about a credential that works elsewhere.
         Two things then made it worse rather than merely old. Arm 3 now
         DETECTS the secret and the gate stayed silent anyway, which is the
-        exact shape of a check whose finding nothing acts on. And #341's first
-        slice extends this vouch from the agent's lifetime to the chat's,
-        across every ship. So the secret joins the list above."""
+        exact shape of a check whose finding nothing acts on. And the vouch has
+        gone from the agent's lifetime (#341) to the machine's (#295 M3), so
+        residual (a) is now permanent rather than per chat — which makes the
+        one thing it must not cover matter more, not less. So the secret joins
+        the list above."""
         if not hosts or not self._approved_hosts:
             return False
         if not all(h in self._approved_hosts for h in hosts):
@@ -6855,8 +6870,10 @@ class Agent:
         `_owner_hosts` merely for appearing in text he typed OR PASTED, so an
         address inside a forwarded email is owner-authored by provenance and
         attacker-chosen in fact. The offered half is asked before this function
-        is reached, by `_url_was_offered`. With the vouch now surviving a
-        restart, arms 5 and 7 cost one card per host per chat, ever.
+        is reached, by `_url_was_offered`. With the vouch now machine-wide and
+        permanent (#295 M3), arms 5 and 7 cost one card per host, EVER — and
+        the seeding means 11 of the 18 hosts his own history actually reaches
+        never draw that card at all.
 
         **What DID narrow, said plainly.** The card narrowed, and so did the
         refusal set — for path-borne payloads at unvouched hosts, attended.
@@ -6900,15 +6917,19 @@ class Agent:
             return ""
         # Both remaining arms share one condition — no provenance — because
         # both are about the DESTINATION rather than about the value's shape.
+        #
+        # "you have never agreed", not "nothing in this chat has agreed": since
+        # #295 M3 the set this was checked against is machine-wide and
+        # permanent, so the chat-scoped sentence would state something narrower
+        # than the line established. A card must say what was checked.
         if (run := _longest_path_run(parts)) >= PATH_RUN_MIN:
             return (
-                f"carries a {run}-character run in its path, and nothing in "
-                "this chat has agreed to send anything there"
+                f"carries a {run}-character run in its path, and you have never "
+                "agreed to send anything there"
             )
         if parts.query or parts.fragment:
             return (
-                "carries a query, and nothing in this chat has agreed to send "
-                "anything there"
+                "carries a query, and you have never agreed to send anything there"
             )
         return ""
 
@@ -7012,13 +7033,28 @@ class Agent:
         return None
 
     def _vouch_hosts(self, hosts: list[str]) -> None:
-        """Record an egress vouch, in memory and in the chat's log (#341).
+        """Record an egress vouch — in memory, in the chat's log (#341), and in
+        the machine-wide store (#295 M3).
 
         The comment above claimed his answer LASTS, and for the agent's
         lifetime it did — but a chat outlives the agent holding it, since every
         ship rebuilds one underneath an open chat. Measured:
         `session-20260830-124807-752582` drew two cards for allegro.pl in one
         session, records 816 and 1093, the second after the first was approved.
+
+        **And a chat is not the scope either.** The same yes for allegro.pl was
+        collected in three separate chats in one week, which is what "once per
+        host per chat" costs when the steady state is 18 distinct hosts across
+        his entire recorded history. So the vouch is now machine-wide and
+        permanent (`vouches.add`). Legal under epic #295 P3 because the grant is
+        the owner's own act; recorded because P6 requires the capability not to
+        outrun the record.
+
+        **THREE writes, and the log one is not redundant.** `vouches` is the
+        answer; the `egress_vouch` record is the audit trail — WHICH chat, at
+        which point in it, asked and was told yes — and it is what
+        `restore_egress_vouches` and #341's tests read. A store that is only a
+        set of hosts cannot say when or why a host got in.
 
         **Its own record kind, and never `GRANT_KINDS`.** Site grants are read
         back into `_approved_sites`, which `_site_granted` matches by SUFFIX
@@ -7032,6 +7068,7 @@ class Agent:
         `docs/agent-core.md` — so the round trip through the log must not grow
         the set either."""
         self._approved_hosts.update(hosts)
+        vouches.add(list(hosts))
         if self.state_log is None:
             return
         for host in hosts:
@@ -7049,9 +7086,31 @@ class Agent:
         An EMPTY value is not recorded. Clearing a field sends nothing, and the
         question this record answers is what would ride the submit."""
         typed = [(target, value) for target, value in browse.typed_values(name, args) if value]
-        host = self._browse_host(name, args)
+        host = self._driven_host(name, args)
         if host and typed:
             self._typed_this_task.setdefault(host, []).extend(typed)
+
+    def _driven_host(self, name: str, args: dict) -> str:
+        """The EXACT host a submit would send to, `_approved_hosts`' vocabulary.
+
+        Deliberately NOT `_browse_host`, which strips `www.` — that one speaks
+        `_approved_sites`' vocabulary, where the grant is suffix-matched and the
+        bare site is the honest name for what a yes covers. The send vouch is
+        EXACT-matched, and that is load-bearing: mixing the two would make a
+        yes given for `www.ryanair.com` silently free `ryanair.com`, and a card
+        naming one host while vouching another breaks the invariant that what
+        enters `_approved_hosts` is exactly what the preview put in front of
+        him. So a merged card can name two spellings of the same site, one per
+        clause, because the two clauses grant differently matched things."""
+        if name == "browse":
+            url = str(args.get("url", "") or "")
+        else:
+            current = self._browse_view.shown
+            url = current.url if current is not None else ""
+        try:
+            return (urllib.parse.urlsplit(url).hostname or "").lower()
+        except ValueError:
+            return ""
 
     def _submitting_control(self, name: str, args: dict):
         """The control this call would press to SEND a form, or None.
@@ -7137,7 +7196,7 @@ class Agent:
         Unattended keeps the strict rule reads already keep: every submit
         carrying typed values gates, vouch or no vouch, because nobody is going
         to read the answer either way."""
-        host = self._browse_host(name, args)
+        host = self._driven_host(name, args)
         if not host or self._submitting_control(name, args) is None:
             return ""
         attended = self.origin == "user"
@@ -7505,6 +7564,10 @@ class Agent:
         would read as part of that value."""
         granted = self._site_granted(host)
         sending = self._driven_finding(name, args)
+        # The EXACT host, never `host`: the send vouch is exact-matched and the
+        # press grant is suffix-matched, so the two clauses of one card may
+        # legitimately spell the same site differently (see `_driven_host`).
+        send_host = self._driven_host(name, args)
         if granted and not what and not sending:
             return None
         clauses = [what] if what else []
@@ -7519,10 +7582,10 @@ class Agent:
             # — the only condition epic #295 P2 lets a card exist under.
             clauses.append(
                 (SEND_GRANT_RIDER if clauses else SEND_GRANT).format(
-                    host=host, finding=sending
+                    host=send_host, finding=sending
                 )
             )
-            if note := self._driven_note(name, args, host):
+            if note := self._driven_note(name, args, send_host):
                 clauses.append(note)
         preview = clauses[0]
         for clause in clauses[1:]:
@@ -7536,7 +7599,9 @@ class Agent:
         else:
             denial = ""
         if sending:
-            denial = (denial + " " if denial else "") + SEND_DENIED.format(host=host)
+            denial = (denial + " " if denial else "") + SEND_DENIED.format(
+                host=send_host
+            )
         refusal = self._browse_approval(name, args, preview, denial)
         if refusal is not None:
             return refusal
@@ -7545,8 +7610,9 @@ class Agent:
         if sending:
             # The SAME vouch a composed address collects, recorded the same way
             # — the two grants stay disjoint (`_grant_site` above writes the
-            # other one), and neither is ever filled from the other.
-            self._vouch_hosts([host])
+            # other one), and neither is ever filled from the other. Exactly the
+            # host the clause NAMED, which is residual (c)'s invariant.
+            self._vouch_hosts([send_host])
         return None
 
     def _form_note(self, control) -> str:
@@ -8650,8 +8716,15 @@ class Agent:
         A read-vouch must not license driving, and a press grant must not
         silently cover subdomain egress, so neither set is ever filled from the
         other's card or the other's record. Restored per chat, from that chat's
-        own log, exactly as the site grants are — which is what keeps it a
-        SESSION grant (L4)."""
+        own log, exactly as the site grants are.
+
+        **Kept after the vouch went machine-wide (#295 M3), and not as
+        belt-and-braces.** The durable store is loaded at construction and is
+        the answer for every chat; this replays what THIS chat's own log says it
+        was told, which is what makes a chat reopened on a machine whose store
+        was purged behave as its own record says it should. It can only ever
+        re-add a host the owner approved in this very chat, so it cannot widen
+        anything the store did not already hold."""
         self._approved_hosts.update(hosts)
 
     def restore_opened_links(self, calls: list[tuple[dict, int]]) -> None:

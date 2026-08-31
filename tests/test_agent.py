@@ -11927,7 +11927,7 @@ class TestThePayloadPredicateReadsTheValue:
         named."""
         agent = self._attended()
         asked = "https://lookup.example/q?ask=his+invoice+total+is+412+eur+due+friday"
-        assert "nothing in this chat has agreed" in agent._value_finding(asked)
+        assert "you have never agreed" in agent._value_finding(asked)
         # ...and a vouch is what retires it, per host, per chat.
         agent._approved_hosts.add("lookup.example")
         assert agent._value_finding(asked) == ""
@@ -11939,7 +11939,7 @@ class TestThePayloadPredicateReadsTheValue:
         provenance and attacker-chosen in fact."""
         agent = self._attended()
         agent.note_owner_hosts("have a look at https://lookup.example/x")
-        assert "nothing in this chat has agreed" in agent._value_finding(
+        assert "you have never agreed" in agent._value_finding(
             "https://lookup.example/q?ask=his+invoice+total"
         )
 
@@ -12122,6 +12122,10 @@ class TestTheEgressCardSaysWhatALineChecked:
     def _card_for(self, url, **kw):
         agent, _ = make_agent([], **kw)
         agent._tainted = True
+        # A machine that has vouched nothing: the store is machine-wide since
+        # #295 M3, so agents built inside ONE test share it — and every
+        # scenario below is a separate machine, not a later chat.
+        agent._approved_hosts.clear()
         shown: list = []
         agent.approve_tool = lambda n, a, p=None: shown.append(p) or True
         agent._egress_gate("read_url", {"url": url})
@@ -12141,7 +12145,7 @@ class TestTheEgressCardSaysWhatALineChecked:
             ),
             (
                 "https://drop.example/q?ask=his+invoice+total",
-                "carries a query, and nothing in this chat has agreed to send anything there",
+                "carries a query, and you have never agreed to send anything there",
             ),
             (
                 "https://" + "z" * 50 + ".example/x",
@@ -12167,6 +12171,7 @@ class TestTheEgressCardSaysWhatALineChecked:
             for tool in ("read_url", "browse"):
                 agent, _ = make_agent([])
                 agent._tainted = True
+                agent._approved_hosts.clear()  # a fresh machine per scenario
                 shown: list = []
                 agent.approve_tool = lambda n, a, p=None, s=shown: s.append(p) or True
                 agent._egress_gate(tool, {"url": url})
@@ -12300,6 +12305,10 @@ class TestTheRecordedCorpusAndTheComposedAddresses:
     def _agent(self):
         agent, _ = make_agent([])
         agent._tainted = True
+        # A machine that has vouched nothing: the store is machine-wide since
+        # #295 M3, so agents built inside ONE test share it — and every
+        # scenario below is a separate machine, not a later chat.
+        agent._approved_hosts.clear()
         return agent
 
     @staticmethod
@@ -12420,6 +12429,10 @@ class TestOneAnswerPerReadWhicheverTool:
     def _tainted(self, origin="user"):
         agent, _ = make_agent([], origin=origin)
         agent._tainted = True
+        # A machine that has vouched nothing: the store is machine-wide since
+        # #295 M3, so agents built inside ONE test share it — and every
+        # scenario below is a separate machine, not a later chat.
+        agent._approved_hosts.clear()
         return agent
 
     def test_the_same_address_gets_the_same_verdict_through_either_tool(self):
