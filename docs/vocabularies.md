@@ -89,6 +89,11 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `browse._IDP_ALONE` | PL + EN | permits | yes | — | 5 |
 | `browse._NOT_AN_IDENTITY` | PL + EN | friction | yes | — (inverted: this list EXEMPTS) | 5 |
 | `browse._CLOSE_ACCOUNT_PHRASES` | PL + EN | permits | yes | — | 13 |
+| `browse._COMMIT_MONEY` | PL + EN | permits | yes | none — an unworded *Jetzt kaufen* rides the grant (#299 owns the miss) | 22 |
+| `browse._COMMIT_SUBSCRIPTION` | EN | permits | yes | — | 1 |
+| `browse._COMMIT_BOOKING` | PL + EN | permits | yes | — | 7 |
+| `browse._COMMIT_CONTRACT` | PL + EN | permits | yes | — | 4 |
+| `browse._COMMIT_DELETE` | PL + EN | permits | yes | — | 6 |
 | `browse._DOWNLOAD_WORDS` | PL + EN | breaks | yes | the `/download` and `/export` path test beside it | 13 |
 | `browse._DOWNLOAD_SUFFIXES` | file suffixes | breaks | yes | — | 9 |
 | `browse._FORWARD` | PL + EN + arrows | breaks | yes | none — but a name not on the list REFUSES rather than guesses | 14 |
@@ -108,7 +113,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 
 ### The entries worth arguing about
 
-**`browse._MUTATING_WORDS` (77, the largest).** Fail-open, and the file says so out loud —
+**`browse._MUTATING_WORDS` (77, still the largest).** Fail-open, and the file says so out loud —
 *"it costs a prompt when it is wrong and costs a paid bill when it is missing"*. But only the
 WORDED half fails open: a nondescript `Dalej` that POSTs a form is gated by
 `is_mutating`'s structural half regardless. The residual is a button that neither says a
@@ -116,6 +121,26 @@ mutating word nor submits a form — a JavaScript control on an SPA — and for 
 nothing but the per-host, per-task driving grant.
 **Could a structural check replace it?** No, and it should not try. Whether pressing a thing
 spends money is not a property of the DOM.
+**#342 changed what a hit COSTS without changing one word of it.** The commit verbs
+(`kup`, `zapłać`, `usuń`, `subscribe` …) now also sit in the `_COMMIT_*` lists, where a hit is
+a refusal rather than a card. They stayed here as well, deliberately: three fences besides
+the card read `Control.mutating`, and a word that merely moved would turn a stale-snapshot
+press onto a live `Kup teraz` from a refusal into a buy. So this list is unchanged, its
+count is unchanged, and its size is what it was when the before-picture was taken.
+
+**The `browse._COMMIT_*` five (40 entries across five lists) are the one place the MATCHING
+differs.** Everything else in this table is `vocab.hit` — a bare substring scan, right for a
+list whose false positive costs a prompt. A false positive on these removes the capability
+outright with no way to grant it back in the moment, so they go through
+`_has(..., whole_words=True)`, which matches at word boundaries after the fold. Measured
+over 3,002 recorded control labels, a bare scan of the same words also refuses `facebook`,
+`Books`, `SZCZEGÓŁY ZAKUPU #1` and the surname `Tamara Kuprianowicz`.
+**Could a structural check replace them?** No, for the same reason as above, and the entry
+says so: `browse._COMMIT_MONEY` declares **no** structural half. #299 owns the miss.
+**They are also the shape the change fence cannot see.** `TestTheCountingChangedNoMatching`
+compares each list against the commit before instrumentation, so a list that did not exist
+then has nothing to drift from — a NEW list enters silently and is caught only by
+`TestTheCatalogueIsTheInventory`, which is why the table above is the record.
 
 **`browser._CHALLENGE_MARKERS` — already the shape P4 asks for.** `BLOCK_STATUS`
 (401/403/405/429/503) is a test needing no words, `CHALLENGE_MAX_CHARS` is another (a real
@@ -214,10 +239,14 @@ matched=…)` is for call sites whose matching is not a plain substring scan —
 handed to Chrome, a cookie jar walked by name, a list comprehension that needs the hits
 themselves. `vocab.looked_up` is the dict form.
 
-**`asked` means consultations, not opportunities.** `browse.irreversible` tests seven lists
-in order and returns at the first match, so a label caught by the first leaves the other six
-**absent** from the record rather than at zero. That is what makes `never_consulted` mean
-anything at all.
+**`asked` means consultations, not opportunities.** `browse.irreversible` tests up to ten
+lists in order and returns at the first match, so a label caught by the first leaves the
+other nine **absent** from the record rather than at zero. That is what makes
+`never_consulted` mean anything at all. `browse.commits` is a second ladder of the same
+shape over the five `_COMMIT_*` lists, so `_COMMIT_MONEY` is asked for every control it sees
+and `_COMMIT_DELETE`, last on the ladder, only for the ones the four above it missed. A
+`_COMMIT_DELETE` count far below `_COMMIT_MONEY`'s is the ladder working, not a list going
+unconsulted.
 
 **`candidates` is recorded only where the call site already knows it** — how many mutating
 words a name matched (`_only_chrome`), how many cookies were in the jar
@@ -226,10 +255,15 @@ a command segment had. Where nothing can say, the key is **absent**, never 0, an
 `Counters.mean_candidates` returns `None`: an average taken over a zero for every silent call
 site is a number the log cannot support.
 
-**`browse._has` is the one indirect counting site.** Seven of the irreversible lists are
-consulted through it, and `TestTheCatalogueIsTheInventory` follows it by name — a sweep that
-could not would report ten counted lists as uncounted, which is the false alarm that teaches
-a reader to ignore a check.
+**`browse._has` is the one indirect counting site**, and it stayed the only one when #342
+added five lists with different matching. Fifteen lists are consulted through it now — the
+ten `irreversible()` reads and the five `commits()` reads — and
+`TestTheCatalogueIsTheInventory` follows it by name; a sweep that could not would report
+fifteen counted lists as uncounted, which is the false alarm that teaches a reader to ignore
+a check. **The word-boundary matching went INSIDE it (`whole_words=`) rather than beside it
+in a second helper**, for exactly that reason: a `_says` next to a `_has` would have needed
+the sweep widened to follow both, and a sweep with two names to keep in step is a sweep that
+will one day follow one of them.
 
 ### What it costs
 
@@ -242,6 +276,14 @@ thread's consultation and the loop thread's from losing each other's updates.
 `TestWhatCountingCosts` pins the order of magnitude rather than the number, so a machine
 under load cannot fail it but a regression that made counting cost ten times the match still
 would.
+
+**Word-boundary matching is CHEAPER than the substring scan it replaces, which was not the
+expected answer.** Measured the same way on `browse._COMMIT_MONEY` (22 entries): the bare
+scan **0.70 µs**, one compiled boundaried alternation **0.45 µs**. Python's `in` walks the
+haystack once per needle; the alternation walks it once in C. The whole `commits()` ladder —
+a `fold()` plus up to five of those — is **3.7 µs** per control, so a page of sixty controls
+pays about **0.22 ms**. The pattern is compiled once per list (`_boundaried` is `@cache`d on
+the tuple, and these are module constants), so nothing recompiles per call.
 
 ## The record — `kind: "vocab"`
 

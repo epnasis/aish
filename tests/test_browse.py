@@ -2763,11 +2763,28 @@ class TestTheGrantIsWhereTheConsentLives:
     def test_the_card_says_what_riding_it_means(self):
         """The win has to come from MOVING the decision, not thinning it: a
         card tapped blind records a consent he never gave, so what the grant
-        covers is said on the card that grants it."""
+        covers is said on the card that grants it.
+
+        Since #342 the sentence has to say two different things, because the
+        floor now has two shapes: what aish will not press at all, and what it
+        presses only after asking. It said only the second, which after that
+        issue promised a card where there is a wall."""
         agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
         agent._browse_gate("browse_act", {"target": "Przełącz lokal"})
         assert "signed in as you" in asked[0]
-        assert "asks again by name" in asked[0]
+        assert "asks by name" in asked[0]
+        assert "never one that says it buys, pays or deletes" in asked[0]
+
+    def test_the_card_never_claims_aish_cannot_buy(self):
+        """The claim has to stop exactly where the code does. A control whose
+        WORDS say it buys is refused; a nondescript "Dalej" that completes a
+        purchase still rides this yes, and #299 owns that. A card saying "aish
+        never buys" would be the claim wider than the code."""
+        agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
+        agent._browse_gate("browse_act", {"target": "Przełącz lokal"})
+        assert "says it buys" in asked[0]
+        for wider in ("never buys", "cannot buy", "will never spend"):
+            assert wider not in asked[0], wider
 
     def test_the_card_stays_one_sentence(self):
         """Said on a phone, where four sentences is a card he scrolls past to

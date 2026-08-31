@@ -271,6 +271,14 @@ Rules:
    same thing. Call browse_act(action="read") when you need the whole page back.
    A control marked "(needs approval)" will ask the user; that is expected, not
    an error.
+   AISH REFUSES TO PRESS A CONTROL WHOSE OWN WORDS SAY IT BUYS, PAYS, ORDERS,
+   BOOKS, SUBSCRIBES, ENDS A CONTRACT OR DELETES — "Kup teraz", "Zapłać",
+   "Place your order", "Usuń", "Subscribe". There is no approval for those and
+   asking for one is not an option. When you hit that refusal, do NOT look for
+   another control that does the same thing: get the user to the exact point
+   where they press it, tell them what is on the page, and tell them to run
+   /browser <host> and do that last step themselves. Everything up to it is
+   still yours to do.
    IF THE CONTROL YOU WANT IS NOT IN THE LIST, IT IS CLOSED AWAY — NOT ABSENT.
    The list ends with a line saying how many controls are shut in a collapsed
    menu, an off-screen panel or behind a dialog. Press the thing that opens
@@ -1512,9 +1520,10 @@ NO_READABLE_HOST = (
 # rejected that, and the machine was on his side: a click that navigates or
 # expands, and a form that searches or filters, ride the grant precisely
 # BECAUSE they are how you read a modern site, while every control whose name
-# says it pays, buys, books, deletes, sends or signs draws its own card
-# regardless, a page showing checkout structure re-cards every submit, and
-# passwords and the irreversible list are refused with no yes at all. So the
+# says it sends or signs draws its own card regardless, a page showing checkout
+# structure re-cards every submit, and passwords, the irreversible list and
+# (since #342) every control whose name says it buys, pays, orders, books,
+# subscribes, ends a contract or deletes are refused with no yes at all. So the
 # two tools were never two permissions — they were one permission described by
 # implementation, and the split bought nothing but a second card.
 #
@@ -1524,8 +1533,9 @@ NO_READABLE_HOST = (
 # instead — changing anything asks first — is what makes the assumption he
 # already makes when he taps Approve a true one instead of a smuggled one.
 SITE_GRANT = (
-    "act on {host} signed in as you — aish will press things inside your "
-    "account; anything that spends, ends or deletes asks again by name."
+    "act on {host} signed in as you — aish presses things inside your account, "
+    "never one that says it buys, pays or deletes, and asks by name before "
+    "changing anything else."
 )
 
 # The grant is per site and lasts the session, matching every other grant here
@@ -7280,10 +7290,14 @@ class Agent:
         """Does this control draw a card of its own, on top of the grant?
 
         Two reasons, and only one of them is grantable. A NAME that says it
-        pays, deletes, sends or signs draws a card whatever the owner granted —
-        that is the floor the grant explicitly does not cover. A nondescript
-        form submit is what the grant is FOR… unless the page itself shows it
-        commits something, and then every submit is carded again.
+        sends, saves or signs draws a card whatever the owner granted — that is
+        the floor the grant explicitly does not cover. A nondescript form submit
+        is what the grant is FOR… unless the page itself shows it commits
+        something, and then every submit is carded again.
+
+        Nothing here decides what happens to a name that says it BUYS or
+        DELETES: since #342 the gate has already refused it, above, and this is
+        never reached for one.
 
         Evidence is read in the escalating direction ONLY. Absence proves
         nothing: a card-on-file checkout has no payment field at all, a
