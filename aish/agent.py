@@ -241,7 +241,10 @@ Rules:
    The browser keeps the user's own signed-in sessions, so reading a site they are logged into
    asks them first — expect that prompt and never work around it. Their yes covers the SITE, not
    the tool: once they approve it, read_url and browse both work there for the rest of the
-   chat, so never avoid browse for fear of a second prompt. The same is true of the prompt you
+   chat, so never avoid browse for fear of a second prompt. When the first press on a site is
+   itself one that asks by name, the two questions are ONE card: it names the press and grants
+   the site together, so a no there means the press was refused AND the site was not granted —
+   do not try a different control to get around it. The same is true of the prompt you
    may see before an address at a host nobody has named yet — it is asked once for that exact
    host, and it covers read_url and browse alike. In a web chat it lasts even if aish restarts.
    Once they approve, that page IS
@@ -1542,6 +1545,27 @@ SITE_GRANT = (
 # (L4): a flow that clicks through twenty pages of one portal asks once,
 # because a card per click is a card nobody reads.
 
+# AND WHEN THE FIRST PRESS IS ALSO A PRESS THAT DRAWS ITS OWN CARD, IT IS STILL
+# ONE CARD (#295 M1). The two questions were asked in sequence, so the owner
+# answered the site and then, seconds later, the control: measured in his own
+# log, `Accept Jai Paliwal's invitation` carded at 22:07:07 and again at
+# 22:07:12 on 2026-08-26. Two cards for one press is the fatigue this road
+# exists to remove — and it is the worse kind, because the second one arrives
+# after he has already decided and is therefore the one he taps without
+# reading.
+#
+# Riding the control's card COSTS NOTHING and hides nothing: the grant is
+# recorded exactly as before, and it is described in the same clauses
+# `SITE_GRANT` uses — what aish will press, what it will never press, and the
+# bound on the rest — so a grant given here and a grant given on its own card
+# are the same grant, told the same way. What he is spared is being asked
+# twice for one decision.
+SITE_GRANT_RIDER = (
+    "and act on {host} signed in as you: aish presses things inside your "
+    "account, never one that says it buys, pays or deletes, and asks by name "
+    "before changing anything else."
+)
+
 
 BROWSE_DENIED = (
     "USER DENIED acting on {host} as them — nothing was pressed. Do not retry "
@@ -1559,6 +1583,18 @@ BROWSE_ACTION_DENIED = (
     "USER DENIED {what} — it was NOT clicked and nothing on the page changed. "
     "Do not retry it or look for another control that does the same thing. Tell "
     "the user what you were about to do and let them decide."
+)
+
+# A no to the merged card is a no to BOTH halves, and the model has to be told
+# both — otherwise it hears only "that control was refused", tries the one
+# beside it, and draws the site card it was just denied. The two denials are
+# stated together rather than one being allowed to stand for the other.
+BROWSE_ACTION_AND_SITE_DENIED = (
+    "USER DENIED {what} — it was NOT clicked, nothing on the page changed, and "
+    "acting on {host} as them was NOT granted. Do not retry it, and do not look "
+    "for another control that does the same thing. Reading the site is still "
+    "allowed; report what the page says, or ask the user to do the step "
+    "themselves."
 )
 
 # Every fence in the dispatch path keys on the tool NAME, and there are four of
@@ -7217,14 +7253,9 @@ class Agent:
             return _gate_outcome(
                 BROWSE_NO_APPROVER.format(host=host), decision="blocked"
             )
-        refusal = self._grant_host(name, args, host)
-        if refusal is not None:
-            return refusal
-        if name != "browse_act":
-            return None
-        control = self._browse_target(args)
+        control = self._browse_target(args) if name == "browse_act" else None
         if control is None or not self._needs_its_own_card(control):
-            return None
+            return self._press_card(name, args, host)
         # Named, every time, and never folded into the driving grant: this is
         # the click the owner would want to have been asked about.
         # The ROW rides the card, not just the address: on a results page the
@@ -7237,31 +7268,56 @@ class Agent:
         what += f" on {host}"
         if held := self._form_note(control):
             what += f"\n{held}"
-        return self._browse_approval(
-            name, args, what, BROWSE_ACTION_DENIED.format(what=what)
-        )
+        return self._press_card(name, args, host, what)
 
-    def _grant_host(self, name: str, args: dict, host: str) -> str | None:
-        """The one card the owner demonstrably reads, and what it now grants.
+    def _press_card(
+        self, name: str, args: dict, host: str, what: str = ""
+    ) -> str | None:
+        """The ONE card a press draws — its own, the site grant, or both at once.
 
-        **The consent moved onto this card rather than being thinned quietly.**
-        One flight search drew FIVE cards — the grant, two form-fills, a date
+        **The card the owner demonstrably reads, and what it grants.** One
+        flight search drew FIVE cards — the grant, two form-fills, a date
         picker's "Confirm" and the search press — none of which bought
         anything, and a fence that fires five times a search is one he has
         already learned to tap through by the time it matters. The fix is not
         to reclassify submits behind his back: a card tapped blind records a
         consent he never gave, so the win has to come from moving the decision,
-        not from thinning it. So this card says what riding it means — and
-        says it as READING, which is what he means when he approves it and
-        what the floor below makes true (#287)."""
-        if self._site_granted(host):
+        not from thinning it. So the card says what riding it means — and says
+        it as READING, which is what he means when he approves it and what the
+        floor below makes true (#287).
+
+        **And a press that draws its own card no longer draws a second one for
+        the site (#295 M1).** The two questions used to be asked in sequence,
+        so `Accept Jai Paliwal's invitation` was carded at 22:07:07 and again
+        at 22:07:12. They are one decision — he is agreeing to this press, on
+        this site, as him — and asking it twice does not make either answer
+        better informed, it only spends the attention the second card needed.
+        Nothing is thinned to buy it: the grant sentence rides along in the
+        same clauses `SITE_GRANT` states it in, and `_grant_site` records it
+        exactly as before.
+
+        Joined with a dash when the card is one line and a newline when it is
+        not, because a card carrying a form's held values or a batch's steps is
+        already a block, and running the grant onto the end of its last value
+        would read as part of that value."""
+        granted = self._site_granted(host)
+        if granted and not what:
             return None
-        refusal = self._browse_approval(
-            name, args, SITE_GRANT.format(host=host), BROWSE_DENIED.format(host=host)
-        )
+        if not what:
+            preview = SITE_GRANT.format(host=host)
+            denial = BROWSE_DENIED.format(host=host)
+        elif granted:
+            preview = what
+            denial = BROWSE_ACTION_DENIED.format(what=what)
+        else:
+            joint = "\n" if "\n" in what else " — "
+            preview = what + joint + SITE_GRANT_RIDER.format(host=host)
+            denial = BROWSE_ACTION_AND_SITE_DENIED.format(what=what, host=host)
+        refusal = self._browse_approval(name, args, preview, denial)
         if refusal is not None:
             return refusal
-        self._grant_site(host)
+        if not granted:
+            self._grant_site(host)
         return None
 
     def _form_note(self, control) -> str:
@@ -7351,14 +7407,11 @@ class Agent:
             return _gate_outcome(
                 BROWSE_NO_APPROVER.format(host=host), decision="blocked"
             )
-        refusal = self._grant_host("browse_fill", args, host)
-        if refusal is not None:
-            return refusal
         if not any(
             step.control is not None and self._needs_its_own_card(step.control)
             for step in plan.steps
         ):
-            return None
+            return self._press_card("browse_fill", args, host)
         what = plan.card(host)
         committing = next(
             (
@@ -7369,16 +7422,18 @@ class Agent:
         )
         if committing is not None and (held := self._form_note(committing)):
             what += f"\n{held}"
-        if what in self._approved_batches:
+        if what in self._approved_batches and self._site_granted(host):
             # The SAME form, the same values, the same committing press — this
             # is the retry of a batch that stopped part-way, and one of the
             # five cards that search drew was exactly this asked twice. A yes
             # covers the thing it was given for; asking again for it teaches
             # him the card means nothing.
+            #
+            # The site is asked about too, because a remembered batch answers
+            # only for the batch: a yes given before the grant existed cannot
+            # be read as a yes to the grant that was never on the card.
             return None
-        refusal = self._browse_approval(
-            "browse_fill", args, what, BROWSE_ACTION_DENIED.format(what=what)
-        )
+        refusal = self._press_card("browse_fill", args, host, what)
         if refusal is None:
             self._approved_batches.add(what)
         return refusal
@@ -8352,7 +8407,7 @@ class Agent:
         - `_approved_hosts` is exact-match and answers *may data ride this
           address* — `_egress_novel_hosts`, `_searching_a_vouched_site`;
         - `_approved_sites` is suffix-match and answers *may aish press things
-          here* — `_site_granted`, `_grant_host`.
+          here* — `_site_granted`, `_press_card`.
 
         A read-vouch must not license driving, and a press grant must not
         silently cover subdomain egress, so neither set is ever filled from the
