@@ -12907,6 +12907,51 @@ class TestTheDrivenTwinOfTheComposedAddress:
         assert len(asked) == 1
         assert "send data to drop.example" in asked[0]
 
+    def test_a_remembered_batch_never_stands_in_for_a_send_never_vouched(self):
+        """`_browse_batch_gate` short-circuits a batch whose card text it has
+        already been given a yes for. That memo answers for the BATCH, and a yes
+        given before the address question reached driving cannot be read as a
+        yes to a question that was never on the card — the same rule the memo
+        already follows about the site grant."""
+        # A WORDED submit, so the batch really takes the memo branch — a plain
+        # GET submit needs no card of its own and never reaches it.
+        # No `form`, so `_form_note` returns before it re-reads the live page —
+        # what this test is about is the memo, not the held-values block.
+        controls = browse.controls_from([
+            {"n": 1, "kind": "field", "name": "Search"},
+            {"n": 2, "kind": "button", "name": "Wyślij", "submits": True},
+        ])
+        args = {"steps": [
+            {"target": "Search", "value": self.SECRET},
+            {"target": "Wyślij", "do": "click"},
+        ]}
+        memo = browse.plan_batch(controls, args["steps"]).card("drop.example")
+
+        def agent_with(vouched):
+            asked: list = []
+            agent, _ = make_agent(
+                [], approve_tool=lambda n, a, p=None, s=asked: s.append(p) or True
+            )
+            agent._tainted = True
+            agent._browse_view.remember(browse.Snapshot(
+                url=self.HOSTILE, title="", text="t", controls=controls
+            ))
+            agent._approved_sites.add("drop.example")
+            agent._approved_hosts.clear()
+            agent._approved_hosts.update(vouched)
+            agent._approved_batches.add(memo)
+            return agent, asked
+
+        # Non-vacuous: with the host vouched the memo DOES short-circuit…
+        agent, asked = agent_with(["drop.example"])
+        assert agent._browse_gate("browse_fill", args) is None
+        assert asked == []
+        # …and without it, the send question is asked anyway.
+        agent, asked = agent_with([])
+        assert agent._browse_gate("browse_fill", args) is None
+        assert len(asked) == 1
+        assert "send data to drop.example" in asked[0]
+
     def test_the_cross_host_prefill_residual_is_accepted_with_visibility(self):
         """The record is per HOST as well as per task, and this is what that
         costs: aish types at A, the page navigates to B carrying the values in
