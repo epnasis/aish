@@ -29,7 +29,11 @@ from aish import browse, browser  # noqa: E402
 
 # (label, url, the field whose name should open a date picker)
 SITES = [
-    ("lot.pl", "https://www.lot.com/pl/en/", "travel date"),
+    # The POLISH page, deliberately: it is the one the owner books on, and the
+    # English one never rendered a date field the probe could find at all — so
+    # lot.pl was in this list for a week while its picker went unmeasured, and
+    # the arrow shape that defeats the word list was sitting on the other URL.
+    ("lot.pl", "https://www.lot.com/pl/pl", "wylot od"),
     ("wizzair", "https://wizzair.com/en-gb", "departure"),
     ("ryanair", "https://www.ryanair.com/gb/en", "depart"),
     ("booking.com", "https://www.booking.com/", "check-in"),
@@ -63,6 +67,41 @@ def shoot(path: Path) -> bool:
         return False
 
 
+# A consent wall arrives AFTER the first read and covers the whole form, so the
+# probe reported 'onetrust-pc-dark-filter is sitting on top of it' for lot.pl —
+# a finding about a cookie banner, printed where the finding about the picker
+# should be. An instrument that cannot get past the front door measures nothing.
+CONSENT = ("i agree", "akceptuj", "zgadzam", "accept all", "allow all", "zezwol")
+
+
+def past_the_consent_wall(snapshot):
+    """Press whatever agrees, up to twice — the banner is the probe's problem,
+    not the finding. Nothing else on these pages is ever pressed.
+
+    Re-read FIRST, because the wall arrives after the page does: lot.com's
+    OneTrust banner is on no control list at load and owns the whole page a
+    second later, so a probe that only checked the opening snapshot walked
+    straight into it."""
+    try:
+        snapshot = browser.browse_act("", "read", timeout=60)
+    except Exception:  # noqa: BLE001 — a page that will not re-read is data too
+        pass
+    for _ in range(2):
+        one = next(
+            (c for c in snapshot.controls
+             if any(w in browse.fold(c.name) for w in CONSENT)),
+            None,
+        )
+        if one is None:
+            return snapshot
+        print(f"  (dismissing {one.address[:40]!r})")
+        try:
+            snapshot = browser.browse_act(one.address, "click", timeout=60)
+        except Exception:  # noqa: BLE001 — a banner that will not go is data too
+            return snapshot
+    return snapshot
+
+
 def date_field(snapshot, hint: str):
     """A control that plausibly opens a date picker, by what it SAYS."""
     hint = browse.fold(hint)
@@ -85,6 +124,7 @@ def report(label: str, url: str, hint: str) -> None:
         return
     if page.problem:
         print(f"  problem: {page.problem[:120]}")
+    page = past_the_consent_wall(page)
     field = date_field(page, hint)
     if field is None:
         print(f"  no date-ish control found among {len(page.controls)}; sample:")
@@ -129,7 +169,21 @@ def report(label: str, url: str, hint: str) -> None:
         if browse.month_step(str(n.get("name") or ""), forward=True)
         or browse.month_step(str(n.get("name") or ""), forward=False)
     ]
-    print(f"  nav candidates: {len(nav)}; matched as month arrows: {len(arrows)}")
+    # Both halves, separately. The word list matching nothing while the walk
+    # still works is exactly what this instrument now has to be able to show:
+    # lot.com's arrows are called `October 2026` and no list can ever hold that.
+    named = {
+        str(n.get("name") or ""): browse.month_arrow(str(n.get("name") or ""))
+        for n in nav
+    }
+    named = {k: v for k, v in named.items() if v}
+    print(f"  nav candidates: {len(nav)}; matched by the word list: {len(arrows)}; "
+          f"read as a month: {named}")
+    # What the PAGE says its months are called, and what aish derives from it.
+    said = grid.get("months") or {}
+    table = browse.month_table(said)
+    print(f"  page locales: {list(said)}; derived stems: "
+          f"{[t[0] if t else '' for t in (table or ())]}")
     # What the page actually calls the things that are NOT day cells — this is
     # where a vocabulary that does not match a real site shows up.
     not_days = [
@@ -145,7 +199,16 @@ def report(label: str, url: str, hint: str) -> None:
               f"disabled={chosen.disabled}")
     # END TO END, not just the cell ladder: a date months out is what exercises
     # the walk, and the walk is where the heading/cells question actually bites.
+    #
+    # From a FRESH page, because pressing the field above opened the picker and
+    # RENAMED the control — lot.com's 'Wylot Od Wybierz datę' becomes 'Wylot
+    # Wybierz datę wylot z zakresu od…'. Asking for the old name got "no control
+    # on this page is called that", so this leg reported a probe artefact
+    # instead of the walk, on the one site whose walk was broken. An instrument
+    # that cannot run its own end-to-end leg is how lot.pl sat in SITES for a
+    # week while its picker went unmeasured.
     try:
+        past_the_consent_wall(browser.browse_open(url, timeout=90))
         out = browser.browse_fill(
             [{"target": field.address, "do": "date", "value": "2026-12-15"}],
             timeout=180,

@@ -3550,14 +3550,30 @@ class TestAGridThatIsPartlyMute:
 
 
 class TestWhichMonthsAreOnShow:
-    """The heading is asked first and is usually enough. `ngb-datepicker` labels
-    itself "Travel Dates" and puts the months in sub-headings it never
-    associates with the grid — so the walk had nothing to steer by and refused
-    rather than guess. The CELLS already know: each states its own full date,
-    which is what makes it pressable at all (#273)."""
+    """The CELLS are asked first; the heading is the fallback. Each cell states
+    its own full date, which is what makes it pressable at all (#273) — and
+    `ngb-datepicker` labels itself "Travel Dates" and puts its months in
+    sub-headings it never associates with the grid, so the heading alone left
+    the walk with nothing to steer by."""
 
-    def test_the_heading_is_believed_when_it_says_a_month(self):
+    def test_the_cells_win_over_a_heading_that_contradicts_them(self):
+        """This was the other way round, and lot.com is why it changed. The
+        "grid heading" is whatever `aria-labelledby` points at, and there it
+        points at the date FIELD's label — *"Wybierz datę wylot z zakresu od 1
+        września 2026 do 28 sierpnia 2027"*. That parses, so the heading branch
+        won and returned a month the picker was not showing and never would,
+        CONSTANT across every hop; the walk then oscillated between two arrows
+        that were both "beyond" it and gave up with *"the picker stopped
+        changing"*. A cell asserts what it IS; a heading is a claim about the
+        grid. Where they disagree the cells are the evidence."""
         cells = [browse.Cell(tag=1, text="1", label="1 August 2026")]
+        assert browse.months_on_show(cells, "wrzesień 2026") == [(2026, 8)]
+
+    def test_the_heading_still_answers_when_the_cells_say_nothing(self):
+        """Demoting it costs nothing: a grid whose cells resolve no month is one
+        `pick_day` refuses anyway, so the heading is all there is to steer by
+        and it is still used."""
+        cells = [browse.Cell(tag=1, text="1"), browse.Cell(tag=2, text="2")]
         assert browse.months_on_show(cells, "wrzesień 2026") == [(2026, 9)]
 
     def test_a_useless_heading_falls_through_to_the_cells(self):
@@ -3579,6 +3595,20 @@ class TestWhichMonthsAreOnShow:
     def test_a_grid_that_says_nothing_anywhere_reports_nothing(self):
         cells = [browse.Cell(tag=1, text="5"), browse.Cell(tag=2, text="6")]
         assert browse.months_on_show(cells, "Travel Dates") == []
+
+    def test_the_walk_takes_the_nearest_month_beyond_the_edge(self):
+        """lot.com offers BOTH ends at once — showing October and November its
+        nav reads `September 2026` and `December 2026`. First-in-document-order
+        is a coin flip that walks backwards half the time; nearest is also what
+        keeps a year-jump arrow from eating twelve of `MONTH_HOPS`."""
+        nav = [
+            {"tag": 1, "name": "September 2026"},
+            {"tag": 2, "name": "December 2027"},
+            {"tag": 3, "name": "December 2026"},
+        ]
+        on_show = [(2026, 10), (2026, 11)]
+        assert browse.choose_arrow(nav, on_show, forward=True)["tag"] == 3
+        assert browse.choose_arrow(nav, on_show, forward=False)["tag"] == 1
 
 class TestTheCardSaysWhatIsAboutToBeSent:
     """#251. The card named what was about to be PRESSED and never what was
@@ -3660,6 +3690,19 @@ class TestTheCardSaysWhatIsAboutToBeSent:
         assert "when aish last looked" in asked[0]
 
 
+# Twelve month names as a browser's `Intl` returns them, for two languages
+# `_MONTH_STEMS` does not hold. GERMAN is the one aish could not read at all;
+# FRENCH is the one whose stems must grow past three letters.
+GERMAN_MONTHS = (
+    "Januar Februar März April Mai Juni "
+    "Juli August September Oktober November Dezember"
+).split()
+FRENCH_MONTHS = (
+    "janvier février mars avril mai juin "
+    "juillet août septembre octobre novembre décembre"
+).split()
+
+
 class TestWhatRealPickersActuallyLookLike:
     """Measured, not imagined (#251). `scripts/probe_calendars.py` opens real
     booking sites and prints what their pickers are made of — and every rule
@@ -3680,6 +3723,110 @@ class TestWhatRealPickersActuallyLookLike:
         refuses rather than guesses."""
         assert not browse.month_step("Next offer in this carousel", forward=True)
         assert not browse.month_step("wrapper", forward=True)
+
+    def test_an_arrow_can_be_called_the_month_it_goes_to(self):
+        """lot.com's, measured off the session that filed this: showing August
+        and September 2026 the forward arrow is `October 2026`, and after a
+        jump to March/April 2027 the pair reads `February 2027` / `May 2027`.
+        Not one word of `_FORWARD` appears in any of them."""
+        for said in ("October 2026", "February 2027", "May 2027"):
+            assert not browse.month_step(said, forward=True), said
+            assert not browse.month_step(said, forward=False), said
+        assert browse.month_arrow("October 2026") == (2026, 10)
+        assert browse.month_arrow("February 2027") == (2027, 2)
+        assert browse.month_arrow("May 2027") == (2027, 5)
+        assert browse.month_arrow("Marzec 2027") == (2027, 3)
+
+    def test_a_sentence_that_merely_names_a_month_is_not_an_arrow(self):
+        """This is a control aish presses with nobody looking, so the whole
+        name has to BE the month — one word a stem starts, one that is the
+        year, nothing else."""
+        for said in (
+            "Show March 2027 deals", "March", "2027", "Bezposrednio z Gdanska",
+            "od 5 kwietnia 2027 polecisz", "next", "",
+        ):
+            assert browse.month_arrow(said) is None, said
+
+    def test_the_month_named_arrow_is_chosen_against_the_grid(self):
+        """The direction is never read off the label. The month it names has to
+        lie strictly outside the span on show, on the side being walked to —
+        which is what stops the BACKWARD arrow being pressed on a forward walk,
+        and what excludes a header button carrying a month already displayed."""
+        nav = [
+            {"tag": 1, "name": "February 2027"},
+            {"tag": 2, "name": "March 2027"},
+            {"tag": 3, "name": "May 2027"},
+        ]
+        on_show = [(2027, 3), (2027, 4)]
+        assert browse.choose_arrow(nav, on_show, forward=True)["tag"] == 3
+        assert browse.choose_arrow(nav, on_show, forward=False)["tag"] == 1
+
+    def test_a_worded_arrow_still_wins_over_a_month_named_one(self):
+        """A control that SAYS "next month" says what it does; the month shape
+        is the fallback under it, not a replacement for it."""
+        nav = [{"tag": 1, "name": "May 2027"}, {"tag": 2, "name": "Next month"}]
+        assert browse.choose_arrow(nav, [(2027, 3)], forward=True)["tag"] == 2
+
+    def test_a_mute_grid_gets_no_month_named_arrow(self):
+        """`on_show` is one of the two operands of the comparison. With no span
+        there is nothing to compare against, so a month on a label decides
+        nothing — the walk refuses rather than guessing a direction."""
+        nav = [{"tag": 1, "name": "October 2026"}]
+        assert browse.choose_arrow(nav, [], forward=True) is None
+        assert browse.month_step("October 2026", forward=True) is False
+
+    def test_the_month_names_come_from_the_page_not_from_aish(self):
+        """`_MONTH_STEMS` is Polish and English. Measured: a German arrow reads
+        as no month at all against it, so the whole date step — cells, heading
+        and arrows alike — is blind on a German picker, and the fix under the
+        old design was another hand-written table entry per language.
+
+        `CALENDAR_JS` asks `Intl` in the page's own locale instead, so a
+        language aish has never heard of arrives with no code change."""
+        german = GERMAN_MONTHS
+        assert browse.month_arrow("Oktober 2026") is None
+        table = browse.month_table({"de": german})
+        assert browse.month_arrow("Oktober 2026", table) == (2026, 10)
+        assert browse.month_of("15. Dezember 2026", table) == 12
+
+    def test_the_language_decides_the_stem_length_not_aish(self):
+        """Three letters is right for Polish and WRONG for French: `juin` and
+        `juillet` are one word until the fourth, and a collision here does not
+        fail loudly — it reads June as July on somebody's trip. So the shortest
+        length at which all twelve are distinct is derived per language."""
+        polish = browse.month_stems(
+            "styczeń luty marzec kwiecień maj czerwiec lipiec sierpień "
+            "wrzesień październik listopad grudzień".split()
+        )
+        assert polish == tuple((s,) for s in (
+            "sty lut mar kwi maj cze lip sie wrz paz lis gru".split()
+        )), polish
+        french = browse.month_stems(FRENCH_MONTHS)
+        assert french[5] == ("juin",) and french[6] == ("juil",), french
+
+    def test_a_language_whose_months_cannot_be_told_apart_contributes_nothing(self):
+        """A table that cannot separate twelve months would match the wrong one
+        silently. It is dropped rather than guessed at, and `month_table`
+        returning None leaves the built-in floor exactly as it was."""
+        assert browse.month_stems(["same"] * 12) is None
+        assert browse.month_stems(["only", "three"]) is None
+        assert browse.month_table({"xx": ["same"] * 12}) is None
+        assert browse.month_table({}) is None
+
+    def test_where_the_two_tables_disagree_neither_wins(self):
+        """A built-in stem saying one month while the page's own language says
+        another is aish not knowing, not a tie to break by ordering. Every
+        caller refuses on None rather than pressing something."""
+        wrong = tuple(("mar",) for _ in range(12))
+        assert browse.month_of("marzec 2027") == 3
+        assert browse.month_of("marzec 2027", wrong) is None
+
+    def test_the_page_table_is_added_to_the_floor_never_swapped_for_it(self):
+        """Every page aish already reads must behave exactly as before, so the
+        built-in table still answers on its own."""
+        table = browse.month_table({"de": GERMAN_MONTHS})
+        assert browse.month_of("7 września 2026", table) == 9
+        assert browse.month_of("7 September 2026", table) == 9
 
     def test_the_picker_and_the_page_name_a_control_the_same_way(self):
         """One naming ladder, shared verbatim — the picker had a naive one of

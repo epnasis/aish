@@ -2242,6 +2242,36 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     });
   }
 
+  // WHAT THIS PAGE CALLS ITS MONTHS, asked of the browser rather than held by
+  // aish. `_MONTH_STEMS` is Polish and English, so a picker that writes
+  // "Oktober 2026" or "Οκτώβριος 2026" is unreadable to every part of the date
+  // step — the cells, the heading and the arrows alike — and the fix for each
+  // new language would be another entry in a table aish maintains by hand.
+  // Chrome already ships every locale's month names; `Intl` is the oracle, and
+  // the page itself says which locale it is written in. English is added
+  // because an aria-label is very often English on a page that is not — which
+  // is exactly lot.com, whose heading reads SIERPIEŃ 2026 while its arrow is
+  // labelled `October 2026`.
+  const monthNames = () => {
+    const out = {};
+    const langs = [];
+    for (const said of [document.documentElement.lang, navigator.language, 'en']) {
+      const one = String(said || '').trim();
+      if (one && !langs.includes(one)) langs.push(one);
+    }
+    for (const locale of langs) {
+      let fmt;
+      try { fmt = new Intl.DateTimeFormat(locale, {month: 'long', timeZone: 'UTC'}); }
+      catch (e) { continue; }
+      const said = [];
+      for (let m = 0; m < 12; m += 1) {
+        said.push(fmt.format(new Date(Date.UTC(2026, m, 15))));
+      }
+      out[locale] = said;
+    }
+    return out;
+  };
+
   // Month arrows, scoped to the picker. A page-level carousel's "next" must be
   // out of reach of a step that presses things with nobody looking.
   const box = grid.closest('[class*=datepicker], [class*=alendar], [role=dialog]') || grid;
@@ -2263,6 +2293,13 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     // an icon class token, or the glyph itself.
     const name = nameOf(one);
     if (!name) continue;
+    // A DAY CELL IS NOT AN ARROW, and on a picker whose days are <button> it
+    // matches NAVISH — so this pass used to re-stamp a cell the pass above had
+    // already tagged, overwriting its number. `pick_day` then returned a tag
+    // that `_press_in_picker` could no longer find, and the press came back
+    // Stuck with the right day plainly on screen. Measured on wizzair.com: 92
+    // nav candidates against 8 things that are not days.
+    if (one.hasAttribute('data-aish-cell')) continue;
     stamp += 1;
     one.setAttribute('data-aish-cell', String(stamp));
     nav.push({
@@ -2275,7 +2312,8 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
                  && (one.getAttribute('type') || 'submit') === 'submit')),
     });
   }
-  return {found: true, heading: heading, cells: cells, nav: nav};
+  return {found: true, heading: heading, cells: cells, nav: nav,
+          months: monthNames()};
 }"""
 
 
@@ -2747,6 +2785,10 @@ def batch_is_mutating(batch: Batch) -> bool:
 # spellings and every inflection share (września/wrzesień both start wrz).
 # `mar` and `maj`/`may` collide across the two languages onto the same month,
 # which is exactly why stems are safe here.
+# What a language calls its twelve months, as stems: one tuple per month,
+# January first. `None` means "only what aish itself holds" — see `month_of`.
+Months = tuple[tuple[str, ...], ...] | None
+
 _MONTH_STEMS = (
     ("sty", "jan"), ("lut", "feb"), ("mar",), ("kwi", "apr"), ("maj", "may"),
     ("cze", "jun"), ("lip", "jul"), ("sie", "aug"), ("wrz", "sep"),
@@ -2754,18 +2796,93 @@ _MONTH_STEMS = (
 )
 
 
-def month_of(text: str) -> int | None:
+# How short a month stem may be, and how long it is allowed to grow. Three is
+# what Polish and English need; French needs four, because "juin" and "juillet"
+# are one word until the fourth letter — which is the whole reason the length is
+# DERIVED per language instead of chosen once.
+STEM_MIN = 3
+STEM_MAX = 12
+
+
+def month_stems(names: list[str]) -> Months:
+    """Twelve month names in one language → the shortest prefixes that tell them
+    apart, one per month, or None if they cannot be told apart at all.
+
+    **The language decides the length, not aish.** A fixed three letters is
+    right for Polish (sty/lut/mar…) and WRONG for French, where `juin` and
+    `juillet` collide until the fourth — and a collision here does not fail
+    loudly, it silently reads June as July on somebody's trip. So the shortest
+    length at which all twelve are distinct is computed, and a language where
+    no length works contributes nothing rather than contributing a guess.
+
+    Prefixes rather than whole names because pickers inflect: a Polish cell
+    says "7 września" and the nominative is "wrzesień", so only a stem matches
+    both. That is the same argument `_MONTH_STEMS` was built on; what is new is
+    that the stem no longer has to be written down by hand."""
+    folded = [fold(one) for one in names]
+    if len(folded) != 12 or not all(folded):
+        return None
+    for length in range(STEM_MIN, STEM_MAX + 1):
+        cut = [one[:length] for one in folded]
+        if len(set(cut)) == 12:
+            return tuple((one,) for one in cut)
+    return None
+
+
+def month_table(said: dict) -> Months:
+    """Every language the page offered, merged into one stem table.
+
+    A page is written in one language and its aria-labels are very often
+    written in another, so this is a handful of locales and not a world atlas —
+    which is what keeps the merged table free of the cross-language collisions
+    a big one would collect."""
+    if not isinstance(said, dict):
+        return None
+    merged: list[set[str]] = [set() for _ in range(12)]
+    for names in said.values():
+        stems = month_stems(list(names or []))
+        if stems is None:
+            continue
+        for number, one in enumerate(stems):
+            merged[number].update(one)
+    if not any(merged):
+        return None
+    return tuple(tuple(sorted(one)) for one in merged)
+
+
+def _month_by(text: str, table: tuple[tuple[str, ...], ...]) -> int | None:
+    words = fold(text).replace(",", " ").split()
+    for number, stems in enumerate(table, start=1):
+        if any(word.startswith(stem) for word in words for stem in stems if stem):
+            return number
+    return None
+
+
+def month_of(text: str, months: Months = None) -> int | None:
     """Which month does this text name, if any.
 
     A stem must START a word, never merely occur in one: "wrzesień" folds to
     "wrzesien", which CONTAINS "sie", so a substring test reads September as
     August. On a date step that is the difference between two months of the
-    owner's trip."""
-    words = fold(text).replace(",", " ").split()
-    for number, stems in enumerate(_MONTH_STEMS, start=1):
-        if any(word.startswith(stem) for word in words for stem in stems):
-            return number
-    return None
+    owner's trip.
+
+    `months` is what the PAGE calls its months, asked of `Intl` in the page's
+    own locale (see `monthNames` in `CALENDAR_JS`). It is added to the built-in
+    Polish/English table, never a replacement for it — so the behaviour on
+    every page aish already reads is unchanged, and a language aish has never
+    heard of arrives without a code change.
+
+    **Where the two disagree, neither wins.** A built-in stem matching one
+    month while the page's own language says another is not a tie to be broken
+    by ordering; it is aish not knowing, and the caller can say so. Every one
+    of them refuses on None rather than pressing something."""
+    mine = _month_by(text, _MONTH_STEMS)
+    if months is None:
+        return mine
+    theirs = _month_by(text, months)
+    if mine and theirs and mine != theirs:
+        return None
+    return mine or theirs
 
 
 # A date, as much of one as could be read. A missing year is not a failure: a
@@ -2795,7 +2912,7 @@ _YEAR = re.compile(r"\b(20\d{2})\b")
 _DAY = re.compile(r"\b(\d{1,2})\b")
 
 
-def read_date(text: str) -> Day | None:
+def read_date(text: str, months: Months = None) -> Day | None:
     """Read a date out of anything a page or a model writes.
 
     Tolerant on purpose and in one direction only: it will return a PARTIAL
@@ -2808,7 +2925,7 @@ def read_date(text: str) -> Day | None:
     iso = _ISO.search(text)
     if iso:
         return Day(int(iso.group(3)), int(iso.group(2)), int(iso.group(1)))
-    named = month_of(text)
+    named = month_of(text, months)
     if named:
         day = _DAY.search(text)
         year = _YEAR.search(text)
@@ -2831,7 +2948,9 @@ def read_date(text: str) -> Day | None:
     return None
 
 
-def months_on_show(cells: list[Cell], heading: str = "") -> list[tuple[int, int]]:
+def months_on_show(
+    cells: list[Cell], heading: str = "", months: Months = None
+) -> list[tuple[int, int]]:
     """The (year, month) pairs the open picker is actually displaying, sorted.
 
     The heading is asked first and is usually enough. When it is not — an
@@ -2843,26 +2962,46 @@ def months_on_show(cells: list[Cell], heading: str = "") -> list[tuple[int, int]
 
     Deliberately a SPAN and not a single month: a range picker shows two at
     once, and "is November after what is on screen" has to mean after the LAST
-    of them or the walk oscillates."""
-    month, year = read_month(heading)
-    if month and year:
-        return [(year, month)]
+    of them or the walk oscillates.
+
+    **The cells are asked FIRST, and the heading is the fallback.** It was the
+    other way round, on the reasoning that a heading is usually enough — but
+    "the grid's accessible heading" is whatever `aria-labelledby` happens to
+    point at, and on lot.com it points at the date FIELD's own label: *"Wybierz
+    datę wylot z zakresu od 1 września 2026 do 28 sierpnia 2027"*. That parses,
+    so the heading branch won, and it returned `[(2026, 8)]` — a month the
+    picker was not showing and never would, CONSTANT across every hop. The walk
+    then oscillated: with the span stuck in August, both `September 2026` and
+    `December 2026` were "beyond" it, and pressing one then the other stepped
+    forward and back until the grid signature repeated and the step gave up
+    with *"the picker stopped changing"*.
+
+    A cell states its own full date, which is what makes it pressable at all;
+    a heading is a label about the grid. Where they disagree the cells are the
+    evidence and the heading is a claim, so the heading is consulted only when
+    the cells say nothing — and when the cells say nothing `pick_day` refuses
+    anyway, which is why nothing is lost by demoting it."""
     seen = set()
     for cell in cells:
-        found = cell.day(heading)
+        found = cell.day(heading, months)
         if found and found.month and found.year:
             seen.add((found.year, found.month))
-    return sorted(seen)
+    if seen:
+        return sorted(seen)
+    month, year = read_month(heading, months)
+    if month and year:
+        return [(year, month)]
+    return []
 
 
-def read_month(text: str) -> tuple[int | None, int | None]:
+def read_month(text: str, months: Months = None) -> tuple[int | None, int | None]:
     """The month and year a picker's heading names — "wrzesień 2026", "September
     2026", "2026-09". A heading has no day, so `read_date` cannot read one."""
     text = (text or "").strip()
     if not text:
         return (None, None)
     year = _YEAR.search(text)
-    month = month_of(text)
+    month = month_of(text, months)
     if month is None:
         numeric = re.search(r"\b(20\d{2})[-/.](\d{1,2})\b", text)
         if numeric:
@@ -2884,7 +3023,7 @@ class Cell:
     # and `_centre` scrolls to it.
     onscreen: bool = False
 
-    def day(self, heading: str = "") -> Day | None:
+    def day(self, heading: str = "", months: Months = None) -> Day | None:
         """The date this cell IS, read from the most trustworthy thing it has.
 
         The stamp beats the label beats the visible text — `data-date` is
@@ -2892,12 +3031,12 @@ class Cell:
         ever just "7". A heading contributes only what the cell does not say
         itself."""
         for said in (self.stamp, self.label, self.text):
-            found = read_date(said)
+            found = read_date(said, months)
             if found is None:
                 continue
             if found.complete() or not heading:
                 return found
-            month, year = read_month(heading)
+            month, year = read_month(heading, months)
             return Day(found.day, found.month or month, found.year or year)
         return None
 
@@ -2911,7 +3050,7 @@ class Pick:
     problem: str = ""
 
 
-def pick_day(cells: list[Cell], wanted: Day, heading: str = "") -> Pick:
+def pick_day(cells: list[Cell], wanted: Day, heading: str = "", months: Months = None) -> Pick:
     """Which cell in this grid is the date asked for?
 
     **A cell is never pressed on a day number alone.** A range picker shows two
@@ -2938,7 +3077,7 @@ def pick_day(cells: list[Cell], wanted: Day, heading: str = "") -> Pick:
     vague = 0
     dated = 0
     for cell in cells:
-        found = cell.day(heading)
+        found = cell.day(heading, months)
         if found is None:
             continue
         if not found.month:
@@ -2997,8 +3136,11 @@ _FORWARD = vocab.declare(
     "browse._FORWARD",
     languages="Polish + English + arrow glyphs",
     on_miss=vocab.BREAKS,
-    structural="none — and the fence is that a name not on the list REFUSES "
-    "rather than guesses, so the break is loud at the call site",
+    structural="`month_arrow` + `month_table` — an arrow whose whole name IS a "
+    "month reads as the month it goes to, in whatever language the PAGE says "
+    "it is written in, checked against the months the grid is showing. A name "
+    "that is neither still REFUSES rather than guessing, so the break stays "
+    "loud at the call site",
     entries=(
     "next month", "next", "next dates", "later", "later dates", "forward",
     "calendar page forward", "nastepny miesiac", "nastepny", "pozniejsze daty",
@@ -3008,7 +3150,7 @@ _BACKWARD = vocab.declare(
     "browse._BACKWARD",
     languages="Polish + English + arrow glyphs",
     on_miss=vocab.BREAKS,
-    structural="none — see `browse._FORWARD`",
+    structural="`month_arrow` — see `browse._FORWARD`",
     entries=(
     "previous month", "previous", "prev", "previous dates", "earlier",
     "earlier dates", "back", "calendar page back", "poprzedni miesiac",
@@ -3034,6 +3176,91 @@ def month_step(name: str, *, forward: bool) -> bool:
         "previous month", "poprzedni miesiac"
     )
     return any(folded.startswith(fold(phrase)) for phrase in phrases)
+
+
+def month_arrow(name: str, months: Months = None) -> tuple[int, int] | None:
+    """The (year, month) an arrow goes TO, when its whole name IS that month.
+
+    Some pickers do not call their arrows anything like "next". lot.com labels
+    them with the month on the other side — showing August and September 2026,
+    the forward arrow is called `October 2026`, and after a jump to March 2027
+    the pair reads `February 2027` / `May 2027`. No closed list of words for
+    "next" can ever hold that, so `do="date"` refused with the arrow plainly on
+    screen and the model had no second way to press a day: the cells are not in
+    the page's control list, by design. Seven asks and zero matches on
+    `browse._FORWARD` over thirty days, which is what `aish vocab` was built to
+    make visible.
+
+    **The whole name, and nothing else.** "Show March 2027 deals" names a month
+    and is not an arrow, and this is a control aish presses with nobody
+    looking. Exactly two words survive the fold — one that a month stem starts
+    and one that is the year — so a sentence containing a month refuses, and a
+    button carrying the CURRENT month (a "pick a month" header, which some
+    pickers do have) is excluded by the caller instead: `choose_arrow` presses
+    a month only when it lies beyond the span already on show.
+
+    The direction is not read off the name at all. It is decided by comparing
+    the month named against the months the grid is displaying, which is the
+    same compass `months_on_show` gives the walk — so an arrow cannot lie about
+    where it goes, and a mislabelled one simply fails the comparison."""
+    words = fold(name).split()
+    if len(words) != 2:
+        return None
+    month = month_of(name, months)
+    year = _YEAR.search(name)
+    if month is None or year is None:
+        return None
+    stems = tuple(_MONTH_STEMS[month - 1]) + tuple(
+        months[month - 1] if months else ()
+    )
+    named = [word for word in words if word.startswith(stems)]
+    yearly = [word for word in words if word == year.group(1)]
+    if len(named) != 1 or len(yearly) != 1:
+        return None
+    return (int(year.group(1)), month)
+
+
+def choose_arrow(
+    nav: list[dict], on_show: list[tuple[int, int]], *, forward: bool,
+    months: Months = None,
+) -> dict | None:
+    """Which of the picker's own controls moves it the way the walk needs.
+
+    The closed vocabulary first, because a control that SAYS "next month" says
+    what it does. Then the month-named shape, which has to earn it against the
+    grid: the month on the arrow must lie strictly outside the span on show, on
+    the side being walked to. That comparison is what makes reading a month off
+    a label safe — the picker's own heading is one of the two operands, so a
+    header button carrying a month already displayed can never be selected, and
+    neither can the backward arrow while walking forward.
+
+    Returns the entry to press, submit-shaped or not: refusing a form submit is
+    the caller's, and it stays there so the refusal keeps naming which control
+    it was about."""
+    for one in nav:
+        if month_step(str(one.get("name") or ""), forward=forward):
+            return one
+    if not on_show:
+        return None
+    edge = on_show[-1] if forward else on_show[0]
+    beyond = []
+    for one in nav:
+        goes = month_arrow(str(one.get("name") or ""), months)
+        if goes is None:
+            continue
+        if (goes > edge) if forward else (goes < edge):
+            beyond.append((goes, one))
+    if not beyond:
+        return None
+    # The NEAREST, never merely the first listed. A picker that offers both
+    # ends at once — lot.com shows `September 2026` and `December 2026` while
+    # displaying October and November — has two candidates "beyond" any stale
+    # edge, and taking the first in document order is a coin flip that walks
+    # backwards half the time. Nearest is also right on a picker that offers a
+    # year jump beside a month step: one hop of a month beats one hop of
+    # twelve, and the walk stays inside `MONTH_HOPS`.
+    beyond.sort(key=lambda pair: pair[0], reverse=not forward)
+    return beyond[0][1]
 
 
 # How much of a form a card shows, and how much of one value. A card nobody

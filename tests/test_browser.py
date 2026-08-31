@@ -2616,6 +2616,49 @@ class TestALedgerNeverStatesWhatItDidNotRead:
         assert browser._held(unreadable, "Dokąd") is None
 
 
+class TestABatchIsNoMoreConfidentThanTheActItIsMadeOf:
+    """`_press` escalates below a real click and `_took` reports whether the
+    page took it. `browse_act` showed that note; a `fill` step DROPPED it and
+    reported a flat "pressed 'X'".
+
+    Measured on lot.com: the same disabled 'Potwierdź' came back as *"the click
+    would not land, so aish dispatched the event straight to the control,
+    though aish could not check whether the page took it"* through `browse_act`
+    and as *"pressed 'Potwierdź'"* inside a batch. The model believed the
+    batch, told the owner the dates were set, and the form still read *Wybierz
+    datę*."""
+
+    def _step(self, monkeypatch, note):
+        from aish import browse as browse_mod
+
+        control = browse_mod.controls_from(
+            [{"n": 1, "kind": "button", "name": "Potwierdź"}]
+        )[0]
+        control.address = "Potwierdź"
+        monkeypatch.setattr(browser, "_find", lambda page, n: _resolved((object(), True)))
+        monkeypatch.setattr(browser, "_reachable_now", lambda t: _resolved(""))
+        monkeypatch.setattr(browser, "_centre", lambda t: _resolved(None))
+        monkeypatch.setattr(
+            browser,
+            "_press",
+            lambda *a, **kw: _resolved(browse_mod.Pressed(note=note)),
+        )
+        return _run(browser._run_step(object(), control, "click", "", []))
+
+    def test_the_caveat_travels_into_the_step_ledger(self, monkeypatch):
+        said = self._step(
+            monkeypatch,
+            "the click would not land, so aish dispatched the event straight to "
+            "the control, though aish could not check whether the page took it",
+        )
+        assert "pressed 'Potwierdź'" in said
+        assert "could not check whether the page took it" in said
+
+    def test_a_plain_click_still_reads_as_a_plain_click(self, monkeypatch):
+        """A real click has no note, and nothing is added to say so."""
+        assert self._step(monkeypatch, "") == "pressed 'Potwierdź'"
+
+
 class TestAPageAnotherChatTookIsNotActedOn:
     """One page, several chats, and the epoch is what tells them apart (#272).
 
