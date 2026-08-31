@@ -11986,10 +11986,11 @@ class TestThePayloadPredicateReadsTheValue:
             "web_search", {"query": "wycieraczki site:allegro.pl"}
         ) == ["allegro.pl"]
 
-    def test_a_vouched_host_is_unchanged_by_all_of_it(self):
-        """Residual (a), unchanged in both directions. `_searching_a_vouched_site`
-        runs after the predicate and frees anything that is not a forward, so
-        this issue narrows the CARD and not the refusal set."""
+    def test_a_vouched_host_keeps_residual_a(self):
+        """Residual (a): a vouched host accepts an arbitrary query, because
+        that query reaches only its own search index and access logs. What a
+        vouch never covered is an address aimed somewhere else from inside
+        itself."""
         agent = self._attended()
         agent._approved_hosts.add("allegro.pl")
         assert agent._egress_novel_hosts(
@@ -11998,6 +11999,106 @@ class TestThePayloadPredicateReadsTheValue:
         assert agent._egress_novel_hosts(
             "read_url", {"url": "https://allegro.pl/go?next=https://evil.example/x"}
         ) == ["allegro.pl"]
+
+    def test_a_vouch_does_not_cover_one_of_his_own_secrets(self, monkeypatch, tmp_path):
+        """He said yes to searching a shop, not to handing that shop his
+        password, and no reading of the card he approved covers it.
+
+        Arm 3 DETECTED this and the gate stayed silent anyway —
+        `_searching_a_vouched_site` runs after the predicate — which is the
+        shape of a check whose finding nothing acts on. Slice 1 made it worse
+        by extending the vouch from the agent's lifetime to the chat's."""
+        token = "awov6ybawmor59a9d7u926vk1yfdsm"
+        index = tmp_path / "names.txt"
+        index.write_text("PUSHOVER_TOKEN\n", encoding="utf-8")
+        monkeypatch.setattr(secrets_module, "NAMES_INDEX", index)
+        monkeypatch.setattr(
+            secrets_module, "get", lambda n: token if n == "PUSHOVER_TOKEN" else None
+        )
+        secrets_module._invalidate()
+        try:
+            agent = self._attended()
+            agent._approved_hosts.add("allegro.pl")
+            assert agent._egress_novel_hosts(
+                "read_url", {"url": f"https://allegro.pl/listing?string={token}"}
+            ) == ["allegro.pl"]
+            # ...and an ordinary search there is still free.
+            assert agent._egress_novel_hosts(
+                "read_url", {"url": "https://allegro.pl/listing?string=Bosch+AR26U"}
+            ) is None
+        finally:
+            secrets_module._invalidate()
+
+    @pytest.mark.parametrize(
+        "url,run",
+        [
+            # The classic beacon shape, in the three encodings arm 4 cannot
+            # see, because each carries only one or two character classes:
+            # base32 (upper + digits), plain lowercase, plain uppercase.
+            ("https://evil.example/" + ("JBSWY3DPEHPK3PXP" * 8)[:120], 120),
+            ("https://evil.example/" + ("hisibanispl" * 10)[:95], 95),
+            ("https://evil.example/" + "HISIBANISPLTWOSEVENONEONE", 25),
+        ],
+    )
+    def test_a_long_run_in_the_path_at_an_unvouched_host(self, url, run):
+        """Arm 7. `PLAIN_PATH_MAX` retired attended, arm 4 wants three
+        character classes and arm 5 reads query and fragment only — so a
+        payload in the PATH at the attacker's own host hit no arm at all, and
+        he reads it back out of his own access logs. That was a real narrowing
+        of the refusal set and this closes it."""
+        agent = self._attended()
+        assert f"{run}-character run in its path" in agent._value_finding(url)
+        assert agent._egress_novel_hosts("read_url", {"url": url}) == ["evil.example"]
+
+    def test_arm_seven_leaves_ordinary_long_paths_alone(self):
+        """The whole win of the slice is that a long path is not a payload.
+        Every one of these is from the acceptance corpus."""
+        agent = self._attended()
+        for url in (
+            "https://blog.google/innovation-and-ai/products/gemini-app/student-offer-google-ai/",
+            "https://github.com/googleworkspace/cli/blob/main/crates/gws-auth/src/credential_store.rs",
+            "https://www.reddit.com/r/LocalLLM/comments/1tv8v2x/best_local_model_for_coding_on_a_mac/",
+        ):
+            assert agent._value_finding(url) == "", url
+
+    def test_the_corpus_stays_clear_of_arm_sevens_bound(self):
+        """The bound is measured, not picked, and this is the measurement kept
+        live: the longest path run in any of the fifteen recorded cards is 15,
+        against a bound of 20. A future edit that lowers the bound under the
+        corpus fails here as well as in the Law B count."""
+        split = agent_module.urllib.parse.urlsplit
+        longest = max(
+            agent_module._longest_path_run(split(url))
+            for _day, url in TestTheRecordedCorpusAndTheComposedAddresses.CORPUS
+        )
+        assert longest == 15  # 'googleworkspace'
+        assert longest < agent_module.PATH_RUN_MIN
+
+    def test_the_chunking_residual_is_accepted_with_visibility(self):
+        """Pinned so it is a decision and not a surprise, exactly as #294's
+        enumeration channel is.
+
+        A payload cut into runs under `PATH_RUN_MIN` and separated by `/` or
+        `-` stays FREE attended at an unvouched host. Closing it means
+        re-gating ordinary long paths — a slug-heavy shop URL is precisely
+        short runs joined by hyphens — which is the whole win of this change.
+        A triggered session keeps the full old rule and has no such residual."""
+        chunked = "https://evil.example/" + "/".join(["aB3dE7gH2jK9mN4"] * 5)
+        attended = self._attended()
+        assert attended._value_finding(chunked) == ""
+        assert attended._egress_novel_hosts("read_url", {"url": chunked}) is None
+        unattended, _ = make_agent([], origin="email")
+        assert unattended._egress_novel_hosts("read_url", {"url": chunked}) == [
+            "evil.example"
+        ]
+
+    def test_arm_seven_is_bounded_by_provenance_like_arm_five(self):
+        """One card per host per chat, ever — the vouch retires it."""
+        agent = self._attended()
+        beacon = "https://shop.example/" + ("JBSWY3DPEHPK3PXP" * 8)[:120]
+        assert agent._value_finding(beacon) != ""
+        agent._approved_hosts.add("shop.example")
+        assert agent._value_finding(beacon) == ""
 
     def test_the_gate_never_reaches_the_real_keychain(self, monkeypatch):
         """Same guard the scrub has, one caller over: the secret arm runs on

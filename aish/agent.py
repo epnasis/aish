@@ -242,8 +242,8 @@ Rules:
    asks them first — expect that prompt and never work around it. Their yes covers the SITE, not
    the tool: once they approve it, read_url and browse both work there for the rest of the
    chat, so never avoid browse for fear of a second prompt. The same is true of the prompt you
-   may see before an address at a site nobody has named yet — it is asked once for that site,
-   it covers read_url and browse alike, and it lasts for the whole chat even if aish restarts.
+   may see before an address at a host nobody has named yet — it is asked once for that exact
+   host, and it covers read_url and browse alike. In a web chat it lasts even if aish restarts.
    Once they approve, that page IS
    read through their signed-in browser: you never need a cookie, a token, or a manual download
    to see their account. A line beginning "[aish:" ABOVE the untrusted-content banner is from
@@ -1373,6 +1373,19 @@ HEX_TOKEN_MIN = 32
 # `CAESaQmVsb25naW5nVG9Hb29nbGU` mixes three because an encoder put them there.
 OPAQUE_TOKEN_CLASSES = 3
 
+# Arm 7: the longest single run of letters and digits a PATH may hold at a host
+# with no provenance. A separate bound from OPAQUE_TOKEN_MIN even though the two
+# coincide today, because they answer different questions: that one asks whether
+# an encoder produced this, and this one asks whether a path at somebody else's
+# host has room in it to hide something.
+#
+# Measured against the acceptance corpus rather than picked: the longest path run
+# in any of the fifteen recorded cards is 15 (`googleworkspace`), then
+# `Documentation` at 13, `innovation`, `motorcycle` and the Amazon ASIN at 10,
+# `LocalLLM` at 8 and `listing` at 7. So 20 fires on 0 of the 15 and the Law B
+# measurement is unchanged by it.
+PATH_RUN_MIN = 20
+
 # URL or bare-domain-looking tokens in owner text. Deliberately generous
 # (matches "setup.py"-shaped tokens too): over-inclusion only ever widens
 # provenance with strings the owner literally typed, while under-inclusion
@@ -1783,10 +1796,15 @@ def _opaque_run(parts: urllib.parse.SplitResult) -> int:
 
     **The cost, stated rather than left to be found.** A run of one or two
     classes is missed: base32 (upper + digits), a plain lowercase word, an IBAN
-    (upper + digits). Each is caught by arm 5 the moment it rides a query to a
-    host nothing has vouched for, which is the only place it can be read back;
-    in a path at a host the owner DID vouch for it is residual (a), unchanged
-    by this issue."""
+    (upper + digits). At a host with no provenance those are caught by arm 5 in
+    a query and by arm 7 in a PATH; at a host the owner DID vouch for they are
+    residual (a), unchanged by this issue.
+
+    This paragraph used to say a query was "the only place it can be read
+    back", and that was simply false: `evil.example/<encoded>` is the classic
+    beacon shape and its author reads it out of his own access logs. Arm 7
+    exists because of that sentence being wrong, and the sentence is corrected
+    here rather than deleted, because it is the reason the arm is there."""
     for chunk in (parts.query, parts.fragment, parts.path):
         if not chunk:
             continue
@@ -1802,6 +1820,19 @@ def _opaque_run(parts: urllib.parse.SplitResult) -> int:
             if classes >= OPAQUE_TOKEN_CLASSES:
                 return len(token)
     return 0
+
+
+def _longest_path_run(parts: urllib.parse.SplitResult) -> int:
+    """The longest single run of letters and digits in this address's PATH.
+
+    Arm 7's measurement. Deliberately blind to character classes, unlike
+    `_opaque_run`: at a host with no provenance the question is not whether an
+    encoder made this string, it is whether the path has room to hide something
+    — and base32, lowercase and IBAN runs all hide things while carrying only
+    one or two classes. Chunking is what this cannot see; that residual is
+    named in `_value_finding` and pinned by a test."""
+    runs = _OPAQUE_TOKEN_RE.findall(urllib.parse.unquote(parts.path))
+    return max((len(run) for run in runs), default=0)
 
 
 def _address_carries_payload(url: str) -> bool:
@@ -6553,7 +6584,20 @@ class Agent:
         What a vouch does NOT cover is an address aimed somewhere else from
         inside the query — an open redirect, an SSRF forward, credentials in
         userinfo. Those name a second destination he was never shown, so the
-        card he gave for this host says nothing about them."""
+        card he gave for this host says nothing about them.
+
+        **Nor does it cover one of his own stored secrets (#341).** He said yes
+        to searching a shop, not to handing that shop his password, and no
+        reading of the card he approved covers it. In refusal terms this was
+        already true before the vouch escape existed and it stopped being true
+        quietly: residual (a) accepts an arbitrary QUERY, on the argument that
+        the query reaches only that host's own logs — which is an argument
+        about a search term and not about a credential that works elsewhere.
+        Two things then made it worse rather than merely old. Arm 3 now
+        DETECTS the secret and the gate stayed silent anyway, which is the
+        exact shape of a check whose finding nothing acts on. And #341's first
+        slice extends this vouch from the agent's lifetime to the chat's,
+        across every ship. So the secret joins the list above."""
         if not hosts or not self._approved_hosts:
             return False
         if not all(h in self._approved_hosts for h in hosts):
@@ -6562,6 +6606,8 @@ class Agent:
         if name == "web_search":
             # The query reaches the search engine and nobody else, so it was
             # never this branch's business; it is judged in _carries_payload.
+            return False
+        if secrets.contains(urllib.parse.unquote(url)) or secrets.contains(url):
             return False
         return not _forwards_elsewhere(url)
 
@@ -6664,6 +6710,15 @@ class Agent:
            arm is what keeps that sentence true now the any-query trigger has
            gone.
         6. **`HOST_LABEL_MAX`**, unchanged and in both origins.
+        7. **A long run in the PATH at a host with no provenance**
+           (`_longest_path_run` past `PATH_RUN_MIN`). Arms 4 and 5 between them
+           left a hole and it was the classic one: `PLAIN_PATH_MAX` retired
+           attended, arm 4 wants three character classes, arm 5 reads query and
+           fragment only — so `evil.example/<base32 of the thing>` hit no arm
+           at all, and its author reads it back out of his own access logs.
+           Blind to character classes on purpose, because at somebody else's
+           host the question is whether the path has ROOM to hide something,
+           not whether an encoder made it.
 
         **Provenance here means VOUCHED-OR-OFFERED, and a mere mention is NOT
         enough.** `_approved_hosts`, never `_owner_hosts`, and that asymmetry is
@@ -6672,14 +6727,27 @@ class Agent:
         address inside a forwarded email is owner-authored by provenance and
         attacker-chosen in fact. The offered half is asked before this function
         is reached, by `_url_was_offered`. With the vouch now surviving a
-        restart, arm 5 costs one card per host per chat, ever.
+        restart, arms 5 and 7 cost one card per host per chat, ever.
+
+        **What DID narrow, said plainly.** The card narrowed, and so did the
+        refusal set — for path-borne payloads at unvouched hosts, attended.
+        `PLAIN_PATH_MAX` used to gate every attended path past sixty
+        characters; arm 7 replaces that with a bound on the longest single run
+        inside it, so an ordinary long path is free and a blob is not. The cost
+        is the CHUNKING residual: a payload cut into runs under
+        `PATH_RUN_MIN` and separated by `/` or `-` stays free attended at an
+        unvouched host. Closing it means re-gating ordinary long paths, which
+        is the whole win of this change, so it is accepted-with-visibility
+        exactly as #294's enumeration channel is — pinned by a test so nobody
+        later reads it as an oversight. A triggered session keeps the full old
+        rule and has no such residual.
 
         **What this does NOT narrow.** A vouched host still accepts anything
-        that is not a forward: `_searching_a_vouched_site` runs after this and
-        frees it, exactly as it did before, so residual (a) is unchanged in
-        both directions. And the enumeration residual #294 accepted is
-        unchanged too — a short plain path at a novel host carries nothing and
-        is free, which is the #198 usability constraint doing its job."""
+        that is not a forward and does not carry one of his secrets:
+        `_searching_a_vouched_site` runs after this and frees the rest, so
+        residual (a) is unchanged. And the enumeration residual #294 accepted
+        is unchanged too — a short plain path at a novel host carries nothing
+        and is free, which is the #198 usability constraint doing its job."""
         try:
             parts = urllib.parse.urlsplit(
                 url if "//" in url else f"//{url}", scheme="https"
@@ -6699,7 +6767,16 @@ class Agent:
         for label in host.split("."):
             if len(label) > HOST_LABEL_MAX:
                 return f"hides a {len(label)}-character run inside the hostname"
-        if (parts.query or parts.fragment) and host not in self._approved_hosts:
+        if host in self._approved_hosts:
+            return ""
+        # Both remaining arms share one condition — no provenance — because
+        # both are about the DESTINATION rather than about the value's shape.
+        if (run := _longest_path_run(parts)) >= PATH_RUN_MIN:
+            return (
+                f"carries a {run}-character run in its path, and nothing in "
+                "this chat has agreed to send anything there"
+            )
+        if parts.query or parts.fragment:
             return (
                 "carries a query, and nothing in this chat has agreed to send "
                 "anything there"
