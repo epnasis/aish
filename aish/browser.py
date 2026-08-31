@@ -151,6 +151,8 @@ _STEALTH_OMIT = ["--enable-automation"]
 # is already dismissing today.
 _CONSENT_SELECTORS = vocab.declare(
     "browser._CONSENT_SELECTORS",
+    demanded=True,  # counted at `_uncover` only, where the structural check has
+    # ALREADY found something covering a control: an ask is a blocked press
     languages="Polish + English, plus vendor-specific ids",
     on_miss=vocab.BREAKS,
     structural="`_COVERED_JS` / `browse.Cover` — the page is asked what sits at "
@@ -174,6 +176,8 @@ _CONSENT_SELECTORS = vocab.declare(
 _LOCK_FILES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
 _LOCK_MARKERS = vocab.declare(
     "browser._LOCK_MARKERS",
+    demanded=True,  # `_clear_stale_lock` is reached only after Chrome failed to
+    # start: an ask is a launch that is already broken
     languages="English — Chrome's own error text",
     on_miss=vocab.BREAKS,
     note="A miss leaves a dead Chrome's lock in place, so every later launch "
@@ -311,6 +315,8 @@ def asks_to_sign_in(html: str) -> bool:
 # challenge was already solved. Dropping it would throw away a good thing.
 _REPUTATION_COOKIES = vocab.declare(
     "browser._REPUTATION_COOKIES",
+    demanded=False,  # one ask per jar, whether or not the jar holds one; a jar
+    # with nothing to shed sheds nothing, correctly
     languages="vendor cookie names — locale-invariant",
     on_miss=vocab.BREAKS,
     note="A miss leaves the bot-scoring token in place, so a warm profile keeps "

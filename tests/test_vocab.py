@@ -327,6 +327,67 @@ class TestTheAnomalyFloor:
             for name, (a, m) in spec.items()
         }
 
+    def test_a_demanded_list_is_flagged_at_any_exposure_at_all(self):
+        """`quiet` structurally cannot see the case that started this. Measured:
+        `browse._FORWARD` sat at 7 asked / 0 matched for a month against
+        `on_miss=breaks`, and at that window's rarest working rate 7 asks expect
+        0.09 matches against a bar of 1 — it would have needed about 78 asks to
+        trip, and a date picker is consulted seven times a month.
+
+        A demanded list needs no threshold: every ask was a moment aish had
+        already committed to needing an answer, so one ask and no match is one
+        aborted operation."""
+        vocab.declare(
+            "test.demanded", ("a",), languages="—", on_miss=vocab.BREAKS,
+            demanded=True,
+        )
+        counters = self._counters(working=(400, 20), **{"test.demanded": (1, 0)})
+        assert vocab.quiet(counters) == []
+        assert [c.vocabulary for c in vocab.failing(counters)] == ["test.demanded"]
+        assert "test.demanded (1 asked)" in vocab.summary_line(counters)
+        assert "LEANED ON" in vocab.summary_line(counters)
+
+    def test_a_speculative_list_matching_nothing_is_not_a_defect(self):
+        """The reason this is not simply "breaks and zero": `_DOWNLOAD_WORDS` is
+        asked of every link on every page, so 24 asked / 0 matched means there
+        were no downloads — the correct answer."""
+        vocab.declare(
+            "test.speculative", ("a",), languages="—", on_miss=vocab.BREAKS,
+            demanded=False,
+        )
+        counters = self._counters(**{"test.speculative": (24, 0)})
+        assert vocab.failing(counters) == []
+
+    def test_a_demanded_list_that_answers_is_not_flagged(self):
+        vocab.declare(
+            "test.answering", ("a",), languages="—", on_miss=vocab.BREAKS,
+            demanded=True,
+        )
+        counters = self._counters(**{"test.answering": (9, 1)})
+        assert vocab.failing(counters) == []
+
+    def test_a_breaks_list_may_not_leave_the_question_unanswered(self):
+        """`None` is an unanswered question, not a default. The verdict is read
+        off the call site by a person, exactly like `on_miss`."""
+        with pytest.raises(ValueError, match="must say whether every consultation"):
+            vocab.declare(
+                "test.undeclared", ("a",), languages="—", on_miss=vocab.BREAKS,
+            )
+
+    def test_the_certainty_leads_the_suspicion(self):
+        """Reporting both in one sentence would rank a fact about work that did
+        not happen behind a statistical eyebrow-raise."""
+        vocab.declare(
+            "test.leading", ("a",), languages="—", on_miss=vocab.BREAKS,
+            demanded=True,
+        )
+        counters = self._counters(
+            working=(400, 20), silent=(200, 0), **{"test.leading": (2, 0)}
+        )
+        assert vocab.quiet(counters)
+        assert "test.leading" in vocab.summary_line(counters)
+        assert "silent" not in vocab.summary_line(counters)
+
     def test_a_list_asked_two_hundred_times_and_matching_nothing_is_flagged(self):
         counters = self._counters(working=(400, 20), silent=(200, 0))
         assert [c.vocabulary for c in vocab.quiet(counters)] == ["silent"]

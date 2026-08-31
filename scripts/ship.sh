@@ -79,6 +79,30 @@ head_subject="$(git log -1 --pretty=%s)"
 echo "→ shipping ${head_sha} ${head_subject}"
 [ -n "$dirty" ] && echo "  ⚠ plus uncommitted changes (--dirty)"
 
+# A word list aish LEANED ON and that never once matched — reported here and
+# nowhere else that gets walked. `browse._FORWARD` sat at 7 asked / 0 matched
+# for a month against `on_miss=breaks`, and the statistical detector stayed
+# silent about it correctly: at that window's rarest working rate, 7 asks expect
+# 0.09 matches and the bar is 1. It would have needed ~78 asks to trip, and a
+# date picker is consulted seven times a month. `vocab.failing` needs no
+# threshold because every consultation of a demanded list is one aish had
+# already committed to needing an answer from.
+#
+# A WARNING, never a refusal. It is evidence about the last 30 days of browsing,
+# not about the commit being shipped, so blocking on it would stop unrelated
+# work and teach everyone to reach for an override.
+broken="$(uv run --quiet python -c '
+from aish import vocab
+import aish.browse, aish.browser, aish.web, aish.approval, aish.signin  # noqa: F401
+import aish.provenance, aish.agent  # noqa: F401
+for one in vocab.failing(vocab.scan(days=30)):
+    print(f"    {one.vocabulary} — {one.asked} asked, none matched")
+' 2>/dev/null || true)"
+if [ -n "$broken" ]; then
+    echo "⚠ word lists aish leaned on and that never matched (\`aish vocab\`):"
+    printf '%s\n' "$broken"
+fi
+
 if [ "$check_only" -eq 1 ]; then
     echo "✓ preflight passed (--check: nothing installed)"
     exit 0

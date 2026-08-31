@@ -229,6 +229,54 @@ French, where `juin`/`juillet` collide). The built-in table stays as the floor a
 is added to it; where the two disagree, `month_of` returns None and every caller refuses.
 That is the shape this document argues for, applied to itself. `docs/browser.md`.
 
+## The counter that could not see its own worst case
+
+`quiet` is the anomaly detector: a list matched nothing where the window's own rarest working
+rate expected at least one match. It is careful, it derives its threshold from the data
+instead of picking a constant, and it states that it is weak.
+
+**It could not have caught `browse._FORWARD`, and did not.** Measured on the real 30-day
+window: 7 asked, 0 matched, `on_miss=breaks`, and `quiet` silent — *correctly by its own
+rule*. The rarest comparable working rate in that window was 1.28%, so 7 asks expect **0.09**
+matches against a bar of 1. `_FORWARD` would have needed about **78** asks to be flagged, and
+a date picker is consulted seven times a month. The list was broken for its entire life, the
+counter built to notice exactly this shape was in place the whole time, and no threshold
+tuning would have helped: a statistical floor cannot see a list this rare, ever.
+
+The first instinct was to wire `quiet` into `make ship-check` so somebody would read it. That
+would have shipped a gate that could never fire for the bug that motivated it.
+
+**What distinguishes the case is a property of the CALL SITE, not of the counts.**
+`_FORWARD` is consulted only from inside a month walk that has already decided it needs an
+arrow — seven asks were seven walks, and zero matches were seven ABORTED walks. Every
+consultation was a failure, at any exposure. `_DOWNLOAD_WORDS` is the opposite, and is why
+this is not simply *"breaks and zero"*: it is asked of every link on every page, so 24 asked /
+0 matched means there were no downloads, which is the correct answer.
+
+So `Vocabulary.demanded` records it, and `vocab.failing` reports it with **no threshold, no
+floor and no comparison to other lists**. The two checks stay apart rather than merging:
+`quiet` asks *"was this asked often enough that silence is surprising"*, a statistical
+question weak by its own admission; `failing` asks *"did a list aish leaned on ever hold it"*,
+which needs no statistics and is not weakened by rarity. `summary_line` leads with `failing`,
+because ranking a certainty behind a suspicion is how the certainty went unseen for a month.
+
+**`demanded` is `None` by default and `declare` REFUSES a `breaks` list that leaves it that
+way.** An unanswered question must not be the quiet option — that is the same argument
+`counted` already makes for a list left out of the catalogue. The verdict is read off the call
+site by a person, exactly like `on_miss`, and every one of the ten `breaks` lists now carries
+it with its reason on the line beside it.
+
+Run against the real window the moment it existed, it named two: `browse._FORWARD` (7 asked,
+the bug this came from) and `browser._CONSENT_SELECTORS` (1 asked — lot.com's OneTrust banner,
+which `_uncover` could not take down, recorded at the one call site where an ask means a press
+is already blocked). `quiet` named neither.
+
+It is reported in `aish vocab`, in `summary_line` (so it reaches `aish usage`, where he
+already looks), and in `scripts/ship.sh`'s preflight — **a warning, never a refusal**. It is
+evidence about the last thirty days of browsing, not about the commit being shipped, so
+blocking on it would stop unrelated work and teach everyone to reach for an override.
+`TestTheAnomalyFloor` pins both halves.
+
 ### Where a structural check already replaced the words entirely
 
 Two of the four questions #322 opens with turned out to have **no vocabulary at all**, and
