@@ -622,6 +622,8 @@ _SCHEMA_PREFIX = "https://schema.org/"
 # that way because it is already the sentence the answer would have to write.
 _AVAILABILITY = vocab.declare(
     "web._AVAILABILITY",
+    demanded=False,  # asked of whatever an offer declares, including nothing;
+    # a value outside the schema.org enum is not aish being blocked
     languages="schema.org enum values — a machine vocabulary, not prose",
     on_miss=vocab.BREAKS,
     note="A miss drops the availability line entirely, so an OUT OF STOCK offer "
@@ -648,6 +650,7 @@ _AVAILABILITY = vocab.declare(
 # So it goes FIRST and says what to do with it.
 _NOT_BUYABLE = vocab.declare(
     "web._NOT_BUYABLE",
+    demanded=False,  # membership inside the `_AVAILABILITY` branch, same shape
     languages="schema.org enum values",
     on_miss=vocab.BREAKS,
     counted=False,

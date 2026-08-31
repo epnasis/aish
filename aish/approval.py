@@ -731,6 +731,8 @@ def check_denied(command: str, extra_prefixes: list[str] | None = None) -> str |
 
 _DESTRUCTIVE_COMMANDS = vocab.declare(
     "approval._DESTRUCTIVE_COMMANDS",
+    demanded=False,  # one ask per command, and most commands are not
+    # destructive — `sudo`/`--force` mark one without this list matching
     languages="program names — locale-invariant",
     on_miss=vocab.BREAKS,
     structural="none, and none is needed — the GATE is `check_denied` and the "

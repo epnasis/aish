@@ -1406,6 +1406,8 @@ def is_mutating(
 # reason: this is the owner's web.
 _DOWNLOAD_WORDS = vocab.declare(
     "browse._DOWNLOAD_WORDS",
+    demanded=False,  # asked of every link on every page; no downloads is the
+    # correct answer, not a defect
     languages="Polish + English",
     on_miss=vocab.BREAKS,
     structural="the `/download` and `/export` path test beside it, and the fact "
@@ -1419,6 +1421,7 @@ _DOWNLOAD_WORDS = vocab.declare(
 ))
 _DOWNLOAD_SUFFIXES = vocab.declare(
     "browse._DOWNLOAD_SUFFIXES",
+    demanded=False,  # as `_DOWNLOAD_WORDS` — asked of every URL seen
     languages="file suffixes — locale-invariant",
     on_miss=vocab.BREAKS,
     entries=(
@@ -3134,6 +3137,8 @@ MONTH_HOPS = 14
 # site's phrasing is one probe run away.
 _FORWARD = vocab.declare(
     "browse._FORWARD",
+    demanded=True,  # asked only from inside a walk that has already decided it
+    # needs an arrow: an ask is a walk, a miss is an aborted one
     languages="Polish + English + arrow glyphs",
     on_miss=vocab.BREAKS,
     structural="`month_arrow` + `month_table` — an arrow whose whole name IS a "
@@ -3148,6 +3153,7 @@ _FORWARD = vocab.declare(
 ))
 _BACKWARD = vocab.declare(
     "browse._BACKWARD",
+    demanded=True,  # see `browse._FORWARD`
     languages="Polish + English + arrow glyphs",
     on_miss=vocab.BREAKS,
     structural="`month_arrow` — see `browse._FORWARD`",
