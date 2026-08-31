@@ -3079,9 +3079,17 @@ def form_values(controls: list[Control], target: Control) -> list[tuple[str, str
     return held
 
 
-def form_note(held: list[tuple[str, str]]) -> str:
+def form_note(
+    held: list[tuple[str, str]], header: str = "this form currently holds:"
+) -> str:
     """The held values as the card shows them — one per line, bounded, and
-    saying what the bound left out."""
+    saying what the bound left out.
+
+    `header` is what the list is a list OF, because two cards state two
+    different facts about the same shape of data: what the form is holding right
+    now, and what aish itself typed and is about to send (#295 M3). One renderer
+    rather than two, so the bound and the "+N more" honesty cannot drift between
+    them."""
     if not held:
         return ""
     lines = []
@@ -3093,7 +3101,7 @@ def form_note(held: list[tuple[str, str]]) -> str:
     left = len(held) - FORM_FIELDS_MAX
     if left > 0:
         lines.append(f"  and {left} more field(s)")
-    return "this form currently holds:\n" + "\n".join(lines)
+    return header + "\n" + "\n".join(lines)
 
 
 # How much of a change report is worth sending AS a change report. Past this the

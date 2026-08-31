@@ -247,6 +247,9 @@ Rules:
    do not try a different control to get around it. The same is true of the prompt you
    may see before an address at a host nobody has named yet — it is asked once for that exact
    host, and it covers read_url and browse alike. In a web chat it lasts even if aish restarts.
+   Pressing a control that SENDS A FORM carrying values you typed asks that same question, at a
+   host nobody has agreed to send anything to yet, and a yes there covers addresses too — so do
+   not avoid a form for fear of it. Filling a form in is never asked about; only sending it is.
    Once they approve, that page IS
    read through their signed-in browser: you never need a cookie, a token, or a manual download
    to see their account. A line beginning "[aish:" ABOVE the untrusted-content banner is from
@@ -1480,6 +1483,39 @@ EGRESS_NO_APPROVER = (
     "the owner named, or finish and report."
 )
 
+# The DRIVEN TWIN of the composed address (#295 M3). Same question, same vouch,
+# different mechanism: a form submit carrying values aish itself typed is a
+# composed query URL that a page built instead of a string concatenation. The
+# sentence never names a tool (P1) — it says what would leave the machine and
+# where it would go, exactly as the composed-address card does, and it rides the
+# press card rather than drawing a second one (M1's law: one press, one card).
+SEND_GRANT = "send data to {host} — pressing this {finding}."
+
+SEND_GRANT_RIDER = "and send data to {host} — pressing this {finding}."
+
+# A no here must not leave the model with an obvious way round: the same values
+# in a composed address gate too, and it is told so rather than left to find out.
+SEND_DENIED = (
+    "USER DENIED sending what aish typed to {host} — the form was NOT submitted "
+    "and nothing left the machine. Do not retry it, and do not put the same "
+    "values into an address instead. Ask the user what to do."
+)
+
+# What the driven twin found, and it is the same clause `_value_finding` uses
+# for a query at an unvouched host, because it is the same finding: values are
+# about to ride an address to somewhere the owner has never agreed to send
+# anything. `{n}` is counted, never estimated — the values are the ones aish
+# composed, so there is nothing to guess about.
+DRIVEN_CARRIES = (
+    "would send {n} value(s) aish typed into the page, and you have never "
+    "agreed to send anything there"
+)
+
+# The same finding in a triggered session, minus the clause about a vouch: the
+# strict unattended rule gates a payload at a host the owner DID name, so
+# saying "you have never agreed" there would state something no line checked.
+DRIVEN_UNATTENDED_CARRIES = "would send {n} value(s) aish typed into the page"
+
 # `_payload_finding` returns the sentence the ATTENDED card says. These three
 # are its findings for the cases the attended card does not word: a search
 # (which names a host and never reaches one, so it has its own sentence), a
@@ -1601,6 +1637,12 @@ BROWSE_ACTION_AND_SITE_DENIED = (
 # them. A new browsing tool that misses one is a tool outside the gate, so they
 # all read this.
 BROWSE_TOOLS = ("browse", "browse_act", "browse_fill")
+
+# The two of them that put aish's OWN hands on a page already open. `browse` is
+# the open, which is an address the model composed and is judged as one by
+# `_egress_gate`; these two are judged by `_driven_egress_gate`, which asks the
+# same question about a form the page composed instead.
+DRIVING_TOOLS = ("browse_act", "browse_fill")
 
 # Tools whose results carry bytes from OUTSIDE this machine. Once one has run,
 # everything the model proposes next may be an echo of text an attacker wrote,
@@ -2450,6 +2492,18 @@ class Agent:
         # recorded as whole addresses rather than re-derived by searching raw
         # text later. Read by _url_was_offered.
         self._offered_links: set[str] = set()
+        # What aish TYPED into a page this task, per host, as (the control the
+        # model named, the value it sent). Read by `_driven_egress_gate`, which
+        # is the driven twin of the composed-address question (#295 M3): a
+        # submit carrying these is the same egress as a URL with the same text
+        # stapled into its query.
+        #
+        # Recorded from the ARGUMENTS aish itself composed, never read back off
+        # the page. The page is attacker-authored — reading the values out of it
+        # would let a page decide whether the gate fires by rewriting its own
+        # fields, and it would miss a value the page hides the moment it is
+        # entered.
+        self._typed_this_task: dict[str, list[tuple[str, str]]] = {}
         # URLs that arrived by e-mail this task, mapped to what they are
         # (provenance.LINK / provenance.SIGN_IN). Read by _mail_link_gate.
         self._mail_links: dict[str, str] = {}
@@ -3270,6 +3324,10 @@ class Agent:
         # tainted, and a link a page showed while answering one question is not
         # a licence to compose an address at that host in the next.
         self._offered_links = set()
+        # Typed values belong to the task that typed them, exactly as taint and
+        # offered links do: a value sent to a form while answering one question
+        # is not a licence to send the next task's values to the same host.
+        self._typed_this_task = {}
         self._mail_links = {}
         self._approved_mail_links = set()
         with self._provenance_lock:
@@ -6703,6 +6761,11 @@ class Agent:
         one of them an ordinary read. A gate that knows only *something* can
         only say *something*, so the sentence and the decision are computed
         together and by the same code."""
+        if name in DRIVING_TOOLS:
+            # A form the PAGE composed, carrying values AISH composed — the
+            # driven twin of everything below (#295 M3). Same question, asked
+            # of the other channel.
+            return self._driven_finding(name, args)
         if name == "web_search":
             # **A search query NAMES a host; it never reaches one.** The query
             # is handed to the search engine and to nobody else, so `site:` —
@@ -6973,6 +7036,131 @@ class Agent:
             return
         for host in hosts:
             self.state_log({"kind": "egress_vouch", "host": host})
+
+    def _note_typed_values(self, name: str, args: dict) -> None:
+        """Remember what aish is about to TYPE into the page, per host (#295 M3).
+
+        Written from the arguments aish itself composed and never read back off
+        the page, and that is the property rather than an economy: the page is
+        attacker-authored, so reading the values out of it would let a page
+        decide whether the gate fires by rewriting its own fields, and it would
+        miss a value the page hides the moment it is entered.
+
+        An EMPTY value is not recorded. Clearing a field sends nothing, and the
+        question this record answers is what would ride the submit."""
+        typed = [(target, value) for target, value in browse.typed_values(name, args) if value]
+        host = self._browse_host(name, args)
+        if host and typed:
+            self._typed_this_task.setdefault(host, []).extend(typed)
+
+    def _submitting_control(self, name: str, args: dict):
+        """The control this call would press to SEND a form, or None.
+
+        Two shapes, and missing the second one would have made the fence
+        decorative. A submit BUTTON is `Control.submits`, carried from the page
+        enumeration. But `browse_act(action="type", submit=True)` presses Enter
+        in the field it just typed into, which submits the form around it — the
+        target there resolves to a FIELD, whose `submits` is false, so a check
+        that read only the button would be walked past by the one argument that
+        exists to send without pressing anything.
+
+        The Enter case is failed CLOSED — an explicit `submit=True` is the model
+        asking to send, so it counts whether or not the field's form can be
+        resolved. `choose` and `check` carry no model-supplied value at all and
+        are not submits; `read` touches nothing."""
+        if name == "browse_act":
+            action = str(args.get("action", "click") or "click")
+            if action == "type":
+                return self._browse_target(args) if args.get("submit") else None
+            if action != "click":
+                return None
+            control = self._browse_target(args)
+            return control if control is not None and control.submits else None
+        if name == "browse_fill":
+            current = self._browse_view.shown
+            if current is None:
+                return None
+            plan = browse.plan_batch(current.controls, list(args.get("steps") or []))
+            if plan.problem:
+                return None
+            for step in plan.steps:
+                if (
+                    step.do == "click"
+                    and step.control is not None
+                    and step.control.submits
+                ):
+                    return step.control
+        return None
+
+    def _values_riding_this_press(self, name: str, args: dict, host: str) -> list:
+        """Every value aish typed that pressing this would send.
+
+        This call's own typed values are included, which is what makes the
+        one-call `browse_fill` — type three fields, then press Search — the same
+        answer as the two-call version. A batch that types and submits in one
+        step would otherwise have nothing recorded yet and go free."""
+        return [
+            *self._typed_this_task.get(host, []),
+            *[(t, v) for t, v in browse.typed_values(name, args) if v],
+        ]
+
+    def _driven_finding(self, name: str, args: dict) -> str:
+        """WHAT pressing this would send, in the owner's own words — or "" when
+        it would send nothing (#295 M3).
+
+        **The driven twin of the composed address, and it exists because the
+        composed address is not the only way to build one.** A later slice
+        re-anchors the site grant so inert presses stop asking, and that opens a
+        path only the site card blocks today: open an attacker's page (a plain
+        URL — free), type prose into its search box (typing is free, and has
+        always been: nothing is committed until something is pressed), then
+        press its GET submit (inert, so free). The page builds
+        `https://attacker.example/?q=<the owner's mail in plain words>` out of
+        its own form, and no value check catches prose. That is arm 5 of
+        `_value_finding` — *the destination* — rebuilt one layer down.
+
+        So the FIXED RULE (P3 — a rule, not a judgement, and it can only ever
+        draw a card that was not needed): a form submit carrying values aish
+        itself typed THIS TASK, at a host with no vouch, is the same egress as a
+        composed query URL. Same question, same card, same vouch.
+
+        **At a vouched host it is free**, which is everywhere he actually
+        drives — measured, 11 of the 18 hosts his 273 query-carrying opens land
+        on are covered by approvals already in his logs — so ordinary
+        form-filling never sees this.
+
+        **POST submits are covered too, not only the GET ones the attack uses.**
+        `Control.submits` does not distinguish, and the safe direction is not to
+        teach it to: a non-GET submit is already `mutating` and already carded,
+        so including it costs a clause on a card that was being drawn anyway.
+
+        Unattended keeps the strict rule reads already keep: every submit
+        carrying typed values gates, vouch or no vouch, because nobody is going
+        to read the answer either way."""
+        host = self._browse_host(name, args)
+        if not host or self._submitting_control(name, args) is None:
+            return ""
+        attended = self.origin == "user"
+        if attended and host in self._approved_hosts:
+            return ""
+        carried = self._values_riding_this_press(name, args, host)
+        if not carried:
+            return ""
+        template = DRIVEN_CARRIES if attended else DRIVEN_UNATTENDED_CARRIES
+        return template.format(n=len(carried))
+
+    def _driven_note(self, name: str, args: dict, host: str) -> str:
+        """The values themselves, as the card shows them.
+
+        A count is the finding; the values are what makes it checkable at a
+        glance, which is the only condition under which epic #295 P2 lets a card
+        exist at all. Rendered by the same bounded renderer the form card
+        already uses, so a paragraph pasted into a search box cannot push the
+        rest of the card off the screen."""
+        return browse.form_note(
+            self._values_riding_this_press(name, args, host),
+            header="aish would send what it typed:",
+        )
 
     def _mail_link_url(self, name: str, args: dict) -> str:
         """The e-mailed URL this call would open, or "".
@@ -7296,28 +7484,69 @@ class Agent:
         same clauses `SITE_GRANT` states it in, and `_grant_site` records it
         exactly as before.
 
+        **A third clause, on the same terms: what this press would SEND (#295
+        M3).** A submit carrying values aish typed at a host with no vouch is
+        the driven twin of a composed query URL, and it asks the same question
+        and collects the same vouch — see `_driven_finding`. It rides here for
+        the reason the grant does: it is the same press, so it is one card, and
+        it is the ONE function both press gates already route through, so the
+        two tools cannot drift on how often he is asked. It is also the only
+        place downstream of every refusal, which matters — a card in front of an
+        action that is about to be refused anyway is how a card stops meaning
+        anything.
+
+        The clauses grant DIFFERENT things and record separately: `_grant_site`
+        writes the suffix-matched press grant, `_vouch_hosts` writes the
+        exact-matched send vouch, and neither set is ever filled from the other.
+
         Joined with a dash when the card is one line and a newline when it is
         not, because a card carrying a form's held values or a batch's steps is
         already a block, and running the grant onto the end of its last value
         would read as part of that value."""
         granted = self._site_granted(host)
-        if granted and not what:
+        sending = self._driven_finding(name, args)
+        if granted and not what and not sending:
             return None
-        if not what:
-            preview = SITE_GRANT.format(host=host)
-            denial = BROWSE_DENIED.format(host=host)
-        elif granted:
-            preview = what
-            denial = BROWSE_ACTION_DENIED.format(what=what)
-        else:
-            joint = "\n" if "\n" in what else " — "
-            preview = what + joint + SITE_GRANT_RIDER.format(host=host)
+        clauses = [what] if what else []
+        if not granted:
+            clauses.append(
+                SITE_GRANT_RIDER.format(host=host) if clauses
+                else SITE_GRANT.format(host=host)
+            )
+        if sending:
+            # The values themselves ride below the sentence, because a count is
+            # the finding and the values are what make it checkable at a glance
+            # — the only condition epic #295 P2 lets a card exist under.
+            clauses.append(
+                (SEND_GRANT_RIDER if clauses else SEND_GRANT).format(
+                    host=host, finding=sending
+                )
+            )
+            if note := self._driven_note(name, args, host):
+                clauses.append(note)
+        preview = clauses[0]
+        for clause in clauses[1:]:
+            preview += ("\n" if "\n" in preview or "\n" in clause else " — ") + clause
+        if what and not granted:
             denial = BROWSE_ACTION_AND_SITE_DENIED.format(what=what, host=host)
+        elif what:
+            denial = BROWSE_ACTION_DENIED.format(what=what)
+        elif not granted:
+            denial = BROWSE_DENIED.format(host=host)
+        else:
+            denial = ""
+        if sending:
+            denial = (denial + " " if denial else "") + SEND_DENIED.format(host=host)
         refusal = self._browse_approval(name, args, preview, denial)
         if refusal is not None:
             return refusal
         if not granted:
             self._grant_site(host)
+        if sending:
+            # The SAME vouch a composed address collects, recorded the same way
+            # — the two grants stay disjoint (`_grant_site` above writes the
+            # other one), and neither is ever filled from the other.
+            self._vouch_hosts([host])
         return None
 
     def _form_note(self, control) -> str:
@@ -7422,7 +7651,16 @@ class Agent:
         )
         if committing is not None and (held := self._form_note(committing)):
             what += f"\n{held}"
-        if what in self._approved_batches and self._site_granted(host):
+        if (
+            what in self._approved_batches
+            and self._site_granted(host)
+            # …and nothing is about to be SENT that has not been vouched for.
+            # A remembered batch answers only for the batch, exactly as the
+            # clause below says about the site grant: a yes given before the
+            # address question reached driving (#295 M3) cannot be read as a
+            # yes to a question that was never on the card.
+            and not self._driven_finding("browse_fill", args)
+        ):
             # The SAME form, the same values, the same committing press — this
             # is the retry of a batch that stopped part-way, and one of the
             # five cards that search drew was exactly this asked twice. A yes
@@ -8890,6 +9128,11 @@ class Agent:
             refusal = self._browse_gate(name, args)
             if refusal is not None:
                 return refusal
+            # Past every gate, so these values are about to reach the page.
+            # Recorded HERE and not inside the gate because the gate has a
+            # dozen ways out and a record written on some of them is a record
+            # the next submit reads a wrong answer out of (#295 M3).
+            self._note_typed_values(name, args)
             label, thunk = self._browse_call(name, args)
             self._note(label)
             self.status.start(name)
