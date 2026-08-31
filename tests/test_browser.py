@@ -2284,6 +2284,23 @@ class TestTheThingApprovedIsTheThingPressed:
         assert pressed == []
         assert "not the control that was approved" in snaps[0]
 
+    def test_a_stale_snapshot_that_lands_on_a_live_buy_button_is_not_pressed(
+        self, monkeypatch
+    ):
+        """The interleaving that decided how #342 was built.
+
+        The gate approved a benign control; between the card and the press the
+        page turned it into a JavaScript "Kup teraz" that submits no form. Had
+        the commit verbs simply LEFT `_MUTATING_WORDS` for the refusal list,
+        the live control would classify as not-mutating, this fence would find
+        nothing to disagree with, and a path that ends in a refusal today would
+        end in a buy. They are in both lists, so it holds — and the assertion
+        that matters is the second one: Chrome was never asked to click."""
+        live = [{"n": 3, "kind": "button", "name": "Kup teraz"}]
+        pressed, snaps = self._drive(monkeypatch, live, target="Kup teraz")
+        assert pressed == []
+        assert "not the control that was approved" in snaps[0]
+
     def test_a_password_field_is_never_typed_however_it_is_reached(self, monkeypatch):
         live = [{"n": 1, "kind": "password", "name": "Hasło"}]
         pressed, snaps = self._drive(monkeypatch, live, target="Hasło")

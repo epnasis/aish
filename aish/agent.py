@@ -271,6 +271,14 @@ Rules:
    same thing. Call browse_act(action="read") when you need the whole page back.
    A control marked "(needs approval)" will ask the user; that is expected, not
    an error.
+   AISH REFUSES TO PRESS A CONTROL WHOSE OWN WORDS SAY IT BUYS, PAYS, ORDERS,
+   BOOKS, SUBSCRIBES, ENDS A CONTRACT OR DELETES — "Kup teraz", "Zapłać",
+   "Place your order", "Usuń", "Subscribe". There is no approval for those and
+   asking for one is not an option. When you hit that refusal, do NOT look for
+   another control that does the same thing: get the user to the exact point
+   where they press it, tell them what is on the page, and tell them to run
+   /browser <host> and do that last step themselves. Everything up to it is
+   still yours to do.
    IF THE CONTROL YOU WANT IS NOT IN THE LIST, IT IS CLOSED AWAY — NOT ABSENT.
    The list ends with a line saying how many controls are shut in a collapsed
    menu, an off-screen panel or behind a dialog. Press the thing that opens
@@ -1512,9 +1520,10 @@ NO_READABLE_HOST = (
 # rejected that, and the machine was on his side: a click that navigates or
 # expands, and a form that searches or filters, ride the grant precisely
 # BECAUSE they are how you read a modern site, while every control whose name
-# says it pays, buys, books, deletes, sends or signs draws its own card
-# regardless, a page showing checkout structure re-cards every submit, and
-# passwords and the irreversible list are refused with no yes at all. So the
+# says it sends or signs draws its own card regardless, a page showing checkout
+# structure re-cards every submit, and passwords, the irreversible list and
+# (since #342) every control whose name says it buys, pays, orders, books,
+# subscribes, ends a contract or deletes are refused with no yes at all. So the
 # two tools were never two permissions — they were one permission described by
 # implementation, and the split bought nothing but a second card.
 #
@@ -1524,8 +1533,9 @@ NO_READABLE_HOST = (
 # instead — changing anything asks first — is what makes the assumption he
 # already makes when he taps Approve a true one instead of a smuggled one.
 SITE_GRANT = (
-    "act on {host} signed in as you — aish will press things inside your "
-    "account; anything that spends, ends or deletes asks again by name."
+    "act on {host} signed in as you — aish presses things inside your account, "
+    "never one that says it buys, pays or deletes, and asks by name before "
+    "changing anything else."
 )
 
 # The grant is per site and lasts the session, matching every other grant here
@@ -1597,6 +1607,26 @@ BROWSE_IRREVERSIBLE = (
     "acceptable, because it cannot be undone and it is exactly what a page "
     "carrying hidden instructions would want. The control {n} says it does. "
     "Tell the user to run /browser {host} and do it themselves."
+)
+
+# The commit verbs (#342). The same shape and a DIFFERENT sentence, because the
+# reason is different. BROWSE_IRREVERSIBLE says "it cannot be undone", which is
+# true of closing an account and would be a claim wider than anything checked
+# about a `Usuń` that empties a cart. What is true of all of these is that the
+# owner decided the last press is his: there is no future in which aish pressing
+# "Zapłać" was wanted, so a card offering a yes for it protects nothing and
+# trains the tap that is waiting on the purchase.
+# The sentence stops exactly where the code does. It opened "aish will never
+# {what}, on any site, however it is asked", which is wider than anything here
+# enforces: an unworded "Jetzt kaufen" rides the site grant, and #299 owns that
+# miss. What a line actually checked is the control's WORDS, so that is what
+# the refusal claims — and it matters more than usual because the model reads
+# this sentence and repeats it to the owner as aish's own account of itself.
+BROWSE_COMMITS = (
+    "NOT EXECUTED: aish does not press a control whose words say it would "
+    "{what} — on any site, and no approval changes that. {n} says that is what "
+    "pressing it does, and that press is the user's own. Tell the user to run "
+    "/browser {host} and do it themselves."
 )
 
 # A link that arrived by e-mail (#279). Structural, and it needs no classifier:
@@ -7077,6 +7107,49 @@ class Agent:
                 )
         return None
 
+    def _commits_here(self, control, args: dict, host: str) -> str | None:
+        """Does this press commit the owner to something (#342)?
+
+        Read off the control's own NAME — never its address, which carries row
+        text a page wrote about the row and not about the button. A link that
+        navigates is exempt, on the ground `is_mutating` already stands on.
+
+        **An unresolvable target is classified on the model's own words**, the
+        way `_committing_step` already does with `step.target`. It is the same
+        answer whichever way the sentence is reached, it is strictly the safe
+        direction — an unresolvable name presses nothing either way, so the
+        refusal costs a round trip and never a consequence — and it closes the
+        one gap the gate cannot cover from the page: when the snapshot cannot
+        resolve the target, the gate has nothing to read and the live fence in
+        `browser.browse_act` is all that is left."""
+        asked = str(args.get("target") if args.get("target") is not None else "")
+        said = (control.name or control.address) if control is not None else asked
+        claimed = browse.commits(
+            said, navigates=bool(control is not None and control.navigates)
+        )
+        if not claimed:
+            return None
+        return _gate_outcome(
+            BROWSE_COMMITS.format(
+                what=browse.COMMITS[claimed],
+                n=repr(control.address if control is not None else asked),
+                host=host or "the site",
+            ),
+            decision="blocked",
+        )
+
+    def _committing_step(self, plan: "browse.Batch", host: str) -> str | None:
+        """The same question over a whole batch, before any of it runs.
+
+        Beside `_irreversible_step` rather than inside it, because the two name
+        different consequences and each method's name has to stay true: a cart
+        row removed is not irreversible, and it is refused all the same."""
+        for step in plan.steps:
+            refusal = self._commits_here(step.control, {"target": step.target}, host)
+            if refusal is not None:
+                return refusal
+        return None
+
     def _browse_gate(self, name: str, args: dict) -> str | None:
         """Approval gate for driving a page (#237): None = proceed, else the
         refusal text.
@@ -7136,6 +7209,8 @@ class Agent:
                     ),
                     decision="blocked",
                 )
+            if not reading and (refusal := self._commits_here(control, args, host)):
+                return refusal
         if not host or reading:
             return None
         if self.approve_tool is None:
@@ -7221,10 +7296,14 @@ class Agent:
         """Does this control draw a card of its own, on top of the grant?
 
         Two reasons, and only one of them is grantable. A NAME that says it
-        pays, deletes, sends or signs draws a card whatever the owner granted —
-        that is the floor the grant explicitly does not cover. A nondescript
-        form submit is what the grant is FOR… unless the page itself shows it
-        commits something, and then every submit is carded again.
+        sends, saves or signs draws a card whatever the owner granted — that is
+        the floor the grant explicitly does not cover. A nondescript form submit
+        is what the grant is FOR… unless the page itself shows it commits
+        something, and then every submit is carded again.
+
+        Nothing here decides what happens to a name that says it BUYS or
+        DELETES: since #342 the gate has already refused it, above, and this is
+        never reached for one.
 
         Evidence is read in the escalating direction ONLY. Absence proves
         nothing: a card-on-file checkout has no payment field at all, a
@@ -7263,6 +7342,8 @@ class Agent:
         # refused here has typed nothing, pressed nothing, and left nothing
         # half-sent.
         if refusal := self._irreversible_step(plan, host):
+            return refusal
+        if refusal := self._committing_step(plan, host):
             return refusal
         if not host:
             return None

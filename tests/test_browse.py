@@ -337,15 +337,17 @@ class TestBrowseGate:
         assert asked == []
 
     def test_a_mutating_click_asks_again_and_names_the_control(self, monkeypatch):
-        snap = snapshot(controls=[control(n=5, name="Zapłać")])
+        """'Wyślij' and not 'Zapłać' since #342: a control whose words say it
+        PAYS no longer draws a card at all, and the card is what this pins."""
+        snap = snapshot(controls=[control(n=5, name="Wyślij")])
         agent, asked = self._agent(monkeypatch, lambda *a: True, snap)
         agent._approved_sites.add("eon.pl")
         assert agent._browse_gate("browse_act", {"target": 5}) is None
         assert len(asked) == 1
-        assert "click button 'Zapłać' on eon.pl" in asked[0]
+        assert "click button 'Wyślij' on eon.pl" in asked[0]
 
     def test_denying_a_mutating_click_says_nothing_changed(self, monkeypatch):
-        snap = snapshot(controls=[control(n=5, name="Zapłać")])
+        snap = snapshot(controls=[control(n=5, name="Wyślij")])
         agent, _ = self._agent(monkeypatch, lambda *a: False, snap)
         agent._approved_sites.add("eon.pl")
         out = agent._browse_gate("browse_act", {"target": 5})
@@ -367,11 +369,11 @@ class TestBrowseGate:
         """What the owner used to read on the card was `browse_act target=15,
         action=click`, and nobody can review "click 15". He decides to press a
         button by reading its label; the card has to carry the same words."""
-        snap = snapshot(controls=[control(n=5, name="Zapłać")])
+        snap = snapshot(controls=[control(n=5, name="Wyślij")])
         agent, asked = self._agent(monkeypatch, lambda *a: True, snap)
         agent._approved_sites.add("eon.pl")
-        assert agent._browse_gate("browse_act", {"target": "Zapłać"}) is None
-        assert "click button 'Zapłać' on eon.pl" in asked[0]
+        assert agent._browse_gate("browse_act", {"target": "Wyślij"}) is None
+        assert "click button 'Wyślij' on eon.pl" in asked[0]
 
     def test_the_echo_names_the_control_too(self, monkeypatch):
         """The transcript line is the owner's only running account of what aish
@@ -1277,10 +1279,16 @@ class TestFillingAFormIsOneAct:
         ]}) is None
         assert asked == []
 
-    def test_a_batch_that_pays_still_draws_one_card_naming_every_value(
+    def test_a_batch_that_commits_still_draws_one_card_naming_every_value(
         self, monkeypatch
     ):
-        snap = snapshot(controls=self._form())
+        """The committing press is 'Wyślij' and not 'Zapłać' since #342: a
+        control whose words say it PAYS never reaches a card at all now, and
+        one card for a whole form is what this pins."""
+        snap = snapshot(controls=browse.controls_from([
+            {"n": 0, "kind": "field", "name": "Skąd"},
+            {"n": 1, "kind": "button", "name": "Wyślij", "submits": True},
+        ]))
         asked = []
 
         def approve_tool(name, args, preview):
@@ -1295,10 +1303,10 @@ class TestFillingAFormIsOneAct:
         agent._approved_sites.add("eon.pl")
         assert agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "WAW"},
-            {"target": "Zapłać", "do": "click"},
+            {"target": "Wyślij", "do": "click"},
         ]}) is None
         assert len(asked) == 1
-        assert "'Skąd' ← 'WAW'" in asked[0] and "press 'Zapłać'" in asked[0]
+        assert "'Skąd' ← 'WAW'" in asked[0] and "press 'Wyślij'" in asked[0]
 
     def test_an_unrunnable_batch_never_reaches_a_card(self, monkeypatch):
         snap = snapshot(controls=self._form())
@@ -1953,12 +1961,14 @@ class TestConsequencesWithNoYesButton:
         assert "/browser eon.pl" in out  # the door he already has
 
     def test_an_ordinary_mutating_control_still_gets_its_card(self):
-        """The floor is unchanged: this list only promotes a handful of acts,
-        it does not replace the card for everything that spends money."""
-        snap = snapshot(controls=[control(n=4, name="Zapłać", mutating=True)])
+        """The floor is unchanged for everything the refusals did not take: a
+        'Wyślij' that sends a message is how ordinary work happens, and it
+        still asks by name. It was 'Zapłać' until #342 moved that one out of
+        the approvable set altogether."""
+        snap = snapshot(controls=[control(n=4, name="Wyślij")])
         agent, asked = self._agent(snap)
-        assert agent._browse_gate("browse_act", {"target": "Zapłać"}) is None
-        assert asked and "Zapłać" in asked[0]
+        assert agent._browse_gate("browse_act", {"target": "Wyślij"}) is None
+        assert asked and "Wyślij" in asked[0]
 
     def test_a_batch_that_closes_the_account_is_refused_whole(self):
         snap = snapshot(controls=[
@@ -2062,6 +2072,440 @@ class TestConsequencesWithNoYesButton:
         # is not REFUSED — an unapprovable act removes a decision, and filling
         # in a search form is not one of them.
         assert asked == []
+
+
+class TestTheCommitVerbsLeaveTheApprovableSet:
+    """#342. A control whose OWN WORDS say it buys, pays, orders, books,
+    subscribes, ends a contract or deletes is refused outright — no yes button,
+    the owner handed `/browser <host>`.
+
+    It drew a card until now, and the card was the problem: measured this
+    period, the owner's median tap on one is 4.3 seconds and 11 of 34 were
+    under 3. There is no future in which aish pressing "Zapłać" was wanted, so
+    a popup offering a yes for it protects nothing and trains the tap that is
+    waiting on the purchase.
+    """
+
+    def _agent(self, snap, approve=lambda *_a: True):
+        asked = []
+
+        def approve_tool(name, args, preview):
+            asked.append(preview)
+            return approve(name, args, preview)
+
+        agent = Agent(
+            model="fake", approve=lambda _c: True,
+            client_chat=lambda **kw: {}, approve_tool=approve_tool,
+        )
+        agent._browse_view.remember(snap)
+        agent._approved_sites.add("eon.pl")  # the driving grant is not the point
+        return agent, asked
+
+    def test_the_five_the_issue_named(self):
+        assert browse.commits("Kup teraz") == "money"
+        assert browse.commits("Kupuję i płacę") == "money"
+        assert browse.commits("Place your order") == "money"
+        assert browse.commits("Rezerwuję z obowiązkiem zapłaty") == "booking"
+        assert browse.commits("Usuń") == "delete"
+
+    def test_the_three_the_issue_named_as_untouched(self):
+        """Ordinary work: a "send" refusal would end every contact-form and
+        message task, and "continue as guest" is a checkout."""
+        for ordinary in ("Wyślij", "Zapisz", "Continue as guest"):
+            assert browse.commits(ordinary) == "", ordinary
+
+    def test_a_word_is_a_word_and_not_a_run_of_letters(self):
+        """`vocab.hit` is a bare substring scan, calibrated for a list whose
+        false positive costs a PROMPT. These cost the capability outright with
+        no way to grant it back in the moment, so the matching has to implement
+        the owner's own sentence — a control whose words SAY it buys — rather
+        than "contains these letters". Every string here is a real label
+        recorded in his sessions, and a bare substring scan refuses all of
+        them."""
+        for innocent in (
+            "facebook", "Facebook", "Books", "SZCZEGÓŁY ZAKUPU #1",
+            "Kontynuuj zakupy", "Moje zamówienia", "Manage booking",
+            "Tamara Kuprianowicz", "Order history", "Purchase history",
+            "Allegro - wygodne i bezpieczne zakupy online, największy wybór ofert",
+        ):
+            assert browse.commits(innocent) == "", innocent
+
+    #: Ending a contract, both directions. Not illustrations — this is the
+    #: evidence that settled the guard, measured against the census.
+    ENDS_A_CONTRACT = (
+        "Wypowiedz umowę", "Rozwiąż umowę", "Zerwij umowę",
+        "Wypowiedzenie umowy", "Terminate contract", "Terminate subscription",
+    )
+    #: The same folded strings, meaning something else entirely.
+    NOT_A_CONTRACT = (
+        "Rozwiąż quiz", "Rozwiąż test", "Dodaj wypowiedź", "Wypowiedzi",
+        "Zerwij z nałogiem", "Rozwiązania",
+    )
+
+    def test_ending_a_contract_needs_the_contract(self):
+        """The one guard here that is about HOMONYMS and not about breadth.
+        `rozwiązać` is to SOLVE, `wypowiedź` is a COMMENT and folds to
+        `wypowiedz` exactly, and `zerwij z nałogiem` is breaking a habit —
+        different words that fold to the same string, so the bare verb refused
+        a quiz, a comment box and a stop-smoking button. They take the
+        verb+noun shape the account-scoped refusals in this file already use.
+
+        `Wypowiedzenie umowy` is in the refuse list because word boundaries
+        mean `wypowiedz` does not reach inside it, and that noun form is
+        exactly what a Polish provider calls the button."""
+        for label in self.ENDS_A_CONTRACT:
+            assert browse.commits(label) == "contract", label
+        for label in self.NOT_A_CONTRACT:
+            assert browse.commits(label) == "", label
+
+    def test_a_guard_that_misses_falls_back_to_a_card_and_not_to_silence(self):
+        """Why narrowing here is safe, and the reason the words stayed in
+        `_MUTATING_WORDS`. A contract label these guards do not catch does not
+        go free — it lands on the incumbent list and draws a card, which is
+        exactly what it did before this issue."""
+        for label in self.ENDS_A_CONTRACT:
+            assert browse.is_worded(label), label
+
+    def test_wyczysc_and_clear_stay_carded_together(self):
+        """The issue's prose moved `wyczyść` and left its English twin behind,
+        and moved "transfers" while `transfer` was never in its list. The list
+        is what shipped, not the prose — and both of these are the vocabulary
+        of clearing a FILTER, not of destroying data."""
+        for filter_word in ("Wyczyść", "Clear", "Clear all", "Transfer"):
+            assert browse.commits(filter_word) == "", filter_word
+            assert browse.is_worded(filter_word), filter_word  # still a card
+
+    def test_pressing_one_is_refused_and_never_drawn_as_a_card(self):
+        snap = snapshot(controls=[control(n=4, name="Kup teraz")])
+        agent, asked = self._agent(snap)
+        out = agent._browse_gate("browse_act", {"target": "Kup teraz"})
+        assert "NOT EXECUTED" in out
+        assert "buy something or pay money from your account" in out
+        assert asked == []                # no card, ever
+        assert "/browser eon.pl" in out   # the door he already has
+
+    def test_the_refusal_names_the_consequence_and_never_the_mechanism(self):
+        """#295 P1. He is told what pressing it would have done TO HIM — not
+        which word list caught it, which tool asked, or that anything was
+        "gated". `/browser eon.pl` is the one exception and it is not a
+        mechanism word: it is the command HE types, and the whole point of the
+        sentence is that the capability left aish's hands and not his."""
+        snap = snapshot(controls=[control(n=1, name="Usuń przedmiot BOSCH")])
+        agent, _ = self._agent(snap)
+        out = agent._browse_gate("browse_act", {"target": "Usuń przedmiot BOSCH"})
+        assert "delete something" in out
+        assert "/browser eon.pl" in out
+        for mechanism in (
+            "browse_act", "vocab", "word list", "gate", "mutating", "approval card",
+        ):
+            assert mechanism not in out.lower(), mechanism
+
+    def test_the_refusal_never_claims_aish_cannot_buy(self):
+        """The claim has to stop where the code does, and this string is read
+        by the MODEL, which then repeats it to the owner as aish's own account
+        of itself. It opened "aish will never buy something or pay money from
+        your account, on any site, however it is asked" — wider than anything
+        enforced, since an unworded "Jetzt kaufen" rides the site grant and
+        #299 owns that miss. What a line checked is the control's WORDS."""
+        snap = snapshot(controls=[control(n=1, name="Kup teraz")])
+        agent, _ = self._agent(snap)
+        out = agent._browse_gate("browse_act", {"target": "Kup teraz"})
+        assert "words say it would buy" in out
+        for wider in (
+            "will never buy", "never buy something", "aish cannot buy",
+            "will never spend", "never pays",
+        ):
+            assert wider not in out, wider
+
+    def test_the_refusal_does_not_claim_the_press_was_irreversible(self):
+        """A cart row removed is undone by adding it back, and
+        `BROWSE_IRREVERSIBLE`'s "it cannot be undone" would be a claim wider
+        than anything here checked. What IS true of all of them is the owner's
+        decision that the last press is his."""
+        snap = snapshot(controls=[control(n=1, name="Usuń")])
+        agent, _ = self._agent(snap)
+        out = agent._browse_gate("browse_act", {"target": "Usuń"})
+        assert "cannot be undone" not in out
+        assert "that press is the user's own" in out
+
+    def test_every_delete_goes_not_only_an_account_delete(self):
+        """The code's own comment argued row-deletes should stay approvable —
+        a draft, a reminder, one message. The owner overruled it in the issue,
+        in these words: the escape is `/browser`, and if a real task breaks the
+        softening comes back WITH THAT TASK as its evidence."""
+        for row_delete in (
+            "Usuń", "Usuń przedmiot BOSCH Wycieraczka AreoTwin Retro 650mm",
+            "Remove Sean Horgan as a suggestion", "Delete draft", "Skasuj",
+        ):
+            assert browse.commits(row_delete) == "delete", row_delete
+
+    def test_a_link_that_navigates_cannot_itself_commit(self):
+        """The structural ground `is_mutating` already stands on: an `<a>` with
+        a real http href is a GET to another page, which is what `read_url`
+        does unasked. The commit is a button on the DESTINATION. Without this
+        exemption every one of these becomes a dead end while pressing
+        nothing."""
+        for label in (
+            "Allegro Pay", "Allegro Pay Business", "Kup ponownie",
+            "Remove all filters", "Purchase insurance", "Book now",
+            "Show 3 newsletters you subscribe to",
+            "Pay with a credit card and fly for miles with Miles & More",
+        ):
+            assert browse.commits(label, navigates=True) == "", label
+        # …and the exemption is the NAVIGATION, not the words: the same labels
+        # on a JavaScript control that goes nowhere are refused.
+        for label in (
+            "Allegro Pay", "Kup ponownie", "Remove all filters",
+            "Show 3 newsletters you subscribe to",
+        ):
+            assert browse.commits(label, navigates=False) != "", label
+
+    def test_the_gate_reads_the_link_from_the_page_and_not_from_the_kind(self):
+        """`<a href="#">Zapłać</a>` is a JavaScript button wearing a link's
+        clothes, which is why `navigates` is carried from the enumeration
+        rather than derived from `kind`."""
+        snap = snapshot(controls=browse.controls_from([
+            {"n": 1, "kind": "link", "name": "Allegro Pay",
+             "href": "https://allegro.pl/pay"},
+            {"n": 2, "kind": "link", "name": "Zapłać"},
+        ]))
+        agent, asked = self._agent(snap)
+        assert agent._browse_gate("browse_act", {"target": "Allegro Pay"}) is None
+        out = agent._browse_gate("browse_act", {"target": "Zapłać"})
+        assert "NOT EXECUTED" in out
+
+    def test_looking_is_not_acting(self):
+        """`action="read"` presses nothing — it is how the model gets the whole
+        page back. Reading a page that happens to have a `Usuń` on it must not
+        be refused, and the check sits before the gate's reading short-circuit,
+        so the exemption has to be explicit."""
+        snap = snapshot(controls=[control(n=1, name="Usuń")])
+        agent, asked = self._agent(snap)
+        assert agent._browse_gate(
+            "browse_act", {"target": "Usuń", "action": "read"}
+        ) is None
+        assert asked == []
+
+    def test_it_reads_the_controls_own_words_not_its_rows(self):
+        """`address_controls` appends up to 44 characters of ROW text when
+        duplicate labels need telling apart, so a plain `Wybierz` button is
+        addressed `Wybierz — Zamówienie nr 123`. The owner's sentence is *a
+        control whose own words say it buys*, and the row's words are the
+        page's, about the row."""
+        snap = snapshot(controls=browse.controls_from([
+            {"n": 1, "kind": "button", "name": "Wybierz",
+             "row": ["Kup teraz za 199 zł — wysyłka jutro"]},
+            {"n": 2, "kind": "button", "name": "Wybierz",
+             "row": ["Licytuj od 20 zł — wysyłka w piątek"]},
+        ]))
+        row_keyed = snap.controls[0].address
+        assert browse.commits(row_keyed) != ""    # the ROW says it buys…
+        assert browse.commits("Wybierz") == ""    # …the BUTTON does not
+        agent, asked = self._agent(snap)
+        assert agent._browse_gate("browse_act", {"target": row_keyed}) is None
+        assert asked == []  # rides the grant, exactly as it did before
+
+    def test_an_unresolvable_target_is_judged_on_the_models_own_words(self):
+        """When the snapshot cannot resolve the target the gate has nothing to
+        read off the page, and the live fence in `browser.browse_act` is all
+        that is left. Judging the words the model typed is the same answer
+        `_committing_step` already gives a batch, and it is free: an
+        unresolvable name presses nothing either way."""
+        snap = snapshot(controls=[control(n=1, name="Przełącz lokal")])
+        agent, asked = self._agent(snap)
+        out = agent._browse_gate("browse_act", {"target": "Kup teraz"})
+        assert "NOT EXECUTED" in out and "buy something" in out
+        assert asked == []
+
+    def test_a_batch_is_refused_whole_before_anything_is_typed(self):
+        """The committing press is last by construction, so a batch refused
+        here has typed nothing, pressed nothing and left nothing half-sent."""
+        snap = snapshot(controls=browse.controls_from([
+            {"n": 1, "kind": "field", "name": "Kod rabatowy"},
+            {"n": 2, "kind": "button", "name": "Złóż zamówienie", "submits": True},
+        ]))
+        agent, asked = self._agent(snap)
+        out = agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Kod rabatowy", "value": "LATO26"},
+            {"target": "Złóż zamówienie", "do": "click"},
+        ]})
+        assert "NOT EXECUTED" in out and "buy something" in out
+        assert asked == []
+
+    #: Every commit-verb list, and which of three kinds it is. A list added
+    #: later and left out of this map FAILS the sweep below rather than being
+    #: skipped — an invariant this load-bearing must not depend on somebody
+    #: remembering to extend a tuple.
+    #:
+    #: `refuses` — an entry ALONE draws the refusal.
+    #: `needs a noun` — the verb half of a guarded pair; alone it refuses
+    #:   nothing, and the noun is what fires it.
+    #: `is a noun` — the other half. Never a commit verb on its own, so
+    #:   `is_worded` says nothing about it and must not be asserted.
+    LIST_KINDS = {
+        "_COMMIT_MONEY": "refuses",
+        "_COMMIT_SUBSCRIPTION": "refuses",
+        "_COMMIT_BOOKING": "refuses",
+        "_COMMIT_CONTRACT": "refuses",
+        "_COMMIT_DELETE": "refuses",
+        "_END_CONTRACT_VERBS": "needs a noun",
+        "_CONTRACT_NOUNS": "is a noun",
+    }
+
+    def _commit_lists(self):
+        """Swept from the module, not typed out, so a new list cannot slip
+        past by not being mentioned."""
+        found = {
+            name: value for name, value in vars(browse).items()
+            if ("_COMMIT_" in name or "_CONTRACT_" in name)
+            and isinstance(value, tuple)
+        }
+        assert found, "the sweep itself is broken — no commit lists found"
+        unclassified = sorted(set(found) - set(self.LIST_KINDS))
+        assert not unclassified, (
+            "a commit list nothing classifies is a list this property skips "
+            f"in silence: {unclassified}"
+        )
+        return found
+
+    def test_every_moved_word_is_still_in_the_mutating_list(self):
+        """**The load-bearing half of the change, checked over every entry
+        rather than a sample.**
+
+        `Control.mutating` is read by three fences besides the card:
+        `browser.browse_act`'s act-time re-resolution, and `plan_batch`'s
+        mid-step and sight-unseen fences. A word that only MOVED lists leaves a
+        stale-snapshot press landing on that live label classified as
+        not-mutating, and it RUNS — where the same word on a fresh snapshot is
+        refused.
+
+        This test sampled five labels until `zamawiam` got through it: carried
+        into the refusal list as an inflection, covered by nothing here
+        (`zamow` is not a substring of it, unlike `kupuje`/`kupie`, which ride
+        `kup`), so `Zamawiam z obowiązkiem zapłaty` — the statutory Polish
+        checkout wording — was refused by the gate and pressable by the live
+        fences. A sampled guard on an invariant this load-bearing is not a
+        guard, so it is every entry now."""
+        for name, entries in sorted(self._commit_lists().items()):
+            if self.LIST_KINDS[name] == "is a noun":
+                continue
+            for entry in entries:
+                assert browse.is_worded(entry), f"{name}: {entry!r}"
+                assert browse.is_mutating(entry, browse.BUTTON), f"{name}: {entry!r}"
+
+    def test_every_entry_that_refuses_alone_actually_does(self):
+        """The other direction of the same sweep: a list declared as refusing
+        on its own must, or the classification above is decoration."""
+        lists = self._commit_lists()
+        for name, entries in sorted(lists.items()):
+            for entry in entries:
+                kind = self.LIST_KINDS[name]
+                if kind == "refuses":
+                    assert browse.commits(entry) != "", f"{name}: {entry!r}"
+                else:
+                    # A contract verb alone, or a bare noun, refuses nothing —
+                    # that IS the guard, and it is why the homonyms are free.
+                    assert browse.commits(entry) == "", f"{name}: {entry!r}"
+
+    def test_the_contract_pair_refuses_only_together(self):
+        for verb in browse._END_CONTRACT_VERBS:
+            for noun in browse._CONTRACT_NOUNS:
+                assert browse.commits(f"{verb} {noun}") == "contract", (verb, noun)
+
+    def test_a_committing_step_in_the_middle_of_a_batch_is_still_refused(self):
+        """The other consumer of `mutating`: only ONE step may need approval
+        and it must be last. That fence reads the same flag, and it is why the
+        words had to stay."""
+        controls = browse.controls_from([
+            {"n": 1, "kind": "button", "name": "Kup teraz"},
+            {"n": 2, "kind": "button", "name": "Wyślij"},
+        ])
+        plan = browse.plan_batch(controls, [
+            {"target": "Kup teraz", "do": "click"},
+            {"target": "Wyślij", "do": "click"},
+        ])
+        assert "only ONE step that needs approval" in plan.problem
+
+
+class TestTheMeasuredComparisonAgainstTheIncumbent:
+    """Law B (#295): no replacement ships without a measured comparison against
+    the incumbent, on recorded material.
+
+    The material is a census the drive ran over the owner's own recorded
+    sessions — **3,002 distinct control labels**, of which 85 had ever drawn an
+    approval card. **36 of those 85 become refusals**, and the cost across the
+    whole corpus is **one** acting control. Those two numbers are the census's,
+    not this test's; what is carried here is every label the census NAMED, as
+    labels only. No test reads `~/.local/state/aish`.
+
+    Each row is compared both ways: what the INCUMBENT did with it
+    (`is_worded` — a card) and what the replacement does (`commits` — a
+    refusal), so the direction of every move is checked and not assumed."""
+
+    #: Carded before, refused now. The win.
+    WINS = (
+        "Zapłać wybrane",
+        "Zapłać",
+        "Usuń przedmiot BOSCH Wycieraczka AreoTwin Retro 650mm",
+        "Subscribe",
+        "Remove Sean Horgan as a suggestion",  # one of eight LinkedIn rows
+    )
+
+    #: Recorded labels that must come out exactly as they went in: a label that
+    #: was free stays free, and one that drew a card still draws one.
+    HELD_BUTTONS = (
+        "Wyślij", "Zapisz", "Continue as guest", "Kontynuuj zakupy",
+        "Moje zamówienia", "SZCZEGÓŁY ZAKUPU #1", "facebook",
+        "Tamara Kuprianowicz", "Manage booking", "Order history",
+        "Purchase history", "Book a flight", "Book",
+        "Book your flight from Krakow", "Wyczyść", "Clear",
+    )
+
+    #: The same, for controls that NAVIGATE. Without the link exemption every
+    #: one of these becomes a dead end while pressing nothing.
+    HELD_LINKS = (
+        "Allegro Pay", "Allegro Pay Business", "Kup ponownie",
+        "Remove all filters", "Purchase insurance",
+        "Show 3 newsletters you subscribe to", "Book now",
+        "Pay with a credit card and fly for miles with Miles & More",
+    )
+
+    #: What the change COSTS, stated rather than hidden: acting controls that
+    #: could be pressed before and cannot now. One, across 3,002 labels.
+    COST = ("Sprawdź szczegóły dotyczące reklam — Zamów zestaw w jednej przesyłce",)
+
+    def test_the_win_is_a_move_from_card_to_refusal_and_not_from_nothing(self):
+        for label in self.WINS:
+            assert browse.is_worded(label), f"{label}: was not carded before"
+            assert browse.commits(label) != "", f"{label}: is not refused now"
+
+    def test_nothing_that_worked_before_is_refused_now(self):
+        for label in self.HELD_BUTTONS:
+            assert browse.commits(label) == "", label
+        for label in self.HELD_LINKS:
+            assert browse.commits(label, navigates=True) == "", label
+
+    def test_what_it_costs_is_one_acting_control_in_three_thousand(self):
+        for label in self.COST:
+            assert browse.commits(label) != "", label
+
+    def test_the_bare_booking_word_was_measured_and_rejected(self):
+        """The comparison that settled `book`/`reserve` as PHRASES ONLY. With
+        the bare word, word boundaries and the link exemption still in place,
+        the corpus loses three more acting controls — `Book a flight` (44
+        sightings), `Book` (36), `Book your flight from Krakow` (3), which are
+        search-start buttons on a booking site's front page. Refusing them
+        means aish cannot begin a flight search at all, which is the epic's own
+        flagship flow.
+
+        The residual is written down rather than argued away: a payment-free
+        binding labelled bare `Reserve` — a restaurant table, a doctor's
+        appointment — stays a CARD, and #295 P2 says a card is not a control.
+        #299's judge is the systemic cover for it."""
+        bare = browse._boundaried(("book", "reserve"))
+        for label in ("Book a flight", "Book", "Book your flight from Krakow"):
+            assert bare.search(browse.fold(label)), label   # the rejected design
+            assert browse.commits(label) == "", label       # the shipped one
 
 
 class TestOneFenceOverTypingWhicheverToolTypes:
@@ -2440,11 +2884,28 @@ class TestTheGrantIsWhereTheConsentLives:
     def test_the_card_says_what_riding_it_means(self):
         """The win has to come from MOVING the decision, not thinning it: a
         card tapped blind records a consent he never gave, so what the grant
-        covers is said on the card that grants it."""
+        covers is said on the card that grants it.
+
+        Since #342 the sentence has to say two different things, because the
+        floor now has two shapes: what aish will not press at all, and what it
+        presses only after asking. It said only the second, which after that
+        issue promised a card where there is a wall."""
         agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
         agent._browse_gate("browse_act", {"target": "Przełącz lokal"})
         assert "signed in as you" in asked[0]
-        assert "asks again by name" in asked[0]
+        assert "asks by name" in asked[0]
+        assert "never one that says it buys, pays or deletes" in asked[0]
+
+    def test_the_card_never_claims_aish_cannot_buy(self):
+        """The claim has to stop exactly where the code does. A control whose
+        WORDS say it buys is refused; a nondescript "Dalej" that completes a
+        purchase still rides this yes, and #299 owns that. A card saying "aish
+        never buys" would be the claim wider than the code."""
+        agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
+        agent._browse_gate("browse_act", {"target": "Przełącz lokal"})
+        assert "says it buys" in asked[0]
+        for wider in ("never buys", "cannot buy", "will never spend"):
+            assert wider not in asked[0], wider
 
     def test_the_card_stays_one_sentence(self):
         """Said on a phone, where four sentences is a card he scrolls past to
@@ -2465,12 +2926,13 @@ class TestTheGrantIsWhereTheConsentLives:
         assert asked == []
 
     def test_a_name_that_says_it_commits_still_asks(self):
-        """The floor the grant explicitly does not cover."""
+        """The floor the grant explicitly does not cover. 'Wyślij' since #342
+        — the paying half of that floor is now a refusal, not a card."""
         snap = snapshot(controls=browse.controls_from(
-            [{"n": 1, "kind": "button", "name": "Zapłać", "submits": True}]
+            [{"n": 1, "kind": "button", "name": "Wyślij", "submits": True}]
         ))
         agent, asked = self._agent(snap)
-        assert agent._browse_gate("browse_act", {"target": "Zapłać"}) is None
+        assert agent._browse_gate("browse_act", {"target": "Wyślij"}) is None
         assert len(asked) == 1
 
     def test_a_checkout_page_puts_every_submit_back_behind_a_card(self):
@@ -2493,10 +2955,10 @@ class TestTheGrantIsWhereTheConsentLives:
         the model re-composed the same form with the same values."""
         snap = snapshot(controls=browse.controls_from([
             {"n": 1, "kind": "field", "name": "Skąd"},
-            {"n": 2, "kind": "button", "name": "Zapłać", "submits": True},
+            {"n": 2, "kind": "button", "name": "Wyślij", "submits": True},
         ]))
         agent, asked = self._agent(snap)
-        steps = [{"target": "Skąd", "value": "WAW"}, {"target": "Zapłać", "do": "click"}]
+        steps = [{"target": "Skąd", "value": "WAW"}, {"target": "Wyślij", "do": "click"}]
         assert agent._browse_gate("browse_fill", {"steps": steps}) is None
         assert agent._browse_gate("browse_fill", {"steps": steps}) is None
         assert len(asked) == 1
@@ -2507,13 +2969,13 @@ class TestTheGrantIsWhereTheConsentLives:
         words."""
         snap = snapshot(controls=browse.controls_from([
             {"n": 1, "kind": "field", "name": "Skąd"},
-            {"n": 2, "kind": "button", "name": "Zapłać", "submits": True},
+            {"n": 2, "kind": "button", "name": "Wyślij", "submits": True},
         ]))
         agent, asked = self._agent(snap)
         agent._browse_gate("browse_fill", {"steps": [
-            {"target": "Skąd", "value": "WAW"}, {"target": "Zapłać", "do": "click"}]})
+            {"target": "Skąd", "value": "WAW"}, {"target": "Wyślij", "do": "click"}]})
         agent._browse_gate("browse_fill", {"steps": [
-            {"target": "Skąd", "value": "KRK"}, {"target": "Zapłać", "do": "click"}]})
+            {"target": "Skąd", "value": "KRK"}, {"target": "Wyślij", "do": "click"}]})
         assert len(asked) == 2
 
     def test_a_widget_confirm_is_not_a_commitment(self):
@@ -2653,7 +3115,7 @@ class TestTheCardSaysWhatIsAboutToBeSent:
              "form": "0:0"},
             {"n": 5, "kind": "field", "name": "Szukaj w pomocy",
              "detail": "currently: x", "form": "0:9"},
-            {"n": 6, "kind": "button", "name": "Zapłać", "submits": True,
+            {"n": 6, "kind": "button", "name": "Wyślij", "submits": True,
              "form": "0:0"},
         ])
 
@@ -2696,7 +3158,7 @@ class TestTheCardSaysWhatIsAboutToBeSent:
         agent._browse_view.remember(snapshot(controls=controls))
         agent._approved_sites.add("eon.pl")
         monkeypatch.setattr(browser, "browse_fields", lambda **kw: controls)
-        assert agent._browse_gate("browse_act", {"target": "Zapłać"}) is None
+        assert agent._browse_gate("browse_act", {"target": "Wyślij"}) is None
         assert "this form currently holds:" in asked[0]
         assert "Skąd: WAW" in asked[0]
 
@@ -2713,7 +3175,7 @@ class TestTheCardSaysWhatIsAboutToBeSent:
         agent._approved_sites.add("eon.pl")
         # The live read fails — no page, a torn-down browser, a busy loop.
         monkeypatch.setattr(browser, "browse_fields", lambda **kw: [])
-        agent._browse_gate("browse_act", {"target": "Zapłać"})
+        agent._browse_gate("browse_act", {"target": "Wyślij"})
         assert "when aish last looked" in asked[0]
 
 
