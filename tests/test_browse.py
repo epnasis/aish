@@ -3690,6 +3690,19 @@ class TestTheCardSaysWhatIsAboutToBeSent:
         assert "when aish last looked" in asked[0]
 
 
+# Twelve month names as a browser's `Intl` returns them, for two languages
+# `_MONTH_STEMS` does not hold. GERMAN is the one aish could not read at all;
+# FRENCH is the one whose stems must grow past three letters.
+GERMAN_MONTHS = (
+    "Januar Februar März April Mai Juni "
+    "Juli August September Oktober November Dezember"
+).split()
+FRENCH_MONTHS = (
+    "janvier février mars avril mai juin "
+    "juillet août septembre octobre novembre décembre"
+).split()
+
+
 class TestWhatRealPickersActuallyLookLike:
     """Measured, not imagined (#251). `scripts/probe_calendars.py` opens real
     booking sites and prints what their pickers are made of — and every rule
@@ -3770,7 +3783,7 @@ class TestWhatRealPickersActuallyLookLike:
 
         `CALENDAR_JS` asks `Intl` in the page's own locale instead, so a
         language aish has never heard of arrives with no code change."""
-        german = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']
+        german = GERMAN_MONTHS
         assert browse.month_arrow("Oktober 2026") is None
         table = browse.month_table({"de": german})
         assert browse.month_arrow("Oktober 2026", table) == (2026, 10)
@@ -3788,7 +3801,7 @@ class TestWhatRealPickersActuallyLookLike:
         assert polish == tuple((s,) for s in (
             "sty lut mar kwi maj cze lip sie wrz paz lis gru".split()
         )), polish
-        french = browse.month_stems(['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'])
+        french = browse.month_stems(FRENCH_MONTHS)
         assert french[5] == ("juin",) and french[6] == ("juil",), french
 
     def test_a_language_whose_months_cannot_be_told_apart_contributes_nothing(self):
@@ -3811,7 +3824,7 @@ class TestWhatRealPickersActuallyLookLike:
     def test_the_page_table_is_added_to_the_floor_never_swapped_for_it(self):
         """Every page aish already reads must behave exactly as before, so the
         built-in table still answers on its own."""
-        table = browse.month_table({"de": ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']})
+        table = browse.month_table({"de": GERMAN_MONTHS})
         assert browse.month_of("7 września 2026", table) == 9
         assert browse.month_of("7 September 2026", table) == 9
 
