@@ -98,6 +98,34 @@ class TestTheCountingChangedNoMatching:
                     out[names[0]] = [k.value for k in value.keys]
         return out
 
+    #: Lists deliberately changed SINCE the before-picture was taken, each with
+    #: the issue that changed it and the entries it gained or lost. The fence
+    #: is not "no list may ever change" — `docs/vocabularies.md` says a later
+    #: change is *judged against* these numbers — it is "no list changes
+    #: without a reader being told". An undeclared drift still fails; a
+    #: declared one has to say what it did, here, in the diff that did it.
+    DELIBERATE = {
+        # #341: not a word list at all — aish's own tool NAMES, matched against
+        # the tool the model called and never against page text or a label.
+        # `browse` joined it because the identical page drew a card through
+        # read_url and nothing through browse: the model's choice of tool was
+        # deciding a permission.
+        "aish/agent.py:EGRESS_TOOLS": {"added": ["browse"], "removed": []},
+    }
+
+    @staticmethod
+    def _matches(before: list, after: list, declared: dict) -> bool:
+        """Is `after` exactly `before` plus/minus what the entry DECLARED?
+
+        Exactly, and never "at least": a declaration that waved through any
+        change to a list it happened to name would be an exemption rather than
+        a record, and the fence exists because a human reading a diff is the
+        instrument that misses one letter."""
+        expected = [e for e in before if e not in declared["removed"]] + list(
+            declared["added"]
+        )
+        return after == expected
+
     def test_not_one_word_was_added_removed_or_reordered(self):
         """Against the commit BEFORE this work, so the comparison is with what
         shipped and not with the diff's own starting point."""
@@ -117,8 +145,13 @@ class TestTheCountingChangedNoMatching:
             old = self._lists(before.stdout)
             new = self._lists((REPO / name).read_text())
             for key, entries in old.items():
-                if key in new and new[key] != entries:
-                    drifted[f"{name}:{key}"] = (entries, new[key])
+                if key not in new or new[key] == entries:
+                    continue
+                where = f"{name}:{key}"
+                declared = self.DELIBERATE.get(where)
+                if declared is not None and self._matches(entries, new[key], declared):
+                    continue
+                drifted[where] = (entries, new[key])
         assert not drifted, (
             "instrumenting a list CHANGED it, which destroys the before-picture "
             f"this slice exists to take: {drifted}"

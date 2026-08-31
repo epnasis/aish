@@ -11658,6 +11658,892 @@ class TestSearchingIsReading:
         assert agent._egress_novel_hosts("read_url", {"url": "https://eon.pl/faktury"}) is None
 
 
+class TestTheEgressVouchOutlivesTheAgent:
+    """#341. `_egress_gate`'s own comment says the owner's answer LASTS, and
+    for the agent's lifetime it did — but a chat outlives the agent holding it:
+    every ship rebuilds one underneath an open chat.
+
+    Replayed from `session-20260830-124807-752582`, records 816 and 1093 — two
+    cards for allegro.pl in ONE session, the second after the first had been
+    approved. The log below is that session minimized to the records the
+    readers actually consult; the owner's own state dir is never read."""
+
+    #: The two searches the recorded session ran, in order.
+    SEARCHES = [
+        "https://allegro.pl/listing?string=okularki+plywackie+Arena",
+        "https://allegro.pl/listing?string=TYR%20Special%20Ops",
+    ]
+
+    def _chat_log(self, tmp_path):
+        """One chat's log, as the web writes it: a task, a page read that
+        tainted it, and the vouch the approved card recorded."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("find me swimming goggles")
+        log.message({"role": "user", "content": "find me swimming goggles"})
+        log.step({"kind": "call", "turn": 1, "call": 1, "name": "read_url",
+                  "args": {"url": "https://share.gemini.google/niX1J3p1agFn"}})
+        log.workspace({"kind": "egress_vouch", "host": "allegro.pl"})
+        log.task_end()
+        log.close()
+        return log
+
+    def _fresh_agent_on(self, log, restore=True):
+        """The agent the next attach builds — a NEW object, as create_app makes
+        one, holding nothing the approved card put in the old one."""
+        fresh, _ = make_agent([])
+        fresh._tainted = True  # the chat had read the open web before the card
+        if restore:
+            fresh.restore_egress_vouches(SessionLog.egress_vouches(log.path))
+        return fresh
+
+    def test_the_second_identical_call_draws_no_card_after_a_rebuild(self, tmp_path):
+        """The measured failure, end to end: card, restart, same shop, no
+        second card."""
+        log = self._chat_log(tmp_path)
+        fresh = self._fresh_agent_on(log)
+        assert fresh._egress_novel_hosts("read_url", {"url": self.SEARCHES[1]}) is None
+
+    def test_without_the_restore_it_asks_again(self, tmp_path):
+        """The control arm. Same log, same agent, restore skipped — the card
+        the owner saw twice."""
+        log = self._chat_log(tmp_path)
+        fresh = self._fresh_agent_on(log, restore=False)
+        assert fresh._egress_novel_hosts(
+            "read_url", {"url": self.SEARCHES[1]}
+        ) == ["allegro.pl"]
+
+    def test_the_card_writes_the_record_the_restore_reads(self):
+        """The two halves have to be one mechanism, not two that agree today:
+        an approved card writes it, and the reader gets exactly that back."""
+        written: list[dict] = []
+        agent, _ = make_agent(
+            [],
+            approve_tool=lambda name, args, preview=None: True,
+            state_log=written.append,
+        )
+        agent._tainted = True
+        assert agent._egress_gate("read_url", {"url": self.SEARCHES[0]}) is None
+        assert written == [{"kind": "egress_vouch", "host": "allegro.pl"}]
+
+    def test_a_held_adjustment_vouches_nothing(self):
+        """`Approved(comment)` is a HOLD — the call never ran. Recording a
+        permission for an action the owner asked to have reworked would make
+        the log say yes to something nobody did."""
+        written: list[dict] = []
+        agent, _ = make_agent(
+            [],
+            approve_tool=lambda name, args, preview=None: Approved("use the other shop"),
+            state_log=written.append,
+        )
+        agent._tainted = True
+        assert agent._egress_gate("read_url", {"url": self.SEARCHES[0]}) is not None
+        assert written == []
+        assert agent._approved_hosts == set()
+
+    def test_a_denial_vouches_nothing(self):
+        written: list[dict] = []
+        agent, _ = make_agent(
+            [],
+            approve_tool=lambda name, args, preview=None: False,
+            state_log=written.append,
+        )
+        agent._tainted = True
+        assert agent._egress_gate("read_url", {"url": self.SEARCHES[0]}) is not None
+        assert written == []
+
+    def test_a_vouch_inside_a_discarded_attempt_does_not_survive_it(self, tmp_path):
+        """Retry REWRITES the log (#338/#339), so a yes given inside an attempt
+        the owner threw away must go with that attempt — the same rule
+        `site_grants` follows, for the same reason."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("find me swimming goggles")
+        log.message({"role": "user", "content": "find me swimming goggles"})
+        log.workspace({"kind": "egress_vouch", "host": "allegro.pl"})
+        log.task_end()
+        log.supersede_last_turn()
+        log.close()
+        assert SessionLog.egress_vouches(log.path) == []
+
+    def test_a_read_vouch_never_licenses_driving(self, tmp_path):
+        """The trap this slice exists to avoid. `_approved_sites` is matched by
+        SUFFIX and licenses pressing things as the owner; `_approved_hosts` is
+        matched exactly and licenses data riding an address. A yes to reading
+        allegro.pl must not become a yes to driving it — nor to every subdomain
+        under it."""
+        log = self._chat_log(tmp_path)
+        fresh = self._fresh_agent_on(log)
+        assert fresh._approved_hosts == {"allegro.pl"}
+        assert fresh._approved_sites == set()
+        assert fresh._site_granted("allegro.pl") is False
+        # ...and the vouch itself does not widen downward either.
+        assert fresh._egress_novel_hosts(
+            "read_url", {"url": "https://sub.allegro.pl/listing?string=x"}
+        ) == ["sub.allegro.pl"]
+
+    def test_a_press_grant_never_licenses_egress(self, tmp_path):
+        """And the other direction, which is the one that would leak: a site
+        grant covers subdomains, so restoring one into the egress set would
+        vouch for hosts no card ever named."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("book it")
+        log.workspace({"kind": "site_grant", "host": "allegro.pl"})
+        log.task_end()
+        log.close()
+        assert SessionLog.egress_vouches(log.path) == []
+        fresh, _ = make_agent([])
+        fresh._tainted = True
+        fresh.restore_site_grants(SessionLog.site_grants(log.path))
+        fresh.restore_egress_vouches(SessionLog.egress_vouches(log.path))
+        assert fresh._approved_hosts == set()
+        assert fresh._egress_novel_hosts(
+            "read_url", {"url": self.SEARCHES[1]}
+        ) == ["allegro.pl"]
+
+    def test_the_round_trip_vouches_exactly_the_hosts_the_card_named(self, tmp_path):
+        """Residual (c) has to survive the log. A multi-host search card
+        vouches every host it NAMED and no others; a restore that added one, or
+        dropped one, would make the grant less legible than the card."""
+        written: list[dict] = []
+        agent, _ = make_agent(
+            [],
+            origin="email",
+            approve_tool=lambda name, args, preview=None: True,
+            state_log=written.append,
+        )
+        query = "invoice site:eon.pl OR site:pge.pl OR site:tauron.pl"
+        assert agent._egress_gate("web_search", {"query": query}) is None
+        named = {"eon.pl", "pge.pl", "tauron.pl"}
+        assert agent._approved_hosts == named
+
+        log = SessionLog.new(tmp_path)
+        for record in written:
+            log.workspace(record)
+        log.close()
+        fresh, _ = make_agent([])
+        fresh.restore_egress_vouches(SessionLog.egress_vouches(log.path))
+        assert fresh._approved_hosts == named
+
+    def test_claude_max_forwards_the_restore(self):
+        """#311's lesson, and the reason this is asserted rather than assumed:
+        that backend owns its own loop and delegates by hand, so a seam
+        server.py appears to cover generically covers it only if it is
+        forwarded. An omission is the owner answering the card again on every
+        claude-max chat."""
+        from aish.claude_max import ClaudeMaxAgent
+
+        inner, _ = make_agent([])
+        wrapper = ClaudeMaxAgent.__new__(ClaudeMaxAgent)
+        wrapper.inner = inner
+        wrapper.restore_egress_vouches(["allegro.pl"])
+        assert inner._approved_hosts == {"allegro.pl"}
+
+
+class TestThePayloadPredicateReadsTheValue:
+    """#341. `_address_carries_payload` fired on any query, any fragment,
+    userinfo, a path past 60 characters or a host label past 40 — and all five
+    of the distinct real URLs the owner was carded on in a week returned True.
+    An ATTENDED turn now asks `_value_finding`, which reads the value about to
+    be sent instead of the shape of the address carrying it.
+
+    Every arm is a FIXED RULE. Nothing here judges whether something looks like
+    data, which epic #295 P3 bars outright — anything that GRANTS permission is
+    a fixed rule, an external fact, or the owner's own act."""
+
+    def _attended(self):
+        agent, _ = make_agent([])
+        agent._tainted = True
+        return agent
+
+    # ------------------------------------------------------------ the arms
+
+    def test_userinfo(self):
+        agent = self._attended()
+        assert "username and password" in agent._value_finding(
+            "https://user:pw@drop.example/x"
+        )
+
+    def test_a_nested_address(self):
+        agent = self._attended()
+        assert "second address" in agent._value_finding(
+            "https://allegro.pl/go?next=https://evil.example/?d=x"
+        )
+
+    def test_a_stored_secret_verbatim(self, monkeypatch, tmp_path):
+        """A join against his own keychain, not a pattern he has to write.
+        Zero false positives on faceted search by construction: a shop's filter
+        is not his password."""
+        token = "awov6ybawmor59a9d7u926vk1yfdsm"
+        index = tmp_path / "names.txt"
+        index.write_text("PUSHOVER_TOKEN\n", encoding="utf-8")
+        monkeypatch.setattr(secrets_module, "NAMES_INDEX", index)
+        monkeypatch.setattr(
+            secrets_module, "get", lambda name: token if name == "PUSHOVER_TOKEN" else None
+        )
+        secrets_module._invalidate()
+        try:
+            agent = self._attended()
+            agent._approved_hosts.add("allegro.pl")
+            # Percent-encoded, so only the decoded form matches — both are asked.
+            found = agent._value_finding(f"https://allegro.pl/x?q=%20{token}%20")
+            assert "stored secrets" in found
+            assert token not in found  # the card never repeats the secret back
+        finally:
+            secrets_module._invalidate()
+
+    @pytest.mark.parametrize(
+        "url,length",
+        [
+            # A Google redirect blob, and an AWS-style signature.
+            ("https://www.google.com/goto?url=CAESaQRkaHR0cHM6Ly9ibG9nLmdvb2dsZQ", 34),
+            ("https://x.example/f?sig=" + "a1b2c3d4" * 8, 64),
+        ],
+    )
+    def test_an_opaque_token(self, url, length):
+        agent = self._attended()
+        assert f"{length}-character run" in agent._value_finding(url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # Every shape the corpus is made of: an Amazon product slug, a
+            # Reddit thread slug, a GitHub path, a Polish product listing.
+            "https://www.amazon.com/BitPC-Mini-PC-N150-Windows-11-Pro-Desktop/dp/B0FY63H6NH",
+            "https://www.reddit.com/r/LocalLLM/comments/1tv8v2x/best_local_model_for_a_mac/",
+            "https://github.com/googleworkspace/cli/blob/main/crates/gws-auth/credential_store.rs",
+            "https://sklep.example/bosch-aerotwin-ar26u-ar20u-2024",
+            # A UUID: two classes once the hyphens separate it, so it is a name
+            # and not a payload.
+            "https://x.example/item/550e8400-e29b-41d4-a716-446655440000",
+        ],
+    )
+    def test_what_is_not_an_opaque_token(self, url):
+        agent = self._attended()
+        assert agent._value_finding(url) == ""
+
+    def test_the_destination_arm_is_what_stops_semantic_exfiltration(self):
+        """The arm the issue calls load-bearing, and the reason a pure
+        value-shape predicate was rejected. Plain words, low entropy, no nested
+        address, no secret verbatim — and full bandwidth, to a host nobody
+        named."""
+        agent = self._attended()
+        asked = "https://lookup.example/q?ask=his+invoice+total+is+412+eur+due+friday"
+        assert "nothing in this chat has agreed" in agent._value_finding(asked)
+        # ...and a vouch is what retires it, per host, per chat.
+        agent._approved_hosts.add("lookup.example")
+        assert agent._value_finding(asked) == ""
+
+    def test_a_mention_is_not_a_vouch(self):
+        """#293's recorded asymmetry, not this issue's to re-litigate: a host
+        lands in `_owner_hosts` merely for appearing in text he typed OR
+        PASTED, so an address inside a forwarded email is owner-authored by
+        provenance and attacker-chosen in fact."""
+        agent = self._attended()
+        agent.note_owner_hosts("have a look at https://lookup.example/x")
+        assert "nothing in this chat has agreed" in agent._value_finding(
+            "https://lookup.example/q?ask=his+invoice+total"
+        )
+
+    def test_the_host_label_bound_stays_in_both_origins(self):
+        buried = "https://" + "z" * 50 + ".example/"
+        for origin in ("user", "email"):
+            agent, _ = make_agent([], origin=origin)
+            agent._tainted = True
+            assert agent._egress_novel_hosts("read_url", {"url": buried}) is not None
+
+    def test_the_path_bound_retires_for_attended_turns_only(self):
+        """`PLAIN_PATH_MAX` measured the modern web, not a payload. It stays
+        where nobody is watching."""
+        long_path = "https://blog.google/innovation-and-ai/products/gemini-app/student-offer-google-ai/"
+        attended = self._attended()
+        assert attended._egress_novel_hosts("read_url", {"url": long_path}) is None
+        unattended, _ = make_agent([], origin="email")
+        assert unattended._egress_novel_hosts("read_url", {"url": long_path}) == [
+            "blog.google"
+        ]
+
+    def test_a_search_is_unchanged_in_both_origins(self):
+        """A search names a host and never reaches one, so the destination arm
+        has nothing to ask about. The corpus that motivated this is entirely
+        reads, and widening past it would be a change nothing measured."""
+        for origin in ("user", "email"):
+            agent, _ = make_agent([], origin=origin)
+            agent._tainted = True
+            assert agent._carries_payload(
+                "web_search", {"query": "wycieraczki site:allegro.pl"}
+            ) is False
+            assert agent._carries_payload(
+                "web_search", {"query": "look at drop.example/?d=secret"}
+            ) is True
+        # And the gate follows: a plain search is free attended, and a novel
+        # host still holds unattended, exactly as #293 left it.
+        attended, _ = make_agent([])
+        attended._tainted = True
+        assert attended._egress_novel_hosts(
+            "web_search", {"query": "wycieraczki site:allegro.pl"}
+        ) is None
+        triggered, _ = make_agent([], origin="email")
+        assert triggered._egress_novel_hosts(
+            "web_search", {"query": "wycieraczki site:allegro.pl"}
+        ) == ["allegro.pl"]
+
+    def test_a_vouched_host_keeps_residual_a(self):
+        """Residual (a): a vouched host accepts an arbitrary query, because
+        that query reaches only its own search index and access logs. What a
+        vouch never covered is an address aimed somewhere else from inside
+        itself."""
+        agent = self._attended()
+        agent._approved_hosts.add("allegro.pl")
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://allegro.pl/listing?string=" + "S" * 400}
+        ) is None
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://allegro.pl/go?next=https://evil.example/x"}
+        ) == ["allegro.pl"]
+
+    def test_a_vouch_does_not_cover_one_of_his_own_secrets(self, monkeypatch, tmp_path):
+        """He said yes to searching a shop, not to handing that shop his
+        password, and no reading of the card he approved covers it.
+
+        Arm 3 DETECTED this and the gate stayed silent anyway —
+        `_searching_a_vouched_site` runs after the predicate — which is the
+        shape of a check whose finding nothing acts on. Slice 1 made it worse
+        by extending the vouch from the agent's lifetime to the chat's."""
+        token = "awov6ybawmor59a9d7u926vk1yfdsm"
+        index = tmp_path / "names.txt"
+        index.write_text("PUSHOVER_TOKEN\n", encoding="utf-8")
+        monkeypatch.setattr(secrets_module, "NAMES_INDEX", index)
+        monkeypatch.setattr(
+            secrets_module, "get", lambda n: token if n == "PUSHOVER_TOKEN" else None
+        )
+        secrets_module._invalidate()
+        try:
+            agent = self._attended()
+            agent._approved_hosts.add("allegro.pl")
+            assert agent._egress_novel_hosts(
+                "read_url", {"url": f"https://allegro.pl/listing?string={token}"}
+            ) == ["allegro.pl"]
+            # ...and an ordinary search there is still free.
+            assert agent._egress_novel_hosts(
+                "read_url", {"url": "https://allegro.pl/listing?string=Bosch+AR26U"}
+            ) is None
+        finally:
+            secrets_module._invalidate()
+
+    @pytest.mark.parametrize(
+        "url,run",
+        [
+            # The classic beacon shape, in the three encodings arm 4 cannot
+            # see, because each carries only one or two character classes:
+            # base32 (upper + digits), plain lowercase, plain uppercase.
+            ("https://evil.example/" + ("JBSWY3DPEHPK3PXP" * 8)[:120], 120),
+            ("https://evil.example/" + ("hisibanispl" * 10)[:95], 95),
+            ("https://evil.example/" + "HISIBANISPLTWOSEVENONEONE", 25),
+        ],
+    )
+    def test_a_long_run_in_the_path_at_an_unvouched_host(self, url, run):
+        """Arm 7. `PLAIN_PATH_MAX` retired attended, arm 4 wants three
+        character classes and arm 5 reads query and fragment only — so a
+        payload in the PATH at the attacker's own host hit no arm at all, and
+        he reads it back out of his own access logs. That was a real narrowing
+        of the refusal set and this closes it."""
+        agent = self._attended()
+        assert f"{run}-character run in its path" in agent._value_finding(url)
+        assert agent._egress_novel_hosts("read_url", {"url": url}) == ["evil.example"]
+
+    def test_arm_seven_leaves_ordinary_long_paths_alone(self):
+        """The whole win of the slice is that a long path is not a payload.
+        Every one of these is from the acceptance corpus."""
+        agent = self._attended()
+        for url in (
+            "https://blog.google/innovation-and-ai/products/gemini-app/student-offer-google-ai/",
+            "https://github.com/googleworkspace/cli/blob/main/crates/gws-auth/src/credential_store.rs",
+            "https://www.reddit.com/r/LocalLLM/comments/1tv8v2x/best_local_model_for_coding_on_a_mac/",
+        ):
+            assert agent._value_finding(url) == "", url
+
+    def test_the_corpus_stays_clear_of_arm_sevens_bound(self):
+        """The bound is measured, not picked, and this is the measurement kept
+        live: the longest path run in any of the fifteen recorded cards is 15,
+        against a bound of 20. A future edit that lowers the bound under the
+        corpus fails here as well as in the Law B count."""
+        split = agent_module.urllib.parse.urlsplit
+        longest = max(
+            agent_module._longest_path_run(split(url))
+            for _day, url in TestTheRecordedCorpusAndTheComposedAddresses.CORPUS
+        )
+        assert longest == 15  # 'googleworkspace'
+        assert longest < agent_module.PATH_RUN_MIN
+
+    def test_the_chunking_residual_is_accepted_with_visibility(self):
+        """Pinned so it is a decision and not a surprise, exactly as #294's
+        enumeration channel is.
+
+        A payload cut into runs under `PATH_RUN_MIN` and separated by `/` or
+        `-` stays FREE attended at an unvouched host. Closing it means
+        re-gating ordinary long paths — a slug-heavy shop URL is precisely
+        short runs joined by hyphens — which is the whole win of this change.
+        A triggered session keeps the full old rule and has no such residual."""
+        chunked = "https://evil.example/" + "/".join(["aB3dE7gH2jK9mN4"] * 5)
+        attended = self._attended()
+        assert attended._value_finding(chunked) == ""
+        assert attended._egress_novel_hosts("read_url", {"url": chunked}) is None
+        unattended, _ = make_agent([], origin="email")
+        assert unattended._egress_novel_hosts("read_url", {"url": chunked}) == [
+            "evil.example"
+        ]
+
+    def test_arm_seven_is_bounded_by_provenance_like_arm_five(self):
+        """One card per host per chat, ever — the vouch retires it."""
+        agent = self._attended()
+        beacon = "https://shop.example/" + ("JBSWY3DPEHPK3PXP" * 8)[:120]
+        assert agent._value_finding(beacon) != ""
+        agent._approved_hosts.add("shop.example")
+        assert agent._value_finding(beacon) == ""
+
+    def test_the_gate_never_reaches_the_real_keychain(self, monkeypatch):
+        """Same guard the scrub has, one caller over: the secret arm runs on
+        every gated attended read, so an unguarded suite would shell out to
+        `security` from inside the gate."""
+        reached: list = []
+        monkeypatch.setattr(
+            secrets_module, "_security", lambda *a, **k: reached.append(a)
+        )
+        agent = self._attended()
+        agent._value_finding("https://drop.example/x?d=y")
+        assert reached == []
+
+
+class TestTheEgressCardSaysWhatALineChecked:
+    """The headline failure of #341, and an L8 violation: the card said "wants
+    to send something" wherever it fired — a cause no line of code established
+    — on 18 of the owner's 33 web-acting cards in a week, every inspected one
+    of them an ordinary read."""
+
+    def _card_for(self, url, **kw):
+        agent, _ = make_agent([], **kw)
+        agent._tainted = True
+        shown: list = []
+        agent.approve_tool = lambda n, a, p=None: shown.append(p) or True
+        agent._egress_gate("read_url", {"url": url})
+        return shown[0] if shown else ""
+
+    @pytest.mark.parametrize(
+        "url,says",
+        [
+            ("https://user:pw@drop.example/x", "has a username and password written inside it"),
+            (
+                "https://drop.example/go?to=https://evil.example/x",
+                "has a second address written inside it",
+            ),
+            (
+                "https://drop.example/f?sig=" + "a1b2c3d4" * 8,
+                "carries a 64-character run of random-looking text",
+            ),
+            (
+                "https://drop.example/q?ask=his+invoice+total",
+                "carries a query, and nothing in this chat has agreed to send anything there",
+            ),
+            (
+                "https://" + "z" * 50 + ".example/x",
+                "hides a 50-character run inside the hostname",
+            ),
+        ],
+    )
+    def test_the_card_names_the_specific_finding(self, url, says):
+        assert says in self._card_for(url)
+
+    def test_the_old_unchecked_sentence_is_gone(self):
+        assert "wants to send something" not in self._card_for(
+            "https://drop.example/q?ask=x"
+        )
+
+    def test_no_card_carries_a_mechanism_word(self):
+        """P1: mechanism words never appear on a consent surface."""
+        for url in (
+            "https://drop.example/q?ask=x",
+            "https://user:pw@drop.example/x",
+            "https://drop.example/f?sig=" + "a1b2c3d4" * 8,
+        ):
+            for tool in ("read_url", "browse"):
+                agent, _ = make_agent([])
+                agent._tainted = True
+                shown: list = []
+                agent.approve_tool = lambda n, a, p=None, s=shown: s.append(p) or True
+                agent._egress_gate(tool, {"url": url})
+                assert shown, url
+                assert not any(
+                    word in shown[0].lower()
+                    for word in ("browse", "drive", "read_url", "tool", "fetch")
+                ), shown[0]
+
+    def test_the_unattended_card_is_untouched(self):
+        """Its rule did not change, so neither did its words."""
+        card = self._card_for("https://drop.example/x", origin="email")
+        assert "automated session wants to reach drop.example" in card
+
+    #: Every shape that can reach a card, degenerate ones first. The two at the
+    #: top are the regression: a scheme-less address is an ordinary thing for a
+    #: model to emit, `_egress_novel_hosts` fails closed on the unreadable host
+    #: and returns BEFORE the payload branch, and the sentence then ended in
+    #: mid-air after the host — a card asserting nothing at all, which is this
+    #: issue's own failure one layer over.
+    RAISES_A_CARD = [
+        "allegro.pl",
+        "",
+        "http://[bad",
+        "//evil.example/x?d=1",
+        "https://user:pw@drop.example/x",
+        "https://drop.example/go?to=https://evil.example/x",
+        "https://drop.example/f?sig=" + "a1b2c3d4" * 8,
+        "https://drop.example/q?ask=his+invoice+total",
+        "https://" + "z" * 50 + ".example/x",
+        "https://drop.example/plain",  # unattended only, and it must still speak
+    ]
+
+    def test_no_card_is_ever_drawn_with_nothing_to_say(self):
+        """The durable half of the fix, and it is an invariant rather than a
+        case: whatever raised a card, the card SAYS what it was.
+
+        A sentence that is empty, or that trails off in whitespace where a
+        finding should be, is the L8 failure this issue exists to fix —
+        `_egress_gate` has four preview branches and any of them could grow
+        this bug again, so the assertion is over every path that can raise a
+        card rather than over the one that did."""
+        for origin in ("user", "email"):
+            for tool in sorted(agent_module.EGRESS_TOOLS - {"web_search"}):
+                for url in self.RAISES_A_CARD:
+                    agent, _ = make_agent([], origin=origin)
+                    agent._tainted = True
+                    shown: list = []
+                    agent.approve_tool = (
+                        lambda n, a, p=None, s=shown: s.append(p) or True
+                    )
+                    agent._egress_gate(tool, {"url": url})
+                    if not shown:
+                        continue  # free, and a card nobody drew says nothing
+                    said = shown[0]
+                    assert said, (origin, tool, url)
+                    assert said == said.strip(), (origin, tool, url, repr(said))
+                    # ...and it says something PAST the host it names, which is
+                    # the shape the empty finding produced.
+                    assert not said.rstrip().endswith("it built for"), said
+                    assert len(said.split()) > 12, (origin, tool, url, said)
+
+    def test_a_search_card_says_something_too(self):
+        """The other two preview branches, held to the same invariant."""
+        for origin in ("user", "email"):
+            agent, _ = make_agent([], origin=origin)
+            agent._tainted = True
+            shown: list = []
+            agent.approve_tool = lambda n, a, p=None, s=shown: s.append(p) or True
+            agent._egress_gate("web_search", {"query": "look at drop.example/?d=x"})
+            assert shown and shown[0] == shown[0].strip()
+            assert len(shown[0].split()) > 8, shown[0]
+
+    def test_the_hostless_address_says_what_was_checked_and_no_more(self):
+        """It says aish cannot tell where this would go — which is what the
+        line established — and NOT that the string is unparseable, which it is
+        not. Two different facts, and only one of them was checked."""
+        card = self._card_for("allegro.pl")
+        assert "has no readable host in it" in card
+        assert "cannot be read as an address at all" not in card
+        # ...and a string that genuinely will not parse still says so.
+        assert "cannot be read as an address at all" in self._card_for("http://[bad")
+
+
+class TestTheRecordedCorpusAndTheComposedAddresses:
+    """Law B (epic #295): no replacement ships without a measured comparison
+    against the incumbent it replaces, on recorded material where it exists.
+
+    The corpus is the fifteen cards the owner's own logs recorded between
+    2026-08-24 and 2026-08-30, verbatim from issue #341 — the incumbent's own
+    record, which is what makes it an acceptance corpus rather than a set of
+    examples chosen to pass.
+
+    **What is reconstructed here, and it is not nothing.** Four of the fifteen
+    are recorded with the middle of the path elided (`…`), and the issue groups
+    the cards by DATE rather than by session id. So the elided tails are
+    completed with the shape the rest of that address plainly has, and a chat
+    is taken to be a day — the one place the record says otherwise (08-30,
+    "same session, same host") agrees with that grouping. Both are stated
+    rather than hidden, because the numbers below depend on them."""
+
+    #: (day, url). Fifteen cards over fourteen distinct addresses — the
+    #: googleworkspace blob was denied and then approved, so it is here twice.
+    CORPUS = [
+        ("08-24", "https://github.com/viticci/shortcuts-playground-plugin/blob/main/Documentation/ACTIONS.md"),
+        ("08-24", "https://allegro.pl/listing?string=hammer%205%20smart&stan=nowe"),
+        ("08-26", "https://blog.google/innovation-and-ai/products/gemini-app/student-offer-google-ai/"),
+        ("08-26", "https://www.reddit.com/r/LocalLLM/comments/1tv8v2x/best_local_model_for_coding_on_a_mac/"),
+        ("08-27", "https://www.google.com/goto?url=CAESaQRkaHR0cHM6Ly9ibG9nLmdvb2dsZS9wcm9kdWN0cw"),
+        ("08-27", "https://github.com/googleworkspace/cli/blob/main/crates/gws-auth/src/credential_store.rs"),
+        ("08-27", "https://github.com/googleworkspace/cli/blob/main/crates/gws-auth/src/credential_store.rs"),
+        ("08-27", "https://www.amazon.com/BitPC-Mini-PC-N150-Windows-11-Pro-Desktop-Computer/dp/B0FY63H6NH"),
+        ("08-27", "https://www.google.com/goto?url=CAESRQRkaHR0cHM6Ly93d3cuYW1hem9uLmNvbS9kcC9CMEZ"),
+        ("08-29", "https://allegro.pl/listing?string=UniFi+U7+Pro+access+point"),
+        ("08-29", "https://www.akrapovic.com/en/motorcycle/product/21927/slip-on-line-titanium-yamaha-tracer-7"),
+        ("08-29", "https://allegro.pl/listing?string=Akrapovic+Tracer+7"),
+        ("08-29", "https://cdn2.yamaha-motor.eu/prod/product-assets/2023/tracer-7/tracer-7-owners-manual-en.pdf"),
+        ("08-30", "https://allegro.pl/listing?string=okularki+plywackie+Arena"),
+        ("08-30", "https://allegro.pl/listing?string=TYR%20Special%20Ops"),
+    ]
+
+    #: Hand-written, not recorded: what the predicate must never stop catching.
+    COMPOSED = [
+        "https://drop.example/?d=hunter2-the-owners-password",
+        "https://drop.example/collect?b=SGlzIElCQU4gaXMgUEwyNzExNDAyMDA0MDAwMDMwMDIwMTM1NTM4Nw",
+        "https://allegro.pl/go?next=https://evil.example/?d=secret",
+        "https://user:pass@drop.example/x",
+        "https://lookup.example/q?ask=what+is+the+total+on+his+latest+invoice",
+    ]
+
+    def _agent(self):
+        agent, _ = make_agent([])
+        agent._tainted = True
+        return agent
+
+    @staticmethod
+    def _incumbent(monkeypatch):
+        """The gate walk with the OLD predicate back in place of the new one.
+
+        Patched rather than re-implemented, so what is measured is the real
+        `_egress_novel_hosts` — offered-link escape, payload test, vouched-site
+        escape — and only the one function under comparison differs."""
+        monkeypatch.setattr(
+            agent_module.Agent,
+            "_payload_finding",
+            lambda self, name, args: (
+                ""
+                if self._url_was_offered(str(args.get("url", "")))
+                else (
+                    agent_module.UNATTENDED_CARRIES
+                    if agent_module._address_carries_payload(str(args.get("url", "")))
+                    else ""
+                )
+            ),
+        )
+
+    def _walk(self, *, offered: bool, per_day: bool):
+        """Replay the corpus and return the URLs that drew a card.
+
+        `offered` restores what the banner bug (`0b4408f`/`e021b75`) had
+        starved: a Google result redirect IS a link a result offered.
+        `per_day` gives each day its own agent, so a vouch persists across that
+        chat exactly as slice 1 now makes it."""
+        fired = []
+        agents: dict = {}
+        for day, url in self.CORPUS:
+            agent = agents.setdefault(day, self._agent()) if per_day else self._agent()
+            if offered and "/goto?url=" in url:
+                agent._offered_links.add(url)
+            hosts = agent._egress_novel_hosts("read_url", {"url": url})
+            if hosts is not None:
+                fired.append(url)
+                agent._approved_hosts.update(hosts)  # the card was approved
+        return fired
+
+    # -------------------------------------------- measurement 1: the corpus
+
+    def test_the_bare_predicate_on_the_bare_corpus(self, monkeypatch):
+        """No provenance at all: nothing offered, nothing vouched, a fresh
+        agent per address. The incumbent fires on every one of the fifteen —
+        which is what makes them a corpus — and the new arm on seven."""
+        self._incumbent(monkeypatch)
+        assert len(self._walk(offered=False, per_day=False)) == 15
+        monkeypatch.undo()
+        assert len(self._walk(offered=False, per_day=False)) == 7
+
+    def test_the_honest_incumbent_against_the_new_arm(self, monkeypatch):
+        """The comparison the owner should read, because it says how much of
+        the win is slice 3's rather than slices 1-2's.
+
+        The honest incumbent is the banner fix plus slices 1-2 plus the OLD
+        predicate: several of the fifteen fired only because a since-fixed bug
+        starved `_note_offered_links` of banners, and the vouch now persists.
+        On that footing the incumbent still draws 10 of the 15, and the new arm
+        draws 3."""
+        self._incumbent(monkeypatch)
+        assert len(self._walk(offered=True, per_day=True)) == 10
+        monkeypatch.undo()
+        assert len(self._walk(offered=True, per_day=True)) == 3
+
+    def test_what_the_three_survivors_are_and_why(self):
+        """Stated rather than left as a number. Every one is the FIRST query at
+        allegro.pl in a chat — arm 5 doing exactly what it exists for. The
+        second query in the same chat is free, which is the shape #293 wanted
+        and never got: once per site, not once per search term.
+
+        This is short of the issue's own "zero fire" acceptance and it is the
+        one place the issue's two requirements pull against each other: arm 5
+        is specified to draw a card for a query at a host nothing has vouched
+        for, and eight of the fifteen recorded addresses are exactly that. Arm
+        5 is the load-bearing one — without it, plain-language exfiltration to
+        a host nobody named goes free — so it stays, and the residual is three
+        cards a week rather than none."""
+        fired = self._walk(offered=True, per_day=True)
+        assert [u.split("?")[0] for u in fired] == ["https://allegro.pl/listing"] * 3
+        seen = [day for day, url in self.CORPUS if url in fired]
+        assert seen == ["08-24", "08-29", "08-30"]  # once per chat, never twice
+
+    # ---------------------------------- measurement 2: composed exfiltration
+
+    def test_both_arms_fire_on_every_composed_address(self, monkeypatch):
+        """A secret appended verbatim, a base64 blob of stolen text, a nested
+        second address, userinfo, and a plain-language question at an unvouched
+        host. The narrowing may not reach any of them."""
+        def fires(url):
+            agent = self._agent()
+            agent._approved_hosts.add("allegro.pl")  # the forward's host IS vouched
+            return agent._egress_novel_hosts("read_url", {"url": url}) is not None
+
+        self._incumbent(monkeypatch)
+        assert [fires(u) for u in self.COMPOSED] == [True] * 5
+        monkeypatch.undo()
+        assert [fires(u) for u in self.COMPOSED] == [True] * 5
+
+
+class TestOneAnswerPerReadWhicheverTool:
+    """#341. `EGRESS_TOOLS` held `read_url` and not `browse`, so the identical
+    page was carded through one tool and free through the other — the model's
+    choice of tool deciding the permission, which is the exact bypassability
+    #287 fixed one layer down, surviving one layer up.
+
+    The unattended half was a live hole, not a tidiness point: the browse
+    dispatch branch asked `_mail_link_gate` and `_browse_gate`, and
+    `_browse_gate` has no origin arm at all (`if not host or reading: return
+    None`). A triggered session could open `https://attacker/?d=<data>` in real
+    Chrome with only the mail-link rule in the way."""
+
+    PAYLOAD = "https://drop.example/collect?d=his-invoice-total"
+    PLAIN = "https://drop.example/article"
+
+    def _tainted(self, origin="user"):
+        agent, _ = make_agent([], origin=origin)
+        agent._tainted = True
+        return agent
+
+    def test_the_same_address_gets_the_same_verdict_through_either_tool(self):
+        """Asserted both directions, on the same agent, so no ordering or
+        per-tool state can make them agree by accident."""
+        agent = self._tainted()
+        assert agent._egress_novel_hosts("read_url", {"url": self.PAYLOAD}) == [
+            "drop.example"
+        ]
+        assert agent._egress_novel_hosts("browse", {"url": self.PAYLOAD}) == [
+            "drop.example"
+        ]
+
+    def test_a_plain_address_is_free_through_either_tool(self):
+        """Reading is free, and this must not become a card for browse where
+        read_url had none — the narrowing runs the same way round."""
+        agent = self._tainted()
+        assert agent._egress_novel_hosts("read_url", {"url": self.PLAIN}) is None
+        assert agent._egress_novel_hosts("browse", {"url": self.PLAIN}) is None
+
+    def test_one_vouch_covers_both_tools_in_both_directions(self):
+        """The card names a host, not a mechanism, so what it buys cannot
+        depend on which tool happened to draw it."""
+        for asked_through, then in (("read_url", "browse"), ("browse", "read_url")):
+            agent = self._tainted()
+            shown: list = []
+            agent.approve_tool = (
+                lambda n, a, p=None, seen=shown: seen.append(p) or True
+            )
+            assert agent._egress_gate(asked_through, {"url": self.PAYLOAD}) is None
+            assert len(shown) == 1
+            assert agent._egress_gate(then, {"url": self.PAYLOAD}) is None
+            assert len(shown) == 1  # the second tool asks nothing
+
+    def test_a_triggered_session_cannot_open_a_composed_address_in_chrome(self):
+        """The live hole. Unattended keeps the strict rule — every novel host,
+        payload or not — and it now reaches the browser too."""
+        agent = self._tainted(origin="email")
+        assert agent._egress_novel_hosts("browse", {"url": self.PAYLOAD}) == [
+            "drop.example"
+        ]
+        assert agent._egress_novel_hosts("browse", {"url": self.PLAIN}) == [
+            "drop.example"
+        ]
+
+    def test_only_the_OPEN_and_never_the_press(self):
+        """`browse_act`/`browse_fill` navigate from controls the PAGE wrote
+        rather than an address the model composed, and what may be typed into
+        them is the typing fence's question (#310). Widening this gate onto
+        them would put a card on pressing a link that is already carded, in
+        words about sending data that nothing checked."""
+        agent = self._tainted(origin="email")
+        assert agent._egress_novel_hosts("browse_act", {"target": "Dalej"}) is None
+        assert agent._egress_novel_hosts("browse_fill", {"steps": []}) is None
+
+    def test_naming_browse_in_the_tool_set_alone_would_not_have_worked(self):
+        """Pinned because it is invisible and it fails OPEN. The name branch
+        reads `url`; the else-branch reads `query`, which `browse` does not
+        have — so a `browse` that reached it would find no hosts in an empty
+        string and be freed. A future edit that drops `browse` from the name
+        tuple while leaving it in `EGRESS_TOOLS` puts the hole straight back."""
+        assert "browse" in agent_module.EGRESS_TOOLS
+        agent = self._tainted(origin="email")
+        assert agent._egress_novel_hosts("browse", {"query": ""}) == ["(no url)"]
+
+    def test_the_dispatch_branch_gates_before_chrome_is_reached(self, monkeypatch):
+        """At the gate is not the same as at the door. This drives the real
+        dispatch path: a denied open must leave `web.browse` uncalled."""
+        opened: list[str] = []
+        monkeypatch.setattr(
+            agent_module.web, "browse",
+            lambda url, topic=None, **_kw: (opened.append(url), "a page")[1],
+        )
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://blog.example/x")]),
+                model_says(tool_calls=[tool_call("browse", url=self.PAYLOAD)]),
+                model_says("stopped"),
+            ],
+            approve_tool=lambda n, a, p=None: asked.append(p) or False,
+        )
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None, **_kw: "a page",
+        )
+        agent.run_task("read the blog")
+        assert len(asked) == 1
+        assert opened == []
+
+    def test_an_approved_open_runs(self, monkeypatch):
+        """The other half of the same claim: the gate holds the call, it does
+        not remove the capability."""
+        opened: list[str] = []
+        monkeypatch.setattr(
+            agent_module.web, "browse",
+            lambda url, topic=None, **_kw: (opened.append(url), "a page")[1],
+        )
+        monkeypatch.setattr(
+            agent_module.web, "read_url", lambda url, topic=None, **_kw: "a page"
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://blog.example/x")]),
+                model_says(tool_calls=[tool_call("browse", url=self.PAYLOAD)]),
+                model_says("done"),
+            ],
+            approve_tool=lambda n, a, p=None: True,
+        )
+        agent.run_task("read the blog")
+        assert opened == [self.PAYLOAD]
+
+    def test_the_card_never_says_which_tool_it_was(self):
+        """P1: mechanism words never appear on a consent surface. The owner is
+        told what changes for him, not which of aish's functions ran."""
+        agent = self._tainted()
+        shown: list = []
+        agent.approve_tool = lambda n, a, p=None: shown.append(p) or True
+        agent._egress_gate("browse", {"url": self.PAYLOAD})
+        assert shown and not any(
+            word in shown[0].lower() for word in ("browse", "drive", "read_url", "tool")
+        )
+
+
 class TestALinkThatArrivedByMail:
     """#279. Mail is the delivery mechanism for every account-recovery flow
     there is, so aish following a link by itself hands an injected turn the

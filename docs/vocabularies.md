@@ -31,6 +31,19 @@ and a slice that also changed behaviour cannot provide one. A later change to an
 judged against these numbers, and it can only be judged against them if they were taken
 against what shipped.
 
+**A later change is DECLARED, never exempted (#341).** The fence compares today's tree
+against the picture, so it fires on any edit to any collection in those seven files — which
+is right, and it is not "no list may ever change". `TestTheCountingChangedNoMatching.DELIBERATE`
+names the list, the issue and the entries gained or lost, and the comparison is
+`before − removed + added` **exactly**: a declaration that waved through any change to a list
+it happened to name would be an exemption rather than a record, and an undeclared drift still
+fails. The first entry is `agent.EGRESS_TOOLS` gaining `browse`, which the extractor collects
+because it sweeps every module-level string collection — a deliberate over-collection, since
+narrowing it to "things that look like words" is exactly the judgement the fence exists to
+take away from a human reading a diff. It is not a vocabulary and is not in the inventory
+below: it holds aish's own TOOL NAMES, matched against the tool the model called and never
+against page text, a control label or an error string.
+
 **Half-done, and which half.** 26 lists are counted at their real call sites; 2 more are
 catalogued and not counted (`counted=False`, and they say why); a further group is
 inventoried in this document alone, in *"Considered and not catalogued"* below. Nothing is
