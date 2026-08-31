@@ -12907,6 +12907,25 @@ class TestTheDrivenTwinOfTheComposedAddress:
         assert len(asked) == 1
         assert "send data to drop.example" in asked[0]
 
+    def test_the_cross_host_prefill_residual_is_accepted_with_visibility(self):
+        """The record is per HOST as well as per task, and this is what that
+        costs: aish types at A, the page navigates to B carrying the values in
+        the URL, B's form comes back prefilled, and pressing B's submit is free.
+
+        Keying per TASK would close it and would state a cause no line checked
+        — nothing here can see what a page prefilled, so the card would claim
+        aish's values are in a form it never typed into. Pinned so nobody later
+        reads it as an oversight."""
+        agent, asked, _ = self._agent()
+        agent._note_typed_values("browse_fill", {"steps": [dict(self.STEPS[0])]})
+        agent._approved_sites.add("elsewhere.example")
+        agent._browse_view.remember(browse.Snapshot(
+            url="https://elsewhere.example/f?q=" + self.SECRET.replace(" ", "+"),
+            title="", text="t", controls=self._form(),
+        ))
+        assert agent._browse_gate("browse_act", {"target": "Go"}) is None
+        assert asked == []
+
     def test_the_values_belong_to_the_task_that_typed_them(self):
         """Taint, offered links and typed values are all per task, for the same
         reason: a value sent while answering one question is not a licence to

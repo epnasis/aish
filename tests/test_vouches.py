@@ -262,6 +262,38 @@ class TestTheStoreSeedsFromHisOwnRecordedActs:
         log.close()
         assert vouches.hosts() == ["eon.pl"]
 
+    def test_a_mail_link_approval_also_seeds_and_that_is_wider_than_its_card(
+        self, machine
+    ):
+        """A RESIDUAL, pinned so a later narrowing changes a test on purpose.
+
+        The audit trail does not record which card asked: `_mail_link_gate`
+        approvals go through the same `approve_tool` channel and land in the log
+        as `tool read_url(url='…')` / `approved`, identical to an egress card's
+        record. So a link that arrived by e-mail and was approved for OPENING
+        seeds a permanent send vouch for its host — still his act, and the
+        address had already reached that host with his consent, but not the same
+        question. Narrowing it means matching the card sentence in `preview`,
+        which would change the measured 11-of-18 seed."""
+        log = SessionLog.new(machine)
+        log.task_start("read my mail")
+        log.message({"role": "user", "content": "read my mail"})
+        log.command(
+            "tool read_url(url='https://tracking.example/parcel/9')",
+            "approved",
+            "",
+            f"{agent_module.MAIL_LINK_HELD}: https://tracking.example/parcel/9",
+        )
+        log.task_end()
+        log.close()
+        assert vouches.hosts() == ["tracking.example"]
+        # And what the record DOES still carry, which is what a narrowing would
+        # have to read: the sentence he was actually shown.
+        assert any(
+            agent_module.MAIL_LINK_HELD in line
+            for line in log.path.read_text().splitlines()
+        )
+
     def test_a_command_naming_no_url_seeds_nothing(self, machine):
         log = SessionLog.new(machine)
         log.task_start("x")
