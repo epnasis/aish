@@ -1468,6 +1468,23 @@ SEARCH_CARRIES = "puts an address with data stapled to it into a search"
 UNATTENDED_CARRIES = "carries more than the bare place it points at"
 UNREADABLE_ADDRESS = "cannot be read as an address at all"
 
+# The attended card's sentence for the ONE way it can fire with nothing found.
+# `_egress_novel_hosts` fails closed on an address it cannot read a host out of
+# and returns BEFORE the payload branch is ever reached, so the card is drawn by
+# a check the payload predicate never ran. A scheme-less `allegro.pl` is exactly
+# that: `urlsplit` parses it happily as a relative reference and reports no
+# host, so the gate holds and `_value_finding` — which prefixes `//` before
+# parsing — truthfully finds nothing in it.
+#
+# It says NO HOST rather than reusing UNREADABLE_ADDRESS because those are two
+# different facts and only one of them was checked here: this string may parse
+# perfectly well, and what the line established is that aish cannot tell where
+# it would go. Stating the wider one would be the same L8 mistake in a smaller
+# font.
+NO_READABLE_HOST = (
+    "has no readable host in it, so aish cannot say where it would go"
+)
+
 # Using a site the owner is SIGNED INTO (#221, #237). The browser carries his
 # live session, so the page comes back as HIM and can be private — order
 # history, messages, an account balance. That is what he asked for and it is
@@ -6746,9 +6763,17 @@ class Agent:
             # Never a tool name, never "browse" or "drive" (epic #295 P1): he
             # is told what would leave his machine and where it would go, not
             # which of aish's functions is about to run.
+            #
+            # `or NO_READABLE_HOST`: the one path that reaches here with
+            # nothing found is the fail-closed one in `_egress_novel_hosts`,
+            # which returns before the payload branch — so the card must state
+            # what THAT check established, not what the predicate would have
+            # said. Defaulting to an empty finding shipped the failure this
+            # issue is about, one layer over: the sentence ended mid-air after
+            # the host and the card asserted nothing at all.
             preview = (
                 f"this turn has read the open web, and the address it built "
-                f"for {shown} {self._payload_finding(name, args)}"
+                f"for {shown} {self._payload_finding(name, args) or NO_READABLE_HOST}"
             )
         decision = self.approve_tool(name, args, preview)
         if isinstance(decision, Denied):

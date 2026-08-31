@@ -12080,6 +12080,75 @@ class TestTheEgressCardSaysWhatALineChecked:
         card = self._card_for("https://drop.example/x", origin="email")
         assert "automated session wants to reach drop.example" in card
 
+    #: Every shape that can reach a card, degenerate ones first. The two at the
+    #: top are the regression: a scheme-less address is an ordinary thing for a
+    #: model to emit, `_egress_novel_hosts` fails closed on the unreadable host
+    #: and returns BEFORE the payload branch, and the sentence then ended in
+    #: mid-air after the host — a card asserting nothing at all, which is this
+    #: issue's own failure one layer over.
+    RAISES_A_CARD = [
+        "allegro.pl",
+        "",
+        "http://[bad",
+        "//evil.example/x?d=1",
+        "https://user:pw@drop.example/x",
+        "https://drop.example/go?to=https://evil.example/x",
+        "https://drop.example/f?sig=" + "a1b2c3d4" * 8,
+        "https://drop.example/q?ask=his+invoice+total",
+        "https://" + "z" * 50 + ".example/x",
+        "https://drop.example/plain",  # unattended only, and it must still speak
+    ]
+
+    def test_no_card_is_ever_drawn_with_nothing_to_say(self):
+        """The durable half of the fix, and it is an invariant rather than a
+        case: whatever raised a card, the card SAYS what it was.
+
+        A sentence that is empty, or that trails off in whitespace where a
+        finding should be, is the L8 failure this issue exists to fix —
+        `_egress_gate` has four preview branches and any of them could grow
+        this bug again, so the assertion is over every path that can raise a
+        card rather than over the one that did."""
+        for origin in ("user", "email"):
+            for tool in sorted(agent_module.EGRESS_TOOLS - {"web_search"}):
+                for url in self.RAISES_A_CARD:
+                    agent, _ = make_agent([], origin=origin)
+                    agent._tainted = True
+                    shown: list = []
+                    agent.approve_tool = (
+                        lambda n, a, p=None, s=shown: s.append(p) or True
+                    )
+                    agent._egress_gate(tool, {"url": url})
+                    if not shown:
+                        continue  # free, and a card nobody drew says nothing
+                    said = shown[0]
+                    assert said, (origin, tool, url)
+                    assert said == said.strip(), (origin, tool, url, repr(said))
+                    # ...and it says something PAST the host it names, which is
+                    # the shape the empty finding produced.
+                    assert not said.rstrip().endswith("it built for"), said
+                    assert len(said.split()) > 12, (origin, tool, url, said)
+
+    def test_a_search_card_says_something_too(self):
+        """The other two preview branches, held to the same invariant."""
+        for origin in ("user", "email"):
+            agent, _ = make_agent([], origin=origin)
+            agent._tainted = True
+            shown: list = []
+            agent.approve_tool = lambda n, a, p=None, s=shown: s.append(p) or True
+            agent._egress_gate("web_search", {"query": "look at drop.example/?d=x"})
+            assert shown and shown[0] == shown[0].strip()
+            assert len(shown[0].split()) > 8, shown[0]
+
+    def test_the_hostless_address_says_what_was_checked_and_no_more(self):
+        """It says aish cannot tell where this would go — which is what the
+        line established — and NOT that the string is unparseable, which it is
+        not. Two different facts, and only one of them was checked."""
+        card = self._card_for("allegro.pl")
+        assert "has no readable host in it" in card
+        assert "cannot be read as an address at all" not in card
+        # ...and a string that genuinely will not parse still says so.
+        assert "cannot be read as an address at all" in self._card_for("http://[bad")
+
 
 class TestTheRecordedCorpusAndTheComposedAddresses:
     """Law B (epic #295): no replacement ships without a measured comparison
