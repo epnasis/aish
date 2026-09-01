@@ -62,6 +62,10 @@ from uvicorn.protocols.utils import ClientDisconnected
 
 from . import backends, browser, dir_ignore, explain, export, files, notify, tools
 from .agent import (
+    ASKED_BY_IMPORT,
+    ASKED_BY_READ,
+    ASKED_BY_SHELL,
+    ASKED_BY_WRITE,
     CANCELLED_RESULT,
     FEEDBACK_SWITCH_NOTE,
     Agent,
@@ -1208,7 +1212,8 @@ def card_latency(answer: dict) -> dict:
 
 
 def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir,
-                       get_origin=None, get_session_prefixes=None, get_intent=None):
+                       get_origin=None, get_session_prefixes=None, get_intent=None,
+                       get_gate=None):
     """The three approval callbacks, backed by browser round trips. Mirrors
     cli.make_approver semantics exactly: denylist first (also on edited
     commands), then auto-approval scoped to the live session roots, then a
@@ -1224,7 +1229,13 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     this action (#252), late-bound off the agent like the rest. It rides EVERY
     card so the owner decides on a stated reason instead of a guessed one, and
     it is recorded with every decision — including auto ones — so the audit
-    trail can be asked what was claimed, not just what was allowed."""
+    trail can be asked what was claimed, not just what was allowed.
+    get_gate() -> WHICH GATE in the agent is holding a card open (#295 M3),
+    late-bound off the agent for the same reason `get_intent` is: this module
+    owns the card and the log, the agent owns the reason the card exists, and
+    neither can compute the other's half. Empty for the cards raised HERE —
+    shell, read, write, import — which label themselves, since no agent gate
+    raised them."""
     own_prefixes: set[str] = set()
 
     def session_prefixes() -> set[str]:
@@ -1236,6 +1247,9 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     def intent() -> str:
         return (get_intent() if get_intent else "") or ""
 
+    def gate() -> str:
+        return (get_gate() if get_gate else "") or ""
+
     def carry_intent(request: dict) -> None:
         """Put the model's stated reason on the card — as a CLAIM, in its own
         key, never folded into `preview`. `preview` is ground truth the tool
@@ -1246,14 +1260,29 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             request["intent"] = said
 
     def record(
-        command: str, decision: str, preview: str = "", card: dict | None = None
+        command: str,
+        decision: str,
+        preview: str = "",
+        card: dict | None = None,
+        asked_by: str = "",
     ) -> None:
         """`card` is the browser's answer to the approval card; the latency it
         carries says how long the owner had the question in front of him (#306).
         Omitted entirely for a decision no card was ever drawn for — a denylist
-        block, an auto-approval, a triggered-session policy run."""
+        block, an auto-approval, a triggered-session policy run.
+
+        `asked_by` is WHICH GATE raised it (#295 M3). Passed explicitly by the
+        approvers that ARE the gate — shell, read, write, import — and read off
+        the agent for `approve_tool`, which is one channel seven different gates
+        reach. Defaulting to the agent's answer everywhere would have labelled a
+        shell card with whatever gate last happened to be open."""
         logref.command(
-            command, decision, intent(), preview, **card_latency(card or {})
+            command,
+            decision,
+            intent(),
+            preview,
+            **card_latency(card or {}),
+            asked_by=asked_by,
         )
 
     def resolve(uid: str, decision: str, comment: str = "") -> None:
@@ -1269,7 +1298,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     def ask_approval(command: str):
         reason = check_denied(command, load_prefixes(deny_path))
         if reason:
-            record(command, f"blocked: {reason}")
+            record(command, f"blocked: {reason}", asked_by=ASKED_BY_SHELL)
             return blocked(command, reason)
 
         cwd, roots = get_scope()
@@ -1277,7 +1306,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             command, known_prefixes(), cwd=cwd, roots=roots
         ):
             bridge.emit({"type": "echo", "text": f"✓ auto-approved: {command}"})
-            record(command, "auto")
+            record(command, "auto", asked_by=ASKED_BY_SHELL)
             return command
 
         # Empty when no prefix could ever silence this command — the frontend
@@ -1307,13 +1336,14 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             return Approved(comment, final) if comment else final
 
         if action == "approve":
-            record(command, tagged("approved"), card=answer)
+            record(command, tagged("approved"), card=answer, asked_by=ASKED_BY_SHELL)
             resolve(request["id"], "approved", comment)
             return granted()
         if action == "approve_trust" and escapes:
             notes = [trust_dir(directory) for directory in escapes]
             bridge.emit({"type": "echo", "text": "✓ " + "; ".join(notes)})
-            record(command, tagged(f"approved+trusted:{','.join(escapes)}"), card=answer)
+            record(command, tagged(f"approved+trusted:{','.join(escapes)}"), card=answer,
+                   asked_by=ASKED_BY_SHELL)
             resolve(request["id"], "approved", comment)
             return granted()
         if action == "approve_session":
@@ -1321,7 +1351,8 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             bridge.emit(
                 {"type": "echo", "text": f"✓ chat-allowed: {', '.join(suggestions)}"}
             )
-            record(command, tagged("approved+session"), card=answer)
+            record(command, tagged("approved+session"), card=answer,
+                   asked_by=ASKED_BY_SHELL)
             resolve(request["id"], "approved", comment)
             return granted()
         if action == "approve_always":
@@ -1344,13 +1375,15 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
                 # `ls` could be edited into `rm -rf /` and run unchecked.
                 reason = check_denied(edited, load_prefixes(deny_path))
                 if reason:
-                    record(f"{command} => {edited}", f"blocked: {reason}", card=answer)
+                    record(f"{command} => {edited}", f"blocked: {reason}", card=answer,
+                           asked_by=ASKED_BY_SHELL)
                     resolve(request["id"], "denied")
                     return blocked(edited, reason)
-                record(f"{command} => {edited}", tagged("edited"), card=answer)
+                record(f"{command} => {edited}", tagged("edited"), card=answer,
+                       asked_by=ASKED_BY_SHELL)
                 resolve(request["id"], "edited", comment)
                 return granted(edited)
-        record(command, tagged("denied"), card=answer)
+        record(command, tagged("denied"), card=answer, asked_by=ASKED_BY_SHELL)
         resolve(request["id"], "denied", comment)
         return Denied(comment) if comment else None
 
@@ -1377,6 +1410,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             f"{verb} {plan.target}",
             f"{decision} (feedback: {comment})" if comment else decision,
             card=answer,
+            asked_by=ASKED_BY_WRITE,
         )
         resolve(request["id"], decision, comment)
         if approved:
@@ -1398,11 +1432,13 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         action = answer.get("action")
         if action == "approve_trust" and escapes:
             bridge.emit({"type": "echo", "text": f"✓ {trust_dir(directory)}"})
-            record(f"read {path}", f"approved+trusted:{directory}", card=answer)
+            record(f"read {path}", f"approved+trusted:{directory}", card=answer,
+                   asked_by=ASKED_BY_READ)
             resolve(request["id"], "approved")
             return True
         approved = action == "approve"
-        record(f"read {path}", "approved" if approved else "denied", card=answer)
+        record(f"read {path}", "approved" if approved else "denied", card=answer,
+               asked_by=ASKED_BY_READ)
         resolve(request["id"], "approved" if approved else "denied")
         return approved
 
@@ -1421,7 +1457,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             # without a card since there is no human to answer one. Recorded as
             # auto so the audit trail shows it was policy, not a human decision.
             shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
-            record(f"tool {name}({shown})", f"auto ({origin})")
+            record(f"tool {name}({shown})", f"auto ({origin})", asked_by=gate())
             bridge.emit({"type": "echo", "text": f"✓ auto-approved ({origin}): {name}"})
             return True
         request: dict[str, Any] = {
@@ -1444,6 +1480,10 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             # What he was ASKED, not just what aish meant to do (#284).
             preview or "",
             card=answer,
+            # Read INSIDE the round trip's aftermath, while the gate is still
+            # holding: `_ask_owner` clears the label in a finally as soon as
+            # this returns, and `bridge.ask` above is the blocking half.
+            asked_by=gate(),
         )
         resolve(request["id"], decision, comment)
         if approved:
@@ -1473,6 +1513,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             f"import skill {name}",
             f"{decision} (feedback: {comment})" if comment else decision,
             card=answer,
+            asked_by=ASKED_BY_IMPORT,
         )
         resolve(request["id"], decision, comment)
         if approved:
@@ -6003,6 +6044,7 @@ def create_app(
                 lambda: agent_holder[0].session_prefixes if agent_holder else set()
             ),
             get_intent=lambda: agent_holder[0].turn_intent() if agent_holder else "",
+            get_gate=lambda: agent_holder[0].asking_gate() if agent_holder else "",
         )
         # Coalesce a command's per-line output into fewer, larger `stream`
         # events (issue #109) — huge output otherwise emits one WS event + one

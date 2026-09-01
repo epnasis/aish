@@ -1647,6 +1647,45 @@ BROWSE_TOOLS = ("browse", "browse_act", "browse_fill")
 # same question about a form the page composed instead.
 DRIVING_TOOLS = ("browse_act", "browse_fill")
 
+# WHICH GATE raised an approval card, recorded on the decision (#295 M3).
+#
+# **The record could not say who asked, and that has now cost twice in one
+# day.** It forced an unanswerable question about seeding — whether the
+# hosts in the owner's history came from egress cards or from mail-link
+# cards, which grant very different things — and it made the epic's own
+# ledger tell him that `Przełącz lokal` was a worded-link card when the log
+# proves it was the site grant. Both were answered by INFERENCE: looking
+# for a `site_grant` record landing after the approval, and reasoning from
+# a label. That is a hypothesis standing where a line of code should be,
+# which is the thing L8 exists to stop. `_dispatch` is one execution point;
+# `approve_tool` is one card channel, and seven different gates reach it.
+#
+# Named `asked_by` on the record and never `gate`: `kind:"gate"` is an
+# existing trace record with its OWN `gate` field
+# (`docs/trace-contract.md` §3.3), and one word meaning two things in one
+# log is how a reader comes to read the wrong one confidently.
+ASKED_BY_EGRESS = "egress"
+ASKED_BY_MAIL_LINK = "mail-link"
+ASKED_BY_PRESS = "press"
+ASKED_BY_BATCH = "batch"
+ASKED_BY_KNOWLEDGE = "knowledge"
+ASKED_BY_RULE = "rule"
+ASKED_BY_PLUGIN = "plugin"
+
+# The client-side approvers label their own cards, since no gate in this
+# file raises them. They are here so the whole vocabulary is one list a
+# test can iterate rather than strings scattered over three modules.
+ASKED_BY_SHELL = "shell"
+ASKED_BY_READ = "read"
+ASKED_BY_WRITE = "write"
+ASKED_BY_IMPORT = "import"
+
+ASKED_BY = (
+    ASKED_BY_EGRESS, ASKED_BY_MAIL_LINK, ASKED_BY_PRESS, ASKED_BY_BATCH,
+    ASKED_BY_KNOWLEDGE, ASKED_BY_RULE, ASKED_BY_PLUGIN, ASKED_BY_SHELL,
+    ASKED_BY_READ, ASKED_BY_WRITE, ASKED_BY_IMPORT,
+)
+
 # Tools whose results carry bytes from OUTSIDE this machine. Once one has run,
 # everything the model proposes next may be an echo of text an attacker wrote,
 # so the turn is TAINTED and outbound calls stop being free (see
@@ -2706,6 +2745,11 @@ class Agent:
         # the owner was told it (#252). Read by the approval gate; see
         # note_intent for why it is not the same thing as `_delivered`.
         self._intent = ""
+        # Which gate is holding a card open RIGHT NOW, for the recorder to
+        # stamp on the decision (#295 M3). Not task state: it is set and
+        # cleared around a single blocking call by `_ask_owner`, which is the
+        # only thing that may write it.
+        self._gate_asking = ""
         # Tokens withheld from the client while a bound turn's answer is still
         # unverified. `None` means stream normally.
         self._held_answer: list[str] | None = None
@@ -7002,7 +7046,7 @@ class Agent:
                 f"this turn has read the open web, and the address it built "
                 f"for {shown} {self._payload_finding(name, args) or NO_READABLE_HOST}"
             )
-        decision = self.approve_tool(name, args, preview)
+        decision = self._ask_owner(ASKED_BY_EGRESS, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
@@ -7298,7 +7342,9 @@ class Agent:
             return _gate_outcome(
                 MAIL_LINK_NO_APPROVER.format(url=url), decision="blocked"
             )
-        decision = self.approve_tool(name, args, f"{MAIL_LINK_HELD}: {url}")
+        decision = self._ask_owner(
+            ASKED_BY_MAIL_LINK, name, args, f"{MAIL_LINK_HELD}: {url}"
+        )
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
@@ -7794,7 +7840,11 @@ class Agent:
         self, name: str, args: dict, preview: str, denial: str
     ) -> str | None:
         """One approval card for a browse call. None = approved."""
-        decision = self.approve_tool(name, args, preview)  # type: ignore[misc]
+        # A batch and a single press are different gates and the census has to
+        # be able to tell them apart — inferring one from a label is exactly
+        # what went wrong with `Przełącz lokal`.
+        gate = ASKED_BY_BATCH if name == "browse_fill" else ASKED_BY_PRESS
+        decision = self._ask_owner(gate, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
@@ -7855,7 +7905,7 @@ class Agent:
             f"{who} {what} {slug} — a memory persists into every future "
             "session and is retrieved automatically"
         )
-        decision = self.approve_tool(name, args, preview)
+        decision = self._ask_owner(ASKED_BY_KNOWLEDGE, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
@@ -8479,6 +8529,34 @@ class Agent:
         self._commit_provenance()
         self._intent = (said or "").strip()
 
+    def asking_gate(self) -> str:
+        """Which gate is holding a card open, for the recorder (#295 M3).
+
+        Late-bound off the agent exactly as `turn_intent` is, and for the same
+        reason: the client owns the card and the log, the AGENT owns the reason
+        the card exists, and neither can compute the other's half. Empty
+        whenever no gate in this file is asking — which is every card the
+        client raises itself, and those label their own."""
+        return self._gate_asking
+
+    def _ask_owner(self, gate: str, name: str, args: dict, preview: "str | None"):
+        """Draw one approval card and say WHICH GATE drew it.
+
+        Every `approve_tool` call in this file goes through here. That is the
+        point: seven gates share one card channel, so a gate that set the label
+        itself would be a gate that could forget to, and the eighth one added
+        later would record nothing at all. `test_every_gate_that_asks_says_who_asked`
+        iterates the call sites to keep that true.
+
+        Cleared in a `finally` because the approver BLOCKS — on the web it is a
+        round trip to a phone that may never answer — and a label left standing
+        would be stamped on whatever decision came next."""
+        self._gate_asking = gate
+        try:
+            return self.approve_tool(name, args, preview)  # type: ignore[misc]
+        finally:
+            self._gate_asking = ""
+
     def turn_intent(self) -> str:
         """What the model said before proposing this step's actions — the
         approvers' late-bound reader, mirroring get_scope/get_origin. Empty
@@ -8930,7 +9008,7 @@ class Agent:
             f"the rule '{binding.name}' says you decide this one "
             f"({binding.rule.description})"
         )
-        decision = self.approve_tool(name, args, preview)
+        decision = self._ask_owner(ASKED_BY_RULE, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             message = _with_feedback(
@@ -8980,7 +9058,7 @@ class Agent:
             f"({binding.rule.description}) — the model has insisted after "
             f"{binding.rounds - 1} refusals"
         )
-        decision = self.approve_tool(name, args, preview)
+        decision = self._ask_owner(ASKED_BY_RULE, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             message = _with_feedback(
@@ -9527,7 +9605,9 @@ class Agent:
             # None when the tool declares no preview or resolution fails (raw-args
             # fallback). Read-only, so it runs ungated.
             preview_text = tool_plugins.preview(tool, args, self.cwd)
-            decision = self.approve_tool(tool.name, args, preview_text)
+            decision = self._ask_owner(
+                ASKED_BY_PLUGIN, tool.name, args, preview_text
+            )
             if isinstance(decision, Denied):
                 # Deny + comment = STOP (issue #81): address the concern, then halt.
                 self._arm_stop_gate(decision.comment)

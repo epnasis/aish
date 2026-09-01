@@ -10,6 +10,7 @@ that structural rather than a habit, and one test asserts it.
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import pytest
 from aish import agent as agent_module
 from aish import vouches
 from aish.agent import Agent
+from aish.cli import LogRef
 from aish.session import SessionLog
 
 #: Every host the owner's 273 query-carrying page opens land on, split by
@@ -270,46 +272,6 @@ class TestTheStoreSeedsFromHisOwnRecordedActs:
         log.close()
         assert vouches.hosts() == ["eon.pl"]
 
-    def test_a_mail_link_approval_also_seeds_and_that_is_wider_than_its_card(
-        self, machine
-    ):
-        """A RESIDUAL, pinned so a later narrowing changes a test on purpose.
-
-        The audit trail does not record which card asked: `_mail_link_gate`
-        approvals go through the same `approve_tool` channel and land in the log
-        as `tool read_url(url='…')` / `approved`, identical to an egress card's
-        record. So a link that arrived by e-mail and was approved for OPENING
-        seeds a permanent send vouch for its host.
-
-        **The sharp version, because "wider than its card" undersells it:** the
-        mail-link gate is deliberately per LINK and never per host — *approving
-        one tracking link must not approve the next one* (`_approved_mail_links`
-        is keyed by URL). Seeding converts one such yes into a permanent per-host
-        SEND grant, which is a stronger thing than opening a single link ever
-        implied. It is still his act and the address had already reached that
-        host with his consent, which is why it is accepted rather than blocking
-        the slice. Narrowing it means matching the card sentence in `preview`,
-        which changes the measured 11-of-18 seed, so it is a decision and not an
-        edit."""
-        log = SessionLog.new(machine)
-        log.task_start("read my mail")
-        log.message({"role": "user", "content": "read my mail"})
-        log.command(
-            "tool read_url(url='https://tracking.example/parcel/9')",
-            "approved",
-            "",
-            f"{agent_module.MAIL_LINK_HELD}: https://tracking.example/parcel/9",
-        )
-        log.task_end()
-        log.close()
-        assert vouches.hosts() == ["tracking.example"]
-        # And what the record DOES still carry, which is what a narrowing would
-        # have to read: the sentence he was actually shown.
-        assert any(
-            agent_module.MAIL_LINK_HELD in line
-            for line in log.path.read_text().splitlines()
-        )
-
     def test_an_approved_shell_command_carrying_a_url_seeds_nothing(self, machine):
         """The defect a delivery review found. `kind: "command"` is the audit
         trail's record for SHELL approvals as well as tool ones, so matching the
@@ -534,3 +496,224 @@ class TestTheCliHalfOfTheGrantGap:
         agent._grant_site("eon.pl")
         assert tainted()._approved_sites == set()
         assert agent_module.SITE_GRANT  # the card that will be drawn again
+
+
+class TestTheRecordSaysWhichGateAsked:
+    """#295 M3. The approval record said WHAT was proposed (`command`) and WHAT
+    the owner was asked (`preview`), and never which rule decided he had to be
+    asked at all. `approve_tool` is ONE card channel that seven different gates
+    in `agent.py` reach, so the gate was recoverable only by inference.
+
+    That gap was paid for twice in one day: it made *which of these hosts did he
+    vouch for reading, and which did he merely agree to open one link at*
+    unanswerable from the log, and it put a wrong attribution for `Przełącz
+    lokal` into the epic's ledger — reached by looking for a `site_grant` record
+    landing after the approval. A hypothesis standing where a line of code
+    belongs is exactly what L8 forbids."""
+
+    def _agent(self, **kw):
+        logged: list = []
+        seen: list = []
+
+        def approve_tool(name, args, preview=None):
+            # Read WHILE the card is open, which is what the recorder does.
+            seen.append(agent.asking_gate())
+            return True
+
+        agent = tainted(approve_tool=approve_tool, state_log=logged.append, **kw)
+        return agent, seen, logged
+
+    def test_the_egress_card_says_egress(self, machine):
+        agent, seen, _ = self._agent()
+        agent._egress_gate("read_url", {"url": "https://drop.example/?d=x"})
+        assert seen == [agent_module.ASKED_BY_EGRESS]
+
+    def test_the_mail_link_card_says_mail_link(self, machine):
+        from aish import provenance
+
+        agent, seen, _ = self._agent()
+        agent._mail_links = {"https://x.test/a": provenance.LINK}
+        agent._mail_link_gate("read_url", {"url": "https://x.test/a"})
+        assert seen == [agent_module.ASKED_BY_MAIL_LINK]
+
+    def test_a_press_and_a_batch_are_told_apart(self, machine):
+        """The distinction the `Przełącz lokal` mis-attribution needed. Both
+        cards come out of ONE function since M1, so nothing but the record can
+        say which of the two drew this one."""
+        from aish import browse
+
+        for tool, args, expected in (
+            ("browse_act", {"target": "Wyślij"}, agent_module.ASKED_BY_PRESS),
+            (
+                "browse_fill",
+                {"steps": [{"target": "Wyślij", "do": "click"}]},
+                agent_module.ASKED_BY_BATCH,
+            ),
+        ):
+            agent, seen, _ = self._agent()
+            agent._browse_view.remember(browse.Snapshot(
+                url="https://eon.pl/x", title="", text="t",
+                controls=browse.controls_from(
+                    [{"n": 1, "kind": "button", "name": "Wyślij", "submits": True}]
+                ),
+            ))
+            assert agent._browse_gate(tool, args) is None
+            assert seen == [expected], tool
+
+    def test_the_knowledge_card_says_knowledge(self, machine):
+        agent, seen, _ = self._agent()
+        agent._knowledge_gate("remember", {"name": "a-fact"})
+        assert seen == [agent_module.ASKED_BY_KNOWLEDGE]
+
+    def test_every_gate_that_asks_says_who_asked(self):
+        """The GUARD, iterated rather than sampled: no gate in `agent.py` may
+        call `approve_tool` directly — all of them go through `_ask_owner`, so
+        the eighth gate added later cannot silently record nothing.
+
+        Read off the source, because the property is about call sites that a
+        behavioural test can only reach one at a time."""
+        source = Path(agent_module.__file__).read_text()
+        direct = [
+            line.strip()
+            for line in source.splitlines()
+            if "self.approve_tool(" in line
+        ]
+        assert direct == ["return self.approve_tool(name, args, preview)  # type: ignore[misc]"], (
+            f"a gate calls approve_tool directly instead of _ask_owner: {direct}"
+        )
+
+    def test_every_label_is_declared_in_one_vocabulary(self):
+        """One list, so a census can enumerate the gates instead of guessing
+        which strings exist."""
+        for label in agent_module.ASKED_BY:
+            assert label and label == label.strip()
+        assert len(set(agent_module.ASKED_BY)) == len(agent_module.ASKED_BY)
+
+    def test_the_field_is_omitted_when_nothing_said_who_asked(self, machine):
+        """Same terms as `intent`: a session written before this replays
+        byte-identically, and an absent value means *this log predates the
+        field*, never *no gate asked*."""
+        log = SessionLog.new(machine)
+        log.task_start("x")
+        log.command("ls", "approved")
+        log.close()
+        rows = [
+            json.loads(line) for line in log.path.read_text().splitlines()
+            if '"kind": "command"' in line or '"kind":"command"' in line
+        ]
+        assert rows and all("asked_by" not in row for row in rows)
+
+    def test_the_field_is_written_when_it_is_known(self, machine):
+        log = SessionLog.new(machine)
+        log.task_start("x")
+        log.command("tool read_url(url='https://a.test/')", "approved",
+                    asked_by=agent_module.ASKED_BY_EGRESS)
+        log.close()
+        assert any(
+            json.loads(line).get("asked_by") == "egress"
+            for line in log.path.read_text().splitlines()
+            if line.strip().startswith("{")
+        )
+
+
+class TestAMailLinkYesNeverSeedsASendVouch:
+    """The residual this instrument exists to close. A `read_url` approval can
+    come from the egress card (*may data ride an address to this host*) or the
+    mail-link card (*may aish open this ONE link that arrived by e-mail*), and
+    the second is per link by design. Before `asked_by` the log could not tell
+    them apart at all."""
+
+    def test_a_mail_link_approval_is_excluded_by_its_record(self, machine):
+        log = SessionLog.new(machine)
+        log.task_start("read my mail")
+        log.message({"role": "user", "content": "read my mail"})
+        log.command(
+            "tool read_url(url='https://tracking.example/parcel/9')",
+            "approved",
+            asked_by=agent_module.ASKED_BY_MAIL_LINK,
+        )
+        log.task_end()
+        log.close()
+        assert SessionLog.approved_read_hosts(log.path) == []
+        assert vouches.hosts() == []
+
+    def test_the_same_host_through_the_egress_card_does_seed(self, machine):
+        """The control arm: identical record, one field different."""
+        log = SessionLog.new(machine)
+        log.task_start("read my mail")
+        log.message({"role": "user", "content": "read my mail"})
+        log.command(
+            "tool read_url(url='https://tracking.example/parcel/9')",
+            "approved",
+            asked_by=agent_module.ASKED_BY_EGRESS,
+        )
+        log.task_end()
+        log.close()
+        assert vouches.hosts() == ["tracking.example"]
+
+    def test_a_record_with_no_gate_still_seeds_and_that_is_measured(self, machine):
+        """History has no `asked_by`, so it cannot be filtered — what it
+        contains is settled by MEASUREMENT: no mail-link card has ever fired in
+        the owner's corpus, zero firings across every recorded session. That is
+        a fact about his logs today, NOT a property of this code, and the
+        difference is why the filter above exists: the email agent is live, so
+        mail-link cards will fire, and from then on they carry their own record.
+
+        A reader who mistook the measurement for the mechanism would delete the
+        filter. This test is where that reading is contradicted."""
+        log = SessionLog.new(machine)
+        log.task_start("older chat")
+        log.message({"role": "user", "content": "older chat"})
+        log.command("tool read_url(url='https://historic.example/x')", "approved")
+        log.task_end()
+        log.close()
+        assert vouches.hosts() == ["historic.example"]
+        assert "asked_by" not in log.path.read_text()
+
+    def test_every_never_seeds_label_is_a_real_gate(self):
+        """Iterated: an entry that matches no gate would be a filter that
+        silently does nothing."""
+        for label in SessionLog.NEVER_SEEDS:
+            assert label in agent_module.ASKED_BY
+
+
+class TestTheApprovalLogInterfaceStaysOneInterface:
+    """`SessionLog.command` has THREE implementations — itself, `cli.LogRef`
+    (which the web server uses too), and the suite's own double — and the
+    wrapper forwards positionally.
+
+    `LogRef.command` already carried the warning in a comment: *a keyword the
+    wrapper does not accept is a TypeError inside the approval path*. Adding
+    `asked_by` (#295 M3) to `SessionLog` alone proved it, and the failure mode
+    is the worst shape there is: the TypeError landed inside the web approval
+    round trip, so an APPROVED shell command silently never ran while the card,
+    the `done` event and the log all looked normal. One test out of ~4500
+    noticed, and it noticed by checking for a file on disk.
+
+    A comment is not a guard. This is."""
+
+    def test_the_wrapper_accepts_everything_the_log_does(self):
+        from aish.cli import LogRef
+
+        real = inspect.signature(SessionLog.command).parameters
+        wrapper = inspect.signature(LogRef.command).parameters
+        assert list(real) == list(wrapper), (
+            "cli.LogRef.command must accept exactly what SessionLog.command "
+            "does — a keyword it lacks is a TypeError inside the approval path, "
+            "and an approved action that silently never ran"
+        )
+
+    def test_the_wrapper_forwards_every_argument(self):
+        """Accepting a keyword and dropping it is the same defect one step
+        later, so the values have to arrive."""
+        seen: dict = {}
+
+        class Spy:
+            def command(self, *args, **kw):
+                seen["args"] = args
+                seen["kw"] = kw
+
+        ref = LogRef.__new__(LogRef)
+        ref.log = Spy()
+        ref.command("ls", "approved", "why", "shown", 1, 2, "egress")
+        assert seen["args"] == ("ls", "approved", "why", "shown", 1, 2, "egress")

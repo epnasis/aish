@@ -1142,6 +1142,14 @@ class SessionLog:
     #: not a yes to an address riding one.
     READ_TOOLS = ("read_url", "browse", "show_image", "read_pdf", "read_media")
 
+    #: The gate whose approvals must NEVER seed a send vouch. The mail-link gate
+    #: is deliberately per LINK and never per host — approving one tracking link
+    #: must not approve the next one — so reading its yes as *data may ride an
+    #: address to this host forever* is a strictly stronger grant than the card
+    #: offered. Excluded BY RECORD since `asked_by` exists (#295 M3); before it,
+    #: the two were indistinguishable in the log.
+    NEVER_SEEDS = ("mail-link",)
+
     #: Which tool the approval was FOR, anchored at the start of the command
     #: string exactly as `server.py` and `cli.py` write it: `tool read_url(`.
     #: `browse` here never matches `browse_act(`/`browse_fill(` — those press
@@ -1169,6 +1177,23 @@ class SessionLog:
         well as tool ones, so matching the argument shape alone let an approved
         `curl --data "url='https://evil.example/'"` seed a permanent send vouch
         for a host no card had ever named.
+
+        **And `NEVER_SEEDS`, which is the third half.** A `read_url` approval
+        can come from the egress card (*may data ride an address to this host*)
+        or from the mail-link card (*may aish open this one link that arrived by
+        e-mail*), and those grant very different things — the second is per LINK
+        by design. Until `asked_by` existed the log could not tell them apart at
+        all, which is what made the question unanswerable rather than merely
+        unanswered.
+
+        **What the historical seed contains is settled by MEASUREMENT, not by
+        this filter.** The owner's corpus was searched before this shipped and
+        NO mail-link card has ever fired — zero firings across every recorded
+        session — so no record predating `asked_by` can be one. That is a fact
+        about his logs today and not a property of the code: the email agent is
+        live, mail-link cards will fire, and from now on they are excluded by
+        their own record. The distinction is written here because a reader who
+        mistook the measurement for the mechanism would delete the filter.
 
         A third reader over a third question rather than a widening of either
         of the two above, for the reason `egress_vouches` records: `site_grants`
@@ -1202,6 +1227,8 @@ class SessionLog:
             # host the owner was never asked about — a yes to running a command
             # is not a yes to an address riding one.
             if not SessionLog._READ_TOOL_CALL.match(command):
+                continue
+            if str(record.get("asked_by", "")) in SessionLog.NEVER_SEEDS:
                 continue
             match = SessionLog._URL_ARG.search(command)
             if match is None:
@@ -2757,6 +2784,7 @@ class SessionLog:
         preview: str = "",
         held_ms: int | None = None,
         shown_ms: int | None = None,
+        asked_by: str = "",
     ) -> None:
         """`intent` is what the model SAID it was doing when this decision was
         made (#252) — the same text the card showed. Recorded so a stated
@@ -2779,6 +2807,21 @@ class SessionLog:
 
         Omitted when empty, on the same terms as `intent`.
 
+        `asked_by` is WHICH GATE raised the card (#295 M3) — `egress`,
+        `mail-link`, `press`, `batch`, `knowledge`, `rule`, `plugin`, or one of
+        the client's own (`shell`, `read`, `write`, `import`). The command
+        string says what was proposed and `preview` says what he was asked;
+        neither says which rule decided he had to be. That gap has been paid for
+        twice: it made *which of these hosts did he vouch for reading, and which
+        did he merely agree to open one link at* unanswerable from the log, and
+        it put a wrong attribution for `Przełącz lokal` into the epic's ledger,
+        reached by looking for a `site_grant` record landing nearby. Both are
+        inference where a field belongs.
+
+        Omitted when empty, on the same terms as `intent` — so every session
+        written before this replays byte-identically, and an absent value means
+        *this log predates the field*, never *no gate asked*.
+
         `held_ms` and `shown_ms` are how long the question was in front of him
         before he answered it (#306). Two numbers because they are two claims:
         `held_ms` is how long the gate waited, which is always knowable and is
@@ -2796,6 +2839,8 @@ class SessionLog:
         extra: dict[str, Any] = {"intent": intent} if intent else {}
         if preview:
             extra["preview"] = preview
+        if asked_by:
+            extra["asked_by"] = asked_by
         if held_ms is not None:
             extra["held_ms"] = held_ms
         if shown_ms is not None:
