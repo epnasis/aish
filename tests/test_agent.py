@@ -4335,16 +4335,20 @@ class TestReadingHisAccountIsFreeAndDrivingIsNot:
             browse_mod.Snapshot(
                 url="https://eon.pl/x", title="", text="t",
                 controls=browse_mod.controls_from(
-                    [{"n": 0, "kind": "button", "name": "Faktury"}]
+                    [{"n": 0, "kind": "button", "name": "Faktury"},
+                     {"n": 1, "kind": "button", "name": "Dalej", "submits": True}]
                 ),
             )
         )
-        # Opening and reading are free by any route; the card is spent on the
-        # first PRESS, which is what read_url cannot do.
+        # Opening and reading are free by any route, and since #295 M4 so is a
+        # press that changes nothing; the card is spent on the first press that
+        # does, which is what read_url cannot do.
         assert agent._browse_gate("browse", {"url": "https://eon.pl/mojeon"}) is None
         assert asked == []
         assert agent._browse_gate("browse_act", {"target": "Faktury"}) is None
-        assert agent._browse_gate("browse_act", {"target": "Faktury"}) is None
+        assert asked == []
+        assert agent._browse_gate("browse_act", {"target": "Dalej"}) is None
+        assert agent._browse_gate("browse_act", {"target": "Dalej"}) is None
         assert len(asked) == 1
         assert "eon.pl" in asked[0]
 
@@ -12880,10 +12884,18 @@ class TestTheDrivenTwinOfTheComposedAddress:
         assert agent._approved_hosts == set()
         assert logged == []
 
-    def test_it_is_one_card_and_not_two(self):
+    def test_it_is_one_card_and_not_two(self, monkeypatch):
         """M1's law survives this: a press that would ask about the site AND
-        about what it sends asks once, in two clauses, and records both."""
-        agent, asked, logged = self._agent(granted=())
+        about what it sends asks once, in two clauses, and records both.
+
+        A POST submit, because since #295 M4 the site half is asked on the
+        press that CHANGES something — a GET submit is inert and asks only the
+        send question, which is the composition this slice's own tests pin."""
+        # A POST submit makes the card carry the form's held values, which are
+        # read LIVE (#251) — there is no browser here, and the fallback to the
+        # snapshot is what this test is not about.
+        monkeypatch.setattr(agent_module.browser, "browse_fields", lambda **kw: [])
+        agent, asked, logged = self._agent(granted=(), method="post")
         assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
         assert len(asked) == 1
         assert "signed in as you" in asked[0]

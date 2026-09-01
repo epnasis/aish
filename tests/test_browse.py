@@ -252,9 +252,17 @@ class TestBrowseGate:
     and reading it is what `read_url` does, and reading his account is free —
     so the same page fetched the other way used to ask, which the model could
     sidestep by choosing the other tool. Reading is free whichever way it is
-    done; the card is spent on what `read_url` cannot do."""
+    done; the card is spent on what `read_url` cannot do.
 
-    PRESSABLE = (control(n=0, name="Przełącz lokal"),)
+    **And since #295 M4 it is the first press that CHANGES something**, so the
+    page here carries both shapes: `Przełącz lokal`, a tab switch that changes
+    nothing, and `Dalej`, the nondescript submit that posts the form. The
+    grant's own tests drive the second one, because the first no longer asks."""
+
+    PRESSABLE = (
+        control(n=0, name="Przełącz lokal"),
+        control(n=1, name="Dalej", submits=True),
+    )
 
     def _agent(self, monkeypatch, approve, snap=None):
         asked = []
@@ -272,7 +280,7 @@ class TestBrowseGate:
         )
         return agent, asked
 
-    def _press(self, agent, target="Przełącz lokal"):
+    def _press(self, agent, target="Dalej"):
         return agent._browse_gate("browse_act", {"target": target, "action": "click"})
 
     def test_opening_and_reading_a_page_asks_nothing(self, monkeypatch):
@@ -298,7 +306,9 @@ class TestBrowseGate:
     def test_denying_the_site_stops_the_flow(self, monkeypatch):
         agent, _ = self._agent(monkeypatch, lambda *a: False)
         out = self._press(agent)
-        assert "USER DENIED acting on eon.pl" in out
+        # The merged denial (#295 M1), because the card that asked was the
+        # merged one: the press the grant was collected on is named in it.
+        assert "acting on eon.pl as them was NOT granted" in out
         assert "Reading the site is still allowed" in out
         assert "eon.pl" not in agent._approved_sites
 
@@ -1772,13 +1782,15 @@ class TestTwoChatsDoNotShareOnePageView:
         chat must not be asked to drive imdb.com."""
         flights = []
         qatar = self._chat(flights)
+        # A submit, because since #295 M4 the grant is collected on the press
+        # that changes something — a field asks nothing at all now.
         qatar._browse_view.remember(
-            snapshot(url=self.QATAR, controls=[control(n=1, name="To", kind=browse.FIELD)])
+            snapshot(url=self.QATAR, controls=[control(n=1, name="Dalej", submits=True)])
         )
         films = self._chat([])
         films._browse_view.remember(snapshot(url=self.IMDB))
 
-        assert qatar._browse_gate("browse_act", {"target": "To"}) is None
+        assert qatar._browse_gate("browse_act", {"target": "Dalej"}) is None
         assert len(flights) == 1
         assert "act on qatarairways.com" in flights[0]
         assert "imdb" not in flights[0]
@@ -3164,6 +3176,15 @@ class TestTheGrantIsWhereTheConsentLives:
             agent._approved_sites.add("eon.pl")
         return agent, asked
 
+    def _committing(self):
+        """The press the grant is now collected on (#295 M4): a nondescript
+        submit, which is `mutating` and needs no card of its own. It used to be
+        `Przełącz lokal`, a tab switch — and asking for the grant in front of a
+        control that changes nothing is exactly what M4 removed."""
+        return snapshot(controls=browse.controls_from(
+            [{"n": 1, "kind": "button", "name": "Dalej", "submits": True}]
+        ))
+
     def test_the_card_says_what_riding_it_means(self):
         """The win has to come from MOVING the decision, not thinning it: a
         card tapped blind records a consent he never gave, so what the grant
@@ -3173,8 +3194,8 @@ class TestTheGrantIsWhereTheConsentLives:
         floor now has two shapes: what aish will not press at all, and what it
         presses only after asking. It said only the second, which after that
         issue promised a card where there is a wall."""
-        agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
-        agent._browse_gate("browse_act", {"target": "Przełącz lokal"})
+        agent, asked = self._agent(self._committing(), granted=False)
+        agent._browse_gate("browse_act", {"target": "Dalej"})
         assert "signed in as you" in asked[0]
         assert "asks by name" in asked[0]
         assert "never one that says it buys, pays or deletes" in asked[0]
@@ -3184,8 +3205,8 @@ class TestTheGrantIsWhereTheConsentLives:
         WORDS say it buys is refused; a nondescript "Dalej" that completes a
         purchase still rides this yes, and #299 owns that. A card saying "aish
         never buys" would be the claim wider than the code."""
-        agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
-        agent._browse_gate("browse_act", {"target": "Przełącz lokal"})
+        agent, asked = self._agent(self._committing(), granted=False)
+        agent._browse_gate("browse_act", {"target": "Dalej"})
         assert "says it buys" in asked[0]
         for wider in ("never buys", "cannot buy", "will never spend"):
             assert wider not in asked[0], wider
@@ -3194,11 +3215,14 @@ class TestTheGrantIsWhereTheConsentLives:
         """Said on a phone, where four sentences is a card he scrolls past to
         reach the buttons. The floor the grant does not cover draws its own
         card when it fires; promising it here only buys length."""
-        agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
-        agent._browse_gate("browse_act", {"target": "Przełącz lokal"})
+        agent, asked = self._agent(self._committing(), granted=False)
+        agent._browse_gate("browse_act", {"target": "Dalej"})
         assert "\n" not in asked[0]
         assert ". " not in asked[0] and asked[0].endswith(".")
-        assert len(asked[0]) < 180
+        # The budget is the GRANT SENTENCE's, and it is pinned on the sentence
+        # itself: since #295 M4 the card it rides on also names the press it
+        # was collected on, and `TestOneCardNotTwo` owns the merged length.
+        assert len(agent_module.SITE_GRANT.format(host="eon.pl")) < 180
 
     def test_a_plain_submit_rides_the_grant(self):
         snap = snapshot(controls=browse.controls_from(
@@ -3447,15 +3471,22 @@ class TestOneCardNotTwo:
         assert asked[0] == "click button 'Wyślij' on eon.pl"
 
     def test_a_press_that_needs_no_card_of_its_own_still_asks_for_the_site(self):
-        """The half that is not merged, and must not be: the first press on a
-        site is still the moment the site is asked about, even when the control
-        itself rides the grant."""
+        """The half that is not merged, and must not be: the first press that
+        CHANGES something is still the moment the site is asked about, even
+        when the control needs no card of its own.
+
+        Since #295 M4 that card NAMES the press, because it is drawn on the
+        press rather than on whatever happened to be clicked first — a grant
+        card is only checkable against something he can see."""
         snap = snapshot(controls=browse.controls_from(
             [{"n": 1, "kind": "button", "name": "Search", "submits": True}]
         ))
         agent, asked, _ = self._agent(snap)
         assert agent._browse_gate("browse_act", {"target": "Search"}) is None
-        assert asked == [agent_module.SITE_GRANT.format(host="eon.pl")]
+        assert asked == [
+            "click button 'Search' on eon.pl — "
+            + agent_module.SITE_GRANT_RIDER.format(host="eon.pl")
+        ]
 
     def test_the_second_press_on_a_site_asks_only_about_the_control(self):
         """One grant, once — the merge must not turn a per-site question into a
@@ -3503,23 +3534,26 @@ class TestOneCardNotTwo:
             "\n" + agent_module.SITE_GRANT_RIDER.format(host="eon.pl")
         )
 
-    def test_a_form_that_needs_no_card_still_asks_for_the_site(self):
-        """THE PROPERTY, unchanged: a batch with nothing committing in it rides
-        the grant like any other read — and the grant itself is still the first
-        press's question, so exactly one card is drawn and it is the site's.
-        The host is vouched so the address question (#295 M3) is not the thing
-        being counted here; it has its own tests."""
+    def test_a_form_that_needs_no_card_asks_nothing_at_all(self):
+        """This one MOVED in #295 M4, and it is the whole of that slice. A
+        batch with nothing committing in it — type, then press a GET search —
+        used to draw the site card, because the grant was collected on the
+        first press whatever that press did. It now asks nothing and records
+        nothing. The host is vouched so the address question (#295 M3) is not
+        what is being counted; it has its own tests."""
         snap = snapshot(controls=browse.controls_from([
             {"n": 1, "kind": "field", "name": "Skąd"},
             {"n": 2, "kind": "button", "name": "Search", "submits": True,
              "method": "get"},
         ]))
-        agent, asked, _ = self._agent(snap)
+        agent, asked, logged = self._agent(snap)
         agent._approved_hosts.add("eon.pl")  # the send clause has its own tests
         out = agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "WAW"}, {"target": "Search", "do": "click"}]})
         assert out is None
-        assert asked == [agent_module.SITE_GRANT.format(host="eon.pl")]
+        assert asked == []
+        assert agent._approved_sites == set()
+        assert logged == []
 
     def test_a_remembered_batch_never_stands_in_for_a_grant_never_given(self):
         """The batch memo answers for the BATCH. A yes given while the site was
@@ -3541,6 +3575,539 @@ class TestOneCardNotTwo:
         agent._browse_gate("browse_fill", {"steps": list(self.STEPS)})
         agent._browse_gate("browse_fill", {"steps": list(self.STEPS)})
         assert len(asked) == 1
+
+class TestTheGrantIsCollectedOnTheFirstPressThatChanges:
+    """#295 M4, and Law B's measured comparison for it.
+
+    **The grant was collected on the first press, and the first press is almost
+    always inert.** So the owner was asked to authorise *act on this site as
+    you* while looking at a control that does nothing — a tab switch, a search
+    box, an airport field. Settled against his own log: of the seventeen
+    driving cards since 2026-08-24, TEN came from the site-grant card and every
+    one of those was named after an inert control. The other seven came from a
+    control's own card and are already correct.
+
+    So the question moves to the first press that is CONSEQUENTIAL. An inert
+    press proceeds with no card and — the half that matters as much — records
+    NO GRANT: a grant taken quietly on an inert press is the same defect with a
+    nicer face, because it spends the consent without ever asking for it.
+
+    **Consequential is `Control.mutating`, and no new classifier.** It already
+    answers *would pressing this change something the owner would mind*, and it
+    is already the fence `browser.browse_act` and `plan_batch` enforce at act
+    time. A second predicate here would be a second opinion about one question,
+    and the two would drift.
+
+    **The material is the owner's own recorded controls**, carried here as
+    labels and shapes only — no test reads `~/.local/state/aish`. Each row
+    carries the fate the INCUMBENT gave it and the fate the replacement gives
+    it. Every row is iterated; nothing is sampled.
+
+    **The two columns are established differently, and that is worth saying
+    plainly.** The replacement's fate is DRIVEN — `_fate` builds a real `Agent`
+    and calls the real gate, so it is re-derived on every run and a regression
+    fails here. The incumbent's fate was measured once, by driving this same
+    corpus through the shipped gate at `e34d5d0` before the change, and is
+    RECORDED here as a literal: nothing in this file re-runs the old code, so a
+    mis-recorded `before` would not be caught by CI. It is documentation of a
+    measurement, and the direction check is only as good as it.
+    """
+
+    HOST = "eon.pl"
+
+    #: The shapes the recorded labels were seen in. `navigates` is the
+    #: enumeration's own destination signal and never the kind, and `method` is
+    #: the raw attribute: an explicit `get` is HTTP's own statement that the
+    #: submit is safe, and absence is not (on an SPA it usually means
+    #: JavaScript intercepts and posts).
+    SHAPES = {
+        "navigating link": {"kind": browse.LINK, "href": "https://eon.pl/x"},
+        "button": {"kind": browse.BUTTON},
+        "field": {"kind": browse.FIELD},
+        "submit, no method": {"kind": browse.BUTTON, "submits": True},
+        "GET submit": {"kind": browse.BUTTON, "submits": True, "method": "get"},
+    }
+
+    #: (label, shape, incumbent fate, replacement fate) on an UNGRANTED site,
+    #: which is the state the grant question is asked in.
+    #:
+    #: `free` — no card, and no grant recorded.
+    #: `site card` — one card, the bare site grant, naming no control.
+    #: `names it, and grants` — one card naming the press, carrying the grant.
+    #: `refused` — no yes button, and the grant is never consulted (#342).
+    CORPUS = (
+        # The ten the log said came from the site card, in the shapes they were
+        # recorded in. Every one is inert, and every one becomes free.
+        ("Przełącz lokal", "navigating link", "site card", "free"),
+        ("Przełącz lokal", "button", "site card", "free"),
+        ("Przełącz lokal/umowę", "navigating link", "site card", "free"),
+        ("Search", "button", "site card", "free"),
+        ("Search", "GET submit", "site card", "free"),
+        ("przeszukaj Moje Allegro", "button", "site card", "free"),
+        ("przeszukaj Moje Allegro", "field", "site card", "free"),
+        ("Numer przesyłki", "field", "site card", "free"),
+        ("1 passenger, change number of passengers.", "button",
+         "site card", "free"),
+        ("Dokąd Wybierz lotnisko przylotu", "field", "site card", "free"),
+        ("Dokąd Wybierz lotnisko przylotu", "button", "site card", "free"),
+        ("Dodaj + — Dorośli", "button", "site card", "free"),
+        # Worded and non-navigating: the presses that must keep asking, and
+        # which already collected the grant on their own card since M1.
+        ("Accept Jai Paliwal's invitation", "button",
+         "names it, and grants", "names it, and grants"),
+        ("Accept Darshan .'s invitation", "button",
+         "names it, and grants", "names it, and grants"),
+        ("Accept Vincent Haucke's invitation", "button",
+         "names it, and grants", "names it, and grants"),
+        # #342's refusals, unchanged in both directions.
+        ("Kup teraz", "button", "refused", "refused"),
+        ("Zapłać wybrane", "button", "refused", "refused"),
+        ("Usuń przedmiot BOSCH Wycieraczka AreoTwin Retro 650mm", "button",
+         "refused", "refused"),
+        ("Zamawiam z obowiązkiem zapłaty", "button", "refused", "refused"),
+        ("Complete booking", "button", "refused", "refused"),
+        ("Wypowiedz umowę", "button", "refused", "refused"),
+        # The structural half: a nondescript submit nobody wrote a method on.
+        # It still asks — what moved is that the card now NAMES it, because the
+        # card is drawn on the consequential press rather than on whatever
+        # happened to be clicked first.
+        ("Dalej", "submit, no method", "site card", "names it, and grants"),
+    )
+
+    def _drive(self, label, shape, *, evidence="", origin="user", granted=False):
+        """The SHIPPED gate, driven — never modelled. Returns the fate, the
+        cards drawn, and whether the grant was recorded."""
+        raw = {"n": 1, "kind": browse.BUTTON, "name": label}
+        raw.update(self.SHAPES[shape])
+        controls = browse.controls_from([raw])
+        asked, logged = [], []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+            state_log=logged.append, origin=origin,
+        )
+        agent._browse_view.remember(snapshot(
+            url=f"https://{self.HOST}/mojeon", controls=controls,
+            commit_evidence=evidence,
+        ))
+        if granted:
+            agent._approved_sites.add(self.HOST)
+        out = agent._browse_gate("browse_act", {"target": controls[0].address})
+        return out, asked, logged, agent
+
+    def _fate(self, label, shape, **kw):
+        out, asked, _, agent = self._drive(label, shape, **kw)
+        took = self.HOST in agent._approved_sites
+        if out is not None:
+            assert not asked, f"{label!r} drew a card before being refused"
+            assert not took, f"{label!r} was refused and still took the grant"
+            return "refused"
+        if not asked:
+            assert not took, f"{label!r} took the grant with no card"
+            return "free"
+        assert len(asked) == 1, f"{label!r} drew {len(asked)} cards"
+        assert took, f"{label!r} drew the grant card and recorded nothing"
+        if asked[0] == agent_module.SITE_GRANT.format(host=self.HOST):
+            return "site card"
+        assert agent_module.SITE_GRANT_RIDER.format(host=self.HOST) in asked[0]
+        return "names it, and grants"
+
+    def test_every_row_lands_on_the_fate_the_corpus_declares(self):
+        """The measurement itself, iterated over every row. A fate is the pair
+        (was he asked, was the grant taken), so a card quietly kept while the
+        grant leaked — or a grant taken with no card — fails here."""
+        for label, shape, _, after in self.CORPUS:
+            assert self._fate(label, shape) == after, (label, shape)
+
+    def test_the_only_permitted_move_is_an_inert_press_becoming_free(self):
+        """The whole direction of the change, and the whole of it. One row is
+        allowed a second move — a nondescript submit whose card now names it —
+        and it is declared here rather than waved through, because it still
+        asks and still grants: only the words on the card changed.
+
+        Measured: 13 of the 22 rows move. Twelve are `site card` → `free`, and
+        every one of those twelve is inert by `Control.mutating`. The
+        thirteenth is the named submit. No refusal moves in either direction,
+        and nothing becomes free that changes something."""
+        freed, renamed = [], []
+        for label, shape, before, after in self.CORPUS:
+            assert self._fate(label, shape) == after, (label, shape)
+            if before == after:
+                continue
+            if (before, after) == ("site card", "free"):
+                _, _, _, agent = self._drive(label, shape)
+                control = agent._browse_view.shown.controls[0]
+                assert not control.mutating, f"{label!r} freed while mutating"
+                freed.append((label, shape))
+            elif (before, after) == ("site card", "names it, and grants"):
+                renamed.append((label, shape))
+            else:
+                raise AssertionError(f"forbidden move: {label!r} {before}→{after}")
+        # The COUNT as well as the direction: a direction check alone passes
+        # happily while a widened rule frees ten more labels the right way.
+        assert len(freed) == 12, freed
+        assert len(renamed) == 1, renamed
+        assert len(self.CORPUS) == 22
+
+    def test_an_inert_press_records_no_grant(self):
+        """The half that would be the same bug wearing a nicer face. A grant
+        taken quietly on an inert press spends the consent without asking for
+        it, and the next consequential press would ride a yes he never gave."""
+        out, asked, logged, agent = self._drive("Przełącz lokal", "button")
+        assert out is None
+        assert asked == []
+        assert agent._approved_sites == set()
+        assert logged == []
+
+    def test_the_first_consequential_press_collects_it_and_names_it(self):
+        """One card, the merged M1 shape, naming the press the grant is being
+        taken on — and the grant recorded exactly as `_grant_site` always
+        recorded it, because a reopened chat replays it from that record."""
+        out, asked, logged, agent = self._drive("Dalej", "submit, no method")
+        assert out is None
+        assert asked == [
+            "click button 'Dalej' on eon.pl — "
+            + agent_module.SITE_GRANT_RIDER.format(host=self.HOST)
+        ]
+        assert agent._approved_sites == {self.HOST}
+        assert {"kind": "site_grant", "host": self.HOST} in logged
+
+    def test_an_inert_press_first_does_not_spend_the_later_ones_card(self):
+        """The sequence the owner actually walks: switch a tab, look at the
+        page, then press the thing that does something. The card arrives on the
+        third act and names it, where before it arrived on the first and named
+        a tab switch."""
+        raws = [
+            {"n": 1, "kind": browse.BUTTON, "name": "Przełącz lokal"},
+            {"n": 2, "kind": browse.BUTTON, "name": "Dalej", "submits": True},
+        ]
+        controls = browse.controls_from(raws)
+        asked = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+        )
+        agent._browse_view.remember(snapshot(
+            url=f"https://{self.HOST}/mojeon", controls=controls
+        ))
+        assert agent._browse_gate("browse_act", {"target": "Przełącz lokal"}) is None
+        assert asked == []
+        assert agent._browse_gate("browse_act", {"target": "Dalej"}) is None
+        assert len(asked) == 1
+        assert "Dalej" in asked[0]
+        assert "Przełącz lokal" not in asked[0]
+
+    def test_a_refusal_never_consults_the_grant_entry_by_entry(self):
+        """#342's refusals are above the grant in `_browse_gate` and must stay
+        there: a refusal that reached the grant could be turned into a card by
+        a site the owner had already said yes to.
+
+        Swept over EVERY entry of EVERY commit list rather than a sample — the
+        `zamawiam` lesson applied to the guard. Driven both ways, granted and
+        ungranted, and the two refusals must be the same string."""
+        incumbent = TestTheCommitVerbsLeaveTheApprovableSet()
+        for name, entries in sorted(incumbent._commit_lists().items()):
+            if incumbent.LIST_KINDS[name] != "refuses":
+                continue
+            for entry in entries:
+                cold, asked, logged, agent = self._drive(entry, "button")
+                warm, warm_asked, _, _ = self._drive(entry, "button", granted=True)
+                assert cold is not None, f"{name}: {entry!r}"
+                assert cold == warm, f"{name}: {entry!r} reads the grant"
+                assert asked == warm_asked == [], f"{name}: {entry!r}"
+                assert agent._approved_sites == set(), f"{name}: {entry!r}"
+                assert logged == [], f"{name}: {entry!r}"
+
+    def test_a_granted_site_is_completely_unaffected(self):
+        """What M4 changes is WHEN the grant is collected, never what it means
+        or how it matches. Past the grant, every fate is the one it always
+        was."""
+        for label, shape, _, _ in self.CORPUS:
+            out, asked, _, _ = self._drive(label, shape, granted=True)
+            if browse.commits(label, navigates="href" in self.SHAPES[shape]):
+                assert out is not None, label
+                continue
+            assert out is None, label
+            for card in asked:
+                assert "signed in as you" not in card, label
+
+    def test_the_suffix_match_and_the_scope_are_untouched(self):
+        """`_site_granted` is not what this slice changes. A grant on the site
+        still covers a country subdomain and still covers nothing above it."""
+        agent = Agent(model="fake", approve=lambda _c: True,
+                      client_chat=lambda **kw: {})
+        agent._approved_sites.add("linkedin.com")
+        assert agent._site_granted("pl.linkedin.com")
+        assert agent._site_granted("linkedin.com")
+        assert not agent._site_granted("evil-linkedin.com")
+        assert not agent._site_granted("com")
+
+    # ------------------------------------------------------------ the batch
+
+    def _batch(self, *, get=True, worded=False):
+        return snapshot(url=f"https://{self.HOST}/mojeon", controls=(
+            browse.controls_from([
+                {"n": 1, "kind": "field", "name": "Skąd"},
+                {"n": 2, "kind": "button", "submits": True,
+                 "name": "Wyślij" if worded else "Szukaj",
+                 **({"method": "get"} if get else {})},
+            ])
+        ))
+
+    def _batch_agent(self, snap, *, vouched=True):
+        asked, logged = [], []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+            state_log=logged.append,
+        )
+        agent._browse_view.remember(snap)
+        if vouched:
+            # The send question (#295 M3) has its own tests; it is not what is
+            # being counted here.
+            agent._approved_hosts.add(self.HOST)
+        return agent, asked, logged
+
+    BATCH_STEPS = ({"target": "Skąd", "value": "WAW"},
+                   {"target": "Szukaj", "do": "click"})
+
+    def test_a_batch_of_inert_steps_asks_nothing_and_grants_nothing(self):
+        """The same move as the single press: type into a box and press a GET
+        search, which is a link with the query typed into it. His own
+        `browse_fill` cards — `Dokąd Wybierz lotnisko przylotu`, `Dodaj + —
+        Dorośli` — were this."""
+        agent, asked, logged = self._batch_agent(self._batch())
+        out = agent._browse_gate("browse_fill", {"steps": list(self.BATCH_STEPS)})
+        assert out is None
+        assert asked == []
+        assert agent._approved_sites == set()
+        assert logged == []
+
+    def test_a_batch_with_a_consequential_step_asks_once_and_names_it(self):
+        """One card, naming the form and every value it would send, with the
+        grant riding it on a line of its own."""
+        agent, asked, logged = self._batch_agent(self._batch(get=False))
+        out = agent._browse_gate("browse_fill", {"steps": list(self.BATCH_STEPS)})
+        assert out is None
+        assert len(asked) == 1
+        assert "fill in this form on eon.pl" in asked[0]
+        assert asked[0].endswith(
+            "\n" + agent_module.SITE_GRANT_RIDER.format(host=self.HOST)
+        )
+        assert agent._approved_sites == {self.HOST}
+        assert {"kind": "site_grant", "host": self.HOST} in logged
+
+    def test_a_batch_whose_press_is_worded_still_draws_its_own_card(self):
+        """The floor the grant explicitly does not cover is unmoved: a name
+        that says it sends draws a card whatever else is true."""
+        agent, asked, _ = self._batch_agent(self._batch(worded=True))
+        steps = [{"target": "Skąd", "value": "WAW"},
+                 {"target": "Wyślij", "do": "click"}]
+        assert agent._browse_gate("browse_fill", {"steps": steps}) is None
+        assert len(asked) == 1
+        assert "Wyślij" in asked[0]
+
+    # ------------------------------------------- what still holds around it
+
+    def test_the_driven_send_question_still_fires_on_a_freed_press(self):
+        """**The composition M3 shipped for, checked here as well as there.**
+        The path this slice opens is: open an attacker's page (free), type
+        prose into its box (free), press its GET submit — which M4 makes inert
+        and therefore free of the grant card. The send question is a DIFFERENT
+        grant asked about a different thing, so it still fires: the press asks
+        nothing about the site and everything about the egress."""
+        agent, asked, _ = self._batch_agent(
+            self._batch(), vouched=False,
+        )
+        agent._tainted = True
+        out = agent._browse_gate("browse_fill", {"steps": list(self.BATCH_STEPS)})
+        assert out is None
+        assert len(asked) == 1
+        assert "send data to eon.pl" in asked[0]
+        # …and the site half is genuinely absent, not merely outvoted.
+        assert "signed in as you" not in asked[0]
+        assert agent._approved_sites == set()
+
+    def test_a_password_field_is_still_refused_before_any_of_this(self):
+        """The never-typed floor and the password refusal sit above the grant
+        and are untouched by when it is collected."""
+        controls = browse.controls_from(
+            [{"n": 1, "kind": browse.PASSWORD, "name": "Hasło"}]
+        )
+        asked = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+        )
+        agent._browse_view.remember(snapshot(
+            url=f"https://{self.HOST}/mojeon", controls=controls
+        ))
+        out = agent._browse_gate(
+            "browse_act", {"target": "Hasło", "action": "type", "text": "x"}
+        )
+        assert out is not None and "password" in out.lower()
+        assert asked == []
+        assert agent._approved_sites == set()
+
+
+    # ------------------------------------------------- the Enter-key submit
+
+    def _enter_page(self, *, get, form="f1"):
+        return snapshot(url=f"https://{self.HOST}/x", controls=browse.controls_from([
+            {"n": 1, "kind": "field", "name": "Skąd", "form": form},
+            {"n": 2, "kind": "button", "name": "Go", "submits": True,
+             "form": form, **({"method": "get"} if get else {})},
+        ]))
+
+    def _enter(self, snap, *, vouched=True, monkeypatch=None):
+        if monkeypatch is not None:
+            # A submit card carries the form's held values, read LIVE (#251).
+            # There is no browser here and that fallback is not what is under
+            # test; the grant clause is.
+            monkeypatch.setattr(browser, "browse_fields", lambda **kw: [])
+        asked, logged = [], []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+            state_log=logged.append,
+        )
+        agent._browse_view.remember(snap)
+        if vouched:
+            agent._approved_hosts.add(self.HOST)  # the send clause has its tests
+        out = agent._browse_gate("browse_act", {
+            "target": "Skąd", "action": "type", "text": "WAW", "submit": True,
+        })
+        return out, asked, logged, agent
+
+    def test_pressing_enter_in_a_field_is_judged_by_the_form_it_sends(
+        self, monkeypatch
+    ):
+        """A FIELD is never `mutating` — typing changes nothing until something
+        is pressed — so read off the named control alone, `submit=True` would
+        skip the grant while clicking that same form's button collects it. The
+        difference between the two is an argument the model picks, which is the
+        bypass shape this file has twice had to remove (#287, #310)."""
+        out, asked, logged, agent = self._enter(
+            self._enter_page(get=False), monkeypatch=monkeypatch
+        )
+        assert out is None
+        assert len(asked) == 1
+        assert agent_module.SITE_GRANT_RIDER.format(host=self.HOST) in asked[0]
+        assert agent._approved_sites == {self.HOST}
+        assert {"kind": "site_grant", "host": self.HOST} in logged
+
+    def test_enter_in_a_search_box_stays_free(self):
+        """And the same predicate keeps it honest in the other direction: an
+        explicit `method="get"` form is a link with the query typed into it, so
+        Enter there is as inert as clicking its button. His `przeszukaj Moje
+        Allegro` and `Numer przesyłki` are exactly this."""
+        out, asked, logged, agent = self._enter(self._enter_page(get=True))
+        assert out is None
+        assert asked == []
+        assert agent._approved_sites == set()
+        assert logged == []
+
+    def test_a_form_this_cannot_see_into_fails_closed(self):
+        """An explicit `submit=True` is the model asking to SEND. A field with
+        no resolvable submit beside it is treated as one that changes something
+        — being wrong costs the card he is shown today, and the other direction
+        costs the grant."""
+        lone = snapshot(url=f"https://{self.HOST}/x", controls=browse.controls_from(
+            [{"n": 1, "kind": "field", "name": "Skąd"}]
+        ))
+        out, asked, _, agent = self._enter(lone)
+        assert out is None
+        assert len(asked) == 1
+        assert agent._approved_sites == {self.HOST}
+
+
+    def test_the_bare_site_card_survives_where_there_is_nothing_to_name(self):
+        """The one path with no control to name: the target did not resolve
+        against the snapshot, so the gate fails closed and asks about the site
+        alone. It is reachable ATTENDED as well as unattended — the doc claimed
+        otherwise until a review drove it, and a sentence about which card he
+        can be shown has to be checked rather than reasoned about."""
+        for origin in ("user", "schedule"):
+            asked = []
+            agent = Agent(
+                model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+                approve_tool=lambda n, a, p, seen=asked: seen.append(p) or True,
+                origin=origin,
+            )
+            agent._approved_hosts.add(self.HOST)  # the send clause has its tests
+            agent._browse_view.remember(snapshot(
+                url=f"https://{self.HOST}/x",
+                controls=browse.controls_from(
+                    [{"n": 1, "kind": "field", "name": "Skąd"}]
+                ),
+            ))
+            out = agent._browse_gate("browse_act", {
+                "target": "nothing on this page", "action": "type",
+                "text": "WAW", "submit": True,
+            })
+            assert out is None, origin
+            assert asked == [agent_module.SITE_GRANT.format(host=self.HOST)], origin
+            assert agent._approved_sites == {self.HOST}, origin
+
+    def test_typing_without_submitting_is_still_free(self):
+        """Unchanged, and it is the floor the whole slice stands on: nothing is
+        committed until something is pressed."""
+        asked = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+        )
+        agent._browse_view.remember(self._enter_page(get=False))
+        agent._approved_hosts.add(self.HOST)
+        out = agent._browse_gate(
+            "browse_act", {"target": "Skąd", "action": "type", "text": "WAW"}
+        )
+        assert out is None
+        assert asked == []
+        assert agent._approved_sites == set()
+
+    def test_a_granted_site_gains_no_card_from_any_of_this(self, monkeypatch):
+        """The Enter branch decides only WHEN the grant is collected. Past the
+        grant it has no effect at all, so this slice adds no card class."""
+        for get in (True, False):
+            asked = []
+            agent = Agent(
+                model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+                approve_tool=lambda n, a, p, seen=asked: seen.append(p) or True,
+            )
+            monkeypatch.setattr(browser, "browse_fields", lambda **kw: [])
+            agent._browse_view.remember(self._enter_page(get=get))
+            agent._approved_sites.add(self.HOST)
+            agent._approved_hosts.add(self.HOST)
+            out = agent._browse_gate("browse_act", {
+                "target": "Skąd", "action": "type", "text": "WAW", "submit": True,
+            })
+            assert out is None, get
+            assert asked == [], get
+
+    def test_a_checkout_page_puts_the_first_submit_back_behind_a_named_card(self):
+        """Page evidence is read in the escalating direction only, and it is
+        read before the grant is collected: a submit on a page showing commit
+        structure needs a card of its own, which is also the press the grant
+        rides on."""
+        assert self._fate(
+            "Dalej", "submit, no method", evidence="a payment provider frame"
+        ) == "names it, and grants"
+
+    def test_an_unattended_session_keeps_todays_strictness(self):
+        """Nobody is going to read the answer, so the card cannot be justified
+        by his attention and is not thinned by its absence. Every press in a
+        triggered session is treated as due, exactly as before — the ONE thing
+        that changed there is that the card now names the press."""
+        for label, shape, _, _ in self.CORPUS:
+            if browse.commits(label, navigates="href" in self.SHAPES[shape]):
+                continue
+            out, asked, _, agent = self._drive(label, shape, origin="schedule")
+            assert out is None, label
+            assert len(asked) == 1, label
+            assert "signed in as you" in asked[0], label
+            assert agent._approved_sites == {self.HOST}, label
+
 
 class TestAGridThatIsPartlyMute:
     """A picker is very often a MIXTURE: the day cells state their date and the

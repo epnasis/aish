@@ -61,7 +61,7 @@ ALLOWED = {
     # The three below are the SAME cookie jar, in the CLI system prompt: what
     # the site remembers about the owner being logged in. Nothing to do with
     # the conversation — the chat outlives the sign-in and resumes without it.
-    "The browser keeps the user's own signed-in sessions, so reading a site they are logged into",
+    "The browser keeps the user's own signed-in sessions. READING one of their sites is free by",
     "AISH, not from the page, and it is true — it tells you the session has expired, or that the",
     'says and then STOP. Say "your eon.pl session has expired — run /browser '
     "https://eon.pl to sign",
