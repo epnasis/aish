@@ -221,6 +221,15 @@ class ClaudeMaxAgent:
         # approval this backend ever shows.
         return self.inner.turn_intent()
 
+    def asking_gate(self) -> str:
+        # Same seam, same hazard, one line lower (#295 M3): the gates run on
+        # the inner agent because `_locked_dispatch` routes through it, so that
+        # is the object that knows who is asking. Missing here, this backend's
+        # approvals would record no gate at all — #311's lesson, which is that a
+        # seam `server.py` appears to cover generically covers it only where it
+        # is forwarded by hand.
+        return self.inner.asking_gate()
+
     def restore_workspace(self, cwd: str | None, trusted: list[str]) -> None:
         self.inner.restore_workspace(cwd, trusted)
 

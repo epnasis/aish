@@ -56,6 +56,7 @@ from . import (
     tool_plugins,
     tools,
     vocab,
+    vouches,
     web,
 )
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
@@ -246,7 +247,12 @@ Rules:
    the site together, so a no there means the press was refused AND the site was not granted —
    do not try a different control to get around it. The same is true of the prompt you
    may see before an address at a host nobody has named yet — it is asked once for that exact
-   host, and it covers read_url and browse alike. In a web chat it lasts even if aish restarts.
+   host, and it covers read_url and browse alike. It is asked ONCE, EVER — it survives aish
+   restarting, the next chat, and the terminal as well as the web — so never warn the user
+   that they will be asked again.
+   Pressing a control that SENDS A FORM carrying values you typed asks that same question, at a
+   host nobody has agreed to send anything to yet, and a yes there covers addresses too — so do
+   not avoid a form for fear of it. Filling a form in is never asked about; only sending it is.
    Once they approve, that page IS
    read through their signed-in browser: you never need a cookie, a token, or a manual download
    to see their account. A line beginning "[aish:" ABOVE the untrusted-content banner is from
@@ -1480,6 +1486,39 @@ EGRESS_NO_APPROVER = (
     "the owner named, or finish and report."
 )
 
+# The DRIVEN TWIN of the composed address (#295 M3). Same question, same vouch,
+# different mechanism: a form submit carrying values aish itself typed is a
+# composed query URL that a page built instead of a string concatenation. The
+# sentence never names a tool (P1) — it says what would leave the machine and
+# where it would go, exactly as the composed-address card does, and it rides the
+# press card rather than drawing a second one (M1's law: one press, one card).
+SEND_GRANT = "send data to {host} — pressing this {finding}."
+
+SEND_GRANT_RIDER = "and send data to {host} — pressing this {finding}."
+
+# A no here must not leave the model with an obvious way round: the same values
+# in a composed address gate too, and it is told so rather than left to find out.
+SEND_DENIED = (
+    "USER DENIED sending what aish typed to {host} — the form was NOT submitted "
+    "and nothing left the machine. Do not retry it, and do not put the same "
+    "values into an address instead. Ask the user what to do."
+)
+
+# What the driven twin found, and it is the same clause `_value_finding` uses
+# for a query at an unvouched host, because it is the same finding: values are
+# about to ride an address to somewhere the owner has never agreed to send
+# anything. `{n}` is counted, never estimated — the values are the ones aish
+# composed, so there is nothing to guess about.
+DRIVEN_CARRIES = (
+    "would send {n} value(s) aish typed into the page, and you have never "
+    "agreed to send anything there"
+)
+
+# The same finding in a triggered session, minus the clause about a vouch: the
+# strict unattended rule gates a payload at a host the owner DID name, so
+# saying "you have never agreed" there would state something no line checked.
+DRIVEN_UNATTENDED_CARRIES = "would send {n} value(s) aish typed into the page"
+
 # `_payload_finding` returns the sentence the ATTENDED card says. These three
 # are its findings for the cases the attended card does not word: a search
 # (which names a host and never reaches one, so it has its own sentence), a
@@ -1601,6 +1640,51 @@ BROWSE_ACTION_AND_SITE_DENIED = (
 # them. A new browsing tool that misses one is a tool outside the gate, so they
 # all read this.
 BROWSE_TOOLS = ("browse", "browse_act", "browse_fill")
+
+# The two of them that put aish's OWN hands on a page already open. `browse` is
+# the open, which is an address the model composed and is judged as one by
+# `_egress_gate`; these two are judged by `_driven_egress_gate`, which asks the
+# same question about a form the page composed instead.
+DRIVING_TOOLS = ("browse_act", "browse_fill")
+
+# WHICH GATE raised an approval card, recorded on the decision (#295 M3).
+#
+# **The record could not say who asked, and that has now cost twice in one
+# day.** It forced an unanswerable question about seeding — whether the
+# hosts in the owner's history came from egress cards or from mail-link
+# cards, which grant very different things — and it made the epic's own
+# ledger tell him that `Przełącz lokal` was a worded-link card when the log
+# proves it was the site grant. Both were answered by INFERENCE: looking
+# for a `site_grant` record landing after the approval, and reasoning from
+# a label. That is a hypothesis standing where a line of code should be,
+# which is the thing L8 exists to stop. `_dispatch` is one execution point;
+# `approve_tool` is one card channel, and seven different gates reach it.
+#
+# Named `asked_by` on the record and never `gate`: `kind:"gate"` is an
+# existing trace record with its OWN `gate` field
+# (`docs/trace-contract.md` §3.3), and one word meaning two things in one
+# log is how a reader comes to read the wrong one confidently.
+ASKED_BY_EGRESS = "egress"
+ASKED_BY_MAIL_LINK = "mail-link"
+ASKED_BY_PRESS = "press"
+ASKED_BY_BATCH = "batch"
+ASKED_BY_KNOWLEDGE = "knowledge"
+ASKED_BY_RULE = "rule"
+ASKED_BY_PLUGIN = "plugin"
+
+# The client-side approvers label their own cards, since no gate in this
+# file raises them. They are here so the whole vocabulary is one list a
+# test can iterate rather than strings scattered over three modules.
+ASKED_BY_SHELL = "shell"
+ASKED_BY_READ = "read"
+ASKED_BY_WRITE = "write"
+ASKED_BY_IMPORT = "import"
+
+ASKED_BY = (
+    ASKED_BY_EGRESS, ASKED_BY_MAIL_LINK, ASKED_BY_PRESS, ASKED_BY_BATCH,
+    ASKED_BY_KNOWLEDGE, ASKED_BY_RULE, ASKED_BY_PLUGIN, ASKED_BY_SHELL,
+    ASKED_BY_READ, ASKED_BY_WRITE, ASKED_BY_IMPORT,
+)
 
 # Tools whose results carry bytes from OUTSIDE this machine. Once one has run,
 # everything the model proposes next may be an echo of text an attacker wrote,
@@ -2439,7 +2523,17 @@ class Agent:
         # web is gated too, and without provenance every host he named himself
         # would come back novel.
         self._owner_hosts: set[str] = set()
-        self._approved_hosts: set[str] = set()
+        # MACHINE-WIDE and PERMANENT since #295 M3, seeded on first use from
+        # his own recorded approvals. An answer he has given once is not asked
+        # again — not in the next chat, not on the other client, not after a
+        # ship. Measured: the same yes for allegro.pl was collected in three
+        # separate chats in one week while this was per chat.
+        #
+        # Read once, HERE, rather than on every gate call. A vouch another
+        # process records while this agent is alive is not seen until the next
+        # one is built, which costs one card and can never grant one — the same
+        # bargain `_approved_sites` makes with its own restore.
+        self._approved_hosts: set[str] = set(vouches.hosts())
         # Has content from outside this machine entered the task? Set by
         # _execute_tool_calls, reset per task. It is what replaces "who started
         # the session?" as the question the egress and knowledge gates ask —
@@ -2450,6 +2544,18 @@ class Agent:
         # recorded as whole addresses rather than re-derived by searching raw
         # text later. Read by _url_was_offered.
         self._offered_links: set[str] = set()
+        # What aish TYPED into a page this task, per host, as (the control the
+        # model named, the value it sent). Read by `_driven_egress_gate`, which
+        # is the driven twin of the composed-address question (#295 M3): a
+        # submit carrying these is the same egress as a URL with the same text
+        # stapled into its query.
+        #
+        # Recorded from the ARGUMENTS aish itself composed, never read back off
+        # the page. The page is attacker-authored — reading the values out of it
+        # would let a page decide whether the gate fires by rewriting its own
+        # fields, and it would miss a value the page hides the moment it is
+        # entered.
+        self._typed_this_task: dict[str, list[tuple[str, str]]] = {}
         # URLs that arrived by e-mail this task, mapped to what they are
         # (provenance.LINK / provenance.SIGN_IN). Read by _mail_link_gate.
         self._mail_links: dict[str, str] = {}
@@ -2639,6 +2745,11 @@ class Agent:
         # the owner was told it (#252). Read by the approval gate; see
         # note_intent for why it is not the same thing as `_delivered`.
         self._intent = ""
+        # Which gate is holding a card open RIGHT NOW, for the recorder to
+        # stamp on the decision (#295 M3). Not task state: it is set and
+        # cleared around a single blocking call by `_ask_owner`, which is the
+        # only thing that may write it.
+        self._gate_asking = ""
         # Tokens withheld from the client while a bound turn's answer is still
         # unverified. `None` means stream normally.
         self._held_answer: list[str] | None = None
@@ -3270,6 +3381,10 @@ class Agent:
         # tainted, and a link a page showed while answering one question is not
         # a licence to compose an address at that host in the next.
         self._offered_links = set()
+        # Typed values belong to the task that typed them, exactly as taint and
+        # offered links do: a value sent to a form while answering one question
+        # is not a licence to send the next task's values to the same host.
+        self._typed_this_task = {}
         self._mail_links = {}
         self._approved_mail_links = set()
         with self._provenance_lock:
@@ -6661,9 +6776,11 @@ class Agent:
         about a search term and not about a credential that works elsewhere.
         Two things then made it worse rather than merely old. Arm 3 now
         DETECTS the secret and the gate stayed silent anyway, which is the
-        exact shape of a check whose finding nothing acts on. And #341's first
-        slice extends this vouch from the agent's lifetime to the chat's,
-        across every ship. So the secret joins the list above."""
+        exact shape of a check whose finding nothing acts on. And the vouch has
+        gone from the agent's lifetime (#341) to the machine's (#295 M3), so
+        residual (a) is now permanent rather than per chat — which makes the
+        one thing it must not cover matter more, not less. So the secret joins
+        the list above."""
         if not hosts or not self._approved_hosts:
             return False
         if not all(h in self._approved_hosts for h in hosts):
@@ -6703,6 +6820,11 @@ class Agent:
         one of them an ordinary read. A gate that knows only *something* can
         only say *something*, so the sentence and the decision are computed
         together and by the same code."""
+        if name in DRIVING_TOOLS:
+            # A form the PAGE composed, carrying values AISH composed — the
+            # driven twin of everything below (#295 M3). Same question, asked
+            # of the other channel.
+            return self._driven_finding(name, args)
         if name == "web_search":
             # **A search query NAMES a host; it never reaches one.** The query
             # is handed to the search engine and to nobody else, so `site:` —
@@ -6792,8 +6914,10 @@ class Agent:
         `_owner_hosts` merely for appearing in text he typed OR PASTED, so an
         address inside a forwarded email is owner-authored by provenance and
         attacker-chosen in fact. The offered half is asked before this function
-        is reached, by `_url_was_offered`. With the vouch now surviving a
-        restart, arms 5 and 7 cost one card per host per chat, ever.
+        is reached, by `_url_was_offered`. With the vouch now machine-wide and
+        permanent (#295 M3), arms 5 and 7 cost one card per host, EVER — and
+        the seeding means 11 of the 18 hosts his own history actually reaches
+        never draw that card at all.
 
         **What DID narrow, said plainly.** The card narrowed, and so did the
         refusal set — for path-borne payloads at unvouched hosts, attended.
@@ -6837,15 +6961,19 @@ class Agent:
             return ""
         # Both remaining arms share one condition — no provenance — because
         # both are about the DESTINATION rather than about the value's shape.
+        #
+        # "you have never agreed", not "nothing in this chat has agreed": since
+        # #295 M3 the set this was checked against is machine-wide and
+        # permanent, so the chat-scoped sentence would state something narrower
+        # than the line established. A card must say what was checked.
         if (run := _longest_path_run(parts)) >= PATH_RUN_MIN:
             return (
-                f"carries a {run}-character run in its path, and nothing in "
-                "this chat has agreed to send anything there"
+                f"carries a {run}-character run in its path, and you have never "
+                "agreed to send anything there"
             )
         if parts.query or parts.fragment:
             return (
-                "carries a query, and nothing in this chat has agreed to send "
-                "anything there"
+                "carries a query, and you have never agreed to send anything there"
             )
         return ""
 
@@ -6918,7 +7046,7 @@ class Agent:
                 f"this turn has read the open web, and the address it built "
                 f"for {shown} {self._payload_finding(name, args) or NO_READABLE_HOST}"
             )
-        decision = self.approve_tool(name, args, preview)
+        decision = self._ask_owner(ASKED_BY_EGRESS, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
@@ -6949,13 +7077,28 @@ class Agent:
         return None
 
     def _vouch_hosts(self, hosts: list[str]) -> None:
-        """Record an egress vouch, in memory and in the chat's log (#341).
+        """Record an egress vouch — in memory, in the chat's log (#341), and in
+        the machine-wide store (#295 M3).
 
         The comment above claimed his answer LASTS, and for the agent's
         lifetime it did — but a chat outlives the agent holding it, since every
         ship rebuilds one underneath an open chat. Measured:
         `session-20260830-124807-752582` drew two cards for allegro.pl in one
         session, records 816 and 1093, the second after the first was approved.
+
+        **And a chat is not the scope either.** The same yes for allegro.pl was
+        collected in three separate chats in one week, which is what "once per
+        host per chat" costs when the steady state is 18 distinct hosts across
+        his entire recorded history. So the vouch is now machine-wide and
+        permanent (`vouches.add`). Legal under epic #295 P3 because the grant is
+        the owner's own act; recorded because P6 requires the capability not to
+        outrun the record.
+
+        **THREE writes, and the log one is not redundant.** `vouches` is the
+        answer; the `egress_vouch` record is the audit trail — WHICH chat, at
+        which point in it, asked and was told yes — and it is what
+        `restore_egress_vouches` and #341's tests read. A store that is only a
+        set of hosts cannot say when or why a host got in.
 
         **Its own record kind, and never `GRANT_KINDS`.** Site grants are read
         back into `_approved_sites`, which `_site_granted` matches by SUFFIX
@@ -6969,10 +7112,194 @@ class Agent:
         `docs/agent-core.md` — so the round trip through the log must not grow
         the set either."""
         self._approved_hosts.update(hosts)
+        vouches.add(list(hosts))
         if self.state_log is None:
             return
         for host in hosts:
             self.state_log({"kind": "egress_vouch", "host": host})
+
+    def _note_typed_values(self, name: str, args: dict) -> None:
+        """Remember what aish is about to TYPE into the page, per host (#295 M3).
+
+        Written from the arguments aish itself composed and never read back off
+        the page, and that is the property rather than an economy: the page is
+        attacker-authored, so reading the values out of it would let a page
+        decide whether the gate fires by rewriting its own fields, and it would
+        miss a value the page hides the moment it is entered.
+
+        An EMPTY value is not recorded. Clearing a field sends nothing, and the
+        question this record answers is what would ride the submit."""
+        typed = [(target, value) for target, value in browse.typed_values(name, args) if value]
+        host = self._driven_host(name, args)
+        if host and typed:
+            self._typed_this_task.setdefault(host, []).extend(typed)
+
+    def _driven_host(self, name: str, args: dict) -> str:
+        """The EXACT host a submit would send to, `_approved_hosts`' vocabulary.
+
+        Deliberately NOT `_browse_host`, which strips `www.` — that one speaks
+        `_approved_sites`' vocabulary, where the grant is suffix-matched and the
+        bare site is the honest name for what a yes covers. The send vouch is
+        EXACT-matched, and that is load-bearing: mixing the two would make a
+        yes given for `www.ryanair.com` silently free `ryanair.com`, and a card
+        naming one host while vouching another breaks the invariant that what
+        enters `_approved_hosts` is exactly what the preview put in front of
+        him. So a merged card can name two spellings of the same site, one per
+        clause, because the two clauses grant differently matched things."""
+        if name == "browse":
+            url = str(args.get("url", "") or "")
+        else:
+            current = self._browse_view.shown
+            url = current.url if current is not None else ""
+        try:
+            return (urllib.parse.urlsplit(url).hostname or "").lower()
+        except ValueError:
+            return ""
+
+    def _submitting_control(self, name: str, args: dict):
+        """The control this call would press to SEND a form, or None.
+
+        Two shapes, and missing the second one would have made the fence
+        decorative. A submit BUTTON is `Control.submits`, carried from the page
+        enumeration. But `browse_act(action="type", submit=True)` presses Enter
+        in the field it just typed into, which submits the form around it — the
+        target there resolves to a FIELD, whose `submits` is false, so a check
+        that read only the button would be walked past by the one argument that
+        exists to send without pressing anything.
+
+        The Enter case is failed CLOSED — an explicit `submit=True` is the model
+        asking to send, so it counts whether or not the field's form can be
+        resolved. `choose` and `check` carry no model-supplied value at all and
+        are not submits; `read` touches nothing."""
+        if name == "browse_act":
+            action = str(args.get("action", "click") or "click")
+            if action == "type":
+                return self._browse_target(args) if args.get("submit") else None
+            if action != "click":
+                return None
+            control = self._browse_target(args)
+            return control if control is not None and control.submits else None
+        if name == "browse_fill":
+            current = self._browse_view.shown
+            if current is None:
+                return None
+            plan = browse.plan_batch(current.controls, list(args.get("steps") or []))
+            if plan.problem:
+                return None
+            for step in plan.steps:
+                if (
+                    step.do == "click"
+                    and step.control is not None
+                    and step.control.submits
+                ):
+                    return step.control
+        return None
+
+    def _values_riding_this_press(self, name: str, args: dict, host: str) -> list:
+        """Every value aish typed that pressing this would send.
+
+        This call's own typed values are included, which is what makes the
+        one-call `browse_fill` — type three fields, then press Search — the same
+        answer as the two-call version. A batch that types and submits in one
+        step would otherwise have nothing recorded yet and go free."""
+        return [
+            *self._typed_this_task.get(host, []),
+            *[(t, v) for t, v in browse.typed_values(name, args) if v],
+        ]
+
+    def _driven_finding(self, name: str, args: dict) -> str:
+        """WHAT pressing this would send, in the owner's own words — or "" when
+        it would send nothing (#295 M3).
+
+        **The driven twin of the composed address, and it exists because the
+        composed address is not the only way to build one.** A later slice
+        re-anchors the site grant so inert presses stop asking, and that opens a
+        path only the site card blocks today: open an attacker's page (a plain
+        URL — free), type prose into its search box (typing is free, and has
+        always been: nothing is committed until something is pressed), then
+        press its GET submit (inert, so free). The page builds
+        `https://attacker.example/?q=<the owner's mail in plain words>` out of
+        its own form, and no value check catches prose. That is arm 5 of
+        `_value_finding` — *the destination* — rebuilt one layer down.
+
+        So the FIXED RULE (P3 — a rule, not a judgement, and it can only ever
+        draw a card that was not needed): a form submit carrying values aish
+        itself typed THIS TASK, at a host with no vouch, is the same egress as a
+        composed query URL. Same question, same card, same vouch.
+
+        **The VALUE arms run first, and they run at a vouched host too.** The
+        first version of this stopped at the destination arm, and a delivery
+        review found what that cost: with a host vouched, typing one of the
+        owner's stored secrets into its search box and pressing submit was FREE,
+        while the identical secret in a composed `?q=` at that same host drew a
+        card. `_searching_a_vouched_site`'s own docstring is the reason it must
+        not — *he said yes to searching a shop, not to handing that shop his
+        password* — and this slice made it sharper, not softer, by widening the
+        vouch to machine-wide and seeding 11 of his 18 hosts on day one. So the
+        two things a vouch has never covered are asked here of the typed values,
+        which is where they would ride: a stored secret, and a second address
+        written inside a value. Their sentences are `_value_finding`'s own,
+        because they are the same finding.
+
+        **EXACTLY those two, and the property test is what says so.** The first
+        attempt at this fix added a data-shaped-run arm as well, and
+        `test_the_value_arms_and_the_composed_arms_agree_host_for_host` failed
+        it: at a vouched host `_searching_a_vouched_site` FREES a high-entropy
+        query — that is residual (a), written down in `docs/agent-core.md` —
+        so an entropy arm here would have made the driven path stricter than the
+        composed one, which is the same divergence in the other direction. A
+        twin is a twin in both directions. The hostname and path arms are not
+        rebuilt and cannot be: those belong to the page aish is standing on,
+        not to anything it composed.
+
+        **Past those, at a vouched host it is free**, which is everywhere he
+        actually drives, so ordinary form-filling never sees this.
+
+        **POST submits are covered too, not only the GET ones the attack uses.**
+        `Control.submits` does not distinguish, and the safe direction is not to
+        teach it to: a non-GET submit is already `mutating` and already carded,
+        so including it costs a clause on a card that was being drawn anyway.
+
+        Unattended keeps the strict rule reads already keep: every submit
+        carrying typed values gates, vouch or no vouch, because nobody is going
+        to read the answer either way."""
+        host = self._driven_host(name, args)
+        if not host or self._submitting_control(name, args) is None:
+            return ""
+        carried = self._values_riding_this_press(name, args, host)
+        if not carried:
+            return ""
+        for value in (v for _, v in carried):
+            # Both forms, exactly as `_value_finding` asks it: a secret holding
+            # a '%' would survive only one of them.
+            if secrets.contains(value) or secrets.contains(
+                urllib.parse.unquote(value)
+            ):
+                return "carries one of your stored secrets"
+        for value in (v for _, v in carried):
+            # A value about to become a query chunk at somebody's host is where
+            # `_forwards_elsewhere` looks; here the value IS that chunk, one
+            # step before the address exists.
+            if _addresses_in_text(urllib.parse.unquote(value)):
+                return "has a second address written inside it"
+        attended = self.origin == "user"
+        if attended and host in self._approved_hosts:
+            return ""
+        template = DRIVEN_CARRIES if attended else DRIVEN_UNATTENDED_CARRIES
+        return template.format(n=len(carried))
+
+    def _driven_note(self, name: str, args: dict, host: str) -> str:
+        """The values themselves, as the card shows them.
+
+        A count is the finding; the values are what makes it checkable at a
+        glance, which is the only condition under which epic #295 P2 lets a card
+        exist at all. Rendered by the same bounded renderer the form card
+        already uses, so a paragraph pasted into a search box cannot push the
+        rest of the card off the screen."""
+        return browse.form_note(
+            self._values_riding_this_press(name, args, host),
+            header="aish would send what it typed:",
+        )
 
     def _mail_link_url(self, name: str, args: dict) -> str:
         """The e-mailed URL this call would open, or "".
@@ -7015,7 +7342,9 @@ class Agent:
             return _gate_outcome(
                 MAIL_LINK_NO_APPROVER.format(url=url), decision="blocked"
             )
-        decision = self.approve_tool(name, args, f"{MAIL_LINK_HELD}: {url}")
+        decision = self._ask_owner(
+            ASKED_BY_MAIL_LINK, name, args, f"{MAIL_LINK_HELD}: {url}"
+        )
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
@@ -7296,28 +7625,76 @@ class Agent:
         same clauses `SITE_GRANT` states it in, and `_grant_site` records it
         exactly as before.
 
+        **A third clause, on the same terms: what this press would SEND (#295
+        M3).** A submit carrying values aish typed at a host with no vouch is
+        the driven twin of a composed query URL, and it asks the same question
+        and collects the same vouch — see `_driven_finding`. It rides here for
+        the reason the grant does: it is the same press, so it is one card, and
+        it is the ONE function both press gates already route through, so the
+        two tools cannot drift on how often he is asked. It is also the only
+        place downstream of every refusal, which matters — a card in front of an
+        action that is about to be refused anyway is how a card stops meaning
+        anything.
+
+        The clauses grant DIFFERENT things and record separately: `_grant_site`
+        writes the suffix-matched press grant, `_vouch_hosts` writes the
+        exact-matched send vouch, and neither set is ever filled from the other.
+
         Joined with a dash when the card is one line and a newline when it is
         not, because a card carrying a form's held values or a batch's steps is
         already a block, and running the grant onto the end of its last value
         would read as part of that value."""
         granted = self._site_granted(host)
-        if granted and not what:
+        sending = self._driven_finding(name, args)
+        # The EXACT host, never `host`: the send vouch is exact-matched and the
+        # press grant is suffix-matched, so the two clauses of one card may
+        # legitimately spell the same site differently (see `_driven_host`).
+        send_host = self._driven_host(name, args)
+        if granted and not what and not sending:
             return None
-        if not what:
-            preview = SITE_GRANT.format(host=host)
-            denial = BROWSE_DENIED.format(host=host)
-        elif granted:
-            preview = what
-            denial = BROWSE_ACTION_DENIED.format(what=what)
-        else:
-            joint = "\n" if "\n" in what else " — "
-            preview = what + joint + SITE_GRANT_RIDER.format(host=host)
+        clauses = [what] if what else []
+        if not granted:
+            clauses.append(
+                SITE_GRANT_RIDER.format(host=host) if clauses
+                else SITE_GRANT.format(host=host)
+            )
+        if sending:
+            # The values themselves ride below the sentence, because a count is
+            # the finding and the values are what make it checkable at a glance
+            # — the only condition epic #295 P2 lets a card exist under.
+            clauses.append(
+                (SEND_GRANT_RIDER if clauses else SEND_GRANT).format(
+                    host=send_host, finding=sending
+                )
+            )
+            if note := self._driven_note(name, args, send_host):
+                clauses.append(note)
+        preview = clauses[0]
+        for clause in clauses[1:]:
+            preview += ("\n" if "\n" in preview or "\n" in clause else " — ") + clause
+        if what and not granted:
             denial = BROWSE_ACTION_AND_SITE_DENIED.format(what=what, host=host)
+        elif what:
+            denial = BROWSE_ACTION_DENIED.format(what=what)
+        elif not granted:
+            denial = BROWSE_DENIED.format(host=host)
+        else:
+            denial = ""
+        if sending:
+            denial = (denial + " " if denial else "") + SEND_DENIED.format(
+                host=send_host
+            )
         refusal = self._browse_approval(name, args, preview, denial)
         if refusal is not None:
             return refusal
         if not granted:
             self._grant_site(host)
+        if sending:
+            # The SAME vouch a composed address collects, recorded the same way
+            # — the two grants stay disjoint (`_grant_site` above writes the
+            # other one), and neither is ever filled from the other. Exactly the
+            # host the clause NAMED, which is residual (c)'s invariant.
+            self._vouch_hosts([send_host])
         return None
 
     def _form_note(self, control) -> str:
@@ -7422,7 +7799,16 @@ class Agent:
         )
         if committing is not None and (held := self._form_note(committing)):
             what += f"\n{held}"
-        if what in self._approved_batches and self._site_granted(host):
+        if (
+            what in self._approved_batches
+            and self._site_granted(host)
+            # …and nothing is about to be SENT that has not been vouched for.
+            # A remembered batch answers only for the batch, exactly as the
+            # clause below says about the site grant: a yes given before the
+            # address question reached driving (#295 M3) cannot be read as a
+            # yes to a question that was never on the card.
+            and not self._driven_finding("browse_fill", args)
+        ):
             # The SAME form, the same values, the same committing press — this
             # is the retry of a batch that stopped part-way, and one of the
             # five cards that search drew was exactly this asked twice. A yes
@@ -7454,7 +7840,11 @@ class Agent:
         self, name: str, args: dict, preview: str, denial: str
     ) -> str | None:
         """One approval card for a browse call. None = approved."""
-        decision = self.approve_tool(name, args, preview)  # type: ignore[misc]
+        # A batch and a single press are different gates and the census has to
+        # be able to tell them apart — inferring one from a label is exactly
+        # what went wrong with `Przełącz lokal`.
+        gate = ASKED_BY_BATCH if name == "browse_fill" else ASKED_BY_PRESS
+        decision = self._ask_owner(gate, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
@@ -7515,7 +7905,7 @@ class Agent:
             f"{who} {what} {slug} — a memory persists into every future "
             "session and is retrieved automatically"
         )
-        decision = self.approve_tool(name, args, preview)
+        decision = self._ask_owner(ASKED_BY_KNOWLEDGE, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
@@ -8139,6 +8529,34 @@ class Agent:
         self._commit_provenance()
         self._intent = (said or "").strip()
 
+    def asking_gate(self) -> str:
+        """Which gate is holding a card open, for the recorder (#295 M3).
+
+        Late-bound off the agent exactly as `turn_intent` is, and for the same
+        reason: the client owns the card and the log, the AGENT owns the reason
+        the card exists, and neither can compute the other's half. Empty
+        whenever no gate in this file is asking — which is every card the
+        client raises itself, and those label their own."""
+        return self._gate_asking
+
+    def _ask_owner(self, gate: str, name: str, args: dict, preview: "str | None"):
+        """Draw one approval card and say WHICH GATE drew it.
+
+        Every `approve_tool` call in this file goes through here. That is the
+        point: seven gates share one card channel, so a gate that set the label
+        itself would be a gate that could forget to, and the eighth one added
+        later would record nothing at all. `test_every_gate_that_asks_says_who_asked`
+        iterates the call sites to keep that true.
+
+        Cleared in a `finally` because the approver BLOCKS — on the web it is a
+        round trip to a phone that may never answer — and a label left standing
+        would be stamped on whatever decision came next."""
+        self._gate_asking = gate
+        try:
+            return self.approve_tool(name, args, preview)  # type: ignore[misc]
+        finally:
+            self._gate_asking = ""
+
     def turn_intent(self) -> str:
         """What the model said before proposing this step's actions — the
         approvers' late-bound reader, mirroring get_scope/get_origin. Empty
@@ -8412,8 +8830,15 @@ class Agent:
         A read-vouch must not license driving, and a press grant must not
         silently cover subdomain egress, so neither set is ever filled from the
         other's card or the other's record. Restored per chat, from that chat's
-        own log, exactly as the site grants are — which is what keeps it a
-        SESSION grant (L4)."""
+        own log, exactly as the site grants are.
+
+        **Kept after the vouch went machine-wide (#295 M3), and not as
+        belt-and-braces.** The durable store is loaded at construction and is
+        the answer for every chat; this replays what THIS chat's own log says it
+        was told, which is what makes a chat reopened on a machine whose store
+        was purged behave as its own record says it should. It can only ever
+        re-add a host the owner approved in this very chat, so it cannot widen
+        anything the store did not already hold."""
         self._approved_hosts.update(hosts)
 
     def restore_opened_links(self, calls: list[tuple[dict, int]]) -> None:
@@ -8583,7 +9008,7 @@ class Agent:
             f"the rule '{binding.name}' says you decide this one "
             f"({binding.rule.description})"
         )
-        decision = self.approve_tool(name, args, preview)
+        decision = self._ask_owner(ASKED_BY_RULE, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             message = _with_feedback(
@@ -8633,7 +9058,7 @@ class Agent:
             f"({binding.rule.description}) — the model has insisted after "
             f"{binding.rounds - 1} refusals"
         )
-        decision = self.approve_tool(name, args, preview)
+        decision = self._ask_owner(ASKED_BY_RULE, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             message = _with_feedback(
@@ -8890,6 +9315,11 @@ class Agent:
             refusal = self._browse_gate(name, args)
             if refusal is not None:
                 return refusal
+            # Past every gate, so these values are about to reach the page.
+            # Recorded HERE and not inside the gate because the gate has a
+            # dozen ways out and a record written on some of them is a record
+            # the next submit reads a wrong answer out of (#295 M3).
+            self._note_typed_values(name, args)
             label, thunk = self._browse_call(name, args)
             self._note(label)
             self.status.start(name)
@@ -9175,7 +9605,9 @@ class Agent:
             # None when the tool declares no preview or resolution fails (raw-args
             # fallback). Read-only, so it runs ungated.
             preview_text = tool_plugins.preview(tool, args, self.cwd)
-            decision = self.approve_tool(tool.name, args, preview_text)
+            decision = self._ask_owner(
+                ASKED_BY_PLUGIN, tool.name, args, preview_text
+            )
             if isinstance(decision, Denied):
                 # Deny + comment = STOP (issue #81): address the concern, then halt.
                 self._arm_stop_gate(decision.comment)

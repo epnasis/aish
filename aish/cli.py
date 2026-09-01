@@ -16,6 +16,10 @@ from typing import TYPE_CHECKING
 
 from . import aliases, backends, browser, term_image, tools
 from .agent import (
+    ASKED_BY_IMPORT,
+    ASKED_BY_READ,
+    ASKED_BY_SHELL,
+    ASKED_BY_WRITE,
     Agent,
     ModelUnavailable,
     environment_context,
@@ -268,12 +272,22 @@ class LogRef:
         preview: str = "",
         held_ms: int | None = None,
         shown_ms: int | None = None,
+        asked_by: str = "",
     ) -> None:
         # The terminal draws no card, so the CLI never has the two latencies to
         # pass (#306) — the parameters are here because this is one interface
         # with three implementations, and a keyword the wrapper does not accept
         # is a TypeError inside the approval path.
-        self.log.command(command, decision, intent, preview, held_ms, shown_ms)
+        #
+        # That sentence was written before `asked_by` (#295 M3) and it caught
+        # it: adding the field to `SessionLog.command` alone left this wrapper
+        # rejecting it, the TypeError landed inside the web approval round trip,
+        # and an APPROVED command silently never ran while the card, the
+        # `done` event and the log all looked normal. The suite said so in one
+        # test out of 4500. Anything added to that signature is added here too.
+        self.log.command(
+            command, decision, intent, preview, held_ms, shown_ms, asked_by
+        )
 
     def set_title(self, title: str) -> None:
         self.log.set_title(title)
@@ -422,7 +436,10 @@ def make_approver(
 
     def record(command: str, decision: str) -> None:
         if log:
-            log.command(command, decision, intent())
+            # This approver IS the gate, so it labels its own card (#295 M3) —
+            # it never asks the agent, which would answer with whichever gate
+            # last happened to be open.
+            log.command(command, decision, intent(), asked_by=ASKED_BY_SHELL)
 
     def ask_approval(command: str) -> str | Blocked | None:
         # Denylist first: unrecoverable commands never reach the prompt and
@@ -577,7 +594,8 @@ def make_write_approver(log, get_intent=None):
         approved = answer in ("y", "yes")
         if log:
             log.command(
-                f"{verb} {plan.target}", "approved" if approved else "denied", said
+                f"{verb} {plan.target}", "approved" if approved else "denied", said,
+                asked_by=ASKED_BY_WRITE,
             )
         return approved
 
@@ -612,18 +630,24 @@ def make_import_approver(log, get_intent=None):
         approved = answer in ("y", "yes")
         if log:
             log.command(
-                f"import skill {name}", "approved" if approved else "denied", said
+                f"import skill {name}", "approved" if approved else "denied", said,
+                asked_by=ASKED_BY_IMPORT,
             )
         return approved
 
     return approve_import
 
 
-def make_tool_approver(log, get_intent=None):
+def make_tool_approver(log, get_intent=None, get_gate=None):
     """Gate a mutating plugin tool call (issue #141). Reuses the command
     prompt's shape — the tool name + its structured args stand in for a shell
     string — but there is no denylist or auto-approval: a mutating tool always
-    prompts. CLI stays y/N (the comment/adjust verdicts are web-card-only)."""
+    prompts. CLI stays y/N (the comment/adjust verdicts are web-card-only).
+
+    Unlike the three approvers around it, this one is a CHANNEL rather than a
+    gate: seven different gates in `agent.py` reach it. So it is the one that
+    asks the agent who is holding the card (#295 M3), late-bound exactly as
+    `get_intent` is."""
 
     def approve_tool(name: str, args: dict, preview: "str | None" = None) -> bool:
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
@@ -639,7 +663,8 @@ def make_tool_approver(log, get_intent=None):
         approved = answer in ("y", "yes")
         if log:
             log.command(
-                f"tool {name}({shown})", "approved" if approved else "denied", said
+                f"tool {name}({shown})", "approved" if approved else "denied", said,
+                asked_by=(get_gate() if get_gate else "") or "",
             )
         return approved
 
@@ -672,11 +697,17 @@ def make_read_approver(log, trust_dir=None, get_intent=None):
             directory = os.path.dirname(os.path.expanduser(path)) or "."
             print(f"{DIM}  {trust_dir(directory)}{RESET}")
             if log:
-                log.command(f"read {path}", f"approved+trusted:{directory}", said)
+                log.command(
+                    f"read {path}", f"approved+trusted:{directory}", said,
+                    asked_by=ASKED_BY_READ,
+                )
             return True
         approved = answer in ("y", "yes")
         if log:
-            log.command(f"read {path}", "approved" if approved else "denied", said)
+            log.command(
+                f"read {path}", "approved" if approved else "denied", said,
+                asked_by=ASKED_BY_READ,
+            )
         return approved
 
     return approve_read
@@ -2104,6 +2135,11 @@ def main() -> int:
         # (#252) — late-bound off the agent like the scope and the allowances.
         return agent_holder[0].turn_intent() if agent_holder else ""
 
+    def get_gate() -> str:
+        # Same late binding as get_intent, and the same hazard: the gates run
+        # on the agent, the log lives here.
+        return agent_holder[0].asking_gate() if agent_holder else ""
+
     agent: Agent | ClaudeMaxAgent
     if provider == "claude-max":
         # aliased so the annotation above binds the TYPE_CHECKING import,
@@ -2124,7 +2160,7 @@ def main() -> int:
             approve_read=make_read_approver(
                 logref, trust_dir=trust_dir, get_intent=get_intent
             ),
-            approve_tool=make_tool_approver(logref, get_intent),
+            approve_tool=make_tool_approver(logref, get_intent, get_gate),
             approve_import=make_import_approver(logref, get_intent),
             echo=echo,
             stream=stream_line,
@@ -2160,7 +2196,7 @@ def main() -> int:
             approve_read=make_read_approver(
                 logref, trust_dir=trust_dir, get_intent=get_intent
             ),
-            approve_tool=make_tool_approver(logref, get_intent),
+            approve_tool=make_tool_approver(logref, get_intent, get_gate),
             approve_import=make_import_approver(logref, get_intent),
             echo=echo,
             stream=stream_line,

@@ -1262,9 +1262,14 @@ class TestFillingAFormIsOneAct:
         assert asked == []
 
     def test_a_search_batch_rides_the_driving_grant(self):
-        """#251. A batch ending in a plain "Szukaj" submit is exactly what the
-        widened host card grants — and it was one of five cards that a single
-        flight search drew, none of which bought anything."""
+        """#251, and THE PROPERTY is unchanged: a batch ending in a plain
+        "Szukaj" submit is exactly what the widened host card grants — it was
+        one of five cards a single flight search drew, none of which bought
+        anything, and it must still draw none.
+
+        Both grants are given below because the search press now also meets the
+        address question (#295 M3). That fence has its own tests; this one is
+        about the DRIVING grant covering an ordinary search, and it still is."""
         snap = snapshot(controls=self._form())
         asked = []
         agent = Agent(
@@ -1273,6 +1278,13 @@ class TestFillingAFormIsOneAct:
         )
         agent._browse_view.remember(snap)
         agent._approved_sites.add("eon.pl")
+        # The send vouch too, since #295 M3: a submit carrying values aish typed
+        # is the driven twin of a composed query URL and asks the address
+        # question at a host with no vouch. eon.pl is one of the 18 hosts the
+        # owner's own approvals seed, so this is the state he is actually in —
+        # and what #251 pinned, that the SEARCH itself draws nothing, is what
+        # this still pins.
+        agent._approved_hosts.add("eon.pl")
         assert agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "WAW"},
             {"target": "Szukaj", "do": "click"},
@@ -2056,12 +2068,24 @@ class TestConsequencesWithNoYesButton:
             assert not browse.types_a_card_number(ordinary), ordinary
 
     def test_an_ordinary_form_fill_is_completely_unaffected(self):
+        """THE PROPERTY: the card-number refusal must not touch an ordinary
+        form fill. Filling in a search form is not a decision, and an
+        unapprovable act removes one — so what this pins is that the batch is
+        never REFUSED.
+
+        The host is vouched so that the address question (#295 M3), which is a
+        different fence with its own tests, is not what the assertion below is
+        reading. Nothing about the never-typed property changed."""
         snap = snapshot(controls=[
             control(n=1, kind=browse.FIELD, name="Skąd"),
             control(n=2, kind=browse.FIELD, name="Dokąd"),
             control(n=3, name="Szukaj", mutating=True, submits=True),
         ])
         agent, asked = self._agent(snap)
+        # Vouched, which is the state seeding puts his own sites in (#295 M3):
+        # the address question reaching driving is a separate property with its
+        # own tests, and this one is about the never-typed list.
+        agent._approved_hosts.add("eon.pl")
         assert agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "Warszawa"},
             {"target": "Dokąd", "value": "Paryż"},
@@ -3466,24 +3490,32 @@ class TestOneCardNotTwo:
         assert "eon.pl" in agent._approved_sites
 
     def test_the_form_card_keeps_the_grant_on_a_line_of_its_own(self):
-        """A batch card is a block — the form, then every value. Running the
-        grant onto the end of its last value would read as part of that value,
-        so it joins with a newline where a one-line card joins with a dash."""
+        """THE PROPERTY: a batch card is a block — the form, then every value.
+        Running the grant onto the end of its last value would read as part of
+        that value, so it joins with a newline where a one-line card joins with
+        a dash. Asserted on the grant clause exactly as before; the host is
+        vouched so the send clause (#295 M3, its own tests) is not what the
+        `endswith` is reading."""
         agent, asked, _ = self._agent(self._batch())
+        agent._approved_hosts.add("eon.pl")  # the send clause has its own tests
         agent._browse_gate("browse_fill", {"steps": list(self.STEPS)})
         assert asked[0].endswith(
             "\n" + agent_module.SITE_GRANT_RIDER.format(host="eon.pl")
         )
 
     def test_a_form_that_needs_no_card_still_asks_for_the_site(self):
-        """A batch with nothing committing in it rides the grant like any other
-        read — but the grant itself is still the first press's question."""
+        """THE PROPERTY, unchanged: a batch with nothing committing in it rides
+        the grant like any other read — and the grant itself is still the first
+        press's question, so exactly one card is drawn and it is the site's.
+        The host is vouched so the address question (#295 M3) is not the thing
+        being counted here; it has its own tests."""
         snap = snapshot(controls=browse.controls_from([
             {"n": 1, "kind": "field", "name": "Skąd"},
             {"n": 2, "kind": "button", "name": "Search", "submits": True,
              "method": "get"},
         ]))
         agent, asked, _ = self._agent(snap)
+        agent._approved_hosts.add("eon.pl")  # the send clause has its own tests
         out = agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "WAW"}, {"target": "Search", "do": "click"}]})
         assert out is None
