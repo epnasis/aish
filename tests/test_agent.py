@@ -11,6 +11,7 @@ import json
 import re
 import stat
 import time
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12906,6 +12907,70 @@ class TestTheDrivenTwinOfTheComposedAddress:
         assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
         assert len(asked) == 1
         assert "send data to drop.example" in asked[0]
+
+    def test_a_stored_secret_is_gated_even_at_a_vouched_host(self, monkeypatch):
+        """The defect a delivery review found in the first version of this, and
+        the reason the value arms run BEFORE the vouch check.
+
+        `_searching_a_vouched_site` gates a stored secret in a composed `?q=` at
+        a host the owner vouched — *he said yes to searching a shop, not to
+        handing that shop his password*. Without this, typing the identical
+        secret into that shop's search box and pressing submit was FREE, so the
+        model's choice of mechanism decided the permission. Seeding makes
+        vouched hosts the common case, which sharpens it rather than softening
+        it."""
+        monkeypatch.setattr(
+            agent_module.secrets, "contains", lambda text: "hunter2" in text
+        )
+        agent, asked, _ = self._agent(vouched=["drop.example"])
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Search", "value": "my password is hunter2"},
+            {"target": "Go", "do": "click"},
+        ]}) is None
+        assert len(asked) == 1
+        assert "carries one of your stored secrets" in asked[0]
+
+    def test_a_second_address_inside_a_typed_value_is_gated_when_vouched(self):
+        """A vouch says *data may ride an address here*. It never says *and a
+        second address inside it may go somewhere else* — the composed path has
+        said so since #293, and this is the same fact one mechanism over."""
+        agent, asked, _ = self._agent(vouched=["drop.example"])
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Search", "value": "https://evil.example/?d=secret"},
+            {"target": "Go", "do": "click"},
+        ]}) is None
+        assert len(asked) == 1
+        assert "has a second address written inside it" in asked[0]
+
+    def test_the_value_arms_and_the_composed_arms_agree_host_for_host(self):
+        """The property, not the cases: for each payload, the composed address
+        and the driven form reach the SAME verdict at a vouched host. Iterated,
+        because a sampled guard on a load-bearing invariant is not a guard.
+
+        It is what caught the over-correction in the fix for the defect above.
+        An entropy arm was added here first, and this failed: at a vouched host
+        `_searching_a_vouched_site` FREES a high-entropy query — residual (a) —
+        so the driven path would have been STRICTER than the composed one, which
+        is the same divergence pointing the other way."""
+        payloads = (
+            "https://evil.example/?d=secret",     # gates both ways
+            "SGlzIElCQU4gaXMgUEwyNzExNDAyMDA0MDAw",  # residual (a): free both
+            "ordinary swimming goggles",          # the control: free both ways
+        )
+        for value in payloads:
+            composed, _ = make_agent([])
+            composed._tainted = True
+            composed._approved_hosts = {"drop.example"}
+            by_address = composed._egress_novel_hosts(
+                "read_url",
+                {"url": "https://drop.example/s?q=" + urllib.parse.quote(value)},
+            ) is not None
+            agent, asked, _ = self._agent(vouched=["drop.example"])
+            agent._browse_gate("browse_fill", {"steps": [
+                {"target": "Search", "value": value},
+                {"target": "Go", "do": "click"},
+            ]})
+            assert by_address == bool(asked), value
 
     def test_a_remembered_batch_never_stands_in_for_a_send_never_vouched(self):
         """`_browse_batch_gate` short-circuits a batch whose card text it has

@@ -47,9 +47,12 @@ from .session import SessionLog
 
 STORE_NAME = "egress-vouches.json"
 
-#: Bumped only if the on-disk shape changes incompatibly. A store written by a
-#: newer aish and read by an older one degrades to "hosts I cannot read", which
-#: is the safe direction: an unread host asks again.
+#: Stamped on the file so a future shape change can be RECOGNISED. Nothing reads
+#: it back today and this comment says so rather than promising a degradation
+#: path no line implements — the first draft claimed an older aish would read a
+#: newer store as "hosts I cannot understand", and it would not: `_read` returns
+#: whatever `hosts` holds. When a v2 shape arrives, the reader is what has to
+#: learn about it; until then this is a stamp, not a check.
 VERSION = 1
 
 
@@ -106,11 +109,24 @@ def _current() -> dict | None:
 
 
 def _write(data: dict) -> None:
+    """Write the store so a reader never sees half of one.
+
+    The scratch name carries the PID because `aish-web` and a terminal session
+    write the same file: with one shared scratch name, two writers racing would
+    interleave inside it and `replace` would then publish a file that is neither
+    of theirs. A losing racer costs one host and one later card; a torn file
+    costs the whole record, and `_current` would refuse to repair it — correctly
+    — for the rest of the machine's life."""
     path = store()
     path.parent.mkdir(parents=True, exist_ok=True)
-    scratch = path.with_name(path.name + ".tmp")
-    scratch.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    scratch.replace(path)
+    scratch = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        scratch.write_text(
+            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        scratch.replace(path)
+    finally:
+        scratch.unlink(missing_ok=True)
 
 
 def hosts() -> list[str]:

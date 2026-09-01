@@ -1133,9 +1133,23 @@ class SessionLog:
                 hosts.append(host)
         return hosts
 
-    #: A tool approval, as `server.py` and `cli.py` write it into the audit
-    #: trail: `tool read_url(url='https://…')`. Both quote styles, because
-    #: `repr()` switches to double quotes for a value holding an apostrophe.
+    #: The tools whose approval IS an answer about reading a URL. Named rather
+    #: than left to the argument shape, because a delivery review found what
+    #: that costs: `kind: "command"` is also every SHELL approval, so an
+    #: approved `curl --data "url='https://evil.example/'" …` matched on the
+    #: argument alone and seeded a permanent send vouch for a host the owner had
+    #: never been asked a single question about. A yes to running a command is
+    #: not a yes to an address riding one.
+    READ_TOOLS = ("read_url", "browse", "show_image", "read_pdf", "read_media")
+
+    #: Which tool the approval was FOR, anchored at the start of the command
+    #: string exactly as `server.py` and `cli.py` write it: `tool read_url(`.
+    #: `browse` here never matches `browse_act(`/`browse_fill(` — those press
+    #: things and name no address.
+    _READ_TOOL_CALL = re.compile(r"^tool (?:{})\(".format("|".join(READ_TOOLS)))
+
+    #: The address inside it. Both quote styles, because `repr()` switches to
+    #: double quotes for a value holding an apostrophe.
     _URL_ARG = re.compile(r"""\burl=(?:'([^']*)'|"([^"]*)")""")
 
     @staticmethod
@@ -1144,10 +1158,17 @@ class SessionLog:
 
         Read by the machine-wide vouch store's one-time seeding (#295 M3), and
         the rule it implements is *only his own acts count*: a `command` record
-        whose decision starts with `approved` and whose command string names a
-        URL. No heuristics, no external list, nothing inferred from what he
-        happened to READ — an auto-approved fetch is not an answer he gave, and
-        a denial is the opposite of one.
+        whose decision starts with `approved`, whose command string is an
+        approval OF ONE OF `READ_TOOLS`, and which names a URL. No heuristics,
+        no external list, nothing inferred from what he happened to READ — an
+        auto-approved fetch is not an answer he gave, and a denial is the
+        opposite of one.
+
+        **Both halves of that, and the second one was learned the hard way.**
+        `kind: "command"` is the audit trail's record for SHELL approvals as
+        well as tool ones, so matching the argument shape alone let an approved
+        `curl --data "url='https://evil.example/'"` seed a permanent send vouch
+        for a host no card had ever named.
 
         A third reader over a third question rather than a widening of either
         of the two above, for the reason `egress_vouches` records: `site_grants`
@@ -1175,7 +1196,14 @@ class SessionLog:
                 or not str(record.get("decision", "")).startswith("approved")
             ):
                 continue
-            match = SessionLog._URL_ARG.search(str(record.get("command", "")))
+            command = str(record.get("command", ""))
+            # WHICH TOOL, then which address. Asking only the second question
+            # let an approved shell command carrying a `url='…'` flag seed a
+            # host the owner was never asked about — a yes to running a command
+            # is not a yes to an address riding one.
+            if not SessionLog._READ_TOOL_CALL.match(command):
+                continue
+            match = SessionLog._URL_ARG.search(command)
             if match is None:
                 continue
             try:

@@ -7183,10 +7183,33 @@ class Agent:
         itself typed THIS TASK, at a host with no vouch, is the same egress as a
         composed query URL. Same question, same card, same vouch.
 
-        **At a vouched host it is free**, which is everywhere he actually
-        drives — measured, 11 of the 18 hosts his 273 query-carrying opens land
-        on are covered by approvals already in his logs — so ordinary
-        form-filling never sees this.
+        **The VALUE arms run first, and they run at a vouched host too.** The
+        first version of this stopped at the destination arm, and a delivery
+        review found what that cost: with a host vouched, typing one of the
+        owner's stored secrets into its search box and pressing submit was FREE,
+        while the identical secret in a composed `?q=` at that same host drew a
+        card. `_searching_a_vouched_site`'s own docstring is the reason it must
+        not — *he said yes to searching a shop, not to handing that shop his
+        password* — and this slice made it sharper, not softer, by widening the
+        vouch to machine-wide and seeding 11 of his 18 hosts on day one. So the
+        two things a vouch has never covered are asked here of the typed values,
+        which is where they would ride: a stored secret, and a second address
+        written inside a value. Their sentences are `_value_finding`'s own,
+        because they are the same finding.
+
+        **EXACTLY those two, and the property test is what says so.** The first
+        attempt at this fix added a data-shaped-run arm as well, and
+        `test_the_value_arms_and_the_composed_arms_agree_host_for_host` failed
+        it: at a vouched host `_searching_a_vouched_site` FREES a high-entropy
+        query — that is residual (a), written down in `docs/agent-core.md` —
+        so an entropy arm here would have made the driven path stricter than the
+        composed one, which is the same divergence in the other direction. A
+        twin is a twin in both directions. The hostname and path arms are not
+        rebuilt and cannot be: those belong to the page aish is standing on,
+        not to anything it composed.
+
+        **Past those, at a vouched host it is free**, which is everywhere he
+        actually drives, so ordinary form-filling never sees this.
 
         **POST submits are covered too, not only the GET ones the attack uses.**
         `Control.submits` does not distinguish, and the safe direction is not to
@@ -7199,11 +7222,24 @@ class Agent:
         host = self._driven_host(name, args)
         if not host or self._submitting_control(name, args) is None:
             return ""
-        attended = self.origin == "user"
-        if attended and host in self._approved_hosts:
-            return ""
         carried = self._values_riding_this_press(name, args, host)
         if not carried:
+            return ""
+        for value in (v for _, v in carried):
+            # Both forms, exactly as `_value_finding` asks it: a secret holding
+            # a '%' would survive only one of them.
+            if secrets.contains(value) or secrets.contains(
+                urllib.parse.unquote(value)
+            ):
+                return "carries one of your stored secrets"
+        for value in (v for _, v in carried):
+            # A value about to become a query chunk at somebody's host is where
+            # `_forwards_elsewhere` looks; here the value IS that chunk, one
+            # step before the address exists.
+            if _addresses_in_text(urllib.parse.unquote(value)):
+                return "has a second address written inside it"
+        attended = self.origin == "user"
+        if attended and host in self._approved_hosts:
             return ""
         template = DRIVEN_CARRIES if attended else DRIVEN_UNATTENDED_CARRIES
         return template.format(n=len(carried))

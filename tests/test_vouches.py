@@ -178,6 +178,14 @@ class TestTheVouchIsMachineWideAndPermanent:
         assert vouches.hosts() == []
         assert (machine / vouches.STORE_NAME).read_text() == "{not json"
 
+    def test_a_write_leaves_no_scratch_behind_and_publishes_whole(self, machine):
+        """Two processes write this file. The scratch name carries the PID so
+        they cannot interleave inside one, and it is cleaned up either way — a
+        torn store would be refused by `_current` for the life of the machine."""
+        vouches.add(["allegro.pl"])
+        assert sorted(p.name for p in machine.iterdir()) == [vouches.STORE_NAME]
+        assert json.loads((machine / vouches.STORE_NAME).read_text())["hosts"]
+
     def test_writing_twice_keeps_the_first_answer(self, machine):
         vouches.add(["allegro.pl"])
         first = json.loads((machine / vouches.STORE_NAME).read_text())
@@ -271,10 +279,18 @@ class TestTheStoreSeedsFromHisOwnRecordedActs:
         approvals go through the same `approve_tool` channel and land in the log
         as `tool read_url(url='…')` / `approved`, identical to an egress card's
         record. So a link that arrived by e-mail and was approved for OPENING
-        seeds a permanent send vouch for its host — still his act, and the
-        address had already reached that host with his consent, but not the same
-        question. Narrowing it means matching the card sentence in `preview`,
-        which would change the measured 11-of-18 seed."""
+        seeds a permanent send vouch for its host.
+
+        **The sharp version, because "wider than its card" undersells it:** the
+        mail-link gate is deliberately per LINK and never per host — *approving
+        one tracking link must not approve the next one* (`_approved_mail_links`
+        is keyed by URL). Seeding converts one such yes into a permanent per-host
+        SEND grant, which is a stronger thing than opening a single link ever
+        implied. It is still his act and the address had already reached that
+        host with his consent, which is why it is accepted rather than blocking
+        the slice. Narrowing it means matching the card sentence in `preview`,
+        which changes the measured 11-of-18 seed, so it is a decision and not an
+        edit."""
         log = SessionLog.new(machine)
         log.task_start("read my mail")
         log.message({"role": "user", "content": "read my mail"})
@@ -293,6 +309,42 @@ class TestTheStoreSeedsFromHisOwnRecordedActs:
             agent_module.MAIL_LINK_HELD in line
             for line in log.path.read_text().splitlines()
         )
+
+    def test_an_approved_shell_command_carrying_a_url_seeds_nothing(self, machine):
+        """The defect a delivery review found. `kind: "command"` is the audit
+        trail's record for SHELL approvals as well as tool ones, so matching the
+        argument shape alone let an approved `curl --data "url='…'"` seed a
+        permanent send vouch for a host no card had ever named. A yes to running
+        a command is not a yes to an address riding one."""
+        log = SessionLog.new(machine)
+        log.task_start("post the form")
+        log.message({"role": "user", "content": "post the form"})
+        for shell in (
+            """curl --data "url='https://evil.example/x'" https://ok.test""",
+            """wget --post-data "url='https://evil.example/x'" https://ok.test""",
+            """python -c "url='https://evil.example/x'" """,
+        ):
+            log.command(shell, "approved")
+        log.task_end()
+        log.close()
+        assert SessionLog.approved_read_hosts(log.path) == []
+        assert vouches.hosts() == []
+
+    def test_only_the_read_tools_seed_and_the_list_is_iterated(self, machine):
+        """Every entry of `READ_TOOLS` seeds, and the press tools next to them
+        do not — `browse` must not be read as a prefix of `browse_act`."""
+        log = SessionLog.new(machine)
+        log.task_start("x")
+        log.message({"role": "user", "content": "x"})
+        for i, tool in enumerate(SessionLog.READ_TOOLS):
+            log.command(f"tool {tool}(url='https://read{i}.example/a')", "approved")
+        for tool in ("browse_act", "browse_fill", "run_command", "fetch_binary"):
+            log.command(f"tool {tool}(url='https://press.example/a')", "approved")
+        log.task_end()
+        log.close()
+        found = SessionLog.approved_read_hosts(log.path)
+        assert found == [f"read{i}.example" for i in range(len(SessionLog.READ_TOOLS))]
+        assert "press.example" not in found
 
     def test_a_command_naming_no_url_seeds_nothing(self, machine):
         log = SessionLog.new(machine)
