@@ -239,13 +239,14 @@ Rules:
    that a site "blocks automated reading" in a turn where you read a page from
    it — telling the user a source failed when it succeeded is worse than the
    original failure, because it also throws away the answer you already had.
-   The browser keeps the user's own signed-in sessions, so reading a site they are logged into
-   asks them first — expect that prompt and never work around it. Their yes covers the SITE, not
-   the tool: once they approve it, read_url and browse both work there for the rest of the
-   chat, so never avoid browse for fear of a second prompt. When the first press on a site is
-   itself one that asks by name, the two questions are ONE card: it names the press and grants
-   the site together, so a no there means the press was refused AND the site was not granted —
-   do not try a different control to get around it. The same is true of the prompt you
+   The browser keeps the user's own signed-in sessions. READING one of their sites is free by
+   any route. What asks is PRESSING something on it, and only a press that CHANGES something:
+   switching a tab, following a link, typing, choosing an option and pressing a plain search
+   button ask nothing at all, so never avoid browse for fear of a prompt. The first press that
+   does change something asks once, and that ONE card names the press and grants the site
+   together — so a no there means the press was refused AND the site was not granted, and you
+   must not try a different control to get around it. Their yes covers the SITE, not the tool:
+   read_url and browse both work there for the rest of the chat. The same is true of the prompt you
    may see before an address at a host nobody has named yet — it is asked once for that exact
    host, and it covers read_url and browse alike. It is asked ONCE, EVER — it survives aish
    restarting, the next chat, and the terminal as well as the web — so never warn the user
@@ -7526,8 +7527,15 @@ class Agent:
         card says `click "Zapłać"` rather than `click element 7`. A password
         field is refused outright and never draws a card at all.
 
-        **The first question is asked at the first PRESS, not at the open**,
-        and that is not a nicety. Opening a page and reading it is what
+        **The first question is asked at the first press that CHANGES
+        SOMETHING** (#295 M4). It used to be the first press full stop, and the
+        first press is almost always inert — so he authorised acting on a site
+        while looking at a tab switch or a search box. What decides it is
+        `Control.mutating`, the classifier the act-time fences already use; see
+        `_grant_is_due`.
+
+        **And it is asked at a press and not at the open**, and that is not a
+        nicety. Opening a page and reading it is what
         `read_url` does, and reading his account was made free — so the same
         page, fetched the other way, asked. The model chooses the tool, which
         made the card bypassable for exactly the half it was covering and left
@@ -7583,8 +7591,18 @@ class Agent:
                 BROWSE_NO_APPROVER.format(host=host), decision="blocked"
             )
         control = self._browse_target(args) if name == "browse_act" else None
-        if control is None or not self._needs_its_own_card(control):
-            return self._press_card(name, args, host)
+        own = control is not None and self._needs_its_own_card(control)
+        # #295 M4: the grant is collected on the first press that CHANGES
+        # something, not on the first press. A control that draws a card of its
+        # own is consequential by construction — a card shown without the grant
+        # being taken would ask him twice for one site.
+        due = self._grant_is_due(own or self._press_changes_something(name, args, control))
+        # Named on the card whenever it draws one of its own, and — since M4 —
+        # whenever it is the consequential press the grant is being collected
+        # on. Never on a granted site that needs no card of its own: the grant
+        # already answered for it, and that path stays exactly as it was.
+        if control is None or not (own or (due and not self._site_granted(host))):
+            return self._press_card(name, args, host, grant_due=due)
         # Named, every time, and never folded into the driving grant: this is
         # the click the owner would want to have been asked about.
         # The ROW rides the card, not just the address: on a results page the
@@ -7597,10 +7615,91 @@ class Agent:
         what += f" on {host}"
         if held := self._form_note(control):
             what += f"\n{held}"
-        return self._press_card(name, args, host, what)
+        return self._press_card(name, args, host, what, grant_due=due)
+
+    def _press_changes_something(self, name: str, args: dict, control) -> bool:
+        """Would this call change something — `Control.mutating`, asked of the
+        control the press actually LANDS on (#295 M4).
+
+        Almost always that is the control the model named. The exception is the
+        one `_submitting_control` already exists for: `browse_act(action="type",
+        submit=True)` presses Enter, which sends the form around the field, and
+        a FIELD is never `mutating` — typing changes nothing until something is
+        pressed. Read off the named control alone, Enter would be inert while
+        clicking that same form's own button is not, and the difference between
+        them is an argument the model chooses. That is the shape this file has
+        twice had to remove (#287, #310): a fence that a tool or a flag can
+        walk around is a fence for one of the paths it covers.
+
+        So the Enter case is judged by the form's own submit control, which is
+        where `Control.mutating` already carries the GET/POST answer — a search
+        box sending `?q=` stays inert, a POST form does not. **No new
+        classifier**: the same predicate, asked about the right control.
+
+        It FAILS CLOSED, for the reason `_submitting_control` does: an explicit
+        `submit=True` is the model asking to send, so a form this cannot see
+        into is treated as one that changes something. Being wrong costs the
+        card the owner is shown today; the other direction costs the grant.
+
+        **A field carrying no form identity fails closed too, rather than being
+        answered by the rest of the page.** An earlier draft looked at every
+        submit on the page when `Control.form` was empty, which decided the
+        question by whether some UNRELATED form happened to be a GET — an answer
+        arrived at by coincidence. Empty means the enumeration saw no `el.form`,
+        and the honest reading of that is that this code does not know what
+        Enter would send."""
+        if control is not None and control.mutating:
+            return True
+        if name != "browse_act" or not args.get("submit"):
+            return False
+        if str(args.get("action", "click") or "click") != "type":
+            return False
+        shown = self._browse_view.shown
+        if shown is None or control is None:
+            return True
+        form = getattr(control, "form", "")
+        if not form:
+            return True
+        sends = [o for o in shown.controls if o.submits and o.form == form]
+        return not sends or any(o.mutating for o in sends)
+
+    def _grant_is_due(self, changes: bool) -> bool:
+        """Is THIS press the one that collects the site grant (#295 M4)?
+
+        **The grant was collected on the first press, and the first press is
+        almost always inert** — so the owner was asked to authorise *act on this
+        site as you* while looking at a control that does nothing. Measured
+        against his own log, every driving card since 2026-08-24 that came from
+        the site card was one of these: a tab switch (`Przełącz lokal`, three
+        times), a search button, a tracking-number field, a search box, a
+        passenger stepper, an airport field. Ten cards, not one of which changed
+        anything. P1 says consent attaches to what changes for him; a card in
+        front of a control that changes nothing is the false positive that
+        teaches the tap waiting on the purchase.
+
+        So the question moves to the first press that is CONSEQUENTIAL. An inert
+        press proceeds with no card and grants nothing — *nothing*, because a
+        grant quietly recorded on an inert press is the same defect wearing a
+        nicer face: it would spend the consent without ever asking for it.
+
+        **Consequential is `Control.mutating` and no new classifier.** That is
+        already the answer to *would pressing this change something the owner
+        would mind* — a non-GET (or method-absent) form submit, or a worded
+        label — and it is already the fence `browser.browse_act` and
+        `plan_batch` enforce at act time. A second predicate here would be a
+        second opinion about the same question, and the two would drift.
+
+        **Unattended sessions keep today's strictness**, and this is the whole
+        of that difference: nobody is going to read the answer, so the card
+        cannot be justified by his attention and is not thinned by its absence.
+        Every press there is treated as due, exactly as before."""
+        if self.origin != "user":
+            return True
+        return changes
 
     def _press_card(
-        self, name: str, args: dict, host: str, what: str = ""
+        self, name: str, args: dict, host: str, what: str = "",
+        *, grant_due: bool = True,
     ) -> str | None:
         """The ONE card a press draws — its own, the site grant, or both at once.
 
@@ -7624,6 +7723,12 @@ class Agent:
         Nothing is thinned to buy it: the grant sentence rides along in the
         same clauses `SITE_GRANT` states it in, and `_grant_site` records it
         exactly as before.
+
+        **And since #295 M4 the grant clause appears only when the press is
+        CONSEQUENTIAL** — `grant_due`, decided by `_grant_is_due`. An inert
+        press on a site with no grant draws no card and records no grant; the
+        second half of that matters as much as the first, because a grant taken
+        silently is a consent nobody was asked for.
 
         **A third clause, on the same terms: what this press would SEND (#295
         M3).** A submit carrying values aish typed at a host with no vouch is
@@ -7650,10 +7755,16 @@ class Agent:
         # press grant is suffix-matched, so the two clauses of one card may
         # legitimately spell the same site differently (see `_driven_host`).
         send_host = self._driven_host(name, args)
-        if granted and not what and not sending:
+        # An inert press on a site with no grant asks nothing and RECORDS
+        # nothing (#295 M4) — see `_grant_is_due`. The send clause below is a
+        # different question about a different grant, so it still fires here:
+        # a GET submit is inert, and carrying the owner's mail into somebody
+        # else's query string is exactly what M3 exists to ask about.
+        asking = not granted and grant_due
+        if not asking and not what and not sending:
             return None
         clauses = [what] if what else []
-        if not granted:
+        if asking:
             clauses.append(
                 SITE_GRANT_RIDER.format(host=host) if clauses
                 else SITE_GRANT.format(host=host)
@@ -7672,11 +7783,11 @@ class Agent:
         preview = clauses[0]
         for clause in clauses[1:]:
             preview += ("\n" if "\n" in preview or "\n" in clause else " — ") + clause
-        if what and not granted:
+        if what and asking:
             denial = BROWSE_ACTION_AND_SITE_DENIED.format(what=what, host=host)
         elif what:
             denial = BROWSE_ACTION_DENIED.format(what=what)
-        elif not granted:
+        elif asking:
             denial = BROWSE_DENIED.format(host=host)
         else:
             denial = ""
@@ -7687,7 +7798,7 @@ class Agent:
         refusal = self._browse_approval(name, args, preview, denial)
         if refusal is not None:
             return refusal
-        if not granted:
+        if asking:
             self._grant_site(host)
         if sending:
             # The SAME vouch a composed address collects, recorded the same way
@@ -7757,7 +7868,9 @@ class Agent:
         for something that cannot run — and a batch carrying a password is
         refused outright, exactly as a single action is. Filling needs no card
         at all: typing has never been mutating, so a batch with no committing
-        step rides the host grant like any other read.
+        step rides the host grant like any other read — and since #295 M4 it
+        does not COLLECT that grant either, because a batch that changes nothing
+        is not a thing to ask permission for.
 
         What this batch would TYPE was already judged by `_never_typed`, above
         `_browse_gate`'s branches: it is a question about the act, and it is the
@@ -7784,11 +7897,18 @@ class Agent:
             return _gate_outcome(
                 BROWSE_NO_APPROVER.format(host=host), decision="blocked"
             )
-        if not any(
+        own = any(
             step.control is not None and self._needs_its_own_card(step.control)
             for step in plan.steps
-        ):
-            return self._press_card("browse_fill", args, host)
+        )
+        # The same move as the single press (#295 M4): a batch of purely inert
+        # steps — type, choose, pick a date, press a GET search — asks nothing
+        # and grants nothing, and a batch containing a consequential step asks
+        # once, naming the batch. `batch_is_mutating` is the one owner of *does
+        # this batch change something*, shared with the sight-unseen fence.
+        due = self._grant_is_due(own or browse.batch_is_mutating(plan))
+        if not own and not (due and not self._site_granted(host)):
+            return self._press_card("browse_fill", args, host, grant_due=due)
         what = plan.card(host)
         committing = next(
             (
@@ -7799,6 +7919,10 @@ class Agent:
         )
         if committing is not None and (held := self._form_note(committing)):
             what += f"\n{held}"
+        # `due` is provably True on this path — `own` implies it, and the only
+        # other way here is `due and not granted`. Passed explicitly anyway, so
+        # the grant clause can never desync from the decision that reached it if
+        # the condition above is ever changed.
         if (
             what in self._approved_batches
             and self._site_granted(host)
@@ -7819,7 +7943,7 @@ class Agent:
             # only for the batch: a yes given before the grant existed cannot
             # be read as a yes to the grant that was never on the card.
             return None
-        refusal = self._press_card("browse_fill", args, host, what)
+        refusal = self._press_card("browse_fill", args, host, what, grant_due=due)
         if refusal is None:
             self._approved_batches.add(what)
         return refusal

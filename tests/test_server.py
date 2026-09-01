@@ -1655,10 +1655,19 @@ class TestBrowseApproval:
     step is a rules-engine record, so "a call with no gate step" says nothing
     about whether a card was asked for.
 
-    The card is spent on the first PRESS, and these are what that looks like
-    from a socket. Browser functions are stubbed at the module boundary, the
-    same way tool implementations are everywhere else in this suite — the
-    gate, the card, the bridge and the agent loop are all real.
+    The card is spent on the first press that CHANGES something (#295 M4), and
+    these are what that looks like from a socket. Browser functions are stubbed
+    at the module boundary, the same way tool implementations are everywhere
+    else in this suite — the gate, the card, the bridge and the agent loop are
+    all real.
+
+    **The page carries both shapes, and it has to.** `Faktury` is a plain
+    button that changes nothing; `Dalej` is the nondescript submit. When M4
+    moved the grant, this class pressed `Faktury` and then blocked forever in
+    `recv_until` waiting for a card that correctly no longer comes — a
+    wire-level test is exactly where a gate change goes unnoticed, and one that
+    waits without a bound turns "no card" into a hung suite instead of a
+    failure.
     """
 
     URL = "https://eon.pl/mojeon"
@@ -1666,9 +1675,10 @@ class TestBrowseApproval:
     def _snapshot(self, text="your invoices"):
         return browse_module.Snapshot(
             url=self.URL, title="eOn", text=text,
-            controls=browse_module.controls_from(
-                [{"n": 0, "kind": "button", "name": "Faktury"}]
-            ),
+            controls=browse_module.controls_from([
+                {"n": 0, "kind": "button", "name": "Faktury"},
+                {"n": 1, "kind": "button", "name": "Dalej", "submits": True},
+            ]),
         )
 
     def _stub_browser(self, monkeypatch) -> list:
@@ -1685,16 +1695,31 @@ class TestBrowseApproval:
         )
         return pressed
 
-    def _responses(self, *, press=True):
+    def _responses(self, *, press="Dalej"):
         script = [model_says(tool_calls=[tool_call("browse", url=self.URL)])]
         if press:
             script.append(
                 model_says(tool_calls=[
-                    tool_call("browse_act", target="Faktury", action="click")
+                    tool_call("browse_act", target=press, action="click")
                 ])
             )
         script.append(model_says("opened the invoices"))
         return script
+
+    def _run_to_done(self, ws, text):
+        """Drive one task and collect every event up to `done`.
+
+        Bounded on purpose: a card that does not come must fail this test, not
+        hang the suite — which is what `recv_until` does when the expected card
+        is the thing under test."""
+        ws.send_json({"type": "task", "text": text})
+        events = []
+        for _ in range(200):
+            event = ws.receive_json()
+            events.append(event)
+            if event["type"] == "done":
+                return events
+        raise AssertionError("no done event in 200 messages")
 
     def test_opening_a_page_asks_nothing(self, app_env, monkeypatch):
         """The scenario the issue scripted: a bare `browse` runs to completion.
@@ -1702,17 +1727,29 @@ class TestBrowseApproval:
         No card, and — the half that was actually missing — a `done`, so a
         harness driving this path has something to wait for."""
         self._stub_browser(monkeypatch)
-        client, _ = make_client(app_env, self._responses(press=False))
+        client, _ = make_client(app_env, self._responses(press=""))
         with client, connected(client) as (ws, _, _):
-            ws.send_json({"type": "task", "text": "open my eon account"})
-            events = []
-            for _ in range(200):
-                event = ws.receive_json()
-                events.append(event)
-                if event["type"] == "done":
-                    break
-            assert events[-1]["type"] == "done"
+            events = self._run_to_done(ws, "open my eon account")
             assert not any(e["type"] == "approval_request" for e in events)
+
+    def test_an_inert_press_asks_nothing_and_grants_nothing(
+        self, app_env, monkeypatch
+    ):
+        """#295 M4, over the wire. `Faktury` changes nothing, so the whole task
+        runs with no card at all — and the press still REACHES the page, which
+        is the half a "no card" assertion alone would not catch. Nothing is
+        recorded either: a grant taken with no card is the same defect wearing
+        a nicer face."""
+        pressed = self._stub_browser(monkeypatch)
+        client, _ = make_client(app_env, self._responses(press="Faktury"))
+        with client, connected(client) as (ws, _, _):
+            events = self._run_to_done(ws, "open eon and press Faktury")
+            server = client.app.state.server
+            path = server.active.logref.log.path
+        assert not any(e["type"] == "approval_request" for e in events)
+        assert pressed == [("Faktury", "click")]
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [r for r in records if r["kind"] == "site_grant"] == []
 
     def test_the_press_draws_the_grant_card_and_proceeds(self, app_env, monkeypatch):
         pressed = self._stub_browser(monkeypatch)
@@ -1730,7 +1767,7 @@ class TestBrowseApproval:
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
             assert recv_until(ws, "approval_resolved")["decision"] == "approved"
             recv_until(ws, "done")
-        assert pressed == [("Faktury", "click")]
+        assert pressed == [("Dalej", "click")]
 
     def test_denying_the_grant_never_presses(self, app_env, monkeypatch):
         pressed = self._stub_browser(monkeypatch)
@@ -1748,7 +1785,7 @@ class TestBrowseApproval:
         pressed = self._stub_browser(monkeypatch)
         script = self._responses()
         script.insert(2, model_says(tool_calls=[
-            tool_call("browse_act", target="Faktury", action="click")
+            tool_call("browse_act", target="Dalej", action="click")
         ]))
         client, _ = make_client(app_env, script)
         with client, connected(client) as (ws, _, _):

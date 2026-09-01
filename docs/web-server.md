@@ -323,6 +323,12 @@ CLI feedback, and web feedback carrying attachments, use the **classic flow**: t
 
 ---
 
+## A wire test that waits for a card must be able to FAIL
+
+`recv_until(ws, "approval_request")` blocks until that event arrives, with no bound. That is right when the card is the fixture and wrong when the card is the thing under test: #295 M4 stopped an inert press drawing one, and `TestBrowseApproval` — which pressed a plain `Faktury` button — stopped at that call and hung the whole suite. The run looked identical to a slow machine, and the failing test was found by sampling the blocked process rather than by reading a failure.
+
+So a wire test whose SUBJECT is whether a card appears reads events into a list up to a bound and asserts on the list — `_run_to_done` in `tests/test_server.py`. It also asserts what reached the page, because "no card" and "nothing happened" are different outcomes and only one of them is the feature.
+
 ## Not here
 
 - **Anything in `aish/static/`** — the rail, the transcript, the trace card, gesture handling, the console UI, the offline client, PWA reconnect, voice, approval-card accents: `docs/web-frontend.md`.
