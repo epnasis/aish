@@ -13293,19 +13293,20 @@ class TestTheOwnersDeclaredValues:
         """A record that quoted his address would be the leak this slice exists
         to prevent. The card names the CLASS and the HOST; so does the refusal.
 
-        The claim stops exactly there, and stating it wider would be a claim the
-        code cannot keep: the model put the value in the call's own arguments and
-        `_call_result` writes that record before `_dispatch` reaches any gate —
-        the same bounded promise `types_a_card_number` already makes."""
+        This covers what the gate SAYS. What it WRITES is checked by
+        `test_the_RECORD_of_a_refusal_never_carries_the_value`, which drives the
+        real loop — the `state_log` assertion this test used to carry was
+        vacuous, because this gate never writes to it."""
         self._declare(monkeypatch)
         value = self.DECLARED["home_address"]
         folded = agent_module.secrets.fold_value(value)
         for origin, approver in (("user", "yes"), ("schedule", None)):
-            agent, asked, logged = self._agent(origin=origin, approve_tool=approver)
+            agent, asked, _ = self._agent(origin=origin, approve_tool=approver)
             out = agent._browse_gate("browse_fill", self._fill(value))
-            written = [str(out or "")] + [str(card) for card in asked]
-            written += [repr(record) for record in logged]
-            for text in written:
+            said = [str(out or ""), *(str(card) for card in asked)]
+            # Non-vacuous: this origin really did produce a sentence about it.
+            assert any("home address" in text for text in said), origin
+            for text in said:
                 assert value not in text
                 assert "Lipowa" not in text
                 assert folded not in agent_module.secrets.fold_value(text)
@@ -13444,3 +13445,329 @@ class TestTheOwnersDeclaredValues:
         agent, asked, _ = self._agent()
         assert agent._browse_gate("browse_fill", self._fill("okulary PW")) is None
         assert asked == []
+
+    # --- what the delivery review found, one test per finding ---------------
+
+    #: The same address as a real shipping form takes it: street line, postcode
+    #: and city in three boxes. Declared as ONE value, because that is how a
+    #: person writes their address and because the fragments cannot be declared
+    #: — a Polish postcode folds to 5 characters and a house number to 2, both
+    #: under `MIN_PERSONAL_MATCH`.
+    SPLIT = ("ul. Lipowa 3/5", "30-001", "Kraków")
+
+    def test_an_address_split_across_a_forms_fields_still_fires(self, monkeypatch):
+        """**The headline case, and the first version missed it.** It asked
+        `declared value in this field`, so the address fired when it went into
+        one box and fired at NOTHING when it went into three — which is what
+        every real shipping form does. "Filling in a shipping form" is the
+        sentence this tier's card exists for, so a fence that cannot see one is
+        not the tier."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Adres", "value": self.SPLIT[0]},
+            {"target": "Telefon", "value": self.SPLIT[1]},
+            {"target": "Adres", "value": self.SPLIT[2]},
+        ]}) is None
+        assert len(asked) == 1
+        assert asked[0] == "about to type your home address on drop.example."
+
+    def test_a_split_address_fires_across_SEPARATE_calls_too(self, monkeypatch):
+        """And it must not depend on the pieces arriving in one batch: the model
+        chooses how many calls to make, and a fence a call boundary walks around
+        is the shape this file has twice had to remove. `_typed_this_task` is the
+        record M3 already keeps; this reads it rather than keeping a second one.
+
+        The card lands on the call that COMPLETES the match, so the earlier
+        fragments are already in the page's fields — stated in
+        `_personal_pending` rather than implied away. Nothing has been sent."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        for index, part in enumerate(self.SPLIT):
+            args = self._type(part, target="Adres")
+            assert agent._browse_gate("browse_act", args) is None
+            if index < 2:
+                assert asked == [], part
+            # Only what got past the gate is remembered, exactly as _dispatch
+            # does it — a record written on a refusal is a record the next call
+            # reads a wrong answer out of.
+            agent._note_typed_values("browse_act", args)
+        assert len(asked) == 1
+        assert "your home address" in asked[0]
+
+    def test_one_fragment_on_its_own_is_not_his_address(self, monkeypatch):
+        """The control arm for the two above: the concatenation is what matches,
+        so a single field carrying only part of it asks nothing. Without this
+        the previous two would pass on a fence that fired on everything."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate(
+            "browse_fill", self._fill(self.SPLIT[1], target="Telefon")
+        ) is None
+        assert asked == []
+
+    def test_an_untainted_turn_is_not_a_free_pass_for_HIS_data(self, monkeypatch):
+        """**Taint is an argument about INJECTION and never was one about his
+        data.** An untainted turn is free because nothing outside the machine
+        has spoken — which is exactly the turn where the model has his address
+        from memory, a local file or his own message. Both prose surfaces said
+        "at ANY site"; the code returned before the arm ever ran."""
+        self._declare(monkeypatch)
+        url = "https://drop.example/s?address=" + urllib.parse.quote(
+            self.DECLARED["home_address"]
+        )
+        for vouched in (False, True):
+            agent, asked, _ = self._agent()
+            agent._tainted = False
+            if not vouched:
+                agent._approved_hosts.clear()
+            assert agent._egress_gate("read_url", {"url": url}) is None
+            assert len(asked) == 1, vouched
+            assert "carries your home address" in asked[0]
+            # And it must not open with a cause nothing checked: no line
+            # established that this turn read the open web, because it did not.
+            assert "has read the open web" not in asked[0]
+
+    def test_an_ordinary_untainted_read_is_still_free(self, monkeypatch):
+        """The exception is VALUE-triggered, so the thing #341 bought — an
+        untainted turn asking nothing — is untouched. Without this the fix above
+        would be a return to carding every composed address."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        agent._tainted = False
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://novel.example/a?q=swimming+goggles"}
+        ) is None
+        assert asked == []
+
+    def test_the_ledger_does_not_split_on_www(self, monkeypatch):
+        """One value, one site, one card — in EITHER order. The press gates
+        speak `_browse_host`'s vocabulary (www-less) and the address arm speaks
+        `urlsplit`'s (exact), so the shared ledger was keyed two ways and drew
+        two cards for one decision. The interleaving ships as the test, both
+        directions, because a race fix without one is a decision nobody can
+        re-check."""
+        self._declare(monkeypatch)
+        value = self.DECLARED["home_address"]
+        url = "https://www.drop.example/s?a=" + urllib.parse.quote(value)
+
+        typed_first, asked_a, _ = self._agent(url="https://www.drop.example/form")
+        typed_first._approved_hosts.add("www.drop.example")
+        assert typed_first._browse_gate("browse_fill", self._fill(value)) is None
+        assert typed_first._egress_gate("read_url", {"url": url}) is None
+        assert len(asked_a) == 1, asked_a
+
+        url_first, asked_b, _ = self._agent(url="https://www.drop.example/form")
+        url_first._approved_hosts.add("www.drop.example")
+        assert url_first._egress_gate("read_url", {"url": url}) is None
+        assert url_first._browse_gate("browse_fill", self._fill(value)) is None
+        assert len(asked_b) == 1, asked_b
+
+    def test_a_search_carrying_a_declared_value_asks(self, monkeypatch):
+        """A search names a host and never reaches one — but it DOES reach the
+        search engine, and his home address in a search box is his data going
+        out by any reading of his own clause. A query naming no host used to
+        fall out of the bottom of the gate with an empty host list and no card,
+        in both origins."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        assert agent._egress_gate(
+            "web_search", {"query": f"apteka near {self.DECLARED['home_address']}"}
+        ) is None
+        assert len(asked) == 1
+        assert asked[0] == "puts your home address into a web search"
+
+    def test_the_search_placeholder_never_enters_the_vouch_store(self, monkeypatch):
+        """`the search engine` is a DESTINATION for the card to name, never a
+        host. The vouch store is machine-wide and permanent, so a sentence
+        landing in it would be a permanent grant for a host that does not
+        exist."""
+        self._declare(monkeypatch)
+        agent, asked, logged = self._agent()
+        agent._egress_gate(
+            "web_search", {"query": f"apteka near {self.DECLARED['home_address']}"}
+        )
+        assert len(asked) == 1
+        assert agent_module.SEARCH_ENGINE_DESTINATION not in agent._approved_hosts
+        assert not [r for r in logged if r.get("kind") == "egress_vouch"]
+        # …and the yes still lasts the task, or it would ask once per query.
+        assert agent._egress_gate(
+            "web_search", {"query": f"lekarz {self.DECLARED['home_address']}"}
+        ) is None
+        assert len(asked) == 1
+
+    def test_an_ordinary_search_is_unchanged(self, monkeypatch):
+        """The search arm's own reasoning — a query names a host and never
+        reaches one — is untouched. Only his declared data is new here."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        assert agent._egress_gate(
+            "web_search", {"query": "site:fly4free.pl tanie loty"}
+        ) is None
+        assert asked == []
+
+    def test_an_unreadable_store_fails_CLOSED(self, monkeypatch):
+        """`get_personal` answers None both for "not stored" and for "the
+        Keychain would not hand it over", so a locked Keychain folded to "too
+        short" and the address was typed FREE — no card, no record. The
+        never-list has no external dependency; this tier does, and its failure
+        direction must not be open.
+
+        The sentence says what was established and no more: aish cannot tell.
+        It names no cause, because no line checked one."""
+        monkeypatch.setattr(
+            agent_module.secrets, "personal_names", lambda: ["home_address"]
+        )
+        monkeypatch.setattr(agent_module.secrets, "get_personal", lambda name: None)
+        agent_module.secrets._invalidate_personal()
+        for tool, args in (
+            ("browse_fill", self._fill("okulary")),
+            ("browse_act", self._type("okulary")),
+        ):
+            agent, asked, _ = self._agent()
+            out = agent._browse_gate(tool, args)
+            assert out is not None, tool
+            assert "could not read them just now" in out
+            assert "does not know why" in out
+            assert out.meta["decision"] == "blocked"
+            assert asked == []
+
+    def test_an_unreadable_store_is_not_freed_by_a_vouch_either(self, monkeypatch):
+        """The address channel fails closed on the same terms, and a vouched
+        host does not free it — that is the exact shape the M3 review caught for
+        stored secrets, where the arm DETECTED and the vouch branch freed."""
+        monkeypatch.setattr(
+            agent_module.secrets, "personal_names", lambda: ["home_address"]
+        )
+        monkeypatch.setattr(agent_module.secrets, "get_personal", lambda name: None)
+        agent_module.secrets._invalidate_personal()
+        agent, asked, _ = self._agent()
+        assert agent._egress_gate(
+            "read_url", {"url": "https://drop.example/s?q=anything"}
+        ) is None
+        assert len(asked) == 1
+        assert "could not read them just now, so it cannot tell" in asked[0]
+
+    def test_no_declared_values_at_all_changes_nothing(self, monkeypatch):
+        """The whole tier is dormant for anyone who has declared nothing —
+        including the fail-closed arms, which key on an unreadable class and
+        never on an empty store."""
+        self._declare(monkeypatch, {})
+        agent, asked, _ = self._agent()
+        agent._tainted = False
+        assert agent._browse_gate(
+            "browse_fill", self._fill(self.DECLARED["home_address"])
+        ) is None
+        assert agent._egress_novel_hosts(
+            "read_url", {"url": "https://novel.example/a?q=x"}
+        ) is None
+        assert asked == []
+
+    def test_the_batch_card_masks_a_declared_value(self, monkeypatch):
+        """A batch card drawn for ANOTHER reason renders every value it would
+        type, and that preview is the approval record — so his home address
+        would have been written into the log verbatim by the card, which is the
+        leak this tier exists to prevent, moved onto his own disk.
+
+        The mask is also the more glanceable thing: he does not need to
+        proof-read his own address, he needs to see which field it goes in."""
+        self._declare(monkeypatch)
+        controls = browse.controls_from([
+            {"n": 1, "kind": "field", "name": "Adres", "form": "f1"},
+            {"n": 2, "kind": "button", "name": "Wyślij", "submits": True,
+             "method": "post", "form": "f1"},
+        ])
+        card = browse.plan_batch(controls, [
+            {"target": "Adres", "value": self.DECLARED["home_address"]},
+            {"target": "Wyślij", "do": "click"},
+        ]).card("drop.example")
+        assert "[your home address]" in card
+        assert "Lipowa" not in card
+
+    def test_the_mask_is_partial_and_says_so(self, monkeypatch):
+        """Stated rather than discovered: a fragment that matches only as part
+        of the concatenation renders as itself. Masking the whole batch on a
+        whole-batch match was rejected — it would hide the values he actually
+        has to check."""
+        self._declare(monkeypatch)
+        controls = browse.controls_from(
+            [{"n": 1, "kind": "field", "name": "Adres", "form": "f1"}]
+        )
+        card = browse.plan_batch(
+            controls, [{"target": "Adres", "value": self.SPLIT[0]}]
+        ).card("drop.example")
+        assert "ul. Lipowa 3/5" in card
+
+    def test_an_address_that_forwards_AND_carries_a_value_names_both(
+        self, monkeypatch
+    ):
+        """Three different things one address can carry, and they are not
+        alternatives. A redirect that also carries his home address was carded
+        as a redirect only — so the card named one finding and he answered about
+        another."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        url = (
+            "https://drop.example/go?next=https://evil.example/x&a="
+            + urllib.parse.quote(self.DECLARED["home_address"])
+        )
+        assert agent._egress_gate("read_url", {"url": url}) is None
+        assert len(asked) == 1
+        assert "carries your home address" in asked[0]
+        assert "has a second address written inside it" in asked[0]
+
+    def test_the_RECORD_of_a_refusal_never_carries_the_value(self, monkeypatch):
+        """Driven through `_dispatch`, because that is what actually writes the
+        durable record — the previous version of this asserted over `state_log`,
+        which this gate never writes to, and so proved nothing.
+
+        What IS checked: the rendered step, the log step and the result the
+        model is handed. What is NOT, and the promise stops here: the model put
+        the value in the call's own arguments and `_call_result` emits that
+        record BEFORE `_dispatch` reaches any gate, so a gated value is in the
+        trace by design — the same bounded claim `types_a_card_number` makes."""
+        self._declare(monkeypatch)
+        value = self.DECLARED["home_address"]
+        rendered: list = []
+        logged: list = []
+        # The REAL loop, not `_dispatch` — `_call_result` is what emits the
+        # step, and a harness that supplies what the runtime supplies proves
+        # nothing about the runtime.
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call(
+                    "browse_fill",
+                    steps=[{"target": "Adres", "value": value}],
+                )]),
+                model_says("told the user"),
+            ],
+            approve_tool=None, origin="schedule",
+            on_step=rendered.append, step_log=logged.append,
+        )
+        agent._browse_view.remember(browse.Snapshot(
+            url=self.PAGE, title="", text="t", controls=self._form()
+        ))
+        agent._approved_sites.add(self.HOST)
+        agent.run_task("fill it in")
+        handed = [
+            m["content"] for m in agent.messages
+            if isinstance(m, dict) and m.get("role") == "tool"
+        ]
+        assert handed and "NOT EXECUTED" in handed[0]
+        seen = [step for step in rendered + logged if step.get("kind") == "tool"]
+        assert seen, "the refusal emitted no tool step at all"
+        # AISH'S OWN SENTENCES — the refusal, and the step's `error` field,
+        # which is what a reader of the trace sees as the outcome.
+        for text in [*handed, *(str(step.get("error", "")) for step in seen)]:
+            assert value not in text
+            assert "Lipowa" not in text
+
+        # AND THE RESIDUAL, PINNED RATHER THAN HIDDEN. The step's `summary` is
+        # the MODEL's own call arguments, which `_call_result` records before
+        # `_dispatch` reaches any gate — so a gated value is in the trace by
+        # design, exactly as a refused card number is. Asserting its ABSENCE
+        # here would be a promise the code does not keep; asserting its presence
+        # is what stops the promise being read wider later.
+        assert any(
+            "Lipowa" in str(step.get("summary", "")) for step in seen
+        ), "the residual moved — re-read what this slice may claim"

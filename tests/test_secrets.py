@@ -114,7 +114,7 @@ class TestDeclaredPersonalValues:
         secrets.put_personal("home_address", self.ADDRESS)
         assert secrets.get_personal("home_address") == self.ADDRESS
         assert secrets.personal_names() == ["home_address"]
-        assert secrets.personal_fenced("home_address") is True
+        assert secrets.personal_status("home_address") == secrets.FENCED
 
     def test_a_two_character_value_is_refused_at_declaration(self, personal):
         """What happens if he declares a two-character value. It is refused, he
@@ -142,7 +142,7 @@ class TestDeclaredPersonalValues:
         secrets._index_add("initials", secrets.PERSONAL_NAMES_INDEX)
         secrets._invalidate_personal()
         assert secrets.personal_names() == ["initials"]
-        assert secrets.personal_fenced("initials") is False
+        assert secrets.personal_status("initials") == secrets.TOO_SHORT
         assert secrets.personal_matches("okulary PW") == []
 
     def test_a_declared_value_is_unreachable_through_the_secret_store(self, personal):

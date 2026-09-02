@@ -257,9 +257,10 @@ Rules:
    value the user has DECLARED as their own — their address, phone, date of birth, e-mail or name
    — draws one card naming what it is and which site it would go to, and one yes covers that kind
    of value at that site for the rest of the task. The same card comes up if you put one of those
-   values into an address you build, at ANY site. Everything else you type is never asked about.
-   Do not go looking for which values those are and do not ask the user to confirm one: aish
-   checks it itself, and you MUST simply fill the form in as asked.
+   values into an address you build or into a web search, at ANY site. Everything else you type is
+   never asked about. Do not go looking for which values those are, do not ask the user to confirm
+   one, and do not split a value across fields to avoid it — aish checks what it is about to send,
+   run together, so it makes no difference. You MUST simply fill the form in as asked.
    Once they approve, that page IS
    read through their signed-in browser: you never need a cookie, a token, or a manual download
    to see their account. A line beginning "[aish:" ABOVE the untrusted-content banner is from
@@ -1549,6 +1550,26 @@ PERSONAL_UNATTENDED = (
     "in your report and leave that step to the user."
 )
 
+# What aish says when it CANNOT CHECK. The Keychain refused a class the name
+# index says is there, so aish does not know whether this value is one of his —
+# which is a different fact from knowing it is not, and the never-list has no
+# external dependency to fail this way. It states what was established and
+# nothing wider: no cause is named for the refusal, because no line checked one.
+PERSONAL_UNREADABLE = (
+    "NOT EXECUTED: the user declared values aish must ask about before typing "
+    "({what}), and aish could not read them just now — so it cannot tell "
+    "whether this is one of them. Nothing was typed, and aish does not know "
+    "why the values could not be read. Tell the user, and suggest they run "
+    "`aish personal list`."
+)
+
+# The same not-knowing on the address channel, as a FINDING rather than a
+# refusal, because that channel's verdict is a card.
+PERSONAL_UNREADABLE_CARRIES = (
+    "may carry one of the values you declared — aish could not read them just "
+    "now, so it cannot tell"
+)
+
 # The one attended path that cannot draw the card: a page whose URL has no
 # host. The gate then cannot say WHERE the value would go, and a card that
 # cannot name the destination is not a card he can check — so it fails closed,
@@ -1583,6 +1604,18 @@ DRIVEN_UNATTENDED_CARRIES = "would send {n} value(s) aish typed into the page"
 # because a finding that could reach a surface must never be a token nobody
 # wrote words for.
 SEARCH_CARRIES = "puts an address with data stapled to it into a search"
+
+# Where a search query GOES, for a card that has to name a destination and has
+# no host to name (#343 F4). It is a placeholder and never a host: it names the
+# thing the query really reaches, it is what the ledger keys a yes under, and
+# `_egress_gate` filters it out of `_vouch_hosts` — the vouch store is
+# machine-wide and permanent, and a sentence is not a host.
+SEARCH_ENGINE_DESTINATION = "the search engine"
+
+# His declared values in a QUERY. The search arm's own sentence, because the
+# query is handed to the search engine and reaches nobody else — saying "sent to
+# {host}" here would state something no line checked.
+PERSONAL_IN_A_SEARCH = "puts your {what} into a web search"
 UNATTENDED_CARRIES = "carries more than the bare place it points at"
 UNREADABLE_ADDRESS = "cannot be read as an address at all"
 
@@ -1869,18 +1902,27 @@ NEVER_TYPED = {
 }
 
 
-def _personal_words(classes: list[str]) -> str:
-    """The declared classes as one phrase, in HIS words.
+#: The declared classes as one phrase, in HIS words. `secrets` owns it because
+#: `browse.Batch.card` masks a declared value with the same phrase and `browse`
+#: cannot import `agent` — one phrase, one owner, so a card and a mask can never
+#: describe the same value differently.
+_personal_words = secrets.personal_words
 
-    The class name is what he typed at `aish personal set`, so the card says
-    `home address` because he called it `home_address`. Nothing here translates,
-    shortens or prettifies it: a vocabulary sitting between his name for his own
-    data and the card describing it would be one more thing that can be wrong
-    about what he is agreeing to."""
-    said = [name.replace("_", " ") for name in classes]
-    if len(said) <= 1:
-        return said[0] if said else ""
-    return ", ".join(said[:-1]) + " and " + said[-1]
+
+def _ledger_host(host: str) -> str:
+    """The key `_personal_granted` is stored and read under.
+
+    **`www.` is stripped, and that is a deliberate difference from the egress
+    vouch.** The two press gates speak `_browse_host`'s vocabulary (www-less)
+    and the address arm speaks `urlsplit`'s (exact), so one value at one site
+    drew TWO cards — type it, then compose it, in either order. The vouch is
+    exact-matched because it is permanent, machine-wide and about a
+    DESTINATION; this ledger is per task and about a CONSEQUENCE — his address
+    reaching that shop — and `www.lot.com` and `lot.com` are the same shop and
+    the same consequence. So the exact-match rule that binds the vouch does not
+    bind this."""
+    said = (host or "").lower()
+    return said[4:] if said.startswith("www.") else said
 
 # Origin-gated knowledge writes (#196). remember/forget_memory auto-approve, and
 # that is deliberate: capturing a fact must stay frictionless. The reasoning is
@@ -6721,6 +6763,23 @@ class Agent:
             return True
         return self._egress_novel_hosts(name, args) is not None
 
+    def _egress_hosts(self, name: str, args: dict) -> set[str]:
+        """The hosts an outbound call would reach — a LOOKUP, for keying the
+        declared-value ledger and nothing else.
+
+        Deliberately not extracted from `_egress_novel_hosts`, which keeps its
+        own fail-closed early returns: those are VERDICTS ("unparseable, so
+        gate"), and folding a verdict into a lookup is how a reader starts
+        deciding things."""
+        if name == "web_search":
+            return _hosts_in_text(str(args.get("query", "")))
+        url = str(args.get("url") or args.get("source") or "")
+        try:
+            host = (urllib.parse.urlsplit(url).hostname or "").lower()
+        except ValueError:
+            return set()
+        return {host} if host else set()
+
     def _egress_novel_hosts(self, name: str, args: dict) -> list[str] | None:
         """Hosts this call would reach that the owner never introduced, or
         None when the call needs no gate (an untainted attended turn, a
@@ -6741,7 +6800,18 @@ class Agent:
         if name not in EGRESS_TOOLS:
             return None
         attended = self.origin == "user"
-        if attended and not self._tainted:
+        # **Taint is an argument about INJECTION, and never was one about HIS
+        # DATA (#343 F2).** An untainted turn is free because nothing outside
+        # the machine has spoken yet, so an address the model composed is one it
+        # composed from him. That is exactly the case where it can carry his
+        # home address: the model has it from memory, from a local file, or from
+        # his own message. So the early return is not taken when the call
+        # carries one of his declared values — value-triggered, so an ordinary
+        # untainted read stays free, and the prose that already promised "at ANY
+        # site" becomes true.
+        if attended and not self._tainted and not self._personal_outbound(
+            name, args, self._egress_hosts(name, args)
+        ):
             return None
         if name in ("read_url", "show_image", "read_pdf", "read_media", "browse"):
             # `browse` names its opening address in `url`, exactly as read_url
@@ -6768,6 +6838,15 @@ class Agent:
         else:  # web_search: the query goes to the SEARCH ENGINE and to nothing
             # else, so a host it names is at most a signal, never a recipient.
             hosts = _hosts_in_text(str(args.get("query", "")))
+            # …but it DOES reach the search engine, and his home address in a
+            # search box is his data going out by any reading of his own clause
+            # (#343 F4). A query naming no host would otherwise fall out of the
+            # bottom of this function with an empty list and no gate, in both
+            # origins. The placeholder is a DESTINATION for the card to name,
+            # never a host: `_egress_gate` keeps it out of the vouch store,
+            # which is machine-wide and permanent.
+            if not hosts and self._personal_outbound(name, args, hosts):
+                return [SEARCH_ENGINE_DESTINATION]
         known = self._owner_hosts | self._approved_hosts
         novel = sorted(h for h in hosts if h not in known)
         if not attended:
@@ -6884,7 +6963,7 @@ class Agent:
         # — which is the defect the delivery review caught here for stored
         # secrets one slice ago, and the vouch is now permanent and seeded, so
         # vouched is the common case rather than the exception.
-        if self._personal_in_url(url, set(hosts)):
+        if self._personal_in_url(url, set(hosts)) or secrets.personal_unreadable():
             return False
         return not _forwards_elsewhere(url)
 
@@ -6934,6 +7013,17 @@ class Agent:
             # names a host and never reaches one, so the destination arm below
             # — which asks where a value is going — has nothing to ask about
             # here. The corpus that motivated #341 is entirely reads.
+            #
+            # What DID change here (#343 F4): a query carrying one of his
+            # DECLARED values. The search arm's reasoning above is about
+            # addresses and destinations, and it is untouched — this is his own
+            # data reaching the search engine, which is the clause #343 serves,
+            # and it is asked with the search's own sentence rather than a
+            # destination's.
+            if said := self._personal_outbound(
+                name, args, self._egress_hosts(name, args)
+            ):
+                return PERSONAL_IN_A_SEARCH.format(what=_personal_words(said))
             return (
                 SEARCH_CARRIES
                 if any(
@@ -7041,9 +7131,16 @@ class Agent:
         host = (parts.hostname or "").lower()
         if parts.username or parts.password:
             return "has a username and password written inside it"
+        # **Arms 3, 3b and 3c are JOINED, not raced (#343 F7).** They are three
+        # different things one address can carry and they are not alternatives:
+        # an open redirect that ALSO carries his home address used to be carded
+        # as a redirect only, so the card named one finding and the owner
+        # answered about another. The card has to say what the lines checked —
+        # all of them.
+        carried = []
         # Both forms: a secret containing a '%' would survive only one of them.
         if secrets.contains(urllib.parse.unquote(url)) or secrets.contains(url):
-            return "carries one of your stored secrets"
+            carried.append("carries one of your stored secrets")
         # Arm 3b (#295 M5, #343): one of the values he DECLARED, beside the
         # stored-secret arm, on the same primitive and at ANY host — vouched or
         # not, exactly as the secret arm fires. #343 fences typing, and a
@@ -7051,9 +7148,15 @@ class Agent:
         # machine-wide vouch would exempt his third clause at the 17 hosts he
         # uses most, which is where a fence has to hold or it is decoration.
         if said := self._personal_in_url(url, {host}):
-            return PERSONAL_CARRIES.format(what=_personal_words(said))
+            carried.append(PERSONAL_CARRIES.format(what=_personal_words(said)))
+        elif secrets.personal_unreadable():
+            # Fails closed on the same terms the typing fence does: aish cannot
+            # tell, which is not the same as there being nothing to find.
+            carried.append(PERSONAL_UNREADABLE_CARRIES)
         if _forwards_elsewhere(url):
-            return "has a second address written inside it"
+            carried.append("has a second address written inside it")
+        if carried:
+            return ", and ".join(carried)
         if run := _opaque_run(parts):
             return f"carries a {run}-character run of random-looking text"
         for label in host.split("."):
@@ -7112,7 +7215,14 @@ class Agent:
         # A search is not a visit, and the card has to say which one this is —
         # asking him to approve something that is not about to happen is how a
         # card stops meaning anything.
-        if name == "web_search":
+        if name == "web_search" and (
+            said := self._personal_outbound(name, args, self._egress_hosts(name, args))
+        ):
+            # **His own data, so the sentence is about the data (#343 F4).** A
+            # search names a host and never reaches one, so the composed-address
+            # wording below would state something no line checked here.
+            preview = PERSONAL_IN_A_SEARCH.format(what=_personal_words(said))
+        elif name == "web_search":
             preview = (
                 f"this turn has read the open web, and now wants to put an "
                 f"address it composed — {shown} — into a web search"
@@ -7144,9 +7254,22 @@ class Agent:
             # said. Defaulting to an empty finding shipped the failure this
             # issue is about, one layer over: the sentence ended mid-air after
             # the host and the card asserted nothing at all.
+            #
+            # **The opening clause states only what is true of THIS turn
+            # (#343 F2).** Since a declared value gates an UNTAINTED turn too,
+            # "this turn has read the open web" would be, for exactly those
+            # cards, a cause no line established — the L8 failure this whole
+            # sentence exists to have fixed, one clause to the left. The finding
+            # itself is `_payload_finding`'s, unchanged and now JOINED, so a
+            # card naming a redirect still names the value riding beside it.
+            opening = (
+                "this turn has read the open web, and the address it built for"
+                if self._tainted
+                else "the address aish built for"
+            )
             preview = (
-                f"this turn has read the open web, and the address it built "
-                f"for {shown} {self._payload_finding(name, args) or NO_READABLE_HOST}"
+                f"{opening} {shown} "
+                f"{self._payload_finding(name, args) or NO_READABLE_HOST}"
             )
         decision = self._ask_owner(ASKED_BY_EGRESS, name, args, preview)
         if isinstance(decision, Denied):
@@ -7175,17 +7298,17 @@ class Agent:
         # above: that one is a HOLD — the call never ran — so writing a vouch
         # there would record a permission for an action the owner asked to have
         # reworked.
-        self._vouch_hosts(novel)
+        # The PLACEHOLDER is not a host and must never enter a store that is
+        # machine-wide and permanent (#343 F4). Filtered here, at the one call
+        # site that writes it, and pinned by a test.
+        self._vouch_hosts([h for h in novel if h != SEARCH_ENGINE_DESTINATION])
         # And the SAME per-task ledger the typing card writes (#343). The card
-        # he just approved named the value and the host, so a second identical
-        # address in the same task must not ask again — and the ledger is shared
-        # with the typing fence because it is one question about one value going
-        # to one place, whichever mechanism carries it.
+        # he just approved named the value and the destination, so a second
+        # identical address in the same task must not ask again — and the ledger
+        # is shared with the typing fence because it is one question about one
+        # value going to one place, whichever mechanism carries it.
         self._grant_personal(
-            self._personal_in_url(
-                str(args.get("url") or args.get("source") or ""), set(novel)
-            ),
-            novel,
+            self._personal_outbound(name, args, set(novel)), novel
         )
         return None
 
@@ -7586,13 +7709,41 @@ class Agent:
         not the field's name, its placeholder, its autocomplete attribute, nor
         the page's language.
 
+        **IT MATCHES THE CONCATENATION AS WELL AS EACH FIELD, and without that
+        it does not fire on its own headline case.** The first version asked
+        only `declared value in this field`, so a declared
+        `ul. Lipowa 3/5, 30-001 Kraków` fired when it went into one box and
+        fired at NOTHING when it went into three — which is what every real
+        shipping form does, and what every name form does with first and last.
+        The fragments cannot be declared instead: a Polish postcode folds to 5
+        characters and a house number to 2, both under the floor. So the values
+        aish has typed at this host THIS TASK, in order, plus this call's own,
+        are run together and matched as one string — `_values_riding_this_press`
+        is the same reading M3 already maintains, so there is no second answer
+        to *what has been typed here*.
+
+        **The cost, stated rather than found later:** with a split form the card
+        arrives on the call that completes the match, so the earlier fragments
+        are already in the page's fields. Nothing has been SENT — typing is not
+        submitting, and the submit is gated separately — but the fence cannot
+        know a value is his until enough of it exists to recognise, and any
+        design that could would be reading the page.
+
         The result is class NAMES, never values. It goes on a card and into an
         approval record, and a record quoting his address would be the leak this
         whole slice exists to prevent."""
+        key = _ledger_host(host)
+        riding = self._values_riding_this_press(
+            name, args, self._driven_host(name, args)
+        )
+        typed = [value for _, value in riding]
         found: list[str] = []
-        for _, value in browse.typed_values(name, args):
-            for said in secrets.personal_matches(value):
-                if said not in found and (said, host) not in self._personal_granted:
+        # Each field on its own, then everything run together. The joined form
+        # can only ever ADD a class — containment in a part implies containment
+        # in the whole — so this widens the fence and can never narrow it.
+        for haystack in [*typed, "".join(typed)]:
+            for said in secrets.personal_matches(haystack):
+                if said not in found and (said, key) not in self._personal_granted:
                     found.append(said)
         return found
 
@@ -7615,7 +7766,7 @@ class Agent:
         An EMPTY host set fails closed: nothing can have been granted for a
         destination the gate could not name, so the classes come back pending
         rather than silently cleared by an `all()` over nothing."""
-        wanted = hosts or {""}
+        wanted = {_ledger_host(h) for h in hosts} or {""}
         found: list[str] = []
         for text in (url, urllib.parse.unquote(url)):
             for said in secrets.personal_matches(text):
@@ -7625,6 +7776,27 @@ class Agent:
                     found.append(said)
         return found
 
+    def _personal_outbound(self, name: str, args: dict, hosts: set[str]) -> list[str]:
+        """The declared classes an OUTBOUND call would carry, either channel.
+
+        A search names a host and never reaches one, so the query is not an
+        address — but it IS handed to the search engine, and *his address in a
+        search box* is his data going out by any reading of his own clause. One
+        function so the egress gate cannot ask one question and card another."""
+        if name == "web_search":
+            # Keyed on where it really goes when the query names no host, so a
+            # yes lasts the task instead of being re-collected per query — the
+            # failure `_searching_a_vouched_site` records about per-URL holds.
+            wanted = {_ledger_host(h) for h in hosts} or {SEARCH_ENGINE_DESTINATION}
+            return [
+                said
+                for said in secrets.personal_matches(str(args.get("query", "") or ""))
+                if not all((said, host) in self._personal_granted for host in wanted)
+            ]
+        return self._personal_in_url(
+            str(args.get("url") or args.get("source") or ""), hosts
+        )
+
     def _grant_personal(self, classes: list[str], hosts: list[str]) -> None:
         """Record that he agreed these values may go to these hosts this task.
 
@@ -7633,8 +7805,8 @@ class Agent:
         than the sentence he read is a permission nobody was shown."""
         for said in classes:
             for host in hosts:
-                if host:
-                    self._personal_granted.add((said, host))
+                if key := _ledger_host(host):
+                    self._personal_granted.add((said, key))
 
     def _personal_refused(self, name: str, args: dict, host: str) -> str | None:
         """The two cases where a declared value is REFUSED rather than carded.
@@ -7653,6 +7825,19 @@ class Agent:
         the same reason: this is a question about the ACT of typing, so a check
         inside a per-tool branch is a check one tool takes and the other does
         not."""
+        # **Fails closed when the store cannot be READ (#343 F6).** An
+        # unreadable class is not an absent one, and `get_personal` returns None
+        # for both — so a locked Keychain or a refused TCC prompt used to fold
+        # to "too short", and the address was typed free with no card and no
+        # record. The sentence says exactly what was established: aish cannot
+        # tell, not that this is or is not one of his.
+        if (unreadable := secrets.personal_unreadable()) and any(
+            value for _, value in browse.typed_values(name, args)
+        ):
+            return _gate_outcome(
+                PERSONAL_UNREADABLE.format(what=_personal_words(sorted(unreadable))),
+                decision="blocked",
+            )
         classes = self._personal_pending(name, args, host)
         if not classes:
             return None

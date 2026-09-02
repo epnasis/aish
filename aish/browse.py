@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from typing import Any
 
-from . import vocab
+from . import secrets, vocab
 
 # How many controls one snapshot may carry. A portal page runs to a few hundred
 # interactive elements once every nav link and footer link is counted, and a
@@ -2701,6 +2701,23 @@ CARD_VALUE_CHARS = 60
 
 
 def _shown(value: str) -> str:
+    """One typed value as the card renders it.
+
+    **A value the owner DECLARED as his own is shown by its NAME (#343).** The
+    card is the approval record, so a batch card drawn for some other reason —
+    a worded submit, a commit-evidence page — would otherwise write his home
+    address into the log verbatim, which is the leak the declared-value fence
+    exists to prevent, moved from somebody's server onto his own disk. `[your
+    home address]` is also the more glanceable thing: he does not need to
+    proof-read his own address, he needs to see which field it is going in.
+
+    **The mask is PARTIAL by construction and this says so.** It replaces a
+    field whose value matches on its own; an address split across street,
+    postcode and city matches only as the concatenation, and each fragment
+    renders as itself. Masking the whole batch on a whole-batch match was
+    rejected — it would hide the values he actually needs to check."""
+    if said := secrets.personal_matches(value):
+        return f"[your {secrets.personal_words(said)}]"
     if len(value) <= CARD_VALUE_CHARS:
         return repr(value)
     return f"{value[:CARD_VALUE_CHARS]!r} + {len(value) - CARD_VALUE_CHARS} more chars"

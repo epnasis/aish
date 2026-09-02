@@ -1783,12 +1783,16 @@ def _personal_cli(args: list[str]) -> int:
         if not found:
             print("(no values declared)")
             return 0
+        marks = {
+            secrets.FENCED: "",
+            secrets.TOO_SHORT: "  (too short to match — NOT fenced)",
+            secrets.UNREADABLE: "  (could not be read — NOT fenced)",
+        }
         for name in found:
-            # The listing must not claim coverage the matcher does not give:
-            # a value too short to match is shown as unfenced rather than
-            # quietly doing nothing.
-            mark = "" if secrets.personal_fenced(name) else "  (too short to match — NOT fenced)"
-            print(f"{name}{mark}")
+            # The listing must not claim coverage the matcher does not give,
+            # and it must not state a cause no line checked: a class the
+            # Keychain refused is not one he wrote too briefly.
+            print(f"{name}{marks[secrets.personal_status(name)]}")
         return 0
     if cmd in ("set", "get", "rm") and rest:
         name = rest[0]
@@ -1811,6 +1815,15 @@ def _personal_cli(args: list[str]) -> int:
             print(
                 f"declared {name} — aish will ask before typing it into a page "
                 "or putting it in an address"
+            )
+            # The one thing that decides whether the fence sees the value at
+            # all: it is matched against what aish types into ONE field (and
+            # against everything typed at a site, run together), so a value
+            # declared the way a form takes it is a value the fence can find.
+            print(
+                "declare it the way a site takes it in ONE field — the street "
+                "line on its own, the phone without the country code, the "
+                "e-mail as you would type it."
             )
             return 0
         if cmd == "get":

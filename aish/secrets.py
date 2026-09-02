@@ -345,11 +345,11 @@ _TRANSLITERATE = str.maketrans({
 MIN_PERSONAL_MATCH = 6
 
 _PERSONAL_TTL = 30.0
-_personal_cache: dict = {"names": None, "at": 0.0, "pairs": []}
+_personal_cache: dict = {"names": None, "at": 0.0, "pairs": [], "unreadable": []}
 
 
 def _invalidate_personal() -> None:
-    _personal_cache.update(names=None, at=0.0, pairs=[])
+    _personal_cache.update(names=None, at=0.0, pairs=[], unreadable=[])
 
 
 def fold_value(text: str) -> str:
@@ -445,29 +445,87 @@ def _personal_matchable() -> list[tuple[str, str]]:
     the old address for the rest of the session.
 
     Longest first, so a class that is a substring of another reports the more
-    specific one first."""
+    specific one first.
+
+    **A name the index lists and the Keychain will not hand over is UNREADABLE,
+    and it is tracked apart from a short one.** They used to be the same answer:
+    `get_personal(name) or ""` folds to nothing, which is "too short", so a
+    locked Keychain or a refused TCC prompt meant the address was typed FREE,
+    with no card and no record — and `aish personal list` then printed "too
+    short to match", a cause nothing checked. The never-list has no external
+    dependency and this tier does, so its failure direction must not be open."""
     current = tuple(personal_names())
     now = time.monotonic()
     stale = now - _personal_cache["at"] > _PERSONAL_TTL
     if _personal_cache["names"] != current or stale:
         pairs = []
+        unreadable = []
         for name in current:
-            folded = fold_value(get_personal(name) or "")
+            raw = get_personal(name)
+            if raw is None:
+                unreadable.append(name)
+                continue
+            folded = fold_value(raw)
             if len(folded) >= MIN_PERSONAL_MATCH:
                 pairs.append((name, folded))
         pairs.sort(key=lambda pair: len(pair[1]), reverse=True)
-        _personal_cache.update(names=current, at=now, pairs=pairs)
+        _personal_cache.update(
+            names=current, at=now, pairs=pairs, unreadable=unreadable
+        )
     return _personal_cache["pairs"]
 
 
-def personal_fenced(name: str) -> bool:
-    """Is this declared class actually long enough to be matched on?
+def personal_unreadable() -> list[str]:
+    """Declared classes the Keychain would not hand over.
 
-    `aish personal list` reads it, so the listing cannot claim coverage the
-    matcher does not give — a class stored before this floor existed, or by any
-    route other than `put_personal`, is shown as unfenced rather than silently
-    doing nothing."""
-    return any(found == name for found, _ in _personal_matchable())
+    Non-empty means aish CANNOT TELL whether a value is one of his, which is a
+    different fact from "it is not" — the gate fails closed on it and says so,
+    rather than typing the value and recording nothing.
+
+    An exception refreshing the cache is answered with every declared name, for
+    the same reason: not knowing is not the same as knowing there is nothing."""
+    try:
+        _personal_matchable()
+    except Exception:  # noqa: BLE001 — cannot check is never "nothing to check"
+        return list(personal_names())
+    return list(_personal_cache["unreadable"])
+
+
+FENCED = "fenced"
+TOO_SHORT = "short"
+UNREADABLE = "unreadable"
+
+
+def personal_status(name: str) -> str:
+    """`fenced`, `short` or `unreadable` — what the matcher will actually do
+    with this class.
+
+    Three states and not two, because `aish personal list` must not state a
+    cause no line checked: a class the Keychain refused is not a class he wrote
+    too briefly, and printing the second for the first is exactly the failure
+    this codebase keeps having to remove."""
+    if name in personal_unreadable():
+        return UNREADABLE
+    if any(found == name for found, _ in _personal_matchable()):
+        return FENCED
+    return TOO_SHORT
+
+
+def personal_words(classes: list[str]) -> str:
+    """The declared classes as one phrase, in HIS words.
+
+    The class name is what he typed at `aish personal set`, so the phrase says
+    `home address` because he called it `home_address`. Nothing here translates,
+    shortens or prettifies it: a vocabulary sitting between his name for his own
+    data and the card describing it is one more thing that can be wrong about
+    what he is agreeing to.
+
+    Here rather than in `agent.py` because `browse.Batch.card` masks a declared
+    value with the same phrase, and `browse` cannot import `agent`."""
+    said = [name.replace("_", " ") for name in classes]
+    if len(said) <= 1:
+        return said[0] if said else ""
+    return ", ".join(said[:-1]) + " and " + said[-1]
 
 
 def personal_matches(text: str) -> list[str]:
