@@ -5,6 +5,7 @@ and conftest's `no_real_browser` makes any escape from that fail loudly.
 """
 
 import asyncio
+import inspect
 import pathlib
 import time
 import urllib.error
@@ -3366,13 +3367,13 @@ class TestTheEvidenceFrame:
         page = FakePage()
         owner = _owner_on(page)
         monkeypatch.setattr(
-            browser, "_settled_text", lambda p, **kw: _resolved("the page")
+            browser, "_settled_text", lambda p, **kw: _resolved(("the page", browser.Settled()))
         )
         monkeypatch.setattr(
             browser, "_without_option_floods", lambda p, t: _resolved(t)
         )
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, ""))
+            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", ""))
         )
         monkeypatch.setattr(
             browser, "_save_downloads", lambda o, **kw: _resolved([])
@@ -3507,13 +3508,13 @@ class TestThePagesConsoleIsCapturedPerAction:
 
     def _quiet(self, monkeypatch):
         monkeypatch.setattr(
-            browser, "_settled_text", lambda p, **kw: _resolved("the page")
+            browser, "_settled_text", lambda p, **kw: _resolved(("the page", browser.Settled()))
         )
         monkeypatch.setattr(
             browser, "_without_option_floods", lambda p, t: _resolved(t)
         )
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, ""))
+            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", ""))
         )
         monkeypatch.setattr(
             browser, "_save_downloads", lambda o, **kw: _resolved([])
@@ -3525,7 +3526,11 @@ class TestThePagesConsoleIsCapturedPerAction:
         all, and that is exactly the eon.pl case."""
         page = self.FakePage()
         browser._Session(page)
-        assert set(page.handlers) == {"console", "pageerror"}
+        assert {"console", "pageerror"} <= set(page.handlers)
+        # The traffic listeners arrived with #348 and are a different fact —
+        # asserted here rather than by widening this set to an equality nobody
+        # would notice going stale.
+        assert {"request", "requestfinished", "requestfailed"} <= set(page.handlers)
 
     def test_listening_injects_NOTHING_into_the_page(self):
         """Watch mode is careful about this for the opposite reason — its own
@@ -3884,3 +3889,445 @@ class TestARenewedSessionOnlyCLAIMSOneWhenTheReReadAgrees:
         (result, _why) = self._read(monkeypatch, walled_again=False)
         assert "What follows IS their account" in result[4]
         assert result[3] is False
+
+
+class TestWhereADrivenActionsSecondsGo:
+    """#348. A driven action costs 5-13 seconds and the trace recorded ONE
+    number for the whole call, so "why is this slow?" was unanswerable from a
+    log and every proposal to speed it up was an argument about which phase was
+    slow rather than a measurement of it.
+
+    The load-bearing field is `last_arrival_ms`. It says how long after the wait
+    began the page LAST MOVED — so it states, per real page, what a shorter
+    release bar would have cost. It is measured and never acted on: the bar it
+    would license is not lowered by the wait that measures it."""
+
+    class Page:
+        """A page whose activity counter is scripted poll by poll."""
+
+        def __init__(self, states):
+            self.states = list(states)
+            self.polls = 0
+
+        async def wait_for_load_state(self, *a, **kw):
+            return None
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+        async def evaluate(self, *a, **kw):
+            self.polls += 1
+            index = min(self.polls - 1, len(self.states) - 1)
+            return self.states[index]
+
+    @staticmethod
+    def _state(gen, quiet, ready=True):
+        return {"gen": gen, "quiet": quiet, "ready": ready}
+
+    def test_a_page_that_was_already_still_releases_at_the_first_poll(self):
+        page = self.Page([self._state(1, 9_000)])
+        seen = _run(browser._settle(page, still_for=5_000))
+        assert seen.released == "quiet"
+        assert seen.polls == 1
+        assert seen.first_quiet_ms == 9_000
+        # Nothing moved while we watched, and that is NOT the same fact as
+        # "it moved at 0ms" — which is why the sentinel is -1 and not 0.
+        assert seen.last_arrival_ms == -1
+
+    def test_a_late_arrival_is_recorded_as_the_thing_a_shorter_bar_would_miss(self):
+        """The whole reason this field exists. The page is quiet at the first
+        poll — a 350ms bar would have let go — and then moves."""
+        page = self.Page([
+            self._state(4, 400),      # quiet enough for a short bar
+            self._state(4, 750),
+            self._state(5, 0),        # …and then the answer lands
+            self._state(5, 6_000),
+        ])
+        seen = _run(browser._settle(page, still_for=5_000))
+        assert seen.released == "quiet"
+        assert seen.first_quiet_ms == 400   # a short bar WOULD have released here
+        # …and this is what it would have missed. Asserted against the SENTINEL
+        # rather than against a duration: these polls cost no wall-clock, so the
+        # honest reading of 0 here is "it arrived", which is exactly the fact
+        # -1 has to stay distinguishable from.
+        assert seen.last_arrival_ms >= 0
+
+    def test_the_ceiling_is_recorded_as_a_ceiling_and_never_as_a_settle(self):
+        """A wait that ended because it ran out of time and a wait that ended
+        because the page went quiet are different facts. Reading the first as
+        the second is how a timeout comes to be reported as a finished page."""
+        page = self.Page([self._state(n, 0) for n in range(200)])
+        seen = _run(browser._settle(page, still_for=5_000, timeout_ms=1_400))
+        assert seen.released == "timeout"
+
+    def test_a_page_that_stops_answering_says_so(self):
+        page = self.Page([None])
+        seen = _run(browser._settle(page, still_for=5_000))
+        assert seen.released == "unknown"
+
+    def test_the_snapshot_carries_the_phases(self, state, monkeypatch):
+        snapshot = TestTheEvidenceFrame()._snapshot_of(
+            monkeypatch, screenshot=lambda: TestTheEvidenceFrame.JPEG
+        )
+        phases = snapshot.phases
+        for key in ("settle_ms", "enumerate_ms", "frame_ms", "bar_ms", "settle"):
+            assert key in phases, key
+        # The BAR is recorded beside the wait, because "waited 5s" only means
+        # something next to what it was waiting for.
+        assert phases["bar_ms"] == browser.SETTLE_QUIET_MS
+        assert set(phases["settle"]) == {
+            "waited_ms", "polls", "idle_ms", "first_quiet_ms",
+            "last_arrival_ms", "traffic_waited_ms", "released",
+        }
+
+    def test_the_record_reaches_the_tool_step(self):
+        """It has to survive `sealed`, which is the last thing that touches the
+        value — a string operation on a ToolOutcome silently drops the envelope,
+        so this is the join that would go quiet without a test."""
+        from aish import web as web_module
+
+        out = web_module.sealed("a page", None, phases={"settle_ms": 5100})
+        assert out.meta["phases"] == {"settle_ms": 5100}
+        # And a call with nothing to say says nothing, rather than an empty dict
+        # that a reader cannot tell from a log written before this existed.
+        assert not hasattr(web_module.sealed("a page", None), "meta")
+
+
+class TestASuggestionThePageDrewAsAButton:
+    """#348. `fill` is documented as "type, and press the matching suggestion",
+    and on lot.com it could not do the second half for ANY input — the
+    destination suggestion is a plain `<button>`, and the candidate set was
+    `role=option` only. So it typed, recognised nothing, and reported the text
+    back as though the field were an ordinary one.
+
+    That read like a matching failure and was a KIND failure, which is why the
+    session that motivated this spent three round trips per airport field:
+    `'Lot do:' ← 'NRT'` on one call, and the model pressing the suggestion
+    itself on the next.
+
+    The fence that was always doing the work is unchanged: a candidate is
+    something the page put there IN RESPONSE to the typing. What follows is
+    what makes widening past the declared role safe."""
+
+    def _controls(self, specs):
+        from aish import browse as browse_mod
+
+        made = [
+            browse_mod.Control(
+                n=i + 1, kind=spec.get("kind", "button"), name=spec["name"],
+                option=spec.get("option", False),
+                submits=spec.get("submits", False),
+                mutating=spec.get("mutating", False),
+                detail=spec.get("detail", ""),
+            )
+            for i, spec in enumerate(specs)
+        ]
+        # The address is what identity is compared on, and `address_controls`
+        # is what assigns it — a fake with none would make every control look
+        # like every other.
+        browse_mod.address_controls(made)
+        return made
+
+    def _commit(self, monkeypatch, before, after, value, pressed=None):
+        from aish import browse as browse_mod
+
+        control = before[0] if before else self._controls([{"name": "Lot do:"}])[0]
+        monkeypatch.setattr(browser, "_settle", lambda p, **kw: _resolved(browser.Settled()))
+        monkeypatch.setattr(browser, "_enumerate",
+                            lambda p, m="": _resolved(([], 0, 0, 0, "", "")))
+        monkeypatch.setattr(browse_mod, "controls_from", lambda raw: after)
+        monkeypatch.setattr(browser, "_find", lambda p, n: _resolved((object(), True)))
+        monkeypatch.setattr(browser, "_centre", lambda t: _resolved(None))
+        monkeypatch.setattr(browser, "_read_calendar", lambda p, n: _resolved({}))
+
+        def press(page, target, **kw):
+            (pressed if pressed is not None else []).append(target)
+            return _resolved(browse_mod.Pressed())
+
+        monkeypatch.setattr(browser, "_press", press)
+        return _run(browser._commit_suggestion(object(), control, value, before))
+
+    def test_a_button_the_page_opened_in_response_is_now_pressed(self, monkeypatch):
+        """lot.com's own labels. NOT the measured call: the session typed `NRT`,
+        and `NRT` is not the whole label, so strict matching still misses it and
+        falls to the readback. What this pins is the KIND barrier coming down —
+        a `<button>` suggestion can now be committed at all, which it could not
+        be for any input before."""
+        before = self._controls([{"name": "Lot do:", "kind": "field"}])
+        after = before + self._controls([{"name": "Tokio (NRT) Japonia"}])
+        pressed: list = []
+        said = self._commit(monkeypatch, before, after, "Tokio (NRT) Japonia", pressed)
+        assert pressed, "the suggestion was never pressed"
+        assert "picked 'Tokio (NRT) Japonia'" in said
+
+    def test_an_undeclared_candidate_must_match_the_WHOLE_label(self, monkeypatch):
+        """The substring rung is where an undeclared candidate set could press
+        the wrong neighbour, so it is dropped for one. `match_option`'s Iran /
+        Iraq law is about choosing among options the page DECLARED; this is the
+        same law applied where the declaration is missing."""
+        before = self._controls([{"name": "Lot do:", "kind": "field"}])
+        after = before + self._controls([
+            {"name": "Tokio (NRT) Japonia"},
+            {"name": "Tokio (HND) Japonia"},
+        ])
+        pressed: list = []
+        said = self._commit(monkeypatch, before, after, "Tokio", pressed)
+        assert pressed == [], "an ambiguous undeclared candidate was pressed"
+        assert "←" in said
+
+    def test_a_miss_against_UNDECLARED_candidates_is_not_a_failure(self, monkeypatch):
+        """The regression this widening could have shipped. Typing into a
+        search box very often makes a clear ✕ appear inside the field — before
+        the widening it was never a candidate and the step fell through to the
+        readback; it must still do that, or fills that work today become
+        stopped batches.
+
+        The widening may only ever ADD a commit that could not happen before."""
+        before = self._controls([{"name": "Lot do:", "kind": "field"}])
+        after = before + self._controls([{"name": "✕"}])
+        pressed: list = []
+        said = self._commit(monkeypatch, before, after, "NRT", pressed)
+        assert pressed == [], "a stray control was pressed as a suggestion"
+        assert "←" in said and "NRT" in said
+
+    def test_declared_options_do_not_shadow_an_undeclared_suggestion(self, monkeypatch):
+        """lot.com's actual shape, and the flaw in the first version of this.
+
+        Its destination panel renders two STATIC declared options beside the
+        real suggestion drawn as a button (log line 2374: 'Dowolny kierunek',
+        'Siatka połączeń'). A rule that simply preferred declared options would
+        have stopped at those two, missed the button, and bought nothing on the
+        site the change was written for."""
+        before = self._controls([{"name": "Lot do:", "kind": "field"}])
+        after = before + self._controls([
+            {"name": "Dowolny kierunek", "option": True},
+            {"name": "Siatka połączeń", "option": True},
+            {"name": "Tokio (NRT) Japonia"},
+        ])
+        pressed: list = []
+        said = self._commit(monkeypatch, before, after, "Tokio (NRT) Japonia", pressed)
+        assert pressed, "the declared options shadowed the real suggestion"
+        assert "picked 'Tokio (NRT) Japonia'" in said
+
+    def test_the_declared_list_keeps_its_own_terms_when_it_DOES_match(self, monkeypatch):
+        """The other side of the two-stage rule: a page that declared its list
+        is matched on that list first, substring rung intact, exactly as before
+        this change. The undeclared rung is a fallback and never a competitor."""
+        before = self._controls([{"name": "Kraj", "kind": "field"}])
+        after = before + self._controls([
+            {"name": "Polska (PL)", "option": True},
+            {"name": "Polska — coś jeszcze"},
+        ])
+        pressed: list = []
+        said = self._commit(monkeypatch, before, after, "Polska (PL)", pressed)
+        assert "picked 'Polska (PL)'" in said
+
+    def test_a_miss_against_a_DECLARED_list_is_still_reported(self, monkeypatch):
+        """The other half. A page that marked its list `role=option` SAID these
+        are the choices, so not matching one is a real problem and the model
+        needs to hear it rather than get a soft readback."""
+        before = self._controls([{"name": "Kraj", "kind": "field"}])
+        after = before + self._controls([
+            {"name": "Polska", "option": True},
+            {"name": "Portugalia", "option": True},
+        ])
+        with pytest.raises(browser._StepFailed) as exc:
+            self._commit(monkeypatch, before, after, "Niemcy")
+        assert "Nothing was chosen" in str(exc.value)
+
+    def test_a_declared_option_list_keeps_the_substring_rung(self, monkeypatch):
+        """Nothing was taken away from the pages that already worked."""
+        before = self._controls([{"name": "Country", "kind": "field"}])
+        after = before + self._controls([{"name": "Poland (PL)", "option": True}])
+        pressed: list = []
+        said = self._commit(monkeypatch, before, after, "Poland", pressed)
+        assert pressed and "picked 'Poland (PL)'" in said
+
+    def test_a_candidate_that_would_SEND_the_form_is_never_pressed(self, monkeypatch):
+        """The one irreversible thing on the page, reached by a rung that
+        exists to choose a word. A form being filled is not finished."""
+        before = self._controls([{"name": "Lot do:", "kind": "field"}])
+        after = before + self._controls([{"name": "Szukaj", "submits": True}])
+        pressed: list = []
+        said = self._commit(monkeypatch, before, after, "Szukaj", pressed)
+        assert pressed == [], "a submit was pressed from the suggestion rung"
+        # It falls back to the readback rather than raising: nothing appeared
+        # that was a suggestion, which is the ordinary "no list opened" case.
+        assert "←" in said
+
+    def test_a_candidate_needing_its_own_approval_is_still_refused(self, monkeypatch):
+        before = self._controls([{"name": "Lot do:", "kind": "field"}])
+        after = before + self._controls([{"name": "Kup teraz", "mutating": True}])
+        with pytest.raises(browser._StepFailed) as exc:
+            self._commit(monkeypatch, before, after, "Kup teraz")
+        assert "approval of its own" in str(exc.value)
+
+
+class TestTheLedgerSaysWhatItDidNotCheck:
+    """#348. A readback proves what the INPUT holds and nothing about what the
+    FORM has taken, and on a field with a picker open over it those two
+    routinely disagree. On 2026-09-01 the ledger read `'Wybierz datę…' ←
+    '19-03-2027'` while lot.com's picker stood open with its *Potwierdź* button
+    disabled. The model read a verified value, said the dates were set, and
+    spent three more calls finding out they were not."""
+
+    def _line(self, *, picker_open):
+        from aish import browse as browse_mod
+
+        control = browse_mod.Control(n=1, kind="field", name="Wybierz datę wylot")
+        controls = [
+            browse_mod.Control(
+                n=1, kind="field", name="Wybierz datę wylot",
+                detail="currently: 19-03-2027",
+            )
+        ]
+        browse_mod.address_controls(controls)
+        browse_mod.address_controls([control])
+        return browser._readback(
+            controls, control, "19-03-2027", picker_open=picker_open
+        )
+
+    def test_an_open_picker_makes_the_line_say_what_was_not_checked(self):
+        line = self._line(picker_open=True)
+        assert "19-03-2027" in line          # what was seen
+        assert "still open" in line          # what else was seen
+        assert "not something aish checked" in line   # and what was not
+
+    def test_it_does_not_diagnose(self):
+        """An open picker over a field that HAS taken the value is an ordinary
+        thing for a page to do. 'The page rejected it' would be a guess, and a
+        guess written here is the one the model reads as aish's own finding."""
+        line = self._line(picker_open=True)
+        for guess in ("rejected", "refused", "failed", "did not take", "invalid"):
+            assert guess not in line.lower(), guess
+
+    def test_an_ordinary_fill_is_unchanged(self):
+        assert self._line(picker_open=False) == "'Wybierz datę wylot' ← '19-03-2027'"
+
+
+class TestAStoppedBatchIsStillTimed:
+    """#348. A batch that stopped part-way is the case whose timings matter
+    most — it is where a form-fill spends its seconds and then has nothing to
+    show for them. The completed path stamps `act_ms` after `_snapshot`
+    returns, which the stop path never reaches, so `act_ms` would have been
+    absent on exactly the slow failures."""
+
+    def test_the_stop_path_records_the_act_clock_and_where_it_stopped(
+        self, state, monkeypatch
+    ):
+        import time as time_module
+
+        from aish import browse as browse_mod
+
+        class FakePage:
+            url = "https://www.lot.com/pl/pl"
+
+            async def title(self):
+                return "LOT"
+
+            async def screenshot(self, **kw):
+                return TestTheEvidenceFrame.JPEG
+
+            async def query_selector(self, sel):
+                return None
+
+        owner = _owner_on(FakePage())
+        monkeypatch.setattr(
+            browser, "_settled_text",
+            lambda p, **kw: _resolved(("the page", browser.Settled())),
+        )
+        monkeypatch.setattr(browser, "_without_option_floods", lambda p, t: _resolved(t))
+        monkeypatch.setattr(
+            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", ""))
+        )
+        monkeypatch.setattr(browser, "_save_downloads", lambda o, **kw: _resolved([]))
+
+        snapshot = _run(
+            browser._stop(
+                owner, owner.browse_pages[""], ["1. pressed 'Dodaj +'"],
+                2, 6, "the control left the page",
+                act_began=time_module.perf_counter() - 1.5,
+            )
+        )
+        assert isinstance(snapshot, browse_mod.Snapshot)
+        assert snapshot.phases["act_ms"] >= 1_400
+        assert snapshot.phases["steps"] == 6
+        # WHERE it stopped, not just that it did — a batch that died on step 2
+        # of 6 and one that died on step 6 of 6 spent their time differently.
+        assert snapshot.phases["stopped_at"] == 2
+
+    def test_a_stop_with_no_clock_claims_no_timing(self):
+        """Absent, never zero: a caller that had no clock and a batch that took
+        no time are different facts (contract corollary 2)."""
+        source = inspect.getsource(browser._stop)
+        assert "if act_began is not None:" in source
+
+
+class TestWaitingOnTrafficNeverShortensAWait:
+    """#348. The in-flight counter is the piece most easily turned into the bug
+    this file already fixed once — "quiet right now and nothing on the wire,
+    therefore done" is a SHORTER bar wearing evidence. It is used in one
+    direction only, and these are the properties that say so."""
+
+    class Page(TestWhereADrivenActionsSecondsGo.Page):
+        pass
+
+    @staticmethod
+    def _state(gen, quiet, ready=True):
+        return {"gen": gen, "quiet": quiet, "ready": ready}
+
+    def test_traffic_cannot_make_a_settle_finish_sooner(self):
+        """The same page, settled, with and without a busy counter: the version
+        that sees traffic must never poll FEWER times."""
+        script = [self._state(1, 9_000)] * 40
+        quiet_only = _run(browser._settle(self.Page(script), still_for=5_000))
+        with_traffic = _run(
+            browser._settle(self.Page(script), still_for=5_000, inflight=lambda: 2)
+        )
+        assert with_traffic.polls >= quiet_only.polls
+
+    def test_the_grace_is_bounded_so_a_long_poll_cannot_own_the_page(self):
+        """An SSE stream or an analytics beacon never completes. Without a
+        bound, every settle on such a page would run to its ceiling."""
+        seen = _run(
+            browser._settle(
+                self.Page([self._state(1, 9_000)] * 200),
+                still_for=5_000, timeout_ms=60_000, inflight=lambda: 1,
+            )
+        )
+        assert seen.released == "quiet_with_traffic"
+        # The grace is a floor checked once per poll, so it overshoots by at
+        # most one poll — bounded is the property, and the number recorded is
+        # what was actually waited rather than the constant it was aiming at.
+        assert seen.traffic_waited_ms < browser.TRAFFIC_GRACE_MS + browser.WATCH_POLL_MS
+        # …and nowhere near the 60s ceiling it was given.
+        assert seen.traffic_waited_ms < 3_000
+
+    def test_a_counter_that_cannot_answer_degrades_to_the_old_behaviour(self):
+        """Fails toward NOT waiting: an unreadable counter must never produce a
+        wait that hangs on a number nothing can produce."""
+        def boom() -> int:
+            raise RuntimeError("no page")
+
+        seen = _run(
+            browser._settle(
+                self.Page([self._state(1, 9_000)]), still_for=5_000, inflight=boom
+            )
+        )
+        assert seen.released == "quiet"
+        assert seen.traffic_waited_ms == 0
+
+    def test_a_page_that_starts_moving_again_ends_as_an_ordinary_timeout(self):
+        """`quiet_with_traffic` claims the bar was met. If the page moves again
+        afterwards, the last thing SEEN was movement, and a ceiling from there
+        must not inherit the earlier stillness."""
+        script = [self._state(1, 9_000), self._state(2, 0)] + [
+            self._state(n, 0) for n in range(3, 200)
+        ]
+        seen = _run(
+            browser._settle(
+                self.Page(script), still_for=5_000, timeout_ms=2_100,
+                inflight=lambda: 1,
+            )
+        )
+        assert seen.released == "timeout"

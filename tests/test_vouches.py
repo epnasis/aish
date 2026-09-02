@@ -705,7 +705,15 @@ class TestTheApprovalLogInterfaceStaysOneInterface:
 
     def test_the_wrapper_forwards_every_argument(self):
         """Accepting a keyword and dropping it is the same defect one step
-        later, so the values have to arrive."""
+        later, so the values have to arrive.
+
+        **By KEYWORD since #348**, and that is the point rather than a style
+        change. This assertion used to compare a positional tuple, which meant
+        the shim's own forwarding was positional too — so a field inserted
+        anywhere but the end did not raise, it silently shifted every argument
+        after it. Adding `viewers_at_hold` beside the other two latencies wrote
+        `asked_by`'s value into it, and nothing anywhere would have said so; a
+        TypeError is the loud failure, and this was the quiet one."""
         seen: dict = {}
 
         class Spy:
@@ -715,5 +723,29 @@ class TestTheApprovalLogInterfaceStaysOneInterface:
 
         ref = LogRef.__new__(LogRef)
         ref.log = Spy()
-        ref.command("ls", "approved", "why", "shown", 1, 2, "egress")
-        assert seen["args"] == ("ls", "approved", "why", "shown", 1, 2, "egress")
+        ref.command(
+            "ls", "approved", "why", "shown",
+            held_ms=1, shown_ms=2, viewers_at_hold=0, asked_by="egress",
+        )
+        # Only the two that have no meaningful name of their own stay
+        # positional; everything a caller could mis-order arrives named.
+        assert seen["args"] == ("ls", "approved")
+        assert seen["kw"] == {
+            "intent": "why", "preview": "shown",
+            "held_ms": 1, "shown_ms": 2, "viewers_at_hold": 0,
+            "asked_by": "egress",
+        }
+
+    def test_every_field_the_log_records_is_forwarded_by_name(self):
+        """The check that would have caught the positional shift on its own:
+        every parameter the real recorder takes is named in the shim's call."""
+        import inspect as inspect_mod
+
+        from aish.cli import LogRef as Ref
+
+        body = inspect_mod.getsource(Ref.command)
+        call = body[body.index("self.log.command("):]
+        for name in inspect_mod.signature(SessionLog.command).parameters:
+            if name in ("self", "command", "decision"):
+                continue
+            assert f"{name}=" in call, f"{name} is forwarded positionally"

@@ -1,0 +1,24 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Lot do</title></head>
+<body>
+  <form onsubmit="return false">
+    <label>Lot do: <input id="q" aria-label="Lot do:"></label>
+    <div id="out"></div>
+    <button type="submit">Szukaj</button>
+  </form>
+  <script>
+    // A suggestion drawn as a plain <button>, with no ARIA role — the lot.com
+    // shape that role=option matching could never commit.
+    document.getElementById('q').addEventListener('input', (e) => {
+      const out = document.getElementById('out');
+      out.innerHTML = '';
+      if (!e.target.value) return;
+      setTimeout(() => {                     // debounced, like a real one
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = 'Tokio (NRT) Japonia';
+        b.onclick = () => { document.getElementById('q').value = 'Tokio (NRT) Japonia'; };
+        out.appendChild(b);
+      }, 250);
+    });
+  </script>
+</body></html>

@@ -1209,6 +1209,21 @@ class Snapshot:
     # and goes back to guessing URLs, which is the failure the whole tool exists
     # to end. Told what is hidden, it looks for the thing that opens it.
     unreachable: int = 0
+    # Something the page has OPEN on top of itself — a dialog, a date picker —
+    # named if it says its name, `"?"` when it is open but nameless, and "" when
+    # there is none (#348). What it is FOR is the sentence next to
+    # `unreachable`: controls behind an open dialog are reached by closing it,
+    # and telling the model to "press whatever opens them" sent it hunting for
+    # a disclosure that did not exist.
+    #
+    # TWO things must hold before this is non-empty (see `openDialog`): the page
+    # DECLARES modality, and the document is actually scroll-locked. Neither
+    # alone is evidence — a `[role=dialog]` sitting inert in the DOM is on half
+    # the web, and a declared dialog on a page that still scrolls is not what is
+    # holding anything away. The bar is high because the sentence is spoken in
+    # aish's own voice: a wrong one here would replace one false claim with
+    # another, on more pages.
+    dialog: str = ""
     # Which document these numbers belong to. Nothing checks this field, and it
     # should not start: the TAG is the enforcement — it is written during
     # enumeration, cleared from anything the new pass does not list, and dies
@@ -1254,6 +1269,18 @@ class Snapshot:
     # and the page delta cannot report any of it: a suggestion list opens and
     # closes between two snapshots and nets to zero in the diff.
     ledger: list[str] = field(default_factory=list)
+    # WHERE THIS ACTION'S SECONDS WENT (#348), in milliseconds — settle,
+    # enumerate, frame, the act itself, and what the settle was waiting for.
+    # Written for the owner and for the reader of a log, never for the model:
+    # a driven action costs 5-13 seconds and the trace recorded ONE number for
+    # the whole call, so every proposal to make it faster was an argument
+    # about which phase was slow rather than a measurement of it.
+    #
+    # It is a RECORD. Nothing reads it back to decide anything — in particular
+    # `settle.last_arrival_ms`, which exists to say what a shorter release bar
+    # WOULD have cost, must never become the thing that shortens one inside the
+    # same wait that measured it.
+    phases: dict = field(default_factory=dict)
     # The evidence frame (#289): a stored picture of what this page LOOKED LIKE
     # at the moment the model was shown it. A path into the evidence-frame
     # store, or "" — the model never receives either; it is written down for
@@ -2168,12 +2195,62 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     return '';
   };
 
+  // IS SOMETHING OPEN ON TOP OF THIS PAGE? (#348)
+  //
+  // The `unreachable` count above says how many controls could not be reached.
+  // It cannot say WHY, and the sentence built on it told the model to "press
+  // whatever opens them" — which is the right repair for a collapsed menu and
+  // the exact opposite of the right one for a dialog, where the controls are
+  // BEHIND the thing that is open and the way back to them is to close it.
+  //
+  // Measured on lot.com 2026-09-01: with the date picker up, 218 controls were
+  // reported closed away with that advice, and the model spent two calls
+  // hunting for a disclosure to press.
+  //
+  // An OBSERVATION and never an inference, and the bar is deliberately high,
+  // because the sentence this licenses is stated in AISH'S OWN VOICE above the
+  // untrusted banner. Getting it wrong would not soften the old sentence — it
+  // would replace one false claim with another, on more pages.
+  //
+  // Two things must both hold. The page must DECLARE modality — `dialog:modal`
+  // or `aria-modal="true"` — which a bare `[role=dialog]` does not: countless
+  // sites keep an inert one in the DOM, and a great many use the role for a
+  // cookie strip that covers nothing. And the page must actually be SCROLL-
+  // LOCKED (`rootLocked`), which is the mechanism that puts the rest of the
+  // document out of reach in the first place and is exactly what `unreachable`
+  // is counting when this fires. A declared dialog on a page that still
+  // scrolls is not what is holding those controls away.
+  //
+  // Where neither holds, this returns "" and the sentence built on
+  // `unreachable` stays exactly as it was.
+  const openDialog = () => {
+    if (!rootLocked('y') && !rootLocked('x')) return '';
+    let found = null;
+    try {
+      found = document.querySelector('dialog:modal')
+        || document.querySelector('[aria-modal="true"]');
+    } catch (e) {
+      // `:modal` is recent; an engine without it must not lose the other rung.
+      try { found = document.querySelector('[aria-modal="true"]'); }
+      catch (e2) { return ''; }
+    }
+    if (!found || unreachable(found)) return '';
+    let name = '';
+    try { name = nameOf(found) || found.getAttribute('aria-label') || ''; }
+    catch (e) { name = ''; }
+    // Open and nameless is a REAL state and not a miss, so it says so rather
+    // than reporting no dialog: "something is over the page and it does not say
+    // what it is" is still the right repair.
+    return String(name).slice(0, opts.nameMax || 80) || '?';
+  };
+
   return {
     controls: out,
     commit: commitEvidence(),
     matched: matched,
     unreachable: unreached,
     matching: wanted.length,
+    dialog: openDialog(),
   };
 }"""
 
@@ -3544,7 +3621,9 @@ class Choice:
     problem: str = ""
 
 
-def match_option(options: list[tuple[str, str]], asked: str) -> Choice:
+def match_option(
+    options: list[tuple[str, str]], asked: str, *, strict: bool = False
+) -> Choice:
     """Which option did the model mean?
 
     A ladder, tightest first, and it stops at the first rung that yields exactly
@@ -3556,18 +3635,28 @@ def match_option(options: list[tuple[str, str]], asked: str) -> Choice:
     Deliberately NOT fuzzy. Edit-distance matching silently picks, and a `choose`
     is very often followed by a form submit: "Iran" quietly standing in for
     "Iraq" is the kind of wrong this whole module is built to avoid. Substring
-    plus folding covers every honest case; anything past that is a question."""
+    plus folding covers every honest case; anything past that is a question.
+
+    `strict` drops the substring rung, leaving only the three that require the
+    whole label (#348). It is for candidates the page did not DECLARE as
+    options — a suggestion list drawn as plain buttons — where the fence that
+    "this is a chooser" is weaker and so the match has to be stronger. A
+    substring rung against an undeclared candidate set is how *Tokio* would
+    press *Tokio-Haneda* on a page that offered both and neither exactly."""
     if not options:
         return Choice(problem="this control has no options to choose from")
     if not asked:
         return Choice(problem="say which option to choose")
     wanted = fold(asked)
-    rungs = (
+    rungs = [
         [(lab, val) for lab, val in options if lab == asked],
         [(lab, val) for lab, val in options if fold(lab) == wanted],
         [(lab, val) for lab, val in options if val == asked],
-        [(lab, val) for lab, val in options if wanted and wanted in fold(lab)],
-    )
+    ]
+    if not strict:
+        rungs.append(
+            [(lab, val) for lab, val in options if wanted and wanted in fold(lab)]
+        )
     for hits in rungs:
         if len(hits) == 1:
             return Choice(value=hits[0][1], label=hits[0][0])

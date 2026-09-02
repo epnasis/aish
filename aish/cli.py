@@ -272,6 +272,7 @@ class LogRef:
         preview: str = "",
         held_ms: int | None = None,
         shown_ms: int | None = None,
+        viewers_at_hold: int | None = None,
         asked_by: str = "",
     ) -> None:
         # The terminal draws no card, so the CLI never has the two latencies to
@@ -285,8 +286,23 @@ class LogRef:
         # and an APPROVED command silently never ran while the card, the
         # `done` event and the log all looked normal. The suite said so in one
         # test out of 4500. Anything added to that signature is added here too.
+        #
+        # It caught `viewers_at_hold` the same way (#348) — and that one also
+        # exposed the SECOND hazard in this shim, which the sentence above does
+        # not cover: the call below used to be POSITIONAL, so a field inserted
+        # anywhere but the end did not raise at all. It silently shifted every
+        # argument after it, writing `asked_by`'s value into the new field. A
+        # TypeError is the good outcome; that is the quiet one. Keywords now,
+        # so the only way to get this wrong is to leave a field out.
         self.log.command(
-            command, decision, intent, preview, held_ms, shown_ms, asked_by
+            command,
+            decision,
+            intent=intent,
+            preview=preview,
+            held_ms=held_ms,
+            shown_ms=shown_ms,
+            viewers_at_hold=viewers_at_hold,
+            asked_by=asked_by,
         )
 
     def set_title(self, title: str) -> None:
