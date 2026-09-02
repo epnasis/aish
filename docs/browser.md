@@ -1598,10 +1598,194 @@ A total interaction outage once shipped while 68 tests passed. A new `if` block 
 
 It passed because the input-contract tests read `inspect.getsource` and never call anything: **source inspection cannot see control flow.** `TestEveryActionActuallyRuns` drives every action against a fake page and asserts something reached it. Any test that asserts on source text needs a sibling that executes.
 
+## What a driven action costs, and the two sentences that were false about the page (#348)
+
+One flight search on lot.com, 2026-09-01: **641 seconds, 38 steps** — 20 model
+turns and 18 tool calls — to fill in one form. The decomposition, from the trace
+records of `session-20260831-164152-671752.jsonl`:
+
+| | s | share |
+|---|---|---|
+| one approval card waiting (`held_ms: 255630`) | 256 | 40% |
+| 18 browser actions (median 8.8s, 1.2–13.6) | 185 | 29% |
+| 18 model round trips (median 7.5s, 3.4–30.1) | 169 | 26% |
+
+**Context size was measured and ruled out.** Bucketing every model call in that
+session by input tokens (26k → 317k, no compaction) gives medians of 10.0 / 6.7 /
+3.9 / 6.0 / 5.8 / 6.1 / 3.3 s from 0-50k up to 300-350k. There is no trend.
+Prefill is not what a driven page costs, and shrinking the page sent back would
+not have bought a second of this.
+
+### The settle bar was not lowered, and the reason is the record
+
+The obvious read is that `WATCH_SETTLED_MS`'s five seconds of stillness, paid on
+every acted snapshot, is the cost — and that a page which provoked no network
+traffic could be released on the short bar instead. That proposal was designed,
+reviewed and **dropped**, and this paragraph exists so it is not re-derived.
+
+`_WATCH_JS` already bumps the quiet clock on a `PerformanceObserver` resource
+arrival, so the counter adds exactly one thing the clock cannot see: a request
+ISSUED and not yet answered. What it does not cover is the request not yet
+issued — and that is the measured case, in this very session. Call 3 typed `NRT`
+into `Lot do:`, `_commit_suggestion` read at the 350ms bar and found no offer,
+and the results appear in the NEXT snapshot's delta (`+Found 1 result(s)`,
+`+ button 'Tokio (NRT) Japonia'`). A debounced autocomplete had not made its
+request yet, so "quiet, ready, nothing in flight" was all true while the answer
+was still coming. A shorter bar would have released early on the session that
+motivated shortening it.
+
+So the counter went in — `_Session.inflight`, wired in `adopt()` the way the
+console is — and it is used in **one direction only: to keep waiting.** It can
+never release a settle sooner than the bar would have. `TRAFFIC_GRACE_MS` bounds
+it at two seconds so a long-poll or an SSE stream cannot take every settle on a
+chatty page to its ceiling, and the ending is recorded as `quiet_with_traffic`
+rather than as an ordinary settle, because "the bar was met and something was
+still on the wire" is a different fact from "the page went still".
+
+**What would license lowering the bar is a measurement, not an argument**, which
+is why `phases.settle.last_arrival_ms` exists (`docs/trace-contract.md` §3.4):
+per real page, how long after the wait began the page last moved. Until that
+reads consistently below the short bar across real sessions, the five seconds
+stay.
+
+### `fill` could not commit a suggestion on this site, for any input
+
+`fill` is documented as "type, and press the matching suggestion". Its candidate
+set was `role=option` / `role=treeitem`; lot.com draws its destination
+suggestion as a plain `<button>`. So the second half never ran there whatever
+was typed — it typed, recognised nothing as an option, and reported the text
+back through `_readback` as though the field were an ordinary one.
+
+This reads like a matching failure and is a KIND failure, and the difference
+matters because the repair for the first is a better query and the repair for
+the second is a wider candidate set. Three rungs were considered and rejected
+before the cause was found: telling the model to type a shorter query (a
+hypothesis, shipped as an instruction, and on this page it leads to the same
+non-commit), retrying with a prefix (a guessing loop), and a new schema field
+for query-vs-answer (schema for a problem the log does not show).
+
+The fence that was always load-bearing is unchanged: a candidate is something
+the page put there **in response** to the typing (`address not in was`). What
+widened is that the page no longer has to have declared the ARIA role.
+
+**Two things this does NOT claim.** It does not fix the measured call: the model
+typed `NRT`, and under `strict=` only the whole label commits, so `NRT` still
+falls to the readback. What it removes is the KIND barrier — a `<button>`
+suggestion can be committed at all, which it could not be for any input. And
+whether lot.com's suggestion button sits inside the search `<form>` is
+**unverified**; if it does, `submits` is true for a `<button>` with no `type`
+and the candidate is refused by the fence below. The log cannot settle that
+either — call 4's press drew no card, which is equally consistent with
+`submits=False` and with a `method="get"` form.
+
+The matching runs in **two stages**, and the first version got this wrong in a
+way worth recording: it read `[declared options] or [everything else]`, so a
+page rendering ANY declared option shadowed the undeclared rung completely.
+That is exactly lot.com, whose destination panel renders two static options
+('Dowolny kierunek', 'Siatka połączeń') beside the button — the widening would
+have bought nothing on the site it was written for. So the declared list is
+tried first on its own terms, substring rung intact; only if nothing there
+matches does the undeclared rung run, strictly.
+
+Three things keep the new rung safe, and they are stricter than what they
+replace:
+
+- an undeclared candidate is matched with `strict=`, dropping `match_option`'s
+  substring rung. That rung is where an undeclared set could press the wrong
+  neighbour — *Tokio* against *Tokio (NRT)* and *Tokio (HND)* now refuses and
+  says so, rather than picking one;
+- a candidate that SUBMITS the form is refused. A form being filled is not
+  finished, and sending it is the one irreversible thing on the page, reached
+  by a rung whose whole job is to choose a word;
+- a candidate needing its own approval is refused, as before.
+
+### Two sentences in aish's own voice that were false about the page
+
+Calls 10 and 11 of that session were `browse_act(action="read", topic="6294")`
+and `topic="19")` — the model hunting for a day cell, twice, and being told
+`0 control(s) match` both times. It hunted because of what aish had just told
+it, above the untrusted banner, where its own words are the most load-bearing
+thing on the page:
+
+1. **The unreachable footer sent it looking for a disclosure that did not
+   exist.** With the date picker open, 218 controls were unreachable — the page
+   BEHIND the picker — and the line read *"closed away … Press whatever opens
+   them first."* That is the right repair for a collapsed menu and the exact
+   opposite of the right one for a dialog, where the way back is to close the
+   thing already on screen. `CONTROLS_JS` now reports an open `dialog`, and it
+   is an OBSERVATION rather than an inference: a native `<dialog open>` or an
+   element the page itself declares modal. A `[class*=modal]` guess is
+   deliberately not enough — that list is a hint for demoting chrome words, not
+   evidence about the page's state — so where nothing is declared the old
+   sentence stands unchanged.
+
+2. **The ledger claimed a value the form had not taken.** Call 9's `fill` on the
+   date fields returned `'Wybierz datę…' ← '19-03-2027'` from `_held`'s
+   `currently:` readback, which the ledger presents as verified — while the
+   picker stood open and its *Potwierdź* button was `(disabled)`. The readback
+   was true of the `<input>` and false of the form, and the line had no way to
+   say so. It now says what was seen and what was NOT checked, asking
+   `CALENDAR_JS` — the code that already knows how to find a field's own widget
+   — rather than the ARIA roles.
+
+   It does **not** diagnose. "The page rejected it" would be a guess, and a
+   picker open over a field that HAS taken the value is an ordinary thing for a
+   page to do. `TestTheLedgerSaysWhatItDidNotCheck::test_it_does_not_diagnose`
+   pins that, because the sentence that would feel most helpful here is exactly
+   the one L8 forbids. The probe tests day CELLS and re-resolves by ADDRESS —
+   `found` is true-and-empty for any field near a picker-ish wrapper, and `n` is
+   stale after the unnarrowed pass; `_picker_standing_open` carries both reasons.
+
+### Tests
+
+`TestWaitingOnTrafficNeverShortensAWait` covers the one direction the in-flight
+counter may be used in — that a busy counter never polls fewer times than a
+quiet one, that the grace is bounded so a long-poll cannot own the page, that an
+unreadable counter degrades to the old behaviour, and that a page which starts
+moving again ends as an ordinary timeout rather than inheriting earlier
+stillness. `TestWhereADrivenActionsSecondsGo` covers the `phases` record and the
+`last_arrival_ms` shadow measurement, including that a ceiling is never recorded
+as a settle; `TestAStoppedBatchIsStillTimed` covers the batch that died
+part-way, which is where the seconds are most worth having;
+`TestASuggestionThePageDrewAsAButton` covers the widened candidate set — the
+button that could not be committed before, the strict match on undeclared
+candidates, the submit that is never pressed, and the two cases the first
+version got wrong (a miss must not stop the batch, and declared options must not
+shadow an undeclared suggestion); `TestTheLedgerSaysWhatItDidNotCheck` covers
+the ledger clause and that it states no cause; `TestWhenAishMaySayADialogIsOpen`
+covers the two conditions the dialog claim requires, since the sentence it
+licenses is spoken in aish's own voice.
+
+### What was NOT built
+
+**Listing the controls behind a closed disclosure.** The structural cost of the
+form is that the control list is what is currently VISIBLE, so every disclosure
+costs a round trip purely to discover what is behind it — and naming the hidden
+controls looks like the fix. It was designed and dropped, for reasons that are
+in the code rather than in taste:
+
+- `resolve`'s `_one_of` returns `hits[0]` when candidates share an address,
+  because "the mobile copy and the desktop copy of one nav link" is a question
+  with no right answer. That is true only while hidden twins never reach the
+  list. A mobile-nav copy usually precedes the desktop one in document order, so
+  presses that work today would start resolving to the hidden twin and failing
+  `_reachable_now`;
+- `address_controls` assigns `#1/#2` ordinals when same-named controls differ,
+  so a hidden twin would RENAME the visible control the model had already been
+  given — and the address is what the card prints and what the model copies back;
+- `plan_batch` resolves every step against `snapshot.controls`, so the feature
+  would have to put hidden controls in the resolvable set, which is what causes
+  the first two.
+
+And it may not even reach the case: whether lot.com's passenger buttons exist in
+the DOM while the panel is closed is UNKNOWN — an anonymous headless read of the
+site returns one control and an empty title, which is what this file predicts
+elsewhere. Issue #347 carries it, first task an experiment rather than a patch.
+
 ## Testing
 
 Nothing in the suite launches Chrome. `browser.read` / `open_for_login` are patched per test, and conftest's autouse `no_real_browser` makes any escape fail loudly — it raises from `_submit` as a `BaseException` (an `Exception` would be swallowed by `_browser_read`'s fallback, leaving the guard silent exactly where a test is most likely wrong) and redirects `AISH_STATE_DIR` so a test-written `logins.txt` can never change how the real agent gates a real host. Same reasoning as the notifier guard in CLAUDE.md: a module that reaches a live thing outside the process needs a suite-wide guard, not per-test discipline.
 
-`TestDetailIsFetchedForWhatHeIsLookingAt` covers the clamping and the screenful-stays-a-screenful property that makes fetched detail scale where density does not; `TestEveryActionActuallyRuns` also EXECUTES the CDP capture, since nothing else in the module takes that path. `scripts/check-browser-sheet.py` is the only thing that can see the sheet's LAYOUT — a real Chrome, real phone metrics, real safe-area insets — and is deliberately outside the suite; `tests/test_browser_view_layout.py` pins the structural facts it depends on. `TestBrowserView` covers the remote view end of the socket; `TestTheViewIsDesktopSoOneFrameCarriesMore` covers the viewport decision; `TestChallengeDetection` covers telling a wall from a page; `TestViewAndReadShareOneBrowser` and `TestPreviewFence` cover the two places one profile is contended for; `TestAThinPageGetsASecondChance` covers a slow page mistaken for a wall; `TestTheReadingContract` covers what the prompt must keep saying; `TestUnresponsiveHostEscalates` and `TestKnownBlockingHostsSkipTheDoomedFetch` cover the failure that produced no renders at all; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestTheHintIsWrittenByObservation` and `TestReadUrlEscalation` cover the module.
+`TestDetailIsFetchedForWhatHeIsLookingAt` covers the clamping and the screenful-stays-a-screenful property that makes fetched detail scale where density does not; `TestEveryActionActuallyRuns` also EXECUTES the CDP capture, since nothing else in the module takes that path. `scripts/check-browse-fixtures.py` runs the REAL `CONTROLS_JS` through a real Chrome against local file:// fixtures, and is the only thing that can answer the three questions a hand-built `Control` cannot: whether a page's dialog is DECLARED and scroll-locked (the inert `[role=dialog]` fixture is the load-bearing one — a false positive there speaks a new wrong sentence in aish's own voice), what KIND the page gives a suggestion, and whether declared options shadow an undeclared one. Outside the suite for the same reason the sheet check is: conftest's `no_real_browser` guard is worth more than either. Run it after touching `CONTROLS_JS`, `_commit_suggestion` or the dialog probe. `scripts/check-browser-sheet.py` is the only thing that can see the sheet's LAYOUT — a real Chrome, real phone metrics, real safe-area insets — and is deliberately outside the suite; `tests/test_browser_view_layout.py` pins the structural facts it depends on. `TestBrowserView` covers the remote view end of the socket; `TestTheViewIsDesktopSoOneFrameCarriesMore` covers the viewport decision; `TestChallengeDetection` covers telling a wall from a page; `TestViewAndReadShareOneBrowser` and `TestPreviewFence` cover the two places one profile is contended for; `TestAThinPageGetsASecondChance` covers a slow page mistaken for a wall; `TestTheReadingContract` covers what the prompt must keep saying; `TestUnresponsiveHostEscalates` and `TestKnownBlockingHostsSkipTheDoomedFetch` cover the failure that produced no renders at all; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestTheHintIsWrittenByObservation` and `TestReadUrlEscalation` cover the module.
 
 `TestBrowserCommand` covers the WebSocket wiring — the layer where a slash command actually breaks, since a missing app.js case or WS kind surfaces only as "unknown command" in the app.

@@ -692,6 +692,33 @@ class TestWhatTheModelIsToldItCannotSee:
         assert "3 more control(s) are on this page but closed away" in out
         assert "5 more control(s) not listed" in out
 
+    def test_controls_behind_an_OPEN_dialog_are_not_told_to_open_something(self):
+        """#348. "Press whatever opens them first" is the right repair for a
+        collapsed menu and the exact opposite of the right one for a dialog:
+        the controls are BEHIND the open thing and the way back is to close it.
+
+        Measured on lot.com 2026-09-01 — the date picker was up, this line
+        reported 218 controls closed away with that advice, and the model spent
+        two calls narrowing the page to day numbers looking for the disclosure
+        it had been told to press."""
+        out = web_module._present_snapshot(
+            snapshot(unreachable=218, dialog="Wybierz daty")
+        )
+        assert "218 more control(s) are on this page but BEHIND" in out
+        assert "Close it to reach them" in out
+        assert "Press whatever opens them first" not in out
+        # The NAME is the page's claim about itself and is quoted as such; the
+        # sentence around it is aish's own observation.
+        assert "the page calls 'Wybierz daty'" in out
+
+    def test_an_open_dialog_with_no_name_still_says_one_is_open(self):
+        out = web_module._present_snapshot(snapshot(unreachable=4, dialog="?"))
+        assert "BEHIND a dialog the page calls '?'" in out
+
+    def test_no_dialog_keeps_the_sentence_that_was_always_right(self):
+        out = web_module._present_snapshot(snapshot(unreachable=4))
+        assert "Press whatever opens them first" in out
+
 
 class TestHowItWasPressedIsNotWhetherItWorked:
     """`notice` and `problem` mean opposite things, and a press aish did not
@@ -5741,3 +5768,41 @@ class TestTheSignInAttemptIsOnTheStepItHappenedUnder:
         block = out.meta["signin"]
         assert [type(v) for v in block["observed"].values()].count(bool) == 4
         assert isinstance(block["observed"]["declared_widget"], str)
+
+
+class TestWhenAishMaySayADialogIsOpen:
+    """#348. The sentence an open dialog licenses — *close it to reach them* —
+    is spoken in aish's OWN voice above the untrusted banner, replacing one that
+    was wrong on lot.com. So the bar for saying it has to be higher than the bar
+    for the sentence it replaces, or the fix puts a new false claim on more
+    pages than the old one was wrong on.
+
+    Two conditions, and this pins that NEITHER alone is enough. The JS itself
+    runs only in a real Chrome; what is checkable here is that the source states
+    both conditions and that the presenter is driven by the FIELD, so a future
+    edit loosening either one has to walk past a test that says why."""
+
+    def test_a_bare_role_dialog_is_not_a_modality_declaration(self):
+        """Half the web keeps an inert `[role=dialog]` in the DOM, and plenty
+        use the role for a cookie strip that covers nothing."""
+        js = browse.CONTROLS_JS
+        assert "dialog:modal" in js
+        assert '[aria-modal="true"]' in js
+        # The loose rung is deliberately absent from the dialog probe.
+        probe = js[js.index("const openDialog"):]
+        assert "[role=dialog]" not in probe
+        assert "[class*=modal]" not in probe
+
+    def test_a_declared_dialog_on_a_page_that_still_scrolls_claims_nothing(self):
+        """`rootLocked` is the mechanism that actually puts the rest of the
+        document out of reach — which is what `unreachable` is counting when
+        this fires. Without it, the dialog is not what is holding anything
+        away."""
+        probe = browse.CONTROLS_JS[browse.CONTROLS_JS.index("const openDialog"):]
+        assert "rootLocked" in probe
+
+    def test_the_presenter_says_nothing_unless_the_field_is_set(self):
+        """The half that IS executable: no dialog observed, no new sentence."""
+        out = web_module._present_snapshot(snapshot(unreachable=7, dialog=""))
+        assert "Press whatever opens them first" in out
+        assert "Close it to reach them" not in out

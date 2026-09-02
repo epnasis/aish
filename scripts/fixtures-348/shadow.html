@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Lot do — shadowed</title></head>
+<body>
+  <form onsubmit="return false">
+    <label>Lot do: <input id="q" aria-label="Lot do:"></label>
+    <div id="out" role="listbox"></div>
+    <div id="sug"></div>
+  </form>
+  <script>
+    // lot.com's real shape: two STATIC declared options rendered beside the
+    // genuine suggestion, which is an undeclared button.
+    document.getElementById('q').addEventListener('input', (e) => {
+      const s = document.getElementById('sug'); s.innerHTML = '';
+      if (!e.target.value) return;
+      setTimeout(() => {
+        const out = document.getElementById('out');
+        for (const label of ['Dowolny kierunek', 'Siatka połączeń']) {
+          const o = document.createElement('div');
+          o.setAttribute('role', 'option'); o.textContent = label;
+          out.appendChild(o);
+        }
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = 'Tokio (NRT) Japonia';
+        s.appendChild(b);
+      }, 250);
+    });
+  </script>
+</body></html>

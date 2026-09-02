@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import pathlib
+import queue
 import re
 import shlex
 import threading
@@ -7485,17 +7486,78 @@ class TestHoldNotification:
             session.bridge.on_wait(self._held_event(), True)  # someone is watching
         assert calls == []
 
-    def test_user_session_never_notifies_on_hold(self, app_env, monkeypatch):
+    def test_a_user_session_with_nobody_watching_now_notifies(self, app_env, monkeypatch):
+        """#348. This used to be `never_notifies`, and the session that proved
+        it wrong is on disk: a passenger batch on lot.com held 255.6s of a 641s
+        task, and the device that answered rendered the card 11.8s before the
+        tap — it had not been attached when the card went up. He started the
+        task himself, so `origin == "user"` suppressed the push, and nothing
+        told him aish was waiting. Having asked for something is not evidence
+        of watching it happen."""
+        monkeypatch.setattr(server_module.notify, "configured", lambda: True)
+        calls: list = []
+        monkeypatch.setattr(server_module.notify, "pushover",
+                            lambda *a, **k: calls.append((a, k)))
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client:
+            default = client.app.state.server._default
+            assert default.origin == "user"
+            default.bridge.on_wait(self._held_event(), False)
+        assert len(calls) == 1
+
+    def test_a_user_session_being_watched_still_stays_silent(self, app_env, monkeypatch):
+        """The half that did NOT change. An open tab already shows the card."""
         monkeypatch.setattr(server_module.notify, "configured", lambda: True)
         calls: list = []
         monkeypatch.setattr(server_module.notify, "pushover",
                             lambda *a, **k: calls.append(1))
         client, _ = make_client(app_env, [model_says("hi")])
         with client:
-            default = client.app.state.server._default
-            assert default.origin == "user"
-            default.bridge.on_wait(self._held_event(), False)
+            client.app.state.server._default.bridge.on_wait(self._held_event(), True)
         assert calls == []
+
+    def test_a_user_origin_push_does_not_carry_what_aish_would_type(
+        self, app_env, monkeypatch
+    ):
+        """#252's argument, one rung further in (#348). The cards in an
+        owner-started session are the ones quoting HIS data — a destination, a
+        card number, an address — and a push body leaves the machine for a
+        third-party service. The preview stays on the card, on his screen."""
+        monkeypatch.setattr(server_module.notify, "configured", lambda: True)
+        calls: list = []
+        monkeypatch.setattr(server_module.notify, "pushover",
+                            lambda *a, **k: calls.append((a, k)))
+        client, _ = make_client(app_env, [model_says("hi")])
+        event = {
+            "type": "approval_request", "kind": "tool", "tool": "browse_fill",
+            "args": {"steps": [{"target": "Dokąd", "value": "Tokio (NRT)"}]},
+            "preview": "fill in this form on lot.com and send it:\n"
+                       "  Dokąd: Tokio (NRT) Japonia\n  Lot do:: NRT",
+            "id": "u2",
+        }
+        with client:
+            client.app.state.server._default.bridge.on_wait(event, False)
+        (title, body), _ = calls[0]
+        assert "browse_fill" in body          # WHAT is waiting
+        assert "Tokio" not in body            # …and never with what
+        assert "Lot do" not in body
+        # The chat's own title is what he navigates by, and it is his own words.
+        assert "approval" in title.lower()
+
+    def test_a_triggered_push_still_carries_the_preview(self, app_env, monkeypatch):
+        """The terse rule is scoped to owner-started sessions. An unattended
+        triggered job is the case #163 built this for and its preview is the
+        whole value of the push."""
+        client, _ = make_client(app_env, [model_says("done")], token="secret")
+        calls: list = []
+        with client:
+            session = self._spawn_email_session(client, monkeypatch, calls)
+            session.bridge.on_wait(
+                {**self._held_event(), "preview": "delete the message from Anna"},
+                False,
+            )
+        (_, body), _ = calls[0]
+        assert "delete the message from Anna" in body
 
     def test_describe_hold_shapes(self):
         d = server_module._describe_hold
@@ -7503,6 +7565,21 @@ class TestHoldNotification:
         assert d({"kind": "tool", "tool": "t", "preview": "delete X"}).endswith("delete X")
         assert d({"kind": "command", "command": "rm x"}).startswith("run:")
         assert d({"kind": "write", "verb": "edit", "target": "/a"}) == "edit /a"
+
+    def test_terse_names_the_host_when_the_card_has_one_and_never_the_path(self):
+        """A host says whether a waiting card is worth getting up for. A path or
+        a query string is the composed-data case #252 is actually about."""
+        d = server_module._describe_hold
+        event = {
+            "kind": "tool", "tool": "read_url",
+            "args": {"url": "https://www.lot.com/pl/pl/book?pax=Pawel+Wenda"},
+        }
+        terse = d(event, terse=True)
+        assert terse == "read_url on www.lot.com"
+        assert "Pawel" not in terse and "book" not in terse
+        # No url to read: the bare tool name, which is thin ON PURPOSE rather
+        # than filled in from somewhere less safe.
+        assert d({"kind": "tool", "tool": "browse_fill", "args": {}}, terse=True) == "browse_fill"
 
 
 class TestDoneNotification:
@@ -9710,3 +9787,69 @@ class TestClientVanishes:
                 f"Bridge touched {socket_verb!r}: the approval gate must never "
                 "depend on a socket write succeeding"
             )
+
+
+class TestWhoWasThereWhenTheCardWentUp:
+    """#348. `held_ms` says how long the gate waited and cannot say whether
+    anyone was there to look, so a four-minute hold reads identically whether
+    the owner ignored an open tab or had no device attached at all — and those
+    two have opposite repairs. That ambiguity is what made the 2026-09-01
+    lot.com hold un-diagnosable from its own record.
+
+    Read at the ASK, because the question is who the card went to when it was
+    raised, not who happened to be there when it was answered."""
+
+    def test_a_card_that_reached_nobody_records_a_zero(self):
+        bridge = server_module.Bridge(lambda: None)
+        answered = threading.Event()
+
+        def answer_it():
+            while not bridge.pending:
+                time.sleep(0.005)
+            bridge.answer(next(iter(bridge.pending)), {"action": "approve"})
+            answered.set()
+
+        threading.Thread(target=answer_it, daemon=True).start()
+        decided = bridge.ask({"type": "approval_request", "kind": "tool", "tool": "t"})
+        assert answered.wait(5)
+        # Zero is a REAL value here and the load-bearing one — it is the
+        # reading that says the card went to no screen at all — so it is
+        # written down rather than omitted as falsey.
+        assert decided["viewers_at_hold"] == 0
+        assert server_module.card_latency(decided)["viewers_at_hold"] == 0
+
+    def test_it_counts_the_screens_that_were_attached(self):
+        bridge = server_module.Bridge(lambda: None)
+
+        class FakeClient:
+            def __init__(self):
+                self.outbox = queue.Queue()
+
+        bridge.viewers.add(FakeClient())
+        bridge.viewers.add(FakeClient())
+
+        def answer_it():
+            while not bridge.pending:
+                time.sleep(0.005)
+            bridge.answer(next(iter(bridge.pending)), {"action": "approve"})
+
+        threading.Thread(target=answer_it, daemon=True).start()
+        decided = bridge.ask({"type": "approval_request", "kind": "tool", "tool": "t"})
+        assert decided["viewers_at_hold"] == 2
+
+    def test_the_client_cannot_author_it(self):
+        """The same rule `held_ms` has: this half of the measurement is the
+        server's own, and a browser must not be able to write it."""
+        bridge = server_module.Bridge(lambda: None)
+
+        def answer_it():
+            while not bridge.pending:
+                time.sleep(0.005)
+            bridge.answer(
+                next(iter(bridge.pending)),
+                {"action": "approve", "viewers_at_hold": 99},
+            )
+
+        threading.Thread(target=answer_it, daemon=True).start()
+        decided = bridge.ask({"type": "approval_request", "kind": "tool", "tool": "t"})
+        assert decided["viewers_at_hold"] == 0

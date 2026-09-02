@@ -1030,12 +1030,92 @@ def already_finished(*, activity: dict | None, requests_in_flight: int) -> bool:
 SETTLE_UNKNOWN_TRIES = 3
 
 
+@dataclass
+class Settled:
+    """What the wait actually waited for (#348).
+
+    `_settle` is the largest fixed cost in a driven action and it recorded
+    nothing, so "where did those nine seconds go?" was unanswerable from a log
+    and every proposal to shorten it was an argument rather than a measurement.
+
+    `last_arrival_ms` is the SHADOW measurement, and it is the only field here
+    with a decision hanging on it: how long after the wait began the page last
+    moved. A release bar shorter than that value would have handed the model a
+    page that was still changing — so it says, per real page, what a shorter
+    bar would have cost. It is an observation of this wait and never a
+    prediction about the next one.
+
+    `released` is why the loop stopped: `quiet` (the bar was met), `timeout`
+    (the ceiling), `unknown` (the page stopped answering the probe), `torn` (it
+    went away mid-wait), or `quiet_with_traffic` (the bar was met and the grace
+    ran out with a request still on the wire — the page may not be finished and
+    this says so rather than reporting an ordinary settle). A wait that ended
+    for a reason nobody recorded is how a ceiling comes to be read as a
+    settle."""
+
+    waited_ms: int = 0
+    polls: int = 0
+    idle_ms: int = 0          # what `networkidle` alone cost
+    # How still the page already was at the first poll. -1 when that poll did
+    # not answer: an unknown written down as a zero is the same defect this
+    # module fixes everywhere else, and zero here reads as "it had just moved".
+    first_quiet_ms: int = -1
+    last_arrival_ms: int = -1  # -1 = the page never moved while we watched
+    traffic_waited_ms: int = 0  # extra time spent on requests still on the wire
+    released: str = "quiet"
+
+    def record(self) -> dict:
+        return {
+            "waited_ms": self.waited_ms,
+            "polls": self.polls,
+            "idle_ms": self.idle_ms,
+            "first_quiet_ms": self.first_quiet_ms,
+            "last_arrival_ms": self.last_arrival_ms,
+            "traffic_waited_ms": self.traffic_waited_ms,
+            "released": self.released,
+        }
+
+
+# How long a settle that has otherwise finished will keep waiting for a request
+# the page still has out (#348).
+#
+# BOUNDED, and that bound is the whole design. The quiet clock already bumps on
+# a response ARRIVING, so what this covers is the gap the clock cannot see: a
+# request on the wire that has not answered yet, which reads as perfect
+# stillness. That gap is a real miss — `_commit_suggestion` reads an
+# autocomplete 350ms after the keystrokes, and a debounced fetch is very often
+# still out at that point — and it is why this exists.
+#
+# It is not, however, a licence to wait on traffic indefinitely. A long-poll, an
+# SSE stream or an analytics beacon that never completes would otherwise take
+# every settle on that page to its ceiling, turning a fix for a fast page into a
+# tax on a chatty one. So: two seconds, then let go and SAY SO — `released`
+# records `quiet_with_traffic`, which is the honest ending and the one a reader
+# needs in order to tell this case from an ordinary settle.
+TRAFFIC_GRACE_MS = 2_000
+
+
+def _outstanding(inflight: Callable[[], int] | None) -> int:
+    """How many requests the page has out, or 0 when nobody can say.
+
+    Fails toward NOT waiting, deliberately: an unreadable counter must degrade
+    to the behaviour that existed before it — the quiet clock alone — and never
+    to a wait that hangs on a number nothing can produce."""
+    if inflight is None:
+        return 0
+    try:
+        return max(0, int(inflight()))
+    except Exception:  # noqa: BLE001 — a counter that cannot answer says nothing
+        return 0
+
+
 async def _settle(
     page: Any,
     *,
     still_for: float = SETTLE_QUIET_MS,
     timeout_ms: float = SETTLE_MAX_MS,
-) -> None:
+    inflight: Callable[[], int] | None = None,
+) -> Settled:
     """Wait until the page stops changing, or `timeout_ms`, whichever first.
 
     Network idle first, because it is the cheapest signal and settles the
@@ -1055,32 +1135,92 @@ async def _settle(
     `still_for` is the bar, and the caller sets it because the caller knows what
     it just did. A read of a page that finished long ago must not pay seconds
     for the possibility that it did not; a read that follows pressing *Szukaj*
-    must."""
+    must.
+
+    `inflight` says how many requests the page has OUT right now, and it is used
+    in exactly one direction: to keep waiting. It can never release this
+    function sooner than the bar above would have, so no page settles faster
+    because of it and the spinner case `WATCH_SETTLED_MS` exists for is
+    untouched. The tempting version of this reads "quiet right now, and nothing
+    on the wire, therefore done" — that is a SHORTER bar wearing evidence, it
+    is the bug that was already fixed once here, and it is not what this is.
+
+    Returns what it waited for. Every caller is free to ignore it — this is a
+    record, and nothing about the waiting changed to produce it."""
+    seen = Settled()
+    began = time.perf_counter()
     try:
         await page.wait_for_load_state("networkidle", timeout=timeout_ms)
     except Exception:  # noqa: BLE001 — a chatty page never goes idle; carry on
         pass
+    seen.idle_ms = round((time.perf_counter() - began) * 1000)
     waited = 0.0
     unknown = 0
+    traffic_waited = 0.0
+    met_the_bar = False
+    last_gen: int | None = None
     while waited < timeout_ms:
         state = await _activity(page)
+        seen.polls += 1
         if state is None:
             unknown += 1
             if unknown >= SETTLE_UNKNOWN_TRIES:
-                return
+                seen.released = "unknown"
+                break
         else:
             unknown = 0
+            quiet = float(state.get("quiet") or 0)
+            if seen.polls == 1:
+                seen.first_quiet_ms = round(quiet)
+            # A generation that moved is the page moving, and it is read from
+            # the same counter `page_is_done` reads `quiet` from — so the two
+            # can never disagree about whether anything happened.
+            gen = state.get("gen")
+            if gen is not None:
+                if last_gen is not None and int(gen) != last_gen:
+                    seen.last_arrival_ms = round(
+                        (time.perf_counter() - began) * 1000
+                    )
+                last_gen = int(gen)
             if page_is_done(
-                quiet_ms=float(state.get("quiet") or 0),
+                quiet_ms=quiet,
                 ready=bool(state.get("ready")),
                 still_for=still_for,
             ):
-                return
+                # The bar is met. The only question left is whether the page is
+                # still waiting on something it asked for — see TRAFFIC_GRACE_MS.
+                out = _outstanding(inflight)
+                if out and traffic_waited < TRAFFIC_GRACE_MS:
+                    # Recorded AFTER the sleep that pays for it, not before: a
+                    # `torn` exit on the very next line would otherwise claim a
+                    # poll's worth of waiting that never happened.
+                    met_the_bar = True
+                    traffic_waited += WATCH_POLL_MS
+                else:
+                    if out:
+                        seen.released = "quiet_with_traffic"
+                    break
+            else:
+                # The page moved again. Whatever the bar said a moment ago is
+                # no longer what was last SEEN, so a ceiling from here is an
+                # ordinary timeout and must not inherit the earlier stillness.
+                met_the_bar = False
         try:
             await page.wait_for_timeout(WATCH_POLL_MS)
         except Exception:  # noqa: BLE001 — a page torn down mid-wait is settled
-            return
+            seen.released = "torn"
+            break
         waited += WATCH_POLL_MS
+        if met_the_bar:
+            seen.traffic_waited_ms = round(traffic_waited)
+    else:
+        # The ceiling, but not necessarily a page that never settled: if the
+        # bar WAS met and the loop kept going only to see traffic out, the
+        # honest ending is the one that says so. Reporting `timeout` here would
+        # describe a settled page as one that never stopped moving.
+        seen.released = "quiet_with_traffic" if met_the_bar else "timeout"
+    seen.waited_ms = round((time.perf_counter() - began) * 1000)
+    return seen
 
 
 async def _activity(page: Any) -> dict | None:
@@ -1467,6 +1607,41 @@ def _watch_console(page: Any, log: browse_mod.ConsoleLog) -> None:
         page.on("pageerror", threw)
 
 
+def _watch_traffic(page: Any, session: Any) -> None:
+    """Count this page's outstanding requests onto `session` (#348).
+
+    The same three events `_Owner.view_requests` uses, for the same reason and
+    with the same clamp: `requestfailed` and `requestfinished` do not both fire
+    for every request on every engine, and a counter that can go negative would
+    read as "nothing outstanding" at exactly the wrong moment.
+
+    Never raises. A page that will not accept listeners leaves the count at
+    zero, which degrades to the behaviour that existed before this — waiting on
+    the quiet clock alone — rather than to a wait that never ends."""
+
+    # Bound to THIS page. `_adopt_new_tab` leaves the old tab open and its
+    # listeners attached, so without this an SSE stream or a long-poll on a
+    # tab the session has walked away from would keep incrementing the count
+    # for the page it moved TO — and every settle there would pay the full
+    # grace, forever. `adopt` resets the number; this stops the old page
+    # writing to it at all.
+    def mine() -> bool:
+        return getattr(session, "page", None) is page
+
+    def started(_req: Any) -> None:
+        if mine():
+            session.inflight += 1
+
+    def ended(_req: Any) -> None:
+        if mine():
+            session.inflight = max(0, session.inflight - 1)
+
+    with contextlib.suppress(Exception):
+        page.on("request", started)
+        page.on("requestfinished", ended)
+        page.on("requestfailed", ended)
+
+
 class _Session:
     """ONE CHAT's browse page, and what is true about it.
 
@@ -1474,7 +1649,13 @@ class _Session:
     carries between calls so an act cannot land on a page that changed under
     it (#272). Per-session rather than per-owner now that every chat has its
     own page: a counter shared across chats would make every other chat's act
-    look like a page change to this one."""
+    look like a page change to this one.
+
+    `inflight` is how many requests this page has out RIGHT NOW (#348). The
+    view page has had this since #223 (`_Owner.view_requests`); the model's
+    page never did, so `_settle` could let go after five quiet seconds with a
+    request the act itself provoked still on the wire. It is used in ONE
+    direction only — to keep waiting, never to stop sooner. See `_settle`."""
 
     def __init__(self, page: Any) -> None:
         # What the page said while the action now running was carried out.
@@ -1482,17 +1663,24 @@ class _Session:
         # replaced mid-act when a control opens a tab and the messages either
         # side of that are one action's evidence.
         self.console = browse_mod.ConsoleLog()
+        self.inflight = 0
         self.adopt(page)
         self.epoch = 0
         self.touched = time.monotonic()
 
     def adopt(self, page: Any) -> None:
-        """Drive `page` from now on, listening to its console.
+        """Drive `page` from now on, listening to its console and its traffic.
 
         The ONE place a session's page is assigned, so a tab this session moves
-        to cannot be one whose console nobody is recording."""
+        to cannot be one whose console nobody is recording.
+
+        The in-flight count is reset rather than carried: requests belonging to
+        the page being left will never report finishing on the page being
+        joined, and a count that only ever goes up is a wait that never ends."""
         self.page = page
+        self.inflight = 0
         _watch_console(page, self.console)
+        _watch_traffic(page, self)
 
     def live(self, now: float) -> bool:
         if now - self.touched > BROWSE_MAX_IDLE:
@@ -4600,7 +4788,8 @@ async def _settled_text(
     tries: int = 3,
     still_for: float = SETTLE_QUIET_MS,
     timeout_ms: float = SETTLE_MAX_MS,
-) -> str:
+    inflight: Callable[[], int] | None = None,
+) -> tuple[str, Settled]:
     """The page's text, once it stops saying it is still fetching it.
 
     A page mid-load HAS text — "Wczytywanie danych", a spinner's label, a
@@ -4617,14 +4806,16 @@ async def _settled_text(
     invoices". Twice, on two of five properties, and a second run twenty minutes
     later found them all. A page that has not said anything is the case the
     loading-word test cannot see; the mutation observer inside `_settle` can."""
-    await _settle(page, still_for=still_for, timeout_ms=timeout_ms)
+    seen = await _settle(
+        page, still_for=still_for, timeout_ms=timeout_ms, inflight=inflight
+    )
     text = await _body_text(page)
     for _ in range(tries - 1):
         if text and not browse_mod.still_loading(text):
             break
         await page.wait_for_timeout(SETTLE_MS)
         text = await _body_text(page) or text
-    return text
+    return text, seen
 
 
 async def _save_downloads(
@@ -4670,7 +4861,7 @@ MAX_FRAMES = 12
 
 async def _enumerate(
     page: Any, match: str = ""
-) -> tuple[list[dict], int, int, int, str]:
+) -> tuple[list[dict], int, int, int, str, str]:
     """Every control on the page, across its frames, in one numbering.
 
     The count continues across frames rather than restarting, so `[14]` means
@@ -4684,6 +4875,7 @@ async def _enumerate(
     raw: list[dict] = []
     matched = unreached = matching = 0
     commit = ""
+    dialog = ""
     options = {
         "max": browse_mod.MAX_CONTROLS,
         "nameMax": browse_mod.NAME_MAX_CHARS,
@@ -4706,7 +4898,11 @@ async def _enumerate(
         unreached += int(found.get("unreachable") or 0)
         matching += int(found.get("matching") or 0)
         commit = commit or str(found.get("commit") or "")
-    return raw, matched, unreached, matching, commit
+        # First frame that has one wins, like `commit`: a page with a dialog up
+        # has it in the document the model is looking at, and a nested ad frame
+        # with its own consent box must not overwrite that.
+        dialog = dialog or str(found.get("dialog") or "")
+    return raw, matched, unreached, matching, commit, dialog
 
 
 async def _find(page: Any, n: int) -> tuple[Any, bool]:
@@ -4829,21 +5025,36 @@ async def _snapshot(
     a read, an open or a refusal has nothing to say about it and says nothing
     (#321)."""
     page = session.page
-    text = await _without_option_floods(
+    # Where a driven action's seconds go (#348). Wall-clock around the phases
+    # this function actually has, so the answer is arithmetic on one record
+    # rather than an argument about which of them is slow.
+    clock = time.perf_counter
+    began = clock()
+    settled_text, settled = await _settled_text(
         page,
-        await _settled_text(
-            page,
-            still_for=WATCH_SETTLED_MS if started_work else SETTLE_QUIET_MS,
-            timeout_ms=WATCH_MAX_MS if started_work else SETTLE_MAX_MS,
-        ),
+        still_for=WATCH_SETTLED_MS if started_work else SETTLE_QUIET_MS,
+        timeout_ms=WATCH_MAX_MS if started_work else SETTLE_MAX_MS,
+        inflight=lambda: session.inflight,
     )
-    raw, matched, unreached, matching, commit = await _enumerate(page, match)
+    text = await _without_option_floods(page, settled_text)
+    after_settle = clock()
+    raw, matched, unreached, matching, commit, dialog = await _enumerate(page, match)
     controls = browse_mod.controls_from(raw)
+    after_enumerate = clock()
     # What the MODEL is told about the page being a wall. The capture no longer
     # consults it (#320): a browse-path login form is an EMPTY login form, and
     # refusing to photograph it cost the picture and protected nothing.
     signin = await _has_password_field(page)
     frame, frame_skipped = await _evidence_frame(owner, page)
+    after_frame = clock()
+    phases = {
+        "settle_ms": round((after_settle - began) * 1000),
+        "enumerate_ms": round((after_enumerate - after_settle) * 1000),
+        "frame_ms": round((after_frame - after_enumerate) * 1000),
+        "bar_ms": int(WATCH_SETTLED_MS if started_work else SETTLE_QUIET_MS),
+        "controls": len(controls),
+        "settle": settled.record(),
+    }
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
     # control the model is looking for is very often in the header the narrowing
     # would drop — "Przełącz lokal" sits beside the account name, not in <main>.
@@ -4856,6 +5067,7 @@ async def _snapshot(
         narrowed=match or "",
         matching=matching,
         unreachable=unreached,
+        dialog=dialog,
         epoch=session.epoch,
         signin=signin,
         frame=frame,
@@ -4867,6 +5079,7 @@ async def _snapshot(
         frame_skipped=frame_skipped,
         problem=problem,
         notice=notice,
+        phases=phases,
         downloads=await _save_downloads(owner, browse_page=page),
         asked=asked if browse_mod.landed_elsewhere(asked, str(page.url or "")) else "",
         commit_evidence=commit,
@@ -5412,6 +5625,9 @@ def browse_act(
         raise BrowserUnavailable(reason)
 
     async def job(owner: _Owner) -> browse_mod.Snapshot:
+        # Everything up to the closing snapshot is THE ACT — resolving the
+        # name, pressing it, and whatever the press itself waited on (#348).
+        act_began = time.perf_counter()
         session = await _session(owner, key, opening=False)
         page = session.page
         # Before anything is read or pressed, and INSIDE the owner loop: the
@@ -5424,7 +5640,16 @@ def browse_act(
         # silently un-narrowed the list would hand back a DIFFERENT selection
         # of controls from the one the model asked for, on the page it is about
         # to pick its next move from.
-        shot = partial(_snapshot, match=topic)
+        # Every ending in this function goes through `shot`, so the act clock
+        # is stamped HERE rather than at each `return` — the success path used
+        # to be the only one that carried it, which put `act_ms` on the fast
+        # calls and left it off the stuck, refused and timed-out ones (#348).
+        async def shot(*a: Any, **kw: Any) -> browse_mod.Snapshot:
+            snapshot = await _snapshot(*a, match=topic, **kw)
+            snapshot.phases["act_ms"] = round(
+                (time.perf_counter() - act_began) * 1000
+            )
+            return snapshot
         if action == "read":
             # Looking is not acting. The model needs a way to see the whole page
             # again without navigating to it — a `goto` to the same URL resets
@@ -5444,7 +5669,7 @@ def browse_act(
         # the very one the narrowing existed to reach (#270). Falling back to
         # the address costs nothing: a name the matcher cannot see simply
         # leaves the selection in document order, which is what it was before.
-        raw, _, _, _, _ = await _enumerate(page, topic or address)
+        raw, *_ = await _enumerate(page, topic or address)
         live = browse_mod.controls_from(raw)
         found = browse_mod.resolve(live, address)
         if found.control is None:
@@ -5608,6 +5833,7 @@ def browse_fill(
         raise BrowserUnavailable(reason)
 
     async def job(owner: _Owner) -> browse_mod.Snapshot:
+        act_began = time.perf_counter()   # see browse_act
         session = await _session(owner, key, opening=False)
         page = session.page
         # Before anything is read or pressed, and INSIDE the owner loop: the
@@ -5625,34 +5851,35 @@ def browse_fill(
             value = str(step.get("value", "") or step.get("text", "") or "")
             # Narrowed the same way the listing the model read was — see
             # browse_act, same reasoning, and each step names its own control.
-            raw, _, _, _, _ = await _enumerate(page, topic or asked)
+            raw, *_ = await _enumerate(page, topic or asked)
             live = browse_mod.controls_from(raw)
             found = browse_mod.resolve(live, asked)
             control = found.control
             if control is None:
                 return await _stop(
                     owner, session, ledger, index, len(steps),
-                    f"{found.problem}", dated=dated,
+                    f"{found.problem}", dated=dated, act_began=act_began,
                 )
             if control.kind == browse_mod.PASSWORD:
                 return await _stop(
                     owner, session, ledger, index, len(steps),
                     "it is a password field, and aish never types passwords",
-                    dated=dated,
+                    dated=dated, act_began=act_began,
                 )
             if control.mutating and not (index == last and mutating):
                 return await _stop(
                     owner, session, ledger, index, len(steps),
                     f"{control.address!r} needs approval of its own and this "
                     "batch was not approved for it — the page changed under it",
-                    dated=dated,
+                    dated=dated, act_began=act_began,
                 )
             session.epoch += 1
             try:
-                said = await _run_step(page, control, verb, value, live)
+                said = await _run_step(page, control, verb, value, live, session)
             except _StepFailed as exc:
                 return await _stop(
-                    owner, session, ledger, index, len(steps), str(exc), dated=dated
+                    owner, session, ledger, index, len(steps), str(exc),
+                    dated=dated, act_began=act_began,
                 )
             except Stuck as stuck:
                 # A consent wall rendering mid-batch is a case this file
@@ -5664,13 +5891,13 @@ def browse_fill(
                     browse_mod.stuck_reason(
                         stuck.cover, action=verb, address=control.address
                     ),
-                    dated=dated, covered=stuck.cover,
+                    dated=dated, act_began=act_began, covered=stuck.cover,
                 )
             except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
                 return await _stop(
                     owner, session, ledger, index, len(steps),
                     f"could not {verb} it ({type(exc).__name__}: {exc})",
-                    dated=dated,
+                    dated=dated, act_began=act_began,
                 )
             ledger.append(f"{index + 1}. {said}")
             dated = dated or verb == "date"
@@ -5686,11 +5913,14 @@ def browse_fill(
                     owner, session, ledger, index + 1, len(steps),
                     "the page navigated, so the rest of the batch was composed "
                     "against a page you are no longer on",
-                    after=True, dated=dated,
+                    after=True, dated=dated, act_began=act_began,
                 )
         # The last step of a form-fill is usually the press that sends it, so
         # this is the read that lands on a results page still being fetched.
+        act_ms = round((time.perf_counter() - act_began) * 1000)
         snapshot = await _snapshot(owner, session, match=topic, started_work=True)
+        snapshot.phases["act_ms"] = act_ms
+        snapshot.phases["steps"] = len(steps)
         snapshot.ledger = ledger
         return snapshot
 
@@ -5784,7 +6014,7 @@ async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
             raise _StepFailed(f"{control.address!r} left the page mid-batch")
         await _type(page, box, text=value, submit=False)
         await _settle(page)
-        raw, _, _, _, _ = await _enumerate(page)
+        raw, *_ = await _enumerate(page)
         said = _readback(
             browse_mod.controls_from(raw), control, value, kind="typed"
         )
@@ -5808,7 +6038,7 @@ async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
         if pick.tag is not None:
             await _press_in_picker(page, pick.tag)
             await _settle(page)
-            raw, _, _, _, _ = await _enumerate(page)
+            raw, *_ = await _enumerate(page)
             said = _readback(
                 browse_mod.controls_from(raw), control, value, kind="picked"
             )
@@ -5891,7 +6121,7 @@ class _StepFailed(Exception):
 
 
 async def _run_step(
-    page: Any, control: Any, verb: str, value: str, before: list
+    page: Any, control: Any, verb: str, value: str, before: list, session: Any = None
 ) -> str:
     """Carry out one step and say what the control HOLDS afterwards."""
     if verb == "date":
@@ -5920,28 +6150,156 @@ async def _run_step(
         said = f"pressed {control.address!r}"
         return f"{said} — {pressed.note}" if pressed.note else said
     await _type(page, target, text=value, submit=False)
-    return await _commit_suggestion(page, control, value, before)
+    return await _commit_suggestion(page, control, value, before, session)
+
+
+async def _picker_standing_open(page: Any, controls: list, control: Any) -> bool:
+    """Is this field's own date picker open over it, right now? (#348)
+
+    Two things this gets right that the obvious version does not, both of them
+    already paid for elsewhere in this file:
+
+    **It tests CELLS, not `found`.** `CALENDAR_JS` falls back to a document-wide
+    search for picker-ish class names, so on intercity.pl a plain text date box
+    matches its own wrapper and "a grid was found" is true and empty —
+    `_pick_date` says exactly this and tests the cells for exactly this reason.
+    Testing `found` would put *its date picker is still open* on any field
+    sitting anywhere near a `[class*=datepicker]`, which is a NEW false sentence
+    in aish's own voice, on more pages than the one this change removes.
+
+    **It re-resolves by ADDRESS.** `n` is assignment order and a narrowed
+    enumeration emits the matched control FIRST, so a control resolved from a
+    narrowed pass carries a number that a later unnarrowed pass has since given
+    to something else — on lot.com, n=0 went from 'Lot do:' to 'Zamknij pasek
+    informacyjny'. The address survives both passes; the number does not.
+
+    Only a field is asked, because only a field has a picker to stand open over
+    it, and this costs a whole-document walk."""
+    if getattr(control, "kind", "") != browse_mod.FIELD:
+        return False
+    live = next(
+        (c for c in controls if c.address == control.address), None
+    )
+    if live is None:
+        return False
+    grid = await _read_calendar(page, live.n)
+    return bool(grid.get("cells") or [])
 
 
 async def _commit_suggestion(
-    page: Any, control: Any, value: str, before: list
+    page: Any, control: Any, value: str, before: list, session: Any = None
 ) -> str:
     """Typing is not choosing. If the page answered with a list, press the
-    entry that matches; if it did not, the text stands on its own."""
+    entry that matches; if it did not, the text stands on its own.
+
+    **What counts as an entry, and why it is no longer `role=option` alone
+    (#348).** The candidate set used to be controls the page marked
+    `role=option` or `role=treeitem`. On lot.com the destination suggestion is
+    a plain `<button>`, so `fill` could not commit a destination there whatever
+    string was typed — it typed, found nothing it recognised as an option, and
+    reported the text back as though the field were an ordinary one. That cost
+    three round trips per airport field, and it read like a matching failure
+    when it was a kind failure: on 2026-09-01 the ledger said `'Lot do:' ←
+    'NRT'` and the model, correctly not trusting that, pressed the suggestion
+    itself on the next call.
+
+    So a candidate is now anything the page put there IN RESPONSE — which is
+    the fence that was always doing the work, and it is unchanged: `address not
+    in was` means this control did not exist before the keystrokes. What
+    changes is that a page no longer has to have declared the ARIA role for its
+    own list to be usable.
+
+    Three things keep that safe, and they are stricter than what they replace:
+
+    - a candidate the page did not declare an option is matched with `strict=`,
+      so only a WHOLE label matches — the substring rung is exactly where an
+      undeclared candidate set could pick the wrong neighbour;
+    - a candidate that SUBMITS the form is refused outright. A form-fill has
+      not finished composing when this runs, and pressing a submit here would
+      send it — the one irreversible thing on the page, reached by a rung that
+      exists to choose a word;
+    - a candidate needing its own approval is refused, as before.
+
+    Anything ambiguous still raises rather than guessing."""
     # The list is fetched, not rendered locally, so reading straight after the
     # keystrokes reads the page BEFORE it answered — and "no suggestions
     # appeared" would then be a race reported as a fact. Snapshots have always
     # settled; a batch's intermediate reads did not, which is precisely where
     # the readback this design rests on would have been raced.
-    await _settle(page)
-    raw, _, _, _, _ = await _enumerate(page)
+    #
+    # `inflight` is what closes the rest of that race (#348). A debounced
+    # autocomplete has not even ISSUED its request 350ms after the keystrokes,
+    # and once it has, a request on the wire is invisible to the quiet clock —
+    # so the short bar could be met while the answer was still coming. It can
+    # only lengthen this wait; see `_settle`.
+    await _settle(
+        page, inflight=(lambda: session.inflight) if session is not None else None
+    )
+    raw, *_ = await _enumerate(page)
     after = browse_mod.controls_from(raw)
     was = {c.address for c in before}
-    offered = [c for c in after if c.option and c.address not in was]
+    appeared = [c for c in after if c.address not in was]
+    # TWO STAGES, not one preference (#348). The first version read
+    # `[options] or [everything else]`, which meant a page rendering ANY
+    # declared option shadowed the undeclared rung entirely — and that is
+    # precisely lot.com, whose destination panel renders two static options
+    # ('Dowolny kierunek', 'Siatka połączeń') beside the real suggestion drawn
+    # as a button. The widening would have bought nothing on the site it was
+    # written for.
+    #
+    # So: try the DECLARED list on its own terms first, with the substring rung
+    # intact, exactly as before this change. Only if nothing there matches does
+    # the undeclared rung run, and it runs strictly. Existing pages keep their
+    # behaviour to the letter; the new rung can only ever add a commit that
+    # could not happen before.
+    declared_now = [c for c in appeared if c.option]
+    undeclared = [c for c in appeared if not c.option and not c.submits]
+    offered = declared_now
     if not offered:
-        return _readback(after, control, value)
-    picked = browse_mod.match_option([(c.name, c.address) for c in offered], value)
+        offered = undeclared
+    if not offered:
+        # Nothing was offered, so the typed text is the whole result — which is
+        # exactly the case where a picker standing open over the field means
+        # the ledger's `←` would claim more than was checked. Asked of
+        # `CALENDAR_JS`, the code that already knows how to find a field's own
+        # widget, rather than of the ARIA roles: a picker that declares itself
+        # a dialog and one that does not are the same fact here.
+        return _readback(
+            after, control, value,
+            picker_open=await _picker_standing_open(page, after, control),
+        )
+    declared = bool(offered) and all(c.option for c in offered)
+    picked = browse_mod.match_option(
+        [(c.name, c.address) for c in offered], value, strict=not declared
+    )
+    if picked.problem and declared and undeclared:
+        # The page's own list did not have it. Before giving up, the controls
+        # it drew WITHOUT declaring them are still things it put there in
+        # response to the typing — and on lot.com that is where the answer is.
+        second = browse_mod.match_option(
+            [(c.name, c.address) for c in undeclared], value, strict=True
+        )
+        if not second.problem:
+            picked, declared, offered = second, False, undeclared
     if picked.problem:
+        if not declared:
+            # **A miss against UNDECLARED candidates is not a failure**, and
+            # getting this wrong would break fills that work today. When the
+            # page marked its list `role=option` it SAID these are the choices,
+            # so not matching one is a real problem and the model needs to hear
+            # it. When it did not, the only thing observed is that something
+            # appeared after the typing — a clear ✕ inside the field, a
+            # validation hint, a spinner that became a button — and "none of
+            # those was a suggestion" is the ordinary case, not an error.
+            #
+            # Before this widening those controls were never candidates at all
+            # and the step fell through to the readback. It still does. The
+            # widening may only ever ADD a commit that could not happen before;
+            # it must never turn a step that worked into a stopped batch.
+            return _readback(
+                after, control, value,
+                picker_open=await _picker_standing_open(page, after, control),
+            )
         raise _StepFailed(
             f"{control.address!r} offered {len(offered)} suggestions and "
             f"{picked.problem} Nothing was chosen"
@@ -5952,13 +6310,20 @@ async def _commit_suggestion(
             f"the suggestion {chosen.address!r} needs approval of its own, so "
             "it was not pressed"
         )
+    if chosen.submits:
+        # Belt and braces: `offered` already excluded these. Kept because the
+        # cost of the two disagreeing is a form sent mid-compose.
+        raise _StepFailed(
+            f"the suggestion {chosen.address!r} would SEND this form, and a "
+            "form being filled is not finished. Nothing was pressed"
+        )
     element, _top = await _find(page, chosen.n)
     if element is None:
         raise _StepFailed(f"the suggestion {chosen.address!r} vanished before it could be pressed")
     await _centre(element)
     await _press(page, element, mutating=False, href="")
     await _settle(page)
-    raw, _, _, _, _ = await _enumerate(page)
+    raw, *_ = await _enumerate(page)
     said = _readback(
         browse_mod.controls_from(raw), control, picked.label, kind="picked"
     )
@@ -5981,18 +6346,41 @@ def _held(controls: list, address: str) -> str | None:
     return None
 
 
-def _readback(controls: list, control: Any, value: str, *, kind: str = "typed") -> str:
+def _readback(
+    controls: list, control: Any, value: str, *, kind: str = "typed",
+    picker_open: bool = False,
+) -> str:
     """One ledger line, saying whether the value was VERIFIED or merely done.
 
     The distinction is the point: "the field holds X" and "aish did X and the
     control says nothing back" are different claims, and only the first is
-    evidence. Collapsing them is how a ledger states a value nobody checked."""
+    evidence. Collapsing them is how a ledger states a value nobody checked.
+
+    **`picker_open` is a THIRD claim this had no way to make (#348).** A
+    readback proves what the INPUT holds. It proves nothing about what the FORM
+    has taken, and on a field with a picker standing open over it those two
+    routinely disagree — the box shows the typed text while the widget has
+    accepted nothing. On 2026-09-01 this line read `'Wybierz datę…' ←
+    '19-03-2027'` with lot.com's picker open and its *Potwierdź* button
+    DISABLED; the model reasonably read a verified value, said the dates were
+    set, and then spent three calls discovering they were not.
+
+    So where a picker is open the line says what was seen and what was NOT
+    checked, in aish's own voice, and stops there. It does not diagnose — "the
+    page rejected it" would be a guess, and a picker open over a field that has
+    in fact taken the value is an ordinary thing for a page to do."""
     held = _held(controls, control.address)
+    unchecked = (
+        " — its date picker is still open, and whether the form has taken this "
+        "is not something aish checked"
+        if picker_open
+        else ""
+    )
     if held:
-        return f"{control.address!r} ← {held!r}"
+        return f"{control.address!r} ← {held!r}{unchecked}"
     return (
         f"{control.address!r} ← {value!r} ({kind}; the control shows nothing "
-        "readable back)"
+        f"readable back){unchecked}"
     )
 
 
@@ -6007,6 +6395,7 @@ async def _stop(
     after: bool = False,
     dated: bool = False,
     covered: browse_mod.Cover | None = None,
+    act_began: float | None = None,
 ) -> browse_mod.Snapshot:
     """End a batch part-way and say exactly where it got to.
 
@@ -6042,6 +6431,15 @@ async def _stop(
         covered=covered,
     )
     snapshot.ledger = ledger
+    # A batch that STOPPED is the one whose timings matter most — it is where a
+    # form-fill spends its seconds and then has nothing to show for them — and
+    # the completed path stamps these after `_snapshot` returns, which this path
+    # never reaches (#348). Without it `act_ms` would be absent exactly on the
+    # slow failures.
+    if act_began is not None:
+        snapshot.phases["act_ms"] = round((time.perf_counter() - act_began) * 1000)
+        snapshot.phases["steps"] = total
+        snapshot.phases["stopped_at"] = done
     return snapshot
 
 
@@ -6205,7 +6603,7 @@ def browse_fields(*, key: str = "", timeout: float = 20.0) -> list:
 
     async def job(owner: _Owner) -> list:
         session = await _session(owner, key, opening=False)
-        raw, _, _, _, _ = await _enumerate(session.page)
+        raw, *_ = await _enumerate(session.page)
         return browse_mod.controls_from(raw)
 
     try:
