@@ -13058,3 +13058,389 @@ class TestTheDrivenTwinOfTheComposedAddress:
         agent._tainted = True
         assert agent._browse_gate("browse_act", {"target": "Go"}) is None
         assert asked == []
+
+
+class TestTheOwnersDeclaredValues:
+    """#295 M5 / #343 — the third of his three clauses, *restrict my data going
+    out*, and the one no shipped mechanism covered.
+
+    A third tier between NEVER (an IBAN, a card number, a password) and FREE
+    (everything else): **ask, by value**. His name, home address, phone, date of
+    birth and e-mail were typed into any form on any granted site with no
+    question asked — `_browse_batch_gate`'s own docstring said *"Filling needs
+    no card at all"* — and a page that lies about what a field is defeats every
+    label check ever written. This one reads what aish is about to SEND.
+
+    It is a CARD and not a refusal because typing his address is sometimes
+    exactly the task; unattended it is a refusal, because nobody is there to
+    check a card."""
+
+    HOST = "drop.example"
+    PAGE = "https://drop.example/form"
+
+    #: His choice of set, per the design — address, phone, DOB, e-mail, name.
+    #: Fictional values: no test may carry the owner's real data, and none of
+    #: them is read from the Keychain (see `_declare`).
+    DECLARED = {
+        "home_address": "ul. Lipowa 3/5, 30-001 Kraków",
+        "phone": "+48 601 234 567",
+        "date_of_birth": "1979-03-14",
+        "email": "jan.kowalski@example.invalid",
+        "full_name": "Jan Kowalski",
+    }
+
+    def _declare(self, monkeypatch, values=None):
+        """Declare the classes without going anywhere near a real Keychain.
+
+        The NAME index and the per-name lookup are the only two things that
+        shell out; everything above them — the fold, the length floor, the
+        cache, the containment — runs for real, which is the half the fence
+        actually rests on."""
+        declared = self.DECLARED if values is None else values
+        monkeypatch.setattr(
+            agent_module.secrets, "personal_names", lambda: sorted(declared)
+        )
+        monkeypatch.setattr(
+            agent_module.secrets, "get_personal", lambda name: declared.get(name)
+        )
+        agent_module.secrets._invalidate_personal()
+
+    def _form(self):
+        return browse.controls_from([
+            {"n": 1, "kind": "field", "name": "Adres", "form": "f1"},
+            {"n": 2, "kind": "field", "name": "Telefon", "form": "f1"},
+            {"n": 3, "kind": "button", "name": "Go", "submits": True,
+             "method": "get", "form": "f1"},
+        ])
+
+    def _agent(self, origin="user", approve_tool="yes", url=PAGE):
+        asked: list = []
+        logged: list = []
+        if approve_tool == "yes":
+            def approve_tool(name, args, preview=None):  # noqa: F811
+                asked.append(preview)
+                return True
+        agent, _ = make_agent(
+            [], approve_tool=approve_tool, state_log=logged.append, origin=origin
+        )
+        agent._tainted = True
+        agent._browse_view.remember(browse.Snapshot(
+            url=url, title="", text="t", controls=self._form()
+        ))
+        # Granted AND vouched: the ordinary steady state after M3's seeding, and
+        # the only configuration in which this card can be shown alone. Anything
+        # this fence draws here is drawn by the value and by nothing else.
+        agent._approved_sites.add(self.HOST)
+        agent._approved_hosts.add(self.HOST)
+        return agent, asked, logged
+
+    def _fill(self, value, target="Adres"):
+        return {"steps": [{"target": target, "value": value}]}
+
+    def _type(self, value, target="Adres"):
+        return {"target": target, "action": "type", "text": value}
+
+    # --- the acceptance criteria, one test each -----------------------------
+
+    def test_a_declared_value_typed_on_a_granted_site_draws_one_card(self, monkeypatch):
+        """The headline. A granted, vouched, inert form-fill asks nothing today;
+        with his address in it, it asks once — and the sentence says what and
+        where in HIS words, never a tool and never a mechanism (P1)."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate(
+            "browse_fill", self._fill(self.DECLARED["home_address"])
+        ) is None
+        assert len(asked) == 1
+        assert asked[0] == "about to type your home address on drop.example."
+
+    def test_a_second_type_of_the_same_class_at_the_same_host_does_not_re_ask(
+        self, monkeypatch
+    ):
+        """One yes covers that value class on that host for the task. A shipping
+        form takes an address across two fields, and asking twice for one form
+        is the shape P2 forbids."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        agent._browse_gate("browse_fill", self._fill(self.DECLARED["home_address"]))
+        assert len(asked) == 1
+        assert agent._browse_gate(
+            "browse_act", self._type(self.DECLARED["home_address"])
+        ) is None
+        assert len(asked) == 1
+
+    def test_a_different_class_at_the_same_host_asks_again(self, monkeypatch):
+        """Per CLASS as well as per host. A yes for his address is not a yes for
+        his phone number — the grant is exactly what the card named."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        agent._browse_gate("browse_fill", self._fill(self.DECLARED["home_address"]))
+        agent._browse_gate(
+            "browse_fill", self._fill(self.DECLARED["phone"], target="Telefon")
+        )
+        assert len(asked) == 2
+        assert "your phone" in asked[1]
+
+    def test_the_same_value_asks_the_same_way_through_both_tools(self, monkeypatch):
+        """#310's lesson, asserted in BOTH directions: a fence on one entry
+        point is not a fence. `browse_fill` and `browse_act(action="type")` are
+        the only two ways a model-supplied value reaches a page, and the fence
+        is asked above the branches, about the ACT."""
+        self._declare(monkeypatch)
+        by_fill, filled, _ = self._agent()
+        by_type, typed, _ = self._agent()
+        value = self.DECLARED["home_address"]
+        assert by_fill._browse_gate("browse_fill", self._fill(value)) is None
+        assert by_type._browse_gate("browse_act", self._type(value)) is None
+        assert filled == typed
+        assert len(filled) == 1
+
+        # And the other direction: neither tool asks about a value that is not
+        # his, so the agreement is not an artefact of both always asking.
+        free_fill, quiet_a, _ = self._agent()
+        free_type, quiet_b, _ = self._agent()
+        assert free_fill._browse_gate("browse_fill", self._fill("okulary")) is None
+        assert free_type._browse_gate("browse_act", self._type("okulary")) is None
+        assert quiet_a == quiet_b == []
+
+    def test_a_composed_url_carrying_a_declared_value_asks_at_a_vouched_host(
+        self, monkeypatch
+    ):
+        """Amendment 1. #343 fences typing, and a composed `?address=<his
+        street>` never types — so without this arm M3's permanent machine-wide
+        vouch would exempt his third clause at exactly the 17 hosts he uses
+        most. The host here IS vouched, which is the whole point."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        url = "https://drop.example/s?address=" + urllib.parse.quote(
+            self.DECLARED["home_address"]
+        )
+        assert agent._egress_gate("read_url", {"url": url}) is None
+        assert len(asked) == 1
+        assert "carries your home address" in asked[0]
+
+    def test_a_yes_on_one_channel_answers_for_the_other(self, monkeypatch):
+        """ONE ledger for both readers. The typing fence and the composed
+        address ask about the same value going to the same place; two ledgers
+        would ask him twice for one decision, and would be the two-list
+        invariant this epic has already been bitten by."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate(
+            "browse_fill", self._fill(self.DECLARED["home_address"])
+        ) is None
+        assert len(asked) == 1
+        url = "https://drop.example/s?address=" + urllib.parse.quote(
+            self.DECLARED["home_address"]
+        )
+        assert agent._egress_gate("read_url", {"url": url}) is None
+        assert len(asked) == 1
+
+    def test_a_fill_carrying_no_declared_value_is_free(self, monkeypatch):
+        """The control arm, and the measured common case: every recorded
+        form-fill in his history — a tracking number, "Tokio", "okulary",
+        "Drew", "United States" — carries none of these and asks nothing."""
+        self._declare(monkeypatch)
+        for value in ("00159803025860486011", "Tokio", "okulary", "Drew",
+                      "United States"):
+            agent, asked, _ = self._agent()
+            assert agent._browse_gate("browse_fill", self._fill(value)) is None
+            assert asked == [], value
+
+    def test_unattended_it_is_a_refusal_and_it_is_recorded(self, monkeypatch):
+        """Nobody is there to check a card, so there is no card. The refusal
+        carries its own verdict through `_gate_outcome`, like every other one
+        in this file."""
+        self._declare(monkeypatch)
+        agent, _, _ = self._agent(origin="schedule", approve_tool=None)
+        out = agent._browse_gate(
+            "browse_fill", self._fill(self.DECLARED["home_address"])
+        )
+        assert out is not None
+        assert "NOT EXECUTED" in out
+        assert "home address" in out
+        assert out.meta["decision"] == "blocked"
+
+    def test_a_page_with_no_readable_host_fails_closed(self, monkeypatch):
+        """The card's entire content is *what* and *where*. With no host the
+        sentence would have to end mid-air, which is #341's own scar — so it
+        refuses and says what was actually established, in either origin."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent(url="about:blank")
+        out = agent._browse_gate(
+            "browse_fill", self._fill(self.DECLARED["home_address"])
+        )
+        assert out is not None
+        assert "cannot read a site out of that page's address" in out
+        assert asked == []
+
+    def test_a_no_says_nothing_was_typed_and_closes_the_way_round(self, monkeypatch):
+        """A denial must not leave the model an obvious alternative: the same
+        value in a composed address gates too, and it is told so."""
+        self._declare(monkeypatch)
+        agent, _, _ = self._agent(approve_tool=lambda n, a, p=None: False)
+        out = agent._browse_gate(
+            "browse_fill", self._fill(self.DECLARED["home_address"])
+        )
+        assert out is not None
+        assert "NOTHING was typed" in out
+        assert "into an address instead" in out
+        assert agent._personal_granted == set()
+
+    def test_neither_the_card_nor_the_refusal_ever_carries_the_value(
+        self, monkeypatch
+    ):
+        """A record that quoted his address would be the leak this slice exists
+        to prevent. The card names the CLASS and the HOST; so does the refusal.
+
+        The claim stops exactly there, and stating it wider would be a claim the
+        code cannot keep: the model put the value in the call's own arguments and
+        `_call_result` writes that record before `_dispatch` reaches any gate —
+        the same bounded promise `types_a_card_number` already makes."""
+        self._declare(monkeypatch)
+        value = self.DECLARED["home_address"]
+        folded = agent_module.secrets.fold_value(value)
+        for origin, approver in (("user", "yes"), ("schedule", None)):
+            agent, asked, logged = self._agent(origin=origin, approve_tool=approver)
+            out = agent._browse_gate("browse_fill", self._fill(value))
+            written = [str(out or "")] + [str(card) for card in asked]
+            written += [repr(record) for record in logged]
+            for text in written:
+                assert value not in text
+                assert "Lipowa" not in text
+                assert folded not in agent_module.secrets.fold_value(text)
+
+    # --- the incumbent, unchanged -------------------------------------------
+
+    def test_the_never_typed_values_are_unchanged(self, monkeypatch):
+        """The third tier sits BETWEEN never and free and moves neither edge. An
+        IBAN and a card number are still refused outright, through both tools,
+        with no card drawn — declaring values must not turn an unapprovable
+        refusal into something with a yes button."""
+        self._declare(monkeypatch)
+        for value in ("PL27114020040000300201355387", "4111 1111 1111 1111"):
+            for tool, args in (
+                ("browse_fill", self._fill(value)),
+                ("browse_act", self._type(value)),
+            ):
+                agent, asked, _ = self._agent()
+                out = agent._browse_gate(tool, args)
+                assert out is not None, (tool, value)
+                assert "NOT EXECUTED" in out
+                assert "however it is asked" in out
+                assert out.meta["decision"] == "blocked"
+                assert asked == []
+
+    def test_a_password_field_is_still_refused_outright(self, monkeypatch):
+        """The other never-value, refused by the field's kind rather than by the
+        value. Untouched here."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        agent._browse_view.remember(browse.Snapshot(
+            url=self.PAGE, title="", text="t",
+            controls=browse.controls_from(
+                [{"n": 1, "kind": browse.PASSWORD, "name": "Hasło"}]
+            ),
+        ))
+        out = agent._browse_gate(
+            "browse_act", self._type(self.DECLARED["home_address"], target="Hasło")
+        )
+        assert out is not None
+        assert "never types passwords" in out
+        assert asked == []
+
+    # --- the property, iterated, and non-vacuous by construction ------------
+
+    def test_every_declared_class_is_fenced_on_BOTH_paths(self, monkeypatch):
+        """**The property, not a sample.** The declared set feeds two readers —
+        the typing fence and the composed-address arm — and that is the shape
+        this project has already been bitten by: `zamawiam` joined one half of a
+        two-list invariant, the guard test SAMPLED five labels instead of
+        iterating, and the statutory Polish checkout label stayed pressable
+        through the live fence. A sampled guard on a load-bearing invariant is
+        not a guard.
+
+        So: every class, through `browse_fill`, through
+        `browse_act(action="type")`, and through a composed URL — and the
+        assertion is on the SENTENCE each path produces, not merely on the fact
+        that something asked. A gate that fired for another reason (an opaque
+        run, a nested address) would satisfy "it asked" and prove nothing about
+        this fence."""
+        self._declare(monkeypatch)
+        for said, value in sorted(self.DECLARED.items()):
+            spoken = said.replace("_", " ")
+
+            fill_agent, by_fill, _ = self._agent()
+            assert fill_agent._browse_gate("browse_fill", self._fill(value)) is None
+            assert by_fill, f"{said}: browse_fill asked nothing"
+            assert "about to type your " in by_fill[0], said
+            assert spoken in by_fill[0], said
+
+            type_agent, by_type, _ = self._agent()
+            assert type_agent._browse_gate("browse_act", self._type(value)) is None
+            assert by_type, f"{said}: browse_act(type) asked nothing"
+            assert "about to type your " in by_type[0], said
+            assert spoken in by_type[0], said
+
+            # The two typing paths agree on the WHOLE sentence, per class —
+            # #310's lesson asserted inside the loop rather than once.
+            assert by_fill == by_type, said
+
+            url_agent, by_url, _ = self._agent()
+            url = "https://drop.example/s?v=" + urllib.parse.quote(value)
+            assert url_agent._egress_gate("read_url", {"url": url}) is None
+            assert by_url, f"{said}: the composed address asked nothing"
+            # The CLASS, not the whole clause: one value can carry another —
+            # his e-mail has his name inside it — and the raw and
+            # percent-decoded readings can find them in either order. What the
+            # property is about is that this class was named on this path.
+            assert "carries your " in by_url[0], said
+            assert spoken in by_url[0], said
+
+    def test_the_declared_set_is_read_from_ONE_place_by_both_readers(
+        self, monkeypatch
+    ):
+        """The structural half of the property above. Both readers reach
+        `secrets.personal_matches`, so a class cannot join one path and miss the
+        other — there is no second list to keep in step.
+
+        Proved by removing the matcher rather than by reading the source: with
+        it answering "nothing", both paths go silent together."""
+        self._declare(monkeypatch)
+        monkeypatch.setattr(agent_module.secrets, "personal_matches", lambda text: [])
+        value = self.DECLARED["home_address"]
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate("browse_fill", self._fill(value)) is None
+        assert agent._browse_gate("browse_act", self._type(value)) is None
+        url = "https://drop.example/s?v=" + urllib.parse.quote(value)
+        assert agent._egress_gate("read_url", {"url": url}) is None
+        assert asked == []
+
+    def test_a_value_normalises_across_case_spacing_and_diacritics(
+        self, monkeypatch
+    ):
+        """What the fold is FOR, stated as behaviour. He declares his phone with
+        spaces and aish types it without them; he declares "Kraków" and the form
+        takes "Krakow". A fence a different keyboard walks past is not one."""
+        self._declare(monkeypatch)
+        for written in ("+48601234567", "48 601 234 567", "  +48-601-234-567  "):
+            agent, asked, _ = self._agent()
+            assert agent._browse_gate(
+                "browse_fill", self._fill(written, target="Telefon")
+            ) is None
+            assert asked and "your phone" in asked[0], written
+
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate(
+            "browse_fill", self._fill("UL. LIPOWA 3/5, 30-001 KRAKOW")
+        ) is None
+        assert asked and "your home address" in asked[0]
+
+    def test_a_value_too_short_to_match_is_not_a_wildcard(self, monkeypatch):
+        """What happens if he declares a two-character value: it is refused at
+        declaration (`test_secrets`), and if one reaches the store by any other
+        route the matcher skips it — so it can never quietly card everything."""
+        self._declare(monkeypatch, {"initials": "PW"})
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate("browse_fill", self._fill("okulary PW")) is None
+        assert asked == []

@@ -253,7 +253,13 @@ Rules:
    that they will be asked again.
    Pressing a control that SENDS A FORM carrying values you typed asks that same question, at a
    host nobody has agreed to send anything to yet, and a yes there covers addresses too — so do
-   not avoid a form for fear of it. Filling a form in is never asked about; only sending it is.
+   not avoid a form for fear of it. Filling a form in asks about ONE thing and nothing else: a
+   value the user has DECLARED as their own — their address, phone, date of birth, e-mail or name
+   — draws one card naming what it is and which site it would go to, and one yes covers that kind
+   of value at that site for the rest of the task. The same card comes up if you put one of those
+   values into an address you build, at ANY site. Everything else you type is never asked about.
+   Do not go looking for which values those are and do not ask the user to confirm one: aish
+   checks it itself, and you MUST simply fill the form in as asked.
    Once they approve, that page IS
    read through their signed-in browser: you never need a cookie, a token, or a manual download
    to see their account. A line beginning "[aish:" ABOVE the untrusted-content banner is from
@@ -1505,6 +1511,54 @@ SEND_DENIED = (
     "values into an address instead. Ask the user what to do."
 )
 
+# The owner's DECLARED VALUES (#295 M5, #343) — the third tier between *never*
+# (an IBAN, a card number, a password) and *free* (everything else): ask, by
+# value. It is a card and not a refusal because typing his address is sometimes
+# exactly the task — a shipping form he asked for — so a hard refusal would
+# break the staging the epic's §5 exists to allow.
+#
+# It says WHAT and WHERE in his own words, and the words are the ones HE chose:
+# the class name he declared is what the sentence carries, so no vocabulary here
+# gets to decide how his address is described. No mechanism word (P1) — never
+# "browse_fill", never "the typing fence", never a tool.
+PERSONAL_GRANT = "about to type your {what} on {host}."
+
+PERSONAL_GRANT_RIDER = "and about to type your {what} on {host}."
+
+# The same finding on the OTHER channel. It slots into the egress card's
+# sentence — "the address it built for shop.example carries your home address"
+# — because a composed `?address=…` and a typed field are one question about one
+# value, and answering them differently is how a fence becomes a fiction at the
+# 17 hosts he already vouched for.
+PERSONAL_CARRIES = "carries your {what}"
+
+# A no must not leave the model an obvious way round: the same value in a
+# composed address gates too, and it is told so rather than left to find out.
+PERSONAL_DENIED = (
+    "USER DENIED sending their {what} — NOTHING was typed and nothing was sent. "
+    "Do not retry it, do not put the same value into a different field, and do "
+    "not put it into an address instead. Ask the user what to do."
+)
+
+# Unattended it is a refusal and not a card, for the reason every other
+# unattended difference exists: nobody is there to check it. Recorded through
+# `_gate_outcome`, exactly as the never-typed refusals are.
+PERSONAL_UNATTENDED = (
+    "NOT EXECUTED: this would put the user's {what} into a page on {host}, and "
+    "nobody is watching this session to agree to it. Nothing was typed. Say so "
+    "in your report and leave that step to the user."
+)
+
+# The one attended path that cannot draw the card: a page whose URL has no
+# host. The gate then cannot say WHERE the value would go, and a card that
+# cannot name the destination is not a card he can check — so it fails closed,
+# saying what was actually established and nothing wider.
+PERSONAL_NO_HOST = (
+    "NOT EXECUTED: this would put the user's {what} into a page, and aish "
+    "cannot read a site out of that page's address — so it cannot say where "
+    "the value would go. Nothing was typed."
+)
+
 # What the driven twin found, and it is the same clause `_value_finding` uses
 # for a query at an unvouched host, because it is the same finding: values are
 # about to ride an address to somewhere the owner has never agreed to send
@@ -1813,6 +1867,20 @@ NEVER_TYPED = {
     browse.NO_BANK_ACCOUNT: BROWSE_NO_BANK_DETAILS,
     browse.NO_CARD_NUMBER: BROWSE_NO_CARD_NUMBER,
 }
+
+
+def _personal_words(classes: list[str]) -> str:
+    """The declared classes as one phrase, in HIS words.
+
+    The class name is what he typed at `aish personal set`, so the card says
+    `home address` because he called it `home_address`. Nothing here translates,
+    shortens or prettifies it: a vocabulary sitting between his name for his own
+    data and the card describing it would be one more thing that can be wrong
+    about what he is agreeing to."""
+    said = [name.replace("_", " ") for name in classes]
+    if len(said) <= 1:
+        return said[0] if said else ""
+    return ", ".join(said[:-1]) + " and " + said[-1]
 
 # Origin-gated knowledge writes (#196). remember/forget_memory auto-approve, and
 # that is deliberate: capturing a fact must stay frictionless. The reasoning is
@@ -2557,6 +2625,19 @@ class Agent:
         # fields, and it would miss a value the page hides the moment it is
         # entered.
         self._typed_this_task: dict[str, list[tuple[str, str]]] = {}
+        # Declared value classes the owner has agreed may go to a host, as
+        # (class, host), for THIS TASK (#295 M5, #343). One yes covers that
+        # class at that host until the task ends — a shipping form takes an
+        # address in two fields and asking twice for one form is the shape P2
+        # forbids — and it never outlives the task, because a value sent while
+        # answering one question is not a licence to send it while answering
+        # the next.
+        #
+        # ONE ledger for both readers, deliberately: the typing fence and the
+        # composed-address arm ask about the same value going to the same
+        # place, so a yes given on either answers for both. Two ledgers would
+        # be the two-list invariant this epic has already been bitten by.
+        self._personal_granted: set[tuple[str, str]] = set()
         # URLs that arrived by e-mail this task, mapped to what they are
         # (provenance.LINK / provenance.SIGN_IN). Read by _mail_link_gate.
         self._mail_links: dict[str, str] = {}
@@ -3386,6 +3467,10 @@ class Agent:
         # offered links do: a value sent to a form while answering one question
         # is not a licence to send the next task's values to the same host.
         self._typed_this_task = {}
+        # And so does a yes to sending one of his declared values there (#343):
+        # agreeing that a shop may have his address while it ships him a parcel
+        # is not agreeing that the next task may hand it to the same shop.
+        self._personal_granted = set()
         self._mail_links = {}
         self._approved_mail_links = set()
         with self._provenance_lock:
@@ -6793,6 +6878,14 @@ class Agent:
             return False
         if secrets.contains(urllib.parse.unquote(url)) or secrets.contains(url):
             return False
+        # **Nor one of his DECLARED VALUES (#343), and the reason is #341's
+        # scar exactly.** Arm 3b above DETECTS the value; if this branch then
+        # freed it at a vouched host, the finding would be one nothing acts on
+        # — which is the defect the delivery review caught here for stored
+        # secrets one slice ago, and the vouch is now permanent and seeded, so
+        # vouched is the common case rather than the exception.
+        if self._personal_in_url(url, set(hosts)):
+            return False
         return not _forwards_elsewhere(url)
 
     def _carries_payload(self, name: str, args: dict) -> bool:
@@ -6945,16 +7038,24 @@ class Agent:
             )
         except ValueError:
             return UNREADABLE_ADDRESS  # fail closed, as every other reader here does
+        host = (parts.hostname or "").lower()
         if parts.username or parts.password:
             return "has a username and password written inside it"
         # Both forms: a secret containing a '%' would survive only one of them.
         if secrets.contains(urllib.parse.unquote(url)) or secrets.contains(url):
             return "carries one of your stored secrets"
+        # Arm 3b (#295 M5, #343): one of the values he DECLARED, beside the
+        # stored-secret arm, on the same primitive and at ANY host — vouched or
+        # not, exactly as the secret arm fires. #343 fences typing, and a
+        # composed `?address=<his street>` never types; without this the
+        # machine-wide vouch would exempt his third clause at the 17 hosts he
+        # uses most, which is where a fence has to hold or it is decoration.
+        if said := self._personal_in_url(url, {host}):
+            return PERSONAL_CARRIES.format(what=_personal_words(said))
         if _forwards_elsewhere(url):
             return "has a second address written inside it"
         if run := _opaque_run(parts):
             return f"carries a {run}-character run of random-looking text"
-        host = (parts.hostname or "").lower()
         for label in host.split("."):
             if len(label) > HOST_LABEL_MAX:
                 return f"hides a {len(label)}-character run inside the hostname"
@@ -7075,6 +7176,17 @@ class Agent:
         # there would record a permission for an action the owner asked to have
         # reworked.
         self._vouch_hosts(novel)
+        # And the SAME per-task ledger the typing card writes (#343). The card
+        # he just approved named the value and the host, so a second identical
+        # address in the same task must not ask again — and the ledger is shared
+        # with the typing fence because it is one question about one value going
+        # to one place, whichever mechanism carries it.
+        self._grant_personal(
+            self._personal_in_url(
+                str(args.get("url") or args.get("source") or ""), set(novel)
+            ),
+            novel,
+        )
         return None
 
     def _vouch_hosts(self, hosts: list[str]) -> None:
@@ -7452,6 +7564,109 @@ class Agent:
                 )
         return None
 
+    def _personal_pending(self, name: str, args: dict, host: str) -> list[str]:
+        """Which of the owner's DECLARED VALUES this call would type, minus the
+        ones he has already agreed may go to this host this task (#343).
+
+        **The third tier of the typing fence, and it reads the VALUE.** The two
+        never-values (`refuses_to_type`) are the strongest primitive this
+        codebase has, and the reason is that they read what aish is about to
+        SEND rather than what the page WROTE — a page that lies about what a
+        field is defeats every label check ever written, and defeats none of
+        these. His name, home address, phone, date of birth and e-mail were
+        typed into any form on any granted site with no question asked; this is
+        the clause that covers them.
+
+        **It shares `browse.typed_values` with `_never_typed`, so it is one
+        fence over the act and not two per tool.** `browse_fill` and
+        `browse_act(action="type")` are the only two ways a model-supplied value
+        reaches a page, and #310 is the recorded cost of enforcing something on
+        one of them: the same value, the same page, refused by one tool and
+        typed by the other. Nothing about the page is consulted here either —
+        not the field's name, its placeholder, its autocomplete attribute, nor
+        the page's language.
+
+        The result is class NAMES, never values. It goes on a card and into an
+        approval record, and a record quoting his address would be the leak this
+        whole slice exists to prevent."""
+        found: list[str] = []
+        for _, value in browse.typed_values(name, args):
+            for said in secrets.personal_matches(value):
+                if said not in found and (said, host) not in self._personal_granted:
+                    found.append(said)
+        return found
+
+    def _personal_in_url(self, url: str, hosts: set[str]) -> list[str]:
+        """The same question on the OTHER channel: which declared values does
+        this composed address carry, that he has not already agreed to send to
+        these hosts this task (#295 M5, amendment 1)?
+
+        **#343 fences typing, and a composed `?address=<his street>` never
+        types.** Without this arm the vouch M3 made machine-wide and permanent
+        would quietly exempt every vouched host from his third clause — which is
+        to say it would be a fiction at exactly the 17 hosts he uses most, since
+        `_searching_a_vouched_site` frees an arbitrary query there.
+
+        Both decodings, exactly as the stored-secret arm asks it: a value
+        carrying a `%` survives only one of them. And it is asked at ANY host,
+        vouched or not, for the same reason the secret arm is — he said yes to
+        searching a shop, not to handing that shop his home address.
+
+        An EMPTY host set fails closed: nothing can have been granted for a
+        destination the gate could not name, so the classes come back pending
+        rather than silently cleared by an `all()` over nothing."""
+        wanted = hosts or {""}
+        found: list[str] = []
+        for text in (url, urllib.parse.unquote(url)):
+            for said in secrets.personal_matches(text):
+                if said in found:
+                    continue
+                if not all((said, host) in self._personal_granted for host in wanted):
+                    found.append(said)
+        return found
+
+    def _grant_personal(self, classes: list[str], hosts: list[str]) -> None:
+        """Record that he agreed these values may go to these hosts this task.
+
+        Exactly the hosts the card NAMED and exactly the classes it named — the
+        same invariant `_vouch_hosts` keeps, for the same reason: a grant wider
+        than the sentence he read is a permission nobody was shown."""
+        for said in classes:
+            for host in hosts:
+                if host:
+                    self._personal_granted.add((said, host))
+
+    def _personal_refused(self, name: str, args: dict, host: str) -> str | None:
+        """The two cases where a declared value is REFUSED rather than carded.
+
+        **Unattended, because nobody is there to check it.** The card is the
+        whole verdict for this tier — typing his address is sometimes exactly
+        the task — and a card with no reader is not a verdict, it is a delay.
+        The refusal is recorded through `_gate_outcome` like every other one.
+
+        **And a page whose address has no host**, in either origin. The card's
+        entire content is *what* and *where*; with no host the sentence would
+        have to end mid-air, which is the L8 failure #341 exists to have fixed.
+        It fails closed instead and says what was actually established.
+
+        Asked above `_browse_gate`'s branches, beside `_never_typed`, and for
+        the same reason: this is a question about the ACT of typing, so a check
+        inside a per-tool branch is a check one tool takes and the other does
+        not."""
+        classes = self._personal_pending(name, args, host)
+        if not classes:
+            return None
+        what = _personal_words(classes)
+        if not host:
+            return _gate_outcome(
+                PERSONAL_NO_HOST.format(what=what), decision="blocked"
+            )
+        if self.origin != "user":
+            return _gate_outcome(
+                PERSONAL_UNATTENDED.format(what=what, host=host), decision="blocked"
+            )
+        return None
+
     def _irreversible_step(self, plan: "browse.Batch", host: str) -> str | None:
         """Does any step of this batch press a control that SAYS it changes
         contact details, a payout address, a credential, or closes the account?
@@ -7551,6 +7766,14 @@ class Agent:
             return None
         host = self._browse_host(name, args)
         refusal = self._never_typed(name, args, host)
+        if refusal is not None:
+            return refusal
+        # The third tier, in the same position and for the same reason (#343):
+        # a declared value is a question about the ACT of typing, so it is asked
+        # once, above the branches. Only its REFUSALS live here — unattended,
+        # and a page with no readable host. The attended verdict is a CARD, and
+        # it rides `_press_card` so that one press still draws one card.
+        refusal = self._personal_refused(name, args, host)
         if refusal is not None:
             return refusal
         # Opening a page, and re-reading the one already open, are reads.
@@ -7761,7 +7984,15 @@ class Agent:
         # a GET submit is inert, and carrying the owner's mail into somebody
         # else's query string is exactly what M3 exists to ask about.
         asking = not granted and grant_due
-        if not asking and not what and not sending:
+        # A FOURTH clause, on exactly the terms the third arrived on (#343):
+        # one of his declared values is about to be typed here. It rides this
+        # function because both press gates route through it, so `browse_fill`
+        # and `browse_act(action="type")` cannot drift on how often he is asked;
+        # because it is downstream of every refusal, so the card never stands in
+        # front of an action that was going to be refused anyway; and because
+        # M1's law is one press, one card.
+        typing = self._personal_pending(name, args, host)
+        if not asking and not what and not sending and not typing:
             return None
         clauses = [what] if what else []
         if asking:
@@ -7780,6 +8011,17 @@ class Agent:
             )
             if note := self._driven_note(name, args, send_host):
                 clauses.append(note)
+        if typing:
+            # Named on the card and NEVER quoted: the class and the host are
+            # what a line established, and the value itself is the thing this
+            # clause exists to keep off the wire. A card that printed his
+            # address into an approval record would be the leak, in the log
+            # rather than on somebody's server.
+            clauses.append(
+                (PERSONAL_GRANT_RIDER if clauses else PERSONAL_GRANT).format(
+                    what=_personal_words(typing), host=host
+                )
+            )
         preview = clauses[0]
         for clause in clauses[1:]:
             preview += ("\n" if "\n" in preview or "\n" in clause else " — ") + clause
@@ -7795,6 +8037,10 @@ class Agent:
             denial = (denial + " " if denial else "") + SEND_DENIED.format(
                 host=send_host
             )
+        if typing:
+            denial = (denial + " " if denial else "") + PERSONAL_DENIED.format(
+                what=_personal_words(typing)
+            )
         refusal = self._browse_approval(name, args, preview, denial)
         if refusal is not None:
             return refusal
@@ -7806,6 +8052,11 @@ class Agent:
             # other one), and neither is ever filled from the other. Exactly the
             # host the clause NAMED, which is residual (c)'s invariant.
             self._vouch_hosts([send_host])
+        if typing:
+            # Per (class, host), for this task — exactly what the clause said,
+            # and no wider. It is the SAME ledger the composed-address arm reads
+            # and writes: one value, one destination, one question.
+            self._grant_personal(typing, [host])
         return None
 
     def _form_note(self, control) -> str:
@@ -7932,6 +8183,11 @@ class Agent:
             # address question reached driving (#295 M3) cannot be read as a
             # yes to a question that was never on the card.
             and not self._driven_finding("browse_fill", args)
+            # …and nothing declared is about to be TYPED that he has not agreed
+            # to send here this task (#343). Same rule, same reason: a yes given
+            # for the batch before the value question existed cannot be read as
+            # a yes to a question that was never on the card.
+            and not self._personal_pending("browse_fill", args, host)
         ):
             # The SAME form, the same values, the same committing press — this
             # is the retry of a batch that stopped part-way, and one of the
