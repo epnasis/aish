@@ -87,11 +87,15 @@ def no_real_secrets(tmp_path_factory, monkeypatch):
     same constant itself (plus the `security` binary), so it still exercises
     the store; that patch lands inside the test and wins.
     """
-    monkeypatch.setattr(
-        secrets_module,
-        "NAMES_INDEX",
-        tmp_path_factory.mktemp("secret-names") / "secret-names.txt",
-    )
+    # ONE temp dir for both name indexes, and that is not tidiness (#343).
+    # `tmp_path_factory.mktemp` scans every numbered dir already in the base to
+    # pick the next number, so a per-test mktemp is O(n) and the run is O(n²);
+    # this base holds ~14,500 entries by the end of a full suite. Adding a
+    # THIRD mktemp per test made the suite stall past 78% with no failure and
+    # no output — the hang signature this repo already knows. A second FILE in
+    # a directory that is being created anyway costs nothing.
+    index_dir = tmp_path_factory.mktemp("secret-names")
+    monkeypatch.setattr(secrets_module, "NAMES_INDEX", index_dir / "secret-names.txt")
     # The SAME guard, one store over (#280). Site sign-ins are scrubbed on the
     # same terms as named secrets, so the scrub asks `signin.origins()` on every
     # tool result — and that reads a real file in the developer's state dir,
@@ -103,9 +107,19 @@ def no_real_secrets(tmp_path_factory, monkeypatch):
         "STATE",
         tmp_path_factory.mktemp("signins") / "signins.json",
     )
+    # And once more, one store further over (#343). The declared personal values
+    # are asked of every value the browse gate is about to type, from a name
+    # index that is a real file in the developer's state dir — so left alone a
+    # suite run would shell out to `security` for their home address to decide
+    # that a fixture's search term is not it.
+    monkeypatch.setattr(
+        secrets_module, "PERSONAL_NAMES_INDEX", index_dir / "personal-names.txt"
+    )
     secrets_module._invalidate()  # the cache outlives a test; the patch does not
+    secrets_module._invalidate_personal()
     yield
     secrets_module._invalidate()
+    secrets_module._invalidate_personal()
 
 
 @pytest.fixture(autouse=True)
