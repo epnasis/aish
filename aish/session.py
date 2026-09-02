@@ -2784,6 +2784,7 @@ class SessionLog:
         preview: str = "",
         held_ms: int | None = None,
         shown_ms: int | None = None,
+        viewers_at_hold: int | None = None,
         asked_by: str = "",
     ) -> None:
         """`intent` is what the model SAID it was doing when this decision was
@@ -2845,6 +2846,13 @@ class SessionLog:
             extra["held_ms"] = held_ms
         if shown_ms is not None:
             extra["shown_ms"] = shown_ms
+        if viewers_at_hold is not None:
+            # `is not None`, not truthiness — ZERO is the load-bearing value
+            # here (#348). It is the reading that says the card went to no
+            # screen at all, which is the whole reason the field exists: a long
+            # `held_ms` cannot distinguish "he ignored an open tab" from "no
+            # device was attached", and those have opposite repairs.
+            extra["viewers_at_hold"] = viewers_at_hold
         self._record("command", command=command, decision=decision, **extra)
 
     def set_title(self, title: str, auto: bool = False) -> None:

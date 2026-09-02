@@ -883,6 +883,18 @@ class Bridge:
         # sleeping laptop, and wall time would then report a negative or a
         # fictional hold (#306).
         asked_at = time.monotonic()
+        # HOW MANY SCREENS THIS CARD WENT TO (#348). `held_ms` says how long
+        # the gate waited and cannot say whether anyone was there to look —
+        # so a four-minute hold reads identically whether the owner ignored an
+        # open tab or had no device attached at all, and those two have
+        # opposite repairs. Read at the ASK, not at the answer: the question is
+        # who was there when it went up.
+        #
+        # Zero is a real and load-bearing value here, so it is written down
+        # rather than omitted: it is the reading that says the card reached
+        # nobody. Counted on the gate's own thread off a set the loop mutates,
+        # the same benign race `on_wait` already accepts below.
+        viewers_at_ask = len(self.viewers)
         self.emit(event)
         # Announce the hold to non-viewers. Hops to the loop thread like emit()
         # does — this runs on the agent worker — and is registered in `pending`
@@ -907,6 +919,7 @@ class Bridge:
             # and a browser must not be able to author it (#306).
             decided = dict(slot.get())
             decided["held_ms"] = round((time.monotonic() - asked_at) * 1000)
+            decided["viewers_at_hold"] = viewers_at_ask
             return decided
         finally:
             self.pending.pop(uid, None)
@@ -1136,7 +1149,18 @@ def _all_recipients_owner(args: dict) -> bool:
     return all(addr.lower() in OWNER_ADDRESSES for addr in recips)
 
 
-def _describe_hold(event: dict) -> str:
+def _host_arg(event: dict) -> str:
+    """The host of a card's url argument, if it has one. Netloc only."""
+    url = str((event.get("args") or {}).get("url") or "")
+    if not url:
+        return ""
+    try:
+        return urlsplit(url).netloc
+    except Exception:  # noqa: BLE001 — an unparseable url simply has no host
+        return ""
+
+
+def _describe_hold(event: dict, *, terse: bool = False) -> str:
     """A short human phrase for a held approval_request, for the notification
     body (#163) — so the push says WHAT needs approving, not just 'something'.
 
@@ -1144,21 +1168,56 @@ def _describe_hold(event: dict) -> str:
     more incidental detail than the arguments do — the step this feature exists
     for names a home address — and this string leaves the machine for a
     third-party push service. The reason stays on the card, where it is read on
-    the owner's own screen."""
+    the owner's own screen.
+
+    `terse` is the same argument one rung further in, and it arrived with the
+    session kinds this pushes for (#348). A `preview` is the card's own body —
+    on a browse press it lists the values aish is about to type into a form the
+    owner is signed into. That was acceptable while this only ever fired for
+    UNATTENDED triggered work; it is not once an owner-started session pushes
+    too, because those are the cards carrying his own data. Terse says WHAT is
+    waiting — the tool, and the host if the card named one — and never with
+    what. The full preview is still on the card, on his own screen, which is
+    where #252 put it and where it stays."""
     kind = event.get("kind")
     if kind == "tool":
         tool = event.get("tool", "a tool")
+        if terse:
+            # The HOST is not incidental detail — it is the one word that says
+            # whether a waiting card is worth getting up for. Taken from a URL
+            # argument's NETLOC and nothing else: a path or a query string is
+            # exactly the composed-data case #252 is about, and a great many
+            # of them carry the values the card exists to ask about.
+            #
+            # Most press cards have no url in their args (a fill names controls
+            # and values, not an address), and then this is the bare tool name.
+            # That is thin on purpose and it is not the whole notification —
+            # the TITLE carries the owner's own chat name, which is the context
+            # he actually navigates by.
+            return f"{tool} on {host}" if (host := _host_arg(event)) else str(tool)
         if event.get("preview"):
             return f"{tool}: {event['preview']}"
         args = event.get("args") or {}
         detail = ", ".join(f"{k}={v!r}" for k, v in list(args.items())[:2])
         return f"{tool}({detail})" if detail else tool
     if kind == "command":
-        return f"run: {event.get('command', '')}"
+        # "A command is the model's own words, not the owner's data" was the
+        # first version of this line and it is FALSE: `gws gmail send --body
+        # "<his text>"` and `echo '<address>' >> notes` carry his data verbatim,
+        # and a user-origin session never pushed at all before #348. So the
+        # terse form names the PROGRAM and stops — enough to know which card is
+        # waiting, nothing of what it would say.
+        command = str(event.get("command", ""))
+        if terse:
+            return f"run: {command.split()[0]}" if command.split() else "run a command"
+        return f"run: {command}"
     if kind == "write":
-        return f"{event.get('verb', 'write')} {event.get('target', 'a file')}"
+        # The verb without the path. A path is a filename he chose, often in a
+        # home directory that names him.
+        verb = event.get("verb", "write")
+        return str(verb) if terse else f"{verb} {event.get('target', 'a file')}"
     if kind == "import":
-        return f"import skill {event.get('skill', '')}"
+        return "import a skill" if terse else f"import skill {event.get('skill', '')}"
     return "an action"
 
 
@@ -1185,6 +1244,11 @@ def card_latency(answer: dict) -> dict:
     present on a decided card, and it is a FLOOR, not an answer: a card can sit
     held for an hour with nobody attached to look at it.
 
+    `viewers_at_hold` is the third and it answers the question the other two
+    provoke: how many screens the card went to when it was raised. Zero means
+    it reached nobody, which is the reading a long `held_ms` cannot establish
+    on its own — and it is the server's own count, so it is always knowable.
+
     `shown_ms` is the browser's: from the card actually being rendered to the
     tap. That is the load-bearing one, because a sub-second value indicts —
     the card cannot have been READ. It is absent whenever the client did not
@@ -1203,7 +1267,7 @@ def card_latency(answer: dict) -> dict:
     that one IS the finding.
     """
     timing: dict[str, int] = {}
-    for field in ("held_ms", "shown_ms"):
+    for field in ("held_ms", "shown_ms", "viewers_at_hold"):
         value = answer.get(field)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if value >= 0:
@@ -3244,7 +3308,17 @@ class WebServer:
         Silent while anyone is viewing, mirroring notify_hold: an open tab
         already shows the answer, and without this every message typed INTO an
         automated session pushes a phone notification for work being watched
-        live."""
+        live.
+
+        **`origin == "user"` stays here, and it deliberately no longer matches
+        `notify_hold` (#348).** The asymmetry is the point rather than an
+        oversight: a HOLD is aish stopped, waiting on him, and the cost of not
+        telling him is dead time inside a task he is waiting for — 255.6s of a
+        641s task, measured. A finished answer costs nothing to leave sitting;
+        it keeps. So the hold pushes whenever nobody is watching, and a
+        completion still pushes only for work he did not start, which is the
+        difference between telling him something is stuck and pinging him for
+        every chat he closed the tab on."""
         if session.origin == "user" or session.viewers or not notify.configured():
             return
         link = f"{self.public_url}/?session={session.name}" if self.public_url else None
@@ -5950,12 +6024,27 @@ def create_app(
             # card), only when Pushover is configured. Runs on the worker thread
             # inside Bridge.ask's try/except — a slow/failed push can't stall the
             # gate (10 s cap, silent on failure).
-            if origin == "user" or has_viewers or not notify.configured():
+            # `has_viewers` is the whole test, and it used to be one of two:
+            # a session the owner STARTED never pushed, however long the card
+            # then sat. That is the case measured on 2026-09-01 — a passenger
+            # batch on lot.com held 255.6s out of a 641s task, and the device
+            # that answered it rendered the card 11.8s before the tap, so it
+            # had not been attached when the card went up. He had started the
+            # task himself and walked away, and by design nothing told him.
+            # "He asked for this" is not evidence that he is looking at it.
+            if has_viewers or not notify.configured():
                 return
             link = f"{public_url}/?session={log.path.name}" if public_url else None
             notify.pushover(
                 f"aish needs approval — {session_title()}",
-                _describe_hold(event),
+                # A session the OWNER started is the one whose cards quote the
+                # values aish is about to type — a destination, a card number,
+                # a home address — and this string leaves the machine for a
+                # third-party push service. #252 kept `intent` out for exactly
+                # that reason and the argument does not weaken now that the
+                # push is wider; it gets stronger. So a user-origin hold is
+                # told WHAT is waiting and never WITH WHAT.
+                _describe_hold(event, terse=origin == "user"),
                 url=link,
                 url_title="Review & approve",
                 # Normal priority deliberately: Pushover's high priority (1)

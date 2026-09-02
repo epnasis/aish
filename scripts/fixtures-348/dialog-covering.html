@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Picker over a long page</title>
+<style>
+  html,body{overflow:hidden;margin:0}
+  .tall{height:4000px}
+  nav button{display:block;margin:8px}
+</style></head>
+<body>
+  <h1>Wyszukiwanie lotu</h1>
+  <dialog id="d" aria-label="Wybierz daty">
+    <button>Zamknij</button><button disabled>Potwierdź</button>
+  </dialog>
+  <div class="tall">
+    <nav style="margin-top:2000px">
+      <button>Zaloguj się</button><button>Zarezerwuj</button>
+      <button>Odpraw się</button><button>Zaplanuj podróż</button>
+    </nav>
+  </div>
+  <script>document.getElementById('d').showModal();</script>
+</body></html>

@@ -262,6 +262,7 @@ def sealed(
     signin: "SignInSeen | None" = None,
     problem: str = "",
     unchanged: bool = False,
+    phases: "dict | None" = None,
 ) -> str:
     """The result, with the cut and the evidence frame recorded on it — or
     unchanged when there is neither.
@@ -342,6 +343,8 @@ def sealed(
         meta["problem"] = problem
     if unchanged:
         meta["unchanged"] = True
+    if phases:
+        meta["phases"] = dict(phases)
     if signin is not None and (block := signin.record()):
         meta["signin"] = block
     if not meta:
@@ -2596,6 +2599,10 @@ class BrowseView:
         # (`Delta.empty`). An observation and never a verdict: a press that
         # legitimately changes nothing on the page also records it.
         self.unchanged = False
+        # Where this call's seconds went (#348). Per-call like the frame and
+        # for the same reason: a call that never reached a page must not report
+        # the timings of the call before it.
+        self.phases: dict = {}
 
     def start_call(self) -> None:
         """A new browse call begins: this chat has been shown nothing yet."""
@@ -2607,6 +2614,7 @@ class BrowseView:
         self.covered = {}
         self.problem = ""
         self.unchanged = False
+        self.phases = {}
 
     def remember(self, snapshot: Any) -> None:
         was = str(getattr(self.shown, "url", "") or "")
@@ -2623,6 +2631,7 @@ class BrowseView:
         cover = getattr(snapshot, "covered", None)
         self.covered = cover.record() if cover is not None else {}
         self.problem = str(getattr(snapshot, "problem", "") or "")
+        self.phases = dict(getattr(snapshot, "phases", None) or {})
 
     def commit_evidence(self) -> str:
         """What the page this chat was last shown says it COMMITS, if anything.
@@ -2728,6 +2737,16 @@ def _present_snapshot(
     seen.remember(snapshot)
     seen.runs = 0
     return _present_page(snapshot, topic=topic, cut=cut)
+
+
+def _dialog_name(snapshot) -> str:
+    """What to call the thing the page has open, in the page's own words.
+
+    Page-authored, so it is quoted rather than spoken: aish's sentence says
+    THAT something is open (its own observation); the NAME is the page's claim
+    about itself and is marked as such."""
+    name = str(getattr(snapshot, "dialog", "") or "").strip()
+    return f"a dialog the page calls {name!r}" if name else "an open dialog"
 
 
 def _submit_hint(snapshot) -> str:
@@ -2874,10 +2893,27 @@ def _present_page(
         # The sentence a small model needs in order to do the right thing: not
         # "that control does not exist" (which sends it back to guessing URLs)
         # but "find the thing that opens it".
+        #
+        # **Unless something is OPEN, in which case that advice points the
+        # wrong way (#348).** The controls behind a dialog are not waiting for
+        # a disclosure to be pressed; they are waiting for the dialog to be
+        # closed, and the thing to act on is the one already on screen. On
+        # 2026-09-01 lot.com's date picker was up and this line reported 218
+        # controls "closed away — press whatever opens them first". The model
+        # read it, went looking for the disclosure, and spent two calls
+        # narrowing the page to day numbers that are deliberately not controls
+        # at all. A sentence in aish's own voice, above the untrusted banner,
+        # and it was false about the page it described.
         lines.append(
             f"[{snapshot.unreachable} more control(s) are on this page but "
-            "closed away — in a collapsed menu, an off-screen panel, or behind "
-            "a dialog. Press whatever opens them first.]"
+            + (
+                f"BEHIND {_dialog_name(snapshot)}, which is open on top of "
+                "the page. Close it to reach them — do not go looking for "
+                "something that opens them.]"
+                if getattr(snapshot, "dialog", "")
+                else "closed away — in a collapsed menu, an off-screen panel, "
+                "or behind a dialog. Press whatever opens them first.]"
+            )
         )
     if snapshot.hidden:
         # Never a silent cap: a model that cannot see a control concludes the
@@ -2947,6 +2983,7 @@ def browse(
         covered=seen.covered,
         problem=seen.problem,
         unchanged=seen.unchanged,
+        phases=seen.phases,
         signin=signin_seen,
     )
 
@@ -3062,6 +3099,7 @@ def browse_act(
         covered=seen.covered,
         problem=seen.problem,
         unchanged=seen.unchanged,
+        phases=seen.phases,
     )
 
 
@@ -3142,6 +3180,7 @@ def browse_fill(
         covered=seen.covered,
         problem=seen.problem,
         unchanged=seen.unchanged,
+        phases=seen.phases,
     )
 
 
