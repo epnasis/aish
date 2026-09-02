@@ -874,21 +874,64 @@ FIRST_FRAME_MS = 450
 _WATCH_JS = """() => {
   let w = window.__aish_watch;
   if (!w) {
-    w = window.__aish_watch = { gen: 0, at: Date.now() };
-    const bump = () => { w.gen++; w.at = Date.now(); };
+    // `kinds` and `meaningful` are RECORD ONLY (#351). The settle bar does not
+    // read them and must not start: 69% of a driven action's time is this wait,
+    // and the question they exist to answer — was the page finishing a fare
+    // table, or ticking a carousel? — is one no argument should settle. Measure
+    // first, across real sessions, then decide.
+    w = window.__aish_watch = { gen: 0, at: Date.now(), kinds: {}, meaningful: 0 };
+    const tally = (k) => { w.kinds[k] = (w.kinds[k] || 0) + 1; };
+    // `counts` decides whether this is MOVEMENT — whether it resets the quiet
+    // clock the settle waits on — and `real` decides whether it was CONTENT.
+    // They are separate because the first is behaviour and the second is a
+    // record, and conflating them is how a measurement becomes a change.
+    //
+    // **Attributes tally but do NOT count.** They were not observed at all
+    // before #351, so a class toggling on an animating element never reset this
+    // clock. Letting the new observer bump it would make every settle on an
+    // animated page run to `WATCH_MAX_MS` — a measurement that made the thing
+    // it measured slower, and in the exact direction the work is trying to go.
+    const bump = (k, counts, real) => {
+      tally(k);
+      if (counts) { w.gen++; w.at = Date.now(); }
+      if (real) w.meaningful = Date.now();
+    };
     // The same three signals `_settle` calls movement, so "quiet" means one
     // thing in this file and not two.
-    new MutationObserver(bump).observe(document.documentElement,
-      { childList: true, subtree: true, characterData: true });
+    new MutationObserver((records) => {
+      for (const r of records) {
+        const k = r.type === 'childList' ? 'childList'
+                : r.type === 'characterData' ? 'characterData' : 'attributes';
+        // Nodes arriving or text changing is CONTENT and is movement, exactly
+        // as before. An attribute changing is neither — it is counted so the
+        // record can say how noisy the page was, and nothing else.
+        const content = k !== 'attributes';
+        bump(k, content, content);
+      }
+    }).observe(document.documentElement,
+      { childList: true, subtree: true, characterData: true, attributes: true });
     // And the one `_settle` cannot have, because it only ever looked once: a
     // RESPONSE ARRIVING. This is the edge a spinner turns off on, and it is the
     // only signal for a lazily loaded image, which changes an existing `src`
     // rather than adding any node at all — the scroll half of the same bug.
     try {
-      new PerformanceObserver(bump).observe({ type: 'resource', buffered: false });
+      new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) {
+          const t = e.initiatorType || 'other';
+          // Every resource still COUNTS as movement, exactly as before — this
+          // is the signal a spinner turns off on and the one #251 was built
+          // around. Only the `real` half is new: a fetch answering is the page
+          // getting content; an image, a stylesheet or a beacon landing is not
+          // what a read is waiting for, and the gap between the two is what
+          // #351 is trying to size.
+          bump('res:' + t, true, t === 'xmlhttprequest' || t === 'fetch');
+        }
+      }).observe({ type: 'resource', buffered: false });
     } catch (e) { /* an engine without it simply watches the DOM alone */ }
   }
   return { gen: w.gen, quiet: Date.now() - w.at,
+           kinds: w.kinds,
+           meaningful_ago: w.meaningful ? Date.now() - w.meaningful : -1,
            ready: document.readyState === 'complete' };
 }"""
 
@@ -1062,6 +1105,28 @@ class Settled:
     first_quiet_ms: int = -1
     last_arrival_ms: int = -1  # -1 = the page never moved while we watched
     traffic_waited_ms: int = 0  # extra time spent on requests still on the wire
+    # The SECOND shadow measurement (#351). `last_arrival_ms` is the last time
+    # the page moved AT ALL; this is the last time it moved in a way a reader
+    # would call content — nodes arriving, text changing, a fetch answering —
+    # as opposed to a class toggling on an animating element or a beacon
+    # completing. The gap between the two is the size of the prize: on the
+    # 2026-09-02 flight search the settle was 69% of all browser time and every
+    # wait was `last_arrival + 5s`, so whether that 5s was spent on a fare table
+    # or on a carousel is the whole question. Recorded, never read.
+    #
+    # **Known limit, and it is why -1 is not "no content".** `_WATCH_JS`
+    # installs itself on the FIRST poll, so anything that landed before that is
+    # invisible to both fields. Measured on a fixture whose content arrived at
+    # 400ms: `kinds` came back `{attributes: 74}` with no `childList` at all,
+    # and `last_meaningful_ms` was -1 while the content was plainly on the page.
+    # So -1 means *nothing meaningful was seen while we were looking*, which is
+    # a weaker claim than it appears and must stay one.
+    last_meaningful_ms: int = -1
+    # What the page was doing DURING THIS WAIT, tallied — a delta against the
+    # counts at the first poll, because `_WATCH_JS` lives as long as the
+    # document and its running totals would otherwise attribute every earlier
+    # action's churn to the latest one.
+    kinds: dict = field(default_factory=dict)
     released: str = "quiet"
 
     def record(self) -> dict:
@@ -1071,7 +1136,9 @@ class Settled:
             "idle_ms": self.idle_ms,
             "first_quiet_ms": self.first_quiet_ms,
             "last_arrival_ms": self.last_arrival_ms,
+            "last_meaningful_ms": self.last_meaningful_ms,
             "traffic_waited_ms": self.traffic_waited_ms,
+            "kinds": dict(self.kinds),
             "released": self.released,
         }
 
@@ -1158,6 +1225,7 @@ async def _settle(
     unknown = 0
     traffic_waited = 0.0
     met_the_bar = False
+    baseline: dict[str, int] | None = None
     last_gen: int | None = None
     while waited < timeout_ms:
         state = await _activity(page)
@@ -1182,6 +1250,32 @@ async def _settle(
                         (time.perf_counter() - began) * 1000
                     )
                 last_gen = int(gen)
+            # Read every poll rather than only at the end: the page can go on
+            # changing after the last MEANINGFUL change, which is exactly the
+            # gap being measured.
+            ago = state.get("meaningful_ago")
+            if isinstance(ago, (int, float)) and ago >= 0:
+                # `w.meaningful` lives as long as the document, so a content
+                # change from BEFORE this wait began comes back as a negative
+                # here — and at 1ms before, as exactly -1, colliding with the
+                # sentinel. `kinds` got a baseline for this; this needs a floor.
+                # Anything earlier than `began` was not seen during THIS wait,
+                # which is precisely what -1 means.
+                since = round((time.perf_counter() - began) * 1000 - float(ago))
+                seen.last_meaningful_ms = since if since >= 0 else -1
+            if isinstance(state.get("kinds"), dict):
+                # A DELTA over this wait, not the document's running total.
+                # `w.kinds` lives as long as the document, so a page driven for
+                # ten actions would report every earlier action's churn under
+                # the last one — a number that looks per-wait and is not.
+                now = {str(k): int(v) for k, v in state["kinds"].items()}
+                if baseline is None:
+                    baseline = dict(now)
+                seen.kinds = {
+                    k: n - baseline.get(k, 0)
+                    for k, n in now.items()
+                    if n - baseline.get(k, 0) > 0
+                }
             if page_is_done(
                 quiet_ms=quiet,
                 ready=bool(state.get("ready")),
@@ -4861,7 +4955,7 @@ MAX_FRAMES = 12
 
 async def _enumerate(
     page: Any, match: str = ""
-) -> tuple[list[dict], int, int, int, str, str]:
+) -> tuple[list[dict], int, int, int, str, str, dict]:
     """Every control on the page, across its frames, in one numbering.
 
     The count continues across frames rather than restarting, so `[14]` means
@@ -4876,6 +4970,7 @@ async def _enumerate(
     matched = unreached = matching = 0
     commit = ""
     dialog = ""
+    reasons: dict[str, int] = {}
     options = {
         "max": browse_mod.MAX_CONTROLS,
         "nameMax": browse_mod.NAME_MAX_CHARS,
@@ -4902,7 +4997,9 @@ async def _enumerate(
         # has it in the document the model is looking at, and a nested ad frame
         # with its own consent box must not overwrite that.
         dialog = dialog or str(found.get("dialog") or "")
-    return raw, matched, unreached, matching, commit, dialog
+        for why, count in (found.get("reasons") or {}).items():
+            reasons[str(why)] = reasons.get(str(why), 0) + int(count or 0)
+    return raw, matched, unreached, matching, commit, dialog, reasons
 
 
 async def _find(page: Any, n: int) -> tuple[Any, bool]:
@@ -5038,7 +5135,9 @@ async def _snapshot(
     )
     text = await _without_option_floods(page, settled_text)
     after_settle = clock()
-    raw, matched, unreached, matching, commit, dialog = await _enumerate(page, match)
+    raw, matched, unreached, matching, commit, dialog, reasons = await _enumerate(
+        page, match
+    )
     controls = browse_mod.controls_from(raw)
     after_enumerate = clock()
     # What the MODEL is told about the page being a wall. The capture no longer
@@ -5068,6 +5167,7 @@ async def _snapshot(
         matching=matching,
         unreachable=unreached,
         dialog=dialog,
+        reasons=reasons,
         epoch=session.epoch,
         signin=signin,
         frame=frame,
@@ -5645,10 +5745,14 @@ def browse_act(
         # to be the only one that carried it, which put `act_ms` on the fast
         # calls and left it off the stuck, refused and timed-out ones (#348).
         async def shot(*a: Any, **kw: Any) -> browse_mod.Snapshot:
+            # Stamped BEFORE the snapshot, so `act_ms` is the press and nothing
+            # else. Stamping it after made it include the closing settle, and
+            # `settle_ms + act_ms` then exceeded the call's own `secs` — a
+            # record that contradicts itself is worse than one that is missing
+            # (#351).
+            act_ms = round((time.perf_counter() - act_began) * 1000)
             snapshot = await _snapshot(*a, match=topic, **kw)
-            snapshot.phases["act_ms"] = round(
-                (time.perf_counter() - act_began) * 1000
-            )
+            snapshot.phases["act_ms"] = act_ms
             return snapshot
         if action == "read":
             # Looking is not acting. The model needs a way to see the whole page
@@ -5919,7 +6023,7 @@ def browse_fill(
         # this is the read that lands on a results page still being fetched.
         act_ms = round((time.perf_counter() - act_began) * 1000)
         snapshot = await _snapshot(owner, session, match=topic, started_work=True)
-        snapshot.phases["act_ms"] = act_ms
+        snapshot.phases["act_ms"] = act_ms   # the steps, not the closing read
         snapshot.phases["steps"] = len(steps)
         snapshot.ledger = ledger
         return snapshot
@@ -6421,6 +6525,16 @@ async def _stop(
             "setting them again, and clear them if they are wrong"
         )
     session.epoch += 1
+    # BEFORE the snapshot, so `act_ms` is the steps that ran and nothing else —
+    # the same rule and the same arithmetic as `browse_act` and `browse_fill`.
+    # Subtracting the snapshot's phases back out afterwards was a second method
+    # for one fact, keyed on phase NAMES, so a rename would have silently
+    # restored the overlap it existed to remove.
+    act_ms = (
+        round((time.perf_counter() - act_began) * 1000)
+        if act_began is not None
+        else 0
+    )
     snapshot = await _snapshot(
         owner,
         session,
@@ -6437,7 +6551,7 @@ async def _stop(
     # never reaches (#348). Without it `act_ms` would be absent exactly on the
     # slow failures.
     if act_began is not None:
-        snapshot.phases["act_ms"] = round((time.perf_counter() - act_began) * 1000)
+        snapshot.phases["act_ms"] = act_ms
         snapshot.phases["steps"] = total
         snapshot.phases["stopped_at"] = done
     return snapshot

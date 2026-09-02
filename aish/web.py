@@ -2739,14 +2739,96 @@ def _present_snapshot(
     return _present_page(snapshot, topic=topic, cut=cut)
 
 
-def _dialog_name(snapshot) -> str:
-    """What to call the thing the page has open, in the page's own words.
+# What each reason `unreachable` records means for the model's NEXT MOVE (#350).
+#
+# Two repairs, and the old sentence gave one of them for both. A control the
+# page has not drawn yet needs something OPENED; a control that is drawn and
+# sitting outside a clipped, scroll-locked viewport is BEHIND whatever is on
+# top, and the repair is to close it. Telling the model to hunt for a disclosure
+# in the second case is what cost two round trips on lot.com's date picker.
+#
+# Keyed on the reason the predicate returned, so this is a translation of a
+# recorded fact and never a second opinion about the page.
+# `REACH_JS` returns a reason per control, and the useful split is not "which
+# reasons mean a dialog" — it is **which reasons say the control is DRAWN and
+# unscrollable-to**, because that is the only case where the repair differs.
+#
+# Exactly one reason says it: `behind-a-dialog`, which fires when the root is
+# scroll-LOCKED and the control is off-screen.
+#
+# **And it is a NAME THAT ASSERTS A CAUSE the test does not check.** Nothing in
+# it looks for anything on top. Measured in real Chrome: an app shell with
+# `html,body{overflow:hidden}` and a footer below the fold — no overlay of any
+# kind — reports `{'behind-a-dialog': 2}`. So this licenses a description of
+# what was OBSERVED and never the imperative "close it", unless the page has
+# also DECLARED a dialog, which is the corroboration that earns it.
+#
+# `inert` was in this list and has been removed. The comment justifying it said
+# `showModal()` puts `inert` on everything outside the dialog; it does not —
+# measured, `closest('[inert]')` is null out there and the outside control is
+# reachable. `inert` is only ever the SITE's own attribute, and its commonest
+# use is a CLOSED DRAWER: `<nav inert>` was getting "close what is open" with
+# nothing open, which is the exact defect this whole area exists to remove.
+#
+# Everything else — `clipped`, `outside-scroll-range`, `off-canvas`,
+# `off-document`, `inert`, `invisible`, `aria-hidden`, `hidden`, `zero-size`,
+# `closed-details` — keeps the wording that names both possibilities. A
+# collapsed accordion is `height: 0; overflow: hidden`, so `clipped` is
+# genuinely ambiguous and `REACH_JS` says so itself.
+_UNSCROLLABLE = ("behind-a-dialog",)
 
-    Page-authored, so it is quoted rather than spoken: aish's sentence says
-    THAT something is open (its own observation); the NAME is the page's claim
-    about itself and is marked as such."""
-    name = str(getattr(snapshot, "dialog", "") or "").strip()
-    return f"a dialog the page calls {name!r}" if name else "an open dialog"
+# The page said so AND the reason agrees: the only sentence that gives an order.
+BEHIND_NAMED = (
+    "are on this page but BEHIND {named}, which the page has open on top of "
+    "it. CLOSE it to reach them — do not go looking for something that opens "
+    "them."
+)
+# The reason alone. States what was seen and offers both repairs, because the
+# evidence does not choose between them.
+SCROLL_LOCKED = (
+    "are on this page but cannot be scrolled to: the page has scrolling LOCKED "
+    "and they are off-screen. Something open on top does that — if you can see "
+    "a dialog, panel or menu in the list above, CLOSE it. If you cannot, they "
+    "are behind something that still has to be opened."
+)
+NOT_DRAWN_YET = (
+    "are on this page but closed away — in a collapsed menu, an off-screen "
+    "panel, or behind a dialog. Press whatever opens them first."
+)
+MIXED = (
+    "are on this page but out of reach — some not drawn yet, some off-screen "
+    "behind a locked scroll. Look for whichever fits what you can see."
+)
+
+
+def _out_of_reach(snapshot) -> str:
+    """The sentence for `unreachable`, chosen by the reason the page gave.
+
+    A DOMINANT reason gets its own repair; a genuine mix says so rather than
+    picking one, because "some of each" is what was observed and naming one of
+    them would be the same guess this replaced. `dialog` is used only to NAME
+    what is on top when the page happened to declare it — never to decide which
+    sentence is printed, which is what #348 got wrong."""
+    reasons = getattr(snapshot, "reasons", None) or {}
+    locked = sum(n for why, n in reasons.items() if why in _UNSCROLLABLE)
+    # Everything else, including every ambiguous reason and any reason a future
+    # `REACH_JS` adds that nobody has classified — all of them keep the wording
+    # that names both possibilities, so an unknown degrades to the honest
+    # sentence and never to a confident wrong one.
+    other = sum(n for why, n in reasons.items() if why not in _UNSCROLLABLE)
+    if not reasons:
+        return NOT_DRAWN_YET
+    if locked and other:
+        return MIXED
+    if not locked:
+        return NOT_DRAWN_YET
+    named = str(getattr(snapshot, "dialog", "") or "").strip()
+    if named:
+        # Two independent signals agree — the page DECLARED something modal and
+        # the controls are off-screen under a locked scroll. That is the only
+        # combination that has earned an imperative.
+        return BEHIND_NAMED.format(named=f"a dialog the page calls {named!r}")
+    return SCROLL_LOCKED
 
 
 def _submit_hint(snapshot) -> str:
@@ -2905,15 +2987,7 @@ def _present_page(
         # at all. A sentence in aish's own voice, above the untrusted banner,
         # and it was false about the page it described.
         lines.append(
-            f"[{snapshot.unreachable} more control(s) are on this page but "
-            + (
-                f"BEHIND {_dialog_name(snapshot)}, which is open on top of "
-                "the page. Close it to reach them — do not go looking for "
-                "something that opens them.]"
-                if getattr(snapshot, "dialog", "")
-                else "closed away — in a collapsed menu, an off-screen panel, "
-                "or behind a dialog. Press whatever opens them first.]"
-            )
+            f"[{snapshot.unreachable} more control(s) {_out_of_reach(snapshot)}]"
         )
     if snapshot.hidden:
         # Never a silent cap: a model that cannot see a control concludes the

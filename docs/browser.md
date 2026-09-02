@@ -1742,8 +1742,125 @@ thing on the page:
    `found` is true-and-empty for any field near a picker-ish wrapper, and `n` is
    stale after the unnarrowed pass; `_picker_standing_open` carries both reasons.
 
+### The follow-ups the measurement produced (#350, #351)
+
+The 2026-09-02 re-run of the same flight search is what these are built on:
+426s against 641s, but the whole saving was the approval card. Excluding card
+time, **browser work per call went from 10.3s to 12.3s** (185s/18 → 209s/17)
+and model time per turn from 9.4s to 10.9s. (An earlier draft cited "23.2s
+against 19.7s per call"; that figure adds browser and model together and so says
+nothing about browsing on its own.) What #348 actually
+bought was one round trip and, far more usefully, the ability to see where the
+time goes.
+
+**The dialog condition never fired on lot.com (#350).** #348 required the page
+to declare `dialog:modal`/`aria-modal` AND be scroll-locked; lot.com's date
+picker declares neither, so the sentence it was written to fix survived the fix
+verbatim — 224 controls still reported *"closed away … press whatever opens them
+first"* with the picker open.
+
+The right signal was already there and being thrown away. `unreachable(el)`
+returns a REASON — `aria-hidden` | `hidden` | `inert` | `invisible` |
+`zero-size` | `closed-details` | `off-document` | `outside-scroll-range` |
+`clipped` | `behind-a-dialog` — and `CONTROLS_JS` discarded it into a bare
+count. So the sentence now states the reason the predicate recorded, which
+cannot be a false positive the way a probe can: it is not an inference about the
+page, it is the test result.
+
+**`behind-a-dialog` is the load-bearing one** — it fires when the root is
+scroll-LOCKED and the control is off-screen, which is per-control and needs no
+cooperation from the site, and it catches the undeclared overlay that lot.com
+actually uses.
+
+**But a reason's NAME can assert more than its test checked, and this one does.**
+Nothing in it looks for anything on top. Measured in real Chrome: an app shell
+with `html,body{overflow:hidden}` and a footer below the fold — no overlay of
+any kind — reports `{'behind-a-dialog': 2}`. So the first cut of #350 told the
+model to *"CLOSE what is open"* on an ordinary page with nothing open, which is
+the same defect one rung quieter. The claim that a reason "cannot be a false
+positive" was therefore wrong as written, and one experiment disproved it.
+
+So the imperative needs two independent signals: the reason AND a dialog the
+page itself declared. With the reason alone the sentence states what was seen —
+scrolling is locked, they are off-screen — and offers both repairs.
+
+**`inert` was in that set and has been removed.** The comment justifying it said
+`showModal()` puts `inert` on everything outside the dialog. It does not:
+measured, `closest('[inert]')` is null out there and the outside control is
+listed as reachable. `inert` is only ever the SITE's own attribute, and
+`<nav inert>` is the recommended pattern for a CLOSED DRAWER — which was getting
+"close what is open" with nothing open.
+
+**`clipped` is deliberately not treated as "behind something"**, and that is the
+subtle part: a collapsed accordion is `height: 0; overflow: hidden`, so its
+contents are clipped too — `REACH_JS` says exactly this in its own comment. An
+ambiguous reason keeps the wording that names both possibilities, a genuine mix
+of reasons says it is a mix, and an unrecognised reason from a future
+`REACH_JS` degrades to the old wording rather than to a confident wrong one.
+
+**The settle is 69% of all browser time (#351)** — 153s of 221s — and every wait
+is `last_arrival_ms + 5000`. Of the 15 calls held to the 5s bar, **12 saw the page move at
+all**; across those the median `last_arrival_ms` is 5.9s and the range
+1.4–14.0s. The other three never moved while being watched (`-1`) and settled
+in 2.1s, 4.6s and 9.5s — they are excluded from that median rather than folded
+into it, because "never moved" is a different fact from "moved early". So the
+bar is not overhead on an idle page, and `last_arrival_ms` did its job: **it says do
+not lower the bar.**
+
+The question it opens instead is what that arrival WAS, and `_WATCH_JS` could
+not tell — any mutation and any resource reset the clock equally. It now
+separates them: nodes arriving and text changing are content, an attribute
+changing is very often a class on something animating; a `fetch`/`xhr`
+completing is content, an image or a beacon is not. `last_meaningful_ms` and a
+`kinds` tally ride the settle record.
+
+**Counting the noise must not make the wait longer, and the first cut of this
+did exactly that.** Attributes were not observed AT ALL before #351, so a class
+toggling on an animating element never reset the quiet clock. Adding
+`attributes: true` to the observer made them reset it — which took a fixture
+that lands one piece of content at 2s and then churns an attribute every 200ms
+from **7.2s to the full 15.8s ceiling**. A measurement that makes the thing it
+measures slower, in the exact direction this work is trying to go.
+
+So the two questions are answered separately: `counts` decides whether
+something is MOVEMENT (resets the clock — unchanged from before, resources and
+childList/characterData only), and `real` decides whether it was CONTENT (the
+record). Attributes tally and never count.
+`check-browse-fixtures.py` asserts the churn is recorded, that it does NOT
+extend the wait, and that the page settles ~5s after the CONTENT rather than
+after the churn.
+
+**A correction to the framing this started from.** Because attributes were
+never observed, the 1.4–14.0s `last_arrival_ms` values on the real flight search
+were *not* attribute churn — they were childList/characterData changes and
+resource arrivals, i.e. content or loading. So "was that a carousel?" was the
+wrong suspicion for that data; the live question is narrower and is what
+`res:*` now separates: an `img`, a `css` or a `beacon` completing still counts
+as movement and is very often not what a read is waiting for.
+
+**`kinds` is a DELTA over the wait, not the document's running total.**
+`_WATCH_JS` installs once and lives as long as the document, so a page driven
+for ten actions would report every earlier action's churn under the last one —
+a number that looks per-wait and is not, and one that would make the tenth
+action the noisiest by construction. The counts at the first poll are the
+baseline.
+
+**Both fields are recorded and never read**, on the same terms as
+`last_arrival_ms` — `TestWhatTheSettleWasWaitingFor::test_it_decides_nothing`
+asserts that `page_is_done` names neither, because the bar they might one day
+license must not be shortened by the wait that measured them.
+
+**A limit worth knowing:** `_WATCH_JS` installs on the FIRST poll, so anything
+that landed before it is invisible to both fields. The same fixture with its
+content at 400ms instead of 2s reported `kinds: {attributes: 74}` with no
+`childList` at all and `last_meaningful_ms: -1`, while the content was plainly
+on the page. So -1 means *nothing meaningful was seen while looking*, which is
+weaker than it reads.
+
 ### Tests
 
+`TestWhatTheSettleWasWaitingFor` covers the content-vs-decoration split and,
+most importantly, that it decides nothing.
 `TestWaitingOnTrafficNeverShortensAWait` covers the one direction the in-flight
 counter may be used in — that a busy counter never polls fewer times than a
 quiet one, that the grace is bounded so a long-poll cannot own the page, that an
