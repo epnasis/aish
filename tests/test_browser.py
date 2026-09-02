@@ -3373,7 +3373,7 @@ class TestTheEvidenceFrame:
             browser, "_without_option_floods", lambda p, t: _resolved(t)
         )
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", ""))
+            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", "", {}))
         )
         monkeypatch.setattr(
             browser, "_save_downloads", lambda o, **kw: _resolved([])
@@ -3514,7 +3514,7 @@ class TestThePagesConsoleIsCapturedPerAction:
             browser, "_without_option_floods", lambda p, t: _resolved(t)
         )
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", ""))
+            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", "", {}))
         )
         monkeypatch.setattr(
             browser, "_save_downloads", lambda o, **kw: _resolved([])
@@ -3977,7 +3977,8 @@ class TestWhereADrivenActionsSecondsGo:
         assert phases["bar_ms"] == browser.SETTLE_QUIET_MS
         assert set(phases["settle"]) == {
             "waited_ms", "polls", "idle_ms", "first_quiet_ms",
-            "last_arrival_ms", "traffic_waited_ms", "released",
+            "last_arrival_ms", "last_meaningful_ms", "traffic_waited_ms",
+            "kinds", "released",
         }
 
     def test_the_record_reaches_the_tool_step(self):
@@ -4034,7 +4035,7 @@ class TestASuggestionThePageDrewAsAButton:
         control = before[0] if before else self._controls([{"name": "Lot do:"}])[0]
         monkeypatch.setattr(browser, "_settle", lambda p, **kw: _resolved(browser.Settled()))
         monkeypatch.setattr(browser, "_enumerate",
-                            lambda p, m="": _resolved(([], 0, 0, 0, "", "")))
+                            lambda p, m="": _resolved(([], 0, 0, 0, "", "", {})))
         monkeypatch.setattr(browse_mod, "controls_from", lambda raw: after)
         monkeypatch.setattr(browser, "_find", lambda p, n: _resolved((object(), True)))
         monkeypatch.setattr(browser, "_centre", lambda t: _resolved(None))
@@ -4238,7 +4239,7 @@ class TestAStoppedBatchIsStillTimed:
         )
         monkeypatch.setattr(browser, "_without_option_floods", lambda p, t: _resolved(t))
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", ""))
+            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", "", {}))
         )
         monkeypatch.setattr(browser, "_save_downloads", lambda o, **kw: _resolved([]))
 
@@ -4331,3 +4332,102 @@ class TestWaitingOnTrafficNeverShortensAWait:
             )
         )
         assert seen.released == "timeout"
+
+
+class TestWhatTheSettleWasWaitingFor:
+    """#351. The settle is 69% of a driven action's time (153s of 221s on the
+    2026-09-02 flight search), and every wait was `last_arrival_ms + 5000`. So
+    the whole question is what that last arrival WAS — a fare table finishing,
+    or a carousel ticking — and `_WATCH_JS` could not tell: any mutation and any
+    resource reset the clock equally.
+
+    `last_meaningful_ms` and `kinds` are the measurement that would answer it.
+    They are RECORDED AND NEVER READ, on the same terms as `last_arrival_ms`:
+    the bar they might one day license must not be shortened by the wait that
+    measured them."""
+
+    def test_the_probe_separates_content_from_decoration(self):
+        js = browser._WATCH_JS
+        # Nodes arriving and text changing are content; an attribute changing is
+        # very often a class on something animating.
+        assert "r.type === 'childList' ? 'childList'" in js
+        assert "const content = k !== 'attributes';" in js
+        # A fetch answering is the page getting its content; an image or a
+        # beacon landing is not what a read is waiting for.
+        assert "t === 'xmlhttprequest' || t === 'fetch'" in js
+
+    def test_counting_the_noise_does_not_make_the_page_wait_longer(self):
+        """The regression the first cut of this shipped. Attributes were not
+        observed AT ALL before #351, so a class toggling never reset the quiet
+        clock; letting the new observer bump it took an animated fixture from
+        7.2s to the full 15.8s ceiling.
+
+        `counts` (is this MOVEMENT?) and `real` (was it CONTENT?) are therefore
+        separate arguments — the first is behaviour and the second is a record,
+        and conflating them is how a measurement becomes a change."""
+        js = browser._WATCH_JS
+        assert "const bump = (k, counts, real) =>" in js
+        assert "if (counts) { w.gen++; w.at = Date.now(); }" in js
+        # Attributes tally and never count…
+        assert "bump(k, content, content);" in js
+        # …and every resource still counts, exactly as it did before.
+        assert "bump('res:' + t, true," in js
+
+    def test_it_decides_nothing(self):
+        """The property that matters most. `page_is_done` is the one gate on
+        releasing a settle, and it must keep taking only `quiet_ms`, `ready` and
+        the bar — a shortcut through `meaningful` would be exactly the bug this
+        measurement exists to avoid committing."""
+        import inspect
+
+        gate = inspect.getsource(browser.page_is_done)
+        assert "meaningful" not in gate and "kinds" not in gate
+        settle = inspect.getsource(browser._settle)
+        # It is written down…
+        assert "last_meaningful_ms" in settle
+        # …and never consulted to leave the loop.
+        for line in settle.splitlines():
+            if "break" in line or "page_is_done" in line:
+                assert "meaningful" not in line, line
+
+    def test_kinds_is_a_delta_over_THIS_wait(self):
+        """`_WATCH_JS` lives as long as the document, so its running totals
+        would attribute every earlier action's churn to the latest one — a
+        number that looks per-wait and is not. A page driven for ten actions
+        would report the tenth as the noisiest by construction."""
+
+        class Page(TestWhereADrivenActionsSecondsGo.Page):
+            pass
+
+        # Already still, so the bar is met at once; the counts are whatever the
+        # document accumulated before this wait began.
+        page = Page([
+            {"gen": 9, "quiet": 9_000, "ready": True,
+             "kinds": {"attributes": 400, "childList": 12}},
+        ])
+        seen = _run(browser._settle(page, still_for=5_000))
+        assert seen.kinds == {}, "the document's history is not this wait's churn"
+
+        # And a wait that DOES see movement reports only what it saw.
+        page = Page([
+            {"gen": 9, "quiet": 0, "ready": True,
+             "kinds": {"attributes": 400, "childList": 12}},
+            {"gen": 10, "quiet": 0, "ready": True,
+             "kinds": {"attributes": 403, "childList": 13}},
+            {"gen": 10, "quiet": 9_000, "ready": True,
+             "kinds": {"attributes": 405, "childList": 13}},
+        ])
+        seen = _run(browser._settle(page, still_for=5_000))
+        assert seen.kinds == {"attributes": 5, "childList": 1}
+
+    def test_the_act_clock_no_longer_overlaps_the_settle(self):
+        """`act_ms` used to be stamped after `_snapshot` returned, so it
+        included the closing settle and `settle_ms + act_ms` exceeded the call's
+        own `secs`. A record that contradicts itself is worse than one that is
+        missing."""
+        import inspect
+
+        source = inspect.getsource(browser.browse_act)
+        stamp = source.index('act_ms = round(')
+        snap = source.index("snapshot = await _snapshot(*a, match=topic, **kw)")
+        assert stamp < snap, "act_ms must be taken BEFORE the closing snapshot"

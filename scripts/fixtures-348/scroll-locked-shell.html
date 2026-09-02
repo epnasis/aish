@@ -1,0 +1,10 @@
+<!doctype html><html><head><meta charset="utf-8"><title>App shell, nothing open</title>
+<style>html,body{overflow:hidden;margin:0;height:100%}</style></head>
+<body>
+  <h1>Ordinary app shell, nothing open</h1>
+  <button>Szukaj</button>
+  <!-- `behind-a-dialog` fires on "root scroll-locked AND off-screen" and
+       nothing in it looks for anything on top. This page has no overlay at
+       all and still produces that reason. -->
+  <footer style="margin-top:1500px"><button>Kontakt</button><button>BIP</button></footer>
+</body></html>

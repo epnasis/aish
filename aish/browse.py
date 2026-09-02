@@ -1224,6 +1224,23 @@ class Snapshot:
     # aish's own voice: a wrong one here would replace one false claim with
     # another, on more pages.
     dialog: str = ""
+    # WHY the unreachable ones were unreachable, tallied by the very test that
+    # excluded them (#350). The full set `REACH_JS` can return: `aria-hidden` |
+    # `hidden` | `inert` | `invisible` | `zero-size` | `closed-details` |
+    # `off-canvas` | `off-document` | `outside-scroll-range` | `clipped` |
+    # `behind-a-dialog`.
+    #
+    # This replaces a guess with a record. `unreachable` decided a reason per
+    # control and the count threw it away, so the sentence built on the count
+    # had to name a cause it had not observed — and named the wrong one for the
+    # commonest case, telling the model to "press whatever opens them" about
+    # controls sitting BEHIND something already open. A reason cannot be a false
+    # positive in the way a dialog probe can: it is not an inference about the
+    # page, it is the test result — though the NAME of a reason can still
+    # assert more than its test checked, which is exactly what
+    # `behind-a-dialog` does, and why `web._out_of_reach` requires a second
+    # signal before it turns any of this into an instruction.
+    reasons: dict = field(default_factory=dict)
     # Which document these numbers belong to. Nothing checks this field, and it
     # should not start: the TAG is the enforcement — it is written during
     # enumeration, cleared from anything the new pass does not list, and dies
@@ -2009,6 +2026,9 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     });
   };
 
+  // Why each unreachable control was unreachable, tallied (#350).
+  const reasons = {};
+
   const WIDGET = '[role=dialog], [role=alertdialog], [role=listbox], [role=menu],'
                + ' [class*=datepicker], [class*=date-picker], [class*=alendar],'
                + ' [class*=picker], [class*=dropdown], [class*=modal]';
@@ -2050,14 +2070,27 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
       const type = type_(el);
       if (el.tagName === 'INPUT' && type === 'hidden') continue;
       let tagOn = el;
-      if (unreachable(el)) {
+      const why = unreachable(el);
+      if (why) {
         // The one common pattern the predicate is wrong about: a native
         // checkbox hidden under a styled label, which is every custom toggle on
         // the web. Pressing the LABEL toggles the input through the browser's
         // own label activation — a real gesture, not a synthetic one.
         const lab = (el.tagName === 'INPUT' && (type === 'checkbox' || type === 'radio'))
           ? labelElement(el) : null;
-        if (!lab || unreachable(lab)) { unreached += 1; continue; }
+        const labWhy = lab ? unreachable(lab) : null;
+        if (!lab || labWhy) {
+          unreached += 1;
+          // WHY, not just how many (#350). This predicate already decided the
+          // reason and the count threw it away, so the sentence built on the
+          // count had to guess at a cause — and told the model to "press
+          // whatever opens them" for controls sitting BEHIND something open,
+          // where the repair is the opposite. The reason is not an inference
+          // about the page; it is the test that excluded the control.
+          const key = labWhy || why;
+          reasons[key] = (reasons[key] || 0) + 1;
+          continue;
+        }
         tagOn = lab;
       }
       const name = nameOf(el);
@@ -2251,6 +2284,7 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     unreachable: unreached,
     matching: wanted.length,
     dialog: openDialog(),
+    reasons: reasons,
   };
 }"""
 
