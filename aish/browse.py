@@ -2777,6 +2777,27 @@ class Batch:
 CARD_VALUE_CHARS = 60
 
 
+def masked(value: str) -> str:
+    """A declared value replaced by its NAME, or the value unchanged (#343).
+
+    **One masker, because there are two card renderers and only one of them had
+    it.** `_shown` covers the batch card's steps; `form_note` covers what a form
+    is HOLDING and what aish typed and is about to send — and that second note
+    printed his home address, in full, into the press card, which IS the
+    approval record. So the leak the first mask closed was still open one clause
+    down: type the address (card 1, masked), press submit as its own call (card
+    2, verbatim). Both renderers go through here now.
+
+    **Partial by construction, and this says so.** It replaces a field whose
+    value matches on its own; an address split across street, postcode and city
+    renders each fragment as itself, even though the fence fires on the three
+    together. Masking a field because some OTHER field completes a match was
+    rejected — it would hide values he actually has to check."""
+    if said := secrets.personal_matches(value):
+        return f"[your {secrets.personal_words(said)}]"
+    return value
+
+
 def _shown(value: str) -> str:
     """One typed value as the card renders it.
 
@@ -2793,8 +2814,8 @@ def _shown(value: str) -> str:
     postcode and city matches only as the concatenation, and each fragment
     renders as itself. Masking the whole batch on a whole-batch match was
     rejected — it would hide the values he actually needs to check."""
-    if said := secrets.personal_matches(value):
-        return f"[your {secrets.personal_words(said)}]"
+    if (hidden := masked(value)) != value:
+        return hidden
     if len(value) <= CARD_VALUE_CHARS:
         return repr(value)
     return f"{value[:CARD_VALUE_CHARS]!r} + {len(value) - CARD_VALUE_CHARS} more chars"
@@ -3473,6 +3494,9 @@ def form_note(
         return ""
     lines = []
     for name, value in held[:FORM_FIELDS_MAX]:
+        # A declared value is named, never printed (#343): this note rides the
+        # PRESS card, and that card is the approval record.
+        value = masked(value)
         shown = value if len(value) <= FORM_VALUE_CHARS else (
             f"{value[:FORM_VALUE_CHARS]}… (+{len(value) - FORM_VALUE_CHARS})"
         )

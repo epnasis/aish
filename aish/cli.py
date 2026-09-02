@@ -1802,7 +1802,14 @@ def _personal_cli(args: list[str]) -> int:
         marks = {
             secrets.FENCED: "",
             secrets.TOO_SHORT: "  (too short to match — NOT fenced)",
-            secrets.UNREADABLE: "  (could not be read — NOT fenced)",
+            # NOT "not fenced": the gate does the OPPOSITE of leaving it free
+            # — it refuses every typed value until this class can be read. A
+            # listing that says the reverse of what the gate does is worse than
+            # no listing.
+            secrets.UNREADABLE: (
+                "  (could not be read — aish will not type into ANY form "
+                "until it can)"
+            ),
         }
         for name in found:
             # The listing must not claim coverage the matcher does not give,

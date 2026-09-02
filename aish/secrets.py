@@ -166,11 +166,16 @@ def names() -> list[str]:
 
 
 def _read_index(index: Path) -> list[str]:
+    # ValueError as well as OSError: `read_text(encoding="utf-8")` raises
+    # UnicodeDecodeError — a ValueError — on an index that is not UTF-8, and
+    # that used to propagate through both declared-value gates to `_dispatch`'s
+    # generic handler. It was contained by accident rather than by design, and
+    # an accident is not a failure direction.
     try:
         return sorted(
             n for n in index.read_text(encoding="utf-8").splitlines() if n.strip()
         )
-    except OSError:
+    except (OSError, ValueError):
         return []
 
 
@@ -343,6 +348,14 @@ _TRANSLITERATE = str.maketrans({
 # fenced; and `personal_matches` skips one anyway, so a value stored by any
 # other route can never widen the match to everything.
 MIN_PERSONAL_MATCH = 6
+
+# The shortest typed field that may count as a PIECE of a declared value when
+# the form splits one across several boxes (`personal_tiled`). Two, because a
+# house number is two characters and a form that takes it separately is
+# ordinary. It is safe where `MIN_PERSONAL_MATCH` would not be, and the reason
+# is the tiling: a piece proves nothing on its own — the whole declared value
+# still has to be reproduced before anything fires.
+MIN_PERSONAL_PIECE = 2
 
 _PERSONAL_TTL = 30.0
 _personal_cache: dict = {"names": None, "at": 0.0, "pairs": [], "unreadable": []}
@@ -543,3 +556,53 @@ def personal_matches(text: str) -> list[str]:
         return [name for name, value in _personal_matchable() if value in folded]
     except Exception:  # noqa: BLE001 — no keychain is "no match", never a crash
         return []
+
+
+def personal_tiled(values: list[str]) -> list[str]:
+    """Class names whose declared value these fields between them fully COVER.
+
+    **The order-free half of the match, and the reason the ordered one is not
+    enough.** Running the typed fields together and looking for the declared
+    value inside works only when the form takes them in the order he wrote it:
+    street, postcode, city fires and street, city, postcode does not, and the
+    UK/US layout is the second one. A surname box before a forename box does not
+    fire either, and neither does anything with another field typed in between.
+    The MODEL chooses the step order, so a fence that depends on it is a fence
+    for one layout out of several.
+
+    So: fold each typed field, and where a field's fold appears inside the
+    declared fold, mark the span it covers — every occurrence, since marking one
+    could only ever narrow it. Fire when every character of the declared value
+    has been covered.
+
+    **It is exactly as precise as the ordered match and no looser**: the whole
+    declared value must still be reproduced before anything fires, so a single
+    fragment proves nothing and a form that takes half his address is not a
+    match. What it drops is only the assumption about ORDER, and about nothing
+    else being typed in between.
+
+    Pieces shorter than `MIN_PERSONAL_PIECE` are ignored — a one-character field
+    tiles anything given enough boxes, which is the one way this could become a
+    match on nothing."""
+    pieces = [
+        folded for folded in (fold_value(value) for value in values)
+        if len(folded) >= MIN_PERSONAL_PIECE
+    ]
+    if not pieces:
+        return []
+    try:
+        pairs = _personal_matchable()
+    except Exception:  # noqa: BLE001 — no keychain is "no match", never a crash
+        return []
+    found = []
+    for name, declared in pairs:
+        covered = bytearray(len(declared))
+        for piece in pieces:
+            at = declared.find(piece)
+            while at != -1:
+                for index in range(at, at + len(piece)):
+                    covered[index] = 1
+                at = declared.find(piece, at + 1)
+        if all(covered):
+            found.append(name)
+    return found

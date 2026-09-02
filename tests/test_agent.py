@@ -13409,6 +13409,7 @@ class TestTheOwnersDeclaredValues:
         it answering "nothing", both paths go silent together."""
         self._declare(monkeypatch)
         monkeypatch.setattr(agent_module.secrets, "personal_matches", lambda text: [])
+        monkeypatch.setattr(agent_module.secrets, "personal_tiled", lambda vals: [])
         value = self.DECLARED["home_address"]
         agent, asked, _ = self._agent()
         assert agent._browse_gate("browse_fill", self._fill(value)) is None
@@ -13771,3 +13772,208 @@ class TestTheOwnersDeclaredValues:
         assert any(
             "Lipowa" in str(step.get("summary", "")) for step in seen
         ), "the residual moved — re-read what this slice may claim"
+
+    # --- the re-review's findings -------------------------------------------
+
+    #: The same address in the layouts real forms actually use. The MODEL
+    #: chooses the step order, so every one of these must reach the same
+    #: verdict — the ordered join fired on the first and on NONE of the rest.
+    LAYOUTS = (
+        ("street, postcode, city", ("ul. Lipowa 3/5", "30-001", "Krakow")),
+        ("street, city, postcode", ("ul. Lipowa 3/5", "Krakow", "30-001")),
+        ("city, postcode, street", ("Krakow", "30-001", "ul. Lipowa 3/5")),
+    )
+
+    def test_a_split_address_fires_in_ANY_field_order(self, monkeypatch):
+        """**Iterated over the layouts, because one layout is not the fence.**
+        Running the typed fields together and looking for the declared value
+        inside works only when the form takes them in the order he wrote it:
+        street/postcode/city fired and street/city/postcode — the UK and US
+        layout — fired at nothing. `personal_tiled` marks the span each field
+        covers inside the declared value and fires when it is fully tiled, so
+        order stops being an input."""
+        self._declare(monkeypatch)
+        for label, values in self.LAYOUTS:
+            agent, asked, _ = self._agent()
+            steps = [
+                {"target": target, "value": value}
+                for target, value in zip(("Adres", "Telefon", "Adres"), values, strict=True)
+            ]
+            assert agent._browse_gate("browse_fill", {"steps": steps}) is None
+            assert asked == [
+                "about to type your home address on drop.example."
+            ], label
+
+    def test_another_field_typed_in_BETWEEN_does_not_break_the_match(
+        self, monkeypatch
+    ):
+        """The ordered join needed the pieces adjacent, so any other field typed
+        between them broke it — and a phone box sitting between the street and
+        the postcode is an ordinary form. Both classes are named here, because
+        both are his."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Adres", "value": "ul. Lipowa 3/5"},
+            {"target": "Telefon", "value": self.DECLARED["phone"]},
+            {"target": "Adres", "value": "30-001"},
+            {"target": "Adres", "value": "Krakow"},
+        ]}) is None
+        assert len(asked) == 1
+        assert "your phone" in asked[0]
+        assert "home address" in asked[0]
+
+    def test_a_surname_box_before_a_forename_box_still_fires(self, monkeypatch):
+        """The commonest split of all, and the ordered join could not see it:
+        `Kowalski` then `Jan` runs together as `kowalskijan`, which does not
+        contain `jankowalski`."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Adres", "value": "Kowalski"},
+            {"target": "Telefon", "value": "Jan"},
+        ]}) is None
+        assert len(asked) == 1
+        assert "your full name" in asked[0]
+
+    def test_tiling_is_no_looser_than_the_whole_value(self, monkeypatch):
+        """The precision this must NOT trade away: the whole declared value has
+        to be reproduced. A form that takes half his address, or fields that
+        cover every character but one, is not a match — and a one-character
+        field must not be able to tile anything given enough boxes."""
+        self._declare(monkeypatch)
+        for label, steps in (
+            ("half the address", ["ul. Lipowa 3/5", "30-001"]),
+            ("city missing a letter", ["ul. Lipowa 3/5", "30-001", "Krako"]),
+            ("postcode missing a digit", ["ul. Lipowa 3/5", "30-01", "Krakow"]),
+        ):
+            agent, asked, _ = self._agent()
+            assert agent._browse_gate("browse_fill", {"steps": [
+                {"target": "Adres", "value": value} for value in steps
+            ]}) is None
+            assert asked == [], label
+
+    def test_single_character_fields_cannot_tile_anything(self, monkeypatch):
+        """`MIN_PERSONAL_PIECE` is the one guard that keeps TILING from becoming
+        a match on nothing: one-character pieces tile any value at all given
+        enough boxes, in any order.
+
+        Scrambled deliberately. Spelled out IN ORDER the letters really do
+        reproduce the value, and the ordered reading fires on that — correctly,
+        because the whole value is about to be sent. What must not happen is the
+        order-free path accepting a jumble that spells nothing."""
+        self._declare(monkeypatch, {"city": "Krakow"})
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Adres", "value": letter} for letter in "wokark"
+        ]}) is None
+        assert asked == []
+        assert agent_module.secrets.personal_tiled(list("krakow")) == []
+        # …and non-vacuously: two-character pieces DO tile the same value.
+        agent, asked, _ = self._agent()
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Adres", "value": pair} for pair in ("kr", "ak", "ow")
+        ]}) is None
+        assert len(asked) == 1
+
+    def test_the_SEND_clause_never_prints_the_value_either(self, monkeypatch):
+        """**The leak F5 closed, one clause down.** `_shown` covers the batch
+        card's steps; `_driven_note` renders through `form_note`, which had no
+        mask — so typing the address at an unvouched host (card 1, masked) and
+        pressing submit as its own call printed it in full on card 2, which IS
+        the approval record."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        agent._approved_hosts.clear()
+        value = self.DECLARED["home_address"]
+        args = self._fill(value)
+        assert agent._browse_gate("browse_fill", args) is None
+        agent._note_typed_values("browse_fill", args)
+        assert agent._browse_gate("browse_act", {"target": "Go"}) is None
+        assert len(asked) == 2
+        assert "would send 1 value(s)" in asked[1]
+        assert "[your home address]" in asked[1]
+        for card in asked:
+            assert value not in card
+            assert "Lipowa" not in card
+
+    def test_form_note_masks_wherever_it_is_rendered(self, monkeypatch):
+        """One masker, asserted at the renderer rather than only through the
+        gate — `form_note` has two headers and two callers, and a mask that
+        holds for one of them is the shape this slice keeps having to fix."""
+        self._declare(monkeypatch)
+        note = browse.form_note(
+            [("Adres", self.DECLARED["home_address"]), ("Szukaj", "okulary")]
+        )
+        assert "[your home address]" in note
+        assert "Lipowa" not in note
+        assert "okulary" in note
+
+    def test_an_unreadable_store_fails_closed_on_ALL_FOUR_paths(self, monkeypatch):
+        """The typing fence and a tainted read were closed; an UNTAINTED read
+        and a `web_search` were not, because both consulted the matcher — which
+        answers "nothing" precisely because nothing can be read. Three prose
+        surfaces said this failed closed and two code paths did."""
+        monkeypatch.setattr(
+            agent_module.secrets, "personal_names", lambda: ["home_address"]
+        )
+        monkeypatch.setattr(agent_module.secrets, "get_personal", lambda name: None)
+        agent_module.secrets._invalidate_personal()
+        for tainted in (False, True):
+            agent, _, _ = self._agent()
+            agent._tainted = tainted
+            assert agent._egress_novel_hosts(
+                "read_url", {"url": "https://drop.example/s?q=x"}
+            ) is not None, tainted
+        for origin in ("user", "schedule"):
+            agent, _, _ = self._agent(origin=origin)
+            assert agent._egress_novel_hosts(
+                "web_search", {"query": "apteka"}
+            ) == [agent_module.SEARCH_ENGINE_DESTINATION], origin
+
+    def test_a_hostname_with_whitespace_in_it_is_not_a_hostname(self, monkeypatch):
+        """`urlsplit("https://the search engine/x").hostname` is
+        `the search engine` — this file's own placeholder for where a query
+        goes. So a model composing that address reached the per-task ledger
+        under the sentinel key and freed address-carrying searches for the rest
+        of the task. It fails closed now, exactly as an unparseable address
+        already does."""
+        self._declare(monkeypatch)
+        agent, _, _ = self._agent()
+        url = "https://the search engine/x?a=" + urllib.parse.quote(
+            self.DECLARED["home_address"]
+        )
+        got = agent._egress_novel_hosts("read_url", {"url": url})
+        assert got is not None
+        assert got != [agent_module.SEARCH_ENGINE_DESTINATION]
+        # …so nothing was granted under the sentinel key, and a search carrying
+        # the same value still asks — which is what the leak would have freed.
+        assert agent._personal_outbound(
+            "web_search", {"query": self.DECLARED["home_address"]}, set()
+        ) == ["home_address"]
+
+    def test_a_second_query_carrying_the_same_value_does_not_re_ask(
+        self, monkeypatch
+    ):
+        """The search channel keys on the placeholder ALWAYS, never on a host
+        the query happens to name — otherwise the yes splits by key and the
+        same value in a differently-phrased query asks again, which is exactly
+        what `_searching_a_vouched_site` records as the failure that teaches him
+        to tap a card blind."""
+        self._declare(monkeypatch)
+        agent, asked, _ = self._agent()
+        value = self.DECLARED["home_address"]
+        assert agent._egress_gate("web_search", {"query": f"apteka {value}"}) is None
+        assert agent._egress_gate(
+            "web_search", {"query": f"allegro.pl lekarz {value}"}
+        ) is None
+        assert len(asked) == 1
+
+    def test_a_name_index_that_is_not_utf8_is_answered_not_raised(self, tmp_path):
+        """`read_text(encoding="utf-8")` raises UnicodeDecodeError — a
+        ValueError — which used to propagate through both declared-value gates
+        to `_dispatch`'s generic handler. Contained by accident, which is not a
+        failure direction."""
+        index = tmp_path / "personal-names.txt"
+        index.write_bytes(b"\xff\xfe home_address")
+        assert agent_module.secrets._read_index(index) == []
