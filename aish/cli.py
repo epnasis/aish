@@ -1754,6 +1754,80 @@ def _secret_cli(args: list[str]) -> int:
     return 2
 
 
+def _personal_cli(args: list[str]) -> int:
+    """`aish personal <set|get|list|rm> [NAME]` — the values aish asks before
+    typing (#343).
+
+    The SAME command surface as `aish secret`, over a different Keychain
+    namespace, because they are different lifecycles with the same shape: a
+    declared value must not be reachable by a plugin manifest's `secrets:`
+    field or by `aish secret get`, or the data this fence exists to keep off
+    the wire would be injectable into a wrapper's environment by naming it.
+
+    `set` reads the value twice via getpass, and that is not ceremony. A
+    mistyped API token fails loudly the first time it is used; a mistyped home
+    address fails SILENTLY — the fence simply never matches, and he is left
+    believing a class is covered that is not. The confirmation is the cheapest
+    thing that turns that into an error he sees."""
+    import getpass
+
+    from . import secrets
+
+    usage = "usage: aish personal <set|get|list|rm> [NAME]"
+    if not args:
+        print(usage)
+        return 2
+    cmd, rest = args[0], args[1:]
+    if cmd == "list":
+        found = secrets.personal_names()
+        if not found:
+            print("(no values declared)")
+            return 0
+        for name in found:
+            # The listing must not claim coverage the matcher does not give:
+            # a value too short to match is shown as unfenced rather than
+            # quietly doing nothing.
+            mark = "" if secrets.personal_fenced(name) else "  (too short to match — NOT fenced)"
+            print(f"{name}{mark}")
+        return 0
+    if cmd in ("set", "get", "rm") and rest:
+        name = rest[0]
+        if not secrets.valid_name(name):
+            print(f"error: invalid value name {name!r}")
+            return 1
+        if cmd == "set":
+            value = getpass.getpass(f"value for {name} (hidden): ")
+            if not value:
+                print("aborted (empty value)")
+                return 1
+            if getpass.getpass("again, to confirm: ") != value:
+                print("error: the two entries differ — nothing was stored")
+                return 1
+            try:
+                secrets.put_personal(name, value)
+            except secrets.SecretError as exc:
+                print(f"error: {exc}")
+                return 1
+            print(
+                f"declared {name} — aish will ask before typing it into a page "
+                "or putting it in an address"
+            )
+            return 0
+        if cmd == "get":
+            current = secrets.get_personal(name)
+            if current is None:
+                print(f"{name}: not declared")
+                return 1
+            print(current)
+            return 0
+        # rm
+        removed = secrets.delete_personal(name)
+        print(f"removed {name}" if removed else f"{name}: not declared")
+        return 0 if removed else 1
+    print(usage)
+    return 2
+
+
 def _skill_cli(args: list[str]) -> int:
     """`aish skill <import|approve|list|discard>` — the review-in-your-editor
     path for skill imports (#139). `import` STAGES to a quarantine dir (nothing
@@ -1952,6 +2026,8 @@ def _vocab_cli(args: list[str]) -> int:
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "secret":
         return _secret_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "personal":
+        return _personal_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "skill":
         return _skill_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "explain":

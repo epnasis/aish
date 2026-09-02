@@ -103,9 +103,21 @@ def no_real_secrets(tmp_path_factory, monkeypatch):
         "STATE",
         tmp_path_factory.mktemp("signins") / "signins.json",
     )
+    # And once more, one store further over (#343). The declared personal values
+    # are asked of every value the browse gate is about to type, from a name
+    # index that is a real file in the developer's state dir — so left alone a
+    # suite run would shell out to `security` for their home address to decide
+    # that a fixture's search term is not it.
+    monkeypatch.setattr(
+        secrets_module,
+        "PERSONAL_NAMES_INDEX",
+        tmp_path_factory.mktemp("personal-names") / "personal-names.txt",
+    )
     secrets_module._invalidate()  # the cache outlives a test; the patch does not
+    secrets_module._invalidate_personal()
     yield
     secrets_module._invalidate()
+    secrets_module._invalidate_personal()
 
 
 @pytest.fixture(autouse=True)

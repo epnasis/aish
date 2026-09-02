@@ -18,6 +18,12 @@ reviewed):
 A plaintext index of secret NAMES (not values) is kept in the state dir so the
 CLI can list what is set — names are metadata, not secret.
 
+A THIRD namespace lives here too (#343): the owner's **declared personal
+values** — his address, phone, date of birth, e-mail, name. They are not
+credentials and they are not scrubbed; they exist so the browse gate can ask
+before aish types one of them into somebody's form, and before one rides a
+composed address. See "declared personal values" below.
+
 The realistic security ceiling is FileVault + OS access control: this protects
 against disk theft and accidental leakage (git, logs, model context), NOT a
 live attacker already running as the user. That is out of scope by design.
@@ -29,6 +35,7 @@ import json
 import re
 import subprocess
 import time
+import unicodedata
 from pathlib import Path
 
 SERVICE = "aish"
@@ -39,8 +46,17 @@ SERVICE = "aish"
 # would put the owner's password in a subprocess environment aish does not
 # control, and `aish secret list` is a different lifecycle with a different UI.
 SIGNIN_SERVICE = "aish-signin"
+# The owner's declared personal values (#343) are a THIRD namespace, and the
+# separation is the same fence SIGNIN_SERVICE is. A plugin manifest's `secrets:`
+# field and `aish secret get` both resolve a name against SERVICE; his home
+# address must be reachable by neither, or the value this slice exists to keep
+# off the wire would be injected into a wrapper's environment by declaring it.
+PERSONAL_SERVICE = "aish-personal"
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # env-var-shaped
 NAMES_INDEX = Path.home() / ".local" / "state" / "aish" / "secret-names.txt"
+PERSONAL_NAMES_INDEX = (
+    Path.home() / ".local" / "state" / "aish" / "personal-names.txt"
+)
 _SECURITY = "/usr/bin/security"
 
 # Below this length a stored "secret" collides with ordinary text — scrubbing
@@ -146,33 +162,43 @@ def delete_signin(origin: str) -> bool:
 
 def names() -> list[str]:
     """Names of stored secrets (from the state-dir index), sorted."""
+    return _read_index(NAMES_INDEX)
+
+
+def _read_index(index: Path) -> list[str]:
     try:
         return sorted(
-            n for n in NAMES_INDEX.read_text(encoding="utf-8").splitlines() if n.strip()
+            n for n in index.read_text(encoding="utf-8").splitlines() if n.strip()
         )
     except OSError:
         return []
 
 
-def _index_add(name: str) -> None:
-    current = set(names())
+def _index_add(name: str, index: Path | None = None) -> None:
+    # Resolved at CALL time, never as a default argument: a default binds the
+    # module constant at import, and the suite-wide guard that redirects the
+    # index away from the developer's real state dir rebinds that constant.
+    index = NAMES_INDEX if index is None else index
+    current = set(_read_index(index))
     if name in current:
         return
     current.add(name)
-    _write_index(current)
+    _write_index(current, index)
 
 
-def _index_remove(name: str) -> None:
-    current = set(names())
+def _index_remove(name: str, index: Path | None = None) -> None:
+    index = NAMES_INDEX if index is None else index
+    current = set(_read_index(index))
     if name in current:
         current.discard(name)
-        _write_index(current)
+        _write_index(current, index)
 
 
-def _write_index(name_set: set[str]) -> None:
+def _write_index(name_set: set[str], index: Path | None = None) -> None:
+    index = NAMES_INDEX if index is None else index
     try:
-        NAMES_INDEX.parent.mkdir(parents=True, exist_ok=True)
-        NAMES_INDEX.write_text("\n".join(sorted(name_set)) + "\n", encoding="utf-8")
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_text("\n".join(sorted(name_set)) + "\n", encoding="utf-8")
     except OSError:
         pass
 
@@ -272,3 +298,190 @@ def scrub(text: str) -> str:
         if value in text:
             text = text.replace(value, f"[secret {name} — redacted by aish]")
     return text
+
+
+# --- the owner's declared personal values (#343) ----------------------------
+#
+# The third tier of the typing fence, between NEVER (an IBAN, a card number, a
+# password) and FREE (everything else): **ask, by value**. He names the classes
+# once — home_address, phone, date_of_birth, email, full_name, whatever set he
+# wants — and the browse gate asks before aish types one of them into somebody
+# else's form, or lets one ride a composed address.
+#
+# **It reads the VALUE, never a label.** That is the same ground the two
+# refusals stand on: every label check reads what the page WROTE and the page
+# can lie about it, while this reads what aish is about to SEND and the page
+# cannot touch that. No placeholder, no autocomplete attribute and no page
+# language is consulted anywhere in this section.
+#
+# **These are NOT scrubbed, and that is deliberate.** `scrub` replaces a stored
+# value wherever it appears in a tool result, which is right for a credential
+# and wrong for his own name: his name is all over the pages he asks aish to
+# read, and redacting it would corrupt the answer rather than protect anything.
+# So `_matchable` above is untouched by this section — a declared value never
+# joins the scrub set, and the fence is the whole of what these buy.
+
+# Latin letters that carry no combining form, so NFKD leaves them whole. Without
+# this, "Paweł" folds to "pawe" while "Pawel" folds to "pawel", and a value he
+# declared with the diacritic would miss the same value typed without it — the
+# exact miss the normalisation exists to prevent.
+_TRANSLITERATE = str.maketrans({
+    "ł": "l", "Ł": "L", "ø": "o", "Ø": "O", "đ": "d", "Đ": "D",
+    "ß": "ss", "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE",
+    "þ": "th", "Þ": "TH", "ð": "d", "Ð": "D", "ı": "i",
+})
+
+# Below this many folded characters a declared value stops being his and starts
+# being ordinary text: a four-letter fragment occurs in page text, in a search
+# term and in a city name, and every one of those would draw a card. It is a
+# chosen floor, not a measured one — the measured fact is the other direction,
+# that his own classes clear it comfortably (a date of birth folds to 8, a
+# phone to 11, an e-mail past 15).
+#
+# **Enforced in two places on purpose.** `put_personal` REFUSES a short value,
+# so he is told at declaration time instead of keeping a class he believes is
+# fenced; and `personal_matches` skips one anyway, so a value stored by any
+# other route can never widen the match to everything.
+MIN_PERSONAL_MATCH = 6
+
+_PERSONAL_TTL = 30.0
+_personal_cache: dict = {"names": None, "at": 0.0, "pairs": []}
+
+
+def _invalidate_personal() -> None:
+    _personal_cache.update(names=None, at=0.0, pairs=[])
+
+
+def fold_value(text: str) -> str:
+    """`text` reduced to the form both sides of the match are compared in.
+
+    Case, spacing and diacritics are exactly what differ between the value he
+    declared and the value aish is about to type — "+48 601 234 567" against
+    "+48601234567", "ul. Lipowa 3/5" against "ul Lipowa 3/5", "Paweł" against
+    "Pawel". So: transliterate the letters NFKD cannot decompose, decompose the
+    rest and drop the combining marks, casefold, and keep only alphanumerics.
+
+    Deleting the separators from BOTH sides preserves containment — a value that
+    matched with its spaces still matches without them — so this is strictly
+    more permissive than a whitespace-collapsing fold, which is the safe
+    direction for a fence whose false positive costs one card.
+
+    **The residual, stated rather than left to be found:** with separators gone,
+    a declared value can match across a word boundary in the haystack. Six
+    characters is where that starts being plausible, which is what
+    `MIN_PERSONAL_MATCH` is really guarding.
+
+    Alphanumeric rather than ASCII: a value in a non-Latin script keeps its
+    characters and is matched on them, instead of folding to nothing and being
+    silently unfenced."""
+    decomposed = unicodedata.normalize("NFKD", (text or "").translate(_TRANSLITERATE))
+    kept = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return "".join(c for c in kept.casefold() if c.isalnum())
+
+
+def personal_names() -> list[str]:
+    """Names of the declared value classes, sorted. Names, never values."""
+    return _read_index(PERSONAL_NAMES_INDEX)
+
+
+def get_personal(name: str) -> str | None:
+    """The declared value, or None if unset."""
+    if not valid_name(name):
+        return None
+    proc = _security(
+        ["find-generic-password", "-a", name, "-s", PERSONAL_SERVICE, "-w"]
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.rstrip("\n")
+
+
+def put_personal(name: str, value: str) -> None:
+    """Declare a value class. Raises SecretError on an invalid name, or on a
+    value too short to fence.
+
+    Refusing the short value is the point rather than tidiness: storing it would
+    leave him with a class he believes is fenced and a matcher that skips it,
+    which is a capability outrunning its record in the least visible
+    direction."""
+    if not valid_name(name):
+        raise SecretError(
+            f"invalid value name {name!r} (need [A-Za-z_][A-Za-z0-9_]*)"
+        )
+    folded = fold_value(value)
+    if len(folded) < MIN_PERSONAL_MATCH:
+        raise SecretError(
+            f"{name!r} is too short to fence — a declared value needs at least "
+            f"{MIN_PERSONAL_MATCH} letters or digits once spacing, case and "
+            f"accents are normalised away, and this one has {len(folded)}. "
+            "Nothing was stored."
+        )
+    proc = _security(
+        ["add-generic-password", "-a", name, "-s", PERSONAL_SERVICE, "-U", "-w", value]
+    )
+    if proc.returncode != 0:
+        raise SecretError(proc.stderr.strip() or "failed to store value")
+    _index_add(name, PERSONAL_NAMES_INDEX)
+    _invalidate_personal()
+
+
+def delete_personal(name: str) -> bool:
+    """Undeclare a value class; True if it existed."""
+    if not valid_name(name):
+        return False
+    proc = _security(["delete-generic-password", "-a", name, "-s", PERSONAL_SERVICE])
+    _index_remove(name, PERSONAL_NAMES_INDEX)
+    _invalidate_personal()
+    return proc.returncode == 0
+
+
+def _personal_matchable() -> list[tuple[str, str]]:
+    """(class name, FOLDED value) for every declared value long enough to match.
+
+    Cached on the same terms `_matchable` is and for the same reason: the browse
+    gate asks this of every value it is about to type, and a Keychain read is a
+    subprocess. The TTL is what covers a value he CHANGED without renaming —
+    nothing on disk moves in that case, so a names-only key would keep fencing
+    the old address for the rest of the session.
+
+    Longest first, so a class that is a substring of another reports the more
+    specific one first."""
+    current = tuple(personal_names())
+    now = time.monotonic()
+    stale = now - _personal_cache["at"] > _PERSONAL_TTL
+    if _personal_cache["names"] != current or stale:
+        pairs = []
+        for name in current:
+            folded = fold_value(get_personal(name) or "")
+            if len(folded) >= MIN_PERSONAL_MATCH:
+                pairs.append((name, folded))
+        pairs.sort(key=lambda pair: len(pair[1]), reverse=True)
+        _personal_cache.update(names=current, at=now, pairs=pairs)
+    return _personal_cache["pairs"]
+
+
+def personal_fenced(name: str) -> bool:
+    """Is this declared class actually long enough to be matched on?
+
+    `aish personal list` reads it, so the listing cannot claim coverage the
+    matcher does not give — a class stored before this floor existed, or by any
+    route other than `put_personal`, is shown as unfenced rather than silently
+    doing nothing."""
+    return any(found == name for found, _ in _personal_matchable())
+
+
+def personal_matches(text: str) -> list[str]:
+    """The NAMES of every declared value class this text carries.
+
+    Names, never values: the caller puts this on a card and into a record, and a
+    record that quoted his address would be the leak the fence exists to
+    prevent."""
+    if not text or not text.strip():
+        return []
+    folded = fold_value(text)
+    if not folded:
+        return []
+    try:
+        return [name for name, value in _personal_matchable() if value in folded]
+    except Exception:  # noqa: BLE001 — no keychain is "no match", never a crash
+        return []
