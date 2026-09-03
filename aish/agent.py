@@ -5297,12 +5297,18 @@ class Agent:
         # _dispatch joins to THIS call's `tool` step (§2). The local above stays
         # the source of truth for the step itself.
         self._call_ids.current = call_no
+        # Which model call issued this, on the RENDERED step as well as on the
+        # renderless `call` record (#352, the second amendment to contract §2
+        # fork 1(b) — docs/diagnostics.md). It is what lets the trace card
+        # fold its flat timeline into rounds without counting rows. Omitted,
+        # never 0, when nothing recorded issued it: the same rule as `call`.
         self._emit_step(
             kind="tool_start",
             name=name,
             call=call_no,
             summary=self._arg_summary(name, args),
             command=str(args.get("command", "")) if name == "run_command" else "",
+            **({"model_call": model_call} if model_call else {}),
         )
         # The call AS THE MODEL EMITTED IT (#240). The rendered step above keeps
         # `summary`, a human label built per tool — the query for a search, the
@@ -5352,6 +5358,7 @@ class Agent:
                     status=tools.STATUS_FAILED,
                     verdict_by=tools.VERDICT_EXCEPTION,
                     summary="unavailable",
+                    **({"model_call": model_call} if model_call else {}),
                 )
                 return result
             except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
@@ -5369,6 +5376,7 @@ class Agent:
                     status=tools.STATUS_FAILED,
                     verdict_by=tools.VERDICT_EXCEPTION,
                     summary="failed",
+                    **({"model_call": model_call} if model_call else {}),
                 )
                 return result
             result = self._scrub_result(result)
@@ -5381,7 +5389,7 @@ class Agent:
             # it afterwards saw nothing at all.
             self._observe_for_rules(name, result)
             self._note_turn_call(name, args, result)
-            self._emit_tool_step(name, args, result, elapsed, call_no)
+            self._emit_tool_step(name, args, result, elapsed, call_no, model_call)
             return result
         finally:
             # The single seam BOTH loops pass through (#311). Recorded here
@@ -5393,7 +5401,13 @@ class Agent:
             self._capture_provenance(name, args, result)
 
     def _emit_tool_step(
-        self, name: str, args: dict, result: str, secs: float, call_no: int = 0
+        self,
+        name: str,
+        args: dict,
+        result: str,
+        secs: float,
+        call_no: int = 0,
+        model_call: int = 0,
     ) -> None:
         if self.on_step is None and self.step_log is None:
             return
@@ -5434,6 +5448,11 @@ class Agent:
             "call": call_no,
             **envelope,
         }
+        # The issuing model call, passed in from `_call_result` exactly as the
+        # `call` record's is (#352). Omitted rather than zeroed on the
+        # claude-max path, where no recorded model call issued it.
+        if model_call:
+            step["model_call"] = model_call
         _scrub_page_console(step)
         if not ok and self._run_meta is None:
             # Non-run_command failure (a read_url/web_search error, a gate

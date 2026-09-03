@@ -6611,6 +6611,61 @@ class TestTurnAndCallIdentity:
         thinking = [s for s in steps if s.get("kind") == "thinking"]
         assert thinking and all("turn" not in s for s in thinking)
 
+    def test_tool_steps_name_the_model_call_that_issued_them(self):
+        """The second amendment to fork 1(b) (#352): the rendered `tool_start`
+        and `tool` steps carry `model_call`, so the trace card can fold its
+        flat timeline into rounds without counting rows — the same by-id join
+        the `call` record already has, on the steps a browser actually sees."""
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo a")]),
+                model_says(tool_calls=[tool_call("run_command", command="echo b")]),
+                model_says("done"),
+            ],
+            step_log=steps.append,
+        )
+        agent.run_task("two rounds")
+        starts = [s for s in steps if s.get("kind") == "tool_start"]
+        tools_ = [s for s in steps if s.get("kind") == "tool"]
+        assert [s["model_call"] for s in starts] == [1, 2]
+        assert [s["model_call"] for s in tools_] == [1, 2]
+        # …and it agrees with the renderless record, which is the join it mirrors.
+        calls = [s for s in steps if s.get("kind") == "call"]
+        assert [s["model_call"] for s in calls] == [1, 2]
+
+    def test_a_call_no_recorded_model_call_issued_carries_no_stamp(self):
+        """claude-max routes SDK tool calls straight into _call_result without
+        entering the model loop. The stamp is OMITTED there, never written as 0:
+        absence says "this backend records no model calls", a zero would say
+        "round zero", and those route to different repairs (contract §0)."""
+        steps: list[dict] = []
+        agent, _ = make_agent([model_says("done")], step_log=steps.append)
+        agent.run_task("hello")
+        agent._call_result("read_docs", lambda: ("out", 0.1), args={"topic": "x"})
+        start = [s for s in steps if s.get("kind") == "tool_start"][-1]
+        finish = [s for s in steps if s.get("kind") == "tool"][-1]
+        assert "model_call" not in start, start
+        assert "model_call" not in finish, finish
+
+    def test_the_stamp_survives_a_tool_that_crashed(self, monkeypatch):
+        """The exception paths emit their own `tool` step; a stamp that only the
+        happy path carried would make a crashed call the one that cannot be
+        placed in its round — precisely the call a reader opens the record for."""
+        steps: list[dict] = []
+        def explode(q, **k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(agent_module.web, "web_search", explode)
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("web_search", query="x")]), model_says("ok")],
+            step_log=steps.append,
+        )
+        agent.run_task("search")
+        finish = [s for s in steps if s.get("kind") == "tool"][-1]
+        assert finish["ok"] is False
+        assert finish["model_call"] == 1
+
 
 class TestRedactTurn:
     """The log-side removal (#202) is the durable half; this is the other one.
@@ -11276,7 +11331,10 @@ class TestWhatCanBecomeModelVisibleImageContent:
     # rules.past_turns builds a REPLAYED TURN RECORD for the rules engine, not
     # a message: it reads what an attachment was, and nothing it produces ever
     # reaches a provider request.
-    ATTACH_EXEMPT = {("rules.py", "past_turns")}
+    # explain._messages builds the READER's copy of a message record for the
+    # step screen: `images` there is a count of attachments already recorded,
+    # and nothing it produces ever reaches a provider request (#352).
+    ATTACH_EXEMPT = {("rules.py", "past_turns"), ("explain.py", "_messages")}
     PRODUCE_SITES = {
         ("agent.py", "_show_image"),  # a picture the model asked to display
         ("agent.py", "_read_media"),  # frames decoded out of a recording (#215)

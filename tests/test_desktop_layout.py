@@ -72,18 +72,20 @@ def test_a_sheet_is_inset_beside_the_docked_rail() -> None:
     )
 
 
-def test_the_full_record_is_sized_as_a_document() -> None:
-    """Every other sheet is a short list, capped at 560px on a wide screen. The
-    dossier carries a turn's reasoning, arguments and command output, and at
-    picker width it reads through a letterbox."""
-    match = re.search(r"#explain-sheet\s*\{([^}]*)\}", CSS)
-    assert match, "#explain-sheet has no desktop size of its own"
+def test_the_full_record_takes_the_whole_screen() -> None:
+    """The record used to be a sheet, and every other sheet is a short list
+    capped at 560px on a wide screen; a turn's reasoning, arguments and command
+    output read through a letterbox at that width. The step screen (#352) is a
+    surface of its own, fixed to the whole viewport, and there is no sheet
+    left to size: a `#explain-sheet` rule coming back would be a second
+    surface for the same record."""
+    match = re.search(r"#step-screen\s*\{([^}]*)\}", CSS)
+    assert match, "#step-screen has no rule of its own"
     body = match.group(1)
-    width = re.search(r"max-width:[^;]*?(\d{3,4})px", body)
-    assert width and int(width.group(1)) > 560, (
-        "the full record is back at picker width on a desktop"
+    assert "position: fixed" in body and "inset: 0" in body, (
+        "the step screen no longer fills the viewport"
     )
-    assert "max-height" in body, "the dossier no longer claims extra height"
+    assert "#explain-sheet" not in CSS, "the retired dossier sheet is back"
 
 
 def test_one_glyph_at_a_time_can_actually_win() -> None:
