@@ -84,6 +84,20 @@ _EXTERNAL_SYMBOLS: set[str] = {
     # record WHY redirect targets need no URL encoding of ours: the stdlib
     # already quotes them there. Naming the method is the evidence.
     "http_error_302",
+    # claude-agent-sdk symbols — #352 names them in docs/agent-core.md as the
+    # EVIDENCE that the SDK has no pre-request hook: its `HookEvent` literals
+    # (checked in the installed 0.2.121) are all tool- or session-lifecycle
+    # events, the CLI is spawned with `anyio.open_process`, and hooks arrive
+    # as `hook_callback` control requests. Naming them is the finding.
+    "HookEvent",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PreCompact",
+    "SubagentStart",
+    "SubagentStop",
+    "UserPromptSubmit",
+    "open_process",
+    "hook_callback",
 }
 
 # The trailing `()` is optional because docs spell a function both ways, and
