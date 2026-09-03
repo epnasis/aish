@@ -11331,7 +11331,10 @@ class TestWhatCanBecomeModelVisibleImageContent:
     # rules.past_turns builds a REPLAYED TURN RECORD for the rules engine, not
     # a message: it reads what an attachment was, and nothing it produces ever
     # reaches a provider request.
-    ATTACH_EXEMPT = {("rules.py", "past_turns")}
+    # explain._messages builds the READER's copy of a message record for the
+    # step screen: `images` there is a count of attachments already recorded,
+    # and nothing it produces ever reaches a provider request (#352).
+    ATTACH_EXEMPT = {("rules.py", "past_turns"), ("explain.py", "_messages")}
     PRODUCE_SITES = {
         ("agent.py", "_show_image"),  # a picture the model asked to display
         ("agent.py", "_read_media"),  # frames decoded out of a recording (#215)

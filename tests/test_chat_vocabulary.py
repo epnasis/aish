@@ -70,6 +70,11 @@ ALLOWED = {
     # jar as above, worded to exactly what `signin.ok` records.
     " and the session came up",
     " and the session was not seen to come up",
+    # The same sign-in outcome on the step screen's Page pane (#352): still the
+    # SITE's login session, worded to what `signin.ok` records.
+    "the session was seen to come up",
+    "the session was not seen to come up",
+    "whether the session came up was not recorded",
 }
 
 _ALPHA_WORD = re.compile(r"^[A-Za-z]{2,}$")
