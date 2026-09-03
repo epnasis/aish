@@ -3056,6 +3056,7 @@ function traceStep(step) {
       const ref = t.thinkingRow;
       clearStepTimer(t, ref);
       ref.row.classList.remove("running", "active-step");
+      ref.row.classList.add("step-think"); // a model call, for the inspector (#352)
       ref.badge.innerHTML = traceSvg("thinking", "var(--purple)");
       ref.titleEl.textContent = `Thought for ${fmtSecs(step.secs)}`;
       // History bonus: the row keeps the thinking gist as its subtitle —
@@ -3069,8 +3070,9 @@ function traceStep(step) {
       t.thinkingRow = null;
     } else {
       t.started += 1;
-      traceRow(t, traceSvg("thinking", "var(--purple)"),
+      const ref = traceRow(t, traceSvg("thinking", "var(--purple)"),
         `Thought for ${fmtSecs(step.secs)}`, step.gist || "");
+      ref.row.classList.add("step-think");
     }
     updateTraceHead(t);
     return;
@@ -3090,11 +3092,15 @@ function traceStep(step) {
       : recoverable
         ? `${recoverable} of them can be read back on demand`
         : "the model cannot get them back";
-    traceRow(
+    const ref = traceRow(
       t, traceSvg("thinking", "var(--dim)"),
       `Shortened ${n} earlier result${n === 1 ? "" : "s"} for the model`,
       tail
     );
+    // Which trim: a mid-task one is a step of the record, a seed one is part
+    // of what the first model call started from ([TRACE-CLOSE]'s inspector).
+    ref.row.classList.add("step-trim");
+    ref.row.dataset.policy = String(step.policy || "");
     return;
   }
   if (step.kind === "knowledge") {
@@ -3133,7 +3139,8 @@ function traceStep(step) {
     // note in the trace and retire its queued chip (a no-op on cold replay,
     // where no chip exists). Emitted identically live and by reconstruct_events.
     t.started += 1;
-    traceRow(t, traceSvg("chat", "var(--blue)"), "You added", step.text || "");
+    traceRow(t, traceSvg("chat", "var(--blue)"), "You added", step.text || "")
+      .row.classList.add("step-steer");
     removeQueueChip(step.text);
     updateTraceHead(t);
     return;
@@ -3168,7 +3175,8 @@ function traceStep(step) {
     } else {
       tail = `gave up after ${step.attempt} of ${step.attempts} attempts`;
     }
-    traceRow(t, traceSvg("denied", "var(--red)"), `Model call failed — ${what}${status}`, tail);
+    traceRow(t, traceSvg("denied", "var(--red)"), `Model call failed — ${what}${status}`, tail)
+      .row.classList.add("step-model-error");
     updateTraceHead(t);
     return;
   }
@@ -3195,7 +3203,7 @@ function traceStep(step) {
       t, traceSvg("chat", "var(--blue)"),
       step.by === "owner" ? `You retried — attempt ${step.attempt}` : `Retried — attempt ${step.attempt}`,
       `${ended} · its records are kept, superseded`
-    );
+    ).row.classList.add("step-retry");
     updateTraceHead(t);
     return;
   }
@@ -3468,11 +3476,21 @@ function traceFrame(step) {
 }
 // [TRACE-FRAME-END]
 
+// The ids a tool row is joined to the record by (#352): its `call`, and the
+// model call that issued it where the step carries one (omitted on a backend
+// that records none, and on a log older than the stamp). Written on both the
+// start and the finish so a row synthesized on replay carries them too.
+function stampCallRow(ref, step) {
+  if (step.call) ref.row.dataset.call = String(step.call);
+  if (step.model_call) ref.row.dataset.modelCall = String(step.model_call);
+}
+
 function toolStart(t, step) {
   t.started += 1;
   const [title, iconKey] = TOOL_META[step.name] || [step.name, "dot", "--dim"];
   const ref = traceRow(t, SPINNER, title, step.name === "run_command" ? "" : step.summary);
   knowledgeTag(ref, step.name);
+  stampCallRow(ref, step);
   ref.row.classList.add("running", "active-step");
   startStepTimer(t, ref);
   t.running.push({ name: step.name, summary: step.summary || "", command: step.command || "" });
@@ -3525,8 +3543,9 @@ function heldJoin(t, step) {
 
 // Bring a row that is already in this card into view, and say WHICH one.
 // `block: "nearest"` means a row already on screen does not move at all: this
-// is a hop of a few rows inside one card, not the long animated jump [EXPLAIN]
-// rules out, and the flash is what answers "which of these did it land on".
+// is a hop of a few rows inside one card, not the long animated jump
+// [STEP-SCREEN] rules out, and the flash is what answers "which of these did
+// it land on".
 function revealStep(row) {
   if (row.scrollIntoView) row.scrollIntoView({ block: "nearest", inline: "nearest" });
   row.classList.add("step-flash");
@@ -3556,6 +3575,7 @@ function toolFinish(t, step) {
     }
   }
   clearStepTimer(t, ref);
+  stampCallRow(ref, step);
   t.pending = null;
   const runIdx = t.running.findIndex((r) => r.name === step.name);
   if (runIdx !== -1) t.running.splice(runIdx, 1);
@@ -4141,6 +4161,7 @@ function updateTraceHead(t) {
 function finalizeAnswerRow(t, ref, secs) {
   clearStepTimer(t, ref);
   ref.row.classList.remove("running", "active-step");
+  ref.row.classList.add("step-answer"); // the last model call, for the inspector (#352)
   ref.badge.innerHTML = traceSvg("check", "var(--green)");
   ref.titleEl.textContent =
     typeof secs === "number" ? `Answered in ${fmtSecs(secs)}` : "Answered";
@@ -4192,15 +4213,10 @@ function finishTrace(errored) {
     refreshStatusline();
     return;
   }
-  if (t.turnId && !t.el.querySelector(".trace-explain")) {
-    const door = document.createElement("button");
-    door.type = "button";
-    door.className = "trace-explain";
-    door.dataset.turn = t.turnId;
-    door.innerHTML = '<span>Full record</span><span class="trace-explain-chev">\u203a</span>';
-    door.onclick = (e) => { e.stopPropagation(); openExplain(t.turnId); };
-    t.inner.appendChild(door);
-  }
+  // The card is the door to the turn's record (#243, #352): the Full record
+  // row, and every row that is a step of it. Here and nowhere else, so hot and
+  // cold agree (L2).
+  if (t.turnId) traceInspector(t);
   t.el.classList.remove("live", "stopping");
   t.el.classList.remove("open"); // collapse to the summary; tap to expand
   t.el.querySelector(".trace-status").innerHTML = errored
@@ -4208,6 +4224,187 @@ function finishTrace(errored) {
     : traceSvg("check", "var(--green)");
   updateTraceHead(t);
   refreshStatusline();
+}
+
+// ---- the inspector on a finished card (#352) ----------------------------------
+// Rows are the entry point. On a FINISHED card every row that is a step of the
+// record — a tool call, a model call, a between-round event — expands in place
+// to a short summary of its panes with sizes, and each line opens the step
+// screen on that pane. A "worth a look" strip at the top of the card lists the
+// reader's notes, each landing on the cited step and pane. All of it is added
+// HERE, from finishTrace, because that is the one function both the live path
+// and cold replay reach — adding it from the `done` handler would miss every
+// replayed card and still pass the node checks (L2).
+//
+// The dossier is fetched ON THE FIRST TAP, once per card, never at finish: a
+// replay finishes every card on screen, and a fetch per card would pull a
+// hundred documents of hundreds of KB each on every reconnect.
+//
+// Rows are joined to steps by what the step wrote on them: a tool row carries
+// its `call` id (`c<call>`), a thinking row is the model call the tool rows
+// under it are stamped with (`m<k>`) — counted only where a log stamped
+// nothing — and the between-round rows are counted per kind in card order,
+// which is the file order the dossier walks. The answer row is the last model
+// call (`m:last`), resolved when the record arrives.
+function traceInspector(t) {
+  if (!t.el.querySelector(".trace-explain")) {
+    const door = document.createElement("button");
+    door.type = "button";
+    door.className = "trace-explain";
+    door.dataset.turn = t.turnId;
+    door.append(inspectEl("span", null, offlineViewing
+      ? "Full record — the server is needed to read it" : "Full record"));
+    door.append(inspectEl("span", "trace-explain-chev", "›"));
+    door.onclick = (e) => { e.stopPropagation(); inspectOpen(t); };
+    t.inner.appendChild(door);
+  }
+  const rows = [...t.body.querySelectorAll(".step")];
+  const ids = inspectKeys(rows);
+  rows.forEach((row, i) => {
+    if (!ids[i]) return;
+    row.dataset.inspect = ids[i];
+    row.classList.add("inspectable");
+    row.onclick = (e) => inspectRowTap(t, row, e);
+  });
+}
+
+function inspectEl(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+function inspectKeys(rows) {
+  const ids = rows.map(() => null);
+  const counters = {};
+  const next = (kind) => { counters[kind] = (counters[kind] || 0) + 1; return counters[kind]; };
+  let pendingThink = -1;
+  let thinkCount = 0;
+  rows.forEach((row, i) => {
+    const cl = row.classList;
+    const d = row.dataset || {};
+    if (d.call) {
+      ids[i] = `c${d.call}`;
+      // The stamp on a tool row (#352's agent half) names the thinking row
+      // above it better than counting can: a recorded id beats a position.
+      if (pendingThink >= 0 && d.modelCall) { ids[pendingThink] = `m${d.modelCall}`; pendingThink = -1; }
+      return;
+    }
+    if (cl.contains("step-think")) { thinkCount += 1; ids[i] = `m${thinkCount}`; pendingThink = i; return; }
+    if (cl.contains("step-answer")) { ids[i] = "m:last"; pendingThink = -1; return; }
+    if (cl.contains("step-trim")) {
+      // A seed trim is not a step of its own; it shaped what the first model
+      // call started from, which is where the dossier files it.
+      ids[i] = d.policy === "mid_task_budget" ? `t${next("t")}` : "m1";
+      return;
+    }
+    if (cl.contains("step-steer")) { ids[i] = `s${next("s")}`; return; }
+    if (cl.contains("step-model-error")) { ids[i] = `e${next("e")}`; return; }
+    if (cl.contains("step-retry")) { ids[i] = `retry${next("retry")}`; return; }
+  });
+  return ids;
+}
+
+function inspectResolve(id, doc) {
+  if (id !== "m:last") return id;
+  const models = (doc.steps || []).filter((s) => s.kind === "model_call");
+  return models.length ? models[models.length - 1].id : null;
+}
+
+// Once per card. A failure is not cached, so the next tap tries again — the
+// ordinary failure is a phone that was briefly offline.
+function inspectDossier(t) {
+  if (t.dossier) return Promise.resolve(t.dossier);
+  if (!t.dossierFetch) {
+    t.dossierFetch = fetchDossier(t.turnId).then((doc) => {
+      t.dossier = doc;
+      inspectStrip(t, doc);
+      return doc;
+    }, (err) => {
+      t.dossierFetch = null;
+      throw err;
+    });
+  }
+  return t.dossierFetch;
+}
+
+function inspectOpen(t) {
+  inspectDossier(t).then((doc) => ssOpenDoc(doc), (err) => showToast((err && err.message) || "the record could not be read"));
+}
+
+function inspectRowTap(t, row, e) {
+  // The row already has controls of its own — the held-step link, a frame,
+  // the output box's buttons — and a tap on one of those is that control's.
+  const target = e && e.target;
+  if (target && target.closest && target.closest("button, a, img, input, textarea, .out-box, .step-diff, .step-xp")) return;
+  if (e && e.stopPropagation) e.stopPropagation();
+  const open = row.querySelector(".step-xp");
+  if (open) { open.remove(); return; }
+  const box = inspectEl("div", "step-xp");
+  box.appendChild(inspectEl("p", "step-xp-state", "reading the record…"));
+  (row.querySelector(".step-main") || row).appendChild(box);
+  inspectDossier(t).then(
+    (doc) => inspectFill(row, box, doc),
+    (err) => {
+      box.textContent = "";
+      box.appendChild(inspectEl("p", "step-xp-state", (err && err.message) || "the record could not be read"));
+    }
+  );
+}
+
+function inspectFill(row, box, doc) {
+  box.textContent = "";
+  const id = inspectResolve(row.dataset.inspect, doc);
+  const step = (doc.steps || []).find((s) => s.id === id) || null;
+  if (!step) {
+    box.appendChild(inspectEl("p", "step-xp-state", doc.running
+      ? "not in the record yet — this turn is still running"
+      : "the record has no step for this row"));
+    return;
+  }
+  box.appendChild(inspectEl("div", "step-xp-head", `step ${step.n} of ${(doc.steps || []).length} · ${step.title}`));
+  for (const pane of step.panes || []) {
+    const line = inspectEl("button", "step-xp-pane");
+    line.type = "button";
+    line.dataset.pane = pane;
+    line.append(
+      inspectEl("span", "step-xp-label", SS_PANE_LABELS[pane] || pane),
+      inspectEl("span", "step-xp-brief", ssPaneBrief(doc, step, pane)),
+      inspectEl("span", "step-xp-chev", "›"),
+    );
+    line.onclick = (e) => { e.stopPropagation(); ssOpen(doc, step.id, pane); };
+    box.appendChild(line);
+  }
+}
+
+// Facts about this turn worth reading first, at the top of the card. Computed
+// in Python over the same document (`explain.notes`), so this is a renderer and
+// never a second opinion; rows state what happened and none of them says WHY.
+// The empty case names the checks it ran — "nothing unusual" is a claim no
+// checker is entitled to make.
+function inspectStrip(t, doc) {
+  if (t.inner.querySelector(".trace-notes")) return;
+  const notes = doc.notes || { rows: [], checks: [] };
+  const strip = inspectEl("div", "trace-notes");
+  strip.appendChild(inspectEl("div", "trace-notes-head", "Worth a look"));
+  if (!notes.rows.length) {
+    strip.appendChild(inspectEl("p", "step-xp-state",
+      `nothing flagged by the ${(notes.checks || []).length} checks this reader runs`));
+  }
+  for (const row of notes.rows) {
+    const note = inspectEl("button", "trace-note", row.text);
+    note.type = "button";
+    const where = row.where || {};
+    note.onclick = (e) => { e.stopPropagation(); ssOpen(doc, where.step, where.pane); };
+    strip.appendChild(note);
+  }
+  if (doc.running) {
+    strip.appendChild(inspectEl("p", "step-xp-state", "this turn is still running — the record so far"));
+  }
+  const first = t.inner.querySelector(".step");
+  if (first && typeof t.inner.insertBefore === "function") t.inner.insertBefore(strip, first);
+  else t.inner.appendChild(strip);
 }
 // [TRACE-CLOSE-END]
 
@@ -8605,7 +8802,7 @@ const SLASH_COMMANDS = [
   ["/watch", "see the page aish is on in this chat, as it works"],
   ["/chat", "show this chat's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
-  ["/explain", "the full record of a turn — what it was given, thought, ran and answered"],
+  ["/explain", "a turn's record, step by step — what each call was given, did and returned"],
   ["/help", "about aish web"],
 ];
 
@@ -11815,500 +12012,873 @@ function shortName(name, max = NAME_MAX) {
 
 // ---- the dossier ---------------------------------------------------------
 //
-// [EXPLAIN-START]
-// One turn, read back from /explain: what it was given, what it was thinking,
-// what it ran, what it produced. The panel exists because the answer to "why
-// did it do that" is usually "it was not given what you think it was", and
-// that evidence is recorded but was reachable only from a terminal.
+// [STEP-SCREEN-START]
+// The turn inspector (#352 slice 1): one turn, read back from /explain, one
+// STEP at a time on a full-screen surface of its own. A step is one exchange
+// across a boundary — a model call, a tool call — or something that happened
+// between two of them; each has the PANES its kind has (Context / Response,
+// Call / Result / Page, or one Event pane), and swiping moves to the adjacent
+// step keeping the pane by name where the next step has it.
 //
-// EVERY string here is set as TEXT, never as markup. Reasoning quotes fetched
-// pages, file contents and mail bodies — this panel renders the untrusted half
-// of the machine, and the one place it must not be rendered is as HTML.
+// Not #preview: its recognisers own pinch and pan, and a page of text is not a
+// picture. Not a sheet: a sheet is a picker you browse, and this is a document
+// you read, so it takes the whole screen.
 //
-// Nothing from here is cached: the response is `no-store` and the service
-// worker passes /explain through (NEVER_CACHE), so the bodies never reach the
-// device's disk the way transcript events do.
-let xpAbort = null;   // in-flight fetch, so a second open cancels the first
+// EVERY string here is set as TEXT, never as markup. The panes show the
+// untrusted half of the machine — reasoning quotes fetched pages, a tool
+// result is whatever a command printed, the page pane is a site's own console
+// — and `renderMarkdown` mints a <button> that submits a turn from
+// `[label](aish-reply://…)`, which is why it may never see any of it. A
+// rendered mode is deferred (Part 4 of #352). Nothing from here is cached: the
+// response is `no-store` and the service worker passes /explain through.
+//
+// What it draws comes from `explain.dossier()`'s `steps` list and the records
+// it references by id. Where the dossier says a fact is an inference — a call
+// attached to its round by file order, a tool message matched to its call by
+// name — the pane says so in words, because a reader must never see inference
+// wearing a record's clothes (docs/diagnostics.md).
 
-function xpEl(tag, cls, text) {
-  const node = document.createElement(tag);
-  if (cls) node.className = cls;
-  if (text !== undefined && text !== null) node.textContent = String(text);
-  return node;
-}
+// The one fact this surface shows: which dossier, which step, which pane.
+// `ssShow` is the only path that moves it, and `ssClose` the only one that
+// clears it — a half-applied step (new pane under an old title, a find count
+// from the previous body) is the class of bug the single writer exists for.
+let ssView = null;
+let ssAbort = null;
+// What the touch in flight was decided to be, recorded at the moment the axis
+// is known (L5): "page" claims it for a step change, "scroll" yields it to the
+// pane's own vertical scroll and nothing here reads it again.
+let ssGesture = null;
+let ssTouch = null;
+let ssFind = { query: "", hits: 0, at: -1, marks: [] };
+// The context pane opens on what CHANGED since the previous call; the whole
+// context is one tap away, and this is that tap.
+let ssWhole = false;
+
+// How far a claimed swipe must travel to turn the step, and how strongly
+// horizontal a move must be before it is claimed at all: a flick that is even
+// slightly diagonal is a scroll that started sideways, not a page turn.
+const SS_SWIPE_MIN = 56;
+const SS_AXIS_LOCK = 1.6;
+const SS_DECIDE_AT = 8;
+// A body past this folds — max-height and a "show all" control. The whole text
+// stays in the DOM: folded, never truncated, the same law the sheet had.
+const SS_FOLD_CHARS = 20000;
+// Below this a body is a paragraph and "save as file" is furniture.
+const SS_SAVE_MIN_CHARS = 2000;
+// Every match is COUNTED; only this many are marked, and the label says so.
+const SS_FIND_MAX_MARKS = 2000;
 
 // The three states, on screen. A blank is what lets someone read "it was told
 // nothing" off a log that predates the record, or off bytes deliberately
 // purged, so each says which one it is.
-const XP_STATE_WORDS = {
+const SS_STATE_WORDS = {
   not_recorded: "not recorded — the aish that wrote this log did not keep it",
   empty: "recorded, and there was none",
   purged: "recorded, then deleted",
   unreadable: "recorded, but the stored bytes are unreadable",
   fragments: "only a fragment was kept — this log predates the full record",
 };
-
-function xpState(state, into) {
-  const word = XP_STATE_WORDS[state];
-  if (word) into.appendChild(xpEl("p", "xp-state", word));
-  return !word;   // true when the state is `recorded` and there is content
-}
-
-function xpSection(title, summary, fill) {
-  const wrap = xpEl("section", "xp-sec");
-  const head = xpEl("button", "xp-sechead");
-  head.type = "button";
-  head.appendChild(xpEl("span", "xp-secname", title));
-  head.appendChild(xpEl("span", "xp-secsum", summary));
-  head.appendChild(xpEl("span", "xp-chev", "›"));
-  const body = xpEl("div", "xp-secbody");
-  let filled = false;
-  head.onclick = () => {
-    // Built on first open, not on render: a turn's system text alone is tens of
-    // thousands of characters, and four sections of it laid out up front is a
-    // panel that takes a visible beat to appear.
-    if (!filled) { filled = true; fill(body); }
-    wrap.classList.toggle("open");
-  };
-  wrap.append(head, body);
-  return wrap;
-}
-
-function xpRow(into, label, value) {
-  const row = xpEl("div", "xp-row");
-  row.appendChild(xpEl("span", "xp-key", label));
-  row.appendChild(xpEl("span", "xp-val", value));
-  into.appendChild(row);
-}
-
-// A long body (reasoning, a page a tool read, the system prompt) folded to a
-// few lines with the rest one tap away. Not truncated — the whole point of the
-// record is that it is whole; only the first look is short.
-function xpLong(into, text, lines = 6) {
-  const all = String(text || "");
-  const pre = xpEl("pre", "xp-pre", all);
-  const split = all.split("\n");
-  if (split.length > lines || all.length > 600) {
-    pre.classList.add("xp-clamped");
-    const more = xpEl("button", "xp-more", `show all (${all.length} characters)`);
-    more.type = "button";
-    more.onclick = () => {
-      pre.classList.remove("xp-clamped");
-      more.remove();
-    };
-    into.append(pre, more);
-  } else {
-    into.appendChild(pre);
-  }
-}
-
-function xpGiven(doc, into) {
-  const given = doc.given;
-  if (!given.briefs.length) xpState(given.state, into);
-  for (const brief of given.briefs) {
-    const options = brief.options || {};
-    // A brief is written only when what the model was handed CHANGES, so most
-    // turns are shown the one still in force. That is a different fact from one
-    // written here, and collapsing them would let a reader conclude the tools
-    // changed at this turn when the record only says they had not changed since.
-    if (!brief.written_here) {
-      into.appendChild(xpEl("p", "xp-state",
-        `unchanged since turn ${brief.in_force_since} — this is what was still in force`));
-    }
-    xpRow(into, "model", `${options.model} · context ${options.num_ctx} · thinking ${options.think ? "on" : "off"}`);
-    if (options.system_role === "first_only") {
-      into.appendChild(xpEl("p", "xp-warn",
-        `on ${options.provider} the per-task reminder — which carries the rules in force — `
-        + "reached the model as one of your own messages, not as a system instruction"));
-    }
-    const sys = xpEl("div", "xp-sub");
-    sys.appendChild(xpEl("h4", null, "What it was told"));
-    if (xpState(brief.system.state, sys)) {
-      for (const part of brief.system.parts) {
-        const box = xpEl("div", "xp-part");
-        box.appendChild(xpEl("h5", null, `message ${part.at} · ${part.chars} characters`));
-        if (xpState(part.state, box)) xpLong(box, part.text);
-        sys.appendChild(box);
-      }
-    }
-    into.appendChild(sys);
-
-    const menu = xpEl("div", "xp-sub");
-    menu.appendChild(xpEl("h4", null, `Tools it could use (${brief.tools.count})`));
-    if (xpState(brief.tools.state, menu)) {
-      const search = xpEl("input", "xp-search");
-      search.type = "search";
-      search.placeholder = "Search tools";
-      const list = xpEl("div", "xp-tools");
-      const entries = brief.tools.entries || [];
-      const draw = (needle) => {
-        list.textContent = "";
-        for (const entry of entries) {
-          const fn = entry.function || {};
-          const name = String(fn.name || "");
-          const desc = String(fn.description || "");
-          if (needle && !(name + " " + desc).toLowerCase().includes(needle)) continue;
-          const item = xpEl("div", "xp-tool");
-          item.appendChild(xpEl("code", null, name));
-          item.appendChild(xpEl("p", null, desc));
-          list.appendChild(item);
-        }
-        if (!list.children.length) list.appendChild(xpEl("p", "xp-state", "no tool matches that"));
-      };
-      if (entries.length) {
-        search.oninput = () => draw(search.value.trim().toLowerCase());
-        draw("");
-        menu.append(search, list);
-      } else {
-        // Names without descriptions: the record has them, the bytes are gone.
-        menu.appendChild(xpEl("p", "xp-val", (brief.tools.names || []).join(", ")));
-      }
-    }
-    into.appendChild(menu);
-  }
-
-  for (const record of given.context.records || []) {
-    const preload = record.preload || {};
-    xpRow(into, "knowledge",
-      `${((record.index || {}).items || []).length} offered, ${preload.count || 0} injected`
-      + (preload.names && preload.names.length ? ` — ${preload.names.join(", ")}` : ""));
-  }
-  const rules = given.rules || {};
-  const bound = ((rules.groups || {}).bind) || [];
-  const abstained = ((rules.groups || {}).abstain) || [];
-  if (rules.state === "recorded") {
-    xpRow(into, "rules", `${bound.length} in force, ${abstained.length} evaluated and not applied`);
-    for (const row of bound) {
-      const item = xpEl("div", "xp-part");
-      item.appendChild(xpEl("h5", null, String(row.rule || "")));
-      for (const ob of (row.binding || {}).obligations || []) {
-        item.appendChild(xpEl("pre", "xp-pre", JSON.stringify(ob)));
-      }
-      into.appendChild(item);
-    }
-  }
-  for (const note of doc.steering || []) {
-    xpRow(into, "you typed", note.text);
-  }
-}
-
 // How the round grouping was arrived at. `recorded` needs no words; the other
-// two do, because a reader must never be shown an inference wearing a record's
-// clothes.
-const XP_GROUPING_WORDS = {
+// two do.
+const SS_GROUPING_WORDS = {
   inferred: "round order inferred from the order the log was written — this log predates the by-id record",
-  none: "this backend's loop records no model calls, so this turn cannot be shown as rounds",
+  none: "this backend's loop records no model calls, so calls are listed without a round",
+};
+const SS_PLACEMENT_WORDS = {
+  inferred: "attached to its model call by the order the log was written, not by a recorded id",
+  none: "no recorded model call issued this call",
+};
+// Where a tool call's model-facing text was read from (explain.SHOWN_*). The
+// two message joins are inferences and say so; a wrong text presented as
+// "what the model saw" is the exact lie the inspector exists to prevent.
+const SS_SHOWN_WORDS = {
+  step_output: "from the tool step's own output field — a preview the recorder capped; the whole output is not recorded yet",
+  step_error: "from the tool step's own error field",
+  message_by_order: "from the tool-role message record, matched to this call by tool name and order within its model call — the message carries no call id",
+  message_by_name: "from the tool-role message record, matched by tool name as the only call of that tool in its model call — the message carries no call id",
+  not_matched: "not matched — the record has no text that can be joined to this call (the message carries no call id)",
+};
+const SS_PANE_LABELS = {
+  context: "Context", response: "Response", call: "Call", result: "Result", page: "Page", event: "Event",
 };
 
-// The turn in the order it happened. Sectioning by record kind could not answer
-// "what did it think after it got that result", which is the question people
-// open a dossier to ask — so the thought, the calls it issued and the results
-// they returned sit together, round by round.
-//
-// The SKELETON is open and the bodies are folded: the skeleton IS the flow, and
-// if reading it costs a tap per round the reorganisation bought nothing.
-function xpFlow(doc, into) {
-  const flow = doc.flow || { grouping: "none", rounds: [], unplaced: [], loose: [] };
-  // Whether the reasoning is here at all — said once, at the top, rather than
-  // once per round. A log written before the full record kept only a rendered
-  // fragment, and a snippet shown as "the reasoning" is how someone concludes
-  // the model barely thought about it.
-  if (doc.thought.state === "fragments") {
-    xpState("fragments", into);
-    for (const gist of doc.thought.fragments || []) into.appendChild(xpEl("pre", "xp-pre", gist));
-  } else if (doc.thought.state !== "recorded") {
-    xpState(doc.thought.state, into);
-  }
-  const word = XP_GROUPING_WORDS[flow.grouping];
-  if (word) into.appendChild(xpEl("p", "xp-state", word));
-  const thoughts = new Map((doc.thought.calls || []).map((t) => [t.model_call, t]));
-  const calls = new Map((doc.did.calls || []).map((c) => [c.call, c]));
-
-  for (const round of flow.rounds) {
-    for (const event of round.before || []) xpEvent(event, true, into);
-    const box = xpEl("div", "xp-round");
-    const thought = thoughts.get(round.thought);
-    let head = `Round ${round.model_call}`;
-    if (thought && thought.tokens && thought.tokens.length) {
-      head += ` · ${thought.tokens[0]} in, ${thought.tokens[1]} out`;
-    }
-    if (thought && thought.stop && thought.stop !== "stop") head += ` · ${thought.stop}`;
-    box.appendChild(xpEl("h5", null, head));
-    if (!thought) {
-      box.appendChild(xpEl("p", "xp-state", "no response was recorded for this call"));
-    } else {
-      if (thought.synthesized) {
-        box.appendChild(xpEl("p", "xp-warn",
-          "the text below is aish's own sentence, not the model's"));
-      }
-      if (thought.text) xpLong(box, thought.text, 6);
-      else box.appendChild(xpEl("p", "xp-state", "this call recorded no thinking"));
-      if (thought.truncated) {
-        box.appendChild(xpEl("p", "xp-warn",
-          `${thought.truncated} characters were cut from this record by ${thought.cap_source || "a cap"}`));
-      }
-      if (thought.said) {
-        box.appendChild(xpEl("h6", null, "said alongside the call"));
-        xpLong(box, thought.said, 4);
-      }
-      if (thought.malformed && thought.malformed.length) {
-        box.appendChild(xpEl("p", "xp-warn",
-          "arguments did not parse for: " + thought.malformed.join(", ")));
-      }
-    }
-    for (const number of round.calls || []) {
-      const call = calls.get(number);
-      if (call) box.appendChild(xpCall(call));
-    }
-    if (thought && !(round.calls || []).length) {
-      box.appendChild(xpEl("p", "xp-state", "no tool calls ran under this one"));
-    }
-    box.dataset.round = String(round.model_call);
-    into.appendChild(box);
-  }
-
-  if ((flow.unplaced || []).length) {
-    into.appendChild(xpEl("h5", null, "calls that name no model call"));
-    for (const number of flow.unplaced) {
-      const call = calls.get(number);
-      if (call) into.appendChild(xpCall(call));
-    }
-  }
-  for (const event of flow.loose || []) xpEvent(event, false, into);
-  if (!flow.rounds.length && !(flow.unplaced || []).length) {
-    into.appendChild(xpEl("p", "xp-state", "nothing was recorded for this turn"));
-  }
+function ssEl(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
 }
 
-// Something that happened BETWEEN two thoughts — the "what changed while it was
-// running" facts a kind-sliced dossier hid. `placed` is false when no round
-// could be named: the event still shows, without a claim about when.
-function xpEvent(event, placed, into) {
-  const when = placed ? "before this call" : "at some point in this turn";
-  if (event.kind === "trim") {
-    const record = event.record || {};
-    const stubbed = (record.stubbed || []).map((s) => `${s.tool} (#${s.at})`).join(", ");
-    into.appendChild(xpEl("p", "xp-event",
-      `⚠ ${when}, ${record.affected} earlier result(s) were replaced with a stub for the model`
-      + (stubbed ? `: ${stubbed}` : " — which ones was not recorded")));
-  } else if (event.kind === "steering") {
-    into.appendChild(xpEl("p", "xp-event", `⚠ you typed ${when}: ${event.text}`));
-  } else if (event.kind === "brief_changed") {
-    into.appendChild(xpEl("p", "xp-event", `⚠ ${when}, what the model was handed changed`));
-  }
+function ssN(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "?";
+  return String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
-function xpCall(call) {
-  const box = xpEl("div", "xp-call");
-  box.dataset.call = String(call.call);
-  const head = xpEl("h6", null, `→ ${call.name}`);
-  if (!call.completed) head.appendChild(xpEl("span", "xp-bad", " never completed"));
-  else if (!call.ok) head.appendChild(xpEl("span", "xp-bad", ` failed (${call.status})`));
-  else if (call.summary) head.appendChild(xpEl("span", "xp-dim", ` ${call.summary}`));
-  box.appendChild(head);
-  if (call.args_state === "recorded") xpLong(box, JSON.stringify(call.args, null, 1), 4);
-  else xpState("not_recorded", box);
-  if (call.args_truncated) {
-    box.appendChild(xpEl("p", "xp-warn",
-      `${call.args_truncated} characters of these arguments were cut from the record`));
-  }
-  for (const gate of call.refused || []) {
-    box.appendChild(xpEl("p", "xp-warn",
-      `refused by ${gate.rule || gate.at}${gate.why ? ` — ${gate.why}` : ""}`));
-  }
-  if (call.error) box.appendChild(xpEl("p", "xp-bad", call.error));
-  if (call.output) {
-    box.appendChild(xpEl("h6", null, "what came back"));
-    xpLong(box, call.output, 6);
-  }
-  return box;
+function ssJson(value) {
+  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
-function xpFlowSummary(doc) {
-  const flow = doc.flow || { rounds: [], unplaced: [] };
-  const rounds = flow.rounds.length;
-  const calls = (doc.did.calls || []).length;
-  if (!rounds && !calls) return "not recorded";
-  const bad = (doc.did.calls || []).filter((c) => !c.ok || !c.completed).length;
-  return `${rounds} round${rounds === 1 ? "" : "s"} · ${calls} call${calls === 1 ? "" : "s"}`
-    + (bad ? ` · ${bad} failed` : "");
-}
+// ---- the record, fetched ------------------------------------------------
 
-function xpProduced(doc, into) {
-  const produced = doc.produced;
-  if (produced.answer) xpLong(into, produced.answer, 10);
-  else into.appendChild(xpEl("p", "xp-state", "no answer was recorded for this turn"));
-  const verify = produced.verify || {};
-  for (const gate of verify.stopped || []) {
-    into.appendChild(xpEl("p", "xp-warn", `held by ${gate.rule || "a check"}`));
-  }
-  for (const gate of verify.advised || []) {
-    into.appendChild(xpEl("p", "xp-val", `delivered with a note from ${gate.rule || "a check"}`));
-  }
-  if (verify.passed) into.appendChild(xpEl("p", "xp-state", `${verify.passed} check(s) passed`));
-  if (produced.status && produced.status !== "ok") {
-    into.appendChild(xpEl("p", "xp-bad", `the task ended ${produced.status}: ${produced.error}`));
-  }
-}
-
-// Facts about this turn worth reading first — computed in Python over the same
-// document, so this is a renderer and never a second opinion. Rows state what
-// happened and where it came from; none of them says WHY.
-function xpNotes(doc, into) {
-  const notes = doc.notes || { rows: [], checks: [] };
-  const box = xpEl("section", "xp-notes");
-  box.appendChild(xpEl("h4", null, "Worth a look"));
-  if (!notes.rows.length) {
-    // NOT "nothing unusual": a checker knows only the classes someone coded,
-    // so on the one turn whose cause is an uncoded class that sentence would
-    // state the opposite of the truth, above the evidence.
-    box.appendChild(xpEl("p", "xp-state",
-      `nothing flagged by the ${notes.checks.length} checks this reader runs`));
-  }
-  for (const row of notes.rows) {
-    const item = xpEl("button", "xp-note", row.text);
-    item.type = "button";
-    item.onclick = () => xpJump(row.where);
-    box.appendChild(item);
-  }
-  into.appendChild(box);
-}
-
-// Put `el` at the top of the panel's own scroller.
-//
-// NOT scrollIntoView. That scrolls every scrollable ancestor — including the
-// transcript behind the sheet — and its smooth behaviour turns a long jump into
-// an animation that races whatever the reader does next; measured, a jump of
-// 8000px had not arrived a second and a half later, which reads as a dead
-// control. Setting scrollTop on the one scroller that owns this content is
-// deterministic and instant, which is what navigating inside a panel should be.
-function xpScrollTo(el) {
-  const body = $("xp-body");
-  if (!body || !el) return;
-  // offsetTop accumulation, NOT getBoundingClientRect. A rect is measured
-  // against the viewport, so turning it into a content offset needs
-  // `+ scrollTop` — and that term makes the answer depend on the layout being
-  // settled at the instant of measurement. Measured on a real turn: a round
-  // whose true offset was 10812 read as 361 while the section that had just
-  // been filled was still being laid out, so the panel scrolled 355px and the
-  // reader landed in the middle of the wrong section. offsetTop is
-  // scroll-independent, so there is no term to be stale.
-  let top = 0;
-  for (let node = el; node && node !== body; node = node.offsetParent) top += node.offsetTop;
-  body.scrollTop = Math.max(0, top - 6);
-}
-
-// A note is a shortcut INTO the evidence, so it opens the section AND lands on
-// the exact round or call it was computed from. Landing at the top of a long
-// stream makes the citation decorative.
-function xpJump(where) {
-  where = where || {};
-  const target = document.querySelector(`.xp-sec[data-sec="${where.section}"]`);
-  if (!target) return;
-  if (!target.classList.contains("open")) target.querySelector(".xp-sechead").click();
-  let inner = null;
-  if (where.call !== undefined) {
-    inner = target.querySelector(`.xp-call[data-call="${where.call}"]`);
-  } else if (where.model_call !== undefined) {
-    inner = target.querySelector(`.xp-round[data-round="${where.model_call}"]`);
-  }
-  const landing = inner || target;
-  xpScrollTo(landing);
-  // …and again once the browser has laid the new section out. Filling a section
-  // adds thousands of pixels above the landing spot, and the first pass can
-  // measure before that settles; a second pass on the next frame is cheap and
-  // makes the jump land whether or not it did.
-  requestAnimationFrame(() => xpScrollTo(landing));
-}
-
-function xpRender(doc) {
-  const body = $("xp-body");
-  body.textContent = "";
-  $("xp-title").textContent = "Full record";
-
-  const head = xpEl("header", "xp-head");
-  head.appendChild(xpEl("p", "xp-prompt", doc.prompt || "(no prompt recorded)"));
-  const options = ((doc.given.briefs[0] || {}).options) || {};
-  const bits = [options.model, doc.ts].filter(Boolean);
-  head.appendChild(xpEl("p", "xp-meta", bits.join(" · ")));
-  if (doc.running) {
-    head.appendChild(xpEl("p", "xp-warn",
-      "this turn is still running — showing what has been recorded so far"));
-  }
-  body.appendChild(head);
-
-  xpNotes(doc, body);
-
-  // Three parts, in the shape a turn actually has. Sectioning by record kind is
-  // how a FILE is organised, and it left the reader unable to tell which
-  // thinking followed which result.
-  const sections = [
-    ["given", "Before it started", xpGivenSummary(doc), (into) => xpGiven(doc, into)],
-    ["flow", "What happened", xpFlowSummary(doc), (into) => xpFlow(doc, into)],
-    ["produced", "What it answered", xpProducedSummary(doc), (into) => xpProduced(doc, into)],
-  ];
-  for (const [key, title, summary, fill] of sections) {
-    const section = xpSection(title, summary, fill);
-    section.dataset.sec = key;
-    body.appendChild(section);
-  }
-}
-
-function xpGivenSummary(doc) {
-  const brief = doc.given.briefs[0];
-  if (!brief) return "not recorded";
-  const rules = ((doc.given.rules || {}).groups || {}).bind || [];
-  return `${brief.tools.count} tools · ${rules.length} rules`;
-}
-
-function xpProducedSummary(doc) {
-  const produced = doc.produced;
-  if (produced.status && produced.status !== "ok") return `ended ${produced.status}`;
-  const held = (produced.verify || {}).stopped || [];
-  return held.length ? `${held.length} check(s) held it` : "answered";
-}
-
-// [EXPLAIN-OPEN-START]
-// The one entry point. `ref` is the #202 string turn id, or empty for the
-// session's LAST turn — never a client-counted ordinal, because the first paint
-// is bounded and a browser's fourth turn is not the log's fourth on a long chat
-// ([FORK-ANCHOR]'s lesson: an id cannot be counted wrong).
-async function openExplain(ref) {
-  if (!currentSession) return;
-  if (xpAbort) xpAbort.abort();
-  xpAbort = new AbortController();
-  openSheet("explain-sheet");
-  const body = $("xp-body");
-  body.textContent = "";
-  $("xp-title").textContent = "Full record";
-  body.appendChild(xpEl("p", "xp-state", "reading the record…"));
+function dossierUrl(ref) {
   const url = new URL(BASE + "explain", location.href);
   url.searchParams.set("session", currentSession);
   if (ref) url.searchParams.set("turn", ref);
   if (token) url.searchParams.set("token", token);
+  return url.toString();
+}
+
+// Resolves to the document, or rejects with an Error whose message is the
+// sentence to put on screen (L7: a screen that cannot show the truth says so).
+// Offline is the ordinary case — the transcript paints from the mirror while
+// /explain cannot be served — and it is named as such rather than as a failure.
+async function fetchDossier(ref, signal) {
+  if (!currentSession) throw new Error("no chat is open");
+  if (offlineViewing) {
+    throw new Error("the server is needed to read this turn's record — this chat was painted from the offline copy");
+  }
+  let response;
   try {
-    const response = await fetch(url.toString(), { cache: "no-store", signal: xpAbort.signal });
-    if (!response.ok) {
-      // A screen that cannot show the truth SAYS so (L7) rather than leaving
-      // the spinner up. Offline is the common case here: the transcript paints
-      // from the mirror, so the door is visible when the fetch cannot work.
-      body.textContent = "";
-      body.appendChild(xpEl("p", "xp-state",
-        response.status === 404
-          ? "there is no record of that turn in this chat's log"
-          : `the record could not be read (${response.status})`));
-      return;
-    }
-    xpRender(await response.json());
+    response = await fetch(dossierUrl(ref), { cache: "no-store", signal });
   } catch (err) {
-    if (err && err.name === "AbortError") return;
-    body.textContent = "";
-    body.appendChild(xpEl("p", "xp-state",
-      "the record could not be read — this device may be offline"));
+    if (err && err.name === "AbortError") throw err;
+    throw new Error("the record could not be read — this device may be offline");
+  }
+  if (!response.ok) {
+    throw new Error(response.status === 404
+      ? "there is no record of that turn in this chat's log"
+      : `the record could not be read (${response.status})`);
+  }
+  return response.json();
+}
+
+// ---- lookups by reference ------------------------------------------------
+
+// An event step carries no `ref` at all, and every lookup tolerates that.
+function ssThought(doc, step) {
+  const ref = step.ref || {};
+  return (doc.thought.calls || []).find((t) => t.model_call === ref.thought) || null;
+}
+function ssCallOf(doc, step) {
+  const ref = step.ref || {};
+  return (doc.did.calls || []).find((c) => c.call === ref.call) || null;
+}
+function ssCostOf(doc, step) {
+  const ref = step.ref || {};
+  return ((doc.context_cost || {}).calls || []).find((c) => c.model_call === ref.cost) || null;
+}
+function ssMessage(doc, index) {
+  return index === null || index === undefined ? null : (doc.messages || [])[index] || null;
+}
+function ssMsgHead(m) {
+  return `── message #${m.at} · ${m.role}${m.tool_name ? "/" + m.tool_name : ""} · ${ssN(m.chars)} chars`
+    + (m.model_call === null ? " · no model-call stamp" : "")
+    + (m.interim ? " · interim" : "")
+    + (m.images ? ` · ${m.images} image(s)` : "");
+}
+function ssIssued(doc, step) {
+  return (doc.steps || []).filter((s) => s.kind === "tool_call" && s.model_call === step.model_call);
+}
+
+// ---- pane text: model call -------------------------------------------------
+
+function ssBriefLines(doc, step, lines) {
+  const brief = (doc.given.briefs || [])[step.ref.brief];
+  if (!brief) {
+    lines.push(`THE BRIEF — ${SS_STATE_WORDS[doc.given.state] || "not recorded"}`);
+    return;
+  }
+  const options = brief.options || {};
+  lines.push("THE BRIEF — what the model was handed"
+    + (brief.written_here ? "" : ` (unchanged since turn ${brief.in_force_since} — this is what was still in force)`));
+  lines.push(`model ${options.model || "?"} on ${options.provider || "?"} · context ${options.num_ctx || "?"}`
+    + (options.window ? ` · window ${ssN(options.window)} (${options.window_source || "recorded"})` : "")
+    + ` · thinking ${options.think ? "on" : "off"}`);
+  if (options.system_role === "first_only") {
+    lines.push(`on ${options.provider} the per-task reminder — which carries the rules in force — reached the model as one of your own messages, not as a system instruction`);
+  }
+  lines.push("", "SYSTEM TEXT");
+  const system = brief.system || { state: "not_recorded", parts: [] };
+  if (system.state !== "recorded") lines.push(SS_STATE_WORDS[system.state] || system.state);
+  for (const part of system.parts || []) {
+    lines.push(`── system message ${part.at} · ${ssN(part.chars)} chars`);
+    lines.push(part.state === "recorded" ? (part.text || "") : (SS_STATE_WORDS[part.state] || part.state));
+  }
+  const tools = brief.tools || {};
+  lines.push("", `TOOLS ON THE MENU — ${tools.count === undefined ? "?" : tools.count}`);
+  if (tools.state !== "recorded") lines.push(SS_STATE_WORDS[tools.state] || tools.state);
+  if (tools.entries && tools.entries.length) {
+    for (const entry of tools.entries) {
+      const fn = entry.function || {};
+      lines.push(`· ${fn.name || "?"} — ${fn.description || ""}`);
+    }
+  } else if (tools.names && tools.names.length) {
+    lines.push("names only — the menu's bytes are gone: " + tools.names.join(", "));
+  }
+  const rules = doc.given.rules || {};
+  const bound = ((rules.groups || {}).bind) || [];
+  if (rules.state === "recorded") {
+    lines.push("", `RULES BOUND — ${bound.length}`);
+    for (const row of bound) lines.push(`· ${row.rule}: ${ssJson((row.binding || {}).obligations || [])}`);
+  }
+  for (const record of doc.given.context.records || []) {
+    const preload = record.preload || {};
+    lines.push("", `KNOWLEDGE — ${((record.index || {}).items || []).length} offered, ${preload.count || 0} injected`
+      + (preload.names && preload.names.length ? `: ${preload.names.join(", ")}` : ""));
+  }
+  for (const trim of doc.given.trims || []) {
+    lines.push("", `SEED TRIM — ${trim.affected} earlier result(s) were stubbed before the model was called at all`
+      + (trim.stubbed ? `: ${trim.stubbed.map((x) => `${x.tool} (#${x.at})`).join(", ")}` : "; which ones was not recorded"));
   }
 }
-// [EXPLAIN-OPEN-END]
-// [EXPLAIN-END]
+
+function ssCostLines(doc, step, lines) {
+  const cost = ssCostOf(doc, step);
+  if (!cost) {
+    if ((doc.context_cost || {}).state === "not_recorded") {
+      lines.push("what filled this call is not recorded — the messages carry no model-call stamp");
+    }
+    return;
+  }
+  const by = cost.by_where || {};
+  const side = (key) => by[key] ? `${ssN(by[key].chars)} chars in ${by[key].items}` : "0";
+  lines.push(`measured: ${ssN(cost.accounted_chars)} chars in front of this call`
+    + ` (${cost.added_chars >= 0 ? "+" : ""}${ssN(cost.added_chars)} since the previous)`);
+  lines.push(`  carried from earlier turns ${side("carried")} · this turn ${side("turn")}`
+    + ` · system text ${side("system")} · tool menu ${side("tools")}`);
+  const reported = cost.reported || {};
+  const keys = Object.keys(reported);
+  if (keys.length) {
+    lines.push(`reported by the provider: ${keys.map((k) => `${ssN(reported[k])} ${k}`).join(" · ")}`
+      + (cost.chars_per_token ? ` · ${cost.chars_per_token} chars per input token` : ""));
+  } else {
+    lines.push("tokens: not reported by the provider for this call");
+  }
+  if (cost.unmeasured && cost.unmeasured.length) lines.push(`unmeasured: ${cost.unmeasured.join("; ")}`);
+}
+
+function ssContextText(doc, step, whole) {
+  const ctx = step.context || { new: [], in_front: [], unstamped: 0, stubbed: [] };
+  const k = step.model_call;
+  const lines = [];
+  if (whole) lines.push(`THE WHOLE CONTEXT OF MODEL CALL ${k}`);
+  else lines.push(k > 1 ? `WHAT CHANGED SINCE MODEL CALL ${k - 1}` : "WHAT MODEL CALL 1 STARTED FROM");
+  lines.push(ctx.source === "reconstructed"
+    ? "reconstructed from the message records and the brief — not the request as it left aish, which is not recorded yet"
+    : `source: ${ctx.source}`);
+  if (step.numbering === "inferred") lines.push("this call's number is inferred from the order the log was written");
+  ssCostLines(doc, step, lines);
+  lines.push("");
+  if (!whole) {
+    if (ctx.brief_changed) lines.push("what the model was handed CHANGED at this call — the brief is in the whole context");
+    if (ctx.stubbed.length) {
+      lines.push(`stubbed before this call: ${ctx.stubbed.map((x) => `${x.tool} (#${x.at})`).join(", ")}`
+        + " — results the model had already read were replaced with a stub");
+    }
+    lines.push(`NEW TO THIS CALL — ${ctx.new.length} message(s)`);
+    if (!ctx.new.length) lines.push(k > 1 ? "no message record is new to this call" : "no message record precedes this call");
+    for (const index of ctx.new) {
+      const m = ssMessage(doc, index);
+      if (!m) continue;
+      lines.push("", ssMsgHead(m), m.text || "(empty)");
+    }
+    if (ctx.unstamped) {
+      lines.push("", `${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
+    }
+    const older = ctx.in_front.length - ctx.new.length;
+    lines.push("", `${ctx.in_front.length} message(s) of this turn were in front of this call`
+      + (older > 0 ? ` — ${older} from earlier calls; the whole context is one tap away` : "")
+      + (ctx.in_front.length === 0 && k > 1 ? " — none placed" : ""));
+  } else {
+    ssBriefLines(doc, step, lines);
+    const cost = ssCostOf(doc, step);
+    const carried = cost && cost.by_where && cost.by_where.carried;
+    lines.push("", "MESSAGES FROM EARLIER TURNS");
+    lines.push(carried
+      ? `${carried.items} message(s), ${ssN(carried.chars)} chars, carried from earlier turns of this chat are in front of this call and are not in this document — open those turns to read them`
+      : "how much earlier history was in front of this call is not recorded");
+    lines.push("", `MESSAGES OF THIS TURN IN FRONT OF THIS CALL — ${ctx.in_front.length}`);
+    for (const index of ctx.in_front) {
+      const m = ssMessage(doc, index);
+      if (!m) continue;
+      lines.push("", ssMsgHead(m) + (ctx.new.includes(index) ? " · new to this call" : ""), m.text || "(empty)");
+    }
+    if (ctx.unstamped) {
+      lines.push("", `${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function ssResponseText(doc, step) {
+  const th = ssThought(doc, step);
+  const lines = [];
+  if (th) {
+    if (th.synthesized) lines.push("the text below is aish's own sentence, not the model's");
+    lines.push("REASONING");
+    lines.push(th.text || "this call recorded no thinking");
+    if (th.truncated) lines.push(`… ${ssN(th.truncated)} characters were cut from this record by ${th.cap_source || "a cap"}`);
+    lines.push("", "SAID");
+    lines.push(th.said || "nothing was said on this call");
+    if (th.said_truncated) lines.push(`… ${ssN(th.said_truncated)} characters were cut from this record`);
+    if (th.stop) lines.push("", `stop reason: ${th.stop}`);
+    if (th.blocks && th.blocks.length) lines.push(`provider blocks: ${th.blocks.join(", ")}`);
+    if (th.malformed && th.malformed.length) lines.push(`arguments did not parse for: ${th.malformed.join(", ")}`);
+  } else if (step.fragment) {
+    lines.push(SS_STATE_WORDS.fragments, "", step.fragment);
+  } else {
+    lines.push(SS_STATE_WORDS[doc.thought.state] || "no response was recorded for this call");
+  }
+  const issued = ssIssued(doc, step);
+  lines.push("", `TOOL CALLS ISSUED — ${issued.length}`);
+  for (const s of issued) {
+    const c = ssCallOf(doc, s);
+    lines.push(`→ ${s.name} (tool call ${s.call})`);
+    lines.push(c && c.args_state === "recorded" ? ssJson(c.args) : SS_STATE_WORDS.not_recorded);
+  }
+  if (step.is_last) {
+    const produced = doc.produced || {};
+    lines.push("", "WHAT IT ANSWERED");
+    lines.push(produced.answer || (SS_STATE_WORDS[produced.answer_state] || "no answer was recorded for this turn"));
+    const verify = produced.verify || {};
+    for (const gate of verify.stopped || []) lines.push(`held by ${gate.rule || "a check"}`);
+    for (const gate of verify.advised || []) lines.push(`delivered with a note from ${gate.rule || "a check"}`);
+    if (verify.passed) lines.push(`${verify.passed} check(s) passed`);
+    if (produced.status === null || produced.status === undefined) {
+      lines.push("no end was recorded for this task — it was interrupted, or it is still running");
+    } else if (produced.status !== "ok") {
+      lines.push(`the task ended ${produced.status}: ${produced.error || ""}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+// ---- pane text: tool call ---------------------------------------------------
+
+function ssCallText(doc, step) {
+  const c = ssCallOf(doc, step);
+  const lines = [];
+  if (!c) return "the record has no call for this step";
+  lines.push(`${c.name}` + (c.completed ? "" : " — proposed, and no result was recorded"));
+  if (SS_PLACEMENT_WORDS[step.placement]) lines.push(SS_PLACEMENT_WORDS[step.placement]);
+  lines.push("", "ARGUMENTS");
+  lines.push(c.args_state === "recorded" ? ssJson(c.args) : SS_STATE_WORDS.not_recorded);
+  if (c.args_truncated) {
+    lines.push(`… ${ssN(c.args_truncated)} characters of these arguments were cut from the record by ${c.cap_source || "a cap"} (applied per argument value)`);
+  }
+  if (c.command) lines.push("", "COMMAND AS RUN", c.command);
+  lines.push("", "DECISION");
+  lines.push(c.decision ? `${c.decision}` : "no decision recorded on the step (auto-approved, or a tool with no gate)");
+  if (c.verdict_by) lines.push(`verdict by: ${c.verdict_by}`);
+  if (c.comment) lines.push(`you said: ${c.comment}`);
+  if (c.replaces) lines.push(`proposed after the held call ${c.replaces}`);
+  const gates = c.gates || [];
+  const refused = c.refused || [];
+  const allowed = gates.length - refused.length;
+  lines.push("", `GATE VERDICTS — ${gates.length}` + (allowed ? ` (${allowed} allowed, collapsed)` : ""));
+  if (!gates.length) lines.push("no gate verdict was recorded for this call");
+  for (const gate of refused) lines.push(ssJson(gate));
+  return lines.join("\n");
+}
+
+function ssShownText(doc, step) {
+  const c = ssCallOf(doc, step);
+  if (!c) return "";
+  const how = step.ref.shown_how;
+  if (how === "step_output") return c.output || "";
+  if (how === "step_error") return c.error || "";
+  const m = ssMessage(doc, step.ref.shown);
+  return m ? m.text : "";
+}
+
+function ssResultText(doc, step) {
+  const c = ssCallOf(doc, step);
+  const lines = [];
+  if (!c) return "the record has no call for this step";
+  const how = step.ref.shown_how;
+  lines.push("WHAT THE MODEL WAS GIVEN — " + (SS_SHOWN_WORDS[how] || how));
+  if (!c.completed) lines.push("the call never completed, so nothing came back");
+  else if (how !== "not_matched") lines.push("", ssShownText(doc, step) || "(empty)");
+  if (c.bytes !== null && c.bytes !== undefined) lines.push("", `payload before any cut: ${ssN(c.bytes)} bytes`);
+  const cut = c.truncation || {};
+  lines.push("", "TRUNCATION");
+  if (!Object.keys(cut).length) lines.push("no truncation block was recorded for this call");
+  else {
+    lines.push(`cut by ${cut.truncator || "a cap"}: kept ${ssN(cut.kept)} chars, omitted ${ssN(cut.omitted)}`
+      + (cut.cap_source ? ` (${cut.cap_source})` : ""));
+    lines.push(cut.offered
+      ? `a continuation was offered (${cut.continuation || "?"})`
+      : "no continuation was offered — the rest could not be read back");
+    if (step.continuation_read === true) lines.push("the continuation was read back in this turn");
+    else if (step.continuation_read === false) lines.push("nothing read the continuation back in this turn");
+  }
+  if (c.read) lines.push(`this call read back the continuation ${c.read}`);
+  lines.push("", "NOT RECORDED YET");
+  lines.push("the whole output before any cut: not recorded (part 3 of #352)");
+  lines.push("the text exactly as it was sent to the model: not recorded (part 2 of #352) — the text above is the record's copy");
+  return lines.join("\n");
+}
+
+function ssPageBefore(c) {
+  if (!c || !c.frame || c.frame_state !== "recorded") return null;
+  return framePicture(c.frame, "the page as aish read it");
+}
+
+function ssPageText(doc, step) {
+  const c = ssCallOf(doc, step);
+  const lines = [];
+  if (!c) return "the record has no call for this step";
+  lines.push("THE PICTURE");
+  if (c.frame && c.frame_state === "recorded") lines.push(`the page at the moment the model was shown it: ${c.frame}`);
+  else if (c.frame) lines.push(`a picture was recorded at ${c.frame} and the store has since cleared it (purged)`);
+  else if (c.frame_skipped) lines.push((typeof FRAME_ABSENT === "object" && FRAME_ABSENT[c.frame_skipped]) || `no picture — ${c.frame_skipped}`);
+  else lines.push("no picture and no reason recorded — a log written before frames, or a tool with no page");
+  if (c.frame_url) {
+    lines.push(c.frame_from
+      ? `${c.frame_url} — aish was on ${c.frame_from} before this`
+      : `${c.frame_url} — the address did not change`);
+  }
+  if (c.covered && c.covered.by) {
+    lines.push("", `a click could not land — the page had "${c.covered.by}" on top of the control`
+      + (c.covered.dismissed ? " — aish dismissed it and clicked again" : ""));
+  }
+  if (c.problem) lines.push("", "AISH'S OWN OBSERVATION", c.problem);
+  if (c.unchanged) lines.push("", "nothing on the page changed when aish did this");
+  lines.push("", "THE PAGE'S WORDS — what it wrote to its own console (not aish's)");
+  if (c.console && c.console.length) for (const line of c.console) lines.push(line);
+  else if (c.console) lines.push("the page wrote nothing");
+  else lines.push("not recorded for this call");
+  const signin = c.signin;
+  if (signin && signin.host) {
+    lines.push("", `SIGN-IN ATTEMPT AT ${signin.host} — a page of its own, not the one above`);
+    lines.push(signin.ok === true ? "the session was seen to come up"
+      : signin.ok === false ? "the session was not seen to come up"
+        : "whether the session came up was not recorded");
+    if (signin.verdict_said) lines.push(`verdict: ${signin.verdict_said} (${signin.verdict})`);
+    else if (signin.ok === false) lines.push("no verdict was recorded for this attempt — either it ended before aish judged it, or this log predates the record");
+    for (const said of signin.observed_said || []) lines.push(`· ${said}`);
+    if (signin.frame) lines.push(`its picture: ${signin.frame}` + (signin.frame_state === "purged" ? " (purged)" : ""));
+    else if (signin.frame_skipped) lines.push((typeof FRAME_ABSENT === "object" && FRAME_ABSENT[signin.frame_skipped]) || `no picture — ${signin.frame_skipped}`);
+    if (signin.covered) lines.push(`a click could not land — the page had "${signin.covered}" on top of the control`);
+    if (signin.console && signin.console.length) {
+      lines.push("the sign-in page's words — its own console:");
+      for (const line of signin.console) lines.push(line);
+    }
+  }
+  if (c.phases) lines.push("", "WHERE THE SECONDS WENT (ms)", ssJson(c.phases));
+  return lines.join("\n");
+}
+
+function ssEventText(doc, step) {
+  const lines = [];
+  for (const fact of step.facts || []) lines.push(`${fact.k}: ${fact.v}`);
+  if (step.kind === "steering") lines.push("", "YOU TYPED", step.text || "");
+  else if (step.kind === "model_error") {
+    const record = step.record || {};
+    if (record.text) lines.push("", "WHAT THE PROVIDER SAID", record.text);
+    if (record.truncated) lines.push(`… ${ssN(record.truncated)} characters were cut by ${record.cap_source || "a cap"}`);
+    lines.push("", "THE RECORD", ssJson(record));
+  } else if (step.kind === "trim") {
+    lines.push("", "THE RECORD", ssJson(step.record || {}));
+  } else if (step.kind === "retry") {
+    lines.push("", "its records are kept, superseded", "", "THE RECORD", ssJson(step.record || {}));
+  } else if (step.kind === "brief_changed") {
+    lines.push("", "the brief this call was handed is in that model call's whole context");
+  }
+  return lines.join("\n");
+}
+
+// Every pane of a step, as text. `before` is a node drawn ABOVE the text —
+// the page's picture through the trace card's own `framePicture`, so there is
+// one answer to which pictures may load. `more` is the pane's other reading,
+// the whole context, one tap away.
+function ssPanes(doc, step) {
+  const out = [];
+  for (const name of step.panes || []) {
+    if (name === "context") {
+      out.push({ name, label: SS_PANE_LABELS[name], text: ssContextText(doc, step, false),
+                 more: { label: "whole context", text: ssContextText(doc, step, true) } });
+    } else if (name === "response") out.push({ name, label: SS_PANE_LABELS[name], text: ssResponseText(doc, step) });
+    else if (name === "call") out.push({ name, label: SS_PANE_LABELS[name], text: ssCallText(doc, step) });
+    else if (name === "result") out.push({ name, label: SS_PANE_LABELS[name], text: ssResultText(doc, step) });
+    else if (name === "page") {
+      out.push({ name, label: SS_PANE_LABELS[name], text: ssPageText(doc, step),
+                 before: ssPageBefore(ssCallOf(doc, step)) });
+    } else out.push({ name, label: SS_PANE_LABELS[name] || name, text: ssEventText(doc, step) });
+  }
+  return out;
+}
+
+// One line per pane for the row's in-place summary: what is in it, and how big.
+function ssPaneBrief(doc, step, pane) {
+  if (pane === "context") {
+    const cost = ssCostOf(doc, step);
+    const ctx = step.context || { new: [] };
+    return (cost ? `${ssN(cost.accounted_chars)} chars in front · ` : "")
+      + `${ctx.new.length} new message(s)`
+      + (ctx.stubbed && ctx.stubbed.length ? ` · ${ctx.stubbed.length} stubbed` : "");
+  }
+  if (pane === "response") {
+    const th = ssThought(doc, step);
+    const issued = ssIssued(doc, step).length;
+    if (!th) return (step.fragment ? "a fragment" : (SS_STATE_WORDS[doc.thought.state] || "not recorded"))
+      + ` · ${issued} tool call(s)`;
+    return `reasoning ${ssN((th.text || "").length)} chars · said ${ssN((th.said || "").length)} · ${issued} tool call(s)`;
+  }
+  const c = ssCallOf(doc, step);
+  if (pane === "call") {
+    if (!c) return "not in the record";
+    return (c.args_state === "recorded" ? `args ${ssN(ssJson(c.args).length)} chars` : "args not recorded")
+      + (c.decision ? ` · ${c.decision}` : "")
+      + (c.verdict_by ? ` · by ${c.verdict_by}` : "")
+      + ((c.refused || []).length ? ` · ${c.refused.length} refused` : "");
+  }
+  if (pane === "result") {
+    if (!c) return "not in the record";
+    const cut = c.truncation || {};
+    return `${ssN(ssShownText(doc, step).length)} chars`
+      + (step.ref.shown_how === "not_matched" ? " (not matched)" : "")
+      + (cut.omitted ? ` · ${ssN(cut.omitted)} omitted by ${cut.truncator || "a cap"}` : "")
+      + (step.continuation_read === false ? " · continuation unread" : "");
+  }
+  if (pane === "page") {
+    if (!c) return "not in the record";
+    const bits = [];
+    if (c.frame) bits.push(c.frame_state === "recorded" ? "picture" : "picture purged");
+    else if (c.frame_skipped) bits.push("no picture");
+    if (c.console) bits.push(`console ${c.console.length} line(s)`);
+    if (c.signin && c.signin.host) bits.push(`sign-in at ${c.signin.host}`);
+    if (c.covered && c.covered.by) bits.push("covered");
+    if (c.problem) bits.push("problem");
+    if (c.phases) bits.push("phases");
+    return bits.join(" · ") || "recorded";
+  }
+  return (step.facts || []).map((f) => `${f.k} ${f.v}`).join(" · ");
+}
+
+// ---- the surface ----------------------------------------------------------
+
+function ssIsOpen() { return !!ssView; }
+
+// Open on the step `stepId` names (else the first), on `pane` where that step
+// has it (else its first). Synchronous: a worth-a-look tap lands on its first
+// pass, with no frame to wait for.
+function ssOpen(doc, stepId, pane) {
+  const box = $("step-screen");
+  if (!box) return false;
+  const steps = doc.steps || [];
+  let index = steps.findIndex((s) => s.id === stepId);
+  if (index < 0) index = 0;
+  ssView = { doc, index: 0, pane: "", text: "" };
+  ssFind = { query: "", hits: 0, at: -1, marks: [] };
+  ssWhole = false;
+  ssGesture = null;
+  const find = $("ss-find");
+  if (find) find.value = "";
+  box.hidden = false;
+  if (!steps.length) { ssPaint(); return true; }
+  return ssShow(index, pane || "");
+}
+
+// The door by id (`/explain <ref>`, and the card's Full record row): the first
+// worth-a-look row's step and pane, else the first step.
+function ssOpenDoc(doc, stepId, pane) {
+  const note = !stepId && (((doc.notes || {}).rows) || [])[0];
+  const where = (note && note.where) || {};
+  return ssOpen(doc, stepId || where.step || (((doc.steps || [])[0]) || {}).id, pane || where.pane || "");
+}
+
+// The one writer of what is on screen. Keeps the pane BY NAME where the step
+// has it, and lands on the first pane otherwise.
+function ssShow(index, pane) {
+  if (!ssView) return false;
+  const steps = ssView.doc.steps || [];
+  const step = steps[index];
+  if (!step) return false;
+  const panes = step.panes || [];
+  if (!panes.includes(pane)) pane = panes[0] || "";
+  ssView = { doc: ssView.doc, index, pane, text: "" };
+  ssPaint();
+  return true;
+}
+
+function ssGo(delta) {
+  if (!ssView) return false;
+  return ssShow(ssView.index + delta, ssView.pane);
+}
+
+function ssClose() {
+  if (!ssView) return false;
+  const box = $("step-screen");
+  if (box) box.hidden = true;
+  const body = $("ss-body");
+  if (body) body.textContent = ""; // a turn's context is hundreds of KB; drop it
+  if (ssAbort) { ssAbort.abort(); ssAbort = null; }
+  ssView = null;
+  return true;
+}
+
+function ssPaint() {
+  const { doc, index, pane } = ssView;
+  const steps = doc.steps || [];
+  const step = steps[index] || null;
+  $("ss-count").textContent = steps.length ? `Step ${index + 1} of ${steps.length}` : "No steps";
+  let title = step ? step.title : "nothing was recorded for this turn";
+  if (step && step.kind === "model_call" && step.numbering === "inferred") title += " · number inferred";
+  if (step && step.kind === "tool_call" && step.placement === "inferred") title += " · round inferred";
+  $("ss-title").textContent = title;
+  $("ss-prev").disabled = index <= 0;
+  $("ss-next").disabled = index >= steps.length - 1;
+
+  const facts = $("ss-facts");
+  facts.textContent = "";
+  for (const fact of (step && step.facts) || []) {
+    const chip = ssEl("span", "ss-fact");
+    chip.append(ssEl("span", "ss-fact-k", fact.k), ssEl("span", "ss-fact-v", fact.v));
+    facts.appendChild(chip);
+  }
+
+  const tabs = $("ss-panes");
+  tabs.textContent = "";
+  for (const name of (step && step.panes) || []) {
+    const tab = ssEl("button", "ss-tab" + (name === pane ? " on" : ""), SS_PANE_LABELS[name] || name);
+    tab.type = "button";
+    tab.dataset.pane = name;
+    tab.setAttribute("aria-selected", name === pane ? "true" : "false");
+    tab.onclick = () => ssShow(index, name);
+    tabs.appendChild(tab);
+  }
+
+  // The states, said out loud above the body: a running turn, a grouping that
+  // is an inference, a backend that records no rounds.
+  const note = $("ss-note");
+  note.textContent = "";
+  const sentences = [];
+  if (doc.running) sentences.push("this turn is still running — showing the steps recorded so far");
+  const grouping = (doc.flow || {}).grouping;
+  if (SS_GROUPING_WORDS[grouping]) sentences.push(SS_GROUPING_WORDS[grouping]);
+  if (step && step.kind === "tool_call" && SS_PLACEMENT_WORDS[step.placement]) sentences.push(SS_PLACEMENT_WORDS[step.placement]);
+  for (const sentence of sentences) note.appendChild(ssEl("p", "ss-state", sentence));
+  note.hidden = !sentences.length;
+
+  ssPaintBody(step ? ssPanes(doc, step).find((p) => p.name === pane) : null);
+}
+
+function ssPaintBody(paneObj) {
+  const body = $("ss-body");
+  body.textContent = "";
+  body.scrollTop = 0;
+  const whole = $("ss-whole");
+  const text = paneObj ? ((paneObj.more && ssWhole) ? paneObj.more.text : paneObj.text) : "nothing was recorded for this turn";
+  ssView.text = text;
+  if (whole) {
+    whole.hidden = !(paneObj && paneObj.more);
+    whole.textContent = ssWhole ? "what changed" : (paneObj && paneObj.more ? paneObj.more.label : "");
+  }
+  if (paneObj && paneObj.before) body.appendChild(paneObj.before);
+  const pre = ssEl("pre", "ss-pre mono", text);
+  body.appendChild(pre);
+  if (text.length > SS_FOLD_CHARS) {
+    // Folded, never truncated: the whole text is in `pre`; only the first
+    // look is short.
+    pre.classList.add("ss-clamped");
+    const more = ssEl("button", "ss-more", `show all (${ssN(text.length)} characters)`);
+    more.type = "button";
+    more.onclick = () => { pre.classList.remove("ss-clamped"); more.remove(); };
+    body.appendChild(more);
+  }
+  const save = $("ss-save");
+  if (save) save.hidden = text.length < SS_SAVE_MIN_CHARS;
+  ssApplyFind();
+}
+
+function ssToggleWhole() {
+  if (!ssView) return;
+  ssWhole = !ssWhole;
+  ssShow(ssView.index, ssView.pane);
+}
+
+// ---- find ---------------------------------------------------------------
+
+function ssSetFind(query) {
+  ssFind = { query: String(query || ""), hits: 0, at: -1, marks: [] };
+  ssApplyFind();
+}
+
+// Text nodes plus one <mark> per hit, never innerHTML: the text is a page's
+// own words. Every hit is COUNTED; marking is capped and the label says so.
+function ssApplyFind() {
+  const body = $("ss-body");
+  const pre = body && body.querySelector(".ss-pre");
+  if (!pre || !ssView) return;
+  const text = ssView.text || "";
+  const q = ssFind.query.toLowerCase();
+  ssFind.marks = [];
+  if (!q) {
+    pre.textContent = text;
+    ssFind.hits = 0;
+    ssFind.at = -1;
+    ssFindLabel();
+    return;
+  }
+  const lower = text.toLowerCase();
+  let count = 0;
+  for (let i = lower.indexOf(q); i !== -1; i = lower.indexOf(q, i + q.length)) count += 1;
+  ssFind.hits = count;
+  pre.textContent = "";
+  let from = 0;
+  let marked = 0;
+  for (let i = lower.indexOf(q); i !== -1 && marked < SS_FIND_MAX_MARKS; i = lower.indexOf(q, i + q.length)) {
+    if (i > from) pre.appendChild(document.createTextNode(text.slice(from, i)));
+    const mark = ssEl("mark", "ss-hit", text.slice(i, i + q.length));
+    pre.appendChild(mark);
+    ssFind.marks.push(mark);
+    from = i + q.length;
+    marked += 1;
+  }
+  if (from < text.length) pre.appendChild(document.createTextNode(text.slice(from)));
+  ssFind.at = count ? 0 : -1;
+  ssFindCurrent();
+}
+
+function ssFindLabel() {
+  const label = $("ss-find-count");
+  if (!label) return;
+  if (!ssFind.query) label.textContent = "";
+  else if (!ssFind.hits) label.textContent = "no match";
+  else {
+    label.textContent = `${ssFind.at + 1} of ${ssN(ssFind.hits)}`
+      + (ssFind.hits > SS_FIND_MAX_MARKS ? ` · first ${ssN(SS_FIND_MAX_MARKS)} marked` : "");
+  }
+}
+
+function ssFindCurrent() {
+  for (const mark of ssFind.marks) mark.classList.remove("ss-cur");
+  const mark = ssFind.marks[ssFind.at];
+  if (mark) {
+    mark.classList.add("ss-cur");
+    const pre = $("ss-body").querySelector(".ss-pre");
+    if (pre) pre.classList.remove("ss-clamped"); // a jump into a fold unfolds it
+    ssScrollTo(mark);
+  }
+  ssFindLabel();
+}
+
+function ssFindGo(delta) {
+  if (!ssFind.hits) return;
+  ssFind.at = (ssFind.at + delta + ssFind.hits) % ssFind.hits;
+  ssFindCurrent();
+}
+
+// Put `el` near the top of the pane's own scroller. offsetTop accumulation and
+// never scrollIntoView, which scrolls every scrollable ancestor and animates a
+// long jump into something that reads as a dead control ([EXPLAIN]'s lesson,
+// carried over).
+function ssScrollTo(el) {
+  const body = $("ss-body");
+  if (!body || !el) return;
+  let top = 0;
+  for (let node = el; node && node !== body; node = node.offsetParent) top += node.offsetTop || 0;
+  body.scrollTop = Math.max(0, top - 40);
+}
+
+// ---- copy, save --------------------------------------------------------------
+
+function ssFileName() {
+  if (!ssView) return "step.txt";
+  const step = (ssView.doc.steps || [])[ssView.index] || {};
+  const turn = ssView.doc.ordinal || "";
+  return `turn-${turn}-step-${step.n || 0}-${ssView.pane || "pane"}${ssWhole ? "-whole" : ""}.txt`;
+}
+
+async function ssCopy() {
+  if (!ssView) return;
+  if (await copyText(ssView.text || "")) showToast("copied");
+  else showToast("copy failed — select the text manually");
+}
+
+function ssSave() {
+  if (!ssView) return;
+  saveBlob(new Blob([ssView.text || ""], { type: "text/plain;charset=utf-8" }), ssFileName());
+}
+
+// ---- the swipe -------------------------------------------------------------
+//
+// Claims only a near-horizontal move, decided ONCE at the first SS_DECIDE_AT
+// px of travel and never re-decided; everything else is yielded to the pane's
+// vertical scroll (the pane is `touch-action: pan-y`, so the browser owns the
+// scroll and nothing here needs preventDefault). Passive listeners.
+function ssTouchStart(e) {
+  const t = e.touches && e.touches[0];
+  if (!t) return;
+  ssTouch = { x: t.clientX, y: t.clientY };
+  ssGesture = null;
+}
+
+function ssTouchMove(e) {
+  if (!ssTouch || ssGesture) return;
+  const t = e.touches && e.touches[0];
+  if (!t) return;
+  const dx = t.clientX - ssTouch.x;
+  const dy = t.clientY - ssTouch.y;
+  if (Math.abs(dx) < SS_DECIDE_AT && Math.abs(dy) < SS_DECIDE_AT) return;
+  ssGesture = Math.abs(dx) > SS_AXIS_LOCK * Math.abs(dy) ? "page" : "scroll";
+}
+
+function ssTouchEnd(e) {
+  if (!ssTouch) return;
+  const t = e.changedTouches && e.changedTouches[0];
+  const dx = t ? t.clientX - ssTouch.x : 0;
+  const claimed = ssGesture === "page";
+  ssTouch = null;
+  if (claimed && Math.abs(dx) >= SS_SWIPE_MIN) ssGo(dx < 0 ? 1 : -1);
+}
+
+function ssWire() {
+  const box = $("step-screen");
+  if (!box) return;
+  box.addEventListener("touchstart", ssTouchStart, { passive: true });
+  box.addEventListener("touchmove", ssTouchMove, { passive: true });
+  box.addEventListener("touchend", ssTouchEnd, { passive: true });
+  box.addEventListener("touchcancel", () => { ssTouch = null; ssGesture = null; }, { passive: true });
+  $("ss-close").onclick = () => ssClose();
+  $("ss-prev").onclick = () => ssGo(-1);
+  $("ss-next").onclick = () => ssGo(1);
+  $("ss-wrap").onclick = () => $("ss-body").classList.toggle("wrap-on");
+  $("ss-whole").onclick = () => ssToggleWhole();
+  $("ss-copy").onclick = () => ssCopy();
+  $("ss-save").onclick = () => ssSave();
+  const find = $("ss-find");
+  find.oninput = () => ssSetFind(find.value.trim());
+  find.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); ssFindGo(e.shiftKey ? -1 : 1); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); find.value = ""; ssSetFind(""); find.blur(); }
+  };
+  $("ss-find-prev").onclick = () => ssFindGo(-1);
+  $("ss-find-next").onclick = () => ssFindGo(1);
+}
+ssWire();
+
+// ---- the door by id ---------------------------------------------------------
+// `ref` is the #202 string turn id, or empty for the chat's LAST turn — never a
+// client-counted ordinal, because the first paint is bounded and a browser's
+// fourth turn is not the log's fourth on a long chat ([FORK-ANCHOR]'s lesson).
+// For a turn outside the bounded first paint and for a log written before
+// cards existed, this is the only door.
+async function openExplain(ref) {
+  if (!currentSession) return;
+  if (ssAbort) ssAbort.abort();
+  ssAbort = new AbortController();
+  try {
+    const doc = await fetchDossier(ref, ssAbort.signal);
+    ssOpenDoc(doc);
+  } catch (err) {
+    if (err && err.name === "AbortError") return;
+    showToast((err && err.message) || "the record could not be read");
+  }
+}
+// [STEP-SCREEN-END]
 
 // ---- sheets --------------------------------------------------------------
 function openSheet(id) {
@@ -13897,6 +14467,17 @@ document.addEventListener("keydown", (e) => {
   // takes Escape first — ahead even of the confirm modal, which cannot be
   // raised over it.
   if (e.key === "Escape" && closePreview()) { e.preventDefault(); return; }
+  // The step screen sits under the preview (a frame in its page pane opens the
+  // picture over it) and over everything else. Arrows move a step unless the
+  // find field has focus, where they move the caret.
+  if (ssIsOpen()) {
+    if (e.key === "Escape") { e.preventDefault(); ssClose(); return; }
+    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && document.activeElement !== $("ss-find")) {
+      e.preventDefault();
+      ssGo(e.key === "ArrowRight" ? 1 : -1);
+      return;
+    }
+  }
   if (e.key === "Escape" && confirmIsOpen()) { e.preventDefault(); closeConfirm(); return; }
   // The console link menu is raised OVER the console, so Escape dismisses it
   // before Escape gets to mean anything to the terminal underneath.

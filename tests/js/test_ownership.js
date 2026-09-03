@@ -121,6 +121,14 @@ const OWNED = {
     why: "a live trace left un-closed by a session switch kept receiving the NEXT chat's"
       + " steps, and its interval timer ran forever",
   },
+  ssView: {
+    owners: ["STEP-SCREEN"],
+    instead: "call ssOpen(doc, stepId, pane) / ssShow(index, pane) / ssGo(delta) / ssClose()",
+    why: "it is the one fact the step screen shows — which record, which step, which pane —"
+      + " and the title, the facts strip, the pane tabs, the body and the find count all"
+      + " derive from it in one paint (#352); a second writer is a new pane under an old"
+      + " title, or a match count from the body that was just replaced",
+  },
   // NOT here: answerAbandoned (the flag resetLiveTurn sets when it throws away a
   // half-streamed bubble). Its writers are the owner plus the two turn boundaries
   // that already reset sawAnswer — `user` and `done` — and fencing either of those
