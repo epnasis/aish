@@ -12835,6 +12835,35 @@ function ssTouchEnd(e) {
   if (claimed && Math.abs(dx) >= SS_SWIPE_MIN) ssGo(dx < 0 ? 1 : -1);
 }
 
+// ---- text size -------------------------------------------------------------
+// A−/A+ scale the pane text (`#ss-body` inline font-size; the panes inherit).
+// Clamped to a range that stays readable on a phone; remembered per device,
+// because how large text must be is a fact about the SCREEN it is read on.
+const SS_FONT_MIN = 9;
+const SS_FONT_MAX = 22;
+const SS_FONT_DEFAULT = 12;
+const SS_FONT_KEY = "aish-ss-font";
+
+function ssFontRead() {
+  try {
+    const n = parseInt(localStorage.getItem(SS_FONT_KEY) || "", 10);
+    if (n >= SS_FONT_MIN && n <= SS_FONT_MAX) return n;
+  } catch (_err) { /* no storage: the default */ }
+  return SS_FONT_DEFAULT;
+}
+
+function ssApplyFont(px) {
+  $("ss-body").style.fontSize = px + "px";
+  $("ss-font-dec").disabled = px <= SS_FONT_MIN;
+  $("ss-font-inc").disabled = px >= SS_FONT_MAX;
+}
+
+function ssBumpFont(delta) {
+  const px = Math.min(SS_FONT_MAX, Math.max(SS_FONT_MIN, ssFontRead() + delta));
+  try { localStorage.setItem(SS_FONT_KEY, String(px)); } catch (_err) { /* still applies */ }
+  ssApplyFont(px);
+}
+
 function ssWire() {
   const box = $("step-screen");
   if (!box) return;
@@ -12846,6 +12875,9 @@ function ssWire() {
   $("ss-prev").onclick = () => ssGo(-1);
   $("ss-next").onclick = () => ssGo(1);
   $("ss-wrap").onclick = () => $("ss-body").classList.toggle("wrap-on");
+  $("ss-font-dec").onclick = () => ssBumpFont(-1);
+  $("ss-font-inc").onclick = () => ssBumpFont(1);
+  ssApplyFont(ssFontRead());
   $("ss-whole").onclick = () => ssToggleWhole();
   $("ss-copy").onclick = () => ssCopy();
   $("ss-save").onclick = () => ssSave();

@@ -3817,11 +3817,14 @@ body.console-open #backdrop { z-index: 63; }
   flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch;
   padding: 8px 12px calc(12px + env(safe-area-inset-bottom));
   touch-action: pan-y;
+  /* The A−/A+ buttons set an inline font-size here; the panes inherit it. */
+  font-size: 12px;
 }
+#ss-font-dec, #ss-font-inc { white-space: nowrap; }
 /* Raw monospace text. No wrap by default — a page's console and JSON read
    better with their shape kept — and the toggle turns wrapping on. */
 .ss-pre {
-  margin: 0; font-size: 12px; line-height: 1.45; white-space: pre; overflow-wrap: normal;
+  margin: 0; font-size: inherit; line-height: 1.45; white-space: pre; overflow-wrap: normal;
   -webkit-user-select: text; user-select: text;
 }
 #ss-body.wrap-on .ss-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
