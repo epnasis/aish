@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import evidence
+from . import turns as turn_store
 from .session import synthetic_kind
 
 NOT_RECORDED = "not recorded"
@@ -281,6 +282,20 @@ MISSING = "not_recorded"
 EMPTY = "empty"
 PURGED = "purged"
 UNREADABLE = "unreadable"
+# Two more states the per-chat store adds (#352). EVICTED: the whole chat's
+# evidence went to the budget sweep, on a date the reader can name — a
+# per-chat fact, distinct from a blob purged by a redaction. NEVER_STORED: a
+# picture or a document the request carried as base64, which the store holds
+# as a placeholder naming the file and its size and never as the bytes.
+EVICTED = "evicted"
+NEVER_STORED = "never_stored"
+# Where a per-call context figure came from (#352): read off the `sent` record
+# (exact, the request as sent) or reconstructed from message records and trim
+# rules (short by the channels docs/token-accounting.md lists).
+BASIS_RECORDED = "recorded"
+BASIS_INFERRED = "inferred"
+BASIS_MIXED = "mixed"
+COVERAGE_SDK = "sdk"
 # A log written before #240 has no reasoning record, but its rendered
 # `thinking` step kept a fragment. Showing that fragment as "the reasoning"
 # is how someone concludes the model barely thought about it, so it is its
@@ -340,6 +355,148 @@ def _blob(digest: str, root: os.PathLike | str | None) -> tuple[str, str | None]
     if text is None:
         return PURGED, None
     return RECORDED, text
+
+
+def _sent(turn: Turn, log: Log, root: os.PathLike | str | None, include_text: bool) -> dict:
+    """The exact request of each model call, as the provider saw it (#352).
+
+    Read off the `sent` record — a manifest of digests into the chat's own
+    directory of the per-chat store — and resolved blob by blob, so every
+    entry carries one of the states the store makes possible: recorded ·
+    empty · not recorded · evicted (with the date) · purged · never stored.
+    The text itself rides along only on request (`include_text`): a dossier
+    is fetched to a phone, and the step screen fetches a blob by digest over
+    `/evidence` instead.
+
+    A `coverage` marker with no manifest is the claude-max case (#242): the
+    backend said ONCE that it records none of its requests, and that is what
+    is reported — never a dozen separate absences that read as a dozen faults.
+    """
+    records = turn.of_kind("sent")
+    marker = next((r for r in records if r.get("coverage")), None)
+    calls = [r for r in records if r.get("model_call")]
+    session = log.path
+    evicted = turn_store.evicted_on(root, session)
+    if not calls:
+        if marker is not None:
+            state = MISSING
+        elif log.wrote("sent"):
+            state = EMPTY  # the writer existed; no call of this turn succeeded
+        else:
+            state = MISSING
+        return {
+            "state": state,
+            "coverage": marker.get("coverage") if marker else None,
+            "provider": marker.get("provider") if marker else None,
+            "evicted_on": evicted,
+            "calls": [],
+        }
+
+    def resolve(digest: str | None) -> tuple[str, str | None]:
+        if not digest:
+            return MISSING, None
+        text = turn_store.get(str(digest), root, session)
+        if text is not None:
+            return RECORDED, text
+        return (EVICTED if evicted else PURGED), None
+
+    out: list[dict] = []
+    for record in calls:
+        states: list[str] = []
+        messages = []
+        for entry in record.get("messages") or []:
+            state, text = resolve(entry.get("digest"))
+            states.append(state)
+            item = {
+                key: entry[key]
+                for key in ("at", "role", "tool_name", "tool_names", "chars", "digest",
+                            "origin", "stub", "scrubbed")
+                if key in entry
+            }
+            item["state"] = state
+            if include_text and text is not None:
+                item["text"] = text
+            if entry.get("media"):
+                item["media"] = [
+                    {**dict(m), "state": NEVER_STORED}
+                    for m in entry["media"]
+                    if isinstance(m, dict)
+                ]
+            messages.append(item)
+        tools = record.get("tools")
+        if tools:
+            state, _ = resolve(tools.get("digest"))
+            states.append(state)
+            tools_out = {**dict(tools), "state": state}
+        else:
+            tools_out = {"state": EMPTY}
+        system = record.get("system")
+        system_out = None
+        if system:
+            state, text = resolve(system.get("digest"))
+            states.append(state)
+            system_out = {**dict(system), "state": state}
+            if include_text and text is not None:
+                system_out["text"] = text
+        if all(s == RECORDED for s in states):
+            call_state = RECORDED
+        elif EVICTED in states:
+            call_state = EVICTED
+        else:
+            call_state = PURGED
+        out.append(
+            {
+                "model_call": record.get("model_call"),
+                "provider": record.get("provider"),
+                "model": record.get("model"),
+                "options": record.get("options") or {},
+                "request": record.get("request"),
+                "chars": record.get("chars"),
+                "state": call_state,
+                "messages": messages,
+                "tools": tools_out,
+                "system": system_out,
+            }
+        )
+    return {
+        "state": RECORDED,
+        "coverage": "seam",
+        "provider": out[0]["provider"] if out else None,
+        "evicted_on": evicted,
+        "calls": out,
+    }
+
+
+def _sent_parts(record: dict) -> list[dict]:
+    """What one request was made of, by provider role and tool — exact, from
+    the manifest's own sizes, and needing no stamp to place anything."""
+    groups: dict[tuple, dict] = {}
+    for entry in record.get("messages") or []:
+        label = entry.get("tool_name") or (
+            ", ".join(str(n) for n in entry["tool_names"]) if entry.get("tool_names") else None
+        )
+        key = (entry.get("role"), label)
+        group = groups.setdefault(
+            key,
+            {"role": entry.get("role"), "tool_name": label, "chars": 0, "items": 0, "stubs": 0},
+        )
+        group["chars"] += int(entry.get("chars") or 0)
+        group["items"] += 1
+        group["stubs"] += 1 if entry.get("stub") else 0
+    parts = list(groups.values())
+    system = record.get("system")
+    if system:
+        parts.append(
+            {"role": "system", "tool_name": None, "chars": int(system.get("chars") or 0),
+             "items": 1, "stubs": 0, "param": True}
+        )
+    tools = record.get("tools")
+    if tools:
+        parts.append(
+            {"role": "tools", "tool_name": None, "chars": int(tools.get("chars") or 0),
+             "items": int(tools.get("count") or 0), "stubs": 0}
+        )
+    return sorted(parts, key=lambda p: -p["chars"])
 
 
 def _brief_in_force(turn: Turn, log: Log) -> tuple[dict | None, int | None]:
@@ -1016,6 +1173,7 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
             # what a panel reads, and it must not say something else.
             "state": MISSING,
             "stamped": False,
+            "basis": MISSING,
             "calls": [],
             "peak": None,
             "unattributed_chars": 0,
@@ -1114,6 +1272,36 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         call["added_chars"] = call["accounted_chars"] - before
         call["added_by"] = _added_by(parts_at, calls, index)
 
+    # One answer to "what filled this call" (#352): where the request was
+    # RECORDED at the seam, its own size is the total — exact, and inclusive
+    # of every channel the reconstruction above is blind to (a tool call's
+    # arguments, steering, a held answer, attachment guidance). Where it was
+    # not, the reconstruction stands and is labelled as the inference it is.
+    sent_by_call = {
+        int(s["model_call"]): s for s in turn.of_kind("sent") if s.get("model_call")
+    }
+    for call in calls:
+        sent_record = sent_by_call.get(call["model_call"])
+        if sent_record is None:
+            call["basis"] = BASIS_INFERRED
+            continue
+        call["basis"] = BASIS_RECORDED
+        call["sent_chars"] = int(sent_record.get("chars") or 0)
+        call["sent_parts"] = _sent_parts(sent_record)
+        billed = int(call["reported"].get("input") or 0)
+        # Both halves recorded now, and the numerator is complete — only an
+        # image still stands in the way, being char-invisible and token-huge.
+        call["chars_per_token"] = (
+            round(call["sent_chars"] / billed, 2) if billed and not call["image_count"] else None
+        )
+    recorded = [c for c in calls if c.get("basis") == BASIS_RECORDED]
+    if not calls or not recorded:
+        basis = BASIS_INFERRED
+    elif len(recorded) == len(calls):
+        basis = BASIS_RECORDED
+    else:
+        basis = BASIS_MIXED
+
     peak = max(calls, key=lambda c: (c["reported"].get("input") or 0), default=None)
     if peak is None:
         peak_out = None
@@ -1138,6 +1326,11 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
     return {
         "state": RECORDED if calls else EMPTY,
         "stamped": True,
+        # Whether the per-call totals are the request as sent, or arithmetic
+        # over message records. Steering and unstamped text below are
+        # unplaceable ONLY when this is not `recorded`: a recorded request
+        # holds them by construction.
+        "basis": basis,
         "calls": calls,
         "peak": peak_out,
         # Text a trim removed that no record attributes to an origin. Never
@@ -1731,8 +1924,14 @@ def find(log: Log, ref: str | int | None) -> list[Turn]:
     return [t for t in log.turns if t.ordinal == number or t.counter == number]
 
 
-def dossier(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
-    """One turn, assembled from its records — the data both renderers read."""
+def dossier(
+    turn: Turn, log: Log, root: os.PathLike | str | None, *, request_text: bool = False
+) -> dict:
+    """One turn, assembled from its records — the data both renderers read.
+
+    `request_text` inlines the bytes of every recorded request message
+    (`aish explain … --context`); the web panel leaves it off and fetches a
+    blob by digest instead, because a dossier is fetched to a phone."""
     did = _did(turn)
     doc = {
         "ordinal": turn.ordinal,
@@ -1740,6 +1939,8 @@ def dossier(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         "ts": turn.ts,
         "prompt": turn.prompt,
         "given": _given(turn, log, root),
+        # The exact request of each model call, as the provider saw it (#352).
+        "sent": _sent(turn, log, root, request_text),
         "thought": _thought(turn, log),
         "did": did,
         "produced": _produced(turn, did),
@@ -1866,6 +2067,93 @@ def _given_lines(given: dict, show_tools: bool, show_context: bool, out: list[st
             )
 
     _rules_lines(given["rules"], out)
+
+
+def _blob_status(state: str, evicted_on: str | None) -> str:
+    """One word per store state, for a line that lists many blobs."""
+    if state == RECORDED:
+        return "resolved"
+    if state == EVICTED:
+        return f"evicted on {evicted_on}" if evicted_on else "evicted"
+    if state == NEVER_STORED:
+        return "never stored"
+    return state
+
+
+def _sent_lines(sent: dict, show_context: bool, out: list[str]) -> None:
+    """The request each model call sent, message by message, in the role the
+    provider saw (#352). With `--context` the bytes follow each message."""
+    if not sent["calls"]:
+        if sent.get("coverage") == COVERAGE_SDK:
+            out.append(
+                f"  {'request':<10} {DIM}{NOT_RECORDED} — {sent.get('provider') or 'this backend'} "
+                f"drives the SDK's own loop, which sends its own requests (#242){RESET}"
+            )
+        elif sent["state"] == EMPTY:
+            out.append(
+                f"  {'request':<10} {DIM}recorded, and there was none — no model call of this "
+                f"turn succeeded{RESET}"
+            )
+        else:
+            out.append(f"  {'request':<10} {_state_note(MISSING, ' (log predates #352)')}")
+        return
+    when = sent.get("evicted_on")
+    for call in sent["calls"]:
+        head = (
+            f"call {call['model_call']} · {call.get('provider')} {call.get('model')} · "
+            f"{len(call['messages'])} message(s) · {int(call.get('chars') or 0):,} chars · "
+            f"{str(call.get('request') or '')[:12]}…"
+        )
+        if call["state"] == EVICTED:
+            head += f" · {BOLD}evidence evicted on {when}{RESET}"
+        elif call["state"] != RECORDED:
+            head += f" · {DIM}some bytes {call['state']}{RESET}"
+        out.append(f"  {'request':<10} {head}")
+        system = call.get("system")
+        if system:
+            out.append(
+                f"  {'':<10}   system parameter · {int(system.get('chars') or 0):,} chars · "
+                f"{_blob_status(system['state'], when)}"
+                + (
+                    f" · {DIM}hoisted from #{system.get('origin')}{RESET}"
+                    if system.get("origin") else ""
+                )
+            )
+            if show_context and system.get("text") is not None:
+                for line in system["text"].splitlines():
+                    out.append(f"  {'':<10}   {DIM}│{RESET} {line}")
+        for message in call["messages"]:
+            who = str(message.get("role") or "?")
+            if message.get("tool_name"):
+                who += f" {message['tool_name']}"
+            elif message.get("tool_names"):
+                who += f" {', '.join(message['tool_names'])}"
+            line = (
+                f"#{message.get('at')} {who} · {int(message.get('chars') or 0):,} chars"
+                + (" · stub" if message.get("stub") else "")
+                + (
+                    f" · {message['scrubbed']} secret(s) scrubbed"
+                    if message.get("scrubbed") else ""
+                )
+                + f" · {_blob_status(message['state'], when)}"
+            )
+            for item in message.get("media") or []:
+                line += (
+                    f" · {os.path.basename(str(item.get('path') or ''))} "
+                    f"({int(item.get('bytes') or 0):,} bytes) never stored"
+                )
+            out.append(f"  {'':<10}   {line}")
+            if show_context and message.get("text") is not None:
+                for text_line in message["text"].splitlines():
+                    out.append(f"  {'':<10}   {DIM}│{RESET} {text_line}")
+        tools = call.get("tools") or {}
+        if tools.get("state") == EMPTY:
+            out.append(f"  {'':<10}   tools: none sent")
+        else:
+            out.append(
+                f"  {'':<10}   tools: {tools.get('count', '?')} · "
+                f"{int(tools.get('chars') or 0):,} chars · {_blob_status(tools['state'], when)}"
+            )
 
 
 def _rules_lines(rules: dict, out: list[str]) -> None:
@@ -2035,10 +2323,20 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
             f"{p['origin']} {'+' if p['chars'] > 0 else ''}{_human(p['chars'])}"
             for p in call["added_by"]
         )
+        if call.get("basis") == BASIS_RECORDED:
+            # The request as sent is the total; the reconstruction beside it
+            # says what the message records alone could account for.
+            sized = (
+                f" · {_human(call['sent_chars']):>7} chars sent {DIM}(recorded; "
+                f"{_human(call['accounted_chars'])} reconstructed){RESET}"
+            )
+        else:
+            sized = (
+                f" · {_human(call['accounted_chars']):>7} chars accounted "
+                f"{DIM}(inferred){RESET}"
+            )
         lines.append(
-            f"call {call['model_call']:<3} {billed}"
-            f" · {_human(call['accounted_chars']):>7} chars accounted"
-            + (f" · {moved}" if moved else "")
+            f"call {call['model_call']:<3} {billed}" + sized + (f" · {moved}" if moved else "")
         )
     peak = context["peak"]
     if peak:
@@ -2101,22 +2399,36 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
                 f"{DIM}  {peak['chars_per_token']} chars per reported token, and that ratio "
                 f"moves with the content.{RESET}"
             )
-        lines.append(
-            f"{DIM}  the parts are what the log CAN size, and this total is a LOWER bound: "
-            f"AT LEAST four{RESET}"
-        )
-        lines.append(
-            f"{DIM}  things reach the model's messages with no message record. The largest "
-            f"by far is a{RESET}"
-        )
-        lines.append(
-            f"{DIM}  tool call's own arguments, resent on every later call; then steering, a "
-            f"held answer,{RESET}"
-        )
-        lines.append(
-            f"{DIM}  and the guidance form of an attachment. The list is not known to be "
-            f"closed.{RESET}"
-        )
+        if context.get("basis") == BASIS_RECORDED:
+            lines.append(
+                f"{DIM}  the parts are reconstructed from message records; the SENT total on "
+                f"each call is the{RESET}"
+            )
+            lines.append(
+                f"{DIM}  request as it left aish, and holds the tool-call arguments, steering "
+                f"and held answers{RESET}"
+            )
+            lines.append(
+                f"{DIM}  the parts cannot see. The request section above lists it message by "
+                f"message.{RESET}"
+            )
+        else:
+            lines.append(
+                f"{DIM}  the parts are what the log CAN size, and this total is a LOWER bound: "
+                f"AT LEAST four{RESET}"
+            )
+            lines.append(
+                f"{DIM}  things reach the model's messages with no message record. The largest "
+                f"by far is a{RESET}"
+            )
+            lines.append(
+                f"{DIM}  tool call's own arguments, resent on every later call; then steering, a "
+                f"held answer,{RESET}"
+            )
+            lines.append(
+                f"{DIM}  and the guidance form of an attachment. The list is not known to be "
+                f"closed.{RESET}"
+            )
         for missing in peak["unmeasured"]:
             lines.append(f"  {BOLD}not measured here:{RESET} {missing}")
     if context["unattributed_chars"]:
@@ -2129,7 +2441,12 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
             f"  {BOLD}{context['unstamped_chars']:,} chars{RESET} are in this turn's messages "
             f"with no record of which call they stood in front of"
         )
-    if context["steering_chars"]:
+    if context["steering_chars"] and context.get("basis") == BASIS_RECORDED:
+        lines.append(
+            f"  {BOLD}{context['steering_chars']:,} chars{RESET} were typed while a task ran; "
+            f"whatever of it was in front of a call is inside that call's sent total"
+        )
+    elif context["steering_chars"]:
         lines.append(
             f"  {BOLD}{context['steering_chars']:,} chars{RESET} were typed while a task ran "
             f"and are sized but not placed — the log records the text and not"
@@ -2561,7 +2878,7 @@ def render(
     a dossier cannot answer "what did it think after it got that result", which
     is the question people open one to ask.
     """
-    doc = dossier(turn, log, root)
+    doc = dossier(turn, log, root, request_text=show_context)
     out: list[str] = []
     label = f"turn {doc['ordinal']}"
     if doc["counter"] is not None and doc["counter"] != doc["ordinal"]:
@@ -2583,6 +2900,7 @@ def render(
         )
 
     _given_lines(doc["given"], show_tools, show_context, out)
+    _sent_lines(doc["sent"], show_context, out)
     _flow_lines(doc, out)
     _context_cost_lines(doc["context_cost"], out)
     _produced_lines(doc["produced"], out)
