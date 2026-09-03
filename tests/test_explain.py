@@ -2191,6 +2191,41 @@ class TestSentRecord:
         assert doc["sent"]["state"] == explain_mod.MISSING
         assert "log predates #352" in explain_mod.explain(old, root=tmp_path)
 
+    def test_never_stored_and_empty_are_reader_states_too(self, tmp_path):
+        """The last two of the six states: a media entry is *never stored*
+        whatever its message's blob says, and a turn whose writer existed but
+        whose calls all failed is *empty* — not *not recorded*."""
+        from aish import turns
+
+        path = tmp_path / "session-20260101-000000-000000.jsonl"
+        blob = '{"content":"look","role":"user"}'
+        digest = turns.put(blob, tmp_path, path)
+        record = {
+            "kind": "sent", "turn": 1, "model_call": 1, "provider": "ollama", "model": "m",
+            "messages": [{"at": 0, "role": "user", "digest": digest, "chars": len(blob),
+                          "origin": 0, "media": [{"path": "/tmp/cat.png", "bytes": 104}]}],
+            "options": {}, "request": digest, "chars": len(blob),
+        }
+        rows = [
+            {"kind": "task_start", "ts": "t", "prompt": "look"},
+            {"kind": "trace", "step": record},
+            {"kind": "message", "role": "assistant", "content": "a cat"},
+            {"kind": "task_start", "ts": "t", "prompt": "again"},
+            {"kind": "message", "role": "assistant", "content": "no call succeeded"},
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        lg = explain_mod.load(path)
+        first = explain_mod.dossier(lg.turns[0], lg, tmp_path)["sent"]
+        (media,) = first["calls"][0]["messages"][0]["media"]
+        assert media["state"] == explain_mod.NEVER_STORED
+        assert first["calls"][0]["tools"]["state"] == explain_mod.EMPTY
+        second = explain_mod.dossier(lg.turns[1], lg, tmp_path)["sent"]
+        assert second["state"] == explain_mod.EMPTY, "the writer existed; no call succeeded"
+        out = explain_mod.explain(path, root=tmp_path)
+        assert "cat.png (104 bytes) never stored" in out
+        assert "tools: none sent" in out
+        assert "recorded, and there was none" in out
+
     def test_claude_max_says_once_that_it_records_none_of_it(self, tmp_path):
         path = tmp_path / "session-max.jsonl"
         rows = [
