@@ -125,7 +125,7 @@ function textNode(t) {
 
 const IDS = ["step-screen", "ss-count", "ss-title", "ss-prev", "ss-next", "ss-facts", "ss-panes",
   "ss-tools", "ss-find", "ss-find-count", "ss-find-prev", "ss-find-next", "ss-whole", "ss-copy",
-  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close"];
+  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc"];
 
 function world(overrides = {}) {
   const ids = new Map();
@@ -571,6 +571,34 @@ check("a failed read, a missing turn and an offline device each say so in words"
   await w.sandbox.openExplain("");
   assert.equal(w.toasts.length, 1);
   assert(w.toasts[0].includes("the server is needed"), w.toasts[0]);
+});
+
+check("A−/A+ scale the pane text, clamp at both ends, and survive a reopen", async () => {
+  // No localStorage in this world: the default applies and bumps still work.
+  let w = world();
+  assert.equal(w.sandbox.$("ss-body").style.fontSize, "12px");
+  w.sandbox.$("ss-font-inc").onclick();
+  assert.equal(w.sandbox.$("ss-body").style.fontSize, "13px");
+  // Clamp: bumping past either end sticks at the end and disables the button.
+  const store = new Map();
+  const localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+  };
+  w = world({ localStorage });
+  for (let i = 0; i < 30; i++) w.sandbox.$("ss-font-inc").onclick();
+  assert.equal(w.sandbox.$("ss-body").style.fontSize, "22px");
+  assert.equal(w.sandbox.$("ss-font-inc").disabled, true);
+  assert.equal(w.sandbox.$("ss-font-dec").disabled, false);
+  // Remembered: a fresh world with the same storage opens at the saved size.
+  const w2 = world({ localStorage });
+  assert.equal(w2.sandbox.$("ss-body").style.fontSize, "22px");
+  for (let i = 0; i < 30; i++) w2.sandbox.$("ss-font-dec").onclick();
+  assert.equal(w2.sandbox.$("ss-body").style.fontSize, "9px");
+  assert.equal(w2.sandbox.$("ss-font-dec").disabled, true);
+  // A stored value outside the range is ignored, never applied.
+  store.set("aish-ss-font", "99");
+  assert.equal(world({ localStorage }).sandbox.$("ss-body").style.fontSize, "12px");
 });
 
 (async () => {
