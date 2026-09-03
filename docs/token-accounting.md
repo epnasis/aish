@@ -249,19 +249,35 @@ front of every call of its turn, including calls made before it existed — verb
 failure this reader's own docstring warns about, found in `session-20260824-210909` turn 4.
 It is counted as `unstamped_chars` and placed nowhere.
 
-> **Proposed, additive, TWO ints and not one.** A `sent_chars` on the **`reasoning`**
-> record — `self._total_chars()`, the same integer `model_error` already writes, on every
-> call and not only the failed ones — is most of the answer. But `_total_chars` sums
-> `content` alone, so it shares the blindness above: validating against it would read as
-> *fully accounted* while still short by up to 39% of a session's content. `model_error`'s
-> existing `sent_chars` carries the same blindness, which is why the anchors in this file
-> are short and not exact.
+> **The two ints proposed here (#331) are NOT built, and are redundant since #352.** The
+> proposal was a `sent_chars` on the **`reasoning`** record — `self._total_chars()`, the
+> integer `model_error` already writes — plus a second int for the serialised `tool_calls`
+> + `raw_blocks`, because `_total_chars` sums `content` alone and shares the blindness
+> above. Both would still have been sums over the aish-side list, blind to a demoted
+> reminder's role and to what an adapter merged.
 >
-> So the proposal is **two** ints: `sent_chars` as it stands, and a second for the
-> serialized `tool_calls` + `raw_blocks` beside it. **`_total_chars` itself must not be
-> widened** — it drives trim budgeting, and moving it would move what gets trimmed. That is
-> the "change the instrumentation rather than reach for a more confident guess" move, and
-> it is why the reader does not estimate around the gap today.
+> The `sent` record (contract §3.12) answers the same question one level down and exactly:
+> `sent.chars` is the length of the canonical request AS IT LEFT AISH — tool-call
+> arguments, `raw_blocks`, steering, a held answer and attachment guidance included, every
+> message in the role the provider saw — and each `messages[].chars` sizes one provider
+> message. Adding the two ints beside it would put a second, smaller total on the
+> neighbouring record and invite exactly the false comparison this file warns about.
+> `_total_chars` is still not widened: it drives trim budgeting.
+
+### What filled this call, read off the request (#352)
+
+`_context_cost` now reads `sent` where a call has one and labels the result: each call
+carries `basis: recorded` with `sent_chars` (the exact total) and `sent_parts` (chars by
+provider role and tool, straight off the manifest — no stamp needed to place anything),
+or `basis: inferred` with the reconstruction above standing alone. The section carries a
+`basis` of its own — `recorded`, `inferred` or `mixed` — and `chars_per_token` is computed
+over `sent_chars` where recorded, so both halves of that ratio are now measured numbers
+for the whole request rather than for the part the log could see. `steering_chars` and
+`unstamped_chars` stay reported, and are **unplaceable only for pre-`sent` logs**: a
+recorded request holds whatever of them was in front of the call by construction, and the
+renderer says so instead of repeating the "sized but not placed" sentence. The
+reconstruction is kept beside the recorded total on purpose, as the check this section
+used to run by hand against `model_error.sent_chars`.
 
 Two things that reconstruction taught, both now enforced in `_apply_trim`:
 

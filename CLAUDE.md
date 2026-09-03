@@ -76,7 +76,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
 | `roles.py`, `aish/charters/`, `web_search`'s rendering, anything a role reads or a charter declares | `docs/roles.md` |
 | `tool_plugins.py`, `secrets.py` | `docs/tools-layer.md` |
-| `explain.py`, `evidence.py`, the `brief` record | `docs/diagnostics.md` |
+| `explain.py`, `evidence.py`, `turns.py`, the `brief` and `sent` records | `docs/diagnostics.md` |
 | `ratelimit.py`, `_chat_turn`'s retry loop, anything that retries a model call | `docs/rate-limits.md` |
 | `usage.py`, `aish usage`, anything that reports or attributes token spend | `docs/token-accounting.md` |
 | `vocab.py`, `aish vocab`, **any list of words matched against page text, a control label, error text or a command name** | `docs/vocabularies.md` |
@@ -140,6 +140,9 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`explain.py` + `evidence.py`** — reading back why a turn went the way it did: `aish explain` assembles a
   dossier from recorded evidence only, and the content-addressed evidence store holds the bytes it points at,
   purgeably. No model call, and it must never be able to re-derive behaviour from source. → `docs/diagnostics.md`
+- **`turns.py`** — the per-chat evidence store behind the `sent` record (#352): every request a model call
+  sent, whole and never cut, content-addressed WITHIN the chat so a chat is a directory and nothing else;
+  evicted a whole chat at a time behind a dated tombstone, never one step. → `docs/diagnostics.md`
 - **`ratelimit.py`** — what a failed model call WAS (quota vs blip vs permanent), how long to
   wait, and the record that says it happened. There must be exactly one retry policy and aish
   owns it; a 429 that recovered still leaves evidence. → `docs/rate-limits.md`

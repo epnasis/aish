@@ -679,3 +679,190 @@ class TestUsageDetail:
             backends.INPUT_EXCLUDES_KV_REUSE,
         }
         assert len(flags) == 3
+
+
+# ------------------------------------------------------- the sent seam (#352)
+
+
+class TestSentAtTheSeam:
+    """Every adapter reports the request it is about to send, AFTER conversion,
+    and what it reports serialises byte-for-byte to what its client received.
+    A manifest read off the aish side would be false about role and
+    cardinality on three of the four backends."""
+
+    @staticmethod
+    def _canonical(value):
+        from aish.agent import _canonical
+
+        return _canonical(value)
+
+    @staticmethod
+    def _sent(client_kwargs):
+        return {k: v for k, v in client_kwargs.items() if k not in ("stream", "stream_options")}
+
+    HISTORY = [
+        {"role": "system", "content": "base"},
+        {"role": "system", "content": "<system-reminder>per-task</system-reminder>"},
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "run_command", "arguments": {"command": "ls"}}},
+                {"function": {"name": "read_file", "arguments": {"path": "a"}}},
+            ],
+        },
+        {"role": "tool", "tool_name": "run_command", "content": "out1", "_stub": True},
+        {"role": "tool", "tool_name": "read_file", "content": "out2"},
+        {"role": "user", "content": "and now?"},
+    ]
+    TOOLS = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
+
+    def test_openai_shape_reports_what_the_client_received(self):
+        seen = []
+        client = FakeClient(_completion(content="ok"))
+        backend = OpenAICompatBackend(client, "openai")
+        with backends.observe_sent(seen.append):
+            backend(model="m", messages=self.HISTORY, tools=self.TOOLS, options={"num_ctx": 1})
+        (request,) = seen
+        assert request.provider == "openai"
+        assert self._canonical(request.payload) == self._canonical(self._sent(client.calls[0]))
+        roles = [m["role"] for m in request.payload["messages"]]
+        assert roles[:2] == ["system", "user"]  # the reminder was demoted, and the record says so
+        assert request.origins == list(range(len(self.HISTORY)))
+        assert request.system_origins == []
+        assert "options" not in request.payload and "think" not in request.payload
+
+    def test_gemini_reports_its_extra_body_too(self):
+        seen = []
+        client = FakeClient(_completion(content="ok"))
+        backend = OpenAICompatBackend(client, "gemini")
+        with backends.observe_sent(seen.append):
+            backend(model="m", messages=self.HISTORY, tools=self.TOOLS)
+        (request,) = seen
+        assert request.payload["extra_body"] == backends.GEMINI_THINKING_BODY
+        assert self._canonical(request.payload) == self._canonical(self._sent(client.calls[0]))
+
+    def test_the_streaming_path_reports_the_same_request(self):
+        seen = []
+        client = FakeClient(stream_chunks=[_delta_chunk(content="hi")])
+        backend = OpenAICompatBackend(client, "openai")
+        with backends.observe_sent(seen.append):
+            list(backend(model="m", messages=self.HISTORY, tools=self.TOOLS, stream=True))
+        (request,) = seen
+        assert self._canonical(request.payload) == self._canonical(self._sent(client.calls[0]))
+
+    def test_anthropic_reports_the_hoisted_system_and_the_merged_results(self):
+        seen = []
+        client = FakeAnthropicClient(
+            SimpleNamespace(content=[_anthropic_block(type="text", text="hi")],
+                            stop_reason="end_turn", usage=None)
+        )
+        backend = AnthropicBackend(client, "claude")
+        with backends.observe_sent(seen.append):
+            backend(model="claude-x", messages=self.HISTORY, tools=self.TOOLS, think=True)
+        (request,) = seen
+        assert request.provider == "claude"
+        assert self._canonical(request.payload) == self._canonical(self._sent(client.calls[0]))
+        assert request.payload["system"] == "base\n<system-reminder>per-task</system-reminder>"
+        assert request.system_origins == [0, 1]
+        # user(2), assistant(3), the two tool results merged into one user
+        # message (4, 5), user(6): four provider messages from seven.
+        assert [m["role"] for m in request.payload["messages"]] == [
+            "user", "assistant", "user", "user"
+        ]
+        assert request.origins == [2, 3, [4, 5], 6]
+        assert request.payload["thinking"] == {"type": "adaptive"}
+
+    def test_media_is_replaced_by_a_placeholder_and_only_by_that(self, tmp_path):
+        """The stored blob is what was sent with the base64 swapped for a
+        placeholder naming the file and its size — on both media-carrying
+        shapes, and nothing else about the message moves."""
+        import base64
+
+        image_bytes = b"\x89PNG" + b"\x01" * 50
+        pdf_bytes = b"%PDF" + b"\x02" * 20
+        image = tmp_path / "shot.png"
+        image.write_bytes(image_bytes)
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(pdf_bytes)
+        history = [
+            {"role": "user", "content": "look", "images": [str(image)], "documents": [str(pdf)]},
+        ]
+        anthropic_client = FakeAnthropicClient(
+            SimpleNamespace(content=[], stop_reason="end_turn", usage=None)
+        )
+        for backend in (
+            OpenAICompatBackend(FakeClient(_completion(content="ok")), "openai"),
+            AnthropicBackend(anthropic_client, "claude"),
+        ):
+            seen = []
+            with backends.observe_sent(seen.append):
+                backend(model="m", messages=history)
+            (request,) = seen
+            assert request.media == [[(str(image), 54), (str(pdf), 24)]]
+            sent = request.payload["messages"][0]
+            assert base64.b64encode(image_bytes).decode() in self._canonical(sent)
+            stored = backends.without_media(sent, request.media[0])
+            text = self._canonical(stored)
+            assert base64.b64encode(image_bytes).decode() not in text
+            assert base64.b64encode(pdf_bytes).decode() not in text
+            assert f"[aish: 54 bytes of {image} — never stored]" in text
+            assert f"[aish: 24 bytes of {pdf} — never stored]" in text
+            # The placeholder is the ONLY difference: put the base64 back and
+            # the two serialise identically.
+            image_b64 = base64.b64encode(image_bytes).decode()
+            pdf_b64 = base64.b64encode(pdf_bytes).decode()
+            restored = text.replace(
+                f"[aish: 54 bytes of {image} — never stored]", image_b64
+            ).replace(f"[aish: 24 bytes of {pdf} — never stored]", pdf_b64)
+            assert restored == self._canonical(sent)
+
+    def test_an_unreadable_file_produces_a_note_and_no_media_entry(self, tmp_path):
+        seen = []
+        backend = OpenAICompatBackend(FakeClient(_completion(content="ok")), "openai")
+        with backends.observe_sent(seen.append):
+            backend(model="m", messages=[
+                {"role": "user", "content": "look", "images": [str(tmp_path / "gone.png")]}
+            ])
+        (request,) = seen
+        assert request.media == [[]]
+        stored = backends.without_media(request.payload["messages"][0], [])
+        assert stored == request.payload["messages"][0]
+
+    def test_the_pass_through_shape_is_the_call_itself(self):
+        kwargs = dict(model="m", messages=self.HISTORY, tools=self.TOOLS,
+                      options={"num_ctx": 1}, think=False, stream=True)
+        request = backends.passthrough_request("ollama", kwargs)
+        assert request.provider == "ollama"
+        assert "stream" not in request.payload
+        assert request.payload["options"] == {"num_ctx": 1}
+        assert all("_stub" not in m for m in request.payload["messages"])
+        assert request.origins == list(range(len(self.HISTORY)))
+
+    def test_nothing_is_reported_off_the_observing_thread(self):
+        """Thread-local, like the governor's hooks: a title call on another
+        thread must not land in this call's record."""
+        import threading
+
+        seen = []
+        backend = OpenAICompatBackend(FakeClient(_completion(content="ok")), "openai")
+
+        def elsewhere():
+            backend(model="m", messages=[{"role": "user", "content": "title?"}])
+
+        with backends.observe_sent(seen.append):
+            worker = threading.Thread(target=elsewhere)
+            worker.start()
+            worker.join()
+        assert seen == []
+
+    def test_the_declared_system_policy_still_matches_the_traced_converter(self):
+        """`convert_messages` is now a view over the traced converter; the
+        pinned policy table must keep describing it."""
+        out = convert_messages(self.HISTORY)
+        assert [m["role"] for m in out[:2]] == ["system", "user"]
+        assert backends.system_role_policy("openai") == "first_only"
+        system, out = convert_messages_anthropic(self.HISTORY)
+        assert system.startswith("base")
+        assert backends.system_role_policy("claude") == "hoisted"

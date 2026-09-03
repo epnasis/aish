@@ -60,7 +60,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from uvicorn.protocols.utils import ClientDisconnected
 
-from . import backends, browser, dir_ignore, explain, export, files, notify, tools
+from . import backends, browser, dir_ignore, explain, export, files, notify, tools, turns
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
@@ -2076,6 +2076,26 @@ class WebServer:
         # Off the startup path: reopening sessions touches disk and launches
         # model work, and the server must be serving before any of that.
         self.resumer = asyncio.ensure_future(self._resume_interrupted())
+        # The per-chat evidence store's budget sweep (#352): at start and after
+        # every turn, never inside a tool call. Background for the same reason
+        # as the resumer — it walks the state dir.
+        self.sweeper = asyncio.ensure_future(asyncio.to_thread(self._sweep_turns))
+
+    def _sweep_turns(self) -> None:
+        """Evict whole chats' evidence, oldest first, when the store exceeds
+        its budget. Never raises: the store is evidence, and a store that
+        cannot be swept is a line in the daemon log, not a failed turn."""
+        try:
+            evicted = turns.sweep(self.state_dir)
+        except OSError as exc:
+            print(f"[turns] could not sweep {self.state_dir}: {exc}", file=sys.stderr)
+            return
+        if evicted:
+            print(
+                f"[turns] evicted the evidence of {len(evicted)} chat(s) to fit "
+                f"{turns.TURNS_BUDGET_BYTES:,} bytes: {', '.join(evicted)}",
+                file=sys.stderr,
+            )
 
     async def _resume_interrupted(self) -> None:
         """Pick up where a killed process left off (#164) — see RESUME_WINDOW.
@@ -3678,6 +3698,10 @@ class WebServer:
         clear busy, apply a /cd requested mid-turn, then start the next queued
         message or signal a background session's return to idle."""
         session.busy = False
+        # After a turn ends is one of the two places the evidence store is
+        # swept (#352); the other is server start. Off the loop: it walks a
+        # directory per chat.
+        await asyncio.to_thread(self._sweep_turns)
         if session.pending_cwd:  # a /cd that arrived after the last step's poll
             target, session.pending_cwd = session.pending_cwd, None
             # rebase fires on_state, which retires the #92 queue card and
@@ -4226,6 +4250,10 @@ class WebServer:
         # is the ONLY thing that collects it — closing the session no longer
         # does, because the workspace has to survive eviction and restart.
         await asyncio.to_thread(remove_chat_scratch, self.state_dir, path)
+        # And its evidence (#352, #177): the chat's directory in the per-chat
+        # store holds every request its log referenced, and the chat is the
+        # only thing that owns it.
+        await asyncio.to_thread(turns.delete_chat, self.state_dir, path)
         # To EVERY client, not just the one that asked (#204): a chat deleted
         # on the laptop used to stay on the phone's list until it happened to
         # refresh, and tapping it opened a chat that no longer existed.
@@ -5778,12 +5806,93 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return JSONResponse(doc, status_code=404, headers={"Cache-Control": "no-store"})
         session = self.sessions.get(path.name)
         doc["running"] = bool(session is not None and session.busy)
+        # The capability for each blob this dossier references (#352), minted
+        # HERE and not by the reader: it is a fact about this server, not
+        # about the log. A tap on the step screen then fetches `/evidence`
+        # with it instead of re-parsing a multi-megabyte log.
+        self._sign_evidence(doc, path.name)
         return JSONResponse(
             doc,
             # Two client caches, and NEVER_CACHE only closes one. `no-store`
             # closes the browser's own HTTP cache and the bfcache; without it
             # the payload persists on the device anyway.
             headers={"Cache-Control": "no-store"},
+        )
+
+    def _evidence_sig(self, session: str, digest: str) -> str:
+        """HMAC over (chat, digest), keyed by the access token. It proves the
+        digest was handed out by a dossier for THAT chat, which is what lets
+        `/evidence` serve a blob without re-reading the log to check the
+        reference exists. Keyed by the token so it survives a restart — a
+        holder of the token can call `/explain` anyway, so deriving from it
+        adds no reach."""
+        message = f"{session}\n{digest}".encode()
+        return hmac.new(self.token.encode(), message, hashlib.sha256).hexdigest()[:32]
+
+    def _sign_evidence(self, doc: dict, session: str) -> None:
+        def stamp(entry: object) -> None:
+            if isinstance(entry, dict) and entry.get("digest"):
+                entry["sig"] = self._evidence_sig(session, str(entry["digest"]))
+
+        for call in (doc.get("sent") or {}).get("calls") or []:
+            for entry in call.get("messages") or []:
+                stamp(entry)
+            stamp(call.get("tools"))
+            stamp(call.get("system"))
+
+    async def handle_evidence(self, request) -> Response | JSONResponse:
+        """GET /evidence/{session}/{digest}?sig=…&token=… — one blob from the
+        chat's evidence store (#352): a message as the provider saw it, the
+        tools payload, or the hoisted system text.
+
+        Token-gated like `/explain`, and additionally by the `sig` that
+        `/explain` minted for the digest — a digest nobody was handed answers
+        403 whatever it is. Scoped to the chat by the path: a digest is looked
+        up in that chat's directory only.
+
+        Two absences, told apart on purpose: **410** with a dated body when
+        the chat's evidence was EVICTED (the store's tombstone says when), and
+        **404** when the blob is simply not there — purged by a redaction, or
+        never written. Served as plain text, downloaded rather than rendered
+        (`attachment` + `nosniff`), never cached: the bytes are what a model
+        was handed and can quote anything a page or a mail said.
+        """
+        if not self._token_ok(request.query_params.get("token")):
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        name = str(request.path_params.get("session") or "").strip()
+        digest = str(request.path_params.get("digest") or "").strip()
+        path = safe_session_path(self.state_dir, name)
+        if path is None:
+            return JSONResponse({"error": f"no such chat: {name}"}, status_code=404)
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return JSONResponse({"error": "not a digest"}, status_code=400)
+        sig = str(request.query_params.get("sig") or "")
+        if not hmac.compare_digest(sig, self._evidence_sig(name, digest)):
+            return JSONResponse({"error": "bad sig"}, status_code=403)
+        no_store = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+        text = await asyncio.to_thread(turns.get, digest, self.state_dir, path)
+        if text is None:
+            when = await asyncio.to_thread(turns.evicted_on, self.state_dir, path)
+            if when:
+                return Response(
+                    f"evidence for this chat was evicted on {when}\n",
+                    status_code=410,
+                    media_type="text/plain; charset=utf-8",
+                    headers=no_store,
+                )
+            return Response(
+                "no such blob in this chat's evidence\n",
+                status_code=404,
+                media_type="text/plain; charset=utf-8",
+                headers=no_store,
+            )
+        return Response(
+            text,
+            media_type="text/plain; charset=utf-8",
+            headers={
+                **no_store,
+                "Content-Disposition": f'attachment; filename="{digest[:16]}.txt"',
+            },
         )
 
     async def handle_offline_index(self, request) -> JSONResponse:
@@ -6319,6 +6428,7 @@ def create_app(
             Route("/export/session", server.handle_export_session, methods=["GET"]),
             Route("/dirs", server.handle_dirs, methods=["GET"]),
             Route("/explain", server.handle_explain, methods=["GET"]),
+            Route("/evidence/{session}/{digest}", server.handle_evidence, methods=["GET"]),
             Route("/offline/index", server.handle_offline_index, methods=["GET"]),
             Route("/offline/session", server.handle_offline_session, methods=["GET"]),
             Route("/fonts/{name}", serve_config_font, methods=["GET"]),

@@ -2257,3 +2257,338 @@ class TestTheContextBreakdownIsCheckedAgainstTheRealLoop:
         assert len(doc["calls"]) == len(chat.chars)
         for call, live in zip(doc["calls"], chat.chars, strict=True):
             assert call["accounted_chars"] - menu["chars"] == live
+
+
+class TestSentRecord:
+    """The exact request of every successful model call, captured at the
+    backend seam and stored beside its chat (#352, contract §3.12)."""
+
+    def _agent(self, responses, tmp_path, **kwargs):
+        session = tmp_path / "session-20260101-000000-000000.jsonl"
+        return make_logged_agent(responses, tmp_path, current_session=lambda: session, **kwargs)
+
+    def test_sent_is_registered_renderless(self):
+        assert "sent" in RENDERLESS_STEPS
+
+    def test_one_record_per_successful_call_written_before_its_response(self, tmp_path):
+        agent, _, log = self._agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("done")],
+            tmp_path,
+        )
+        agent.run_task("hello")
+        sent = steps(log.path, "sent")
+        assert [s["model_call"] for s in sent] == [1, 2]
+        assert all(s["turn"] == 1 for s in sent)
+        order = []
+        for line in log.path.read_text().splitlines():
+            record = json.loads(line)
+            step = record.get("step") or {}
+            if record.get("kind") == "trace" and step.get("kind") in ("sent", "reasoning"):
+                order.append((step["kind"], step.get("model_call")))
+        assert order == [("sent", 1), ("reasoning", 1), ("sent", 2), ("reasoning", 2)]
+
+    def test_a_call_that_never_succeeded_records_no_request(self, tmp_path):
+        """kwargs are built once and re-sent on every retry; a permanently
+        failing call must not record a request the model never received."""
+        import pytest
+
+        from aish.agent import Agent, ModelUnavailable
+
+        class Refusing:
+            def __call__(self, **kwargs):
+                raise RuntimeError("400 Bad Request: invalid_request_error")
+
+        log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=Refusing(),
+            on_message=log.message, step_log=log.step, state_dir=tmp_path,
+            current_session=lambda: log.path,
+        )
+        with pytest.raises(ModelUnavailable):
+            agent.run_task("hello")
+        assert steps(log.path, "model_error")
+        assert steps(log.path, "sent") == []
+
+    def test_the_manifest_reassembles_to_the_bytes_the_backend_was_handed(self, tmp_path):
+        """Byte identity on the pass-through (ollama) shape: the blobs in the
+        chat's store, put back in the manifest's order under the recorded
+        options, serialise to exactly what the chat callable received — and
+        hash to the recorded `request` digest."""
+        import copy
+
+        from aish import turns
+        from aish.agent import _canonical
+
+        class Snapshotting(FakeChat):
+            """`messages` is the agent's own list and keeps mutating after the
+            call; what was SENT is what it held at call time."""
+
+            def __call__(self, **kwargs):
+                self.calls.append(copy.deepcopy(kwargs))
+                response = self.responses.pop(0)
+                return iter([response]) if kwargs.get("stream") else response
+
+        log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+        chat = Snapshotting(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("done")]
+        )
+        from aish.agent import Agent
+
+        agent = Agent(
+            model="fake", approve=lambda _cmd: True, client_chat=chat, on_message=log.message,
+            step_log=log.step, state_dir=tmp_path, current_session=lambda: log.path,
+        )
+        agent.run_task("hello")
+        for record, kwargs in zip(steps(log.path, "sent"), chat.calls, strict=True):
+            assert record["provider"] == "ollama"
+            messages = []
+            for entry in record["messages"]:
+                blob = turns.get(entry["digest"], tmp_path, log.path)
+                assert blob is not None, "every message blob resolves in the chat's directory"
+                assert entry["chars"] == len(blob)
+                messages.append(json.loads(blob))
+            tools_blob = turns.get(record["tools"]["digest"], tmp_path, log.path)
+            assert tools_blob is not None
+            assert record["tools"]["count"] == len(json.loads(tools_blob))
+            rebuilt = {**record["options"], "messages": messages, "tools": json.loads(tools_blob)}
+            assert turns.digest_of(_canonical(rebuilt)) == record["request"]
+            assert record["chars"] == len(_canonical(rebuilt))
+            sent = {k: v for k, v in kwargs.items() if k != "stream"}
+            sent["messages"] = [
+                {k: v for k, v in m.items() if not k.startswith("_")} for m in sent["messages"]
+            ]
+            assert _canonical(rebuilt) == _canonical(sent)
+        # And the bytes are in the CHAT's directory, once each.
+        stored = [p for p in turns.chat_dir(tmp_path, log.path).iterdir() if p.is_file()]
+        digests = {e["digest"] for s in steps(log.path, "sent") for e in s["messages"]}
+        digests |= {s["tools"]["digest"] for s in steps(log.path, "sent")}
+        assert {p.name for p in stored} == digests
+
+    def test_origin_and_tool_name_point_back_at_the_aish_side(self, tmp_path):
+        agent, _, log = self._agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("done")],
+            tmp_path,
+        )
+        agent.run_task("hello")
+        second = steps(log.path, "sent")[1]
+        tool_entries = [e for e in second["messages"] if e["role"] == "tool"]
+        assert tool_entries and tool_entries[0]["tool_name"] == "read_docs"
+        assert all(e["origin"] == e["at"] for e in second["messages"])  # pass-through is 1:1
+        assert "stub" not in tool_entries[0]
+
+    def test_a_trimmed_message_is_marked_as_a_stub_not_re_derived(self, tmp_path, monkeypatch):
+        from aish import turns
+
+        monkeypatch.setattr(agent_module.tools, "read_docs", lambda *a, **k: "x" * 5000)
+        agent, _, log = self._agent(
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="ls")]),
+                model_says("first"),
+                model_says("second"),
+            ],
+            tmp_path,
+            num_ctx=100,  # a tiny budget, so the seed trim of task two must stub
+        )
+        agent.run_task("one")
+        agent.run_task("two")  # the budget trim at seed stubs the earlier result
+        stubbed = [m for m in agent.messages if m.get("_stub")]
+        assert stubbed and stubbed[0]["role"] == "tool"
+        last = steps(log.path, "sent")[-1]
+        tool_entries = [e for e in last["messages"] if e["role"] == "tool"]
+        assert tool_entries[0]["stub"] is True
+        # The stub's bytes are what was sent — not the original result.
+        blob = turns.get(tool_entries[0]["digest"], tmp_path, log.path)
+        assert blob is not None and "[trimmed" in blob and "x" * 1000 not in blob
+
+    def test_a_stored_secret_is_scrubbed_from_the_blob_and_the_record_says_so(
+        self, tmp_path, monkeypatch
+    ):
+        """The stored request is byte-identical to what was sent EXCEPT where
+        a stored secret was scrubbed; the digest is of what is stored."""
+        from aish import secrets as secrets_module
+        from aish import turns
+
+        token = "awov6ybawmor59a9d7u926vk1yfdsm"
+        index = tmp_path / "names.txt"
+        index.write_text("PUSHOVER_TOKEN\n", encoding="utf-8")
+        monkeypatch.setattr(secrets_module, "NAMES_INDEX", index)
+        monkeypatch.setattr(
+            secrets_module, "get", lambda name: token if name == "PUSHOVER_TOKEN" else None
+        )
+        secrets_module._invalidate()
+        try:
+            agent, _, log = self._agent([model_says("done")], tmp_path)
+            agent.run_task(f"my token is {token}, remember it")
+        finally:
+            secrets_module._invalidate()
+        (record,) = steps(log.path, "sent")
+        user = [e for e in record["messages"] if e["role"] == "user"][-1]
+        assert user["scrubbed"] == 1
+        blob = turns.get(user["digest"], tmp_path, log.path)
+        assert blob is not None and token not in blob
+        assert "[secret PUSHOVER_TOKEN — redacted by aish]" in blob
+        for entry in record["messages"]:
+            assert token not in (turns.get(entry["digest"], tmp_path, log.path) or "")
+
+    def test_media_travels_as_path_and_size_never_as_bytes(self, tmp_path):
+        from aish import backends
+
+        picture = tmp_path / "cat.png"
+        picture.write_bytes(b"\x89PNG" + b"\x00" * 100)
+        agent, _, log = self._agent([model_says("done")], tmp_path)
+        kwargs = dict(
+            model="fake",
+            messages=[{"role": "user", "content": "look", "images": [str(picture)]}],
+            tools=[],
+            options={"num_ctx": 1},
+            think=False,
+        )
+        agent._model_call = 1
+        agent._record_sent(backends.passthrough_request("ollama", kwargs), kwargs)
+        (record,) = steps(log.path, "sent")
+        assert record["messages"][0]["media"] == [{"path": str(picture), "bytes": 104}]
+        lg = explain_mod.load(log.path)
+        # The turn bracket needs a task; the record alone is enough for the
+        # reader's media state to be checked through the assembly.
+        assert lg.turns == [] or lg.turns[0].of_kind("sent")
+
+    def test_the_reader_lists_the_request_per_message_with_the_provider_role(self, tmp_path):
+        agent, _, log = self._agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("done")],
+            tmp_path,
+        )
+        agent.run_task("hello there")
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        assert doc["sent"]["state"] == explain_mod.RECORDED
+        assert doc["sent"]["coverage"] == "seam"
+        assert [c["model_call"] for c in doc["sent"]["calls"]] == [1, 2]
+        first = doc["sent"]["calls"][0]
+        assert first["state"] == explain_mod.RECORDED
+        assert all(m["state"] == explain_mod.RECORDED for m in first["messages"])
+        assert "text" not in first["messages"][0], "bytes ride only on request"
+        assert first["tools"]["state"] == explain_mod.RECORDED
+        assert first["system"] is None  # ollama carries system as messages
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "request" in out and "resolved" in out
+        with_text = explain_mod.explain(log.path, root=tmp_path, show_context=True)
+        # The prompt line already says it once; --context quotes the user
+        # message as the provider received it, under the request.
+        assert with_text.count("hello there") > out.count("hello there")
+        assert with_text.count("│") > out.count("│")
+
+    def test_purged_evicted_and_not_recorded_are_told_apart(self, tmp_path):
+        from aish import turns
+
+        agent, _, log = self._agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        (record,) = steps(log.path, "sent")
+        digest = record["messages"][-1]["digest"]
+        turns.unlink({digest}, tmp_path, log.path)
+        lg = explain_mod.load(log.path)
+        call = explain_mod.dossier(lg.turns[0], lg, tmp_path)["sent"]["calls"][0]
+        assert call["messages"][-1]["state"] == explain_mod.PURGED
+        assert call["state"] == explain_mod.PURGED
+        assert "purged" in explain_mod.explain(log.path, root=tmp_path)
+
+        turns.sweep(tmp_path, budget=0)
+        lg = explain_mod.load(log.path)
+        sent = explain_mod.dossier(lg.turns[0], lg, tmp_path)["sent"]
+        assert sent["evicted_on"]
+        assert sent["calls"][0]["state"] == explain_mod.EVICTED
+        assert all(m["state"] == explain_mod.EVICTED for m in sent["calls"][0]["messages"])
+        assert f"evicted on {sent['evicted_on']}" in explain_mod.explain(log.path, root=tmp_path)
+
+        old = tmp_path / "session-old.jsonl"
+        old.write_text(
+            json.dumps({"kind": "task_start", "ts": "2026-01-01T00:00:00", "prompt": "hi"})
+            + "\n"
+            + json.dumps({"kind": "message", "role": "assistant", "content": "hello"})
+            + "\n"
+        )
+        lg = explain_mod.load(old)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        assert doc["sent"]["state"] == explain_mod.MISSING
+        assert "log predates #352" in explain_mod.explain(old, root=tmp_path)
+
+    def test_never_stored_and_empty_are_reader_states_too(self, tmp_path):
+        """The last two of the six states: a media entry is *never stored*
+        whatever its message's blob says, and a turn whose writer existed but
+        whose calls all failed is *empty* — not *not recorded*."""
+        from aish import turns
+
+        path = tmp_path / "session-20260101-000000-000000.jsonl"
+        blob = '{"content":"look","role":"user"}'
+        digest = turns.put(blob, tmp_path, path)
+        record = {
+            "kind": "sent", "turn": 1, "model_call": 1, "provider": "ollama", "model": "m",
+            "messages": [{"at": 0, "role": "user", "digest": digest, "chars": len(blob),
+                          "origin": 0, "media": [{"path": "/tmp/cat.png", "bytes": 104}]}],
+            "options": {}, "request": digest, "chars": len(blob),
+        }
+        rows = [
+            {"kind": "task_start", "ts": "t", "prompt": "look"},
+            {"kind": "trace", "step": record},
+            {"kind": "message", "role": "assistant", "content": "a cat"},
+            {"kind": "task_start", "ts": "t", "prompt": "again"},
+            {"kind": "message", "role": "assistant", "content": "no call succeeded"},
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        lg = explain_mod.load(path)
+        first = explain_mod.dossier(lg.turns[0], lg, tmp_path)["sent"]
+        (media,) = first["calls"][0]["messages"][0]["media"]
+        assert media["state"] == explain_mod.NEVER_STORED
+        assert first["calls"][0]["tools"]["state"] == explain_mod.EMPTY
+        second = explain_mod.dossier(lg.turns[1], lg, tmp_path)["sent"]
+        assert second["state"] == explain_mod.EMPTY, "the writer existed; no call succeeded"
+        out = explain_mod.explain(path, root=tmp_path)
+        assert "cat.png (104 bytes) never stored" in out
+        assert "tools: none sent" in out
+        assert "recorded, and there was none" in out
+
+    def test_claude_max_says_once_that_it_records_none_of_it(self, tmp_path):
+        path = tmp_path / "session-max.jsonl"
+        rows = [
+            {"kind": "task_start", "ts": "t", "prompt": "go"},
+            {"kind": "trace", "step": {"kind": "sent", "coverage": "sdk",
+                                       "provider": "claude-max", "turn": 1}},
+            {"kind": "message", "role": "assistant", "content": "done"},
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        lg = explain_mod.load(path)
+        sent = explain_mod.dossier(lg.turns[0], lg, tmp_path)["sent"]
+        assert sent["state"] == explain_mod.MISSING
+        assert sent["coverage"] == "sdk" and sent["calls"] == []
+        assert "drives the SDK's own loop" in explain_mod.explain(path, root=tmp_path)
+
+    def test_context_cost_reads_sent_where_present_and_says_inferred_where_not(self, tmp_path):
+        agent, chat, log = self._agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("done")],
+            tmp_path,
+        )
+        agent.run_task("hello")
+        lg = explain_mod.load(log.path)
+        cost = explain_mod.dossier(lg.turns[0], lg, tmp_path)["context_cost"]
+        assert cost["basis"] == explain_mod.BASIS_RECORDED
+        recorded = {s["model_call"]: s["chars"] for s in steps(log.path, "sent")}
+        for call in cost["calls"]:
+            assert call["basis"] == explain_mod.BASIS_RECORDED
+            assert call["sent_chars"] == recorded[call["model_call"]]
+            roles = {p["role"] for p in call["sent_parts"]}
+            assert {"system", "user", "tools"} <= roles
+        assert "chars sent" in explain_mod.explain(log.path, root=tmp_path)
+
+        # The same log with the `sent` records stripped is a pre-#352 log.
+        stripped = tmp_path / "session-stripped.jsonl"
+        stripped.write_text(
+            "".join(
+                line + "\n"
+                for line in log.path.read_text().splitlines()
+                if (json.loads(line).get("step") or {}).get("kind") != "sent"
+            )
+        )
+        lg = explain_mod.load(stripped)
+        cost = explain_mod.dossier(lg.turns[0], lg, tmp_path)["context_cost"]
+        assert cost["basis"] == explain_mod.BASIS_INFERRED
+        assert all(c["basis"] == explain_mod.BASIS_INFERRED for c in cost["calls"])
+        assert "(inferred)" in explain_mod.explain(stripped, root=tmp_path)

@@ -13,6 +13,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NamedTuple, TextIO
 
+from . import turns
+
 TITLE_MAX = 60
 SNIPPET_MAX = 90  # preview line under the title in the web sessions drawer
 # Characters of run-up before the hit in a search excerpt. Deliberately short:
@@ -615,8 +617,35 @@ RENDERLESS_STEPS = frozenset(
         # `_emit_record` requires, since either half alone is the empty live
         # trace card this set exists to prevent.
         "vocab",  # #322
+        # #352. The exact request a model call sent, as a manifest of digests
+        # into the per-chat store. Evidence about what the model was handed,
+        # read by `aish explain` and the step screen over `/explain`; never a
+        # step the owner watches. Same pair as every kind above.
+        "sent",  # #352
     }
 )
+
+
+def _sent_digests(records: list[dict]) -> set[str]:
+    """Every per-chat-store digest the `sent` records among `records` point
+    at — the messages, the tools payload and the hoisted system text (#352).
+    This is the one place outside the writer that knows the record's shape,
+    so `redact_turn` can unlink exactly what its removed records referenced."""
+    out: set[str] = set()
+    for record in records:
+        if record.get("kind") != "trace":
+            continue
+        step = record.get("step")
+        if not isinstance(step, dict) or step.get("kind") != "sent":
+            continue
+        for entry in step.get("messages") or []:
+            if isinstance(entry, dict) and entry.get("digest"):
+                out.add(str(entry["digest"]))
+        for key in ("tools", "system"):
+            part = step.get(key)
+            if isinstance(part, dict) and part.get("digest"):
+                out.add(str(part["digest"]))
+    return out
 
 
 def _content_words(text: str) -> set[str]:
@@ -2126,6 +2155,16 @@ class SessionLog:
                 self._fh.close()
                 self._fh = None
             self.path.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+            # The bytes the removed records pointed at go with them (#352) —
+            # and ONLY those: a digest a surviving record of this chat still
+            # references is that record's evidence, and the store is
+            # content-addressed within the chat precisely so this set
+            # difference is the whole question.
+            gone = _sent_digests(records[first:end]) - _sent_digests(
+                records[:first] + records[end:]
+            )
+            if gone:
+                turns.unlink(gone, self.path.parent, self.path)
             return Redaction(
                 turn=turn,
                 text=text if isinstance(text, str) else "",

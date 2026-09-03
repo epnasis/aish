@@ -286,6 +286,12 @@ def contains(text: str) -> bool:
         return False
 
 
+# How every placeholder `scrub` writes ends. A caller that needs to COUNT what
+# a scrub did (the `sent` record's `scrubbed: n`, #352) counts this rather than
+# re-implementing the match.
+SCRUB_SUFFIX = " — redacted by aish]"
+
+
 def scrub(text: str) -> str:
     """`text` with every stored secret replaced by a placeholder naming it.
 
@@ -301,7 +307,7 @@ def scrub(text: str) -> str:
         return text
     for name, value in pairs:
         if value in text:
-            text = text.replace(value, f"[secret {name} — redacted by aish]")
+            text = text.replace(value, f"[secret {name}{SCRUB_SUFFIX}")
     return text
 
 
