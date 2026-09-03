@@ -12773,7 +12773,7 @@ function ssFindGo(delta) {
 
 // Put `el` near the top of the pane's own scroller. offsetTop accumulation and
 // never scrollIntoView, which scrolls every scrollable ancestor and animates a
-// long jump into something that reads as a dead control ([EXPLAIN]'s lesson,
+// long jump into something that reads as a dead control (the dossier sheet's lesson,
 // carried over).
 function ssScrollTo(el) {
   const body = $("ss-body");
