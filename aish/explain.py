@@ -785,6 +785,13 @@ def _did(turn: Turn) -> dict:
                 # what makes "offered" and "used" joinable (#274).
                 "truncation": step.get("truncation") or {},
                 "read": step.get("continuation") or "",
+                # The payload size the tool measured BEFORE any cut (contract
+                # §3.4), and where a driven action's seconds went (#348). Both
+                # verbatim; `bytes` is None rather than 0 where the writer
+                # recorded none, because "nothing came back" and "nobody
+                # measured" are different facts.
+                "bytes": step.get("bytes") if isinstance(step.get("bytes"), int) else None,
+                **({"phases": step["phases"]} if isinstance(step.get("phases"), dict) else {}),
                 # The picture of the page this call read (#289), and whether
                 # the bytes it points at are still there. Three states, like
                 # every other reference in this file: no key at all means the
@@ -829,6 +836,7 @@ def _did(turn: Turn) -> dict:
                 "unchanged": False,
                 "truncation": {},
                 "read": "",
+                "bytes": None,
                 "gates": per_call.pop(call, []),
                 # A call that never completed never reached a page, so there is
                 # nothing to have pictured — and no key, rather than an empty
@@ -1242,8 +1250,18 @@ def _snapshot(
         parts.append({"origin": f"{count} image(s)", "where": side, "chars": 0,
                       "items": count, "trimmed": 0, "state": UNREADABLE})
         unmeasured.append(f"{count} image(s), which carry no characters at all")
+    # Per SIDE, so a per-call reader can say "41,200 chars carried from earlier
+    # turns, 3,800 from this one" without the parts list, which is popped off
+    # every call but the peak to keep the document phone-sized (#352).
+    by_where: dict[str, dict] = {}
+    for part in parts:
+        bucket = by_where.setdefault(part["where"], {"chars": 0, "items": 0, "trimmed": 0})
+        bucket["chars"] += part["chars"]
+        bucket["items"] += part["items"]
+        bucket["trimmed"] += part["trimmed"]
     return {
         "parts": parts,
+        "by_where": by_where,
         "accounted_chars": sum(p["chars"] for p in parts),
         "image_count": sum(images.values()),
         "unmeasured": unmeasured,
@@ -1377,6 +1395,30 @@ def _walk_rounds(turn: Turn) -> dict[int, int]:
     return at
 
 
+def _place_calls(turn: Turn) -> tuple[dict[int, int], dict[int, str]]:
+    """Which model call each tool call sat under, and HOW that is known.
+
+    `placed` maps a call id to its model call; `how` says whether the `call`
+    record named it (`recorded`) or file order attached it to the preceding
+    reasoning (`inferred`). One walk shared by the rounds and the step list, so
+    the two views of the same turn cannot place a call differently."""
+    at = _walk_rounds(turn)
+    placed: dict[int, int] = {}
+    how: dict[int, str] = {}
+    for index, step in enumerate(turn.steps):
+        if step.get("kind") != "call" or not step.get("call"):
+            continue
+        call = int(step["call"])
+        recorded = step.get("model_call")
+        if recorded:
+            placed[call] = int(recorded)
+            how[call] = GROUPING_RECORDED
+        elif at.get(index):
+            placed[call] = at[index]
+            how[call] = GROUPING_INFERRED
+    return placed, how
+
+
 def _rounds(turn: Turn, doc: dict) -> dict:
     """The turn as it actually happened: think, call, get results, think again.
 
@@ -1398,17 +1440,8 @@ def _rounds(turn: Turn, doc: dict) -> dict:
     calls = doc["did"]["calls"]
     at = _walk_rounds(turn)
 
-    placed: dict[int, int] = {}   # call id -> model call
-    inferred_any = False
-    for index, step in enumerate(turn.steps):
-        if step.get("kind") != "call" or not step.get("call"):
-            continue
-        recorded = step.get("model_call")
-        if recorded:
-            placed[int(step["call"])] = int(recorded)
-        elif at.get(index):
-            placed[int(step["call"])] = at[index]
-            inferred_any = True
+    placed, how = _place_calls(turn)   # call id -> model call, and how it is known
+    inferred_any = GROUPING_INFERRED in how.values()
 
     if not thoughts and not calls:
         grouping = GROUPING_NONE
@@ -1472,6 +1505,508 @@ def _rounds(turn: Turn, doc: dict) -> dict:
     }
 
 
+
+# ---------------------------------------------------------------------------
+# The turn as a ledger of steps (#352 slice 1)
+# ---------------------------------------------------------------------------
+#
+# Every step is one exchange across a boundary — the model on one side, a tool
+# on the other — or something that happened between two of them. The web step
+# screen walks this list forward and back; the rounds above are the same facts
+# grouped, and both are built from ONE placement walk so they cannot disagree.
+#
+# A step carries its kind, an id, the panes it has, the short facts for its
+# strip, and REFERENCES into `thought` / `did` / `messages` by id. Never a copy:
+# tool output is the bulk of the payload and this document is fetched to a
+# phone. Where a fact is an inference — a call attached to its round by file
+# order, a tool message matched to its call by name — the step says so, because
+# a reader must never see inference wearing a record's clothes.
+
+STEP_MODEL_CALL = "model_call"
+STEP_TOOL_CALL = "tool_call"
+STEP_TRIM = "trim"
+STEP_STEERING = "steering"
+STEP_BRIEF_CHANGED = "brief_changed"
+STEP_MODEL_ERROR = "model_error"
+STEP_RETRY = "retry"
+# Between-round kinds share one pane: the fact and its numbers.
+EVENT_STEPS = frozenset(
+    {STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED, STEP_MODEL_ERROR, STEP_RETRY}
+)
+
+PANE_CONTEXT = "context"
+PANE_RESPONSE = "response"
+PANE_CALL = "call"
+PANE_RESULT = "result"
+PANE_PAGE = "page"
+PANE_EVENT = "event"
+
+# Where the model-facing text of a tool call was read from, in the order the
+# reader prefers them. `step_output` and `step_error` are on the `tool` step
+# itself and joined by call id. The two message joins are INFERENCES: a
+# tool-role `message` record carries the tool's name and the model call it was
+# first in front of, and no call id — so it is matched to the calls of that
+# round by name and order, and the step says which.
+SHOWN_STEP_OUTPUT = "step_output"
+SHOWN_STEP_ERROR = "step_error"
+SHOWN_MESSAGE_ORDER = "message_by_order"
+SHOWN_MESSAGE_NAME = "message_by_name"
+SHOWN_NONE = "not_matched"
+
+
+def _messages(turn: Turn) -> list[dict]:
+    """This turn's message records, sized and stamped, text included ONCE.
+
+    They are here for two panes: a model call's context (which messages were
+    new to it, and the whole of what it was handed) and a tool call's result
+    (the text the model was actually given, where the `tool` step kept none).
+    `model_call` is the stamp as recorded and None where the writer wrote none —
+    a log older than #262 — because reading an absent key as 0 would put every
+    message in front of the first call.
+    """
+    out = []
+    for index, record in enumerate(turn.messages):
+        content = record.get("content")
+        if isinstance(content, str):
+            text = content
+        elif content is None:
+            text = ""
+        else:
+            text = json.dumps(content, ensure_ascii=False)
+        stamp = record.get("model_call")
+        out.append(
+            {
+                "at": index,
+                "role": str(record.get("role") or ""),
+                "tool_name": str(record.get("tool_name") or ""),
+                "model_call": int(stamp) if isinstance(stamp, int) else None,
+                "chars": len(text),
+                "text": text,
+                "interim": bool(record.get("interim")),
+                "images": len(record.get("images") or []),
+                "documents": len(record.get("documents") or []),
+                "superseded": bool(record.get("superseded")),
+            }
+        )
+    return out
+
+
+def _shown_messages(messages: list[dict], calls: list[dict], placed: dict[int, int]) -> dict:
+    """Which tool-role message carried each call's result to the model.
+
+    Joined per model call: the tool messages stamped with round k, in file
+    order, against the calls placed in round k, in call order. When the two name
+    sequences are identical the pairing is by order; when they differ, only a
+    name unique on both sides is paired. Messages with no stamp at all (an older
+    log) fall back to the same rule over the whole turn. Everything else stays
+    unmatched — a wrong text presented as "what the model saw" is the exact
+    lie this reader exists to prevent.
+    """
+    by_round: dict[int | None, list[dict]] = {}
+    for message in messages:
+        if message["role"] != "tool" or message["superseded"]:
+            continue
+        by_round.setdefault(message["model_call"], []).append(message)
+    by_call: dict[int, tuple[int, str]] = {}
+
+    def pair(candidates: list[dict], group: list[dict], how: str) -> None:
+        names_m = [m["tool_name"] for m in candidates]
+        names_c = [str(c["name"] or "") for c in group]
+        if names_m and names_m == names_c:
+            for message, call in zip(candidates, group, strict=True):
+                by_call[call["call"]] = (message["at"], how)
+            return
+        for call in group:
+            name = str(call["name"] or "")
+            same_m = [m for m in candidates if m["tool_name"] == name]
+            same_c = [c for c in group if str(c["name"] or "") == name]
+            if len(same_m) == 1 and len(same_c) == 1:
+                by_call[call["call"]] = (same_m[0]["at"], SHOWN_MESSAGE_NAME)
+
+    completed = [c for c in calls if c["completed"] and c["call"]]
+    if None in by_round and len(by_round) == 1:
+        pair(by_round[None], sorted(completed, key=lambda c: c["call"]), SHOWN_MESSAGE_ORDER)
+        return by_call
+    for number, candidates in by_round.items():
+        if number is None:
+            continue
+        group = sorted((c for c in completed if placed.get(c["call"]) == number),
+                       key=lambda c: c["call"])
+        pair(candidates, group, SHOWN_MESSAGE_ORDER)
+    return by_call
+
+
+def _fmt_n(value: int | float | None) -> str:
+    return f"{int(value):,}" if isinstance(value, (int, float)) else "?"
+
+
+def _brief_index(briefs: list[dict], number: int) -> int | None:
+    """Which of the turn's briefs was in force for model call `number`: the
+    last one written at or before it, else the carried one."""
+    chosen = None
+    for index, brief in enumerate(briefs):
+        written_at = brief.get("model_call") or 0
+        if not brief["written_here"] or written_at <= number:
+            chosen = index
+    return chosen
+
+
+def _model_step(number: int, doc: dict, numbering: str, fragment: str = "") -> dict:
+    thought = next((t for t in doc["thought"]["calls"] if t.get("model_call") == number), None)
+    cost = next((c for c in doc["context_cost"]["calls"] if c.get("model_call") == number), None)
+    briefs = doc["given"]["briefs"]
+    brief_at = _brief_index(briefs, number)
+    options = (briefs[brief_at]["options"] if brief_at is not None else {}) or {}
+    facts: list[dict] = []
+    if options.get("model"):
+        facts.append({"k": "model", "v": f"{options.get('provider') or '?'} · {options['model']}"})
+    if options.get("system_role"):
+        facts.append({"k": "system role", "v": str(options["system_role"])})
+    reported = (cost or {}).get("reported") or {}
+    if reported:
+        facts.append({"k": "tokens", "v": " · ".join(
+            f"{_fmt_n(v)} {k}" for k, v in reported.items() if isinstance(v, (int, float))
+        )})
+    elif thought and thought["tokens"]:
+        tokens = thought["tokens"]
+        facts.append({"k": "tokens", "v": f"{_fmt_n(tokens[0])} in · "
+                      f"{_fmt_n(tokens[1] if len(tokens) > 1 else 0)} out"})
+    else:
+        facts.append({"k": "tokens", "v": "not recorded"})
+    if thought and thought["stop"]:
+        facts.append({"k": "stop", "v": thought["stop"]})
+    errors = [e for e in doc["context_cost"]["failed"] if e.get("model_call") == number]
+    if errors:
+        facts.append({"k": "attempts", "v": f"{len(errors)} failed before this one"})
+    if cost:
+        facts.append({"k": "context", "v": f"{_fmt_n(cost['accounted_chars'])} chars "
+                      f"({'+' if cost['added_chars'] >= 0 else ''}{_fmt_n(cost['added_chars'])})"})
+    elif doc["context_cost"]["state"] == MISSING:
+        facts.append({"k": "context", "v": "not recorded — messages carry no model-call stamp"})
+    # What this call was handed that the previous one was not, by stamp: a
+    # message appended while call k-1 was the one in flight is new to call k.
+    # Messages with no stamp cannot be placed and are counted, not placed.
+    new = [m["at"] for m in doc["messages"]
+           if m["model_call"] == number - 1 and not m["superseded"]]
+    in_front = [m["at"] for m in doc["messages"]
+                if m["model_call"] is not None and m["model_call"] < number and not m["superseded"]]
+    unstamped = sum(1 for m in doc["messages"] if m["model_call"] is None and not m["superseded"])
+    # `stubbed` is filled by _steps, which knows which trim preceded which call.
+    stubbed: list[dict] = []
+    return {
+        "id": f"m{number}",
+        "kind": STEP_MODEL_CALL,
+        "model_call": number,
+        "title": f"model call {number}",
+        "panes": [PANE_CONTEXT, PANE_RESPONSE],
+        "numbering": numbering,
+        "facts": facts,
+        "ref": {
+            "thought": number if thought else None,
+            "cost": number if cost else None,
+            "brief": brief_at,
+        },
+        "fragment": fragment,
+        "errors": [],   # ids of the model_error steps that preceded this call
+        "context": {
+            "new": new,
+            "in_front": in_front,
+            "unstamped": unstamped,
+            "stubbed": stubbed,
+            "brief_changed": bool(
+                brief_at is not None and briefs[brief_at]["written_here"]
+                and briefs[brief_at].get("model_call") == number and number > 1
+            ),
+            # Reconstructed from `message` records and the brief, never the
+            # request as sent — slice 2's `sent` record replaces this with the
+            # bytes that actually left. Said here so a renderer labels it.
+            "source": "reconstructed",
+        },
+        "is_last": False,
+    }
+
+
+def _tool_step(call: dict, placed: dict[int, int], how: dict[int, str],
+               shown: dict, paged: set[str]) -> dict:
+    facts: list[dict] = [{"k": "status", "v": str(call["status"] or ("ok" if call["ok"] else "?"))}]
+    if not call["completed"]:
+        facts[0] = {"k": "status", "v": "never completed"}
+    if call["verdict_by"]:
+        facts.append({"k": "verdict by", "v": str(call["verdict_by"])})
+    if call["decision"]:
+        facts.append({"k": "decision", "v": str(call["decision"])})
+    facts.append({"k": "seconds", "v": f"{float(call['secs'] or 0):.1f}"})
+    if call["bytes"] is not None:
+        facts.append({"k": "bytes", "v": _fmt_n(call["bytes"])})
+    page = any(key in call for key in ("frame", "frame_skipped", "console", "signin", "covered",
+                                        "phases")) or bool(call["problem"]) or call["unchanged"]
+    panes = [PANE_CALL, PANE_RESULT] + ([PANE_PAGE] if page else [])
+    number = placed.get(call["call"])
+    if call["output"]:
+        shown_at, shown_how = None, SHOWN_STEP_OUTPUT
+    elif call["error"]:
+        shown_at, shown_how = None, SHOWN_STEP_ERROR
+    elif call["call"] in shown:
+        shown_at, shown_how = shown[call["call"]]
+    else:
+        shown_at, shown_how = None, SHOWN_NONE
+    cut = call["truncation"]
+    if cut and cut.get("offered"):
+        read_back: bool | None = cut.get("continuation") in paged
+    else:
+        read_back = None
+    return {
+        "id": f"c{call['call']}" if call["call"] else "c0",
+        "kind": STEP_TOOL_CALL,
+        "call": call["call"],
+        "name": str(call["name"] or ""),
+        "title": f"tool call {call['call']} · {call['name']}" if call["call"]
+        else f"tool call · {call['name']}",
+        "panes": panes,
+        "model_call": number,
+        "placement": how.get(call["call"], GROUPING_NONE) if number else GROUPING_NONE,
+        "facts": facts,
+        "ref": {"call": call["call"], "shown": shown_at, "shown_how": shown_how},
+        # Whether the continuation a cut result offered was read back IN THIS
+        # TURN: None where nothing was offered, so "never offered" and "offered
+        # and unread" — different incidents (#274) — stay apart.
+        "continuation_read": read_back,
+    }
+
+
+def _event_step(kind: str, record: dict, facts: list[dict], **extra) -> dict:
+    return {"kind": kind, "panes": [PANE_EVENT], "facts": facts, "record": record, **extra}
+
+
+def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
+    """The turn as an ordered list of steps, in the order they happened.
+
+    File order is the chronology within a turn (`_walk_rounds` says why), so this
+    is a single pass over the records: a `reasoning` record opens a model call,
+    a `call` record (or the `tool` step, for a log without one) is a tool call,
+    and the between-round kinds are events. Ids are the record ids the rest of
+    the dossier already uses — `m<model_call>`, `c<call>` — so a note citing a
+    call cites a step with no second lookup.
+
+    The `retry` record that opened this turn sits at the END of the attempt it
+    discarded (docs/session-log.md), so it is read off the previous turn.
+    """
+    calls = doc["did"]["calls"]
+    placed, how = _place_calls(turn)
+    at = _walk_rounds(turn)
+    numbers = {r["model_call"] for r in doc["flow"]["rounds"]}
+    shown = _shown_messages(doc["messages"], calls, placed)
+    paged = {c["read"] for c in calls if c["read"]}
+    fragments = doc["thought"]["state"] == FRAGMENTS
+    steps: list[dict] = []
+    model_seen = 0
+    calls_seen: set[int] = set()
+    unnumbered = [c for c in calls if not c["call"]]   # a log older than call ids
+    errors_pending: list[str] = []
+    counters: dict[str, int] = {}
+
+    def event_id(kind: str) -> str:
+        counters[kind] = counters.get(kind, 0) + 1
+        return f"{kind}{counters[kind]}"
+
+    def before(index: int) -> int | None:
+        following = at.get(index, 0) + 1
+        return following if following in numbers else None
+
+    if turn.ordinal >= 2:
+        previous = log.turns[turn.ordinal - 2]
+        for record in previous.of_kind("retry"):
+            prev = record.get("previous") or {}
+            ended = str(prev.get("ended") or "unknown")
+            facts = [{"k": "by", "v": str(record.get("by") or "?")},
+                     {"k": "attempt", "v": str(record.get("attempt") or "?")},
+                     {"k": "the attempt before", "v": ended
+                      + (f" — {prev['failure']}" if prev.get("failure") else "")}]
+            steps.append(_event_step(STEP_RETRY, dict(record), facts,
+                                     id=event_id("retry"), title="you retried"))
+
+    for index, step in enumerate(turn.steps):
+        kind = step.get("kind")
+        if kind == "model_error":
+            waited = step.get("waited_s")
+            facts = [{"k": "class", "v": str(step.get("class") or "error")},
+                     {"k": "action", "v": str(step.get("action") or "?")},
+                     {"k": "attempt",
+                      "v": f"{step.get('attempt', '?')} of {step.get('attempts', '?')}"}]
+            if step.get("status"):
+                facts.append({"k": "status", "v": str(step["status"])})
+            if isinstance(waited, (int, float)):
+                facts.append({"k": "waited", "v": f"{waited:g}s"})
+            sid = event_id("e")
+            errors_pending.append(sid)
+            steps.append(_event_step(STEP_MODEL_ERROR, dict(step), facts, id=sid,
+                                     title="model call failed",
+                                     model_call=step.get("model_call")))
+        elif kind == "brief":
+            number = int(step.get("model_call") or 0)
+            if number > 1:
+                facts = [{"k": "at", "v": f"model call {number}"},
+                         {"k": "tools", "v": _fmt_n((step.get("tools") or {}).get("count"))}]
+                steps.append(_event_step(
+                    STEP_BRIEF_CHANGED, {"model_call": number}, facts, id=event_id("b"),
+                    title="what the model was handed changed", before=number,
+                ))
+        elif kind == "trim" and step.get("policy") == "mid_task_budget":
+            stubbed = step.get("stubbed")
+            facts = [{"k": "results stubbed", "v": _fmt_n(step.get("affected"))},
+                     {"k": "which",
+                      "v": ", ".join(f"{x.get('tool')} (#{x.get('at')})" for x in stubbed)
+                      if stubbed else "not recorded"}]
+            if isinstance(step.get("bytes_before"), int):
+                facts.append({"k": "chars", "v": f"{_fmt_n(step.get('bytes_before'))} → "
+                              f"{_fmt_n(step.get('bytes_after'))}"})
+            steps.append(_event_step(STEP_TRIM, dict(step), facts, id=event_id("t"),
+                                     title="earlier results were stubbed", before=before(index)))
+        elif kind == "injected":
+            text = str(step.get("text") or "")
+            steps.append(_event_step(STEP_STEERING, {"text": text},
+                                     [{"k": "chars", "v": _fmt_n(len(text))}],
+                                     id=event_id("s"), title="you typed while it ran",
+                                     text=text, before=before(index)))
+        elif kind == "reasoning":
+            recorded = step.get("model_call")
+            number = int(recorded or model_seen + 1)
+            model_seen = max(model_seen, number)
+            model = _model_step(number, doc,
+                                GROUPING_RECORDED if recorded else GROUPING_INFERRED)
+            model["errors"] = errors_pending
+            errors_pending = []
+            steps.append(model)
+        elif kind == "thinking" and fragments:
+            number = model_seen + 1
+            model_seen = number
+            model = _model_step(
+                number, doc, GROUPING_INFERRED, fragment=str(step.get("gist") or "")
+            )
+            model["errors"] = errors_pending
+            errors_pending = []
+            steps.append(model)
+        elif kind in ("call", "tool"):
+            call_no = int(step.get("call") or 0)
+            if call_no:
+                if call_no in calls_seen:
+                    continue
+                found = next((c for c in calls if c["call"] == call_no), None)
+                if found is None:
+                    continue
+                calls_seen.add(call_no)
+            else:
+                # A `tool` step from before call ids: it is the next one that
+                # has no id, in file order. Positional, and labelled `none`.
+                if kind != "tool" or not unnumbered:
+                    continue
+                found = unnumbered.pop(0)
+            steps.append(_tool_step(found, placed, how, shown, paged))
+
+    # The stubs a call was handed instead of the results it had read: the trims
+    # between the previous model call and this one, read off the steps just
+    # built so the two views agree on which trim preceded which call.
+    for position, step in enumerate(steps):
+        if step["kind"] != STEP_MODEL_CALL:
+            continue
+        stubbed = []
+        for earlier in reversed(steps[:position]):
+            if earlier["kind"] == STEP_MODEL_CALL:
+                break
+            if earlier["kind"] == STEP_TRIM:
+                stubbed[0:0] = [
+                    {"at": x.get("at"), "tool": x.get("tool")}
+                    for x in (earlier["record"].get("stubbed") or [])
+                ]
+        step["context"]["stubbed"] = stubbed
+    last_model = next((s for s in reversed(steps) if s["kind"] == STEP_MODEL_CALL), None)
+    if last_model is not None:
+        last_model["is_last"] = True
+    for n, step in enumerate(steps, 1):
+        step["n"] = n
+    return steps
+
+
+def _link_events(doc: dict) -> None:
+    """Give each event in the flow the id of its step, so a note computed off
+    the flow can cite the step screen's exact step. Matched by kind and record
+    equality in order — both lists come from the same file-order walk."""
+    unused = [
+        s for s in doc["steps"] if s["kind"] in (STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED)
+    ]
+    events = [e for r in doc["flow"]["rounds"] for e in r["before"]] + list(doc["flow"]["loose"])
+    for event in events:
+        for step in unused:
+            if step["kind"] != event["kind"]:
+                continue
+            if event["kind"] == STEP_TRIM and step["record"] != event.get("record"):
+                continue
+            if event["kind"] == STEP_STEERING and step.get("text") != event.get("text"):
+                continue
+            event["step"] = step["id"]
+            unused.remove(step)
+            break
+
+
+# Which pane of a step a note is about — the tap lands on the sentence the row
+# was computed from, not on the step's first pane.
+NOTE_PANES = {
+    "tool_failed": PANE_RESULT,
+    "result_cut": PANE_RESULT,
+    "continuation_unread": PANE_RESULT,
+    "call_incomplete": PANE_CALL,
+    "gate_refused": PANE_CALL,
+    "args_truncated": PANE_CALL,
+    "reasoning_truncated": PANE_RESPONSE,
+    "args_malformed": PANE_RESPONSE,
+    "stop_unusual": PANE_RESPONSE,
+    "context_full": PANE_CONTEXT,
+    "context_fixed_cost": PANE_CONTEXT,
+    "context_unattributed": PANE_CONTEXT,
+    "rule_abstained": PANE_CONTEXT,
+    "reminder_demoted": PANE_CONTEXT,
+    "brief_changed": PANE_CONTEXT,
+    "verify_refused": PANE_RESPONSE,
+    "task_unfinished": PANE_RESPONSE,
+}
+
+
+def _cite_steps(rows: list[dict], doc: dict) -> None:
+    """Point every note at a step and a pane of the step screen.
+
+    A row already naming a call or a model call cites that step; a row about
+    the turn's beginning (the brief, the rules, a seed trim) lands on the first
+    model call's context, and one about its end (the answer, the task status)
+    on the last model call's response — those ARE where the brief and the
+    answer live on the step screen. An event row cites the event's own step."""
+    steps = doc["steps"]
+    by_id = {s["id"]: s for s in steps}
+    models = [s for s in steps if s["kind"] == STEP_MODEL_CALL]
+    first = models[0] if models else (steps[0] if steps else None)
+    last = models[-1] if models else (steps[-1] if steps else None)
+    for row in rows:
+        where = row["where"]
+        check = row["check"]
+        target = None
+        if where.get("step") in by_id:
+            target = by_id[where["step"]]
+        elif where.get("call") is not None and f"c{where['call']}" in by_id:
+            target = by_id[f"c{where['call']}"]
+        elif where.get("model_call") is not None and f"m{where['model_call']}" in by_id:
+            target = by_id[f"m{where['model_call']}"]
+        elif where.get("section") == "produced":
+            target = last
+        else:
+            target = first
+        if target is None:
+            continue
+        pane = NOTE_PANES.get(check, target["panes"][0])
+        if pane not in target["panes"]:
+            pane = target["panes"][0]
+        where["step"] = target["id"]
+        where["pane"] = pane
+
+
 def _event_note(
     rows: list[dict], event: dict, model_call: int | None, section: str = "flow"
 ) -> None:
@@ -1484,6 +2019,8 @@ def _event_note(
     where: dict = {"section": section}
     if model_call is not None:
         where["model_call"] = model_call
+    if event.get("step"):
+        where["step"] = event["step"]
     if model_call:
         when = f"before model call {model_call}"
     elif section == "given":
@@ -1706,6 +2243,8 @@ def notes(doc: dict) -> dict:
               f"the task ended {status}: {doc['produced']['error'][:200]}",
               section="produced")
 
+    if "steps" in doc:
+        _cite_steps(rows, doc)
     return {"rows": rows, "checks": [{"id": i, "label": lb} for i, lb in CHECKS]}
 
 
@@ -1752,8 +2291,16 @@ def dossier(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         # earlier turns is resent on every call of this one.
         "context_cost": _context_cost(turn, log, root),
     }
+    # This turn's messages, text included once; the steps below reference them
+    # by index (#352).
+    doc["messages"] = _messages(turn)
     # After `given`/`thought`/`did` exist, because it references into them.
     doc["flow"] = _rounds(turn, doc)
+    # The same facts as `flow`, as the ordered ledger the step screen walks.
+    # Built after the flow because the placement and the round numbers are
+    # shared, and linked back so a note off the flow cites a step.
+    doc["steps"] = _steps(turn, log, doc)
+    _link_events(doc)
     doc["notes"] = notes(doc)
     return doc
 

@@ -238,6 +238,24 @@ The `inferred` fallback attaches each call to the most recent preceding `reasoni
 
 `TestTheFlow` pins the grouping, the by-id references, the labelled fallback, the claude-max shape, and both sides of the seed-versus-mid-task trim split.
 
+## The step list — the same turn as a ledger (#352 slice 1)
+
+The web step screen walks a turn forward and back, one exchange at a time, so the dossier carries the turn a second way: `steps`, an ordered list in which every entry is a model call, a tool call, or something that happened between two of them (`trim`, `steering`, `brief_changed`, `model_error`, `retry`). It is not a second walk. `_place_calls` is the ONE placement of a tool call under its model call, shared with `_rounds`, so the flow and the ledger cannot file a call in different rounds; and `_link_events` hands every flow event the id of its step, so a note computed off the flow cites the exact step.
+
+A step carries its `kind`, an `id` (`m<model_call>`, `c<call>`, or a per-kind counter for events), `n` of M, the `panes` it has — `context`/`response` for a model call, `call`/`result` for a tool call plus `page` **only where page evidence was recorded**, one `event` pane for the rest — the short `facts` for its strip, and `ref`erences by id into `thought`, `did`, `context_cost` and `messages`. **Never a copy**: tool output is the bulk of the payload and the document is fetched to a phone.
+
+Three inferences live here, and each is said on the step rather than worn as a record:
+
+- **`placement`** on a tool call is `recorded` when the `call` record named its model call, `inferred` when file order attached it (the same fallback `_rounds` labels), and `none` when nothing recorded issued it — claude-max, or a `tool` step from before call ids, which is placed positionally and says so.
+- **`numbering`** on a model call is `inferred` for a log that kept only the rendered `thinking` fragment (the `FRAGMENTS` state): those are still model calls, numbered by order, with the snippet on the step as `fragment`.
+- **`ref.shown_how`** on a tool call says where its model-facing text came from. `step_output` and `step_error` are on the `tool` step and joined by id. `message_by_order` and `message_by_name` are joins to a tool-role `message` record — which carries the tool's name and the model call it was first in front of, and **no call id** — so a message is matched to the calls of its round by name and order, and only where that is unambiguous; anything else is `not_matched`, because a wrong text presented as *what the model saw* is precisely the lie this reader exists to prevent. Slice 2's `sent` record makes this join exact.
+
+**`messages`** is this turn's message records, text included once, each with its `model_call` stamp as recorded (None where the writer wrote none). A model call's `context` block is computed from the stamps — which messages were `new` to it (stamped with the previous call), which were `in_front` of it, how many are `unstamped` and cannot be placed, which results a trim `stubbed` between the previous call and this one, and whether the brief changed at it — and is labelled `source: reconstructed`, because it is built from records and the brief rather than from the request that left aish. `context_cost.calls[].by_where` gives the per-side totals (carried from earlier turns, this turn, the system text, the tool menu) for the same call, kept when the parts list is popped.
+
+The `retry` that opened a rerun sits at the END of the attempt it discarded (`docs/session-log.md`), so the rerun reads it off the previous turn and it is the rerun's first step — the same reader rule the trace card follows.
+
+Every note now cites a `step` and a `pane` in its `where`: a row about a call cites that call's step and the pane it was computed from (`NOTE_PANES` — a failed result lands on the result, a refused gate on the call); a row about the turn's beginning lands on the first model call's context, one about its end on the last model call's response, which is where the brief and the answer live on the step screen. `TestTheStepList`.
+
 ## Worth a look — facts, never causes
 
 A turn with a two-dozen-rule corpus produces dozens of verdicts, and on a phone the line that matters is buried. `notes()` ranks what is worth reading first. Four properties make that safe, and each is a test:
