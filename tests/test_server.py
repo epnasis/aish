@@ -9855,6 +9855,39 @@ class TestWhoWasThereWhenTheCardWentUp:
         assert decided["viewers_at_hold"] == 0
 
 
+class TestTurnsSweepWiring:
+    def test_the_sweep_runs_at_start_and_after_the_turn_not_per_tool_call(
+        self, app_env, monkeypatch
+    ):
+        """The store's budget sweep fires from startup and from _finish_turn
+        (#352) — a task with two tool calls sweeps once when it ends, never
+        inside a tool call."""
+        swept = []
+        monkeypatch.setattr(
+            server_module.turns, "sweep", lambda state_dir, *a, **k: (swept.append(1), [])[1]
+        )
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="ls")]),
+                model_says(tool_calls=[tool_call("read_docs", command="pwd")]),
+                model_says("done"),
+            ],
+        )
+        monkeypatch.setattr(server_module.tools, "read_docs", lambda *a, **k: "docs")
+        with client, connected(client) as (ws, _hello, _):
+            deadline = time.time() + 5
+            while not swept and time.time() < deadline:
+                time.sleep(0.02)
+            assert len(swept) == 1, "startup sweeps once"
+            ws.send_json({"type": "task", "text": "two tools"})
+            recv_until(ws, "done")
+            deadline = time.time() + 5
+            while len(swept) < 2 and time.time() < deadline:
+                time.sleep(0.02)
+        assert len(swept) == 2, "one more sweep when the turn ends — not one per tool call"
+
+
 class TestEvidenceEndpoint:
     """One blob from a chat's evidence store over HTTP (#352): the message a
     model call sent, as the provider saw it. Token-gated like `/explain`, plus
