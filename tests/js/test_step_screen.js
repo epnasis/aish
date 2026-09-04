@@ -237,10 +237,10 @@ function doc(overrides = {}) {
     steps: [
       { id: "retry1", kind: "retry", n: 1, title: "you retried", panes: ["event"], facts: [{ k: "by", v: "owner" }, { k: "attempt", v: "2" }, { k: "the attempt before", v: "failed — rate_limit" }], record: { by: "owner", attempt: 2 } },
       { id: "e1", kind: "model_error", n: 2, title: "model call failed", panes: ["event"], facts: [{ k: "class", v: "rate_limit" }, { k: "action", v: "retry" }], record: { class: "rate_limit", text: `429 ${HOSTILE}` }, model_call: 1 },
-      { id: "m1", kind: "model_call", n: 3, model_call: 1, title: "model call 1", panes: ["context", "response"], numbering: "recorded",
+      { id: "m1", kind: "model_call", n: 3, model_call: 1, secs: 5.44, title: "model call 1", panes: ["context", "response"], numbering: "recorded",
         facts: [{ k: "model", v: "ollama · qwen3:8b" }, { k: "tokens", v: "100 input · 20 output" }], ref: { thought: 1, cost: 1, brief: 0 }, fragment: "", errors: ["e1"],
         context: { new: [0], in_front: [0], unstamped: 0, stubbed: [], brief_changed: false, source: "reconstructed" }, is_last: false },
-      { id: "c1", kind: "tool_call", n: 4, call: 1, name: "read_url", title: "tool call 1 · read_url", panes: ["call", "result", "page"], model_call: 1, placement: "recorded",
+      { id: "c1", kind: "tool_call", n: 4, call: 1, name: "read_url", secs: 1.23, title: "tool call 1 · read_url", panes: ["call", "result", "page"], model_call: 1, placement: "recorded",
         facts: [{ k: "status", v: "failed" }, { k: "verdict by", v: "prefix" }, { k: "seconds", v: "1.2" }, { k: "bytes", v: "6,000" }], ref: { call: 1, shown: 2, shown_how: "message_by_order" }, continuation_read: false },
       { id: "c2", kind: "tool_call", n: 5, call: 2, name: "run_command", title: "tool call 2 · run_command", panes: ["call", "result"], model_call: 1, placement: "recorded",
         facts: [{ k: "status", v: "ok" }, { k: "seconds", v: "0.3" }], ref: { call: 2, shown: null, shown_how: "step_output" }, continuation_read: null },
@@ -378,7 +378,7 @@ check("every kind of step renders, with exactly the panes it has", () => {
   const seen = [];
   for (let i = 0; i < d.steps.length; i++) {
     const step = d.steps[i];
-    assert.equal(w.el("ss-count").textContent, `Step ${i + 1} of ${d.steps.length}`);
+    assert(w.el("ss-count").textContent.startsWith(`Step ${i + 1} of ${d.steps.length}`), w.el("ss-count").textContent);
     assert(w.el("ss-title").textContent.includes(step.title), `title: ${w.el("ss-title").textContent}`);
     const tabs = w.el("ss-panes").children.map((t) => t.dataset.pane);
     assert.deepEqual(tabs, step.panes, `panes of ${step.id}`);
@@ -1013,6 +1013,20 @@ check("wrap is on by default, the toggle is remembered, and \"0\" turns it off",
   w.el("ss-wrap").onclick();
   assert(w.el("ss-body").classList.has("wrap-on"));
   assert.equal(store.get("aish-ss-wrap"), "1");
+});
+
+check("each step's duration shows in the header, only where a step took time", () => {
+  const w = world();
+  const d = doc();
+  w.sandbox.ssOpen(d, "m1", "context");
+  assert(w.el("ss-count").textContent.includes("5.4s"), w.el("ss-count").textContent);
+  w.sandbox.ssShow(d.steps.findIndex((x) => x.id === "c1"), "call");
+  assert(w.el("ss-count").textContent.includes("1.2s"), w.el("ss-count").textContent);
+  // an event step has no duration and the header shows just its position.
+  const ev = d.steps.find((x) => x.kind !== "model_call" && x.kind !== "tool_call");
+  w.sandbox.ssShow(d.steps.indexOf(ev), ev.panes[0]);
+  assert(!/\dm?s\b/.test(w.el("ss-count").textContent.replace(/Step \d+ of \d+/, "")),
+    "no fabricated duration on an event: " + w.el("ss-count").textContent);
 });
 
 check("the scroll arrows follow the chat's directional rule and the keys page", () => {

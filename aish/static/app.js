@@ -12500,6 +12500,18 @@ function ssEl(tag, cls, text) {
   return node;
 }
 
+// A step's wall-clock duration, human-sized: sub-second in ms, under a minute
+// in seconds, longer as m ss. Only steps that took real time (model calls,
+// tool calls) carry `secs`; an event has none and the header shows just N of M.
+function ssDur(secs) {
+  const v = Number(secs);
+  if (!Number.isFinite(v) || v < 0) return "";
+  if (v < 1) return `${Math.round(v * 1000)}ms`;
+  if (v < 60) return `${v.toFixed(1)}s`;
+  const m = Math.floor(v / 60);
+  return `${m}m${String(Math.round(v - m * 60)).padStart(2, "0")}s`;
+}
+
 function ssN(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return "?";
@@ -13252,7 +13264,9 @@ function ssPaint() {
   const { doc, index, pane } = ssView;
   const steps = doc.steps || [];
   const step = steps[index] || null;
-  $("ss-count").textContent = steps.length ? `Step ${index + 1} of ${steps.length}` : "No steps";
+  const dur = step && typeof step.secs === "number" ? ssDur(step.secs) : "";
+  $("ss-count").textContent = (steps.length ? `Step ${index + 1} of ${steps.length}` : "No steps")
+    + (dur ? ` · ${dur}` : "");
   let title = step ? step.title : "nothing was recorded for this turn";
   if (step && step.kind === "model_call" && step.numbering === "inferred") title += " · number inferred";
   if (step && step.kind === "tool_call" && step.placement === "inferred") title += " · round inferred";

@@ -1293,6 +1293,32 @@ class TestTheStepList:
         assert [s["is_last"] for s in steps if s["kind"] == "model_call"] == [False, True]
         json.dumps(doc)
 
+    def test_each_step_carries_its_duration(self, tmp_path):
+        """A tool step's seconds come from the tool record; a model call's from
+        its rendered `thinking` step (matched by order); an event has none."""
+        path = tmp_path / "session-dur.jsonl"
+        tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
+        self._write(path, [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            {"ts": "t", "kind": "message", "role": "user", "content": "go", "model_call": 0},
+            tr({"kind": "thinking", "secs": 5.4, "tokens": [10, 2]}),
+            tr({"kind": "reasoning", "model_call": 1, "text": "t", "tokens": [10, 2]}),
+            tr({"kind": "call", "call": 1, "name": "read_docs", "args": {}, "model_call": 1}),
+            tr({"kind": "tool", "call": 1, "name": "read_docs", "ok": True, "secs": 1.25,
+                "model_call": 1}),
+            {"ts": "t", "kind": "message", "role": "tool", "tool_name": "read_docs",
+             "content": "x", "model_call": 1},
+            tr({"kind": "thinking", "secs": 0.3, "tokens": [12, 1]}),
+            tr({"kind": "reasoning", "model_call": 2, "text": "t2", "said": "done"}),
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ])
+        lg = explain_mod.load(path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        by = {s["id"]: s for s in doc["steps"]}
+        assert by["m1"]["secs"] == 5.4
+        assert by["m2"]["secs"] == 0.3
+        assert by["c1"]["secs"] == 1.25
+
     def test_steps_reference_and_never_copy(self, tmp_path):
         """Tool output is the bulk of the payload; a step holds ids."""
         agent, _, log = make_logged_agent(

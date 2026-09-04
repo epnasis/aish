@@ -690,7 +690,12 @@ def _rules_data(turn: Turn, log: Log) -> dict:
 def _thought(turn: Turn, log: Log) -> dict:
     """What the model was thinking, per model call, in the order it thought it."""
     records = turn.of_kind("reasoning")
-    fragments = [str(s.get("gist")) for s in turn.of_kind("thinking") if s.get("gist")]
+    thinking = turn.of_kind("thinking")
+    fragments = [str(s.get("gist")) for s in thinking if s.get("gist")]
+    # The seconds a call spent live on the rendered `thinking` step, not the
+    # renderless `reasoning` record; matched by position (the i-th thinking step
+    # is the i-th call), which is how they are emitted.
+    secs_by_index = [s.get("secs") for s in thinking]
     if records:
         state = RECORDED
     elif fragments:
@@ -703,6 +708,7 @@ def _thought(turn: Turn, log: Log) -> dict:
         "calls": [
             {
                 "model_call": record.get("model_call"),
+                "secs": secs_by_index[index] if index < len(secs_by_index) else None,
                 "text": record.get("text") or "",
                 "truncated": record.get("truncated") or 0,
                 "cap_source": record.get("cap_source"),
@@ -717,7 +723,7 @@ def _thought(turn: Turn, log: Log) -> dict:
                 "malformed": list(record.get("malformed") or []),
                 "synthesized": bool(record.get("synthesized")),
             }
-            for record in records
+            for index, record in enumerate(records)
         ],
     }
 
@@ -1906,6 +1912,7 @@ def _brief_index(briefs: list[dict], number: int) -> int | None:
 
 def _model_step(number: int, doc: dict, numbering: str, fragment: str = "") -> dict:
     thought = next((t for t in doc["thought"]["calls"] if t.get("model_call") == number), None)
+    step_secs = thought.get("secs") if thought else None
     cost = next((c for c in doc["context_cost"]["calls"] if c.get("model_call") == number), None)
     briefs = doc["given"]["briefs"]
     brief_at = _brief_index(briefs, number)
@@ -1979,6 +1986,7 @@ def _model_step(number: int, doc: dict, numbering: str, fragment: str = "") -> d
             "received": number if received_call is not None else None,
         },
         "fragment": fragment,
+        "secs": step_secs,
         "errors": [],   # ids of the model_error steps that preceded this call
         "context": {
             "new": new,
@@ -2040,6 +2048,7 @@ def _tool_step(call: dict, placed: dict[int, int], how: dict[int, str],
         "model_call": number,
         "placement": how.get(call["call"], GROUPING_NONE) if number else GROUPING_NONE,
         "facts": facts,
+        "secs": call["secs"],
         "ref": {"call": call["call"], "shown": shown_at, "shown_how": shown_how},
         # Whether the continuation a cut result offered was read back IN THIS
         # TURN: None where nothing was offered, so "never offered" and "offered
