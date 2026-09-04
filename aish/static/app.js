@@ -12478,6 +12478,24 @@ function ssDur(secs) {
   return `${m}m${String(Math.round(v - m * 60)).padStart(2, "0")}s`;
 }
 
+// The same icon the chat trace uses for this kind of step, so a tool, a model
+// call, an error and the rest read at a glance. traceSvg returns aish's own
+// fixed SVG (no content), so setting it as innerHTML is safe.
+function ssStepIcon(doc, step) {
+  if (typeof traceSvg !== "function") return "";
+  if (step.kind === "model_call") return traceSvg("thinking", "var(--purple)");
+  if (step.kind === "tool_call") {
+    const c = ssCallOf(doc, step);
+    const meta = (typeof TOOL_META === "object" && TOOL_META[step.name]) || [step.name, "dot", "--dim"];
+    const failed = c && (c.ok === false || (c.status && c.status !== "ok" && c.status !== "incomplete"));
+    const name = failed ? "denied" : (step.name === "run_command" ? "command" : meta[1]);
+    return traceSvg(name, failed ? "var(--red)" : `var(${meta[2]})`);
+  }
+  if (step.kind === "steering") return traceSvg("chat", "var(--blue)");
+  if (step.kind === "model_error") return traceSvg("denied", "var(--red)");
+  return traceSvg("dot", "var(--dim)"); // trim, retry, brief_changed
+}
+
 function ssN(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return "?";
@@ -13242,6 +13260,8 @@ function ssPaint() {
   const flagged = ssFindings.some((f) => f.index === index);
   $("ss-count").textContent = (steps.length ? `Step ${index + 1} of ${steps.length}` : "No steps")
     + (dur ? ` · ${dur}` : "") + (flagged ? " · ⚠" : "");
+  const icon = $("ss-icon");
+  if (icon) icon.innerHTML = step ? ssStepIcon(doc, step) : "";
   let title = step ? step.title : "nothing was recorded for this turn";
   if (step && step.kind === "model_call" && step.numbering === "inferred") title += " · number inferred";
   if (step && step.kind === "tool_call" && step.placement === "inferred") title += " · round inferred";
@@ -13356,6 +13376,9 @@ function ssPaintBody(paneObj) {
   body.textContent = "";
   body.scrollTop = 0;
   ssLastScrollTop = 0;
+  ssChromeLast = 0;
+  const box = $("step-screen");
+  if (box) box.classList.remove("ss-collapsed");
   ssFadeArrows();
   const whole = $("ss-whole");
   const segs = paneObj ? ((paneObj.more && ssWhole) ? paneObj.more.segs : paneObj.segs)
@@ -13707,6 +13730,11 @@ function ssDragEnd(e) {
 // tap smooth-scrolls. One directional rule, not a new one.
 let ssLastScrollTop = 0;
 let ssArrowFadeTimer = null;
+// The scroll-away top bar (Material's collapsing app bar; Safari/Gmail): the
+// chrome hides when reading DOWN and returns on any upward scroll or at the
+// top. `ssChromeLast` is the last scrollTop the direction was measured against.
+let ssChromeLast = 0;
+const SS_CHROME_HIDE_AT = 48;
 
 function ssFadeArrows() {
   $("ss-scroll-down").hidden = true;
@@ -13728,6 +13756,20 @@ function ssUpdateScrollArrows() {
   if (!$("ss-scroll-down").hidden || !$("ss-scroll-top").hidden) {
     ssArrowFadeTimer = setTimeout(ssFadeArrows, SS_ARROW_FADE_MS);
   }
+}
+
+// Hide the chrome while reading down, reveal it on any upward scroll or at the
+// top — the native "scroll-away top bar". Horizontal swipe (the tape) is a
+// separate recogniser and is unaffected.
+function ssScrollChrome() {
+  const body = $("ss-body");
+  const box = $("step-screen");
+  if (!body || !box) return;
+  const top = body.scrollTop;
+  if (top <= 12) box.classList.remove("ss-collapsed");
+  else if (top > ssChromeLast + 4 && top > SS_CHROME_HIDE_AT) box.classList.add("ss-collapsed");
+  else if (top < ssChromeLast - 4) box.classList.remove("ss-collapsed");
+  ssChromeLast = top;
 }
 
 function ssScrollPage(delta) {
@@ -13802,6 +13844,16 @@ function ssWire() {
     else body.scrollTop = 0;
   };
   $("ss-body").addEventListener("scroll", ssUpdateScrollArrows, { passive: true });
+  $("ss-body").addEventListener("scroll", ssScrollChrome, { passive: true });
+  // The grabber is always visible (the chrome above it can collapse), so the
+  // sheet dismissal works whether the header is shown or hidden.
+  const grab = $("ss-grab");
+  if (grab) {
+    grab.addEventListener("touchstart", ssDragStart, { passive: true });
+    grab.addEventListener("touchmove", ssDragMove, { passive: true });
+    grab.addEventListener("touchend", ssDragEnd, { passive: true });
+    grab.addEventListener("touchcancel", ssDragEnd, { passive: true });
+  }
   const head = $("ss-head");
   head.addEventListener("touchstart", ssDragStart, { passive: true });
   head.addEventListener("touchmove", ssDragMove, { passive: true });

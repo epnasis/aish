@@ -330,10 +330,12 @@
      the page pane's picture opens over it. -->
 <div id="step-screen" hidden role="dialog" aria-modal="true" aria-label="turn inspector">
   <div id="ss-grab" aria-hidden="true"></div>
+  <div id="ss-chrome">
   <div id="ss-head">
     <button id="ss-close" type="button" aria-label="close">
       <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
     </button>
+    <span id="ss-icon" aria-hidden="true"></span>
     <div id="ss-titles">
       <div id="ss-count"></div>
       <div id="ss-title"></div>
@@ -367,6 +369,7 @@
     <button id="ss-findings-next" type="button" aria-label="next finding">&#8250;</button>
   </div>
   <div id="ss-findings-list" hidden></div>
+  </div>
   <div id="ss-scroller">
     <div id="ss-body"></div>
     <button id="ss-scroll-down" hidden aria-label="scroll to bottom">
