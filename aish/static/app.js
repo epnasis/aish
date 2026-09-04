@@ -12073,6 +12073,10 @@ let ssWhole = false;
 const SS_SWIPE_MIN = 56;
 const SS_AXIS_LOCK = 1.6;
 const SS_DECIDE_AT = 8;
+// How far a downward pull must travel to close the screen. It can only begin
+// with the pane ALREADY at its top — scrolled anywhere else, down is a scroll
+// and the browser keeps it — so the gesture can never eat a scroll.
+const SS_DISMISS_MIN = 90;
 // A body past this folds — max-height and a "show all" control. The whole text
 // stays in the DOM: folded, never truncated, the same law the sheet had.
 const SS_FOLD_CHARS = 20000;
@@ -12893,14 +12897,18 @@ function ssSave() {
 
 // ---- the swipe -------------------------------------------------------------
 //
-// Claims only a near-horizontal move, decided ONCE at the first SS_DECIDE_AT
-// px of travel and never re-decided; everything else is yielded to the pane's
-// vertical scroll (the pane is `touch-action: pan-y`, so the browser owns the
-// scroll and nothing here needs preventDefault). Passive listeners.
+// Claims a near-horizontal move for the tape, and a downward pull that BEGAN
+// with the pane at its top for dismissal — the X sits top-left, out of thumb
+// reach on a phone, and a sheet-style pull-down is where the thumb already is.
+// Decided ONCE at the first SS_DECIDE_AT px of travel and never re-decided;
+// everything else is yielded to the pane's vertical scroll (the pane is
+// `touch-action: pan-y`, so the browser owns the scroll and nothing here needs
+// preventDefault). Passive listeners.
 function ssTouchStart(e) {
   const t = e.touches && e.touches[0];
   if (!t) return;
-  ssTouch = { x: t.clientX, y: t.clientY };
+  const body = $("ss-body");
+  ssTouch = { x: t.clientX, y: t.clientY, atTop: !body || !body.scrollTop };
   ssGesture = null;
 }
 
@@ -12911,16 +12919,41 @@ function ssTouchMove(e) {
   const dx = t.clientX - ssTouch.x;
   const dy = t.clientY - ssTouch.y;
   if (Math.abs(dx) < SS_DECIDE_AT && Math.abs(dy) < SS_DECIDE_AT) return;
-  ssGesture = Math.abs(dx) > SS_AXIS_LOCK * Math.abs(dy) ? "page" : "scroll";
+  if (Math.abs(dx) > SS_AXIS_LOCK * Math.abs(dy)) ssGesture = "page";
+  else if (dy > 0 && Math.abs(dy) > SS_AXIS_LOCK * Math.abs(dx) && ssTouch.atTop) ssGesture = "dismiss";
+  else ssGesture = "scroll";
 }
 
 function ssTouchEnd(e) {
   if (!ssTouch) return;
   const t = e.changedTouches && e.changedTouches[0];
   const dx = t ? t.clientX - ssTouch.x : 0;
-  const claimed = ssGesture === "page";
+  const dy = t ? t.clientY - ssTouch.y : 0;
+  const gesture = ssGesture;
   ssTouch = null;
-  if (claimed && Math.abs(dx) >= SS_SWIPE_MIN) ssTape(dx < 0 ? 1 : -1);
+  if (gesture === "page" && Math.abs(dx) >= SS_SWIPE_MIN) ssTape(dx < 0 ? 1 : -1);
+  else if (gesture === "dismiss" && dy >= SS_DISMISS_MIN) {
+    // Still at the top at release: a pull that turned into a scroll mid-way
+    // would have moved the pane, and closing then would eat a scroll.
+    const body = $("ss-body");
+    if (!body || !body.scrollTop) ssClose();
+  }
+}
+
+// ---- vertical jumps ---------------------------------------------------------
+// The chat's answer-top lesson, applied here: a long pane is minutes of
+// flicking, so ↑/↓ jump to the top and the bottom, floating bottom-right in
+// thumb reach. ArrowUp/ArrowDown page through the same scroller.
+function ssJump(toBottom) {
+  const body = $("ss-body");
+  if (!body) return;
+  body.scrollTop = toBottom ? (body.scrollHeight || 1e9) : 0;
+}
+
+function ssScrollPage(delta) {
+  const body = $("ss-body");
+  if (!body) return;
+  body.scrollTop = Math.max(0, body.scrollTop + delta * Math.max(200, (body.clientHeight || 480) * 0.85));
 }
 
 // ---- text size -------------------------------------------------------------
@@ -12964,6 +12997,8 @@ function ssWire() {
   box.addEventListener("touchend", ssTouchEnd, { passive: true });
   box.addEventListener("touchcancel", () => { ssTouch = null; ssGesture = null; }, { passive: true });
   $("ss-close").onclick = () => ssClose();
+  $("ss-jump-top").onclick = () => ssJump(false);
+  $("ss-jump-bottom").onclick = () => ssJump(true);
   $("ss-prev").onclick = () => ssGo(-1);
   $("ss-next").onclick = () => ssGo(1);
   let stored = null;
@@ -14606,6 +14641,11 @@ document.addEventListener("keydown", (e) => {
     if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && document.activeElement !== $("ss-find")) {
       e.preventDefault();
       ssTape(e.key === "ArrowRight" ? 1 : -1);
+      return;
+    }
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && document.activeElement !== $("ss-find")) {
+      e.preventDefault();
+      ssScrollPage(e.key === "ArrowDown" ? 1 : -1);
       return;
     }
   }

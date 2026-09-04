@@ -3842,6 +3842,17 @@ body.console-open #backdrop { z-index: 63; }
 /* A raw record: mono like the payload, tinted like meta — it is a record, not
    something a model said or was given. */
 .ss-rec { color: var(--dim); border-left: 3px solid var(--sep); padding-left: 10px; }
+/* The vertical jumps: floating bottom-right, in thumb reach, over the body. */
+#ss-jumps {
+  position: absolute; right: 12px; bottom: calc(16px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 8px; z-index: 2;
+}
+#ss-jumps button {
+  width: 38px; height: 38px; border-radius: 50%;
+  border: 0.5px solid var(--sep); background: var(--bg2, var(--bg));
+  color: var(--dim); font-size: 17px; line-height: 1; cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18); opacity: 0.85;
+}
 /* Folded, never truncated: the whole text is in the pre. */
 .ss-clamped {
   max-height: 70vh; overflow: hidden;
