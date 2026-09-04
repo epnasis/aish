@@ -3834,7 +3834,12 @@ body.console-open #backdrop { z-index: 63; }
 .ss-pre {
   margin: 0 0 10px; font-size: inherit; line-height: 1.45; white-space: pre; overflow-wrap: normal;
   -webkit-user-select: text; user-select: text;
+  /* The Catppuccin Mocha mono surface aish uses for the terminal and code
+     fences, so a payload reads as code like everywhere else in the app. */
+  background: var(--ctp-mantle); color: var(--ctp-text);
+  border-radius: 10px; padding: 10px 12px;
 }
+.ss-pre .tok-em, .ss-pre .tok-strong, .ss-pre .tok-italic { color: var(--ctp-text); }
 #ss-body.wrap-on .ss-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Meta is STRUCTURE: aish's own account around the exchange — headers, states,
    truncation notes, verdicts. UI font and a border, so it can never be read as
@@ -3848,7 +3853,10 @@ body.console-open #backdrop { z-index: 63; }
 .ss-meta:first-child { margin-top: 2px; }
 /* A raw record: mono like the payload, tinted like meta — it is a record, not
    something a model said or was given. */
-.ss-rec { color: var(--dim); border-left: 3px solid var(--sep); padding-left: 10px; }
+.ss-rec {
+  background: var(--ctp-base); color: var(--ctp-subtext);
+  border-left: 3px solid var(--ctp-surface0); border-radius: 8px; padding: 10px 12px;
+}
 /* The readable layer (#354): token colours over the Catppuccin palette the
    chat's code fences already use, so a coloured payload matches the rest of the
    UI. Presentational only — the bytes are unchanged, and a link is the only
