@@ -137,7 +137,7 @@ function textNode(t) {
 
 const IDS = ["step-screen", "ss-count", "ss-title", "ss-prev", "ss-next", "ss-facts", "ss-panes",
   "ss-tools", "ss-find", "ss-find-count", "ss-find-prev", "ss-find-next", "ss-whole", "ss-copy",
-  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head"];
+  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head", "ss-read"];
 
 function world(overrides = {}) {
   const ids = new Map();
@@ -172,6 +172,7 @@ function world(overrides = {}) {
   Object.assign(sandbox, overrides);
   sandbox.window = sandbox;
   vm.createContext(sandbox);
+  vm.runInContext(surface(extract(appSource(), "// [READABLE-START]", "// [READABLE-END]")), sandbox);
   vm.runInContext(surface(extract(appSource(), "// [STEP-SCREEN-START]", "// [STEP-SCREEN-END]")), sandbox);
   return { sandbox, ids, toasts, saved, el: (id) => ids.get(id) };
 }
@@ -515,12 +516,14 @@ check("find counts every match, marks them, and moves between them", () => {
   s.ssSetFind("needle");
   assert.equal(s.ssFind.hits, 3, "case-insensitive count");
   assert.equal(w.el("ss-find-count").textContent, "1 of 3");
-  const marks = preOf(w).children.filter((n) => n.tagName === "mark");
+  // Marks now nest inside token spans (readable rendering), so collect them
+  // recursively; the count and the current-mark highlight are unchanged.
+  const marks = walk(preOf(w)).filter((n) => n.tagName === "mark");
   assert.equal(marks.length, 3);
   assert(marks.every((m) => m.textContent.toLowerCase() === "needle"));
   assert(marks[0].classList.has("ss-cur"));
-  // The text is whole around the marks: nodes and marks concatenate to it.
-  assert.equal(preOf(w).children.map((n) => n.textContent).join(""), whole);
+  // The text is whole around the marks: the pre's textContent aggregates to it.
+  assert.equal(preOf(w).textContent, whole);
   s.ssFindGo(1);
   assert.equal(w.el("ss-find-count").textContent, "2 of 3");
   assert(marks[1].classList.has("ss-cur") && !marks[0].classList.has("ss-cur"));

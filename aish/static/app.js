@@ -12012,6 +12012,348 @@ function shortName(name, max = NAME_MAX) {
 
 // ---- the dossier ---------------------------------------------------------
 //
+// [READABLE-START]
+// A readable layer over the COMPLETE captured content (#354): the same bytes,
+// shown so a human can read them — colour, real newlines, clickable links —
+// and NOTHING else. It is a lens, never a rewrite: the raw toggle and copy/save
+// always give the exact bytes back.
+//
+// The hard lines, each a test in tests/js/test_readable.js:
+//   - No loss. For every lossless language (json-lex on malformed input, yaml,
+//     markdown, plain) the concatenation of the pieces' text EQUALS the input,
+//     character for character. Only valid JSON is reflowed (pretty-printed), and
+//     even then every key and value survives — the raw toggle carries the bytes.
+//   - No medium change. An image reference becomes a clickable LINK, never an
+//     <img>; nothing is ever fetched or embedded.
+//   - No acting on the owner's behalf. A link is clickable but opens only on a
+//     click, in a new tab; only http/https/mailto are ever linkified — never the
+//     aish-reply:// scheme that would submit a turn, nor javascript:/data:.
+//   - Safe nodes only. The DOM renderer mints <span>, <a> and <mark>, each via
+//     createElement + textContent; never innerHTML, never <img>/<button>/<script>.
+//
+// The pieces functions below are pure (no DOM), so the guarantees are unit-
+// testable; `readableInto` is the one function that touches the document.
+
+const RD_SAFE_SCHEME = /^(https?:|mailto:)/i;
+// A URL or mailto inside plain text. Deliberately conservative: a trailing
+// . , ) ] } ; : is punctuation, not part of the address.
+const RD_URL_RE = /((?:https?:\/\/|mailto:)[^\s<>"'`]+[^\s<>"'`.,)\]};:!?])/g;
+
+function rdSafeHref(url) {
+  const u = String(url || "").trim();
+  return RD_SAFE_SCHEME.test(u) ? u : null;
+}
+
+// Plain text -> pieces, with bare URLs made clickable. Lossless: the pieces'
+// text concatenates back to the input exactly.
+function rdLinkify(text, cls) {
+  const out = [];
+  let last = 0;
+  const src = String(text);
+  src.replace(RD_URL_RE, (match, _g, index) => {
+    if (index > last) out.push({ cls, text: src.slice(last, index) });
+    const href = rdSafeHref(match);
+    if (href) out.push({ cls: "tok-link", text: match, href });
+    else out.push({ cls, text: match });
+    last = index + match.length;
+    return match;
+  });
+  if (last < src.length) out.push({ cls, text: src.slice(last) });
+  if (!out.length) out.push({ cls, text: src });
+  return out;
+}
+
+// ---- JSON ------------------------------------------------------------------
+// Valid JSON is pretty-printed from the PARSED value: real newlines, indented,
+// string values shown with their escapes decoded (a "\n" inside a string
+// becomes a real line break — that is what the byte means). Malformed or
+// truncated JSON never throws and is never repaired: it falls to a lexical
+// pass that colours the raw text in place, losslessly, so the break is visible.
+
+function rdJsonString(value, out) {
+  out.push({ cls: "tok-punct", text: '"' });
+  // The decoded value, split on real newlines (from a decoded \n) so the string
+  // reads across lines; URLs inside it become clickable.
+  const parts = String(value).split("\n");
+  parts.forEach((line, i) => {
+    if (i) out.push({ cls: "tok-str", text: "\n" });
+    for (const piece of rdLinkify(line, "tok-str")) out.push(piece);
+  });
+  out.push({ cls: "tok-punct", text: '"' });
+}
+
+function rdJsonValue(value, depth, out) {
+  const pad = "  ".repeat(depth);
+  const inner = "  ".repeat(depth + 1);
+  if (value === null) { out.push({ cls: "tok-null", text: "null" }); return; }
+  const t = typeof value;
+  if (t === "number") { out.push({ cls: "tok-num", text: String(value) }); return; }
+  if (t === "boolean") { out.push({ cls: "tok-bool", text: String(value) }); return; }
+  if (t === "string") { rdJsonString(value, out); return; }
+  if (Array.isArray(value)) {
+    if (!value.length) { out.push({ cls: "tok-punct", text: "[]" }); return; }
+    out.push({ cls: "tok-punct", text: "[\n" });
+    value.forEach((item, i) => {
+      out.push({ text: inner });
+      rdJsonValue(item, depth + 1, out);
+      out.push({ cls: "tok-punct", text: i < value.length - 1 ? ",\n" : "\n" });
+    });
+    out.push({ text: pad }, { cls: "tok-punct", text: "]" });
+    return;
+  }
+  const keys = Object.keys(value);
+  if (!keys.length) { out.push({ cls: "tok-punct", text: "{}" }); return; }
+  out.push({ cls: "tok-punct", text: "{\n" });
+  keys.forEach((key, i) => {
+    out.push({ text: inner }, { cls: "tok-key", text: JSON.stringify(key) },
+             { cls: "tok-punct", text: ": " });
+    rdJsonValue(value[key], depth + 1, out);
+    out.push({ cls: "tok-punct", text: i < keys.length - 1 ? ",\n" : "\n" });
+  });
+  out.push({ text: pad }, { cls: "tok-punct", text: "}" });
+}
+
+// Malformed/partial JSON: colour the raw text in place, lossless.
+function rdJsonLex(text) {
+  const out = [];
+  const src = String(text);
+  let i = 0;
+  const push = (cls, s) => { if (s) out.push({ cls, text: s }); };
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === "\\") { j += 2; continue; }
+        if (src[j] === '"') { j += 1; break; }
+        j += 1;
+      }
+      push("tok-str", src.slice(i, j));
+      i = j;
+    } else if (/[-\d]/.test(ch) && /[\d.eE+\-]/.test(src[i] || "")) {
+      let j = i;
+      while (j < src.length && /[-\d.eE+]/.test(src[j])) j += 1;
+      push("tok-num", src.slice(i, j));
+      i = j;
+    } else if (/[a-z]/i.test(ch)) {
+      let j = i;
+      while (j < src.length && /[a-z]/i.test(src[j])) j += 1;
+      const word = src.slice(i, j);
+      push(word === "null" ? "tok-null" : /^(true|false)$/.test(word) ? "tok-bool" : "", word);
+      i = j;
+    } else if ("{}[]:,".includes(ch)) {
+      push("tok-punct", ch); i += 1;
+    } else {
+      let j = i;
+      while (j < src.length && !'"{}[]:,'.includes(src[j]) && !/[a-z\d-]/i.test(src[j])) j += 1;
+      push("", src.slice(i, Math.max(j, i + 1)));
+      i = Math.max(j, i + 1);
+    }
+  }
+  return out;
+}
+
+function rdJson(text) {
+  try {
+    const value = JSON.parse(text);
+    const out = [];
+    rdJsonValue(value, 0, out);
+    return out;
+  } catch (_err) {
+    return rdJsonLex(text);
+  }
+}
+
+// ---- YAML (line-based, lossless) -------------------------------------------
+function rdYaml(text) {
+  const out = [];
+  const lines = String(text).split("\n");
+  lines.forEach((line, i) => {
+    if (i) out.push({ text: "\n" });
+    const hash = line.indexOf("#");
+    const kv = line.match(/^(\s*(?:- )?)([^:#\s][^:]*)(:)(\s.*|)$/);
+    if (hash === 0 || /^\s*#/.test(line)) {
+      out.push({ cls: "tok-comment", text: line });
+    } else if (kv) {
+      out.push({ text: kv[1] }, { cls: "tok-key", text: kv[2] }, { cls: "tok-punct", text: kv[3] });
+      for (const piece of rdLinkify(kv[4], "tok-str")) out.push(piece);
+    } else {
+      for (const piece of rdLinkify(line, "")) out.push(piece);
+    }
+  });
+  return out;
+}
+
+// ---- Markdown (lossless: colour + clickable, markers kept) ------------------
+// Nothing is removed — a link's [text](url) keeps every character and the url
+// becomes clickable; an image's ![alt](url) is the same, a LINK never an image.
+const RD_LINK_RE = /(!?)\[([^\]]*)\]\((\s*[^)\s]+)\)/g;
+
+function rdInline(line, out) {
+  const src = String(line);
+  let last = 0;
+  let m;
+  RD_LINK_RE.lastIndex = 0;
+  while ((m = RD_LINK_RE.exec(src)) !== null) {
+    if (m.index > last) rdInlinePlain(src.slice(last, m.index), out);
+    const bang = m[1];
+    const label = m[2];
+    const url = m[3];
+    const href = rdSafeHref(url.trim());
+    // Every character kept: the brackets and parens are punctuation, the url is
+    // the clickable part. An image is the SAME shape — a link, never an <img>.
+    out.push({ cls: "tok-punct", text: `${bang}[` }, { cls: "tok-em", text: label },
+             { cls: "tok-punct", text: "](" });
+    if (href) out.push({ cls: "tok-link", text: url, href });
+    else out.push({ cls: "", text: url });
+    out.push({ cls: "tok-punct", text: ")" });
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) rdInlinePlain(src.slice(last), out);
+}
+
+// Bold/italic/inline-code, markers kept and dimmed, content styled; bare URLs
+// linkified. Lossless.
+function rdInlinePlain(text, out) {
+  const re = /(`[^`]*`|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|_[^_\s][^_]*_)/g;
+  const src = String(text);
+  let last = 0;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    if (m.index > last) for (const p of rdLinkify(src.slice(last, m.index), "")) out.push(p);
+    const tok = m[0];
+    if (tok[0] === "`") {
+      out.push({ cls: "tok-code", text: tok });
+    } else {
+      const mark = tok.startsWith("**") || tok.startsWith("__") ? 2 : 1;
+      const cls = mark === 2 ? "tok-strong" : "tok-italic";
+      out.push({ cls: "tok-punct", text: tok.slice(0, mark) },
+               { cls, text: tok.slice(mark, tok.length - mark) },
+               { cls: "tok-punct", text: tok.slice(tok.length - mark) });
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) for (const p of rdLinkify(src.slice(last), "")) out.push(p);
+}
+
+function rdMarkdown(text) {
+  const out = [];
+  const lines = String(text).split("\n");
+  let fence = null; // {lang} while inside a ``` block
+  lines.forEach((line, i) => {
+    if (i) out.push({ text: "\n" });
+    const fenceOpen = line.match(/^(\s*```+)(.*)$/);
+    if (fence) {
+      if (fenceOpen) { rdFlushFence(fence, out); out.push({ text: "\n" }, { cls: "tok-punct", text: line }); fence = null; }
+      else fence.lines.push(line);
+      if (fence && i === lines.length - 1) rdFlushFence(fence, out);
+      return;
+    }
+    if (fenceOpen) {
+      fence = { lang: (fenceOpen[2] || "").trim().toLowerCase(), lines: [], marker: line };
+      // The opening fence prints now; its inner lines are buffered and flushed
+      // (highlighted by the fence language) when the block closes.
+      out.push({ cls: "tok-punct", text: line });
+      fence.emittedOpen = true;
+      return;
+    }
+    const heading = line.match(/^(\s*#{1,6}\s)(.*)$/);
+    const listmark = line.match(/^(\s*(?:[-*+]|\d+\.)\s)(.*)$/);
+    if (heading) {
+      out.push({ cls: "tok-head", text: line });
+    } else if (listmark) {
+      out.push({ cls: "tok-punct", text: listmark[1] });
+      rdInline(listmark[2], out);
+    } else {
+      rdInline(line, out);
+    }
+  });
+  return out;
+}
+
+// A fenced block that never closed: flush its buffered lines, highlighted by
+// the fence language, so a truncated ``` block still reads (lossless).
+function rdFlushFence(fence, out) {
+  if (!fence.lines.length) return;
+  const inner = fence.lines.join("\n");
+  const lang = fence.lang === "yaml" || fence.lang === "yml" ? "yaml"
+    : fence.lang === "json" ? "json" : "code";
+  const pieces = lang === "json" ? rdJson(inner) : lang === "yaml" ? rdYaml(inner)
+    : [{ cls: "tok-code", text: inner }];
+  for (const piece of pieces) out.push(piece);
+}
+
+// ---- dispatch --------------------------------------------------------------
+function rdPieces(text, lang) {
+  if (lang === "auto") {
+    const t = String(text).trim();
+    if (t && (t[0] === "{" || t[0] === "[")) {
+      try { JSON.parse(text); return rdJson(text); } catch (_e) { /* not json: plain */ }
+    }
+    return rdLinkify(String(text), "");
+  }
+  if (lang === "json") return rdJson(text);
+  if (lang === "yaml") return rdYaml(text);
+  if (lang === "markdown") return rdMarkdown(text);
+  return rdLinkify(String(text), ""); // plain: linkify only, lossless
+}
+
+// The display string the pieces render to — what find searches, and what a
+// lossless language reproduces from its input exactly.
+function rdDisplay(pieces) {
+  return pieces.map((p) => p.text).join("");
+}
+
+// The one DOM function: pieces -> nodes under `pre`, marking find hits. Every
+// character reaches the DOM as textContent; a link is an <a> under the scheme
+// allowlist with no auto-navigation, never an <img>.
+function rdRenderInto(pre, pieces, query, marks, cap) {
+  const q = String(query || "").toLowerCase();
+  const limit = cap === undefined ? Infinity : cap;
+  for (const piece of pieces) {
+    const host = piece.href
+      ? (() => {
+          const a = document.createElement("a");
+          a.className = "tok-link";
+          a.href = piece.href;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer nofollow";
+          return a;
+        })()
+      : (() => {
+          const span = document.createElement("span");
+          if (piece.cls) span.className = piece.cls;
+          return span;
+        })();
+    if (!q || (marks && marks.length >= limit)) {
+      host.textContent = piece.text;
+    } else {
+      // Mark every hit inside this piece; a mark can split a piece, and both
+      // stay textContent.
+      const lower = piece.text.toLowerCase();
+      let from = 0;
+      let at = lower.indexOf(q);
+      if (at === -1) {
+        host.textContent = piece.text;
+      } else {
+        while (at !== -1) {
+          if (at > from) host.appendChild(document.createTextNode(piece.text.slice(from, at)));
+          const mark = document.createElement("mark");
+          mark.className = "ss-hit";
+          mark.textContent = piece.text.slice(at, at + q.length);
+          host.appendChild(mark);
+          if (marks) marks.push(mark);
+          from = at + q.length;
+          at = marks && marks.length >= limit ? -1 : lower.indexOf(q, from);
+        }
+        if (from < piece.text.length) host.appendChild(document.createTextNode(piece.text.slice(from)));
+      }
+    }
+    pre.appendChild(host);
+  }
+}
+// [READABLE-END]
+
 // [STEP-SCREEN-START]
 // The turn inspector (#352 slice 1): one turn, read back from /explain, one
 // STEP at a time on a full-screen surface of its own. A step is one exchange
@@ -12088,6 +12430,13 @@ const SS_ARROW_FADE_MS = 2500;
 // A body past this folds — max-height and a "show all" control. The whole text
 // stays in the DOM: folded, never truncated, the same law the sheet had.
 const SS_FOLD_CHARS = 20000;
+// The readable layer (#354): payload shown coloured, pretty-printed and
+// linkified by default; the toggle drops to the exact monospace bytes.
+// Remembered per device. A segment past SS_READ_MAX stays raw (with a note),
+// because colouring hundreds of KB on the main thread would jank.
+const SS_READ_KEY = "aish-ss-read";
+const SS_READ_MAX = 262144;
+let ssReadable = true;
 // Below this a body is a paragraph and "save as file" is furniture.
 const SS_SAVE_MIN_CHARS = 2000;
 // Every match is COUNTED; only this many are marked, and the label says so.
@@ -12270,9 +12619,9 @@ function ssSegs() {
     segs,
     meta(...lines) { segs.push({ kind: "meta", text: lines.join("\n") }); },
     // PAYLOAD: verbatim bytes the model was sent or produced. Never reformat.
-    text(t) { segs.push({ kind: "text", text: t === undefined || t === null ? "" : String(t) }); },
-    // A raw record (aish's structured account), pretty-printed.
-    rec(v) { segs.push({ kind: "record", text: ssJson(v) }); },
+    text(t, lang) { segs.push({ kind: "text", lang: lang || "", text: t === undefined || t === null ? "" : String(t) }); },
+    // A raw record (aish's structured account), pretty-printed JSON.
+    rec(v) { segs.push({ kind: "record", lang: "json", text: ssJson(v) }); },
     // Verbatim external bytes the model did NOT receive — evidence. Shown as-is
     // but tinted like a record, so it never reads as the model's own input.
     raw(t) { segs.push({ kind: "record", text: t === undefined || t === null ? "" : String(t) }); },
@@ -12306,7 +12655,7 @@ function ssBriefSegs(doc, step, b) {
   b.meta("SYSTEM TEXT" + (system.state !== "recorded" ? ` — ${SS_STATE_WORDS[system.state] || system.state}` : ""));
   for (const part of system.parts || []) {
     b.meta(`── system message ${part.at} · ${ssN(part.chars)} chars`);
-    if (part.state === "recorded") b.text(part.text || "");
+    if (part.state === "recorded") b.text(part.text || "", "markdown");
     else b.meta(SS_STATE_WORDS[part.state] || part.state);
   }
   // The tool MENU is sent to the model (the `tools=` request field — it is why
@@ -12319,7 +12668,7 @@ function ssBriefSegs(doc, step, b) {
   b.meta(`TOOLS ON THE MENU — ${tools.count === undefined ? "?" : tools.count}`
     + (tools.state !== "recorded" ? ` — ${SS_STATE_WORDS[tools.state] || tools.state}` : ""));
   if (tools.entries && tools.entries.length) {
-    b.text(ssJson(tools.entries));
+    b.text(ssJson(tools.entries), "json");
   } else if (tools.names && tools.names.length) {
     b.meta("names only — the menu's bytes are gone: " + tools.names.join(", "));
   }
@@ -12402,7 +12751,7 @@ function ssContextSegs(doc, step, whole) {
       const m = ssMessage(doc, index);
       if (!m) continue;
       b.meta(ssMsgHead(m));
-      if (m.text) b.text(m.text);
+      if (m.text) b.text(m.text, "auto");
       else b.meta("(this message had no text content)");
     }
     if (ctx.unstamped) {
@@ -12424,7 +12773,7 @@ function ssContextSegs(doc, step, whole) {
       const m = ssMessage(doc, index);
       if (!m) continue;
       b.meta(ssMsgHead(m) + (ctx.new.includes(index) ? " · new to this call" : ""));
-      if (m.text) b.text(m.text);
+      if (m.text) b.text(m.text, "auto");
       else b.meta("(this message had no text content)");
     }
     if (ctx.unstamped) {
@@ -12537,11 +12886,11 @@ function ssResponseSegs(doc, step) {
   const b = ssSegs();
   if (th) {
     b.meta("REASONING" + (th.synthesized ? " — the text below is aish's own sentence, not the model's" : ""));
-    if (th.text) b.text(th.text);
+    if (th.text) b.text(th.text, "markdown");
     else b.meta("this call recorded no thinking");
     if (th.truncated) b.meta(`… ${ssN(th.truncated)} characters were cut from this record by ${th.cap_source || "a cap"}`);
     b.meta("SAID");
-    if (th.said) b.text(th.said);
+    if (th.said) b.text(th.said, "markdown");
     else b.meta("nothing was said on this call");
     if (th.said_truncated) b.meta(`… ${ssN(th.said_truncated)} characters were cut from this record`);
     const tail = [];
@@ -12551,7 +12900,7 @@ function ssResponseSegs(doc, step) {
     if (tail.length) b.meta(...tail);
   } else if (step.fragment) {
     b.meta(SS_STATE_WORDS.fragments);
-    b.text(step.fragment);
+    b.text(step.fragment, "markdown");
   } else {
     b.meta(SS_STATE_WORDS[doc.thought.state] || "no response was recorded for this call");
   }
@@ -12560,7 +12909,7 @@ function ssResponseSegs(doc, step) {
   for (const s of issued) {
     const c = ssCallOf(doc, s);
     b.meta(`→ ${s.name} (tool call ${s.call})`);
-    if (c && c.args_state === "recorded") b.text(ssJson(c.args));
+    if (c && c.args_state === "recorded") b.text(ssJson(c.args), "json");
     else b.meta(SS_STATE_WORDS.not_recorded);
   }
   // THE COMPLETE RESPONSE (#355): everything the model produced, stored
@@ -12578,7 +12927,7 @@ function ssResponseSegs(doc, step) {
   if (step.is_last) {
     const produced = doc.produced || {};
     b.meta("WHAT IT ANSWERED");
-    if (produced.answer) b.text(produced.answer);
+    if (produced.answer) b.text(produced.answer, "markdown");
     else b.meta(SS_STATE_WORDS[produced.answer_state] || "no answer was recorded for this turn");
     const verify = produced.verify || {};
     const tail = [];
@@ -12605,12 +12954,12 @@ function ssCallSegs(doc, step) {
   if (SS_PLACEMENT_WORDS[step.placement]) head.push(SS_PLACEMENT_WORDS[step.placement]);
   b.meta(...head);
   b.meta("ARGUMENTS — as the model emitted them");
-  if (c.args_state === "recorded") b.text(ssJson(c.args));
+  if (c.args_state === "recorded") b.text(ssJson(c.args), "json");
   else b.meta(SS_STATE_WORDS.not_recorded);
   if (c.args_truncated) {
     b.meta(`… ${ssN(c.args_truncated)} characters of these arguments were cut from the record by ${c.cap_source || "a cap"} (applied per argument value)`);
   }
-  if (c.command) { b.meta("COMMAND AS RUN"); b.text(c.command); }
+  if (c.command) { b.meta("COMMAND AS RUN"); b.text(c.command, "plain"); }
   const decision = ["DECISION",
     c.decision ? `${c.decision}` : "no decision recorded on the step (auto-approved, or a tool with no gate)"];
   if (c.verdict_by) decision.push(`verdict by: ${c.verdict_by}`);
@@ -12645,7 +12994,7 @@ function ssResultSegs(doc, step) {
   if (!c.completed) b.meta("the call never completed, so nothing came back");
   else if (how !== "not_matched") {
     const shown = ssShownText(doc, step);
-    if (shown) b.text(shown);
+    if (shown) b.text(shown, "auto");
     else b.meta("(the model was given an empty result)");
   }
   if (c.bytes !== null && c.bytes !== undefined) b.meta(`payload before any cut: ${ssN(c.bytes)} bytes`);
@@ -12693,10 +13042,10 @@ function ssPageSegs(doc, step) {
       + (c.covered.dismissed ? " — aish dismissed it and clicked again" : ""));
   }
   b.meta(...lines);
-  if (c.problem) { b.meta("AISH'S OWN OBSERVATION"); b.text(c.problem); }
+  if (c.problem) { b.meta("AISH'S OWN OBSERVATION"); b.text(c.problem, "plain"); }
   if (c.unchanged) b.meta("nothing on the page changed when aish did this");
   b.meta("THE PAGE'S WORDS — what it wrote to its own console (not aish's)");
-  if (c.console && c.console.length) b.text(c.console.join("\n"));
+  if (c.console && c.console.length) b.text(c.console.join("\n"), "plain");
   else if (c.console) b.meta("the page wrote nothing");
   else b.meta("not recorded for this call");
   const signin = c.signin;
@@ -12725,10 +13074,10 @@ function ssEventSegs(doc, step) {
   const b = ssSegs();
   const facts = (step.facts || []).map((fact) => `${fact.k}: ${fact.v}`);
   if (facts.length) b.meta(...facts);
-  if (step.kind === "steering") { b.meta("YOU TYPED"); b.text(step.text || ""); }
+  if (step.kind === "steering") { b.meta("YOU TYPED"); b.text(step.text || "", "markdown"); }
   else if (step.kind === "model_error") {
     const record = step.record || {};
-    if (record.text) { b.meta("WHAT THE PROVIDER SAID"); b.text(record.text); }
+    if (record.text) { b.meta("WHAT THE PROVIDER SAID"); b.text(record.text, "plain"); }
     if (record.truncated) b.meta(`… ${ssN(record.truncated)} characters were cut by ${record.cap_source || "a cap"}`);
     b.meta("THE RECORD");
     b.rec(record);
@@ -12964,11 +13313,14 @@ function ssPaintBody(paneObj) {
   if (paneObj && paneObj.before) body.appendChild(paneObj.before);
   const view = ssView;
   for (const seg of segs) {
-    const node = ssSegNode(seg);
-    body.appendChild(node);
-    const entry = { node, text: seg.text };
+    const entry = ssEntry(seg);
+    // A segment too large to colour says so, then shows the raw bytes — the
+    // readable layer is a lens, never a hidden truncation.
+    if (entry.capped) body.appendChild(ssEl("div", "ss-meta",
+      `shown raw — ${ssN(seg.text.length)} characters, too large to colour`));
+    body.appendChild(entry.node);
     ssView.nodes.push(entry);
-    if (seg.kind !== "meta") ssFold(node, seg.text);
+    if (seg.kind !== "meta") ssFold(entry.node, seg.text);
     // A blob of the exact request: fetched now, landed in place when it
     // arrives — and dropped if the view has moved on by then (the reader
     // swiped away, or toggled the reading), because landing bytes into a
@@ -12992,8 +13344,52 @@ function ssPaintBody(paneObj) {
 // something a model said or was given.
 function ssSegNode(seg) {
   return seg.kind === "meta"
-    ? ssEl("div", "ss-meta", seg.text)
-    : ssEl("pre", seg.kind === "record" ? "ss-pre ss-rec mono" : "ss-pre mono", seg.text);
+    ? ssEl("div", "ss-meta")
+    : ssEl("pre", seg.kind === "record" ? "ss-pre ss-rec mono" : "ss-pre mono");
+}
+
+// A rendered entry: the node, the RAW bytes (what copy/save carry), and — when
+// the readable layer is on and the segment has a known language small enough to
+// colour — the coloured pieces and the DISPLAY string find searches. Meta and
+// raw-mode segments have no pieces and render as plain text.
+function ssEntry(seg) {
+  const node = ssSegNode(seg);
+  const raw = seg.text || "";
+  const lang = seg.lang || "";
+  const readable = ssReadable && seg.kind !== "meta" && !!lang && raw.length <= SS_READ_MAX;
+  const capped = ssReadable && seg.kind !== "meta" && !!lang && raw.length > SS_READ_MAX;
+  const pieces = readable ? rdPieces(raw, lang) : null;
+  const display = pieces ? rdDisplay(pieces) : raw;
+  return { node, text: raw, lang, kind: seg.kind, pieces, display, capped };
+}
+
+// Fill one entry's node with its content and this query's find marks. The one
+// place text reaches a node: coloured pieces when readable, plain text + marks
+// otherwise. Every character is textContent; the only nodes minted are span, a
+// (safe schemes only) and mark.
+function ssFill(entry, query) {
+  const node = entry.node;
+  node.textContent = "";
+  if (entry.pieces) {
+    rdRenderInto(node, entry.pieces, query, ssFind.marks, SS_FIND_MAX_MARKS);
+    return;
+  }
+  const text = entry.display;
+  const q = String(query || "").toLowerCase();
+  if (!q) { node.textContent = text; return; }
+  const lower = text.toLowerCase();
+  let from = 0;
+  let at = lower.indexOf(q);
+  if (at === -1) { node.textContent = text; return; }
+  while (at !== -1 && ssFind.marks.length < SS_FIND_MAX_MARKS) {
+    if (at > from) node.appendChild(document.createTextNode(text.slice(from, at)));
+    const mark = ssEl("mark", "ss-hit", text.slice(at, at + q.length));
+    node.appendChild(mark);
+    ssFind.marks.push(mark);
+    from = at + q.length;
+    at = lower.indexOf(q, from);
+  }
+  if (from < text.length) node.appendChild(document.createTextNode(text.slice(from)));
 }
 
 // Folded, never truncated: the whole text is in the node; only the first look
@@ -13013,15 +13409,21 @@ function ssFold(node, text) {
 // The find marks and the copy/save text are re-derived, so both stay true to
 // what is on screen.
 function ssLand(entry, got) {
+  // The exact-request/response blobs are the whole message as JSON, so they
+  // read as JSON when the readable layer is on.
   const seg = got.state === "recorded"
-    ? { kind: "text", text: got.text }
+    ? { kind: "text", lang: "json", text: got.text }
     : { kind: "meta", text: SS_FETCH_WORDS[got.state] || `the bytes could not be read (${got.state})` };
-  const node = ssSegNode(seg);
+  const fresh = ssEntry(seg);
   const old = entry.node;
-  if (old.parentNode) { old.parentNode.insertBefore(node, old); old.remove(); }
-  entry.node = node;
-  entry.text = seg.text;
-  if (seg.kind !== "meta") ssFold(node, seg.text);
+  if (old.parentNode) { old.parentNode.insertBefore(fresh.node, old); old.remove(); }
+  entry.node = fresh.node;
+  entry.text = fresh.text;
+  entry.lang = fresh.lang;
+  entry.kind = fresh.kind;
+  entry.pieces = fresh.pieces;
+  entry.display = fresh.display;
+  if (seg.kind !== "meta") ssFold(fresh.node, seg.text);
   ssView.text = ssView.nodes.map((n) => n.text).join("\n\n");
   const save = $("ss-save");
   if (save) save.hidden = ssView.text.length < SS_SAVE_MIN_CHARS;
@@ -13050,32 +13452,20 @@ function ssApplyFind() {
   const q = ssFind.query.toLowerCase();
   ssFind.marks = [];
   if (!q) {
-    for (const { node, text } of nodes) node.textContent = text;
+    for (const entry of nodes) ssFill(entry, "");
     ssFind.hits = 0;
     ssFind.at = -1;
     ssFindLabel();
     return;
   }
+  // Count every hit across the DISPLAYED text (find searches what is on
+  // screen), then fill each node, marking up to the cap.
   let count = 0;
-  for (const { node, text } of nodes) {
-    const lower = text.toLowerCase();
-    let from = 0;
-    let any = false;
-    node.textContent = "";
-    for (let i = lower.indexOf(q); i !== -1; i = lower.indexOf(q, i + q.length)) {
-      count += 1;
-      any = true;
-      if (ssFind.marks.length < SS_FIND_MAX_MARKS) {
-        if (i > from) node.appendChild(document.createTextNode(text.slice(from, i)));
-        const mark = ssEl("mark", "ss-hit", text.slice(i, i + q.length));
-        node.appendChild(mark);
-        ssFind.marks.push(mark);
-        from = i + q.length;
-      }
-    }
-    if (!any || from === 0) node.textContent = text;
-    else if (from < text.length) node.appendChild(document.createTextNode(text.slice(from)));
+  for (const entry of nodes) {
+    const lower = String(entry.display || "").toLowerCase();
+    for (let i = lower.indexOf(q); i !== -1; i = lower.indexOf(q, i + q.length)) count += 1;
   }
+  for (const entry of nodes) ssFill(entry, q);
   ssFind.hits = count;
   ssFind.at = count ? 0 : -1;
   ssFindCurrent();
@@ -13289,6 +13679,16 @@ const SS_FONT_KEY = "aish-ss-font";
 // screen it is read on. "0" is the one stored value that turns it off.
 const SS_WRAP_KEY = "aish-ss-wrap";
 
+function ssReadRead() {
+  try { return localStorage.getItem(SS_READ_KEY) !== "0"; } catch (_err) { return true; }
+}
+
+function ssApplyRead() {
+  ssReadable = ssReadRead();
+  const btn = $("ss-read");
+  if (btn) { btn.classList.toggle("on", ssReadable); if (btn.setAttribute) btn.setAttribute("aria-pressed", ssReadable ? "true" : "false"); }
+}
+
 function ssFontRead() {
   try {
     const n = parseInt(localStorage.getItem(SS_FONT_KEY) || "", 10);
@@ -13347,6 +13747,14 @@ function ssWire() {
   $("ss-font-dec").onclick = () => ssBumpFont(-1);
   $("ss-font-inc").onclick = () => ssBumpFont(1);
   ssApplyFont(ssFontRead());
+  ssApplyRead();
+  $("ss-read").onclick = () => {
+    ssReadable = !ssReadable;
+    try { localStorage.setItem(SS_READ_KEY, ssReadable ? "1" : "0"); } catch (_err) { /* still applies */ }
+    ssApplyRead();
+    // Re-render the current pane from scratch so segments switch colouring.
+    if (ssView) ssShow(ssView.index, ssView.pane);
+  };
   $("ss-whole").onclick = () => ssToggleWhole();
   $("ss-copy").onclick = () => ssCopy();
   $("ss-save").onclick = () => ssSave();

@@ -3849,6 +3849,26 @@ body.console-open #backdrop { z-index: 63; }
 /* A raw record: mono like the payload, tinted like meta — it is a record, not
    something a model said or was given. */
 .ss-rec { color: var(--dim); border-left: 3px solid var(--sep); padding-left: 10px; }
+/* The readable layer (#354): token colours over the Catppuccin palette the
+   chat's code fences already use, so a coloured payload matches the rest of the
+   UI. Presentational only — the bytes are unchanged, and a link is the only
+   interactive node, opening externally on a click. */
+.ss-pre .tok-key { color: var(--ctp-blue); }
+.ss-pre .tok-str { color: var(--ctp-green); }
+.ss-pre .tok-num { color: var(--ctp-peach); }
+.ss-pre .tok-bool, .ss-pre .tok-null { color: var(--ctp-mauve); }
+.ss-pre .tok-punct { color: var(--ctp-overlay); }
+.ss-pre .tok-comment { color: var(--ctp-overlay); font-style: italic; }
+.ss-pre .tok-head { color: var(--ctp-blue); font-weight: 600; }
+.ss-pre .tok-strong { font-weight: 600; }
+.ss-pre .tok-italic { font-style: italic; }
+.ss-pre .tok-code { color: var(--ctp-peach); }
+.ss-pre .tok-em { color: var(--ctp-text); }
+.ss-pre a.tok-link { color: var(--ctp-sky); text-decoration: underline; text-underline-offset: 2px; }
+/* A record stays tinted as a record even when its JSON is coloured: the token
+   colours read against the border-left that marks it as aish's own account. */
+.ss-rec .tok-key { color: var(--ctp-blue); }
+#ss-read.on { color: var(--fg); border-color: var(--fg); }
 /* The scroll arrows: the CHAT's convention, not a new one — centered circles
    that appear directionally while you scroll, fade after a beat, and smooth-
    scroll on tap. Same look as #scroll-down/#scroll-top; positioned inside the
