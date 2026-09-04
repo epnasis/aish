@@ -502,6 +502,63 @@ def _sent_parts(record: dict) -> list[dict]:
     return sorted(parts, key=lambda p: -p["chars"])
 
 
+def _received(turn: Turn, log: Log, root: os.PathLike | str | None, include_text: bool) -> dict:
+    """The COMPLETE response of each model call (#355), read off the `received`
+    record and resolved blob by blob — recorded / evicted (dated) / purged /
+    not recorded. Symmetric with `_sent`: one whole blob per call rather than a
+    per-message manifest, because a response is one document. `coverage` with no
+    call is claude-max, which records none of its responses (#242).
+    """
+    records = turn.of_kind("received")
+    marker = next((r for r in records if r.get("coverage")), None)
+    calls = [r for r in records if r.get("model_call")]
+    session = log.path
+    evicted = turn_store.evicted_on(root, session)
+    if not calls:
+        if marker is not None:
+            state = MISSING
+        elif log.wrote("received"):
+            state = EMPTY
+        else:
+            state = MISSING
+        return {
+            "state": state,
+            "coverage": marker.get("coverage") if marker else None,
+            "provider": marker.get("provider") if marker else None,
+            "evicted_on": evicted,
+            "calls": [],
+        }
+    out: list[dict] = []
+    for record in calls:
+        digest = record.get("digest")
+        text = turn_store.get(str(digest), root, session) if digest else None
+        if text is not None:
+            state = RECORDED
+        elif not digest:
+            state = MISSING
+        else:
+            state = EVICTED if evicted else PURGED
+        item: dict = {
+            "model_call": record.get("model_call"),
+            "provider": record.get("provider"),
+            "model": record.get("model"),
+            "digest": digest,
+            "chars": record.get("chars"),
+            "scrubbed": record.get("scrubbed"),
+            "state": state,
+        }
+        if include_text and text is not None:
+            item["text"] = text
+        out.append(item)
+    return {
+        "state": RECORDED,
+        "coverage": "seam",
+        "provider": out[0]["provider"] if out else None,
+        "evicted_on": evicted,
+        "calls": out,
+    }
+
+
 def _brief_in_force(turn: Turn, log: Log) -> tuple[dict | None, int | None]:
     """The most recent brief at or before this turn, and the turn it was written
     at.
@@ -1899,6 +1956,13 @@ def _model_step(number: int, doc: dict, numbering: str, fragment: str = "") -> d
          if c.get("model_call") == number and c.get("state") not in (MISSING, EMPTY)),
         None,
     )
+    # The complete response of this call (#355): a renderer shows the whole
+    # captured output by digest, beside the curated reasoning/said view.
+    received_call = next(
+        (c for c in (doc.get("received") or {}).get("calls") or []
+         if c.get("model_call") == number and c.get("state") not in (MISSING, EMPTY)),
+        None,
+    )
     return {
         "id": f"m{number}",
         "kind": STEP_MODEL_CALL,
@@ -1912,6 +1976,7 @@ def _model_step(number: int, doc: dict, numbering: str, fragment: str = "") -> d
             "cost": number if cost else None,
             "brief": brief_at,
             "sent": number if sent_call is not None else None,
+            "received": number if received_call is not None else None,
         },
         "fragment": fragment,
         "errors": [],   # ids of the model_error steps that preceded this call
@@ -2496,6 +2561,8 @@ def dossier(
         "given": _given(turn, log, root),
         # The exact request of each model call, as the provider saw it (#352).
         "sent": _sent(turn, log, root, request_text),
+        # The complete response of each model call (#355) — symmetric with sent.
+        "received": _received(turn, log, root, request_text),
         "thought": _thought(turn, log),
         "did": did,
         "produced": _produced(turn, did),
@@ -3426,6 +3493,35 @@ def _call_lines(call: dict) -> list[str]:
     return lines
 
 
+def _received_lines(received: dict, show_context: bool, out: list[str]) -> None:
+    """The complete response each model call produced (#355). With `--context`
+    the whole captured response follows."""
+    if not received["calls"]:
+        if received.get("coverage") == COVERAGE_SDK:
+            who = received.get("provider") or "this backend"
+            out.append(
+                f"  {'response':<10} {DIM}{NOT_RECORDED} — {who} "
+                f"drives the SDK's own loop (#242){RESET}"
+            )
+        elif received["state"] == EMPTY:
+            out.append(
+                f"  {'response':<10} {DIM}recorded, and there was none{RESET}"
+            )
+        else:
+            out.append(f"  {'response':<10} {_state_note(MISSING, ' (log predates #355)')}")
+        return
+    when = received.get("evicted_on")
+    for call in received["calls"]:
+        head = (
+            f"call {call['model_call']} · {call.get('provider')} {call.get('model')} · "
+            f"{int(call.get('chars') or 0):,} chars · {_blob_status(call['state'], when)}"
+        )
+        out.append(f"  {'response':<10} {head}")
+        if show_context and call.get("text") is not None:
+            for line in call["text"].splitlines():
+                out.append(f"  {'':<10}   {DIM}│{RESET} {line}")
+
+
 def render(
     turn: Turn,
     log: Log,
@@ -3464,6 +3560,7 @@ def render(
 
     _given_lines(doc["given"], show_tools, show_context, out)
     _sent_lines(doc["sent"], show_context, out)
+    _received_lines(doc["received"], show_context, out)
     _flow_lines(doc, out)
     _context_cost_lines(doc["context_cost"], out)
     _produced_lines(doc["produced"], out)

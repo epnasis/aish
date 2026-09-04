@@ -622,6 +622,10 @@ RENDERLESS_STEPS = frozenset(
         # read by `aish explain` and the step screen over `/explain`; never a
         # step the owner watches. Same pair as every kind above.
         "sent",  # #352
+        # #355. The complete model RESPONSE of a call, stored whole in the
+        # per-chat store beside the request. Same pair as `sent`: log-only,
+        # skipped on replay, read by `aish explain` and the step screen.
+        "received",  # #355
     }
 )
 
@@ -636,7 +640,16 @@ def _sent_digests(records: list[dict]) -> set[str]:
         if record.get("kind") != "trace":
             continue
         step = record.get("step")
-        if not isinstance(step, dict) or step.get("kind") != "sent":
+        if not isinstance(step, dict):
+            continue
+        kind = step.get("kind")
+        if kind == "received":
+            # #355: one blob, the whole response. Unlinked on redaction like
+            # the request's blobs, so a redacted turn leaves nothing behind.
+            if step.get("digest"):
+                out.add(str(step["digest"]))
+            continue
+        if kind != "sent":
             continue
         for entry in step.get("messages") or []:
             if isinstance(entry, dict) and entry.get("digest"):
