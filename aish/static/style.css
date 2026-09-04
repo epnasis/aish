@@ -3744,6 +3744,20 @@ body.console-open #backdrop { z-index: 63; }
   border-bottom: 0.5px solid var(--sep);
 }
 #ss-titles { flex: 1; min-width: 0; }
+/* The step icon in the header — the same glyph the chat trace uses for this
+   kind of step, so a tool, a model call and an error read at a glance. */
+#ss-icon { flex: none; width: 18px; height: 18px; display: inline-flex; align-items: center; }
+#ss-icon svg { width: 16px; height: 16px; display: block; }
+#ss-icon:empty { display: none; }
+/* The collapsing top bar: the whole chrome hides while reading down and slides
+   back on scroll up (ssScrollChrome). max-height animates from a generous cap;
+   the flex scroller below grows to fill the space. */
+#ss-chrome {
+  display: flex; flex-direction: column; overflow: hidden;
+  max-height: 80vh; opacity: 1;
+  transition: max-height 0.22s ease, opacity 0.16s ease;
+}
+#step-screen.ss-collapsed #ss-chrome { max-height: 0; opacity: 0; }
 #ss-count { font-size: 12px; color: var(--dim); }
 #ss-title { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
 #ss-close, #ss-prev, #ss-next {

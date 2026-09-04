@@ -137,7 +137,7 @@ function textNode(t) {
 
 const IDS = ["step-screen", "ss-count", "ss-title", "ss-prev", "ss-next", "ss-facts", "ss-panes",
   "ss-tools", "ss-find", "ss-find-count", "ss-find-prev", "ss-find-next", "ss-whole", "ss-copy",
-  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head", "ss-read", "ss-findings", "ss-findings-toggle", "ss-findings-cur", "ss-findings-prev", "ss-findings-pos", "ss-findings-next", "ss-findings-list"];
+  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head", "ss-read", "ss-findings", "ss-findings-toggle", "ss-findings-cur", "ss-findings-prev", "ss-findings-pos", "ss-findings-next", "ss-findings-list", "ss-icon", "ss-chrome", "ss-grab"];
 
 function world(overrides = {}) {
   const ids = new Map();
@@ -160,6 +160,8 @@ function world(overrides = {}) {
     BASE: "/", token: "", location: { href: "http://x/" },
     fetch: async () => { throw new Error("no fetch in this world"); },
     framePicture: () => null,
+    traceSvg: (name) => `<svg data-icon="${name}"></svg>`,
+    TOOL_META: { read_url: ["Read a page", "web", "--blue"], run_command: ["run_command", "command", "--green"] },
     FRAME_ABSENT: { hands: "no picture — you were driving the browser yourself" },
     copyText: async () => true,
     saveBlob: (blob, name) => saved.push({ blob, name }),
@@ -1062,6 +1064,39 @@ check("the findings navigator lists, jumps, cycles, and marks the flagged step",
   const clean = doc({ notes: { rows: [], checks: [{ id: "a" }] } });
   w.sandbox.ssOpen(clean, "m1", "context");
   assert.equal(w.el("ss-findings").hidden, true);
+});
+
+check("each step shows the chat's icon, and the chrome collapses on scroll down", () => {
+  const w = world();
+  const d = doc();
+  const s = w.sandbox;
+  // The icon matches the step kind: a model call is 'thinking', a tool call is
+  // its tool's glyph (read_url → web), the same as the chat trace.
+  s.ssOpen(d, "m1", "context");
+  assert(w.el("ss-icon").innerHTML.includes('data-icon="thinking"'), w.el("ss-icon").innerHTML);
+  s.ssShow(d.steps.findIndex((x) => x.id === "c2"), "call");
+  assert(w.el("ss-icon").innerHTML.includes('data-icon="command"'), "run_command uses the command glyph");
+  // A FAILED tool shows the denied glyph, exactly as the chat trace does.
+  s.ssShow(d.steps.findIndex((x) => x.id === "c1"), "call");
+  assert(w.el("ss-icon").innerHTML.includes('data-icon="denied"'), "a failed tool uses the denied glyph");
+  // Scroll-away top bar: down past the threshold collapses, up reveals, top shows.
+  const box = w.el("step-screen");
+  const body = w.el("ss-body");
+  body.scrollTop = 0; s.ssScrollChrome();
+  assert(!box.classList.has("ss-collapsed"), "shown at the top");
+  body.scrollTop = 120; s.ssScrollChrome();
+  assert(box.classList.has("ss-collapsed"), "collapses when reading down");
+  body.scrollTop = 80; s.ssScrollChrome();
+  assert(!box.classList.has("ss-collapsed"), "reveals on any upward scroll");
+  body.scrollTop = 200; s.ssScrollChrome();
+  assert(box.classList.has("ss-collapsed"));
+  body.scrollTop = 4; s.ssScrollChrome();
+  assert(!box.classList.has("ss-collapsed"), "always shown at the top");
+  // A new pane paint reveals the chrome again (fresh read).
+  body.scrollTop = 300; s.ssScrollChrome();
+  assert(box.classList.has("ss-collapsed"));
+  s.ssShow(d.steps.findIndex((x) => x.id === "c1"), "result");
+  assert(!box.classList.has("ss-collapsed"), "a new pane starts with the chrome shown");
 });
 
 check("wrap is on by default, the toggle is remembered, and \"0\" turns it off", () => {
