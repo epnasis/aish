@@ -68,9 +68,18 @@ function fakeEl(tag) {
       this.parentNode = null;
     },
     setAttribute(k, v) { this.attrs[k] = v; },
-    addEventListener() {},
+    addEventListener(type, fn) { (this._on || (this._on = {})); (this._on[type] || (this._on[type] = [])).push(fn); },
     blur() {}, focus() {},
-    closest() { return null; },
+    contains(node) { return walk(this).includes(node); },
+    closest(sel) {
+      const toks = String(sel).split(",").map((x) => x.trim()).filter(Boolean);
+      let n = this;
+      while (n) {
+        if (n.classList && toks.some((tk) => tk.startsWith(".") ? matches(n, tk) : n.tagName === tk)) return n;
+        n = n.parentNode;
+      }
+      return null;
+    },
     querySelector(sel) {
       const found = walk(this).slice(1).find((n) => matches(n, sel));
       if (found) return found;
@@ -229,7 +238,15 @@ function docFor() {
   };
 }
 
-const tap = (row) => row.onclick({ target: { closest: () => null }, stopPropagation() {} });
+function fire(target) {
+  let n = target;
+  while (n) {
+    const hs = n._on && n._on.click;
+    if (hs) { for (const h of hs) h({ target, stopPropagation() {} }); return; }
+    n = n.parentNode;
+  }
+}
+const tap = (row) => fire(row);
 
 // ---- 1. rows carry the record's ids, live and cold alike -----------------------
 
@@ -254,9 +271,10 @@ check("a finished card's rows name the steps they are, and live and cold agree",
   cold.sandbox.finishTrace();
   assert.deepEqual([...idsOf(ct)].sort(), [...liveIds].sort(),
     "hot and cold disagree about which row is which step");
-  // Every joined row is a control; the door is there; no strip yet — the
-  // record has not been fetched, and a finish must never fetch it.
-  assert(rows(lt).every((r) => r.classList.has("inspectable") && typeof r.onclick === "function"));
+  // Every joined row is inspectable (the tap is delegated, not per-row); the
+  // door is there; no strip yet — the record is fetched only when the card is
+  // OPENED, never at finish (a replay finishes every card on screen).
+  assert(rows(lt).every((r) => r.classList.has("inspectable")));
   assert(lt.el.querySelector(".trace-explain"), "no Full record door");
   assert(!lt.inner.querySelector(".trace-notes"), "the strip must wait for the record");
   assert.equal(lt.dossierFetch, undefined, "finishTrace must not fetch");
@@ -287,7 +305,7 @@ check("a thinking row takes its number from the tool rows under it, and counts o
 
 // ---- 2 & 3. the tap, the summary, the strip -----------------------------------------
 
-check("a tapped row fetches the record once, expands to its panes with sizes, and a line opens the screen", async () => {
+check("one tap on a row opens the step screen on that step, and the record is fetched once for a finished card", async () => {
   const w = world();
   const s = w.sandbox;
   let fetches = 0;
@@ -297,53 +315,47 @@ check("a tapped row fetches the record once, expands to its panes with sizes, an
   liveTurn(s);
   const t = s.currentTrace;
   s.finishTrace();
+  // A tool row opens the step screen ON that step — no in-place accordion.
   const c1 = rows(t).find((r) => r.dataset.inspect === "c1");
-  tap(c1);
-  assert(c1.querySelector(".step-xp"), "no expansion box");
-  assert.equal(c1.querySelector(".step-xp").textContent, "reading the record…");
+  fire(c1);
   await settle();
-  const box = c1.querySelector(".step-xp");
-  assert(box.querySelector(".step-xp-head").textContent.includes("step 4 of 9 · tool call 1 · read_url"));
-  const lines = box.querySelectorAll(".step-xp-pane");
-  assert.deepEqual(lines.map((l) => l.dataset.pane), ["call", "result"]);
-  const brief = lines[1].querySelector(".step-xp-brief").textContent;
-  assert(brief.includes("9 chars") && brief.includes("5 omitted by web") && brief.includes("continuation unread"), brief);
-  assert(lines[0].querySelector(".step-xp-brief").textContent.includes("args "), "sizes");
-  // The line opens the step screen on THAT pane.
-  lines[1].onclick({ stopPropagation() {} });
-  assert(s.ssIsOpen());
+  assert(s.ssIsOpen(), "the step screen opened on one tap");
   assert.equal(d.steps[s.ssView.index].id, "c1");
-  assert.equal(s.ssView.pane, "result");
-  // A second row does not fetch again; a second tap on the first folds it.
+  assert(!c1.querySelector(".step-xp"), "no in-place expansion box any more");
+  // A model row opens its step; the answer row resolves to the LAST model call.
+  s.ssClose();
   const m1 = rows(t).find((r) => r.dataset.inspect === "m1");
-  tap(m1);
+  fire(m1);
   await settle();
-  assert.equal(fetches, 1, "the record must be fetched once per card");
-  assert(m1.querySelector(".step-xp-head").textContent.includes("model call 1"));
-  assert.deepEqual(m1.querySelectorAll(".step-xp-pane").map((l) => l.dataset.pane), ["context", "response"]);
-  tap(c1);
-  assert(!c1.querySelector(".step-xp"), "a second tap must fold the summary");
-  // The answer row resolves to the LAST model call.
+  assert.equal(d.steps[s.ssView.index].id, "m1");
+  s.ssClose();
   const answer = rows(t).find((r) => r.dataset.inspect === "m:last");
-  tap(answer);
+  fire(answer);
   await settle();
-  assert(answer.querySelector(".step-xp-head").textContent.includes("model call 3"));
-  // …and the strip arrived with the record, at the top of the card, landing
-  // on the cited step and pane on its first synchronous pass.
+  assert.equal(d.steps[s.ssView.index].id, "m3", "the answer row resolves to the last model call");
+  // A finished card is immutable: the record is fetched once (for the strip)
+  // and cached for every tap after.
+  assert.equal(fetches, 1, "one fetch per finished card");
+  // Opening the card reveals the Worth-a-look strip at the top (one lazy fetch,
+  // cached from the tap above), and it opens the cited step and pane; the
+  // flagged step's row carries the in-context dot.
+  s.inspectReveal(t);
+  await settle();
   const strip = t.inner.querySelector(".trace-notes");
   assert(strip, "no worth-a-look strip");
-  assert.equal(t.inner.children.indexOf(strip) < t.inner.children.indexOf(rows(t)[0]), true, "the strip is not above the rows");
+  assert(t.inner.children.indexOf(strip) < t.inner.children.indexOf(rows(t)[0]), "the strip is not above the rows");
   const note = strip.querySelector(".trace-note");
   assert.equal(note.textContent, "5 characters of read_url's result were cut");
   s.ssClose();
   note.onclick({ stopPropagation() {} });
   assert.equal(d.steps[s.ssView.index].id, "c1");
   assert.equal(s.ssView.pane, "result");
+  assert(c1.classList.has("flagged") && c1.querySelector(".step-flag"), "the flagged row carries a dot");
   // The door opens on the first worth-a-look row too.
   s.ssClose();
   t.el.querySelector(".trace-explain").onclick({ stopPropagation() {} });
   await settle();
-  assert.equal(s.ssView.pane, "result");
+  assert.equal(d.steps[s.ssView.index].id, "c1");
   assert.equal(fetches, 1);
 });
 
@@ -356,14 +368,16 @@ check("a tap on the row's own controls is that control's, not the row's", async 
   const t = s.currentTrace;
   s.finishTrace();
   const c1 = rows(t).find((r) => r.dataset.inspect === "c1");
-  c1.onclick({ target: { closest: (sel) => (sel.includes("button") ? {} : null) }, stopPropagation() {} });
+  const btn = s.document.createElement("button");
+  c1.appendChild(btn);
+  fire(btn);
   await settle();
-  assert(!c1.querySelector(".step-xp"), "a tap on a button inside the row must not expand it");
+  assert(!s.ssIsOpen(), "a tap on a button inside the row must not open the step screen");
 });
 
 // ---- 4. the states, in the row --------------------------------------------------------
 
-check("offline, a failed read and a running turn are said in the row and on the door", async () => {
+check("offline and a failed read toast; a running turn is reviewable step by step", async () => {
   const w = world();
   const s = w.sandbox;
   s.offlineViewing = true;
@@ -373,40 +387,47 @@ check("offline, a failed read and a running turn are said in the row and on the 
   s.finishTrace();
   assert(t.el.querySelector(".trace-explain").textContent.includes("the server is needed"));
   const c1 = rows(t).find((r) => r.dataset.inspect === "c1");
-  tap(c1);
+  fire(c1);
   await settle();
-  assert(c1.querySelector(".step-xp").textContent.includes("the server is needed to read this turn's record"));
-  assert(!t.inner.querySelector(".trace-notes"));
-  // Back online, the next tap tries again — a failure was never cached.
+  assert(w.toasts.some((x) => x.includes("the server is needed to read this turn's record")), "offline tap toasts");
+  s.inspectReveal(t);
+  await settle();
+  assert(!t.inner.querySelector(".trace-notes"), "no strip when the record cannot be read");
+  assert(!s.ssIsOpen());
+  // Back online but the read fails: the next tap toasts the error, and nothing
+  // was cached.
   s.offlineViewing = false;
   s.fetchDossier = async () => { throw new Error("the record could not be read (500)"); };
-  tap(c1); // folds
-  tap(c1);
+  fire(c1);
   await settle();
-  assert(c1.querySelector(".step-xp").textContent.includes("could not be read (500)"));
+  assert(w.toasts.some((x) => x.includes("could not be read (500)")));
+
+  // A RUNNING turn: rows completed so far are reviewable BEFORE it ends. The
+  // card is not finished, so the record is re-fetched each tap (steps so far).
+  const w2 = world();
+  const s2 = w2.sandbox;
   const running = docFor();
   running.running = true;
-  running.steps = running.steps.slice(0, 4); // the record so far: nothing after c1
-  s.fetchDossier = async () => running;
-  tap(c1); tap(c1);
+  running.steps = running.steps.slice(0, 4); // recorded so far: up to c1
+  let liveFetches = 0;
+  s2.fetchDossier = async () => { liveFetches += 1; return running; };
+  s2.currentTurnId = "turn-b";
+  liveTurn(s2); // builds the card but does NOT finish it
+  const t2 = s2.currentTrace;
+  const liveRows = rows(t2);
+  const liveC1 = liveRows.find((r) => r.classList.has("step-tool") || (r.dataset && r.dataset.call === "1"))
+    || liveRows[3];
+  fire(liveC1);
   await settle();
-  assert(c1.querySelector(".step-xp-head"), "a step in the record expands");
-  const c2 = rows(t).find((r) => r.dataset.inspect === "c2");
-  tap(c2);
+  assert(s2.ssIsOpen(), "a completed step opens while the turn runs");
+  assert.equal(running.steps[s2.ssView.index].id, "c1");
+  // A step not yet in the record toasts rather than opening the wrong one.
+  const liveC2 = liveRows.find((r) => r.dataset && r.dataset.call === "2") || liveRows[liveRows.length - 2];
+  s2.ssClose();
+  fire(liveC2);
   await settle();
-  assert(c2.querySelector(".step-xp").textContent.includes("not in the record yet — this turn is still running"));
-  assert(t.inner.querySelector(".trace-notes").textContent.includes("still running"));
-  // The door on an offline card toasts the same sentence.
-  const w2 = world();
-  w2.sandbox.offlineViewing = true;
-  w2.sandbox.currentTurnId = "turn-b";
-  liveTurn(w2.sandbox);
-  const t2 = w2.sandbox.currentTrace;
-  w2.sandbox.finishTrace();
-  t2.el.querySelector(".trace-explain").onclick({ stopPropagation() {} });
-  await settle();
-  assert.equal(w2.toasts.length, 1);
-  assert(w2.toasts[0].includes("the server is needed"));
+  assert(w2.toasts.some((x) => x.includes("still running")), "a not-yet-recorded step toasts");
+  assert(liveFetches >= 2, "a running turn re-fetches to reflect the latest steps");
 });
 
 check("an empty notes list names its checks and never says all clear", async () => {
@@ -419,7 +440,7 @@ check("an empty notes list names its checks and never says all clear", async () 
   liveTurn(s);
   const t = s.currentTrace;
   s.finishTrace();
-  tap(rows(t)[0]);
+  s.inspectReveal(t); // opening the card reveals the strip
   await settle();
   const strip = t.inner.querySelector(".trace-notes");
   assert(strip.textContent.includes("nothing flagged by the 3 checks this reader runs"));
