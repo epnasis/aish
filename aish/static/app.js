@@ -4252,19 +4252,11 @@ function finishTrace(errored) {
 // which is the file order the dossier walks. The answer row is the last model
 // call (`m:last`), resolved when the record arrives.
 function traceInspector(t) {
-  if (!t.el.querySelector(".trace-explain")) {
-    const door = document.createElement("button");
-    door.type = "button";
-    door.className = "trace-explain";
-    door.dataset.turn = t.turnId;
-    door.append(inspectEl("span", null, offlineViewing
-      ? "Full record — the server is needed to read it" : "Full record"));
-    door.append(inspectEl("span", "trace-explain-chev", "›"));
-    door.onclick = (e) => { e.stopPropagation(); inspectOpen(t); };
-    t.inner.appendChild(door);
-  }
-  // Name each row's step, for the delegated tap and the flag markers. A
-  // recorded id (the tool row's stamp) beats a counted position.
+  // No "Full record" door any more (owner, 2026-09-04): every step row opens
+  // the detail in one tap, so the door was redundant. `/explain <ref>` remains
+  // the by-id entry (openExplain) for a turn off the bounded first paint.
+  // Name each row's step, for the delegated tap. A recorded id (the tool row's
+  // stamp) beats a counted position.
   const rows = [...t.body.querySelectorAll(".step")];
   const ids = inspectKeys(rows);
   rows.forEach((row, i) => {
@@ -4336,10 +4328,6 @@ function inspectDossier(t) {
     });
   }
   return t.dossierFetch;
-}
-
-function inspectOpen(t) {
-  inspectDossier(t).then((doc) => ssOpenDoc(doc, undefined, undefined, t.turnId), (err) => showToast((err && err.message) || "the record could not be read"));
 }
 
 function inspectStepClick(t, e) {
@@ -13819,6 +13807,12 @@ function ssScrollChrome() {
   const box = $("step-screen");
   if (!body || !box) return;
   const top = body.scrollTop;
+  // Never toggle within the last stretch before the bottom: collapsing or
+  // revealing there changes the scroll HEIGHT, which knocks you off the very
+  // end you are scrolling to reach. Freeze the state so the bottom is landable.
+  const fromBottom = (body.scrollHeight || 0) - top - (body.clientHeight || 0);
+  const lock = Math.max(160, (body.clientHeight || 0) * 0.4);
+  if (fromBottom < lock) { ssChromeLast = top; return; }
   if (top <= 12) box.classList.remove("ss-collapsed");
   else if (top > ssChromeLast + 4 && top > SS_CHROME_HIDE_AT) box.classList.add("ss-collapsed");
   else if (top < ssChromeLast - 4) box.classList.remove("ss-collapsed");
