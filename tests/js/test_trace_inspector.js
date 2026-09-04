@@ -275,7 +275,7 @@ check("a finished card's rows name the steps they are, and live and cold agree",
   // door is there; no strip yet — the record is fetched only when the card is
   // OPENED, never at finish (a replay finishes every card on screen).
   assert(rows(lt).every((r) => r.classList.has("inspectable")));
-  assert(lt.el.querySelector(".trace-explain"), "no Full record door");
+  assert(!lt.el.querySelector(".trace-explain"), "no Full record door — rows open the detail directly");
   assert(!lt.inner.querySelector(".trace-notes"), "no worth-a-look strip on the card — it lives in the detail now");
   assert.equal(lt.dossierFetch, undefined, "finishTrace must not fetch");
 });
@@ -340,11 +340,7 @@ check("one tap on a row opens the step screen on that step, and the record is fe
   // full-screen detail (the findings navigator).
   assert(!t.inner.querySelector(".trace-notes"), "no strip on the card");
   assert(!rows(t).some((r) => r.querySelector(".step-flag")), "no flag dots on the card");
-  // The door opens on the first worth-a-look step in the full screen.
-  s.ssClose();
-  t.el.querySelector(".trace-explain").onclick({ stopPropagation() {} });
-  await settle();
-  assert.equal(d.steps[s.ssView.index].id, "c1");
+  assert(!t.el.querySelector(".trace-explain"), "no Full record door on the card");
   assert.equal(fetches, 1);
 });
 
@@ -374,7 +370,7 @@ check("offline and a failed read toast; a running turn is reviewable step by ste
   liveTurn(s);
   const t = s.currentTrace;
   s.finishTrace();
-  assert(t.el.querySelector(".trace-explain").textContent.includes("the server is needed"));
+  assert(!t.el.querySelector(".trace-explain"), "no door");
   const c1 = rows(t).find((r) => r.dataset.inspect === "c1");
   fire(c1);
   await settle();
@@ -418,7 +414,7 @@ check("offline and a failed read toast; a running turn is reviewable step by ste
 
 // ---- 5. the ordinary card is unchanged ------------------------------------------------
 
-check("a plain answer keeps its card and its door, and a card with no turn to open is still dropped", () => {
+check("a plain answer keeps its card, and a card with no turn to open is still dropped", () => {
   const w = world();
   const s = w.sandbox;
   s.currentTurnId = "turn-a";
@@ -428,7 +424,7 @@ check("a plain answer keeps its card and its door, and a card with no turn to op
   const t = s.currentTrace;
   s.finishTrace();
   assert.deepEqual(idsOf(t), ["m:last"]);
-  assert(t.el.querySelector(".trace-explain").textContent.startsWith("Full record"));
+  assert(!t.el.querySelector(".trace-explain"), "no Full record door");
   assert(!t.inner.querySelector(".trace-notes"));
   assert(!t.el.classList.has("live"));
   // No id and nothing on it: removed, as before #243.

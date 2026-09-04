@@ -1084,6 +1084,8 @@ check("each step shows the chat's icon, and the chrome collapses on scroll down"
   // Scroll-away top bar: down past the threshold collapses, up reveals, top shows.
   const box = w.el("step-screen");
   const body = w.el("ss-body");
+  // A tall pane so these mid-scroll checks are clear of the bottom-lock zone.
+  body.scrollHeight = 3000; body.clientHeight = 600;
   body.scrollTop = 0; s.ssScrollChrome();
   assert(!box.classList.has("ss-collapsed"), "shown at the top");
   body.scrollTop = 120; s.ssScrollChrome();
@@ -1099,6 +1101,18 @@ check("each step shows the chat's icon, and the chrome collapses on scroll down"
   assert(box.classList.has("ss-collapsed"));
   s.ssShow(d.steps.findIndex((x) => x.id === "c1"), "result");
   assert(!box.classList.has("ss-collapsed"), "a new pane starts with the chrome shown");
+  // Near the BOTTOM the collapse state is frozen — collapsing there changes the
+  // scroll height and knocks you off the end you are scrolling to reach.
+  body.scrollHeight = 2000; body.clientHeight = 600;
+  body.scrollTop = 300; s.ssScrollChrome();
+  assert(box.classList.has("ss-collapsed"), "collapses in the middle");
+  // now scroll down into the last stretch (within 40% of a screen of the end):
+  // the state does not flip, so the bottom is landable.
+  body.scrollTop = 1550; s.ssScrollChrome(); // fromBottom = 2000-1550-600 = -150 < lock
+  assert(box.classList.has("ss-collapsed"), "stays put near the bottom (was collapsed)");
+  box.classList.remove("ss-collapsed");
+  body.scrollTop = 1300; s.ssScrollChrome(); // fromBottom = 100, still within lock
+  assert(!box.classList.has("ss-collapsed"), "and does not collapse near the bottom either");
 });
 
 check("a running turn refreshes its steps live in the detail, without repainting the pane", async () => {
