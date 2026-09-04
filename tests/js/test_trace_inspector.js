@@ -118,7 +118,7 @@ function walk(node, out = []) {
 
 const SS_IDS = ["step-screen", "ss-count", "ss-title", "ss-prev", "ss-next", "ss-facts", "ss-panes",
   "ss-tools", "ss-find", "ss-find-count", "ss-find-prev", "ss-find-next", "ss-whole", "ss-copy",
-  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head"];
+  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head", "ss-read"];
 
 function world() {
   const src = appSource();
@@ -152,6 +152,7 @@ function world() {
   load("function pinTrace(t) {", "const WRAP_SVG");
   load("function finalizeAnswerRow", "// [TRACE-CLOSE-START]");
   load("// [TRACE-CLOSE-START]", "// [TRACE-CLOSE-END]");
+  load("// [READABLE-START]", "// [READABLE-END]");
   load("// [STEP-SCREEN-START]", "// [STEP-SCREEN-END]");
   assert(typeof sandbox.traceStep === "function" && typeof sandbox.finishTrace === "function");
   assert(typeof sandbox.traceInspector === "function", "the inspector is not in [TRACE-CLOSE]");
