@@ -12017,8 +12017,21 @@ function shortName(name, max = NAME_MAX) {
 // STEP at a time on a full-screen surface of its own. A step is one exchange
 // across a boundary — a model call, a tool call — or something that happened
 // between two of them; each has the PANES its kind has (Context / Response,
-// Call / Result / Page, or one Event pane), and swiping moves to the adjacent
-// step keeping the pane by name where the next step has it.
+// Call / Result / Page, or one Event pane). A swipe (and the arrow keys) walks
+// the TAPE: the next pane of this step, and past the last pane the next step's
+// first (past the first, the previous step's last) — so one gesture reads
+// context, response, next step. The header's ‹ › move a whole step and keep
+// the pane by name where the next step has it.
+//
+// META IS STRUCTURE, NEVER TEXT. A pane interleaves two different things: the
+// bytes of the exchange (a message, the reasoning, a tool's output — shown
+// verbatim, monospace) and aish's own account AROUND them (headers, states,
+// "reconstructed from…", truncation notes, gate verdicts). Concatenating the
+// two made them indistinguishable — a reader could not tell whether a sentence
+// was passed to the model or written by this screen — so a pane is a list of
+// SEGMENTS: `text` (the payload, verbatim), `meta` (aish's account, drawn as a
+// bordered block in the UI font) and `record` (a raw record, mono but tinted
+// like meta). Copy and save join them; the eye never has to.
 //
 // Not #preview: its recognisers own pinch and pan, and a page of text is not a
 // picture. Not a sheet: a sheet is a picker you browse, and this is a document
@@ -12181,65 +12194,81 @@ function ssIssued(doc, step) {
   return (doc.steps || []).filter((s) => s.kind === "tool_call" && s.model_call === step.model_call);
 }
 
-// ---- pane text: model call -------------------------------------------------
+// ---- pane segments: model call ---------------------------------------------
+// A tiny builder for the segment list every pane is made of. `meta` is aish's
+// own account (structure), `text` is the exchange's bytes verbatim, `rec` is a
+// raw record. Nothing here decides how a segment LOOKS — ssPaintBody does.
+function ssSegs() {
+  const segs = [];
+  return {
+    segs,
+    meta(...lines) { segs.push({ kind: "meta", text: lines.join("\n") }); },
+    text(t) { segs.push({ kind: "text", text: t === undefined || t === null ? "" : String(t) }); },
+    rec(v) { segs.push({ kind: "record", text: ssJson(v) }); },
+  };
+}
 
-function ssBriefLines(doc, step, lines) {
+function ssBriefSegs(doc, step, b) {
   const brief = (doc.given.briefs || [])[step.ref.brief];
   if (!brief) {
-    lines.push(`THE BRIEF — ${SS_STATE_WORDS[doc.given.state] || "not recorded"}`);
+    b.meta(`THE BRIEF — ${SS_STATE_WORDS[doc.given.state] || "not recorded"}`);
     return;
   }
   const options = brief.options || {};
-  lines.push("THE BRIEF — what the model was handed"
-    + (brief.written_here ? "" : ` (unchanged since turn ${brief.in_force_since} — this is what was still in force)`));
-  lines.push(`model ${options.model || "?"} on ${options.provider || "?"} · context ${options.num_ctx || "?"}`
+  const head = ["THE BRIEF — what the model was handed"
+    + (brief.written_here ? "" : ` (unchanged since turn ${brief.in_force_since} — this is what was still in force)`)];
+  head.push(`model ${options.model || "?"} on ${options.provider || "?"} · context ${options.num_ctx || "?"}`
     + (options.window ? ` · window ${ssN(options.window)} (${options.window_source || "recorded"})` : "")
     + ` · thinking ${options.think ? "on" : "off"}`);
   if (options.system_role === "first_only") {
-    lines.push(`on ${options.provider} the per-task reminder — which carries the rules in force — reached the model as one of your own messages, not as a system instruction`);
+    head.push(`on ${options.provider} the per-task reminder — which carries the rules in force — reached the model as one of your own messages, not as a system instruction`);
   }
-  lines.push("", "SYSTEM TEXT");
+  b.meta(...head);
   const system = brief.system || { state: "not_recorded", parts: [] };
-  if (system.state !== "recorded") lines.push(SS_STATE_WORDS[system.state] || system.state);
+  b.meta("SYSTEM TEXT" + (system.state !== "recorded" ? ` — ${SS_STATE_WORDS[system.state] || system.state}` : ""));
   for (const part of system.parts || []) {
-    lines.push(`── system message ${part.at} · ${ssN(part.chars)} chars`);
-    lines.push(part.state === "recorded" ? (part.text || "") : (SS_STATE_WORDS[part.state] || part.state));
+    b.meta(`── system message ${part.at} · ${ssN(part.chars)} chars`);
+    if (part.state === "recorded") b.text(part.text || "");
+    else b.meta(SS_STATE_WORDS[part.state] || part.state);
   }
   const tools = brief.tools || {};
-  lines.push("", `TOOLS ON THE MENU — ${tools.count === undefined ? "?" : tools.count}`);
-  if (tools.state !== "recorded") lines.push(SS_STATE_WORDS[tools.state] || tools.state);
+  const menu = [`TOOLS ON THE MENU — ${tools.count === undefined ? "?" : tools.count}`];
+  if (tools.state !== "recorded") menu.push(SS_STATE_WORDS[tools.state] || tools.state);
   if (tools.entries && tools.entries.length) {
     for (const entry of tools.entries) {
       const fn = entry.function || {};
-      lines.push(`· ${fn.name || "?"} — ${fn.description || ""}`);
+      menu.push(`· ${fn.name || "?"} — ${fn.description || ""}`);
     }
   } else if (tools.names && tools.names.length) {
-    lines.push("names only — the menu's bytes are gone: " + tools.names.join(", "));
+    menu.push("names only — the menu's bytes are gone: " + tools.names.join(", "));
   }
+  b.meta(...menu);
   const rules = doc.given.rules || {};
   const bound = ((rules.groups || {}).bind) || [];
   if (rules.state === "recorded") {
-    lines.push("", `RULES BOUND — ${bound.length}`);
-    for (const row of bound) lines.push(`· ${row.rule}: ${ssJson((row.binding || {}).obligations || [])}`);
+    const rows = [`RULES BOUND — ${bound.length}`];
+    for (const row of bound) rows.push(`· ${row.rule}: ${ssJson((row.binding || {}).obligations || [])}`);
+    b.meta(...rows);
   }
   for (const record of doc.given.context.records || []) {
     const preload = record.preload || {};
-    lines.push("", `KNOWLEDGE — ${((record.index || {}).items || []).length} offered, ${preload.count || 0} injected`
+    b.meta(`KNOWLEDGE — ${((record.index || {}).items || []).length} offered, ${preload.count || 0} injected`
       + (preload.names && preload.names.length ? `: ${preload.names.join(", ")}` : ""));
   }
   for (const trim of doc.given.trims || []) {
-    lines.push("", `SEED TRIM — ${trim.affected} earlier result(s) were stubbed before the model was called at all`
+    b.meta(`SEED TRIM — ${trim.affected} earlier result(s) were stubbed before the model was called at all`
       + (trim.stubbed ? `: ${trim.stubbed.map((x) => `${x.tool} (#${x.at})`).join(", ")}` : "; which ones was not recorded"));
   }
 }
 
-function ssCostLines(doc, step, lines) {
+function ssCostMeta(doc, step) {
   const cost = ssCostOf(doc, step);
+  const lines = [];
   if (!cost) {
     if ((doc.context_cost || {}).state === "not_recorded") {
       lines.push("what filled this call is not recorded — the messages carry no model-call stamp");
     }
-    return;
+    return lines;
   }
   const by = cost.by_where || {};
   const side = (key) => by[key] ? `${ssN(by[key].chars)} chars in ${by[key].items}` : "0";
@@ -12256,130 +12285,144 @@ function ssCostLines(doc, step, lines) {
     lines.push("tokens: not reported by the provider for this call");
   }
   if (cost.unmeasured && cost.unmeasured.length) lines.push(`unmeasured: ${cost.unmeasured.join("; ")}`);
+  return lines;
 }
 
-function ssContextText(doc, step, whole) {
+function ssContextSegs(doc, step, whole) {
   const ctx = step.context || { new: [], in_front: [], unstamped: 0, stubbed: [] };
   const k = step.model_call;
-  const lines = [];
-  if (whole) lines.push(`THE WHOLE CONTEXT OF MODEL CALL ${k}`);
-  else lines.push(k > 1 ? `WHAT CHANGED SINCE MODEL CALL ${k - 1}` : "WHAT MODEL CALL 1 STARTED FROM");
-  lines.push(ctx.source === "reconstructed"
+  const b = ssSegs();
+  const head = [];
+  if (whole) head.push(`THE WHOLE CONTEXT OF MODEL CALL ${k}`);
+  else head.push(k > 1 ? `WHAT CHANGED SINCE MODEL CALL ${k - 1}` : "WHAT MODEL CALL 1 STARTED FROM");
+  head.push(ctx.source === "reconstructed"
     ? "reconstructed from the message records and the brief — not the request as it left aish, which is not recorded yet"
     : `source: ${ctx.source}`);
-  if (step.numbering === "inferred") lines.push("this call's number is inferred from the order the log was written");
-  ssCostLines(doc, step, lines);
-  lines.push("");
+  if (step.numbering === "inferred") head.push("this call's number is inferred from the order the log was written");
+  head.push(...ssCostMeta(doc, step));
+  b.meta(...head);
   if (!whole) {
-    if (ctx.brief_changed) lines.push("what the model was handed CHANGED at this call — the brief is in the whole context");
+    if (ctx.brief_changed) b.meta("what the model was handed CHANGED at this call — the brief is in the whole context");
     if (ctx.stubbed.length) {
-      lines.push(`stubbed before this call: ${ctx.stubbed.map((x) => `${x.tool} (#${x.at})`).join(", ")}`
+      b.meta(`stubbed before this call: ${ctx.stubbed.map((x) => `${x.tool} (#${x.at})`).join(", ")}`
         + " — results the model had already read were replaced with a stub");
     }
-    lines.push(`NEW TO THIS CALL — ${ctx.new.length} message(s)`);
-    if (!ctx.new.length) lines.push(k > 1 ? "no message record is new to this call" : "no message record precedes this call");
+    b.meta(`NEW TO THIS CALL — ${ctx.new.length} message(s)`
+      + (!ctx.new.length ? (k > 1 ? " · no message record is new to this call" : " · no message record precedes this call") : ""));
     for (const index of ctx.new) {
       const m = ssMessage(doc, index);
       if (!m) continue;
-      lines.push("", ssMsgHead(m), m.text || "(empty)");
+      b.meta(ssMsgHead(m));
+      b.text(m.text || "(empty)");
     }
     if (ctx.unstamped) {
-      lines.push("", `${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
+      b.meta(`${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
     }
     const older = ctx.in_front.length - ctx.new.length;
-    lines.push("", `${ctx.in_front.length} message(s) of this turn were in front of this call`
+    b.meta(`${ctx.in_front.length} message(s) of this turn were in front of this call`
       + (older > 0 ? ` — ${older} from earlier calls; the whole context is one tap away` : "")
       + (ctx.in_front.length === 0 && k > 1 ? " — none placed" : ""));
   } else {
-    ssBriefLines(doc, step, lines);
+    ssBriefSegs(doc, step, b);
     const cost = ssCostOf(doc, step);
     const carried = cost && cost.by_where && cost.by_where.carried;
-    lines.push("", "MESSAGES FROM EARLIER TURNS");
-    lines.push(carried
+    b.meta("MESSAGES FROM EARLIER TURNS", carried
       ? `${carried.items} message(s), ${ssN(carried.chars)} chars, carried from earlier turns of this chat are in front of this call and are not in this document — open those turns to read them`
       : "how much earlier history was in front of this call is not recorded");
-    lines.push("", `MESSAGES OF THIS TURN IN FRONT OF THIS CALL — ${ctx.in_front.length}`);
+    b.meta(`MESSAGES OF THIS TURN IN FRONT OF THIS CALL — ${ctx.in_front.length}`);
     for (const index of ctx.in_front) {
       const m = ssMessage(doc, index);
       if (!m) continue;
-      lines.push("", ssMsgHead(m) + (ctx.new.includes(index) ? " · new to this call" : ""), m.text || "(empty)");
+      b.meta(ssMsgHead(m) + (ctx.new.includes(index) ? " · new to this call" : ""));
+      b.text(m.text || "(empty)");
     }
     if (ctx.unstamped) {
-      lines.push("", `${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
+      b.meta(`${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
     }
   }
-  return lines.join("\n");
+  return b.segs;
 }
 
-function ssResponseText(doc, step) {
+function ssResponseSegs(doc, step) {
   const th = ssThought(doc, step);
-  const lines = [];
+  const b = ssSegs();
   if (th) {
-    if (th.synthesized) lines.push("the text below is aish's own sentence, not the model's");
-    lines.push("REASONING");
-    lines.push(th.text || "this call recorded no thinking");
-    if (th.truncated) lines.push(`… ${ssN(th.truncated)} characters were cut from this record by ${th.cap_source || "a cap"}`);
-    lines.push("", "SAID");
-    lines.push(th.said || "nothing was said on this call");
-    if (th.said_truncated) lines.push(`… ${ssN(th.said_truncated)} characters were cut from this record`);
-    if (th.stop) lines.push("", `stop reason: ${th.stop}`);
-    if (th.blocks && th.blocks.length) lines.push(`provider blocks: ${th.blocks.join(", ")}`);
-    if (th.malformed && th.malformed.length) lines.push(`arguments did not parse for: ${th.malformed.join(", ")}`);
+    b.meta("REASONING" + (th.synthesized ? " — the text below is aish's own sentence, not the model's" : ""));
+    if (th.text) b.text(th.text);
+    else b.meta("this call recorded no thinking");
+    if (th.truncated) b.meta(`… ${ssN(th.truncated)} characters were cut from this record by ${th.cap_source || "a cap"}`);
+    b.meta("SAID");
+    if (th.said) b.text(th.said);
+    else b.meta("nothing was said on this call");
+    if (th.said_truncated) b.meta(`… ${ssN(th.said_truncated)} characters were cut from this record`);
+    const tail = [];
+    if (th.stop) tail.push(`stop reason: ${th.stop}`);
+    if (th.blocks && th.blocks.length) tail.push(`provider blocks: ${th.blocks.join(", ")}`);
+    if (th.malformed && th.malformed.length) tail.push(`arguments did not parse for: ${th.malformed.join(", ")}`);
+    if (tail.length) b.meta(...tail);
   } else if (step.fragment) {
-    lines.push(SS_STATE_WORDS.fragments, "", step.fragment);
+    b.meta(SS_STATE_WORDS.fragments);
+    b.text(step.fragment);
   } else {
-    lines.push(SS_STATE_WORDS[doc.thought.state] || "no response was recorded for this call");
+    b.meta(SS_STATE_WORDS[doc.thought.state] || "no response was recorded for this call");
   }
   const issued = ssIssued(doc, step);
-  lines.push("", `TOOL CALLS ISSUED — ${issued.length}`);
+  b.meta(`TOOL CALLS ISSUED — ${issued.length}`);
   for (const s of issued) {
     const c = ssCallOf(doc, s);
-    lines.push(`→ ${s.name} (tool call ${s.call})`);
-    lines.push(c && c.args_state === "recorded" ? ssJson(c.args) : SS_STATE_WORDS.not_recorded);
+    b.meta(`→ ${s.name} (tool call ${s.call})`);
+    if (c && c.args_state === "recorded") b.text(ssJson(c.args));
+    else b.meta(SS_STATE_WORDS.not_recorded);
   }
   if (step.is_last) {
     const produced = doc.produced || {};
-    lines.push("", "WHAT IT ANSWERED");
-    lines.push(produced.answer || (SS_STATE_WORDS[produced.answer_state] || "no answer was recorded for this turn"));
+    b.meta("WHAT IT ANSWERED");
+    if (produced.answer) b.text(produced.answer);
+    else b.meta(SS_STATE_WORDS[produced.answer_state] || "no answer was recorded for this turn");
     const verify = produced.verify || {};
-    for (const gate of verify.stopped || []) lines.push(`held by ${gate.rule || "a check"}`);
-    for (const gate of verify.advised || []) lines.push(`delivered with a note from ${gate.rule || "a check"}`);
-    if (verify.passed) lines.push(`${verify.passed} check(s) passed`);
+    const tail = [];
+    for (const gate of verify.stopped || []) tail.push(`held by ${gate.rule || "a check"}`);
+    for (const gate of verify.advised || []) tail.push(`delivered with a note from ${gate.rule || "a check"}`);
+    if (verify.passed) tail.push(`${verify.passed} check(s) passed`);
     if (produced.status === null || produced.status === undefined) {
-      lines.push("no end was recorded for this task — it was interrupted, or it is still running");
+      tail.push("no end was recorded for this task — it was interrupted, or it is still running");
     } else if (produced.status !== "ok") {
-      lines.push(`the task ended ${produced.status}: ${produced.error || ""}`);
+      tail.push(`the task ended ${produced.status}: ${produced.error || ""}`);
     }
+    if (tail.length) b.meta(...tail);
   }
-  return lines.join("\n");
+  return b.segs;
 }
 
-// ---- pane text: tool call ---------------------------------------------------
+// ---- pane segments: tool call -----------------------------------------------
 
-function ssCallText(doc, step) {
+function ssCallSegs(doc, step) {
   const c = ssCallOf(doc, step);
-  const lines = [];
-  if (!c) return "the record has no call for this step";
-  lines.push(`${c.name}` + (c.completed ? "" : " — proposed, and no result was recorded"));
-  if (SS_PLACEMENT_WORDS[step.placement]) lines.push(SS_PLACEMENT_WORDS[step.placement]);
-  lines.push("", "ARGUMENTS");
-  lines.push(c.args_state === "recorded" ? ssJson(c.args) : SS_STATE_WORDS.not_recorded);
+  const b = ssSegs();
+  if (!c) { b.meta("the record has no call for this step"); return b.segs; }
+  const head = [`${c.name}` + (c.completed ? "" : " — proposed, and no result was recorded")];
+  if (SS_PLACEMENT_WORDS[step.placement]) head.push(SS_PLACEMENT_WORDS[step.placement]);
+  b.meta(...head);
+  b.meta("ARGUMENTS — as the model emitted them");
+  if (c.args_state === "recorded") b.text(ssJson(c.args));
+  else b.meta(SS_STATE_WORDS.not_recorded);
   if (c.args_truncated) {
-    lines.push(`… ${ssN(c.args_truncated)} characters of these arguments were cut from the record by ${c.cap_source || "a cap"} (applied per argument value)`);
+    b.meta(`… ${ssN(c.args_truncated)} characters of these arguments were cut from the record by ${c.cap_source || "a cap"} (applied per argument value)`);
   }
-  if (c.command) lines.push("", "COMMAND AS RUN", c.command);
-  lines.push("", "DECISION");
-  lines.push(c.decision ? `${c.decision}` : "no decision recorded on the step (auto-approved, or a tool with no gate)");
-  if (c.verdict_by) lines.push(`verdict by: ${c.verdict_by}`);
-  if (c.comment) lines.push(`you said: ${c.comment}`);
-  if (c.replaces) lines.push(`proposed after the held call ${c.replaces}`);
+  if (c.command) { b.meta("COMMAND AS RUN"); b.text(c.command); }
+  const decision = ["DECISION",
+    c.decision ? `${c.decision}` : "no decision recorded on the step (auto-approved, or a tool with no gate)"];
+  if (c.verdict_by) decision.push(`verdict by: ${c.verdict_by}`);
+  if (c.comment) decision.push(`you said: ${c.comment}`);
+  if (c.replaces) decision.push(`proposed after the held call ${c.replaces}`);
+  b.meta(...decision);
   const gates = c.gates || [];
   const refused = c.refused || [];
   const allowed = gates.length - refused.length;
-  lines.push("", `GATE VERDICTS — ${gates.length}` + (allowed ? ` (${allowed} allowed, collapsed)` : ""));
-  if (!gates.length) lines.push("no gate verdict was recorded for this call");
-  for (const gate of refused) lines.push(ssJson(gate));
-  return lines.join("\n");
+  b.meta(`GATE VERDICTS — ${gates.length}` + (allowed ? ` (${allowed} allowed, collapsed)` : "")
+    + (!gates.length ? " · no gate verdict was recorded for this call" : ""));
+  for (const gate of refused) b.rec(gate);
+  return b.segs;
 }
 
 function ssShownText(doc, step) {
@@ -12392,17 +12435,17 @@ function ssShownText(doc, step) {
   return m ? m.text : "";
 }
 
-function ssResultText(doc, step) {
+function ssResultSegs(doc, step) {
   const c = ssCallOf(doc, step);
-  const lines = [];
-  if (!c) return "the record has no call for this step";
+  const b = ssSegs();
+  if (!c) { b.meta("the record has no call for this step"); return b.segs; }
   const how = step.ref.shown_how;
-  lines.push("WHAT THE MODEL WAS GIVEN — " + (SS_SHOWN_WORDS[how] || how));
-  if (!c.completed) lines.push("the call never completed, so nothing came back");
-  else if (how !== "not_matched") lines.push("", ssShownText(doc, step) || "(empty)");
-  if (c.bytes !== null && c.bytes !== undefined) lines.push("", `payload before any cut: ${ssN(c.bytes)} bytes`);
+  b.meta("WHAT THE MODEL WAS GIVEN — " + (SS_SHOWN_WORDS[how] || how));
+  if (!c.completed) b.meta("the call never completed, so nothing came back");
+  else if (how !== "not_matched") b.text(ssShownText(doc, step) || "(empty)");
+  if (c.bytes !== null && c.bytes !== undefined) b.meta(`payload before any cut: ${ssN(c.bytes)} bytes`);
   const cut = c.truncation || {};
-  lines.push("", "TRUNCATION");
+  const lines = ["TRUNCATION"];
   if (!Object.keys(cut).length) lines.push("no truncation block was recorded for this call");
   else {
     lines.push(`cut by ${cut.truncator || "a cap"}: kept ${ssN(cut.kept)} chars, omitted ${ssN(cut.omitted)}`
@@ -12414,10 +12457,11 @@ function ssResultText(doc, step) {
     else if (step.continuation_read === false) lines.push("nothing read the continuation back in this turn");
   }
   if (c.read) lines.push(`this call read back the continuation ${c.read}`);
-  lines.push("", "NOT RECORDED YET");
-  lines.push("the whole output before any cut: not recorded (part 3 of #352)");
-  lines.push("the text exactly as it was sent to the model: not recorded (part 2 of #352) — the text above is the record's copy");
-  return lines.join("\n");
+  lines.push("NOT RECORDED YET",
+    "the whole output before any cut: not recorded (part 3 of #352)",
+    "the text exactly as it was sent to the model: not recorded (part 2 of #352) — the text above is the record's copy");
+  b.meta(...lines);
+  return b.segs;
 }
 
 function ssPageBefore(c) {
@@ -12425,11 +12469,11 @@ function ssPageBefore(c) {
   return framePicture(c.frame, "the page as aish read it");
 }
 
-function ssPageText(doc, step) {
+function ssPageSegs(doc, step) {
   const c = ssCallOf(doc, step);
-  const lines = [];
-  if (!c) return "the record has no call for this step";
-  lines.push("THE PICTURE");
+  const b = ssSegs();
+  if (!c) { b.meta("the record has no call for this step"); return b.segs; }
+  const lines = ["THE PICTURE"];
   if (c.frame && c.frame_state === "recorded") lines.push(`the page at the moment the model was shown it: ${c.frame}`);
   else if (c.frame) lines.push(`a picture was recorded at ${c.frame} and the store has since cleared it (purged)`);
   else if (c.frame_skipped) lines.push((typeof FRAME_ABSENT === "object" && FRAME_ABSENT[c.frame_skipped]) || `no picture — ${c.frame_skipped}`);
@@ -12440,72 +12484,78 @@ function ssPageText(doc, step) {
       : `${c.frame_url} — the address did not change`);
   }
   if (c.covered && c.covered.by) {
-    lines.push("", `a click could not land — the page had "${c.covered.by}" on top of the control`
+    lines.push(`a click could not land — the page had "${c.covered.by}" on top of the control`
       + (c.covered.dismissed ? " — aish dismissed it and clicked again" : ""));
   }
-  if (c.problem) lines.push("", "AISH'S OWN OBSERVATION", c.problem);
-  if (c.unchanged) lines.push("", "nothing on the page changed when aish did this");
-  lines.push("", "THE PAGE'S WORDS — what it wrote to its own console (not aish's)");
-  if (c.console && c.console.length) for (const line of c.console) lines.push(line);
-  else if (c.console) lines.push("the page wrote nothing");
-  else lines.push("not recorded for this call");
+  b.meta(...lines);
+  if (c.problem) { b.meta("AISH'S OWN OBSERVATION"); b.text(c.problem); }
+  if (c.unchanged) b.meta("nothing on the page changed when aish did this");
+  b.meta("THE PAGE'S WORDS — what it wrote to its own console (not aish's)");
+  if (c.console && c.console.length) b.text(c.console.join("\n"));
+  else if (c.console) b.meta("the page wrote nothing");
+  else b.meta("not recorded for this call");
   const signin = c.signin;
   if (signin && signin.host) {
-    lines.push("", `SIGN-IN ATTEMPT AT ${signin.host} — a page of its own, not the one above`);
-    lines.push(signin.ok === true ? "the session was seen to come up"
+    const rows = [`SIGN-IN ATTEMPT AT ${signin.host} — a page of its own, not the one above`];
+    rows.push(signin.ok === true ? "the session was seen to come up"
       : signin.ok === false ? "the session was not seen to come up"
         : "whether the session came up was not recorded");
-    if (signin.verdict_said) lines.push(`verdict: ${signin.verdict_said} (${signin.verdict})`);
-    else if (signin.ok === false) lines.push("no verdict was recorded for this attempt — either it ended before aish judged it, or this log predates the record");
-    for (const said of signin.observed_said || []) lines.push(`· ${said}`);
-    if (signin.frame) lines.push(`its picture: ${signin.frame}` + (signin.frame_state === "purged" ? " (purged)" : ""));
-    else if (signin.frame_skipped) lines.push((typeof FRAME_ABSENT === "object" && FRAME_ABSENT[signin.frame_skipped]) || `no picture — ${signin.frame_skipped}`);
-    if (signin.covered) lines.push(`a click could not land — the page had "${signin.covered}" on top of the control`);
+    if (signin.verdict_said) rows.push(`verdict: ${signin.verdict_said} (${signin.verdict})`);
+    else if (signin.ok === false) rows.push("no verdict was recorded for this attempt — either it ended before aish judged it, or this log predates the record");
+    for (const said of signin.observed_said || []) rows.push(`· ${said}`);
+    if (signin.frame) rows.push(`its picture: ${signin.frame}` + (signin.frame_state === "purged" ? " (purged)" : ""));
+    else if (signin.frame_skipped) rows.push((typeof FRAME_ABSENT === "object" && FRAME_ABSENT[signin.frame_skipped]) || `no picture — ${signin.frame_skipped}`);
+    if (signin.covered) rows.push(`a click could not land — the page had "${signin.covered}" on top of the control`);
+    b.meta(...rows);
     if (signin.console && signin.console.length) {
-      lines.push("the sign-in page's words — its own console:");
-      for (const line of signin.console) lines.push(line);
+      b.meta("the sign-in page's words — its own console:");
+      b.text(signin.console.join("\n"));
     }
   }
-  if (c.phases) lines.push("", "WHERE THE SECONDS WENT (ms)", ssJson(c.phases));
-  return lines.join("\n");
+  if (c.phases) { b.meta("WHERE THE SECONDS WENT (ms)"); b.rec(c.phases); }
+  return b.segs;
 }
 
-function ssEventText(doc, step) {
-  const lines = [];
-  for (const fact of step.facts || []) lines.push(`${fact.k}: ${fact.v}`);
-  if (step.kind === "steering") lines.push("", "YOU TYPED", step.text || "");
+function ssEventSegs(doc, step) {
+  const b = ssSegs();
+  const facts = (step.facts || []).map((fact) => `${fact.k}: ${fact.v}`);
+  if (facts.length) b.meta(...facts);
+  if (step.kind === "steering") { b.meta("YOU TYPED"); b.text(step.text || ""); }
   else if (step.kind === "model_error") {
     const record = step.record || {};
-    if (record.text) lines.push("", "WHAT THE PROVIDER SAID", record.text);
-    if (record.truncated) lines.push(`… ${ssN(record.truncated)} characters were cut by ${record.cap_source || "a cap"}`);
-    lines.push("", "THE RECORD", ssJson(record));
+    if (record.text) { b.meta("WHAT THE PROVIDER SAID"); b.text(record.text); }
+    if (record.truncated) b.meta(`… ${ssN(record.truncated)} characters were cut by ${record.cap_source || "a cap"}`);
+    b.meta("THE RECORD");
+    b.rec(record);
   } else if (step.kind === "trim") {
-    lines.push("", "THE RECORD", ssJson(step.record || {}));
+    b.meta("THE RECORD");
+    b.rec(step.record || {});
   } else if (step.kind === "retry") {
-    lines.push("", "its records are kept, superseded", "", "THE RECORD", ssJson(step.record || {}));
+    b.meta("its records are kept, superseded", "THE RECORD");
+    b.rec(step.record || {});
   } else if (step.kind === "brief_changed") {
-    lines.push("", "the brief this call was handed is in that model call's whole context");
+    b.meta("the brief this call was handed is in that model call's whole context");
   }
-  return lines.join("\n");
+  return b.segs;
 }
 
-// Every pane of a step, as text. `before` is a node drawn ABOVE the text —
-// the page's picture through the trace card's own `framePicture`, so there is
-// one answer to which pictures may load. `more` is the pane's other reading,
-// the whole context, one tap away.
+// Every pane of a step, as a SEGMENT LIST. `before` is a node drawn ABOVE the
+// segments — the page's picture through the trace card's own `framePicture`,
+// so there is one answer to which pictures may load. `more` is the pane's
+// other reading, the whole context, one tap away.
 function ssPanes(doc, step) {
   const out = [];
   for (const name of step.panes || []) {
     if (name === "context") {
-      out.push({ name, label: SS_PANE_LABELS[name], text: ssContextText(doc, step, false),
-                 more: { label: "whole context", text: ssContextText(doc, step, true) } });
-    } else if (name === "response") out.push({ name, label: SS_PANE_LABELS[name], text: ssResponseText(doc, step) });
-    else if (name === "call") out.push({ name, label: SS_PANE_LABELS[name], text: ssCallText(doc, step) });
-    else if (name === "result") out.push({ name, label: SS_PANE_LABELS[name], text: ssResultText(doc, step) });
+      out.push({ name, label: SS_PANE_LABELS[name], segs: ssContextSegs(doc, step, false),
+                 more: { label: "whole context", segs: ssContextSegs(doc, step, true) } });
+    } else if (name === "response") out.push({ name, label: SS_PANE_LABELS[name], segs: ssResponseSegs(doc, step) });
+    else if (name === "call") out.push({ name, label: SS_PANE_LABELS[name], segs: ssCallSegs(doc, step) });
+    else if (name === "result") out.push({ name, label: SS_PANE_LABELS[name], segs: ssResultSegs(doc, step) });
     else if (name === "page") {
-      out.push({ name, label: SS_PANE_LABELS[name], text: ssPageText(doc, step),
+      out.push({ name, label: SS_PANE_LABELS[name], segs: ssPageSegs(doc, step),
                  before: ssPageBefore(ssCallOf(doc, step)) });
-    } else out.push({ name, label: SS_PANE_LABELS[name] || name, text: ssEventText(doc, step) });
+    } else out.push({ name, label: SS_PANE_LABELS[name] || name, segs: ssEventSegs(doc, step) });
   }
   return out;
 }
@@ -12570,7 +12620,7 @@ function ssOpen(doc, stepId, pane) {
   const steps = doc.steps || [];
   let index = steps.findIndex((s) => s.id === stepId);
   if (index < 0) index = 0;
-  ssView = { doc, index: 0, pane: "", text: "" };
+  ssView = { doc, index: 0, pane: "", text: "", nodes: [] };
   ssFind = { query: "", hits: 0, at: -1, marks: [] };
   ssWhole = false;
   ssGesture = null;
@@ -12598,7 +12648,7 @@ function ssShow(index, pane) {
   if (!step) return false;
   const panes = step.panes || [];
   if (!panes.includes(pane)) pane = panes[0] || "";
-  ssView = { doc: ssView.doc, index, pane, text: "" };
+  ssView = { doc: ssView.doc, index, pane, text: "", nodes: [] };
   ssPaint();
   return true;
 }
@@ -12608,12 +12658,30 @@ function ssGo(delta) {
   return ssShow(ssView.index + delta, ssView.pane);
 }
 
+// The TAPE (a swipe, and the arrow keys): the next pane of THIS step first;
+// past the last pane, the next step's FIRST pane — past the first, the
+// previous step's LAST — so one gesture reads context, response, next step.
+// The header's ‹ › stay whole-step moves (ssGo), pane kept by name.
+function ssTape(delta) {
+  if (!ssView) return false;
+  const steps = ssView.doc.steps || [];
+  const step = steps[ssView.index];
+  const panes = (step && step.panes) || [];
+  const at = panes.indexOf(ssView.pane) + delta;
+  if (at >= 0 && at < panes.length) return ssShow(ssView.index, panes[at]);
+  const next = steps[ssView.index + delta];
+  if (!next) return false;
+  const target = next.panes || [];
+  return ssShow(ssView.index + delta, delta > 0 ? (target[0] || "") : (target[target.length - 1] || ""));
+}
+
 function ssClose() {
   if (!ssView) return false;
   const box = $("step-screen");
   if (box) box.hidden = true;
   const body = $("ss-body");
   if (body) body.textContent = ""; // a turn's context is hundreds of KB; drop it
+  // the node list holds the same text; drop it with the DOM
   if (ssAbort) { ssAbort.abort(); ssAbort = null; }
   ssView = null;
   return true;
@@ -12670,26 +12738,39 @@ function ssPaintBody(paneObj) {
   body.textContent = "";
   body.scrollTop = 0;
   const whole = $("ss-whole");
-  const text = paneObj ? ((paneObj.more && ssWhole) ? paneObj.more.text : paneObj.text) : "nothing was recorded for this turn";
-  ssView.text = text;
+  const segs = paneObj ? ((paneObj.more && ssWhole) ? paneObj.more.segs : paneObj.segs)
+    : [{ kind: "meta", text: "nothing was recorded for this turn" }];
+  // Copy and save join the segments; the DOM never does.
+  ssView.text = segs.map((seg) => seg.text).join("\n\n");
+  ssView.nodes = [];
   if (whole) {
     whole.hidden = !(paneObj && paneObj.more);
     whole.textContent = ssWhole ? "what changed" : (paneObj && paneObj.more ? paneObj.more.label : "");
   }
   if (paneObj && paneObj.before) body.appendChild(paneObj.before);
-  const pre = ssEl("pre", "ss-pre mono", text);
-  body.appendChild(pre);
-  if (text.length > SS_FOLD_CHARS) {
-    // Folded, never truncated: the whole text is in `pre`; only the first
-    // look is short.
-    pre.classList.add("ss-clamped");
-    const more = ssEl("button", "ss-more", `show all (${ssN(text.length)} characters)`);
-    more.type = "button";
-    more.onclick = () => { pre.classList.remove("ss-clamped"); more.remove(); };
-    body.appendChild(more);
+  for (const seg of segs) {
+    // Meta is STRUCTURE: aish's own account around the exchange, drawn as a
+    // bordered block in the UI font. Text is the exchange's bytes, verbatim,
+    // monospace. A record is mono too but tinted like meta — it is a record,
+    // not something a model said or was given.
+    const node = seg.kind === "meta"
+      ? ssEl("div", "ss-meta", seg.text)
+      : ssEl("pre", seg.kind === "record" ? "ss-pre ss-rec mono" : "ss-pre mono", seg.text);
+    body.appendChild(node);
+    ssView.nodes.push({ node, text: seg.text });
+    if (seg.kind !== "meta" && seg.text.length > SS_FOLD_CHARS) {
+      // Folded, never truncated: the whole text is in the node; only the
+      // first look is short.
+      node.classList.add("ss-clamped");
+      const more = ssEl("button", "ss-more", `show all (${ssN(seg.text.length)} characters)`);
+      more.type = "button";
+      more.onclick = () => { node.classList.remove("ss-clamped"); more.remove(); };
+      node._moreBtn = more;
+      body.appendChild(more);
+    }
   }
   const save = $("ss-save");
-  if (save) save.hidden = text.length < SS_SAVE_MIN_CHARS;
+  if (save) save.hidden = ssView.text.length < SS_SAVE_MIN_CHARS;
   ssApplyFind();
 }
 
@@ -12707,37 +12788,41 @@ function ssSetFind(query) {
 }
 
 // Text nodes plus one <mark> per hit, never innerHTML: the text is a page's
-// own words. Every hit is COUNTED; marking is capped and the label says so.
+// own words. Every hit is COUNTED across all of the pane's segments; marking
+// is capped and the label says so.
 function ssApplyFind() {
-  const body = $("ss-body");
-  const pre = body && body.querySelector(".ss-pre");
-  if (!pre || !ssView) return;
-  const text = ssView.text || "";
+  if (!ssView) return;
+  const nodes = ssView.nodes || [];
   const q = ssFind.query.toLowerCase();
   ssFind.marks = [];
   if (!q) {
-    pre.textContent = text;
+    for (const { node, text } of nodes) node.textContent = text;
     ssFind.hits = 0;
     ssFind.at = -1;
     ssFindLabel();
     return;
   }
-  const lower = text.toLowerCase();
   let count = 0;
-  for (let i = lower.indexOf(q); i !== -1; i = lower.indexOf(q, i + q.length)) count += 1;
-  ssFind.hits = count;
-  pre.textContent = "";
-  let from = 0;
-  let marked = 0;
-  for (let i = lower.indexOf(q); i !== -1 && marked < SS_FIND_MAX_MARKS; i = lower.indexOf(q, i + q.length)) {
-    if (i > from) pre.appendChild(document.createTextNode(text.slice(from, i)));
-    const mark = ssEl("mark", "ss-hit", text.slice(i, i + q.length));
-    pre.appendChild(mark);
-    ssFind.marks.push(mark);
-    from = i + q.length;
-    marked += 1;
+  for (const { node, text } of nodes) {
+    const lower = text.toLowerCase();
+    let from = 0;
+    let any = false;
+    node.textContent = "";
+    for (let i = lower.indexOf(q); i !== -1; i = lower.indexOf(q, i + q.length)) {
+      count += 1;
+      any = true;
+      if (ssFind.marks.length < SS_FIND_MAX_MARKS) {
+        if (i > from) node.appendChild(document.createTextNode(text.slice(from, i)));
+        const mark = ssEl("mark", "ss-hit", text.slice(i, i + q.length));
+        node.appendChild(mark);
+        ssFind.marks.push(mark);
+        from = i + q.length;
+      }
+    }
+    if (!any || from === 0) node.textContent = text;
+    else if (from < text.length) node.appendChild(document.createTextNode(text.slice(from)));
   }
-  if (from < text.length) pre.appendChild(document.createTextNode(text.slice(from)));
+  ssFind.hits = count;
   ssFind.at = count ? 0 : -1;
   ssFindCurrent();
 }
@@ -12758,8 +12843,11 @@ function ssFindCurrent() {
   const mark = ssFind.marks[ssFind.at];
   if (mark) {
     mark.classList.add("ss-cur");
-    const pre = $("ss-body").querySelector(".ss-pre");
-    if (pre) pre.classList.remove("ss-clamped"); // a jump into a fold unfolds it
+    const holder = mark.parentNode;
+    if (holder && holder.classList && holder.classList.contains("ss-clamped")) {
+      holder.classList.remove("ss-clamped"); // a jump into a fold unfolds it
+      if (holder._moreBtn) holder._moreBtn.remove();
+    }
     ssScrollTo(mark);
   }
   ssFindLabel();
@@ -12832,7 +12920,7 @@ function ssTouchEnd(e) {
   const dx = t ? t.clientX - ssTouch.x : 0;
   const claimed = ssGesture === "page";
   ssTouch = null;
-  if (claimed && Math.abs(dx) >= SS_SWIPE_MIN) ssGo(dx < 0 ? 1 : -1);
+  if (claimed && Math.abs(dx) >= SS_SWIPE_MIN) ssTape(dx < 0 ? 1 : -1);
 }
 
 // ---- text size -------------------------------------------------------------
@@ -12843,6 +12931,10 @@ const SS_FONT_MIN = 9;
 const SS_FONT_MAX = 22;
 const SS_FONT_DEFAULT = 12;
 const SS_FONT_KEY = "aish-ss-font";
+// Wrapping is ON by default — most panes are prose-bearing — and remembered
+// per device, like the text size: how text must flow is a fact about the
+// screen it is read on. "0" is the one stored value that turns it off.
+const SS_WRAP_KEY = "aish-ss-wrap";
 
 function ssFontRead() {
   try {
@@ -12874,7 +12966,14 @@ function ssWire() {
   $("ss-close").onclick = () => ssClose();
   $("ss-prev").onclick = () => ssGo(-1);
   $("ss-next").onclick = () => ssGo(1);
-  $("ss-wrap").onclick = () => $("ss-body").classList.toggle("wrap-on");
+  let stored = null;
+  try { stored = localStorage.getItem(SS_WRAP_KEY); } catch (_err) { /* no storage */ }
+  if (stored !== "0") $("ss-body").classList.add("wrap-on");
+  $("ss-wrap").onclick = () => {
+    const cls = $("ss-body").classList;
+    cls.toggle("wrap-on");
+    try { localStorage.setItem(SS_WRAP_KEY, cls.contains("wrap-on") ? "1" : "0"); } catch (_err) { /* still applies */ }
+  };
   $("ss-font-dec").onclick = () => ssBumpFont(-1);
   $("ss-font-inc").onclick = () => ssBumpFont(1);
   ssApplyFont(ssFontRead());
@@ -14506,7 +14605,7 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); ssClose(); return; }
     if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && document.activeElement !== $("ss-find")) {
       e.preventDefault();
-      ssGo(e.key === "ArrowRight" ? 1 : -1);
+      ssTape(e.key === "ArrowRight" ? 1 : -1);
       return;
     }
   }

@@ -245,6 +245,12 @@ function preOf(w) {
   return w.el("ss-body").querySelector(".ss-pre");
 }
 
+// The pane is SEGMENTS now — meta blocks around verbatim payload blocks — so
+// whole-pane assertions read every block's text, in order.
+function bodyText(w) {
+  return w.el("ss-body").children.map((n) => n.textContent).join("\n");
+}
+
 // ---- 1. every kind renders -------------------------------------------------
 
 check("every kind of step renders, with exactly the panes it has", () => {
@@ -297,9 +303,12 @@ check("every pane is textContent, and no interactive node is minted from content
     w.sandbox.ssGo(1);
   }
   assert(onScreen >= 5, `the hostile string should be on screen as TEXT in many panes (saw ${onScreen})`);
-  // …and the pre is exactly the pane's text, with no node between.
+  // …and the segments join to exactly the pane's text (what copy/save carry).
   w.sandbox.ssOpen(d, "c1", "result");
-  assert.equal(preOf(w).textContent, w.sandbox.ssView.text);
+  const joined = w.el("ss-body").children
+    .filter((n) => /ss-(pre|meta)/.test(n.className || ""))
+    .map((n) => n.textContent).join("\n\n");
+  assert.equal(joined, w.sandbox.ssView.text);
 });
 
 // ---- 3. the swipe -------------------------------------------------------------
@@ -330,13 +339,25 @@ check("the recogniser claims only a near-horizontal move and yields the rest (L5
   const s = w.sandbox;
   s.ssOpen(d, "c1", "result");
   const at = () => d.steps[s.ssView.index].id;
-  // A flick to the left: claimed, and it turns the step.
-  s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }] });
-  s.ssTouchMove({ touches: [{ clientX: 150, clientY: 303 }] });
-  assert.equal(s.ssGesture, "page", "a near-horizontal move must be claimed");
-  s.ssTouchEnd({ changedTouches: [{ clientX: 110, clientY: 306 }] });
+  const left = () => {
+    s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }] });
+    s.ssTouchMove({ touches: [{ clientX: 150, clientY: 303 }] });
+    assert.equal(s.ssGesture, "page", "a near-horizontal move must be claimed");
+    s.ssTouchEnd({ changedTouches: [{ clientX: 110, clientY: 306 }] });
+  };
+  const right = () => {
+    s.ssTouchStart({ touches: [{ clientX: 100, clientY: 300 }] });
+    s.ssTouchMove({ touches: [{ clientX: 160, clientY: 300 }] });
+    s.ssTouchEnd({ changedTouches: [{ clientX: 200, clientY: 300 }] });
+  };
+  // A flick to the left walks the TAPE: the next pane of THIS step first.
+  left();
+  assert.equal(at(), "c1");
+  assert.equal(s.ssView.pane, "page", "the tape moves to the next pane before the next step");
+  // …and past the last pane, the next step's FIRST pane.
+  left();
   assert.equal(at(), "c2");
-  assert.equal(s.ssView.pane, "result");
+  assert.equal(s.ssView.pane, "call", "past the last pane, the next step's first");
   // A diagonal start is a scroll, decided ONCE: a big horizontal travel later
   // does not turn it into a page.
   s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }] });
@@ -346,16 +367,22 @@ check("the recogniser claims only a near-horizontal move and yields the rest (L5
   assert.equal(s.ssGesture, "scroll", "a decision must not be re-made mid-gesture");
   s.ssTouchEnd({ changedTouches: [{ clientX: 30, clientY: 340 }] });
   assert.equal(at(), "c2", "a yielded gesture must not move the step");
+  assert.equal(s.ssView.pane, "call");
   // A claimed move too short to be a swipe changes nothing.
   s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }] });
   s.ssTouchMove({ touches: [{ clientX: 180, clientY: 301 }] });
   s.ssTouchEnd({ changedTouches: [{ clientX: 175, clientY: 301 }] });
   assert.equal(at(), "c2");
-  // …and a swipe to the right goes back.
-  s.ssTouchStart({ touches: [{ clientX: 100, clientY: 300 }] });
-  s.ssTouchMove({ touches: [{ clientX: 160, clientY: 300 }] });
-  s.ssTouchEnd({ changedTouches: [{ clientX: 200, clientY: 300 }] });
+  // …and a swipe to the right goes back onto the previous step's LAST pane.
+  right();
   assert.equal(at(), "c1");
+  assert.equal(s.ssView.pane, "page", "entering a step from the right lands on its last pane");
+  // The tape ends where the steps do.
+  s.ssOpen(d, d.steps[0].id, "");
+  assert.equal(s.ssTape(-1), false, "no pane before the first step's first");
+  const last = d.steps[d.steps.length - 1];
+  s.ssOpen(d, last.id, last.panes[last.panes.length - 1]);
+  assert.equal(s.ssTape(1), false, "no pane past the last step's last");
 });
 
 // ---- 4. find ------------------------------------------------------------------
@@ -400,7 +427,7 @@ check("a worth-a-look row lands on the cited step AND pane on its first synchron
   w.sandbox.ssOpenDoc(d);
   assert.equal(d.steps[w.sandbox.ssView.index].id, "c1");
   assert.equal(w.sandbox.ssView.pane, "result");
-  assert(preOf(w).textContent.includes("WHAT THE MODEL WAS GIVEN"));
+  assert(bodyText(w).includes("WHAT THE MODEL WAS GIVEN"));
   // No notes: the first step.
   const plain = doc({ notes: { rows: [], checks: [] } });
   w.sandbox.ssOpenDoc(plain);
@@ -419,7 +446,7 @@ check("the panes say what the record can and cannot say", () => {
   const s = w.sandbox;
   // The context pane opens on what changed, with the whole context one tap away.
   s.ssOpen(d, "m2", "context");
-  let text = preOf(w).textContent;
+  let text = bodyText(w);
   assert(text.includes("WHAT CHANGED SINCE MODEL CALL 1"), text.slice(0, 200));
   assert(text.includes("reconstructed from the message records"), "the reconstruction must be labelled");
   assert(text.includes("stubbed before this call: read_url (#2)"));
@@ -427,35 +454,35 @@ check("the panes say what the record can and cannot say", () => {
   assert(text.includes("message #2 · tool/read_url"));
   assert.equal(w.el("ss-whole").hidden, false);
   s.ssToggleWhole();
-  text = preOf(w).textContent;
+  text = bodyText(w);
   assert(text.includes("THE WHOLE CONTEXT OF MODEL CALL 2"));
   assert(text.includes("you are aish"), "the system text is the input of the call");
   assert(text.includes("read_url — read a page"), "the tool menu is the input of the call");
   assert(text.includes("6 message(s), 4,000 chars, carried from earlier turns"));
   // The model-call facts: retries and the context snapshot (#334) are on the strip.
   s.ssOpen(d, "m1", "context");
-  text = preOf(w).textContent;
+  text = bodyText(w);
   assert(text.includes("5,000 chars in front of this call"));
   assert(text.includes("100 input · 20 output"));
   // The response pane: reasoning, said, the calls it issued with args, and the
   // answer on the LAST call.
   s.ssOpen(d, "m2", "response");
-  text = preOf(w).textContent;
+  text = bodyText(w);
   assert(text.includes("done thinking") && text.includes("here it is"));
   assert(text.includes("WHAT IT ANSWERED"));
   s.ssOpen(d, "m1", "response");
-  text = preOf(w).textContent;
+  text = bodyText(w);
   assert(text.includes("TOOL CALLS ISSUED — 2") && text.includes('"url"'));
   assert(!text.includes("WHAT IT ANSWERED"), "the answer belongs to the last call only");
   // The call pane: args, decision, gates collapsed.
   s.ssOpen(d, "c1", "call");
-  text = preOf(w).textContent;
+  text = bodyText(w);
   assert(text.includes("GATE VERDICTS — 1 (1 allowed, collapsed)"));
   assert(text.includes("verdict by: prefix"));
   // The result pane says where the text came from, the cut, and what is not
   // recorded yet.
   s.ssOpen(d, "c1", "result");
-  text = preOf(w).textContent;
+  text = bodyText(w);
   assert(text.includes("matched to this call by tool name and order"));
   assert(text.includes("page text needle one"));
   assert(text.includes("cut by web: kept 4,000 chars, omitted 2,000"));
@@ -464,15 +491,15 @@ check("the panes say what the record can and cannot say", () => {
   assert(text.includes("payload before any cut: 6,000 bytes"));
   // The page pane: the page's words are labelled as the page's.
   s.ssOpen(d, "c1", "page");
-  text = preOf(w).textContent;
+  text = bodyText(w);
   assert(text.includes("you were driving the browser yourself"));
   assert(text.includes("THE PAGE'S WORDS") && text.includes("TypeError: boom"));
   // Events: the fact and its numbers.
   s.ssOpen(d, "e1", "event");
-  text = preOf(w).textContent;
+  text = bodyText(w);
   assert(text.includes("class: rate_limit") && text.includes("WHAT THE PROVIDER SAID"));
   s.ssOpen(d, "s1", "event");
-  assert(preOf(w).textContent.includes("hurry"));
+  assert(bodyText(w).includes("hurry"));
 });
 
 check("running, inferred, none, not recorded, purged and not matched are said out loud", () => {
@@ -493,27 +520,27 @@ check("running, inferred, none, not recorded, purged and not matched are said ou
   assert(note.includes("still running"), note);
   assert(note.includes("inferred from the order the log was written"), note);
   assert(w.el("ss-title").textContent.includes("number inferred"));
-  assert(preOf(w).textContent.includes("not recorded — the aish that wrote this log did not keep it"));
+  assert(bodyText(w).includes("not recorded — the aish that wrote this log did not keep it"));
   s.ssOpen(d, "c1", "result");
   assert(w.el("ss-title").textContent.includes("round inferred"));
   note = w.el("ss-note").textContent;
   assert(note.includes("attached to its model call by the order"), note);
-  assert(preOf(w).textContent.includes("not matched — the record has no text"));
+  assert(bodyText(w).includes("not matched — the record has no text"));
   s.ssOpen(d, "m1", "context");
   s.ssToggleWhole();
-  assert(preOf(w).textContent.includes("recorded, then deleted"));
+  assert(bodyText(w).includes("recorded, then deleted"));
   // A backend that records no rounds.
   const none = doc();
   none.flow.grouping = "none";
   none.steps = none.steps.filter((x) => x.kind === "tool_call").map((x) => ({ ...x, model_call: null, placement: "none" }));
   s.ssOpen(none, "c1", "call");
   assert(w.el("ss-note").textContent.includes("records no model calls"));
-  assert(preOf(w).textContent.includes("no recorded model call issued this call"));
+  assert(bodyText(w).includes("no recorded model call issued this call"));
   // Nothing recorded at all.
   const empty = doc({ steps: [] });
   s.ssOpen(empty, "", "");
   assert.equal(w.el("ss-count").textContent, "No steps");
-  assert(preOf(w).textContent.includes("nothing was recorded for this turn"));
+  assert(bodyText(w).includes("nothing was recorded for this turn"));
 });
 
 check("a long body folds and is never truncated", () => {
@@ -532,7 +559,7 @@ check("a long body folds and is never truncated", () => {
   w.sandbox.ssSave();
   assert.equal(w.saved.length, 1);
   assert(/^turn-3-step-5-result\.txt$/.test(w.saved[0].name), w.saved[0].name);
-  assert.equal(w.saved[0].blob.parts[0], pre.textContent);
+  assert.equal(w.saved[0].blob.parts[0], w.sandbox.ssView.text);
 });
 
 check("close hides the surface, clears the view and drops the body", () => {
@@ -571,6 +598,59 @@ check("a failed read, a missing turn and an offline device each say so in words"
   await w.sandbox.openExplain("");
   assert.equal(w.toasts.length, 1);
   assert(w.toasts[0].includes("the server is needed"), w.toasts[0]);
+});
+
+check("meta is structure, never concatenated with the exchange's bytes", () => {
+  const w = world();
+  const d = doc();
+  w.sandbox.ssOpen(d, "c1", "result");
+  const nodes = w.el("ss-body").children;
+  const metas = nodes.filter((n) => (n.className || "").includes("ss-meta"));
+  const pres = nodes.filter((n) => (n.className || "").includes("ss-pre"));
+  // The provenance sentence is a meta block; the payload is its own pre; and
+  // no single node holds both, so the eye can always tell them apart.
+  assert(metas.some((n) => n.textContent.includes("WHAT THE MODEL WAS GIVEN")));
+  assert(pres.some((n) => n.textContent.includes("page text needle one")));
+  for (const n of nodes) {
+    assert(!(n.textContent.includes("WHAT THE MODEL WAS GIVEN") && n.textContent.includes("page text needle one")),
+      "meta and payload were concatenated into one node");
+  }
+  // A message's head is meta; its text is payload — in the context pane too.
+  w.sandbox.ssOpen(d, "m2", "context");
+  const ctxNodes = w.el("ss-body").children;
+  assert(ctxNodes.some((n) => (n.className || "").includes("ss-meta") && n.textContent.includes("message #2 · tool/read_url")));
+  for (const n of ctxNodes) {
+    assert(!(n.textContent.includes("── message #") && (n.className || "").includes("ss-pre")),
+      "a message head leaked into a payload node");
+  }
+  // A refused gate verdict is a RECORD node, tinted like meta, never plain payload.
+  const dd = doc();
+  dd.did.calls[0].refused = [{ gate: "rule.x", verdict: "denied" }];
+  dd.did.calls[0].gates = [{ gate: "rule.x", verdict: "denied" }];
+  w.sandbox.ssOpen(dd, "c1", "call");
+  const rec = w.el("ss-body").children.find((n) => (n.className || "").includes("ss-rec"));
+  assert(rec && rec.textContent.includes("rule.x"), "a gate verdict must be a record node");
+});
+
+check("wrap is on by default, the toggle is remembered, and \"0\" turns it off", () => {
+  let w = world();
+  assert(w.el("ss-body").classList.has("wrap-on"), "wrap must default on");
+  const store = new Map();
+  const localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+  };
+  w = world({ localStorage });
+  assert(w.el("ss-body").classList.has("wrap-on"));
+  w.el("ss-wrap").onclick();
+  assert(!w.el("ss-body").classList.has("wrap-on"));
+  assert.equal(store.get("aish-ss-wrap"), "0");
+  // A fresh world with the same storage opens with wrap off, and back on.
+  w = world({ localStorage });
+  assert(!w.el("ss-body").classList.has("wrap-on"), "the stored \"0\" must hold");
+  w.el("ss-wrap").onclick();
+  assert(w.el("ss-body").classList.has("wrap-on"));
+  assert.equal(store.get("aish-ss-wrap"), "1");
 });
 
 check("A−/A+ scale the pane text, clamp at both ends, and survive a reopen", async () => {
