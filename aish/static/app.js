@@ -2863,6 +2863,7 @@ function ensureTrace() {
     el.classList.toggle("open");
     t.autoCollapsed = false;
     t.userToggled = true;
+    if (el.classList.contains("open")) inspectReveal(t);
   };
   head.querySelector(".trace-stop").onclick = (e) => {
     e.stopPropagation();
@@ -2879,6 +2880,10 @@ function ensureTrace() {
   // answer claims it instead ([ANSWER-OPEN]).
   currentTrace = t;
   body.addEventListener("scroll", () => updateScrollHints(body));
+  // One tap on a step opens its detail (#352 follow-up): delegation so a live
+  // row and a finished one share the handler and rows completed DURING the turn
+  // are reviewable, not only after it ends.
+  body.addEventListener("click", (e) => inspectStepClick(t, e));
   currentTrace.timer = setInterval(() => updateTraceHead(currentTrace), 1000);
   refreshStatusline(); // the trace header owns Stop now; hide the bottom bar
   measurePinnedTrace(t);
@@ -4216,6 +4221,7 @@ function finishTrace(errored) {
   // The card is the door to the turn's record (#243, #352): the Full record
   // row, and every row that is a step of it. Here and nowhere else, so hot and
   // cold agree (L2).
+  t.finished = true;
   if (t.turnId) traceInspector(t);
   t.el.classList.remove("live", "stopping");
   t.el.classList.remove("open"); // collapse to the summary; tap to expand
@@ -4258,13 +4264,51 @@ function traceInspector(t) {
     door.onclick = (e) => { e.stopPropagation(); inspectOpen(t); };
     t.inner.appendChild(door);
   }
+  // Name each row's step, for the delegated tap and the flag markers. A
+  // recorded id (the tool row's stamp) beats a counted position.
   const rows = [...t.body.querySelectorAll(".step")];
   const ids = inspectKeys(rows);
   rows.forEach((row, i) => {
     if (!ids[i]) return;
     row.dataset.inspect = ids[i];
     row.classList.add("inspectable");
-    row.onclick = (e) => inspectRowTap(t, row, e);
+  });
+  // If the card was already open at finish (the live turn you were watching),
+  // reveal the strip now; otherwise the header expand does it.
+  if (t.el.classList.contains("open")) inspectReveal(t);
+}
+
+// Fetch the record and draw the Worth-a-look strip and the flag markers, once,
+// for a FINISHED card the owner has opened. Lazy on purpose: a replay finishes
+// every card on screen, so fetching per card at finish would pull hundreds of
+// documents; fetching when a card is opened costs one fetch per card actually
+// read. A failure is not cached — the next open tries again.
+function inspectReveal(t) {
+  if (!t.finished || !t.turnId || t.revealed) return;
+  t.revealed = true;
+  inspectDossier(t).then(
+    (doc) => { inspectStrip(t, doc); inspectMark(t, doc); },
+    () => { t.revealed = false; },
+  );
+}
+
+// A dot on the rows a `notes` check flagged, so the timeline shows WHERE the
+// thing worth a look happened — the strip at the top is the index, this is the
+// in-context cue, and both open the same detail.
+function inspectMark(t, doc) {
+  const flagged = new Set(
+    ((doc.notes || {}).rows || []).map((r) => (r.where || {}).step).filter(Boolean));
+  if (!flagged.size) return;
+  const rows = [...t.body.querySelectorAll(".step")];
+  const ids = inspectKeys(rows);
+  rows.forEach((row, i) => {
+    if (!ids[i]) return;
+    const resolved = inspectResolve(ids[i], doc);
+    const main = row.querySelector(".step-main") || row;
+    if (flagged.has(resolved) && !row.querySelector(".step-flag")) {
+      row.classList.add("flagged");
+      main.appendChild(inspectEl("span", "step-flag", "•"));
+    }
   });
 }
 
@@ -4315,11 +4359,13 @@ function inspectResolve(id, doc) {
 // Once per card. A failure is not cached, so the next tap tries again — the
 // ordinary failure is a phone that was briefly offline.
 function inspectDossier(t) {
+  // A running turn re-fetches every time, so a tap reflects the steps completed
+  // SINCE the last read; a finished turn is immutable and cached once.
+  if (!t.finished) return fetchDossier(t.turnId);
   if (t.dossier) return Promise.resolve(t.dossier);
   if (!t.dossierFetch) {
     t.dossierFetch = fetchDossier(t.turnId).then((doc) => {
       t.dossier = doc;
-      inspectStrip(t, doc);
       return doc;
     }, (err) => {
       t.dossierFetch = null;
@@ -4333,49 +4379,28 @@ function inspectOpen(t) {
   inspectDossier(t).then((doc) => ssOpenDoc(doc), (err) => showToast((err && err.message) || "the record could not be read"));
 }
 
-function inspectRowTap(t, row, e) {
-  // The row already has controls of its own — the held-step link, a frame,
-  // the output box's buttons — and a tap on one of those is that control's.
+function inspectStepClick(t, e) {
   const target = e && e.target;
-  if (target && target.closest && target.closest("button, a, img, input, textarea, .out-box, .step-diff, .step-xp")) return;
-  if (e && e.stopPropagation) e.stopPropagation();
-  const open = row.querySelector(".step-xp");
-  if (open) { open.remove(); return; }
-  const box = inspectEl("div", "step-xp");
-  box.appendChild(inspectEl("p", "step-xp-state", "reading the record…"));
-  (row.querySelector(".step-main") || row).appendChild(box);
+  if (!target || !target.closest) return;
+  // A tap on the row's own controls — the held link, a frame, an output box's
+  // buttons, the door, a Worth-a-look note — is that control's, not the row's.
+  if (target.closest("button, a, img, input, textarea, .out-box, .step-diff, .trace-notes, .trace-explain")) return;
+  const row = target.closest(".step");
+  if (!row || (t.body.contains && !t.body.contains(row))) return;
+  if (e.stopPropagation) e.stopPropagation();
+  if (!t.turnId) { showToast("this turn has no record to open yet"); return; }
+  const rows = [...t.body.querySelectorAll(".step")];
+  const id = inspectKeys(rows)[rows.indexOf(row)];
+  if (!id) return;
   inspectDossier(t).then(
-    (doc) => inspectFill(row, box, doc),
-    (err) => {
-      box.textContent = "";
-      box.appendChild(inspectEl("p", "step-xp-state", (err && err.message) || "the record could not be read"));
-    }
+    (doc) => {
+      const resolved = inspectResolve(id, doc);
+      const step = (doc.steps || []).find((x) => x.id === resolved);
+      if (step) ssOpenDoc(doc, step.id);
+      else showToast("not in the record yet — this step is still running");
+    },
+    (err) => showToast((err && err.message) || "the record could not be read"),
   );
-}
-
-function inspectFill(row, box, doc) {
-  box.textContent = "";
-  const id = inspectResolve(row.dataset.inspect, doc);
-  const step = (doc.steps || []).find((s) => s.id === id) || null;
-  if (!step) {
-    box.appendChild(inspectEl("p", "step-xp-state", doc.running
-      ? "not in the record yet — this turn is still running"
-      : "the record has no step for this row"));
-    return;
-  }
-  box.appendChild(inspectEl("div", "step-xp-head", `step ${step.n} of ${(doc.steps || []).length} · ${step.title}`));
-  for (const pane of step.panes || []) {
-    const line = inspectEl("button", "step-xp-pane");
-    line.type = "button";
-    line.dataset.pane = pane;
-    line.append(
-      inspectEl("span", "step-xp-label", SS_PANE_LABELS[pane] || pane),
-      inspectEl("span", "step-xp-brief", ssPaneBrief(doc, step, pane)),
-      inspectEl("span", "step-xp-chev", "›"),
-    );
-    line.onclick = (e) => { e.stopPropagation(); ssOpen(doc, step.id, pane); };
-    box.appendChild(line);
-  }
 }
 
 // Facts about this turn worth reading first, at the top of the card. Computed

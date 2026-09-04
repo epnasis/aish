@@ -3728,6 +3728,11 @@ body.console-open #backdrop { z-index: 63; }
    and nothing else, because the row's own content is what a reader looks at. */
 .step.inspectable { cursor: pointer; }
 .step.inspectable:active { background: var(--row-sel-bg); border-radius: 8px; }
+/* A step a Worth-a-look check flagged: a small amber dot on the row, so the
+   timeline shows where the thing worth reading happened (the strip is the
+   index; both open the same detail). */
+.step.flagged .step-title { }
+.step-flag { color: var(--ctp-yellow); margin-left: 6px; font-size: 13px; line-height: 1; }
 /* The in-place summary: one line per pane, each a control into the step screen. */
 .step-xp { margin-top: 6px; padding: 6px 0 2px; border-top: 0.5px solid var(--sep); }
 .step-xp-head { font-size: 12px; color: var(--dim); margin-bottom: 4px; }
