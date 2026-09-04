@@ -94,6 +94,31 @@ def two_stage(appeared: list, want: str) -> str:
     return picked.label or ""
 
 
+def _sentence(found: dict) -> str:
+    """The line the MODEL would read, built from a real enumeration."""
+    from aish import web as web_mod
+
+    controls = browse_mod.controls_from(found["controls"])
+    browse_mod.address_controls(controls)
+    snap = browse_mod.Snapshot(
+        url="file:///x", title="t", text="x", controls=controls,
+        unreachable=found["unreachable"], dialog=found["dialog"],
+        reasons=found.get("reasons") or {},
+    )
+    return next(
+        (line for line in web_mod._present_snapshot(snap).splitlines()
+         if "more control(s)" in line),
+        "",
+    )
+
+
+async def _settle_here(page):
+    """The REAL `_settle`, so what is measured is what ships."""
+    from aish import browser as browser_mod
+
+    return await browser_mod._settle(page, still_for=5_000, timeout_ms=15_000)
+
+
 async def main() -> int:
     from playwright.async_api import async_playwright
 
@@ -105,6 +130,32 @@ async def main() -> int:
         found = await enumerate_page(page, "dialog-covering")
         check("dialog", found["dialog"], "Wybierz daty")
         check("unreachable", found["unreachable"] > 0, True)
+
+        print("the reason is the one REACH_JS recorded, not a guess (#350):")
+        found = await enumerate_page(page, "dialog-covering")
+        check("reasons", found.get("reasons"), {"behind-a-dialog": 4})
+
+        print("…and it fires on an overlay that DECLARES NOTHING (lot.com's shape):")
+        found = await enumerate_page(page, "undeclared-overlay")
+        # #348's `dialog:modal` condition needed the site's cooperation and so
+        # never fired on lot.com. `behind-a-dialog` is per-control and needs none.
+        check("dialog declared", found["dialog"], "")
+        check("reasons", found.get("reasons"), {"behind-a-dialog": 4})
+
+        print("a reason's NAME can assert more than its test checked (#350):")
+        found = await enumerate_page(page, "scroll-locked-shell")
+        # No overlay of any kind — and `behind-a-dialog` fires anyway.
+        check("reason on a page with nothing open",
+              found.get("reasons"), {"behind-a-dialog": 2})
+        check("so it must NOT give an order", "CLOSE it to reach them" not in
+              _sentence(found), True)
+        check("it describes instead", "scrolling LOCKED" in _sentence(found), True)
+
+        print("`inert` is a closed drawer at least as often as a modal:")
+        found = await enumerate_page(page, "inert-drawer")
+        check("reasons", found.get("reasons"), {"inert": 3})
+        check("gets the OPEN-something repair",
+              "Press whatever opens them first" in _sentence(found), True)
 
         print("an inert [role=dialog] on a scrolling page claims NOTHING:")
         found = await enumerate_page(page, "dialog-inert")
@@ -131,6 +182,23 @@ async def main() -> int:
         )
         check("two-stage still commits the button",
               two_stage(appeared, "Tokio (NRT) Japonia"), "Tokio (NRT) Japonia")
+
+        print("counting the page's noise must not make the wait longer (#351):")
+        await page.goto((FIXTURES / "noisy.html").as_uri())
+        seen = (await _settle_here(page)).record()
+        # The fixture lands ONE piece of content at ~2s and then churns an
+        # attribute every 200ms forever. Attributes were not observed at all
+        # before #351, so they never reset the quiet clock — and the first cut
+        # of this change let them, which took this page from 7.2s to the full
+        # 15.8s ceiling. A measurement that makes the thing it measures slower
+        # is the whole failure mode; this is the check that catches it.
+        check("the churn is recorded", seen["kinds"].get("attributes", 0) > 10, True)
+        check("content is recorded", seen["kinds"].get("childList"), 1)
+        check("but the churn does NOT extend the wait", seen["waited_ms"] < 10_000, True)
+        check("released on quiet, not the ceiling", seen["released"], "quiet")
+        # …and the wait is the content plus the bar, not the churn.
+        check("settled ~5s after the content",
+              4_000 < seen["waited_ms"] - seen["last_meaningful_ms"] < 6_500, True)
 
         await browser.close()
 

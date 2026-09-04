@@ -9853,3 +9853,136 @@ class TestWhoWasThereWhenTheCardWentUp:
         threading.Thread(target=answer_it, daemon=True).start()
         decided = bridge.ask({"type": "approval_request", "kind": "tool", "tool": "t"})
         assert decided["viewers_at_hold"] == 0
+
+
+class TestTurnsSweepWiring:
+    def test_the_sweep_runs_at_start_and_after_the_turn_not_per_tool_call(
+        self, app_env, monkeypatch
+    ):
+        """The store's budget sweep fires from startup and from _finish_turn
+        (#352) — a task with two tool calls sweeps once when it ends, never
+        inside a tool call."""
+        swept = []
+        monkeypatch.setattr(
+            server_module.turns, "sweep", lambda state_dir, *a, **k: (swept.append(1), [])[1]
+        )
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="ls")]),
+                model_says(tool_calls=[tool_call("read_docs", command="pwd")]),
+                model_says("done"),
+            ],
+        )
+        monkeypatch.setattr(server_module.tools, "read_docs", lambda *a, **k: "docs")
+        with client, connected(client) as (ws, _hello, _):
+            deadline = time.time() + 5
+            while not swept and time.time() < deadline:
+                time.sleep(0.02)
+            assert len(swept) == 1, "startup sweeps once"
+            ws.send_json({"type": "task", "text": "two tools"})
+            recv_until(ws, "done")
+            deadline = time.time() + 5
+            while len(swept) < 2 and time.time() < deadline:
+                time.sleep(0.02)
+        assert len(swept) == 2, "one more sweep when the turn ends — not one per tool call"
+
+
+class TestEvidenceEndpoint:
+    """One blob from a chat's evidence store over HTTP (#352): the message a
+    model call sent, as the provider saw it. Token-gated like `/explain`, plus
+    the per-digest capability `/explain` mints, so a tap is not a re-parse of
+    the log. Two absences told apart: 410 evicted (dated), 404 not there."""
+
+    def _first_entry(self, client, session):
+        doc = client.get(f"/explain?session={session}").json()
+        call = doc["sent"]["calls"][0]
+        return doc, call["messages"][0]
+
+    def test_a_signed_digest_is_served_as_plain_text_never_cached(self, app_env):
+        from aish import turns
+
+        client, _ = make_client(app_env, [model_says("the recommendation")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "what should I do?"})
+            recv_until(ws, "done")
+            doc, entry = self._first_entry(client, hello["session"])
+            assert entry["sig"], "/explain mints a capability per digest"
+            assert doc["sent"]["calls"][0]["tools"]["sig"]
+            response = client.get(
+                f"/evidence/{hello['session']}/{entry['digest']}?sig={entry['sig']}"
+            )
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain")
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["content-disposition"].startswith("attachment")
+        assert turns.digest_of(response.text) == entry["digest"]
+        assert '"role"' in response.text
+        sw = (pathlib.Path(__file__).resolve().parents[1] / "aish/static/sw.js").read_text()
+        never = sw.split("const NEVER_CACHE = ")[1].split("\n")[0]
+        assert '"/evidence/"' in never
+
+    def test_a_digest_without_its_capability_is_refused(self, app_env):
+        client, _ = make_client(app_env, [model_says("done")], token="secret")
+        with client, connected(client, "/ws?token=secret") as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+            doc = client.get(f"/explain?session={hello['session']}&token=secret").json()
+            entry = doc["sent"]["calls"][0]["messages"][0]
+            base = f"/evidence/{hello['session']}/{entry['digest']}"
+            assert client.get(f"{base}?sig={entry['sig']}").status_code == 403  # no token
+            assert client.get(f"{base}?token=secret").status_code == 403  # no sig
+            assert client.get(f"{base}?token=secret&sig=nope").status_code == 403
+            other = client.get(
+                f"/evidence/session-20200101-000000-000000.jsonl/{entry['digest']}"
+                f"?token=secret&sig={entry['sig']}"
+            )
+            assert other.status_code == 403, "a sig is scoped to its chat"
+            assert client.get(f"{base}?token=secret&sig={entry['sig']}").status_code == 200
+
+    def test_not_a_digest_and_not_a_chat_are_refused_before_any_lookup(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.get("/evidence/nope.jsonl/" + "a" * 64).status_code == 404
+            assert client.get(
+                "/evidence/session-20260101-000000-000000.jsonl/..%2F..%2Fetc"
+            ).status_code in (400, 404)
+            assert client.get(
+                "/evidence/session-20260101-000000-000000.jsonl/notadigest"
+            ).status_code == 400
+
+    def test_evicted_and_absent_are_different_answers(self, app_env):
+        from aish import turns
+
+        client, _ = make_client(app_env, [model_says("done")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+            _, entry = self._first_entry(client, hello["session"])
+            url = f"/evidence/{hello['session']}/{entry['digest']}?sig={entry['sig']}"
+            turns.unlink({entry["digest"]}, app_env["state_dir"], hello["session"])
+            absent = client.get(url)
+            turns.sweep(app_env["state_dir"], budget=0)
+            evicted = client.get(url)
+            when = turns.evicted_on(app_env["state_dir"], hello["session"])
+        assert absent.status_code == 404
+        assert "no such blob" in absent.text
+        assert evicted.status_code == 410
+        assert when and f"evicted on {when}" in evicted.text
+        assert evicted.headers["cache-control"] == "no-store"
+
+    def test_deleting_the_chat_deletes_its_evidence(self, app_env):
+        from aish import turns
+
+        client, _ = make_client(app_env, [model_says("noted")])
+        with client, connected(client) as (ws, hello, _):
+            first = hello["session"]
+            ws.send_json({"type": "task", "text": "remember the zebra"})
+            recv_until(ws, "done")
+            assert turns.chat_dir(app_env["state_dir"], first).is_dir()
+            ws.send_json({"type": "new"})
+            recv_until(ws, "hello")
+            ws.send_json({"type": "delete_session", "name": first})
+            recv_until(ws, "session_deleted")
+        assert not turns.chat_dir(app_env["state_dir"], first).exists()

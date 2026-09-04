@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Picker that declares nothing</title>
+<style>
+  html,body{overflow:hidden;margin:0}
+  .tall{height:4000px}
+  .panel{position:fixed;top:20px;left:20px;background:#fff;border:1px solid #333;padding:12px;z-index:9}
+</style></head>
+<body>
+  <h1>Wyszukiwanie lotu</h1>
+  <!-- No role=dialog, no aria-modal: exactly what lot.com's date picker does,
+       which is why #348's condition never fired on it. -->
+  <div class="panel">
+    <button>Zamknij</button><button disabled>Potwierdź</button>
+  </div>
+  <div class="tall">
+    <nav style="margin-top:2000px">
+      <button>Zaloguj się</button><button>Zarezerwuj</button>
+      <button>Odpraw się</button><button>Zaplanuj podróż</button>
+    </nav>
+  </div>
+</body></html>

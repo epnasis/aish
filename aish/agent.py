@@ -55,6 +55,7 @@ from . import (
     skills,
     tool_plugins,
     tools,
+    turns,
     vocab,
     vouches,
     web,
@@ -2602,6 +2603,43 @@ def _serialize(message: dict) -> dict:
     return {k: message[k] for k in keys if k in message}
 
 
+def _canonical(value: Any) -> str:
+    """The one serialisation the `sent` record's digests are taken over (#352):
+    sorted keys, no whitespace, unescaped non-ASCII. Two writers that agree
+    on the bytes agree on the digest; `default=str` keeps a value no JSON
+    encoder knows from raising inside a model call, at the cost that such a
+    value is recorded as its `str()`."""
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _scrub_tree(value: Any) -> tuple[Any, int]:
+    """`value` with every string leaf passed through `secrets.scrub`, and how
+    many placeholders that inserted. Leaf by leaf rather than over the JSON,
+    because a secret holding a character JSON escapes would not match its
+    encoded form and would be stored whole."""
+    if isinstance(value, str):
+        scrubbed = secrets.scrub(value)
+        if scrubbed is value or scrubbed == value:
+            return value, 0
+        return scrubbed, scrubbed.count(secrets.SCRUB_SUFFIX) - value.count(secrets.SCRUB_SUFFIX)
+    if isinstance(value, dict):
+        total = 0
+        out: dict = {}
+        for key, item in value.items():
+            out[key], count = _scrub_tree(item)
+            total += count
+        return out, total
+    if isinstance(value, list):
+        total = 0
+        items = []
+        for item in value:
+            scrubbed_item, count = _scrub_tree(item)
+            items.append(scrubbed_item)
+            total += count
+        return items, total
+    return value, 0
+
+
 class Agent:
     def __init__(
         self,
@@ -4111,15 +4149,20 @@ class Agent:
         budget = self._retry_wait_budget()
         waited = 0.0
         attempt = 0
+        # What the adapter reports it is about to send, per attempt (#352).
+        # Cleared before each try so a retry can only ever record the request
+        # the model actually received on the attempt that succeeded.
+        observed: list[backends.SentRequest] = []
         while True:
             attempt += 1
+            observed.clear()
             try:
                 # The governor's cancel and status wiring, for the span of one
                 # call. It cannot ride on the arguments: every backend is
                 # adapted to the exact `ollama.chat` convention so this file
                 # never learns which provider it is on, and a keyword added for
                 # the governor's benefit would break that.
-                with ratelimit.hooks(
+                with backends.observe_sent(observed.append), ratelimit.hooks(
                     should_stop=self._cancel.is_set,
                     on_wait=self.status.note,
                     ceiling=self._wait_ceiling(),
@@ -4163,10 +4206,20 @@ class Agent:
                     # blames the provider for their own decision.
                     raise TaskCancelled from exc
             else:
+                # The request as sent, written only now that a call SUCCEEDED
+                # (#352): the same kwargs are re-sent on every retry, and a
+                # permanently failing call must not record a request the model
+                # never received. Before the response record, so the log reads
+                # in the order the exchange happened.
+                self._record_sent(observed[-1] if observed else None, kwargs)
                 # The ONE emit point for what the model produced, so no caller
                 # can forget it: _chat_turn is reached by the tool-call path,
                 # the text-only path and the final no-tools turn alike.
                 self._record_reasoning(turn)
+                # The COMPLETE response, stored whole beside the request (#355)
+                # — symmetric with _record_sent, so what came back is captured
+                # as completely as what went out, new content types included.
+                self._record_received(turn)
                 return turn
         raise ModelUnavailable(_unavailable_text(last, attempt))
 
@@ -4310,6 +4363,59 @@ class Agent:
             # The content is aish's sentence, not the model's.
             record["synthesized"] = True
         self._emit_record(**record)
+
+    def _record_received(self, turn: tuple) -> None:
+        """The COMPLETE response of one model call, stored whole (#355,
+        `docs/trace-contract.md` §3.13).
+
+        Symmetric with `_record_sent`: the point of a boundary snapshot is
+        COMPLETENESS, not a curated summary. `_record_reasoning` above keeps the
+        channels aish parsed out — thinking, said, the tool calls — which is the
+        readable view; this keeps the WHOLE thing, so a response content type
+        invented in the future is captured here without anyone writing a reader
+        for it. The forward-compatible channel is `raw_blocks`: each provider
+        content block `model_dump`'d verbatim, so a new block type is stored
+        entire rather than reduced to its name (the `reasoning` record keeps
+        block TYPES only, deliberately, and this is the copy that keeps content).
+
+        The bytes go to the per-chat store, scrubbed for stored secrets exactly
+        as the request and tool results are, and the record holds the digest and
+        the size. Renderless: the owner watches the tool result the model's
+        output produced, not this record. A log without it reads as *not
+        recorded*; claude-max writes a `coverage:"sdk"` marker instead (its loop
+        is the SDK's, not aish's), the same as `sent`.
+        """
+        if self.step_log is None:
+            return
+        content, calls, usage, raw_blocks, thinking = turn
+        meta = self._response_meta or {}
+        # The whole response, not a whitelist of channels: `raw_blocks` carries
+        # the provider's own content verbatim, and the assembled text/thinking/
+        # calls carry what aish reads a streamed answer into. Absent keys are
+        # dropped so the blob names only what was actually produced.
+        response: dict[str, Any] = {"content": content}
+        if thinking:
+            response["thinking"] = thinking
+        if calls:
+            response["tool_calls"] = calls
+        if raw_blocks:
+            response["raw_blocks"] = raw_blocks
+        if meta.get("stop"):
+            response["stop"] = meta["stop"]
+        if usage:
+            response["usage"] = list(usage)
+        stored, scrubbed = _scrub_tree(response)
+        blob = _canonical(stored)
+        session = self.current_session() if self.current_session is not None else None
+        record: dict[str, Any] = {
+            "provider": self.provider,
+            "model": self.model,
+            "digest": turns.put(blob, self.state_dir, session),
+            "chars": len(blob),
+        }
+        if scrubbed:
+            record["scrubbed"] = scrubbed
+        self._emit_record(kind="received", model_call=self._model_call, **record)
 
     def _one_chat(
         self, kwargs: dict
@@ -4535,6 +4641,11 @@ class Agent:
         )
         note = TRIMMED_RECOVERABLE.format(key=key) if key else TRIMMED_NOTE
         message["content"] = content[:TRIM_KEEP_CHARS] + note
+        # Carried on the message so the `sent` record can say the model was
+        # handed a stub rather than re-deriving that from the text (#352). A
+        # private key: `_serialize` never logs it, the converters build fresh
+        # dicts, and the ollama library ignores unknown fields.
+        message["_stub"] = True
         return key
 
     def _expire_delivered_images(self, task_start: int) -> None:
@@ -4562,6 +4673,7 @@ class Agent:
                 continue
             del message["images"]
             message["content"] = TOOL_MEDIA_EXPIRED
+            message["_stub"] = True  # see _trim_tool_message
             dropped.append(self._stub_ref(i))
         self._record_trim("delivered_images", before, budget=None, stubbed=dropped)
 
@@ -5334,12 +5446,18 @@ class Agent:
         # _dispatch joins to THIS call's `tool` step (§2). The local above stays
         # the source of truth for the step itself.
         self._call_ids.current = call_no
+        # Which model call issued this, on the RENDERED step as well as on the
+        # renderless `call` record (#352, the second amendment to contract §2
+        # fork 1(b) — docs/diagnostics.md). It is what lets the trace card
+        # fold its flat timeline into rounds without counting rows. Omitted,
+        # never 0, when nothing recorded issued it: the same rule as `call`.
         self._emit_step(
             kind="tool_start",
             name=name,
             call=call_no,
             summary=self._arg_summary(name, args),
             command=str(args.get("command", "")) if name == "run_command" else "",
+            **({"model_call": model_call} if model_call else {}),
         )
         # The call AS THE MODEL EMITTED IT (#240). The rendered step above keeps
         # `summary`, a human label built per tool — the query for a search, the
@@ -5389,6 +5507,7 @@ class Agent:
                     status=tools.STATUS_FAILED,
                     verdict_by=tools.VERDICT_EXCEPTION,
                     summary="unavailable",
+                    **({"model_call": model_call} if model_call else {}),
                 )
                 return result
             except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
@@ -5406,6 +5525,7 @@ class Agent:
                     status=tools.STATUS_FAILED,
                     verdict_by=tools.VERDICT_EXCEPTION,
                     summary="failed",
+                    **({"model_call": model_call} if model_call else {}),
                 )
                 return result
             result = self._scrub_result(result)
@@ -5418,7 +5538,7 @@ class Agent:
             # it afterwards saw nothing at all.
             self._observe_for_rules(name, result)
             self._note_turn_call(name, args, result)
-            self._emit_tool_step(name, args, result, elapsed, call_no)
+            self._emit_tool_step(name, args, result, elapsed, call_no, model_call)
             return result
         finally:
             # The single seam BOTH loops pass through (#311). Recorded here
@@ -5430,7 +5550,13 @@ class Agent:
             self._capture_provenance(name, args, result)
 
     def _emit_tool_step(
-        self, name: str, args: dict, result: str, secs: float, call_no: int = 0
+        self,
+        name: str,
+        args: dict,
+        result: str,
+        secs: float,
+        call_no: int = 0,
+        model_call: int = 0,
     ) -> None:
         if self.on_step is None and self.step_log is None:
             return
@@ -5471,6 +5597,11 @@ class Agent:
             "call": call_no,
             **envelope,
         }
+        # The issuing model call, passed in from `_call_result` exactly as the
+        # `call` record's is (#352). Omitted rather than zeroed on the
+        # claude-max path, where no recorded model call issued it.
+        if model_call:
+            step["model_call"] = model_call
         _scrub_page_console(step)
         if not ok and self._run_meta is None:
             # Non-run_command failure (a read_url/web_search error, a gate
@@ -5632,6 +5763,122 @@ class Agent:
                            backends.context_window(self.provider, self.num_ctx), strict=True)),
             },
         )
+
+    def _record_sent(self, request: "backends.SentRequest | None", kwargs: dict) -> None:
+        """The exact request one successful model call sent, as the provider
+        saw it (#352, `docs/trace-contract.md` §3.12).
+
+        Taken at the backend seam and never from `self.messages`: Anthropic
+        hoists every system message into a top-level parameter and merges tool
+        results into one user message, the OpenAI shape relabels later system
+        messages as `user`, and a manifest read off the aish-side list would be
+        false about role and cardinality on three of the four backends. Ollama
+        takes the aish shape as it is, so for it the seam is the call itself
+        (`backends.passthrough_request`). An adapter that reported nothing on
+        any other provider records nothing, and the reader says *not recorded*
+        — never a manifest built from the wrong side.
+
+        The bytes go to the per-chat store (`turns.py`): one entry per provider
+        message, the tools payload and, where the provider carries one, the
+        system parameter, each as its canonical JSON serialisation. The record
+        holds the digests, the sizes, where each message came from on the aish
+        side (`origin`, a list where several were merged), whether that message
+        was a trimmer's stub, and a `request` digest of the whole canonical
+        payload — so a reassembly from the manifest can be checked
+        byte-for-byte against what the adapter sent. Base64 media is replaced
+        by a placeholder naming the file and its size before storing; the
+        manifest carries the same, and the reader states that as *never
+        stored*.
+
+        Every string is scrubbed for stored secrets on the way in, exactly as
+        tool results are (`_scrub_result`), and the digest is of what is
+        STORED: the request is therefore byte-identical to what was sent
+        except where a stored secret was scrubbed, and `scrubbed: n` on the
+        entry says a scrub fired there.
+        """
+        if self.step_log is None:
+            return
+        if request is None:
+            if self.provider != "ollama":
+                return
+            request = backends.passthrough_request(self.provider, kwargs)
+        aish_side: list = kwargs.get("messages") or []
+        session = self.current_session() if self.current_session is not None else None
+        payload = request.payload
+        manifest: list[dict] = []
+        stored_messages: list = []
+        for at, message in enumerate(payload.get("messages") or []):
+            entries = request.media[at] if at < len(request.media) else []
+            stored = backends.without_media(message, entries) if entries else message
+            stored, scrubbed = _scrub_tree(stored)
+            blob = _canonical(stored)
+            item: dict[str, Any] = {
+                "at": at,
+                "role": message.get("role"),
+                "digest": turns.put(blob, self.state_dir, session),
+                "chars": len(blob),
+            }
+            origin = request.origins[at] if at < len(request.origins) else None
+            if origin is not None:
+                item["origin"] = origin
+                indices = [origin] if isinstance(origin, int) else list(origin)
+                sources = [aish_side[i] for i in indices if 0 <= i < len(aish_side)]
+                names = [
+                    str(m.get("tool_name"))
+                    for m in sources
+                    if m.get("role") == "tool" and m.get("tool_name")
+                ]
+                if len(sources) == 1 and names:
+                    item["tool_name"] = names[0]
+                elif names:
+                    item["tool_names"] = names
+                if any(m.get("_stub") for m in sources):
+                    item["stub"] = True
+            if entries:
+                item["media"] = [{"path": path, "bytes": size} for path, size in entries]
+            if scrubbed:
+                item["scrubbed"] = scrubbed
+            manifest.append(item)
+            stored_messages.append(stored)
+        # Everything else the client was handed, round-tripped through the
+        # canonical form so a value no JSON encoder knows cannot raise inside
+        # the log writer.
+        own = {k: v for k, v in payload.items() if k not in ("messages", "tools", "system")}
+        options = json.loads(_canonical(own))
+        stored_payload: dict[str, Any] = {**options, "messages": stored_messages}
+        record: dict[str, Any] = {
+            "provider": request.provider,
+            "model": payload.get("model"),
+            "messages": manifest,
+        }
+        if "tools" in payload:
+            tools_stored, scrubbed = _scrub_tree(payload["tools"])
+            blob = _canonical(tools_stored)
+            record["tools"] = {
+                "digest": turns.put(blob, self.state_dir, session),
+                "chars": len(blob),
+                "count": len(payload["tools"] or []),
+            }
+            if scrubbed:
+                record["tools"]["scrubbed"] = scrubbed
+            stored_payload["tools"] = tools_stored
+        if "system" in payload:
+            # Anthropic: the hoisted system text, a plain string parameter.
+            system_text, scrubbed = _scrub_tree(str(payload["system"]))
+            record["system"] = {
+                "digest": turns.put(system_text, self.state_dir, session),
+                "chars": len(system_text),
+            }
+            if request.system_origins:
+                record["system"]["origin"] = list(request.system_origins)
+            if scrubbed:
+                record["system"]["scrubbed"] = scrubbed
+            stored_payload["system"] = system_text
+        record["options"] = options
+        canonical = _canonical(stored_payload)
+        record["request"] = turns.digest_of(canonical)
+        record["chars"] = len(canonical)
+        self._emit_record(kind="sent", model_call=self._model_call, **record)
 
     def _browse_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
         """(echo label, execution thunk) for a browse call.

@@ -15,16 +15,150 @@ existing invocations keep working unchanged.
 """
 
 import base64
+import copy
 import functools
 import json
 import mimetypes
 import os
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import ratelimit
+
+# --------------------------------------------------------- the sent seam
+#
+# The request a model call sends exists only inside the adapter, AFTER
+# conversion: Anthropic hoists every system message into a top-level param and
+# merges tool results into one user message, the OpenAI shape relabels later
+# system messages as `user`, ollama passes the aish shape through. A manifest
+# taken from `agent.messages` would be false about role and cardinality on
+# three of the four (#352). So each adapter hands the request it is about to
+# send — exactly the keyword arguments the client receives, minus transport
+# flags — to whoever is observing this thread, and the agent writes the `sent`
+# record from that. Thread-local for the same reason `ratelimit.hooks` is: a
+# keyword added to the `ollama.chat` convention for the recorder's benefit
+# would break the one invariant that keeps the backends interchangeable.
+
+
+class SentRequest(NamedTuple):
+    """One request as the provider will see it."""
+
+    provider: str
+    # The keyword arguments handed to the provider client, `stream` and
+    # `stream_options` excluded — those decide how the answer arrives, not
+    # what was asked.
+    payload: dict
+    # Per provider message: the aish-side index it came from (an int), or the
+    # list of indices where the adapter merged several into one.
+    origins: list
+    # aish-side indices hoisted into a top-level `system` parameter (Anthropic);
+    # empty elsewhere.
+    system_origins: list
+    # Per provider message: [(path, bytes)] for each base64 block the adapter
+    # encoded into it, in the order the blocks appear. The bytes themselves are
+    # never stored; the manifest names the file and its size instead.
+    media: list
+
+
+_SENT = threading.local()
+
+
+class observe_sent:  # noqa: N801 — used as a context manager, reads as one
+    """Receive every `SentRequest` an adapter reports on this thread."""
+
+    def __init__(self, callback: Callable[[SentRequest], None]):
+        self._callback = callback
+        self._previous: Callable | None = None
+
+    def __enter__(self) -> None:
+        self._previous = getattr(_SENT, "current", None)
+        _SENT.current = self._callback
+
+    def __exit__(self, *_exc) -> None:
+        _SENT.current = self._previous
+
+
+def _report_sent(request: SentRequest) -> None:
+    callback = getattr(_SENT, "current", None)
+    if callback is not None:
+        callback(request)
+
+
+def passthrough_request(provider: str, kwargs: dict) -> SentRequest:
+    """The request for a backend that takes the aish shape as it is (ollama).
+
+    There is no conversion to capture after, so the seam is the call itself:
+    what the ollama library is handed is what this records, and the library
+    does its own encoding of `images` file paths after this point. Keys the
+    agent keeps on a message for its own bookkeeping (`_stub`) are dropped
+    here because the library drops them too — pydantic ignores unknown fields
+    — so the record holds what reached the provider, not what aish carried.
+    """
+    payload = {k: v for k, v in kwargs.items() if k not in ("stream", "stream_options")}
+    messages = []
+    media: list[list[tuple[str, int]]] = []
+    for message in payload.get("messages") or []:
+        messages.append({k: v for k, v in message.items() if not str(k).startswith("_")})
+        entries: list[tuple[str, int]] = []
+        for path in list(message.get("images") or []) + list(message.get("documents") or []):
+            try:
+                entries.append((str(path), os.path.getsize(path)))
+            except OSError:
+                entries.append((str(path), -1))
+        media.append(entries)
+    payload["messages"] = messages
+    return SentRequest(provider, payload, list(range(len(messages))), [], media)
+
+
+MEDIA_PLACEHOLDER = "[aish: {bytes} bytes of {path} — never stored]"
+MEDIA_PLACEHOLDER_UNKNOWN = "[aish: base64 media — never stored]"
+
+
+def without_media(message: dict, media: list[tuple[str, int]]) -> dict:
+    """A copy of one provider message with every base64 payload replaced by a
+    placeholder naming the file and its size — the fourth reader state, *never
+    stored*, distinct from purged. The k-th base64 string found walking the
+    message pairs with the k-th media entry: both adapters emit blocks in the
+    order they encoded them, and an unreadable file emits a text note and no
+    entry, so the two sequences line up by construction.
+    """
+    entries = list(media)
+    stored = copy.deepcopy(message)
+
+    def placeholder() -> str:
+        if not entries:
+            return MEDIA_PLACEHOLDER_UNKNOWN
+        path, size = entries.pop(0)
+        return MEDIA_PLACEHOLDER.format(path=path, bytes=size)
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, str) and _is_base64_payload(key, value, node):
+                    # Only the base64 itself goes: a data URL keeps its
+                    # `data:<mime>;base64,` head, so the stored blob still
+                    # says what KIND of thing was there.
+                    head, sep, _payload = value.partition(";base64,")
+                    node[key] = f"{head}{sep}{placeholder()}" if sep else placeholder()
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(stored)
+    return stored
+
+
+def _is_base64_payload(key: str, value: str, holder: dict) -> bool:
+    if key == "data" and holder.get("type") == "base64":
+        return True  # Anthropic `source` block
+    if key in ("url", "file_data") and value.startswith("data:") and ";base64," in value:
+        return True  # OpenAI data URL parts
+    return False
 
 
 @dataclass
@@ -253,7 +387,14 @@ def _mime(path) -> str:
 
 
 def _b64_file(path) -> str:
-    return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return _b64_file_sized(path)[0]
+
+
+def _b64_file_sized(path) -> tuple[str, int]:
+    """(base64, size in bytes) — the size travels to the `sent` manifest in
+    place of the bytes, which are never stored."""
+    raw = Path(path).read_bytes()
+    return base64.b64encode(raw).decode("ascii"), len(raw)
 
 
 def parse_model(model_arg: str) -> tuple[str, str]:
@@ -280,7 +421,8 @@ def make_chat(model_arg: str, client=None) -> tuple[Callable, str, str]:
     if provider.kind == "anthropic":
         if client is None:
             client = _anthropic_client(provider)
-        return governed(AnthropicBackend(client), provider_name), provider_name, model_name
+        anthropic = AnthropicBackend(client, provider_name)
+        return governed(anthropic, provider_name), provider_name, model_name
     if client is None:
         api_key = os.environ.get(provider.env_key, "").strip()
         if not api_key:
@@ -507,7 +649,8 @@ class OpenAICompatBackend:
         think: bool = False,  # Ollama-only; cloud models manage reasoning themselves
         stream: bool = False,
     ):
-        kwargs: dict[str, Any] = dict(model=model, messages=convert_messages(messages))
+        converted, origins, media = _convert_messages_traced(messages)
+        kwargs: dict[str, Any] = dict(model=model, messages=converted)
         if tools:
             kwargs["tools"] = tools  # aish schemas are already OpenAI-format
         if self.provider == "gemini":
@@ -515,6 +658,10 @@ class OpenAICompatBackend:
             # is thinking; the tagged text is split out of content below and
             # never reaches history or the rendered answer.
             kwargs["extra_body"] = GEMINI_THINKING_BODY
+        # The seam (#352): what goes to the client is what is reported, and
+        # it is reported on every attempt so a retry that changed nothing
+        # still hands the agent the request the model actually received.
+        _report_sent(SentRequest(self.provider, dict(kwargs), origins, [], media))
         if stream:
             return self._stream(kwargs)
         response = self.client.chat.completions.create(**kwargs)
@@ -622,12 +769,22 @@ def convert_messages(messages: list[dict]) -> list[dict]:
     are relabelled ``user``. Their content is already ``<system-reminder>``
     tagged, so recency and instruction-ness survive the relabel.
     """
+    return _convert_messages_traced(messages)[0]
+
+
+def _convert_messages_traced(messages: list[dict]) -> tuple[list[dict], list, list]:
+    """`convert_messages`, plus where each output message came from and which
+    files were encoded into it — the two things the `sent` record needs and
+    the plain converter's return shape has no room for. This conversion is
+    one-to-one, so every origin is a single index."""
     out: list[dict] = []
+    media: list[list[tuple[str, int]]] = []
     pending_ids: list[str] = []
     seen_system = False
     for i, message in enumerate(messages):
         role = message.get("role")
         content = message.get("content") or ""
+        media.append([])
         if role == "system":
             if seen_system:
                 out.append({"role": "user", "content": content})
@@ -667,36 +824,50 @@ def convert_messages(messages: list[dict]) -> list[dict]:
                 name = message.get("tool_name", "tool")
                 out.append({"role": "user", "content": f"[{name} result]\n{content}"})
         elif role == "user" and (message.get("images") or message.get("documents")):
-            out.append({"role": "user", "content": _openai_media_parts(message)})
+            parts, encoded = _openai_media_parts(message)
+            media[-1] = encoded
+            out.append({"role": "user", "content": parts})
         else:
             out.append({"role": role, "content": content})
-    return out
+    return out, list(range(len(out))), media
 
 
-def _openai_media_parts(message: dict) -> list[dict]:
-    """User text + attached media as OpenAI content parts (data URLs). An
-    unreadable file degrades to a text note instead of failing the call."""
+def _openai_media_parts(message: dict) -> tuple[list[dict], list[tuple[str, int]]]:
+    """User text + attached media as OpenAI content parts (data URLs), and the
+    (path, bytes) of each file that was actually encoded. An unreadable file
+    degrades to a text note instead of failing the call, and produces no
+    entry — so the entries pair with the data URLs one to one."""
     parts: list[dict] = []
+    encoded: list[tuple[str, int]] = []
     content = message.get("content") or ""
     if content:
         parts.append({"type": "text", "text": content})
     for path in message.get("images") or []:
         try:
-            url = f"data:{_mime(path)};base64,{_b64_file(path)}"
+            data, size = _b64_file_sized(path)
         except OSError:
             parts.append({"type": "text", "text": f"[attachment unavailable: {path}]"})
             continue
+        url = f"data:{_mime(path)};base64,{data}"
         parts.append({"type": "image_url", "image_url": {"url": url}})
+        encoded.append((str(path), size))
     for path in message.get("documents") or []:
         try:
-            data = f"data:application/pdf;base64,{_b64_file(path)}"
+            data, size = _b64_file_sized(path)
         except OSError:
             parts.append({"type": "text", "text": f"[attachment unavailable: {path}]"})
             continue
         parts.append(
-            {"type": "file", "file": {"filename": os.path.basename(path), "file_data": data}}
+            {
+                "type": "file",
+                "file": {
+                    "filename": os.path.basename(path),
+                    "file_data": f"data:application/pdf;base64,{data}",
+                },
+            }
         )
-    return parts
+        encoded.append((str(path), size))
+    return parts, encoded
 
 
 def _parse_args(raw: str) -> tuple[dict, bool]:
@@ -779,11 +950,12 @@ class AnthropicBackend:
     MAX_TOKENS = 16000
     MAX_TOKENS_STREAM = 64000
 
-    def __init__(self, client):
+    def __init__(self, client, provider_name: str = "claude"):
         self.client = client
+        self.provider = provider_name
 
     def _request(self, *, model, messages, tools, think, max_tokens) -> dict:
-        system, converted = convert_messages_anthropic(messages)
+        system, converted, system_origins, origins, media = _convert_anthropic_traced(messages)
         kwargs = dict(
             model=model,
             max_tokens=max_tokens,
@@ -798,6 +970,9 @@ class AnthropicBackend:
             kwargs["tools"] = anthropic_tools(tools)
         if think:
             kwargs["thinking"] = {"type": "adaptive"}
+        # The seam (#352): reported here because this is the one place both
+        # the streaming and the plain path build the request.
+        _report_sent(SentRequest(self.provider, dict(kwargs), origins, system_origins, media))
         return kwargs
 
     def __call__(
@@ -860,16 +1035,35 @@ def convert_messages_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
     Tool results attach to the real tool_use IDs from those blocks; turns
     without raw blocks (imported histories) get synthetic IDs instead.
     """
+    system, out, _system_origins, _origins, _media = _convert_anthropic_traced(messages)
+    return system, out
+
+
+def _convert_anthropic_traced(
+    messages: list[dict],
+) -> tuple[str, list[dict], list[int], list, list]:
+    """`convert_messages_anthropic`, plus the provenance the `sent` record
+    needs: which aish-side messages were hoisted into `system`, which went
+    into each output message (a LIST where several were merged — tool results
+    sharing one user message, a picture joining the results it belongs to),
+    and which files were encoded into each. Empty messages the API rejects
+    are dropped here and so have no output to be the origin of."""
     system_parts: list[str] = []
+    system_origins: list[int] = []
     out: list[dict] = []
+    origins: list[list[int]] = []
+    media: list[list[tuple[str, int]]] = []
     pending_ids: list[str] = []
     for i, message in enumerate(messages):
         role = message.get("role")
         content = message.get("content") or ""
         if role == "system":
             system_parts.append(content)
+            system_origins.append(i)
         elif role == "assistant" and message.get("raw_blocks"):
             out.append({"role": "assistant", "content": message["raw_blocks"]})
+            origins.append([i])
+            media.append([])
             pending_ids = [
                 block.get("id", "")
                 for block in message["raw_blocks"]
@@ -893,6 +1087,8 @@ def convert_messages_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
                     }
                 )
             out.append({"role": "assistant", "content": blocks})
+            origins.append([i])
+            media.append([])
         elif role == "tool":
             if pending_ids:
                 block = {
@@ -911,13 +1107,18 @@ def convert_messages_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
                     and last["content"][-1].get("type") == "tool_result"
                 ):
                     last["content"].append(block)
+                    origins[-1].append(i)
                 else:
                     out.append({"role": "user", "content": [block]})
+                    origins.append([i])
+                    media.append([])
             else:
                 name = message.get("tool_name", "tool")
                 out.append({"role": "user", "content": f"[{name} result]\n{content}"})
+                origins.append([i])
+                media.append([])
         elif role == "user" and (message.get("images") or message.get("documents")):
-            blocks = _anthropic_media_blocks(message)
+            blocks, encoded = _anthropic_media_blocks(message)
             # A tool-produced picture arrives as a user message immediately
             # after the tool results it belongs to (agent._deliver_tool_media),
             # and those results are themselves a user message here. Two user
@@ -927,39 +1128,54 @@ def convert_messages_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
             last = out[-1] if out else None
             if last and last["role"] == "user" and isinstance(last["content"], list):
                 last["content"].extend(blocks)
+                origins[-1].append(i)
+                media[-1].extend(encoded)
             else:
                 out.append({"role": "user", "content": blocks})
+                origins.append([i])
+                media.append(encoded)
         elif content:  # user turns; skip empty messages — the API rejects them
             out.append({"role": role, "content": content})
-    return "\n".join(system_parts), out
+            origins.append([i])
+            media.append([])
+    flat: list = [group[0] if len(group) == 1 else group for group in origins]
+    return "\n".join(system_parts), out, system_origins, flat, media
 
 
-def _anthropic_media_blocks(message: dict) -> list[dict]:
-    """User text + attached media as Anthropic content blocks. An unreadable
-    file degrades to a text note instead of failing the call."""
+def _anthropic_media_blocks(message: dict) -> tuple[list[dict], list[tuple[str, int]]]:
+    """User text + attached media as Anthropic content blocks, and the
+    (path, bytes) of each file that was actually encoded. An unreadable file
+    degrades to a text note instead of failing the call, and produces no
+    entry — so the entries pair with the base64 blocks one to one."""
     blocks: list[dict] = []
+    encoded: list[tuple[str, int]] = []
     for path in message.get("images") or []:
         try:
-            source = {"type": "base64", "media_type": _mime(path), "data": _b64_file(path)}
+            data, size = _b64_file_sized(path)
         except OSError:
             blocks.append({"type": "text", "text": f"[attachment unavailable: {path}]"})
             continue
-        blocks.append({"type": "image", "source": source})
+        blocks.append(
+            {"type": "image", "source": {"type": "base64", "media_type": _mime(path), "data": data}}
+        )
+        encoded.append((str(path), size))
     for path in message.get("documents") or []:
         try:
-            source = {
-                "type": "base64",
-                "media_type": "application/pdf",
-                "data": _b64_file(path),
-            }
+            data, size = _b64_file_sized(path)
         except OSError:
             blocks.append({"type": "text", "text": f"[attachment unavailable: {path}]"})
             continue
-        blocks.append({"type": "document", "source": source})
+        blocks.append(
+            {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": data},
+            }
+        )
+        encoded.append((str(path), size))
     content = message.get("content") or ""
     if content:
         blocks.append({"type": "text", "text": content})
-    return blocks
+    return blocks, encoded
 
 
 def _from_anthropic(response) -> ChatChunk:

@@ -208,6 +208,8 @@ Three details are load-bearing (`TestRedaction`):
 
 An AUTO title is re-derived and its stale records DELETED, because a model-written name is a summary of the conversation and can quote the very text being removed. A hand-typed title is the user's own words and is left alone.
 
+**The bytes go with the records (#352).** A turn's `sent` records point at blobs in the chat's own evidence directory (`turns.py`, `docs/diagnostics.md`), and a redaction that left them would leave the pasted secret in the request that carried it. `_sent_digests` reads the digests off the removed range and off everything kept, and `turns.unlink` removes the difference — ONLY the digests no surviving record of this chat references, because content addressing within the chat means the shared history is one blob that every later call's record still points at. `TestRedactionUnlinksEvidence`.
+
 The model-context half of the same removal is in `docs/agent-core.md`.
 
 ## The record says what he was ASKED, not only what aish meant to do (#284)

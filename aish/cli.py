@@ -14,7 +14,7 @@ import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import aliases, backends, browser, term_image, tools
+from . import aliases, backends, browser, term_image, tools, turns
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
@@ -1364,6 +1364,9 @@ def handle_slash(
         except OSError as exc:
             print(f"{RED}cannot delete {selected.path.name}: {exc}{RESET}")
             return "handled"
+        # The chat's evidence goes with it (#352): the chat is the only owner
+        # of its directory in the per-chat store.
+        turns.delete_chat(state_dir, selected.path)
         print(f"{DIM}deleted {selected.path.name}{RESET}")
         return "handled"
     if command == "/rename":
@@ -1709,6 +1712,22 @@ def load_context_files(cwd: str) -> list[str]:
         except OSError:
             continue
     return parts
+
+
+def _sweep_turns(state_dir) -> None:
+    """The evidence store's budget sweep (#352), after a turn. Never raises:
+    a store that cannot be swept is a line on stderr, not a failed turn."""
+    try:
+        evicted = turns.sweep(state_dir)
+    except OSError as exc:
+        print(f"{DIM}[turns] could not sweep {state_dir}: {exc}{RESET}", file=sys.stderr)
+        return
+    if evicted:
+        print(
+            f"{DIM}[turns] evicted the evidence of {len(evicted)} chat(s) to fit the "
+            f"store's budget: {', '.join(evicted)}{RESET}",
+            file=sys.stderr,
+        )
 
 
 def _backend_hint(agent) -> str:
@@ -2421,6 +2440,9 @@ def main() -> int:
             continue
         try:
             result = agent.run_task(task)
+            # After a turn ends, the evidence store is swept to its budget
+            # (#352) — here as in the web server, never inside a tool call.
+            _sweep_turns(state_dir)
             if chip_stream is not None:
                 chip_stream.close()
             clean, pending_chips = parse_reply_chips(result)

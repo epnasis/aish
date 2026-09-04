@@ -820,3 +820,20 @@ class TestProvenanceConformance:
         agent.run_task("check my mail")
         assert "NOT EXECUTED" in followed[-1]
         assert self.RESET_LINK in followed[-1]
+
+
+class TestSentCoverage:
+    """The one path the `sent` seam does not cover (#352, #242): the SDK spawns
+    the `claude` CLI and the CLI issues the requests, so the turn says ONCE
+    that this backend records none of them."""
+
+    def test_each_task_writes_one_coverage_marker_and_no_manifest(self, monkeypatch, tmp_path):
+        steps = []
+        agent, fake = make_max_agent(monkeypatch, tmp_path, step_log=steps.append)
+        agent.run_task("first")
+        agent.run_task("second")
+        sent = [s for s in steps if s.get("kind") == "sent"]
+        assert [s["coverage"] for s in sent] == ["sdk", "sdk"]
+        assert [s["turn"] for s in sent] == [1, 2]
+        assert all(s["provider"] == "claude-max" for s in sent)
+        assert all("model_call" not in s and "messages" not in s for s in sent)

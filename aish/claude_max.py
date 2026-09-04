@@ -387,6 +387,29 @@ class ClaudeMaxAgent:
             prompt = f"{rules_text}\n\n{prompt}"
             self.inner.mark_rules_seeded()
         self._record({"role": "user", "content": task})
+        # The one path the `sent` seam does not cover (#352, #242): the SDK
+        # spawns the `claude` CLI, and the CLI issues the HTTP requests — the
+        # SDK's hook vocabulary (PreToolUse … PermissionRequest) has no
+        # pre-request event and the payload never passes through Python. So
+        # the turn says ONCE that this backend records none of its requests,
+        # instead of a reader inferring it from a dozen absences. No
+        # `model_call`, matching `call` on this backend: absence says the loop
+        # is not aish's, a zero would say "round zero".
+        self.inner._emit_record(
+            kind="sent",
+            coverage="sdk",
+            provider=self.provider,
+            **({"model": self.model} if self.model else {}),
+        )
+        # The response is the SDK's too (#355): symmetric with `sent`, one
+        # marker per turn so the received side reads as "not aish's loop"
+        # rather than a bare absence.
+        self.inner._emit_record(
+            kind="received",
+            coverage="sdk",
+            provider=self.provider,
+            **({"model": self.model} if self.model else {}),
+        )
         try:
             result = asyncio.run(self._run(prompt))
         except KeyboardInterrupt:

@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import evidence
+from . import turns as turn_store
 from .session import synthetic_kind
 
 NOT_RECORDED = "not recorded"
@@ -281,6 +282,23 @@ MISSING = "not_recorded"
 EMPTY = "empty"
 PURGED = "purged"
 UNREADABLE = "unreadable"
+# Two more states the per-chat store adds (#352). EVICTED: the whole chat's
+# evidence went to the budget sweep, on a date the reader can name — a
+# per-chat fact, distinct from a blob purged by a redaction. NEVER_STORED: a
+# picture or a document the request carried as base64, which the store holds
+# as a placeholder naming the file and its size and never as the bytes.
+EVICTED = "evicted"
+NEVER_STORED = "never_stored"
+# Where a per-call context figure came from (#352): read off the `sent` record
+# (exact, the request as sent) or reconstructed from message records and trim
+# rules (short by the channels docs/token-accounting.md lists).
+BASIS_RECORDED = "recorded"
+BASIS_INFERRED = "inferred"
+BASIS_MIXED = "mixed"
+COVERAGE_SDK = "sdk"
+# Where a model step's Context pane comes from (`steps[].context.source`).
+CONTEXT_SENT = "sent"
+CONTEXT_RECONSTRUCTED = "reconstructed"
 # A log written before #240 has no reasoning record, but its rendered
 # `thinking` step kept a fragment. Showing that fragment as "the reasoning"
 # is how someone concludes the model barely thought about it, so it is its
@@ -340,6 +358,205 @@ def _blob(digest: str, root: os.PathLike | str | None) -> tuple[str, str | None]
     if text is None:
         return PURGED, None
     return RECORDED, text
+
+
+def _sent(turn: Turn, log: Log, root: os.PathLike | str | None, include_text: bool) -> dict:
+    """The exact request of each model call, as the provider saw it (#352).
+
+    Read off the `sent` record — a manifest of digests into the chat's own
+    directory of the per-chat store — and resolved blob by blob, so every
+    entry carries one of the states the store makes possible: recorded ·
+    empty · not recorded · evicted (with the date) · purged · never stored.
+    The text itself rides along only on request (`include_text`): a dossier
+    is fetched to a phone, and the step screen fetches a blob by digest over
+    `/evidence` instead.
+
+    A `coverage` marker with no manifest is the claude-max case (#242): the
+    backend said ONCE that it records none of its requests, and that is what
+    is reported — never a dozen separate absences that read as a dozen faults.
+    """
+    records = turn.of_kind("sent")
+    marker = next((r for r in records if r.get("coverage")), None)
+    calls = [r for r in records if r.get("model_call")]
+    session = log.path
+    evicted = turn_store.evicted_on(root, session)
+    if not calls:
+        if marker is not None:
+            state = MISSING
+        elif log.wrote("sent"):
+            state = EMPTY  # the writer existed; no call of this turn succeeded
+        else:
+            state = MISSING
+        return {
+            "state": state,
+            "coverage": marker.get("coverage") if marker else None,
+            "provider": marker.get("provider") if marker else None,
+            "evicted_on": evicted,
+            "calls": [],
+        }
+
+    def resolve(digest: str | None) -> tuple[str, str | None]:
+        if not digest:
+            return MISSING, None
+        text = turn_store.get(str(digest), root, session)
+        if text is not None:
+            return RECORDED, text
+        return (EVICTED if evicted else PURGED), None
+
+    out: list[dict] = []
+    for record in calls:
+        states: list[str] = []
+        messages = []
+        for entry in record.get("messages") or []:
+            state, text = resolve(entry.get("digest"))
+            states.append(state)
+            item = {
+                key: entry[key]
+                for key in ("at", "role", "tool_name", "tool_names", "chars", "digest",
+                            "origin", "stub", "scrubbed")
+                if key in entry
+            }
+            item["state"] = state
+            if include_text and text is not None:
+                item["text"] = text
+            if entry.get("media"):
+                item["media"] = [
+                    {**dict(m), "state": NEVER_STORED}
+                    for m in entry["media"]
+                    if isinstance(m, dict)
+                ]
+            messages.append(item)
+        tools = record.get("tools")
+        if tools:
+            state, _ = resolve(tools.get("digest"))
+            states.append(state)
+            tools_out = {**dict(tools), "state": state}
+        else:
+            tools_out = {"state": EMPTY}
+        system = record.get("system")
+        system_out = None
+        if system:
+            state, text = resolve(system.get("digest"))
+            states.append(state)
+            system_out = {**dict(system), "state": state}
+            if include_text and text is not None:
+                system_out["text"] = text
+        if all(s == RECORDED for s in states):
+            call_state = RECORDED
+        elif EVICTED in states:
+            call_state = EVICTED
+        else:
+            call_state = PURGED
+        out.append(
+            {
+                "model_call": record.get("model_call"),
+                "provider": record.get("provider"),
+                "model": record.get("model"),
+                "options": record.get("options") or {},
+                "request": record.get("request"),
+                "chars": record.get("chars"),
+                "state": call_state,
+                "messages": messages,
+                "tools": tools_out,
+                "system": system_out,
+            }
+        )
+    return {
+        "state": RECORDED,
+        "coverage": "seam",
+        "provider": out[0]["provider"] if out else None,
+        "evicted_on": evicted,
+        "calls": out,
+    }
+
+
+def _sent_parts(record: dict) -> list[dict]:
+    """What one request was made of, by provider role and tool — exact, from
+    the manifest's own sizes, and needing no stamp to place anything."""
+    groups: dict[tuple, dict] = {}
+    for entry in record.get("messages") or []:
+        label = entry.get("tool_name") or (
+            ", ".join(str(n) for n in entry["tool_names"]) if entry.get("tool_names") else None
+        )
+        key = (entry.get("role"), label)
+        group = groups.setdefault(
+            key,
+            {"role": entry.get("role"), "tool_name": label, "chars": 0, "items": 0, "stubs": 0},
+        )
+        group["chars"] += int(entry.get("chars") or 0)
+        group["items"] += 1
+        group["stubs"] += 1 if entry.get("stub") else 0
+    parts = list(groups.values())
+    system = record.get("system")
+    if system:
+        parts.append(
+            {"role": "system", "tool_name": None, "chars": int(system.get("chars") or 0),
+             "items": 1, "stubs": 0, "param": True}
+        )
+    tools = record.get("tools")
+    if tools:
+        parts.append(
+            {"role": "tools", "tool_name": None, "chars": int(tools.get("chars") or 0),
+             "items": int(tools.get("count") or 0), "stubs": 0}
+        )
+    return sorted(parts, key=lambda p: -p["chars"])
+
+
+def _received(turn: Turn, log: Log, root: os.PathLike | str | None, include_text: bool) -> dict:
+    """The COMPLETE response of each model call (#355), read off the `received`
+    record and resolved blob by blob — recorded / evicted (dated) / purged /
+    not recorded. Symmetric with `_sent`: one whole blob per call rather than a
+    per-message manifest, because a response is one document. `coverage` with no
+    call is claude-max, which records none of its responses (#242).
+    """
+    records = turn.of_kind("received")
+    marker = next((r for r in records if r.get("coverage")), None)
+    calls = [r for r in records if r.get("model_call")]
+    session = log.path
+    evicted = turn_store.evicted_on(root, session)
+    if not calls:
+        if marker is not None:
+            state = MISSING
+        elif log.wrote("received"):
+            state = EMPTY
+        else:
+            state = MISSING
+        return {
+            "state": state,
+            "coverage": marker.get("coverage") if marker else None,
+            "provider": marker.get("provider") if marker else None,
+            "evicted_on": evicted,
+            "calls": [],
+        }
+    out: list[dict] = []
+    for record in calls:
+        digest = record.get("digest")
+        text = turn_store.get(str(digest), root, session) if digest else None
+        if text is not None:
+            state = RECORDED
+        elif not digest:
+            state = MISSING
+        else:
+            state = EVICTED if evicted else PURGED
+        item: dict = {
+            "model_call": record.get("model_call"),
+            "provider": record.get("provider"),
+            "model": record.get("model"),
+            "digest": digest,
+            "chars": record.get("chars"),
+            "scrubbed": record.get("scrubbed"),
+            "state": state,
+        }
+        if include_text and text is not None:
+            item["text"] = text
+        out.append(item)
+    return {
+        "state": RECORDED,
+        "coverage": "seam",
+        "provider": out[0]["provider"] if out else None,
+        "evicted_on": evicted,
+        "calls": out,
+    }
 
 
 def _brief_in_force(turn: Turn, log: Log) -> tuple[dict | None, int | None]:
@@ -473,7 +690,12 @@ def _rules_data(turn: Turn, log: Log) -> dict:
 def _thought(turn: Turn, log: Log) -> dict:
     """What the model was thinking, per model call, in the order it thought it."""
     records = turn.of_kind("reasoning")
-    fragments = [str(s.get("gist")) for s in turn.of_kind("thinking") if s.get("gist")]
+    thinking = turn.of_kind("thinking")
+    fragments = [str(s.get("gist")) for s in thinking if s.get("gist")]
+    # The seconds a call spent live on the rendered `thinking` step, not the
+    # renderless `reasoning` record; matched by position (the i-th thinking step
+    # is the i-th call), which is how they are emitted.
+    secs_by_index = [s.get("secs") for s in thinking]
     if records:
         state = RECORDED
     elif fragments:
@@ -486,6 +708,7 @@ def _thought(turn: Turn, log: Log) -> dict:
         "calls": [
             {
                 "model_call": record.get("model_call"),
+                "secs": secs_by_index[index] if index < len(secs_by_index) else None,
                 "text": record.get("text") or "",
                 "truncated": record.get("truncated") or 0,
                 "cap_source": record.get("cap_source"),
@@ -500,7 +723,7 @@ def _thought(turn: Turn, log: Log) -> dict:
                 "malformed": list(record.get("malformed") or []),
                 "synthesized": bool(record.get("synthesized")),
             }
-            for record in records
+            for index, record in enumerate(records)
         ],
     }
 
@@ -785,6 +1008,13 @@ def _did(turn: Turn) -> dict:
                 # what makes "offered" and "used" joinable (#274).
                 "truncation": step.get("truncation") or {},
                 "read": step.get("continuation") or "",
+                # The payload size the tool measured BEFORE any cut (contract
+                # §3.4), and where a driven action's seconds went (#348). Both
+                # verbatim; `bytes` is None rather than 0 where the writer
+                # recorded none, because "nothing came back" and "nobody
+                # measured" are different facts.
+                "bytes": step.get("bytes") if isinstance(step.get("bytes"), int) else None,
+                **({"phases": step["phases"]} if isinstance(step.get("phases"), dict) else {}),
                 # The picture of the page this call read (#289), and whether
                 # the bytes it points at are still there. Three states, like
                 # every other reference in this file: no key at all means the
@@ -829,6 +1059,7 @@ def _did(turn: Turn) -> dict:
                 "unchanged": False,
                 "truncation": {},
                 "read": "",
+                "bytes": None,
                 "gates": per_call.pop(call, []),
                 # A call that never completed never reached a page, so there is
                 # nothing to have pictured — and no key, rather than an empty
@@ -1016,6 +1247,7 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
             # what a panel reads, and it must not say something else.
             "state": MISSING,
             "stamped": False,
+            "basis": MISSING,
             "calls": [],
             "peak": None,
             "unattributed_chars": 0,
@@ -1114,6 +1346,36 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         call["added_chars"] = call["accounted_chars"] - before
         call["added_by"] = _added_by(parts_at, calls, index)
 
+    # One answer to "what filled this call" (#352): where the request was
+    # RECORDED at the seam, its own size is the total — exact, and inclusive
+    # of every channel the reconstruction above is blind to (a tool call's
+    # arguments, steering, a held answer, attachment guidance). Where it was
+    # not, the reconstruction stands and is labelled as the inference it is.
+    sent_by_call = {
+        int(s["model_call"]): s for s in turn.of_kind("sent") if s.get("model_call")
+    }
+    for call in calls:
+        sent_record = sent_by_call.get(call["model_call"])
+        if sent_record is None:
+            call["basis"] = BASIS_INFERRED
+            continue
+        call["basis"] = BASIS_RECORDED
+        call["sent_chars"] = int(sent_record.get("chars") or 0)
+        call["sent_parts"] = _sent_parts(sent_record)
+        billed = int(call["reported"].get("input") or 0)
+        # Both halves recorded now, and the numerator is complete — only an
+        # image still stands in the way, being char-invisible and token-huge.
+        call["chars_per_token"] = (
+            round(call["sent_chars"] / billed, 2) if billed and not call["image_count"] else None
+        )
+    recorded = [c for c in calls if c.get("basis") == BASIS_RECORDED]
+    if not calls or not recorded:
+        basis = BASIS_INFERRED
+    elif len(recorded) == len(calls):
+        basis = BASIS_RECORDED
+    else:
+        basis = BASIS_MIXED
+
     peak = max(calls, key=lambda c: (c["reported"].get("input") or 0), default=None)
     if peak is None:
         peak_out = None
@@ -1138,6 +1400,11 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
     return {
         "state": RECORDED if calls else EMPTY,
         "stamped": True,
+        # Whether the per-call totals are the request as sent, or arithmetic
+        # over message records. Steering and unstamped text below are
+        # unplaceable ONLY when this is not `recorded`: a recorded request
+        # holds them by construction.
+        "basis": basis,
         "calls": calls,
         "peak": peak_out,
         # Text a trim removed that no record attributes to an origin. Never
@@ -1242,8 +1509,18 @@ def _snapshot(
         parts.append({"origin": f"{count} image(s)", "where": side, "chars": 0,
                       "items": count, "trimmed": 0, "state": UNREADABLE})
         unmeasured.append(f"{count} image(s), which carry no characters at all")
+    # Per SIDE, so a per-call reader can say "41,200 chars carried from earlier
+    # turns, 3,800 from this one" without the parts list, which is popped off
+    # every call but the peak to keep the document phone-sized (#352).
+    by_where: dict[str, dict] = {}
+    for part in parts:
+        bucket = by_where.setdefault(part["where"], {"chars": 0, "items": 0, "trimmed": 0})
+        bucket["chars"] += part["chars"]
+        bucket["items"] += part["items"]
+        bucket["trimmed"] += part["trimmed"]
     return {
         "parts": parts,
+        "by_where": by_where,
         "accounted_chars": sum(p["chars"] for p in parts),
         "image_count": sum(images.values()),
         "unmeasured": unmeasured,
@@ -1377,6 +1654,30 @@ def _walk_rounds(turn: Turn) -> dict[int, int]:
     return at
 
 
+def _place_calls(turn: Turn) -> tuple[dict[int, int], dict[int, str]]:
+    """Which model call each tool call sat under, and HOW that is known.
+
+    `placed` maps a call id to its model call; `how` says whether the `call`
+    record named it (`recorded`) or file order attached it to the preceding
+    reasoning (`inferred`). One walk shared by the rounds and the step list, so
+    the two views of the same turn cannot place a call differently."""
+    at = _walk_rounds(turn)
+    placed: dict[int, int] = {}
+    how: dict[int, str] = {}
+    for index, step in enumerate(turn.steps):
+        if step.get("kind") != "call" or not step.get("call"):
+            continue
+        call = int(step["call"])
+        recorded = step.get("model_call")
+        if recorded:
+            placed[call] = int(recorded)
+            how[call] = GROUPING_RECORDED
+        elif at.get(index):
+            placed[call] = at[index]
+            how[call] = GROUPING_INFERRED
+    return placed, how
+
+
 def _rounds(turn: Turn, doc: dict) -> dict:
     """The turn as it actually happened: think, call, get results, think again.
 
@@ -1398,17 +1699,8 @@ def _rounds(turn: Turn, doc: dict) -> dict:
     calls = doc["did"]["calls"]
     at = _walk_rounds(turn)
 
-    placed: dict[int, int] = {}   # call id -> model call
-    inferred_any = False
-    for index, step in enumerate(turn.steps):
-        if step.get("kind") != "call" or not step.get("call"):
-            continue
-        recorded = step.get("model_call")
-        if recorded:
-            placed[int(step["call"])] = int(recorded)
-        elif at.get(index):
-            placed[int(step["call"])] = at[index]
-            inferred_any = True
+    placed, how = _place_calls(turn)   # call id -> model call, and how it is known
+    inferred_any = GROUPING_INFERRED in how.values()
 
     if not thoughts and not calls:
         grouping = GROUPING_NONE
@@ -1472,6 +1764,532 @@ def _rounds(turn: Turn, doc: dict) -> dict:
     }
 
 
+
+# ---------------------------------------------------------------------------
+# The turn as a ledger of steps (#352 slice 1)
+# ---------------------------------------------------------------------------
+#
+# Every step is one exchange across a boundary — the model on one side, a tool
+# on the other — or something that happened between two of them. The web step
+# screen walks this list forward and back; the rounds above are the same facts
+# grouped, and both are built from ONE placement walk so they cannot disagree.
+#
+# A step carries its kind, an id, the panes it has, the short facts for its
+# strip, and REFERENCES into `thought` / `did` / `messages` by id. Never a copy:
+# tool output is the bulk of the payload and this document is fetched to a
+# phone. Where a fact is an inference — a call attached to its round by file
+# order, a tool message matched to its call by name — the step says so, because
+# a reader must never see inference wearing a record's clothes.
+
+STEP_MODEL_CALL = "model_call"
+STEP_TOOL_CALL = "tool_call"
+STEP_TRIM = "trim"
+STEP_STEERING = "steering"
+STEP_BRIEF_CHANGED = "brief_changed"
+STEP_MODEL_ERROR = "model_error"
+STEP_RETRY = "retry"
+# Between-round kinds share one pane: the fact and its numbers.
+EVENT_STEPS = frozenset(
+    {STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED, STEP_MODEL_ERROR, STEP_RETRY}
+)
+
+PANE_CONTEXT = "context"
+PANE_RESPONSE = "response"
+PANE_CALL = "call"
+PANE_RESULT = "result"
+PANE_PAGE = "page"
+PANE_EVENT = "event"
+
+# Where the model-facing text of a tool call was read from, in the order the
+# reader prefers them. `step_output` and `step_error` are on the `tool` step
+# itself and joined by call id. The two message joins are INFERENCES: a
+# tool-role `message` record carries the tool's name and the model call it was
+# first in front of, and no call id — so it is matched to the calls of that
+# round by name and order, and the step says which.
+SHOWN_STEP_OUTPUT = "step_output"
+SHOWN_STEP_ERROR = "step_error"
+SHOWN_MESSAGE_ORDER = "message_by_order"
+SHOWN_MESSAGE_NAME = "message_by_name"
+SHOWN_NONE = "not_matched"
+
+
+def _messages(turn: Turn) -> list[dict]:
+    """This turn's message records, sized and stamped, text included ONCE.
+
+    They are here for two panes: a model call's context (which messages were
+    new to it, and the whole of what it was handed) and a tool call's result
+    (the text the model was actually given, where the `tool` step kept none).
+    `model_call` is the stamp as recorded and None where the writer wrote none —
+    a log older than #262 — because reading an absent key as 0 would put every
+    message in front of the first call.
+    """
+    out = []
+    for index, record in enumerate(turn.messages):
+        content = record.get("content")
+        if isinstance(content, str):
+            text = content
+        elif content is None:
+            text = ""
+        else:
+            text = json.dumps(content, ensure_ascii=False)
+        stamp = record.get("model_call")
+        out.append(
+            {
+                "at": index,
+                "role": str(record.get("role") or ""),
+                "tool_name": str(record.get("tool_name") or ""),
+                "model_call": int(stamp) if isinstance(stamp, int) else None,
+                "chars": len(text),
+                "text": text,
+                "interim": bool(record.get("interim")),
+                "images": len(record.get("images") or []),
+                "documents": len(record.get("documents") or []),
+                "superseded": bool(record.get("superseded")),
+            }
+        )
+    return out
+
+
+def _shown_messages(messages: list[dict], calls: list[dict], placed: dict[int, int]) -> dict:
+    """Which tool-role message carried each call's result to the model.
+
+    Joined per model call: the tool messages stamped with round k, in file
+    order, against the calls placed in round k, in call order. When the two name
+    sequences are identical the pairing is by order; when they differ, only a
+    name unique on both sides is paired. Messages with no stamp at all (an older
+    log) fall back to the same rule over the whole turn. Everything else stays
+    unmatched — a wrong text presented as "what the model saw" is the exact
+    lie this reader exists to prevent.
+    """
+    by_round: dict[int | None, list[dict]] = {}
+    for message in messages:
+        if message["role"] != "tool" or message["superseded"]:
+            continue
+        by_round.setdefault(message["model_call"], []).append(message)
+    by_call: dict[int, tuple[int, str]] = {}
+
+    def pair(candidates: list[dict], group: list[dict], how: str) -> None:
+        names_m = [m["tool_name"] for m in candidates]
+        names_c = [str(c["name"] or "") for c in group]
+        if names_m and names_m == names_c:
+            for message, call in zip(candidates, group, strict=True):
+                by_call[call["call"]] = (message["at"], how)
+            return
+        for call in group:
+            name = str(call["name"] or "")
+            same_m = [m for m in candidates if m["tool_name"] == name]
+            same_c = [c for c in group if str(c["name"] or "") == name]
+            if len(same_m) == 1 and len(same_c) == 1:
+                by_call[call["call"]] = (same_m[0]["at"], SHOWN_MESSAGE_NAME)
+
+    completed = [c for c in calls if c["completed"] and c["call"]]
+    if None in by_round and len(by_round) == 1:
+        pair(by_round[None], sorted(completed, key=lambda c: c["call"]), SHOWN_MESSAGE_ORDER)
+        return by_call
+    for number, candidates in by_round.items():
+        if number is None:
+            continue
+        group = sorted((c for c in completed if placed.get(c["call"]) == number),
+                       key=lambda c: c["call"])
+        pair(candidates, group, SHOWN_MESSAGE_ORDER)
+    return by_call
+
+
+def _fmt_n(value: int | float | None) -> str:
+    return f"{int(value):,}" if isinstance(value, (int, float)) else "?"
+
+
+def _brief_index(briefs: list[dict], number: int) -> int | None:
+    """Which of the turn's briefs was in force for model call `number`: the
+    last one written at or before it, else the carried one."""
+    chosen = None
+    for index, brief in enumerate(briefs):
+        written_at = brief.get("model_call") or 0
+        if not brief["written_here"] or written_at <= number:
+            chosen = index
+    return chosen
+
+
+def _model_step(number: int, doc: dict, numbering: str, fragment: str = "") -> dict:
+    thought = next((t for t in doc["thought"]["calls"] if t.get("model_call") == number), None)
+    step_secs = thought.get("secs") if thought else None
+    cost = next((c for c in doc["context_cost"]["calls"] if c.get("model_call") == number), None)
+    briefs = doc["given"]["briefs"]
+    brief_at = _brief_index(briefs, number)
+    options = (briefs[brief_at]["options"] if brief_at is not None else {}) or {}
+    facts: list[dict] = []
+    if options.get("model"):
+        facts.append({"k": "model", "v": f"{options.get('provider') or '?'} · {options['model']}"})
+    if options.get("system_role"):
+        facts.append({"k": "system role", "v": str(options["system_role"])})
+    reported = (cost or {}).get("reported") or {}
+    if reported:
+        facts.append({"k": "tokens", "v": " · ".join(
+            f"{_fmt_n(v)} {k}" for k, v in reported.items() if isinstance(v, (int, float))
+        )})
+    elif thought and thought["tokens"]:
+        tokens = thought["tokens"]
+        facts.append({"k": "tokens", "v": f"{_fmt_n(tokens[0])} in · "
+                      f"{_fmt_n(tokens[1] if len(tokens) > 1 else 0)} out"})
+    else:
+        facts.append({"k": "tokens", "v": "not recorded"})
+    if thought and thought["stop"]:
+        facts.append({"k": "stop", "v": thought["stop"]})
+    errors = [e for e in doc["context_cost"]["failed"] if e.get("model_call") == number]
+    if errors:
+        facts.append({"k": "attempts", "v": f"{len(errors)} failed before this one"})
+    if cost:
+        facts.append({"k": "context", "v": f"{_fmt_n(cost['accounted_chars'])} chars "
+                      f"({'+' if cost['added_chars'] >= 0 else ''}{_fmt_n(cost['added_chars'])})"})
+    elif doc["context_cost"]["state"] == MISSING:
+        facts.append({"k": "context", "v": "not recorded — messages carry no model-call stamp"})
+    # What this call was handed that the previous one was not, by stamp: a
+    # message appended while call k-1 was the one in flight is new to call k.
+    # Messages with no stamp cannot be placed and are counted, not placed.
+    new = [m["at"] for m in doc["messages"]
+           if m["model_call"] == number - 1 and not m["superseded"]]
+    in_front = [m["at"] for m in doc["messages"]
+                if m["model_call"] is not None and m["model_call"] < number and not m["superseded"]]
+    unstamped = sum(1 for m in doc["messages"] if m["model_call"] is None and not m["superseded"])
+    # `stubbed` is filled by _steps, which knows which trim preceded which call.
+    stubbed: list[dict] = []
+    # The request as it LEFT aish, when the `sent` record has it (#352 slice
+    # 2): a manifest exists for this call, so the context is exact and a
+    # renderer shows the bytes by digest. Evicted or purged blobs still make
+    # it "sent" — the record says what was sent and what of it is gone; only
+    # a call with no manifest at all falls back to the reconstruction below.
+    sent_call = next(
+        (c for c in (doc.get("sent") or {}).get("calls") or []
+         if c.get("model_call") == number and c.get("state") not in (MISSING, EMPTY)),
+        None,
+    )
+    # The complete response of this call (#355): a renderer shows the whole
+    # captured output by digest, beside the curated reasoning/said view.
+    received_call = next(
+        (c for c in (doc.get("received") or {}).get("calls") or []
+         if c.get("model_call") == number and c.get("state") not in (MISSING, EMPTY)),
+        None,
+    )
+    return {
+        "id": f"m{number}",
+        "kind": STEP_MODEL_CALL,
+        "model_call": number,
+        "title": f"model call {number}",
+        "panes": [PANE_CONTEXT, PANE_RESPONSE],
+        "numbering": numbering,
+        "facts": facts,
+        "ref": {
+            "thought": number if thought else None,
+            "cost": number if cost else None,
+            "brief": brief_at,
+            "sent": number if sent_call is not None else None,
+            "received": number if received_call is not None else None,
+        },
+        "fragment": fragment,
+        "secs": step_secs,
+        "errors": [],   # ids of the model_error steps that preceded this call
+        "context": {
+            "new": new,
+            "in_front": in_front,
+            "unstamped": unstamped,
+            "stubbed": stubbed,
+            "brief_changed": bool(
+                brief_at is not None and briefs[brief_at]["written_here"]
+                and briefs[brief_at].get("model_call") == number and number > 1
+            ),
+            # "sent" when the request as it left aish is on record (the
+            # renderer reads the bytes by digest from `doc["sent"]`);
+            # "reconstructed" — from `message` records and the brief — is the
+            # fallback for a log without the record. The fields above stay
+            # either way. Said here so a renderer labels it.
+            "source": CONTEXT_SENT if sent_call is not None else CONTEXT_RECONSTRUCTED,
+        },
+        "is_last": False,
+    }
+
+
+def _tool_step(call: dict, placed: dict[int, int], how: dict[int, str],
+               shown: dict, paged: set[str]) -> dict:
+    facts: list[dict] = [{"k": "status", "v": str(call["status"] or ("ok" if call["ok"] else "?"))}]
+    if not call["completed"]:
+        facts[0] = {"k": "status", "v": "never completed"}
+    if call["verdict_by"]:
+        facts.append({"k": "verdict by", "v": str(call["verdict_by"])})
+    if call["decision"]:
+        facts.append({"k": "decision", "v": str(call["decision"])})
+    facts.append({"k": "seconds", "v": f"{float(call['secs'] or 0):.1f}"})
+    if call["bytes"] is not None:
+        facts.append({"k": "bytes", "v": _fmt_n(call["bytes"])})
+    page = any(key in call for key in ("frame", "frame_skipped", "console", "signin", "covered",
+                                        "phases")) or bool(call["problem"]) or call["unchanged"]
+    panes = [PANE_CALL, PANE_RESULT] + ([PANE_PAGE] if page else [])
+    number = placed.get(call["call"])
+    if call["output"]:
+        shown_at, shown_how = None, SHOWN_STEP_OUTPUT
+    elif call["error"]:
+        shown_at, shown_how = None, SHOWN_STEP_ERROR
+    elif call["call"] in shown:
+        shown_at, shown_how = shown[call["call"]]
+    else:
+        shown_at, shown_how = None, SHOWN_NONE
+    cut = call["truncation"]
+    if cut and cut.get("offered"):
+        read_back: bool | None = cut.get("continuation") in paged
+    else:
+        read_back = None
+    return {
+        "id": f"c{call['call']}" if call["call"] else "c0",
+        "kind": STEP_TOOL_CALL,
+        "call": call["call"],
+        "name": str(call["name"] or ""),
+        "title": f"tool call {call['call']} · {call['name']}" if call["call"]
+        else f"tool call · {call['name']}",
+        "panes": panes,
+        "model_call": number,
+        "placement": how.get(call["call"], GROUPING_NONE) if number else GROUPING_NONE,
+        "facts": facts,
+        "secs": call["secs"],
+        "ref": {"call": call["call"], "shown": shown_at, "shown_how": shown_how},
+        # Whether the continuation a cut result offered was read back IN THIS
+        # TURN: None where nothing was offered, so "never offered" and "offered
+        # and unread" — different incidents (#274) — stay apart.
+        "continuation_read": read_back,
+    }
+
+
+def _event_step(kind: str, record: dict, facts: list[dict], **extra) -> dict:
+    return {"kind": kind, "panes": [PANE_EVENT], "facts": facts, "record": record, **extra}
+
+
+def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
+    """The turn as an ordered list of steps, in the order they happened.
+
+    File order is the chronology within a turn (`_walk_rounds` says why), so this
+    is a single pass over the records: a `reasoning` record opens a model call,
+    a `call` record (or the `tool` step, for a log without one) is a tool call,
+    and the between-round kinds are events. Ids are the record ids the rest of
+    the dossier already uses — `m<model_call>`, `c<call>` — so a note citing a
+    call cites a step with no second lookup.
+
+    The `retry` record that opened this turn sits at the END of the attempt it
+    discarded (docs/session-log.md), so it is read off the previous turn.
+    """
+    calls = doc["did"]["calls"]
+    placed, how = _place_calls(turn)
+    at = _walk_rounds(turn)
+    numbers = {r["model_call"] for r in doc["flow"]["rounds"]}
+    shown = _shown_messages(doc["messages"], calls, placed)
+    paged = {c["read"] for c in calls if c["read"]}
+    fragments = doc["thought"]["state"] == FRAGMENTS
+    steps: list[dict] = []
+    model_seen = 0
+    calls_seen: set[int] = set()
+    unnumbered = [c for c in calls if not c["call"]]   # a log older than call ids
+    errors_pending: list[str] = []
+    counters: dict[str, int] = {}
+
+    def event_id(kind: str) -> str:
+        counters[kind] = counters.get(kind, 0) + 1
+        return f"{kind}{counters[kind]}"
+
+    def before(index: int) -> int | None:
+        following = at.get(index, 0) + 1
+        return following if following in numbers else None
+
+    if turn.ordinal >= 2:
+        previous = log.turns[turn.ordinal - 2]
+        for record in previous.of_kind("retry"):
+            prev = record.get("previous") or {}
+            ended = str(prev.get("ended") or "unknown")
+            facts = [{"k": "by", "v": str(record.get("by") or "?")},
+                     {"k": "attempt", "v": str(record.get("attempt") or "?")},
+                     {"k": "the attempt before", "v": ended
+                      + (f" — {prev['failure']}" if prev.get("failure") else "")}]
+            steps.append(_event_step(STEP_RETRY, dict(record), facts,
+                                     id=event_id("retry"), title="you retried"))
+
+    for index, step in enumerate(turn.steps):
+        kind = step.get("kind")
+        if kind == "model_error":
+            waited = step.get("waited_s")
+            facts = [{"k": "class", "v": str(step.get("class") or "error")},
+                     {"k": "action", "v": str(step.get("action") or "?")},
+                     {"k": "attempt",
+                      "v": f"{step.get('attempt', '?')} of {step.get('attempts', '?')}"}]
+            if step.get("status"):
+                facts.append({"k": "status", "v": str(step["status"])})
+            if isinstance(waited, (int, float)):
+                facts.append({"k": "waited", "v": f"{waited:g}s"})
+            sid = event_id("e")
+            errors_pending.append(sid)
+            steps.append(_event_step(STEP_MODEL_ERROR, dict(step), facts, id=sid,
+                                     title="model call failed",
+                                     model_call=step.get("model_call")))
+        elif kind == "brief":
+            number = int(step.get("model_call") or 0)
+            if number > 1:
+                facts = [{"k": "at", "v": f"model call {number}"},
+                         {"k": "tools", "v": _fmt_n((step.get("tools") or {}).get("count"))}]
+                steps.append(_event_step(
+                    STEP_BRIEF_CHANGED, {"model_call": number}, facts, id=event_id("b"),
+                    title="what the model was handed changed", before=number,
+                ))
+        elif kind == "trim" and step.get("policy") == "mid_task_budget":
+            stubbed = step.get("stubbed")
+            facts = [{"k": "results stubbed", "v": _fmt_n(step.get("affected"))},
+                     {"k": "which",
+                      "v": ", ".join(f"{x.get('tool')} (#{x.get('at')})" for x in stubbed)
+                      if stubbed else "not recorded"}]
+            if isinstance(step.get("bytes_before"), int):
+                facts.append({"k": "chars", "v": f"{_fmt_n(step.get('bytes_before'))} → "
+                              f"{_fmt_n(step.get('bytes_after'))}"})
+            steps.append(_event_step(STEP_TRIM, dict(step), facts, id=event_id("t"),
+                                     title="earlier results were stubbed", before=before(index)))
+        elif kind == "injected":
+            text = str(step.get("text") or "")
+            steps.append(_event_step(STEP_STEERING, {"text": text},
+                                     [{"k": "chars", "v": _fmt_n(len(text))}],
+                                     id=event_id("s"), title="you typed while it ran",
+                                     text=text, before=before(index)))
+        elif kind == "reasoning":
+            recorded = step.get("model_call")
+            number = int(recorded or model_seen + 1)
+            model_seen = max(model_seen, number)
+            model = _model_step(number, doc,
+                                GROUPING_RECORDED if recorded else GROUPING_INFERRED)
+            model["errors"] = errors_pending
+            errors_pending = []
+            steps.append(model)
+        elif kind == "thinking" and fragments:
+            number = model_seen + 1
+            model_seen = number
+            model = _model_step(
+                number, doc, GROUPING_INFERRED, fragment=str(step.get("gist") or "")
+            )
+            model["errors"] = errors_pending
+            errors_pending = []
+            steps.append(model)
+        elif kind in ("call", "tool"):
+            call_no = int(step.get("call") or 0)
+            if call_no:
+                if call_no in calls_seen:
+                    continue
+                found = next((c for c in calls if c["call"] == call_no), None)
+                if found is None:
+                    continue
+                calls_seen.add(call_no)
+            else:
+                # A `tool` step from before call ids: it is the next one that
+                # has no id, in file order. Positional, and labelled `none`.
+                if kind != "tool" or not unnumbered:
+                    continue
+                found = unnumbered.pop(0)
+            steps.append(_tool_step(found, placed, how, shown, paged))
+
+    # The stubs a call was handed instead of the results it had read: the trims
+    # between the previous model call and this one, read off the steps just
+    # built so the two views agree on which trim preceded which call.
+    for position, step in enumerate(steps):
+        if step["kind"] != STEP_MODEL_CALL:
+            continue
+        stubbed = []
+        for earlier in reversed(steps[:position]):
+            if earlier["kind"] == STEP_MODEL_CALL:
+                break
+            if earlier["kind"] == STEP_TRIM:
+                stubbed[0:0] = [
+                    {"at": x.get("at"), "tool": x.get("tool")}
+                    for x in (earlier["record"].get("stubbed") or [])
+                ]
+        step["context"]["stubbed"] = stubbed
+    last_model = next((s for s in reversed(steps) if s["kind"] == STEP_MODEL_CALL), None)
+    if last_model is not None:
+        last_model["is_last"] = True
+    for n, step in enumerate(steps, 1):
+        step["n"] = n
+    return steps
+
+
+def _link_events(doc: dict) -> None:
+    """Give each event in the flow the id of its step, so a note computed off
+    the flow can cite the step screen's exact step. Matched by kind and record
+    equality in order — both lists come from the same file-order walk."""
+    unused = [
+        s for s in doc["steps"] if s["kind"] in (STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED)
+    ]
+    events = [e for r in doc["flow"]["rounds"] for e in r["before"]] + list(doc["flow"]["loose"])
+    for event in events:
+        for step in unused:
+            if step["kind"] != event["kind"]:
+                continue
+            if event["kind"] == STEP_TRIM and step["record"] != event.get("record"):
+                continue
+            if event["kind"] == STEP_STEERING and step.get("text") != event.get("text"):
+                continue
+            event["step"] = step["id"]
+            unused.remove(step)
+            break
+
+
+# Which pane of a step a note is about — the tap lands on the sentence the row
+# was computed from, not on the step's first pane.
+NOTE_PANES = {
+    "tool_failed": PANE_RESULT,
+    "result_cut": PANE_RESULT,
+    "continuation_unread": PANE_RESULT,
+    "call_incomplete": PANE_CALL,
+    "gate_refused": PANE_CALL,
+    "args_truncated": PANE_CALL,
+    "reasoning_truncated": PANE_RESPONSE,
+    "args_malformed": PANE_RESPONSE,
+    "stop_unusual": PANE_RESPONSE,
+    "context_full": PANE_CONTEXT,
+    "context_fixed_cost": PANE_CONTEXT,
+    "context_unattributed": PANE_CONTEXT,
+    "rule_abstained": PANE_CONTEXT,
+    "reminder_demoted": PANE_CONTEXT,
+    "brief_changed": PANE_CONTEXT,
+    "verify_refused": PANE_RESPONSE,
+    "task_unfinished": PANE_RESPONSE,
+}
+
+
+def _cite_steps(rows: list[dict], doc: dict) -> None:
+    """Point every note at a step and a pane of the step screen.
+
+    A row already naming a call or a model call cites that step; a row about
+    the turn's beginning (the brief, the rules, a seed trim) lands on the first
+    model call's context, and one about its end (the answer, the task status)
+    on the last model call's response — those ARE where the brief and the
+    answer live on the step screen. An event row cites the event's own step."""
+    steps = doc["steps"]
+    by_id = {s["id"]: s for s in steps}
+    models = [s for s in steps if s["kind"] == STEP_MODEL_CALL]
+    first = models[0] if models else (steps[0] if steps else None)
+    last = models[-1] if models else (steps[-1] if steps else None)
+    for row in rows:
+        where = row["where"]
+        check = row["check"]
+        target = None
+        if where.get("step") in by_id:
+            target = by_id[where["step"]]
+        elif where.get("call") is not None and f"c{where['call']}" in by_id:
+            target = by_id[f"c{where['call']}"]
+        elif where.get("model_call") is not None and f"m{where['model_call']}" in by_id:
+            target = by_id[f"m{where['model_call']}"]
+        elif where.get("section") == "produced":
+            target = last
+        else:
+            target = first
+        if target is None:
+            continue
+        pane = NOTE_PANES.get(check, target["panes"][0])
+        if pane not in target["panes"]:
+            pane = target["panes"][0]
+        where["step"] = target["id"]
+        where["pane"] = pane
+
+
 def _event_note(
     rows: list[dict], event: dict, model_call: int | None, section: str = "flow"
 ) -> None:
@@ -1484,6 +2302,8 @@ def _event_note(
     where: dict = {"section": section}
     if model_call is not None:
         where["model_call"] = model_call
+    if event.get("step"):
+        where["step"] = event["step"]
     if model_call:
         when = f"before model call {model_call}"
     elif section == "given":
@@ -1706,6 +2526,8 @@ def notes(doc: dict) -> dict:
               f"the task ended {status}: {doc['produced']['error'][:200]}",
               section="produced")
 
+    if "steps" in doc:
+        _cite_steps(rows, doc)
     return {"rows": rows, "checks": [{"id": i, "label": lb} for i, lb in CHECKS]}
 
 
@@ -1731,8 +2553,14 @@ def find(log: Log, ref: str | int | None) -> list[Turn]:
     return [t for t in log.turns if t.ordinal == number or t.counter == number]
 
 
-def dossier(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
-    """One turn, assembled from its records — the data both renderers read."""
+def dossier(
+    turn: Turn, log: Log, root: os.PathLike | str | None, *, request_text: bool = False
+) -> dict:
+    """One turn, assembled from its records — the data both renderers read.
+
+    `request_text` inlines the bytes of every recorded request message
+    (`aish explain … --context`); the web panel leaves it off and fetches a
+    blob by digest instead, because a dossier is fetched to a phone."""
     did = _did(turn)
     doc = {
         "ordinal": turn.ordinal,
@@ -1740,6 +2568,10 @@ def dossier(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         "ts": turn.ts,
         "prompt": turn.prompt,
         "given": _given(turn, log, root),
+        # The exact request of each model call, as the provider saw it (#352).
+        "sent": _sent(turn, log, root, request_text),
+        # The complete response of each model call (#355) — symmetric with sent.
+        "received": _received(turn, log, root, request_text),
         "thought": _thought(turn, log),
         "did": did,
         "produced": _produced(turn, did),
@@ -1752,8 +2584,16 @@ def dossier(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         # earlier turns is resent on every call of this one.
         "context_cost": _context_cost(turn, log, root),
     }
+    # This turn's messages, text included once; the steps below reference them
+    # by index (#352).
+    doc["messages"] = _messages(turn)
     # After `given`/`thought`/`did` exist, because it references into them.
     doc["flow"] = _rounds(turn, doc)
+    # The same facts as `flow`, as the ordered ledger the step screen walks.
+    # Built after the flow because the placement and the round numbers are
+    # shared, and linked back so a note off the flow cites a step.
+    doc["steps"] = _steps(turn, log, doc)
+    _link_events(doc)
     doc["notes"] = notes(doc)
     return doc
 
@@ -1866,6 +2706,93 @@ def _given_lines(given: dict, show_tools: bool, show_context: bool, out: list[st
             )
 
     _rules_lines(given["rules"], out)
+
+
+def _blob_status(state: str, evicted_on: str | None) -> str:
+    """One word per store state, for a line that lists many blobs."""
+    if state == RECORDED:
+        return "resolved"
+    if state == EVICTED:
+        return f"evicted on {evicted_on}" if evicted_on else "evicted"
+    if state == NEVER_STORED:
+        return "never stored"
+    return state
+
+
+def _sent_lines(sent: dict, show_context: bool, out: list[str]) -> None:
+    """The request each model call sent, message by message, in the role the
+    provider saw (#352). With `--context` the bytes follow each message."""
+    if not sent["calls"]:
+        if sent.get("coverage") == COVERAGE_SDK:
+            out.append(
+                f"  {'request':<10} {DIM}{NOT_RECORDED} — {sent.get('provider') or 'this backend'} "
+                f"drives the SDK's own loop, which sends its own requests (#242){RESET}"
+            )
+        elif sent["state"] == EMPTY:
+            out.append(
+                f"  {'request':<10} {DIM}recorded, and there was none — no model call of this "
+                f"turn succeeded{RESET}"
+            )
+        else:
+            out.append(f"  {'request':<10} {_state_note(MISSING, ' (log predates #352)')}")
+        return
+    when = sent.get("evicted_on")
+    for call in sent["calls"]:
+        head = (
+            f"call {call['model_call']} · {call.get('provider')} {call.get('model')} · "
+            f"{len(call['messages'])} message(s) · {int(call.get('chars') or 0):,} chars · "
+            f"{str(call.get('request') or '')[:12]}…"
+        )
+        if call["state"] == EVICTED:
+            head += f" · {BOLD}evidence evicted on {when}{RESET}"
+        elif call["state"] != RECORDED:
+            head += f" · {DIM}some bytes {call['state']}{RESET}"
+        out.append(f"  {'request':<10} {head}")
+        system = call.get("system")
+        if system:
+            out.append(
+                f"  {'':<10}   system parameter · {int(system.get('chars') or 0):,} chars · "
+                f"{_blob_status(system['state'], when)}"
+                + (
+                    f" · {DIM}hoisted from #{system.get('origin')}{RESET}"
+                    if system.get("origin") else ""
+                )
+            )
+            if show_context and system.get("text") is not None:
+                for line in system["text"].splitlines():
+                    out.append(f"  {'':<10}   {DIM}│{RESET} {line}")
+        for message in call["messages"]:
+            who = str(message.get("role") or "?")
+            if message.get("tool_name"):
+                who += f" {message['tool_name']}"
+            elif message.get("tool_names"):
+                who += f" {', '.join(message['tool_names'])}"
+            line = (
+                f"#{message.get('at')} {who} · {int(message.get('chars') or 0):,} chars"
+                + (" · stub" if message.get("stub") else "")
+                + (
+                    f" · {message['scrubbed']} secret(s) scrubbed"
+                    if message.get("scrubbed") else ""
+                )
+                + f" · {_blob_status(message['state'], when)}"
+            )
+            for item in message.get("media") or []:
+                line += (
+                    f" · {os.path.basename(str(item.get('path') or ''))} "
+                    f"({int(item.get('bytes') or 0):,} bytes) never stored"
+                )
+            out.append(f"  {'':<10}   {line}")
+            if show_context and message.get("text") is not None:
+                for text_line in message["text"].splitlines():
+                    out.append(f"  {'':<10}   {DIM}│{RESET} {text_line}")
+        tools = call.get("tools") or {}
+        if tools.get("state") == EMPTY:
+            out.append(f"  {'':<10}   tools: none sent")
+        else:
+            out.append(
+                f"  {'':<10}   tools: {tools.get('count', '?')} · "
+                f"{int(tools.get('chars') or 0):,} chars · {_blob_status(tools['state'], when)}"
+            )
 
 
 def _rules_lines(rules: dict, out: list[str]) -> None:
@@ -2035,10 +2962,20 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
             f"{p['origin']} {'+' if p['chars'] > 0 else ''}{_human(p['chars'])}"
             for p in call["added_by"]
         )
+        if call.get("basis") == BASIS_RECORDED:
+            # The request as sent is the total; the reconstruction beside it
+            # says what the message records alone could account for.
+            sized = (
+                f" · {_human(call['sent_chars']):>7} chars sent {DIM}(recorded; "
+                f"{_human(call['accounted_chars'])} reconstructed){RESET}"
+            )
+        else:
+            sized = (
+                f" · {_human(call['accounted_chars']):>7} chars accounted "
+                f"{DIM}(inferred){RESET}"
+            )
         lines.append(
-            f"call {call['model_call']:<3} {billed}"
-            f" · {_human(call['accounted_chars']):>7} chars accounted"
-            + (f" · {moved}" if moved else "")
+            f"call {call['model_call']:<3} {billed}" + sized + (f" · {moved}" if moved else "")
         )
     peak = context["peak"]
     if peak:
@@ -2101,22 +3038,36 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
                 f"{DIM}  {peak['chars_per_token']} chars per reported token, and that ratio "
                 f"moves with the content.{RESET}"
             )
-        lines.append(
-            f"{DIM}  the parts are what the log CAN size, and this total is a LOWER bound: "
-            f"AT LEAST four{RESET}"
-        )
-        lines.append(
-            f"{DIM}  things reach the model's messages with no message record. The largest "
-            f"by far is a{RESET}"
-        )
-        lines.append(
-            f"{DIM}  tool call's own arguments, resent on every later call; then steering, a "
-            f"held answer,{RESET}"
-        )
-        lines.append(
-            f"{DIM}  and the guidance form of an attachment. The list is not known to be "
-            f"closed.{RESET}"
-        )
+        if context.get("basis") == BASIS_RECORDED:
+            lines.append(
+                f"{DIM}  the parts are reconstructed from message records; the SENT total on "
+                f"each call is the{RESET}"
+            )
+            lines.append(
+                f"{DIM}  request as it left aish, and holds the tool-call arguments, steering "
+                f"and held answers{RESET}"
+            )
+            lines.append(
+                f"{DIM}  the parts cannot see. The request section above lists it message by "
+                f"message.{RESET}"
+            )
+        else:
+            lines.append(
+                f"{DIM}  the parts are what the log CAN size, and this total is a LOWER bound: "
+                f"AT LEAST four{RESET}"
+            )
+            lines.append(
+                f"{DIM}  things reach the model's messages with no message record. The largest "
+                f"by far is a{RESET}"
+            )
+            lines.append(
+                f"{DIM}  tool call's own arguments, resent on every later call; then steering, a "
+                f"held answer,{RESET}"
+            )
+            lines.append(
+                f"{DIM}  and the guidance form of an attachment. The list is not known to be "
+                f"closed.{RESET}"
+            )
         for missing in peak["unmeasured"]:
             lines.append(f"  {BOLD}not measured here:{RESET} {missing}")
     if context["unattributed_chars"]:
@@ -2129,7 +3080,12 @@ def _context_cost_lines(context: dict, out: list[str]) -> None:
             f"  {BOLD}{context['unstamped_chars']:,} chars{RESET} are in this turn's messages "
             f"with no record of which call they stood in front of"
         )
-    if context["steering_chars"]:
+    if context["steering_chars"] and context.get("basis") == BASIS_RECORDED:
+        lines.append(
+            f"  {BOLD}{context['steering_chars']:,} chars{RESET} were typed while a task ran; "
+            f"whatever of it was in front of a call is inside that call's sent total"
+        )
+    elif context["steering_chars"]:
         lines.append(
             f"  {BOLD}{context['steering_chars']:,} chars{RESET} were typed while a task ran "
             f"and are sized but not placed — the log records the text and not"
@@ -2546,6 +3502,35 @@ def _call_lines(call: dict) -> list[str]:
     return lines
 
 
+def _received_lines(received: dict, show_context: bool, out: list[str]) -> None:
+    """The complete response each model call produced (#355). With `--context`
+    the whole captured response follows."""
+    if not received["calls"]:
+        if received.get("coverage") == COVERAGE_SDK:
+            who = received.get("provider") or "this backend"
+            out.append(
+                f"  {'response':<10} {DIM}{NOT_RECORDED} — {who} "
+                f"drives the SDK's own loop (#242){RESET}"
+            )
+        elif received["state"] == EMPTY:
+            out.append(
+                f"  {'response':<10} {DIM}recorded, and there was none{RESET}"
+            )
+        else:
+            out.append(f"  {'response':<10} {_state_note(MISSING, ' (log predates #355)')}")
+        return
+    when = received.get("evicted_on")
+    for call in received["calls"]:
+        head = (
+            f"call {call['model_call']} · {call.get('provider')} {call.get('model')} · "
+            f"{int(call.get('chars') or 0):,} chars · {_blob_status(call['state'], when)}"
+        )
+        out.append(f"  {'response':<10} {head}")
+        if show_context and call.get("text") is not None:
+            for line in call["text"].splitlines():
+                out.append(f"  {'':<10}   {DIM}│{RESET} {line}")
+
+
 def render(
     turn: Turn,
     log: Log,
@@ -2561,7 +3546,7 @@ def render(
     a dossier cannot answer "what did it think after it got that result", which
     is the question people open one to ask.
     """
-    doc = dossier(turn, log, root)
+    doc = dossier(turn, log, root, request_text=show_context)
     out: list[str] = []
     label = f"turn {doc['ordinal']}"
     if doc["counter"] is not None and doc["counter"] != doc["ordinal"]:
@@ -2583,6 +3568,8 @@ def render(
         )
 
     _given_lines(doc["given"], show_tools, show_context, out)
+    _sent_lines(doc["sent"], show_context, out)
+    _received_lines(doc["received"], show_context, out)
     _flow_lines(doc, out)
     _context_cost_lines(doc["context_cost"], out)
     _produced_lines(doc["produced"], out)

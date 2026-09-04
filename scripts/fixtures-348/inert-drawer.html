@@ -1,0 +1,10 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Closed drawer</title></head>
+<body>
+  <h1>Ordinary page, nothing open</h1>
+  <button>Menu</button>
+  <!-- `<nav inert>` is the recommended pattern for a CLOSED drawer, and
+       `showModal()` does NOT set this attribute on anything. Treating `inert`
+       as "behind something open" told the model to close a thing that was not
+       there. -->
+  <nav inert><button>Profil</button><button>Ustawienia</button><button>Wyloguj</button></nav>
+</body></html>

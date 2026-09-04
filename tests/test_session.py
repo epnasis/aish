@@ -3131,3 +3131,47 @@ class TestTheRecordSaysWhatHeWasAsked:
         )
         assert record["intent"] == "I'll type the destination"
         assert record["preview"] == "drive imdb.com"
+
+
+class TestRedactionUnlinksEvidence:
+    """A redacted turn's `sent` records point at blobs in the chat's own
+    evidence directory (#352); the removal takes those bytes — and ONLY those.
+    A digest a surviving record still references is that record's evidence."""
+
+    def _sent(self, model_call, digests, tools):
+        return {
+            "kind": "sent", "turn": 1, "model_call": model_call,
+            "messages": [{"at": i, "role": "user", "digest": d, "chars": 1}
+                         for i, d in enumerate(digests)],
+            "tools": {"digest": tools, "chars": 1, "count": 0},
+        }
+
+    def test_only_the_digests_no_surviving_record_references_go(self, tmp_path):
+        from aish import turns
+
+        log = SessionLog.new(tmp_path)
+        shared = turns.put("shared history", tmp_path, log.path)
+        only_first = turns.put("the pasted secret", tmp_path, log.path)
+        only_second = turns.put("later text", tmp_path, log.path)
+        menu = turns.put("the tool menu", tmp_path, log.path)
+        log.task_start("first")
+        log.message({"role": "user", "content": "first"})
+        log.step(self._sent(1, [shared, only_first], menu))
+        log.message({"role": "assistant", "content": "ok"})
+        log.task_end()
+        log.task_start("second")
+        log.message({"role": "user", "content": "second"})
+        log.step(self._sent(1, [shared, only_second], menu))
+        log.message({"role": "assistant", "content": "ok"})
+        log.task_end()
+        log.close()
+        first_turn = [
+            json.loads(line)["turn"]
+            for line in log.path.read_text().splitlines()
+            if json.loads(line).get("kind") == "message" and json.loads(line).get("role") == "user"
+        ][0]
+        assert log.redact_turn(first_turn) is not None
+        assert turns.get(only_first, tmp_path, log.path) is None
+        assert turns.get(shared, tmp_path, log.path) == "shared history"
+        assert turns.get(only_second, tmp_path, log.path) == "later text"
+        assert turns.get(menu, tmp_path, log.path) == "the tool menu"

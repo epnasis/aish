@@ -701,30 +701,84 @@ class TestWhatTheModelIsToldItCannotSee:
         assert "3 more control(s) are on this page but closed away" in out
         assert "5 more control(s) not listed" in out
 
-    def test_controls_behind_an_OPEN_dialog_are_not_told_to_open_something(self):
-        """#348. "Press whatever opens them first" is the right repair for a
-        collapsed menu and the exact opposite of the right one for a dialog:
-        the controls are BEHIND the open thing and the way back is to close it.
-
-        Measured on lot.com 2026-09-01 — the date picker was up, this line
-        reported 218 controls closed away with that advice, and the model spent
-        two calls narrowing the page to day numbers looking for the disclosure
-        it had been told to press."""
+    def test_an_ORDER_to_close_needs_two_signals_that_agree(self):
+        """#350, corrected. The page DECLARED something modal and the controls
+        are off-screen under a locked scroll — two independent signals, and
+        only that combination has earned an imperative."""
         out = web_module._present_snapshot(
-            snapshot(unreachable=218, dialog="Wybierz daty")
+            snapshot(unreachable=218, reasons={"behind-a-dialog": 218},
+                     dialog="Wybierz daty")
         )
-        assert "218 more control(s) are on this page but BEHIND" in out
-        assert "Close it to reach them" in out
+        assert "BEHIND a dialog the page calls 'Wybierz daty'" in out
+        assert "CLOSE it to reach them" in out
         assert "Press whatever opens them first" not in out
-        # The NAME is the page's claim about itself and is quoted as such; the
-        # sentence around it is aish's own observation.
-        assert "the page calls 'Wybierz daty'" in out
 
-    def test_an_open_dialog_with_no_name_still_says_one_is_open(self):
-        out = web_module._present_snapshot(snapshot(unreachable=4, dialog="?"))
-        assert "BEHIND a dialog the page calls '?'" in out
+    def test_the_reason_ALONE_describes_and_does_not_order(self):
+        """`behind-a-dialog` is a NAME THAT ASSERTS A CAUSE its own test does
+        not check: it fires on "root scroll-locked AND off-screen", and nothing
+        in it looks for anything on top.
 
-    def test_no_dialog_keeps_the_sentence_that_was_always_right(self):
+        Measured in real Chrome — an app shell with `html,body{overflow:hidden}`
+        and a footer below the fold, no overlay of any kind, reports
+        `{'behind-a-dialog': 2}`. So without corroboration this states what was
+        SEEN and offers both repairs, rather than giving an order that is wrong
+        on every such page."""
+        out = web_module._present_snapshot(
+            snapshot(unreachable=2, reasons={"behind-a-dialog": 2})
+        )
+        assert "scrolling LOCKED and they are off-screen" in out
+        assert "if you can see a dialog, panel or menu" in out
+        # It must not give the bare order without the page having declared one.
+        assert "CLOSE it to reach them" not in out
+
+    def test_inert_is_a_CLOSED_DRAWER_at_least_as_often_as_a_modal(self):
+        """`inert` was treated as "behind something open". It is only ever the
+        SITE's own attribute, and `<nav inert>` is the recommended pattern for a
+        closed drawer — which was getting "close what is open" with nothing
+        open. `showModal()` does NOT set it: measured, `closest('[inert]')` is
+        null outside the dialog and the outside control is reachable."""
+        out = web_module._present_snapshot(
+            snapshot(unreachable=3, reasons={"inert": 3})
+        )
+        assert "Press whatever opens them first" in out
+        assert "CLOSE" not in out
+
+    def test_a_genuine_MIX_says_so_rather_than_picking_one(self):
+        """Naming one repair when both were observed is the same guess this
+        replaced, one rung quieter."""
+        out = web_module._present_snapshot(
+            snapshot(unreachable=10, reasons={"invisible": 6, "behind-a-dialog": 4})
+        )
+        assert "some not drawn yet, some off-screen behind a locked scroll" in out
+
+    def test_a_control_the_page_has_not_drawn_still_says_open_something(self):
+        out = web_module._present_snapshot(
+            snapshot(unreachable=4, reasons={"invisible": 4})
+        )
+        assert "Press whatever opens them first" in out
+
+    def test_an_AMBIGUOUS_reason_keeps_the_wording_that_names_both(self):
+        """`clipped` looks like it means "behind something" and does not: a
+        collapsed accordion is `height: 0; overflow: hidden`, so its contents
+        are clipped too — REACH_JS says so in its own comment. A reason that
+        does not choose must not make the sentence choose."""
+        out = web_module._present_snapshot(
+            snapshot(unreachable=5, reasons={"clipped": 5})
+        )
+        assert "Press whatever opens them first" in out
+        assert "CLOSE what is open" not in out
+
+    def test_an_unrecognised_reason_degrades_to_the_old_wording(self):
+        """A future REACH_JS reason nobody has classified yet must land on the
+        sentence that names both possibilities, never on a confident wrong one."""
+        out = web_module._present_snapshot(
+            snapshot(unreachable=3, reasons={"some-new-reason": 3})
+        )
+        assert "Press whatever opens them first" in out
+
+    def test_a_log_with_no_reasons_keeps_the_old_wording(self):
+        """A snapshot from before #350 records no reasons, and absence must not
+        be read as a finding (contract corollary 2)."""
         out = web_module._present_snapshot(snapshot(unreachable=4))
         assert "Press whatever opens them first" in out
 
@@ -837,7 +891,14 @@ class TestHidingAControlNeverRoutesAroundItsCard:
         # The unreachable `continue` still precedes the only thing the walk does
         # with a control, so a control the page has closed away never reaches
         # the candidate list — let alone the tag.
-        assert walk.index("if (unreachable(el))") < walk.index("found.push(")
+        # Matched on the CALL rather than on the `if` that used to wrap it:
+        # #350 needed the reason as well as the fact, so the shape is now
+        # `const why = unreachable(el); if (why) {`. The invariant is the
+        # ordering, not the spelling.
+        assert walk.index("unreachable(el)") < walk.index("found.push(")
+        assert "unreached += 1" in walk and (
+            walk.index("unreached += 1") < walk.index("found.push(")
+        ), "an unreachable control must be counted and skipped before collection"
         assert "setAttribute" not in walk, "the walk must not tag anything"
 
         # `emit` is the only thing that writes a tag, and it is called exactly

@@ -2879,6 +2879,10 @@ function ensureTrace() {
   // answer claims it instead ([ANSWER-OPEN]).
   currentTrace = t;
   body.addEventListener("scroll", () => updateScrollHints(body));
+  // One tap on a step opens its detail (#352 follow-up): delegation so a live
+  // row and a finished one share the handler and rows completed DURING the turn
+  // are reviewable, not only after it ends.
+  body.addEventListener("click", (e) => inspectStepClick(t, e));
   currentTrace.timer = setInterval(() => updateTraceHead(currentTrace), 1000);
   refreshStatusline(); // the trace header owns Stop now; hide the bottom bar
   measurePinnedTrace(t);
@@ -3056,6 +3060,7 @@ function traceStep(step) {
       const ref = t.thinkingRow;
       clearStepTimer(t, ref);
       ref.row.classList.remove("running", "active-step");
+      ref.row.classList.add("step-think"); // a model call, for the inspector (#352)
       ref.badge.innerHTML = traceSvg("thinking", "var(--purple)");
       ref.titleEl.textContent = `Thought for ${fmtSecs(step.secs)}`;
       // History bonus: the row keeps the thinking gist as its subtitle —
@@ -3069,8 +3074,9 @@ function traceStep(step) {
       t.thinkingRow = null;
     } else {
       t.started += 1;
-      traceRow(t, traceSvg("thinking", "var(--purple)"),
+      const ref = traceRow(t, traceSvg("thinking", "var(--purple)"),
         `Thought for ${fmtSecs(step.secs)}`, step.gist || "");
+      ref.row.classList.add("step-think");
     }
     updateTraceHead(t);
     return;
@@ -3090,11 +3096,15 @@ function traceStep(step) {
       : recoverable
         ? `${recoverable} of them can be read back on demand`
         : "the model cannot get them back";
-    traceRow(
+    const ref = traceRow(
       t, traceSvg("thinking", "var(--dim)"),
       `Shortened ${n} earlier result${n === 1 ? "" : "s"} for the model`,
       tail
     );
+    // Which trim: a mid-task one is a step of the record, a seed one is part
+    // of what the first model call started from ([TRACE-CLOSE]'s inspector).
+    ref.row.classList.add("step-trim");
+    ref.row.dataset.policy = String(step.policy || "");
     return;
   }
   if (step.kind === "knowledge") {
@@ -3133,7 +3143,8 @@ function traceStep(step) {
     // note in the trace and retire its queued chip (a no-op on cold replay,
     // where no chip exists). Emitted identically live and by reconstruct_events.
     t.started += 1;
-    traceRow(t, traceSvg("chat", "var(--blue)"), "You added", step.text || "");
+    traceRow(t, traceSvg("chat", "var(--blue)"), "You added", step.text || "")
+      .row.classList.add("step-steer");
     removeQueueChip(step.text);
     updateTraceHead(t);
     return;
@@ -3168,7 +3179,8 @@ function traceStep(step) {
     } else {
       tail = `gave up after ${step.attempt} of ${step.attempts} attempts`;
     }
-    traceRow(t, traceSvg("denied", "var(--red)"), `Model call failed — ${what}${status}`, tail);
+    traceRow(t, traceSvg("denied", "var(--red)"), `Model call failed — ${what}${status}`, tail)
+      .row.classList.add("step-model-error");
     updateTraceHead(t);
     return;
   }
@@ -3195,7 +3207,7 @@ function traceStep(step) {
       t, traceSvg("chat", "var(--blue)"),
       step.by === "owner" ? `You retried — attempt ${step.attempt}` : `Retried — attempt ${step.attempt}`,
       `${ended} · its records are kept, superseded`
-    );
+    ).row.classList.add("step-retry");
     updateTraceHead(t);
     return;
   }
@@ -3468,11 +3480,21 @@ function traceFrame(step) {
 }
 // [TRACE-FRAME-END]
 
+// The ids a tool row is joined to the record by (#352): its `call`, and the
+// model call that issued it where the step carries one (omitted on a backend
+// that records none, and on a log older than the stamp). Written on both the
+// start and the finish so a row synthesized on replay carries them too.
+function stampCallRow(ref, step) {
+  if (step.call) ref.row.dataset.call = String(step.call);
+  if (step.model_call) ref.row.dataset.modelCall = String(step.model_call);
+}
+
 function toolStart(t, step) {
   t.started += 1;
   const [title, iconKey] = TOOL_META[step.name] || [step.name, "dot", "--dim"];
   const ref = traceRow(t, SPINNER, title, step.name === "run_command" ? "" : step.summary);
   knowledgeTag(ref, step.name);
+  stampCallRow(ref, step);
   ref.row.classList.add("running", "active-step");
   startStepTimer(t, ref);
   t.running.push({ name: step.name, summary: step.summary || "", command: step.command || "" });
@@ -3525,8 +3547,9 @@ function heldJoin(t, step) {
 
 // Bring a row that is already in this card into view, and say WHICH one.
 // `block: "nearest"` means a row already on screen does not move at all: this
-// is a hop of a few rows inside one card, not the long animated jump [EXPLAIN]
-// rules out, and the flash is what answers "which of these did it land on".
+// is a hop of a few rows inside one card, not the long animated jump
+// [STEP-SCREEN] rules out, and the flash is what answers "which of these did
+// it land on".
 function revealStep(row) {
   if (row.scrollIntoView) row.scrollIntoView({ block: "nearest", inline: "nearest" });
   row.classList.add("step-flash");
@@ -3556,6 +3579,7 @@ function toolFinish(t, step) {
     }
   }
   clearStepTimer(t, ref);
+  stampCallRow(ref, step);
   t.pending = null;
   const runIdx = t.running.findIndex((r) => r.name === step.name);
   if (runIdx !== -1) t.running.splice(runIdx, 1);
@@ -4141,6 +4165,7 @@ function updateTraceHead(t) {
 function finalizeAnswerRow(t, ref, secs) {
   clearStepTimer(t, ref);
   ref.row.classList.remove("running", "active-step");
+  ref.row.classList.add("step-answer"); // the last model call, for the inspector (#352)
   ref.badge.innerHTML = traceSvg("check", "var(--green)");
   ref.titleEl.textContent =
     typeof secs === "number" ? `Answered in ${fmtSecs(secs)}` : "Answered";
@@ -4192,15 +4217,11 @@ function finishTrace(errored) {
     refreshStatusline();
     return;
   }
-  if (t.turnId && !t.el.querySelector(".trace-explain")) {
-    const door = document.createElement("button");
-    door.type = "button";
-    door.className = "trace-explain";
-    door.dataset.turn = t.turnId;
-    door.innerHTML = '<span>Full record</span><span class="trace-explain-chev">\u203a</span>';
-    door.onclick = (e) => { e.stopPropagation(); openExplain(t.turnId); };
-    t.inner.appendChild(door);
-  }
+  // The card is the door to the turn's record (#243, #352): the Full record
+  // row, and every row that is a step of it. Here and nowhere else, so hot and
+  // cold agree (L2).
+  t.finished = true;
+  if (t.turnId) traceInspector(t);
   t.el.classList.remove("live", "stopping");
   t.el.classList.remove("open"); // collapse to the summary; tap to expand
   t.el.querySelector(".trace-status").innerHTML = errored
@@ -4209,6 +4230,142 @@ function finishTrace(errored) {
   updateTraceHead(t);
   refreshStatusline();
 }
+
+// ---- the inspector on a finished card (#352) ----------------------------------
+// Rows are the entry point. On a FINISHED card every row that is a step of the
+// record — a tool call, a model call, a between-round event — expands in place
+// to a short summary of its panes with sizes, and each line opens the step
+// screen on that pane. A "worth a look" strip at the top of the card lists the
+// reader's notes, each landing on the cited step and pane. All of it is added
+// HERE, from finishTrace, because that is the one function both the live path
+// and cold replay reach — adding it from the `done` handler would miss every
+// replayed card and still pass the node checks (L2).
+//
+// The dossier is fetched ON THE FIRST TAP, once per card, never at finish: a
+// replay finishes every card on screen, and a fetch per card would pull a
+// hundred documents of hundreds of KB each on every reconnect.
+//
+// Rows are joined to steps by what the step wrote on them: a tool row carries
+// its `call` id (`c<call>`), a thinking row is the model call the tool rows
+// under it are stamped with (`m<k>`) — counted only where a log stamped
+// nothing — and the between-round rows are counted per kind in card order,
+// which is the file order the dossier walks. The answer row is the last model
+// call (`m:last`), resolved when the record arrives.
+function traceInspector(t) {
+  if (!t.el.querySelector(".trace-explain")) {
+    const door = document.createElement("button");
+    door.type = "button";
+    door.className = "trace-explain";
+    door.dataset.turn = t.turnId;
+    door.append(inspectEl("span", null, offlineViewing
+      ? "Full record — the server is needed to read it" : "Full record"));
+    door.append(inspectEl("span", "trace-explain-chev", "›"));
+    door.onclick = (e) => { e.stopPropagation(); inspectOpen(t); };
+    t.inner.appendChild(door);
+  }
+  // Name each row's step, for the delegated tap and the flag markers. A
+  // recorded id (the tool row's stamp) beats a counted position.
+  const rows = [...t.body.querySelectorAll(".step")];
+  const ids = inspectKeys(rows);
+  rows.forEach((row, i) => {
+    if (!ids[i]) return;
+    row.dataset.inspect = ids[i];
+    row.classList.add("inspectable");
+  });
+}
+
+
+function inspectEl(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+function inspectKeys(rows) {
+  const ids = rows.map(() => null);
+  const counters = {};
+  const next = (kind) => { counters[kind] = (counters[kind] || 0) + 1; return counters[kind]; };
+  let pendingThink = -1;
+  let thinkCount = 0;
+  rows.forEach((row, i) => {
+    const cl = row.classList;
+    const d = row.dataset || {};
+    if (d.call) {
+      ids[i] = `c${d.call}`;
+      // The stamp on a tool row (#352's agent half) names the thinking row
+      // above it better than counting can: a recorded id beats a position.
+      if (pendingThink >= 0 && d.modelCall) { ids[pendingThink] = `m${d.modelCall}`; pendingThink = -1; }
+      return;
+    }
+    if (cl.contains("step-think")) { thinkCount += 1; ids[i] = `m${thinkCount}`; pendingThink = i; return; }
+    if (cl.contains("step-answer")) { ids[i] = "m:last"; pendingThink = -1; return; }
+    if (cl.contains("step-trim")) {
+      // A seed trim is not a step of its own; it shaped what the first model
+      // call started from, which is where the dossier files it.
+      ids[i] = d.policy === "mid_task_budget" ? `t${next("t")}` : "m1";
+      return;
+    }
+    if (cl.contains("step-steer")) { ids[i] = `s${next("s")}`; return; }
+    if (cl.contains("step-model-error")) { ids[i] = `e${next("e")}`; return; }
+    if (cl.contains("step-retry")) { ids[i] = `retry${next("retry")}`; return; }
+  });
+  return ids;
+}
+
+function inspectResolve(id, doc) {
+  if (id !== "m:last") return id;
+  const models = (doc.steps || []).filter((s) => s.kind === "model_call");
+  return models.length ? models[models.length - 1].id : null;
+}
+
+// Once per card. A failure is not cached, so the next tap tries again — the
+// ordinary failure is a phone that was briefly offline.
+function inspectDossier(t) {
+  // A running turn re-fetches every time, so a tap reflects the steps completed
+  // SINCE the last read; a finished turn is immutable and cached once.
+  if (!t.finished) return fetchDossier(t.turnId);
+  if (t.dossier) return Promise.resolve(t.dossier);
+  if (!t.dossierFetch) {
+    t.dossierFetch = fetchDossier(t.turnId).then((doc) => {
+      t.dossier = doc;
+      return doc;
+    }, (err) => {
+      t.dossierFetch = null;
+      throw err;
+    });
+  }
+  return t.dossierFetch;
+}
+
+function inspectOpen(t) {
+  inspectDossier(t).then((doc) => ssOpenDoc(doc, undefined, undefined, t.turnId), (err) => showToast((err && err.message) || "the record could not be read"));
+}
+
+function inspectStepClick(t, e) {
+  const target = e && e.target;
+  if (!target || !target.closest) return;
+  // A tap on the row's own controls — the held link, a frame, an output box's
+  // buttons, the door, a Worth-a-look note — is that control's, not the row's.
+  if (target.closest("button, a, img, input, textarea, .out-box, .step-diff, .trace-notes, .trace-explain")) return;
+  const row = target.closest(".step");
+  if (!row || (t.body.contains && !t.body.contains(row))) return;
+  if (e.stopPropagation) e.stopPropagation();
+  if (!t.turnId) { showToast("this turn has no record to open yet"); return; }
+  const rows = [...t.body.querySelectorAll(".step")];
+  const id = inspectKeys(rows)[rows.indexOf(row)];
+  if (!id) return;
+  inspectDossier(t).then(
+    (doc) => {
+      const resolved = inspectResolve(id, doc);
+      const step = (doc.steps || []).find((x) => x.id === resolved);
+      if (step) ssOpenDoc(doc, step.id, undefined, t.turnId);
+      else showToast("not in the record yet — this step is still running");
+    },
+    (err) => showToast((err && err.message) || "the record could not be read"),
+  );
+}
+
 // [TRACE-CLOSE-END]
 
 function fmtSecs(s) {
@@ -8605,7 +8762,7 @@ const SLASH_COMMANDS = [
   ["/watch", "see the page aish is on in this chat, as it works"],
   ["/chat", "show this chat's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
-  ["/explain", "the full record of a turn — what it was given, thought, ran and answered"],
+  ["/explain", "a turn's record, step by step — what each call was given, did and returned"],
   ["/help", "about aish web"],
 ];
 
@@ -11815,500 +11972,2000 @@ function shortName(name, max = NAME_MAX) {
 
 // ---- the dossier ---------------------------------------------------------
 //
-// [EXPLAIN-START]
-// One turn, read back from /explain: what it was given, what it was thinking,
-// what it ran, what it produced. The panel exists because the answer to "why
-// did it do that" is usually "it was not given what you think it was", and
-// that evidence is recorded but was reachable only from a terminal.
+// [READABLE-START]
+// A readable layer over the COMPLETE captured content (#354): the same bytes,
+// shown so a human can read them — colour, real newlines, clickable links —
+// and NOTHING else. It is a lens, never a rewrite: the raw toggle and copy/save
+// always give the exact bytes back.
 //
-// EVERY string here is set as TEXT, never as markup. Reasoning quotes fetched
-// pages, file contents and mail bodies — this panel renders the untrusted half
-// of the machine, and the one place it must not be rendered is as HTML.
+// The hard lines, each a test in tests/js/test_readable.js:
+//   - No loss. For every lossless language (json-lex on malformed input, yaml,
+//     markdown, plain) the concatenation of the pieces' text EQUALS the input,
+//     character for character. Only valid JSON is reflowed (pretty-printed), and
+//     even then every key and value survives — the raw toggle carries the bytes.
+//   - No medium change. An image reference becomes a clickable LINK, never an
+//     <img>; nothing is ever fetched or embedded.
+//   - No acting on the owner's behalf. A link is clickable but opens only on a
+//     click, in a new tab; only http/https/mailto are ever linkified — never the
+//     aish-reply:// scheme that would submit a turn, nor javascript:/data:.
+//   - Safe nodes only. The DOM renderer mints <span>, <a> and <mark>, each via
+//     createElement + textContent; never innerHTML, never <img>/<button>/<script>.
 //
-// Nothing from here is cached: the response is `no-store` and the service
-// worker passes /explain through (NEVER_CACHE), so the bodies never reach the
-// device's disk the way transcript events do.
-let xpAbort = null;   // in-flight fetch, so a second open cancels the first
+// The pieces functions below are pure (no DOM), so the guarantees are unit-
+// testable; `readableInto` is the one function that touches the document.
 
-function xpEl(tag, cls, text) {
-  const node = document.createElement(tag);
-  if (cls) node.className = cls;
-  if (text !== undefined && text !== null) node.textContent = String(text);
-  return node;
+const RD_SAFE_SCHEME = /^(https?:|mailto:)/i;
+// A URL or mailto inside plain text. Deliberately conservative: a trailing
+// . , ) ] } ; : is punctuation, not part of the address.
+const RD_URL_RE = /((?:https?:\/\/|mailto:)[^\s<>"'`]+[^\s<>"'`.,)\]};:!?])/g;
+
+function rdSafeHref(url) {
+  const u = String(url || "").trim();
+  return RD_SAFE_SCHEME.test(u) ? u : null;
 }
+
+// Plain text -> pieces, with bare URLs made clickable. Lossless: the pieces'
+// text concatenates back to the input exactly.
+function rdLinkify(text, cls) {
+  const out = [];
+  let last = 0;
+  const src = String(text);
+  src.replace(RD_URL_RE, (match, _g, index) => {
+    if (index > last) out.push({ cls, text: src.slice(last, index) });
+    const href = rdSafeHref(match);
+    if (href) out.push({ cls: "tok-link", text: match, href });
+    else out.push({ cls, text: match });
+    last = index + match.length;
+    return match;
+  });
+  if (last < src.length) out.push({ cls, text: src.slice(last) });
+  if (!out.length) out.push({ cls, text: src });
+  return out;
+}
+
+// ---- JSON ------------------------------------------------------------------
+// Valid JSON is pretty-printed from the PARSED value: real newlines, indented,
+// string values shown with their escapes decoded (a "\n" inside a string
+// becomes a real line break — that is what the byte means). Malformed or
+// truncated JSON never throws and is never repaired: it falls to a lexical
+// pass that colours the raw text in place, losslessly, so the break is visible.
+
+function rdJsonString(value, out) {
+  out.push({ cls: "tok-punct", text: '"' });
+  // The decoded value, split on real newlines (from a decoded \n) so the string
+  // reads across lines; URLs inside it become clickable.
+  const parts = String(value).split("\n");
+  parts.forEach((line, i) => {
+    if (i) out.push({ cls: "tok-str", text: "\n" });
+    for (const piece of rdLinkify(line, "tok-str")) out.push(piece);
+  });
+  out.push({ cls: "tok-punct", text: '"' });
+}
+
+function rdJsonValue(value, depth, out) {
+  const pad = "  ".repeat(depth);
+  const inner = "  ".repeat(depth + 1);
+  if (value === null) { out.push({ cls: "tok-null", text: "null" }); return; }
+  const t = typeof value;
+  if (t === "number") { out.push({ cls: "tok-num", text: String(value) }); return; }
+  if (t === "boolean") { out.push({ cls: "tok-bool", text: String(value) }); return; }
+  if (t === "string") { rdJsonString(value, out); return; }
+  if (Array.isArray(value)) {
+    if (!value.length) { out.push({ cls: "tok-punct", text: "[]" }); return; }
+    out.push({ cls: "tok-punct", text: "[\n" });
+    value.forEach((item, i) => {
+      out.push({ text: inner });
+      rdJsonValue(item, depth + 1, out);
+      out.push({ cls: "tok-punct", text: i < value.length - 1 ? ",\n" : "\n" });
+    });
+    out.push({ text: pad }, { cls: "tok-punct", text: "]" });
+    return;
+  }
+  const keys = Object.keys(value);
+  if (!keys.length) { out.push({ cls: "tok-punct", text: "{}" }); return; }
+  out.push({ cls: "tok-punct", text: "{\n" });
+  keys.forEach((key, i) => {
+    out.push({ text: inner }, { cls: "tok-key", text: JSON.stringify(key) },
+             { cls: "tok-punct", text: ": " });
+    rdJsonValue(value[key], depth + 1, out);
+    out.push({ cls: "tok-punct", text: i < keys.length - 1 ? ",\n" : "\n" });
+  });
+  out.push({ text: pad }, { cls: "tok-punct", text: "}" });
+}
+
+// Malformed/partial JSON: colour the raw text in place, lossless.
+function rdJsonLex(text) {
+  const out = [];
+  const src = String(text);
+  let i = 0;
+  const push = (cls, s) => { if (s) out.push({ cls, text: s }); };
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === "\\") { j += 2; continue; }
+        if (src[j] === '"') { j += 1; break; }
+        j += 1;
+      }
+      push("tok-str", src.slice(i, j));
+      i = j;
+    } else if (/[-\d]/.test(ch) && /[\d.eE+\-]/.test(src[i] || "")) {
+      let j = i;
+      while (j < src.length && /[-\d.eE+]/.test(src[j])) j += 1;
+      push("tok-num", src.slice(i, j));
+      i = j;
+    } else if (/[a-z]/i.test(ch)) {
+      let j = i;
+      while (j < src.length && /[a-z]/i.test(src[j])) j += 1;
+      const word = src.slice(i, j);
+      push(word === "null" ? "tok-null" : /^(true|false)$/.test(word) ? "tok-bool" : "", word);
+      i = j;
+    } else if ("{}[]:,".includes(ch)) {
+      push("tok-punct", ch); i += 1;
+    } else {
+      let j = i;
+      while (j < src.length && !'"{}[]:,'.includes(src[j]) && !/[a-z\d-]/i.test(src[j])) j += 1;
+      push("", src.slice(i, Math.max(j, i + 1)));
+      i = Math.max(j, i + 1);
+    }
+  }
+  return out;
+}
+
+function rdJson(text) {
+  try {
+    const value = JSON.parse(text);
+    const out = [];
+    rdJsonValue(value, 0, out);
+    return out;
+  } catch (_err) {
+    return rdJsonLex(text);
+  }
+}
+
+// ---- YAML (line-based, lossless) -------------------------------------------
+function rdYaml(text) {
+  const out = [];
+  const lines = String(text).split("\n");
+  lines.forEach((line, i) => {
+    if (i) out.push({ text: "\n" });
+    const hash = line.indexOf("#");
+    const kv = line.match(/^(\s*(?:- )?)([^:#\s][^:]*)(:)(\s.*|)$/);
+    if (hash === 0 || /^\s*#/.test(line)) {
+      out.push({ cls: "tok-comment", text: line });
+    } else if (kv) {
+      out.push({ text: kv[1] }, { cls: "tok-key", text: kv[2] }, { cls: "tok-punct", text: kv[3] });
+      for (const piece of rdLinkify(kv[4], "tok-str")) out.push(piece);
+    } else {
+      for (const piece of rdLinkify(line, "")) out.push(piece);
+    }
+  });
+  return out;
+}
+
+// ---- Markdown (lossless: colour + clickable, markers kept) ------------------
+// Nothing is removed — a link's [text](url) keeps every character and the url
+// becomes clickable; an image's ![alt](url) is the same, a LINK never an image.
+const RD_LINK_RE = /(!?)\[([^\]]*)\]\((\s*[^)\s]+)\)/g;
+
+function rdInline(line, out) {
+  const src = String(line);
+  let last = 0;
+  let m;
+  RD_LINK_RE.lastIndex = 0;
+  while ((m = RD_LINK_RE.exec(src)) !== null) {
+    if (m.index > last) rdInlinePlain(src.slice(last, m.index), out);
+    const bang = m[1];
+    const label = m[2];
+    const url = m[3];
+    const href = rdSafeHref(url.trim());
+    // Every character kept: the brackets and parens are punctuation, the url is
+    // the clickable part. An image is the SAME shape — a link, never an <img>.
+    out.push({ cls: "tok-punct", text: `${bang}[` }, { cls: "tok-em", text: label },
+             { cls: "tok-punct", text: "](" });
+    if (href) out.push({ cls: "tok-link", text: url, href });
+    else out.push({ cls: "", text: url });
+    out.push({ cls: "tok-punct", text: ")" });
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) rdInlinePlain(src.slice(last), out);
+}
+
+// Bold/italic/inline-code, markers kept and dimmed, content styled; bare URLs
+// linkified. Lossless.
+function rdInlinePlain(text, out) {
+  const re = /(`[^`]*`|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|_[^_\s][^_]*_)/g;
+  const src = String(text);
+  let last = 0;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    if (m.index > last) for (const p of rdLinkify(src.slice(last, m.index), "")) out.push(p);
+    const tok = m[0];
+    if (tok[0] === "`") {
+      out.push({ cls: "tok-code", text: tok });
+    } else {
+      const mark = tok.startsWith("**") || tok.startsWith("__") ? 2 : 1;
+      const cls = mark === 2 ? "tok-strong" : "tok-italic";
+      out.push({ cls: "tok-punct", text: tok.slice(0, mark) },
+               { cls, text: tok.slice(mark, tok.length - mark) },
+               { cls: "tok-punct", text: tok.slice(tok.length - mark) });
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) for (const p of rdLinkify(src.slice(last), "")) out.push(p);
+}
+
+function rdMarkdown(text) {
+  const out = [];
+  const lines = String(text).split("\n");
+  let fence = null; // {lang} while inside a ``` block
+  lines.forEach((line, i) => {
+    if (i) out.push({ text: "\n" });
+    const fenceOpen = line.match(/^(\s*```+)(.*)$/);
+    if (fence) {
+      if (fenceOpen) { rdFlushFence(fence, out); out.push({ text: "\n" }, { cls: "tok-punct", text: line }); fence = null; }
+      else fence.lines.push(line);
+      if (fence && i === lines.length - 1) rdFlushFence(fence, out);
+      return;
+    }
+    if (fenceOpen) {
+      fence = { lang: (fenceOpen[2] || "").trim().toLowerCase(), lines: [], marker: line };
+      // The opening fence prints now; its inner lines are buffered and flushed
+      // (highlighted by the fence language) when the block closes.
+      out.push({ cls: "tok-punct", text: line });
+      fence.emittedOpen = true;
+      return;
+    }
+    const heading = line.match(/^(\s*#{1,6}\s)(.*)$/);
+    const listmark = line.match(/^(\s*(?:[-*+]|\d+\.)\s)(.*)$/);
+    if (heading) {
+      out.push({ cls: "tok-head", text: line });
+    } else if (listmark) {
+      out.push({ cls: "tok-punct", text: listmark[1] });
+      rdInline(listmark[2], out);
+    } else {
+      rdInline(line, out);
+    }
+  });
+  return out;
+}
+
+// A fenced block that never closed: flush its buffered lines, highlighted by
+// the fence language, so a truncated ``` block still reads (lossless).
+function rdFlushFence(fence, out) {
+  if (!fence.lines.length) return;
+  const inner = fence.lines.join("\n");
+  const lang = fence.lang === "yaml" || fence.lang === "yml" ? "yaml"
+    : fence.lang === "json" ? "json" : "code";
+  const pieces = lang === "json" ? rdJson(inner) : lang === "yaml" ? rdYaml(inner)
+    : [{ cls: "tok-code", text: inner }];
+  for (const piece of pieces) out.push(piece);
+}
+
+// ---- dispatch --------------------------------------------------------------
+function rdPieces(text, lang) {
+  if (lang === "auto") {
+    const t = String(text).trim();
+    if (t && (t[0] === "{" || t[0] === "[")) {
+      try { JSON.parse(text); return rdJson(text); } catch (_e) { /* not json: plain */ }
+    }
+    return rdLinkify(String(text), "");
+  }
+  if (lang === "json") return rdJson(text);
+  if (lang === "yaml") return rdYaml(text);
+  if (lang === "markdown") return rdMarkdown(text);
+  return rdLinkify(String(text), ""); // plain: linkify only, lossless
+}
+
+// The display string the pieces render to — what find searches, and what a
+// lossless language reproduces from its input exactly.
+function rdDisplay(pieces) {
+  return pieces.map((p) => p.text).join("");
+}
+
+// The one DOM function: pieces -> nodes under `pre`, marking find hits. Every
+// character reaches the DOM as textContent; a link is an <a> under the scheme
+// allowlist with no auto-navigation, never an <img>.
+function rdRenderInto(pre, pieces, query, marks, cap) {
+  const q = String(query || "").toLowerCase();
+  const limit = cap === undefined ? Infinity : cap;
+  for (const piece of pieces) {
+    const host = piece.href
+      ? (() => {
+          const a = document.createElement("a");
+          a.className = "tok-link";
+          a.href = piece.href;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer nofollow";
+          return a;
+        })()
+      : (() => {
+          const span = document.createElement("span");
+          if (piece.cls) span.className = piece.cls;
+          return span;
+        })();
+    if (!q || (marks && marks.length >= limit)) {
+      host.textContent = piece.text;
+    } else {
+      // Mark every hit inside this piece; a mark can split a piece, and both
+      // stay textContent.
+      const lower = piece.text.toLowerCase();
+      let from = 0;
+      let at = lower.indexOf(q);
+      if (at === -1) {
+        host.textContent = piece.text;
+      } else {
+        while (at !== -1) {
+          if (at > from) host.appendChild(document.createTextNode(piece.text.slice(from, at)));
+          const mark = document.createElement("mark");
+          mark.className = "ss-hit";
+          mark.textContent = piece.text.slice(at, at + q.length);
+          host.appendChild(mark);
+          if (marks) marks.push(mark);
+          from = at + q.length;
+          at = marks && marks.length >= limit ? -1 : lower.indexOf(q, from);
+        }
+        if (from < piece.text.length) host.appendChild(document.createTextNode(piece.text.slice(from)));
+      }
+    }
+    pre.appendChild(host);
+  }
+}
+// [READABLE-END]
+
+// [STEP-SCREEN-START]
+// The turn inspector (#352 slice 1): one turn, read back from /explain, one
+// STEP at a time on a full-screen surface of its own. A step is one exchange
+// across a boundary — a model call, a tool call — or something that happened
+// between two of them; each has the PANES its kind has (Context / Response,
+// Call / Result / Page, or one Event pane). A swipe (and the arrow keys) walks
+// the TAPE: the next pane of this step, and past the last pane the next step's
+// first (past the first, the previous step's last) — so one gesture reads
+// context, response, next step. The header's ‹ › move a whole step and keep
+// the pane by name where the next step has it.
+//
+// META IS STRUCTURE, NEVER TEXT. A pane interleaves two different things: the
+// bytes of the exchange (a message, the reasoning, a tool's output — shown
+// verbatim, monospace) and aish's own account AROUND them (headers, states,
+// "reconstructed from…", truncation notes, gate verdicts). Concatenating the
+// two made them indistinguishable — a reader could not tell whether a sentence
+// was passed to the model or written by this screen — so a pane is a list of
+// SEGMENTS: `text` (the payload, verbatim), `meta` (aish's account, drawn as a
+// bordered block in the UI font) and `record` (a raw record, mono but tinted
+// like meta). Copy and save join them; the eye never has to.
+//
+// Not #preview: its recognisers own pinch and pan, and a page of text is not a
+// picture. Not a sheet: a sheet is a picker you browse, and this is a document
+// you read, so it takes the whole screen.
+//
+// EVERY string here is set as TEXT, never as markup. The panes show the
+// untrusted half of the machine — reasoning quotes fetched pages, a tool
+// result is whatever a command printed, the page pane is a site's own console
+// — and `renderMarkdown` mints a <button> that submits a turn from
+// `[label](aish-reply://…)`, which is why it may never see any of it. A
+// rendered mode is deferred (Part 4 of #352). Nothing from here is cached: the
+// response is `no-store` and the service worker passes /explain through.
+//
+// What it draws comes from `explain.dossier()`'s `steps` list and the records
+// it references by id. Where the dossier says a fact is an inference — a call
+// attached to its round by file order, a tool message matched to its call by
+// name — the pane says so in words, because a reader must never see inference
+// wearing a record's clothes (docs/diagnostics.md).
+
+// The one fact this surface shows: which dossier, which step, which pane.
+// `ssShow` is the only path that moves it, and `ssClose` the only one that
+// clears it — a half-applied step (new pane under an old title, a find count
+// from the previous body) is the class of bug the single writer exists for.
+let ssView = null;
+let ssAbort = null;
+// What the touch in flight was decided to be, recorded at the moment the axis
+// is known (L5): "page" claims it for a step change, "scroll" yields it to the
+// pane's own vertical scroll and nothing here reads it again.
+let ssGesture = null;
+let ssTouch = null;
+let ssFind = { query: "", hits: 0, at: -1, marks: [] };
+// The context pane opens on what CHANGED since the previous call; the whole
+// context is one tap away, and this is that tap.
+let ssWhole = false;
+// The turn's findings (`explain.notes`), each resolved to a step index and the
+// pane it cites, and which one is current — the full-screen navigator across
+// "worth a look", the browser-find / IDE-Problems model. Not on the chat
+// timeline: they are detail, and detail belongs where the detail is.
+let ssFindings = [];
+let ssFindingAt = -1;
+// While the step screen is open on a RUNNING turn, poll the record so new
+// steps become reachable without leaving the screen (#354 follow-up). `ssRef`
+// is the turn id to re-fetch; the poll updates the counter and the reachable
+// steps, never the pane you are reading.
+let ssRef = "";
+let ssPollTimer = null;
+let ssPolling = false;
+const SS_POLL_MS = 1500;
+
+// How far a claimed swipe must travel to turn the step, and how strongly
+// horizontal a move must be before it is claimed at all: a flick that is even
+// slightly diagonal is a scroll that started sideways, not a page turn.
+const SS_SWIPE_MIN = 56;
+const SS_AXIS_LOCK = 1.6;
+const SS_DECIDE_AT = 8;
+// The sheet dismissal (the grabber/header drag), judged like a NATIVE sheet:
+// position AND velocity AT RELEASE, not distance alone. A flick down past
+// SS_SHEET_FLICK closes from any distance; any upward motion at release
+// cancels even past the distance threshold (the sheet was brought back up,
+// so it stays — the physical model); otherwise resting past SS_SHEET_DISMISS
+// closes. Velocity is px/ms over the LAST move segment, and only when the
+// finger was still moving at release — a move then a hold before lifting has
+// rested (SS_SHEET_REST_MS), so its velocity is zero, exactly as a real sheet.
+const SS_SHEET_DISMISS = 120;
+const SS_SHEET_FLICK = 0.6;
+const SS_SHEET_REST_MS = 80;
+const SS_ARROW_FADE_MS = 2500;
+// A body past this folds — max-height and a "show all" control. The whole text
+// stays in the DOM: folded, never truncated, the same law the sheet had.
+const SS_FOLD_CHARS = 20000;
+// The readable layer (#354): payload shown coloured, pretty-printed and
+// linkified by default; the toggle drops to the exact monospace bytes.
+// Remembered per device. A segment past SS_READ_MAX stays raw (with a note),
+// because colouring hundreds of KB on the main thread would jank.
+const SS_READ_KEY = "aish-ss-read";
+const SS_READ_MAX = 262144;
+let ssReadable = true;
+// Below this a body is a paragraph and "save as file" is furniture.
+const SS_SAVE_MIN_CHARS = 2000;
+// Every match is COUNTED; only this many are marked, and the label says so.
+const SS_FIND_MAX_MARKS = 2000;
 
 // The three states, on screen. A blank is what lets someone read "it was told
 // nothing" off a log that predates the record, or off bytes deliberately
 // purged, so each says which one it is.
-const XP_STATE_WORDS = {
+const SS_STATE_WORDS = {
   not_recorded: "not recorded — the aish that wrote this log did not keep it",
   empty: "recorded, and there was none",
   purged: "recorded, then deleted",
   unreadable: "recorded, but the stored bytes are unreadable",
   fragments: "only a fragment was kept — this log predates the full record",
 };
-
-function xpState(state, into) {
-  const word = XP_STATE_WORDS[state];
-  if (word) into.appendChild(xpEl("p", "xp-state", word));
-  return !word;   // true when the state is `recorded` and there is content
-}
-
-function xpSection(title, summary, fill) {
-  const wrap = xpEl("section", "xp-sec");
-  const head = xpEl("button", "xp-sechead");
-  head.type = "button";
-  head.appendChild(xpEl("span", "xp-secname", title));
-  head.appendChild(xpEl("span", "xp-secsum", summary));
-  head.appendChild(xpEl("span", "xp-chev", "›"));
-  const body = xpEl("div", "xp-secbody");
-  let filled = false;
-  head.onclick = () => {
-    // Built on first open, not on render: a turn's system text alone is tens of
-    // thousands of characters, and four sections of it laid out up front is a
-    // panel that takes a visible beat to appear.
-    if (!filled) { filled = true; fill(body); }
-    wrap.classList.toggle("open");
-  };
-  wrap.append(head, body);
-  return wrap;
-}
-
-function xpRow(into, label, value) {
-  const row = xpEl("div", "xp-row");
-  row.appendChild(xpEl("span", "xp-key", label));
-  row.appendChild(xpEl("span", "xp-val", value));
-  into.appendChild(row);
-}
-
-// A long body (reasoning, a page a tool read, the system prompt) folded to a
-// few lines with the rest one tap away. Not truncated — the whole point of the
-// record is that it is whole; only the first look is short.
-function xpLong(into, text, lines = 6) {
-  const all = String(text || "");
-  const pre = xpEl("pre", "xp-pre", all);
-  const split = all.split("\n");
-  if (split.length > lines || all.length > 600) {
-    pre.classList.add("xp-clamped");
-    const more = xpEl("button", "xp-more", `show all (${all.length} characters)`);
-    more.type = "button";
-    more.onclick = () => {
-      pre.classList.remove("xp-clamped");
-      more.remove();
-    };
-    into.append(pre, more);
-  } else {
-    into.appendChild(pre);
-  }
-}
-
-function xpGiven(doc, into) {
-  const given = doc.given;
-  if (!given.briefs.length) xpState(given.state, into);
-  for (const brief of given.briefs) {
-    const options = brief.options || {};
-    // A brief is written only when what the model was handed CHANGES, so most
-    // turns are shown the one still in force. That is a different fact from one
-    // written here, and collapsing them would let a reader conclude the tools
-    // changed at this turn when the record only says they had not changed since.
-    if (!brief.written_here) {
-      into.appendChild(xpEl("p", "xp-state",
-        `unchanged since turn ${brief.in_force_since} — this is what was still in force`));
-    }
-    xpRow(into, "model", `${options.model} · context ${options.num_ctx} · thinking ${options.think ? "on" : "off"}`);
-    if (options.system_role === "first_only") {
-      into.appendChild(xpEl("p", "xp-warn",
-        `on ${options.provider} the per-task reminder — which carries the rules in force — `
-        + "reached the model as one of your own messages, not as a system instruction"));
-    }
-    const sys = xpEl("div", "xp-sub");
-    sys.appendChild(xpEl("h4", null, "What it was told"));
-    if (xpState(brief.system.state, sys)) {
-      for (const part of brief.system.parts) {
-        const box = xpEl("div", "xp-part");
-        box.appendChild(xpEl("h5", null, `message ${part.at} · ${part.chars} characters`));
-        if (xpState(part.state, box)) xpLong(box, part.text);
-        sys.appendChild(box);
-      }
-    }
-    into.appendChild(sys);
-
-    const menu = xpEl("div", "xp-sub");
-    menu.appendChild(xpEl("h4", null, `Tools it could use (${brief.tools.count})`));
-    if (xpState(brief.tools.state, menu)) {
-      const search = xpEl("input", "xp-search");
-      search.type = "search";
-      search.placeholder = "Search tools";
-      const list = xpEl("div", "xp-tools");
-      const entries = brief.tools.entries || [];
-      const draw = (needle) => {
-        list.textContent = "";
-        for (const entry of entries) {
-          const fn = entry.function || {};
-          const name = String(fn.name || "");
-          const desc = String(fn.description || "");
-          if (needle && !(name + " " + desc).toLowerCase().includes(needle)) continue;
-          const item = xpEl("div", "xp-tool");
-          item.appendChild(xpEl("code", null, name));
-          item.appendChild(xpEl("p", null, desc));
-          list.appendChild(item);
-        }
-        if (!list.children.length) list.appendChild(xpEl("p", "xp-state", "no tool matches that"));
-      };
-      if (entries.length) {
-        search.oninput = () => draw(search.value.trim().toLowerCase());
-        draw("");
-        menu.append(search, list);
-      } else {
-        // Names without descriptions: the record has them, the bytes are gone.
-        menu.appendChild(xpEl("p", "xp-val", (brief.tools.names || []).join(", ")));
-      }
-    }
-    into.appendChild(menu);
-  }
-
-  for (const record of given.context.records || []) {
-    const preload = record.preload || {};
-    xpRow(into, "knowledge",
-      `${((record.index || {}).items || []).length} offered, ${preload.count || 0} injected`
-      + (preload.names && preload.names.length ? ` — ${preload.names.join(", ")}` : ""));
-  }
-  const rules = given.rules || {};
-  const bound = ((rules.groups || {}).bind) || [];
-  const abstained = ((rules.groups || {}).abstain) || [];
-  if (rules.state === "recorded") {
-    xpRow(into, "rules", `${bound.length} in force, ${abstained.length} evaluated and not applied`);
-    for (const row of bound) {
-      const item = xpEl("div", "xp-part");
-      item.appendChild(xpEl("h5", null, String(row.rule || "")));
-      for (const ob of (row.binding || {}).obligations || []) {
-        item.appendChild(xpEl("pre", "xp-pre", JSON.stringify(ob)));
-      }
-      into.appendChild(item);
-    }
-  }
-  for (const note of doc.steering || []) {
-    xpRow(into, "you typed", note.text);
-  }
-}
-
 // How the round grouping was arrived at. `recorded` needs no words; the other
-// two do, because a reader must never be shown an inference wearing a record's
-// clothes.
-const XP_GROUPING_WORDS = {
+// two do.
+const SS_GROUPING_WORDS = {
   inferred: "round order inferred from the order the log was written — this log predates the by-id record",
-  none: "this backend's loop records no model calls, so this turn cannot be shown as rounds",
+  none: "this backend's loop records no model calls, so calls are listed without a round",
+};
+const SS_PLACEMENT_WORDS = {
+  inferred: "attached to its model call by the order the log was written, not by a recorded id",
+  none: "no recorded model call issued this call",
+};
+// Where a tool call's model-facing text was read from (explain.SHOWN_*). The
+// two message joins are inferences and say so; a wrong text presented as
+// "what the model saw" is the exact lie the inspector exists to prevent.
+const SS_SHOWN_WORDS = {
+  step_output: "from the tool step's own output field — a preview the recorder capped; the whole output is not recorded yet",
+  step_error: "from the tool step's own error field",
+  message_by_order: "from the tool-role message record, matched to this call by tool name and order within its model call — the message carries no call id",
+  message_by_name: "from the tool-role message record, matched by tool name as the only call of that tool in its model call — the message carries no call id",
+  not_matched: "not matched — the record has no text that can be joined to this call (the message carries no call id)",
+};
+// The states of one blob of the exact request (explain._sent): what the store
+// can say about the bytes a provider message, the tool menu or the hoisted
+// system text were. "evicted" carries the date from `doc.sent.evicted_on`.
+const SS_BLOB_WORDS = {
+  recorded: "recorded",
+  empty: "recorded, and there was none",
+  not_recorded: "not recorded — the aish that wrote this log did not keep it",
+  evicted: "evicted — the bytes of this chat's evidence were dropped",
+  purged: "recorded, then deleted",
+  never_stored: "never stored",
+};
+// What a fetch of one blob came back as (ssEvidence).
+const SS_FETCH_WORDS = {
+  evicted: "the bytes are gone: this chat's evidence was evicted",
+  purged: "the bytes are gone: recorded, then deleted",
+  error: "the bytes could not be read — the server did not answer, or this device is offline",
+};
+const SS_PANE_LABELS = {
+  context: "Context", response: "Response", call: "Call", result: "Result", page: "Page", event: "Event",
 };
 
-// The turn in the order it happened. Sectioning by record kind could not answer
-// "what did it think after it got that result", which is the question people
-// open a dossier to ask — so the thought, the calls it issued and the results
-// they returned sit together, round by round.
-//
-// The SKELETON is open and the bodies are folded: the skeleton IS the flow, and
-// if reading it costs a tap per round the reorganisation bought nothing.
-function xpFlow(doc, into) {
-  const flow = doc.flow || { grouping: "none", rounds: [], unplaced: [], loose: [] };
-  // Whether the reasoning is here at all — said once, at the top, rather than
-  // once per round. A log written before the full record kept only a rendered
-  // fragment, and a snippet shown as "the reasoning" is how someone concludes
-  // the model barely thought about it.
-  if (doc.thought.state === "fragments") {
-    xpState("fragments", into);
-    for (const gist of doc.thought.fragments || []) into.appendChild(xpEl("pre", "xp-pre", gist));
-  } else if (doc.thought.state !== "recorded") {
-    xpState(doc.thought.state, into);
-  }
-  const word = XP_GROUPING_WORDS[flow.grouping];
-  if (word) into.appendChild(xpEl("p", "xp-state", word));
-  const thoughts = new Map((doc.thought.calls || []).map((t) => [t.model_call, t]));
-  const calls = new Map((doc.did.calls || []).map((c) => [c.call, c]));
-
-  for (const round of flow.rounds) {
-    for (const event of round.before || []) xpEvent(event, true, into);
-    const box = xpEl("div", "xp-round");
-    const thought = thoughts.get(round.thought);
-    let head = `Round ${round.model_call}`;
-    if (thought && thought.tokens && thought.tokens.length) {
-      head += ` · ${thought.tokens[0]} in, ${thought.tokens[1]} out`;
-    }
-    if (thought && thought.stop && thought.stop !== "stop") head += ` · ${thought.stop}`;
-    box.appendChild(xpEl("h5", null, head));
-    if (!thought) {
-      box.appendChild(xpEl("p", "xp-state", "no response was recorded for this call"));
-    } else {
-      if (thought.synthesized) {
-        box.appendChild(xpEl("p", "xp-warn",
-          "the text below is aish's own sentence, not the model's"));
-      }
-      if (thought.text) xpLong(box, thought.text, 6);
-      else box.appendChild(xpEl("p", "xp-state", "this call recorded no thinking"));
-      if (thought.truncated) {
-        box.appendChild(xpEl("p", "xp-warn",
-          `${thought.truncated} characters were cut from this record by ${thought.cap_source || "a cap"}`));
-      }
-      if (thought.said) {
-        box.appendChild(xpEl("h6", null, "said alongside the call"));
-        xpLong(box, thought.said, 4);
-      }
-      if (thought.malformed && thought.malformed.length) {
-        box.appendChild(xpEl("p", "xp-warn",
-          "arguments did not parse for: " + thought.malformed.join(", ")));
-      }
-    }
-    for (const number of round.calls || []) {
-      const call = calls.get(number);
-      if (call) box.appendChild(xpCall(call));
-    }
-    if (thought && !(round.calls || []).length) {
-      box.appendChild(xpEl("p", "xp-state", "no tool calls ran under this one"));
-    }
-    box.dataset.round = String(round.model_call);
-    into.appendChild(box);
-  }
-
-  if ((flow.unplaced || []).length) {
-    into.appendChild(xpEl("h5", null, "calls that name no model call"));
-    for (const number of flow.unplaced) {
-      const call = calls.get(number);
-      if (call) into.appendChild(xpCall(call));
-    }
-  }
-  for (const event of flow.loose || []) xpEvent(event, false, into);
-  if (!flow.rounds.length && !(flow.unplaced || []).length) {
-    into.appendChild(xpEl("p", "xp-state", "nothing was recorded for this turn"));
-  }
+function ssEl(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
 }
 
-// Something that happened BETWEEN two thoughts — the "what changed while it was
-// running" facts a kind-sliced dossier hid. `placed` is false when no round
-// could be named: the event still shows, without a claim about when.
-function xpEvent(event, placed, into) {
-  const when = placed ? "before this call" : "at some point in this turn";
-  if (event.kind === "trim") {
-    const record = event.record || {};
-    const stubbed = (record.stubbed || []).map((s) => `${s.tool} (#${s.at})`).join(", ");
-    into.appendChild(xpEl("p", "xp-event",
-      `⚠ ${when}, ${record.affected} earlier result(s) were replaced with a stub for the model`
-      + (stubbed ? `: ${stubbed}` : " — which ones was not recorded")));
-  } else if (event.kind === "steering") {
-    into.appendChild(xpEl("p", "xp-event", `⚠ you typed ${when}: ${event.text}`));
-  } else if (event.kind === "brief_changed") {
-    into.appendChild(xpEl("p", "xp-event", `⚠ ${when}, what the model was handed changed`));
-  }
+// A step's wall-clock duration, human-sized: sub-second in ms, under a minute
+// in seconds, longer as m ss. Only steps that took real time (model calls,
+// tool calls) carry `secs`; an event has none and the header shows just N of M.
+function ssDur(secs) {
+  const v = Number(secs);
+  if (!Number.isFinite(v) || v < 0) return "";
+  if (v < 1) return `${Math.round(v * 1000)}ms`;
+  if (v < 60) return `${v.toFixed(1)}s`;
+  const m = Math.floor(v / 60);
+  return `${m}m${String(Math.round(v - m * 60)).padStart(2, "0")}s`;
 }
 
-function xpCall(call) {
-  const box = xpEl("div", "xp-call");
-  box.dataset.call = String(call.call);
-  const head = xpEl("h6", null, `→ ${call.name}`);
-  if (!call.completed) head.appendChild(xpEl("span", "xp-bad", " never completed"));
-  else if (!call.ok) head.appendChild(xpEl("span", "xp-bad", ` failed (${call.status})`));
-  else if (call.summary) head.appendChild(xpEl("span", "xp-dim", ` ${call.summary}`));
-  box.appendChild(head);
-  if (call.args_state === "recorded") xpLong(box, JSON.stringify(call.args, null, 1), 4);
-  else xpState("not_recorded", box);
-  if (call.args_truncated) {
-    box.appendChild(xpEl("p", "xp-warn",
-      `${call.args_truncated} characters of these arguments were cut from the record`));
+// The same icon the chat trace uses for this kind of step, so a tool, a model
+// call, an error and the rest read at a glance. traceSvg returns aish's own
+// fixed SVG (no content), so setting it as innerHTML is safe.
+function ssStepIcon(doc, step) {
+  if (typeof traceSvg !== "function") return "";
+  if (step.kind === "model_call") return traceSvg("thinking", "var(--purple)");
+  if (step.kind === "tool_call") {
+    const c = ssCallOf(doc, step);
+    const meta = (typeof TOOL_META === "object" && TOOL_META[step.name]) || [step.name, "dot", "--dim"];
+    const failed = c && (c.ok === false || (c.status && c.status !== "ok" && c.status !== "incomplete"));
+    const name = failed ? "denied" : (step.name === "run_command" ? "command" : meta[1]);
+    return traceSvg(name, failed ? "var(--red)" : `var(${meta[2]})`);
   }
-  for (const gate of call.refused || []) {
-    box.appendChild(xpEl("p", "xp-warn",
-      `refused by ${gate.rule || gate.at}${gate.why ? ` — ${gate.why}` : ""}`));
-  }
-  if (call.error) box.appendChild(xpEl("p", "xp-bad", call.error));
-  if (call.output) {
-    box.appendChild(xpEl("h6", null, "what came back"));
-    xpLong(box, call.output, 6);
-  }
-  return box;
+  if (step.kind === "steering") return traceSvg("chat", "var(--blue)");
+  if (step.kind === "model_error") return traceSvg("denied", "var(--red)");
+  return traceSvg("dot", "var(--dim)"); // trim, retry, brief_changed
 }
 
-function xpFlowSummary(doc) {
-  const flow = doc.flow || { rounds: [], unplaced: [] };
-  const rounds = flow.rounds.length;
-  const calls = (doc.did.calls || []).length;
-  if (!rounds && !calls) return "not recorded";
-  const bad = (doc.did.calls || []).filter((c) => !c.ok || !c.completed).length;
-  return `${rounds} round${rounds === 1 ? "" : "s"} · ${calls} call${calls === 1 ? "" : "s"}`
-    + (bad ? ` · ${bad} failed` : "");
+function ssN(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "?";
+  return String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
-function xpProduced(doc, into) {
-  const produced = doc.produced;
-  if (produced.answer) xpLong(into, produced.answer, 10);
-  else into.appendChild(xpEl("p", "xp-state", "no answer was recorded for this turn"));
-  const verify = produced.verify || {};
-  for (const gate of verify.stopped || []) {
-    into.appendChild(xpEl("p", "xp-warn", `held by ${gate.rule || "a check"}`));
-  }
-  for (const gate of verify.advised || []) {
-    into.appendChild(xpEl("p", "xp-val", `delivered with a note from ${gate.rule || "a check"}`));
-  }
-  if (verify.passed) into.appendChild(xpEl("p", "xp-state", `${verify.passed} check(s) passed`));
-  if (produced.status && produced.status !== "ok") {
-    into.appendChild(xpEl("p", "xp-bad", `the task ended ${produced.status}: ${produced.error}`));
-  }
+function ssJson(value) {
+  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
-// Facts about this turn worth reading first — computed in Python over the same
-// document, so this is a renderer and never a second opinion. Rows state what
-// happened and where it came from; none of them says WHY.
-function xpNotes(doc, into) {
-  const notes = doc.notes || { rows: [], checks: [] };
-  const box = xpEl("section", "xp-notes");
-  box.appendChild(xpEl("h4", null, "Worth a look"));
-  if (!notes.rows.length) {
-    // NOT "nothing unusual": a checker knows only the classes someone coded,
-    // so on the one turn whose cause is an uncoded class that sentence would
-    // state the opposite of the truth, above the evidence.
-    box.appendChild(xpEl("p", "xp-state",
-      `nothing flagged by the ${notes.checks.length} checks this reader runs`));
-  }
-  for (const row of notes.rows) {
-    const item = xpEl("button", "xp-note", row.text);
-    item.type = "button";
-    item.onclick = () => xpJump(row.where);
-    box.appendChild(item);
-  }
-  into.appendChild(box);
-}
+// ---- the record, fetched ------------------------------------------------
 
-// Put `el` at the top of the panel's own scroller.
-//
-// NOT scrollIntoView. That scrolls every scrollable ancestor — including the
-// transcript behind the sheet — and its smooth behaviour turns a long jump into
-// an animation that races whatever the reader does next; measured, a jump of
-// 8000px had not arrived a second and a half later, which reads as a dead
-// control. Setting scrollTop on the one scroller that owns this content is
-// deterministic and instant, which is what navigating inside a panel should be.
-function xpScrollTo(el) {
-  const body = $("xp-body");
-  if (!body || !el) return;
-  // offsetTop accumulation, NOT getBoundingClientRect. A rect is measured
-  // against the viewport, so turning it into a content offset needs
-  // `+ scrollTop` — and that term makes the answer depend on the layout being
-  // settled at the instant of measurement. Measured on a real turn: a round
-  // whose true offset was 10812 read as 361 while the section that had just
-  // been filled was still being laid out, so the panel scrolled 355px and the
-  // reader landed in the middle of the wrong section. offsetTop is
-  // scroll-independent, so there is no term to be stale.
-  let top = 0;
-  for (let node = el; node && node !== body; node = node.offsetParent) top += node.offsetTop;
-  body.scrollTop = Math.max(0, top - 6);
-}
-
-// A note is a shortcut INTO the evidence, so it opens the section AND lands on
-// the exact round or call it was computed from. Landing at the top of a long
-// stream makes the citation decorative.
-function xpJump(where) {
-  where = where || {};
-  const target = document.querySelector(`.xp-sec[data-sec="${where.section}"]`);
-  if (!target) return;
-  if (!target.classList.contains("open")) target.querySelector(".xp-sechead").click();
-  let inner = null;
-  if (where.call !== undefined) {
-    inner = target.querySelector(`.xp-call[data-call="${where.call}"]`);
-  } else if (where.model_call !== undefined) {
-    inner = target.querySelector(`.xp-round[data-round="${where.model_call}"]`);
-  }
-  const landing = inner || target;
-  xpScrollTo(landing);
-  // …and again once the browser has laid the new section out. Filling a section
-  // adds thousands of pixels above the landing spot, and the first pass can
-  // measure before that settles; a second pass on the next frame is cheap and
-  // makes the jump land whether or not it did.
-  requestAnimationFrame(() => xpScrollTo(landing));
-}
-
-function xpRender(doc) {
-  const body = $("xp-body");
-  body.textContent = "";
-  $("xp-title").textContent = "Full record";
-
-  const head = xpEl("header", "xp-head");
-  head.appendChild(xpEl("p", "xp-prompt", doc.prompt || "(no prompt recorded)"));
-  const options = ((doc.given.briefs[0] || {}).options) || {};
-  const bits = [options.model, doc.ts].filter(Boolean);
-  head.appendChild(xpEl("p", "xp-meta", bits.join(" · ")));
-  if (doc.running) {
-    head.appendChild(xpEl("p", "xp-warn",
-      "this turn is still running — showing what has been recorded so far"));
-  }
-  body.appendChild(head);
-
-  xpNotes(doc, body);
-
-  // Three parts, in the shape a turn actually has. Sectioning by record kind is
-  // how a FILE is organised, and it left the reader unable to tell which
-  // thinking followed which result.
-  const sections = [
-    ["given", "Before it started", xpGivenSummary(doc), (into) => xpGiven(doc, into)],
-    ["flow", "What happened", xpFlowSummary(doc), (into) => xpFlow(doc, into)],
-    ["produced", "What it answered", xpProducedSummary(doc), (into) => xpProduced(doc, into)],
-  ];
-  for (const [key, title, summary, fill] of sections) {
-    const section = xpSection(title, summary, fill);
-    section.dataset.sec = key;
-    body.appendChild(section);
-  }
-}
-
-function xpGivenSummary(doc) {
-  const brief = doc.given.briefs[0];
-  if (!brief) return "not recorded";
-  const rules = ((doc.given.rules || {}).groups || {}).bind || [];
-  return `${brief.tools.count} tools · ${rules.length} rules`;
-}
-
-function xpProducedSummary(doc) {
-  const produced = doc.produced;
-  if (produced.status && produced.status !== "ok") return `ended ${produced.status}`;
-  const held = (produced.verify || {}).stopped || [];
-  return held.length ? `${held.length} check(s) held it` : "answered";
-}
-
-// [EXPLAIN-OPEN-START]
-// The one entry point. `ref` is the #202 string turn id, or empty for the
-// session's LAST turn — never a client-counted ordinal, because the first paint
-// is bounded and a browser's fourth turn is not the log's fourth on a long chat
-// ([FORK-ANCHOR]'s lesson: an id cannot be counted wrong).
-async function openExplain(ref) {
-  if (!currentSession) return;
-  if (xpAbort) xpAbort.abort();
-  xpAbort = new AbortController();
-  openSheet("explain-sheet");
-  const body = $("xp-body");
-  body.textContent = "";
-  $("xp-title").textContent = "Full record";
-  body.appendChild(xpEl("p", "xp-state", "reading the record…"));
+function dossierUrl(ref) {
   const url = new URL(BASE + "explain", location.href);
   url.searchParams.set("session", currentSession);
   if (ref) url.searchParams.set("turn", ref);
   if (token) url.searchParams.set("token", token);
+  return url.toString();
+}
+
+// Resolves to the document, or rejects with an Error whose message is the
+// sentence to put on screen (L7: a screen that cannot show the truth says so).
+// Offline is the ordinary case — the transcript paints from the mirror while
+// /explain cannot be served — and it is named as such rather than as a failure.
+async function fetchDossier(ref, signal) {
+  if (!currentSession) throw new Error("no chat is open");
+  if (offlineViewing) {
+    throw new Error("the server is needed to read this turn's record — this chat was painted from the offline copy");
+  }
+  let response;
   try {
-    const response = await fetch(url.toString(), { cache: "no-store", signal: xpAbort.signal });
-    if (!response.ok) {
-      // A screen that cannot show the truth SAYS so (L7) rather than leaving
-      // the spinner up. Offline is the common case here: the transcript paints
-      // from the mirror, so the door is visible when the fetch cannot work.
-      body.textContent = "";
-      body.appendChild(xpEl("p", "xp-state",
-        response.status === 404
-          ? "there is no record of that turn in this chat's log"
-          : `the record could not be read (${response.status})`));
-      return;
-    }
-    xpRender(await response.json());
+    response = await fetch(dossierUrl(ref), { cache: "no-store", signal });
   } catch (err) {
-    if (err && err.name === "AbortError") return;
-    body.textContent = "";
-    body.appendChild(xpEl("p", "xp-state",
-      "the record could not be read — this device may be offline"));
+    if (err && err.name === "AbortError") throw err;
+    throw new Error("the record could not be read — this device may be offline");
+  }
+  if (!response.ok) {
+    throw new Error(response.status === 404
+      ? "there is no record of that turn in this chat's log"
+      : `the record could not be read (${response.status})`);
+  }
+  return response.json();
+}
+
+// One blob of the exact request by digest (#352 slice 2). Never throws: the
+// answer is a STATE the pane says in words — recorded (the bytes), evicted
+// (410, the chat's evidence was dropped), purged (404, redacted or never
+// written) or error (no answer at all) — because a blank where a message was
+// is what lets someone read "it was told nothing" off a fetch that failed.
+async function ssEvidence(session, digest, sig) {
+  try {
+    const url = new URL(BASE + "evidence/" + encodeURIComponent(session) + "/" + digest, location.href);
+    url.searchParams.set("sig", sig || "");
+    if (token) url.searchParams.set("token", token);
+    const response = await fetch(url.toString(), { cache: "no-store" });
+    if (response.status === 200) return { state: "recorded", text: await response.text() };
+    if (response.status === 410) return { state: "evicted", text: "" };
+    if (response.status === 404) return { state: "purged", text: "" };
+    return { state: "error", text: "" };
+  } catch (_err) {
+    return { state: "error", text: "" };
   }
 }
-// [EXPLAIN-OPEN-END]
-// [EXPLAIN-END]
+
+// ---- lookups by reference ------------------------------------------------
+
+// An event step carries no `ref` at all, and every lookup tolerates that.
+function ssThought(doc, step) {
+  const ref = step.ref || {};
+  return (doc.thought.calls || []).find((t) => t.model_call === ref.thought) || null;
+}
+function ssCallOf(doc, step) {
+  const ref = step.ref || {};
+  return (doc.did.calls || []).find((c) => c.call === ref.call) || null;
+}
+function ssCostOf(doc, step) {
+  const ref = step.ref || {};
+  return ((doc.context_cost || {}).calls || []).find((c) => c.model_call === ref.cost) || null;
+}
+function ssMessage(doc, index) {
+  return index === null || index === undefined ? null : (doc.messages || [])[index] || null;
+}
+function ssMsgHead(m) {
+  return `── message #${m.at} · ${m.role}${m.tool_name ? "/" + m.tool_name : ""} · ${ssN(m.chars)} chars`
+    + (m.model_call === null ? " · no model-call stamp" : "")
+    + (m.interim ? " · interim" : "")
+    + (m.images ? ` · ${m.images} image(s)` : "");
+}
+// The exact request of this model call, where the `sent` record has it; and
+// the one sent before it in this turn, for the delta.
+function ssSentCall(doc, step) {
+  const ref = step.ref || {};
+  if (ref.sent === null || ref.sent === undefined) return null;
+  return ((doc.sent || {}).calls || []).find((c) => c.model_call === ref.sent) || null;
+}
+function ssSentPrev(doc, call) {
+  const earlier = ((doc.sent || {}).calls || []).filter((c) => c.model_call < call.model_call);
+  return earlier.length ? earlier[earlier.length - 1] : null;
+}
+// The complete response of this model call (#355), read whole from the store.
+function ssReceivedCall(doc, step) {
+  const ref = step.ref || {};
+  if (ref.received === null || ref.received === undefined) return null;
+  return ((doc.received || {}).calls || []).find((c) => c.model_call === ref.received) || null;
+}
+function ssIssued(doc, step) {
+  return (doc.steps || []).filter((s) => s.kind === "tool_call" && s.model_call === step.model_call);
+}
+
+// ---- pane segments: model call ---------------------------------------------
+// A tiny builder for the segment list every pane is made of. `meta` is aish's
+// own account (structure), `text` is the exchange's bytes verbatim, `rec` is a
+// raw record. Nothing here decides how a segment LOOKS — ssPaintBody does.
+function ssSegs() {
+  const segs = [];
+  return {
+    segs,
+    meta(...lines) { segs.push({ kind: "meta", text: lines.join("\n") }); },
+    // PAYLOAD: verbatim bytes the model was sent or produced. Never reformat.
+    text(t, lang) { segs.push({ kind: "text", lang: lang || "", text: t === undefined || t === null ? "" : String(t) }); },
+    // A raw record (aish's structured account), pretty-printed JSON.
+    rec(v) { segs.push({ kind: "record", lang: "json", text: ssJson(v) }); },
+    // Verbatim external bytes the model did NOT receive — evidence. Shown as-is
+    // but tinted like a record, so it never reads as the model's own input.
+    raw(t) { segs.push({ kind: "record", text: t === undefined || t === null ? "" : String(t) }); },
+    // PAYLOAD that is not here yet: one blob of the exact request, fetched by
+    // digest when the pane is painted (ssPaintBody). Until it lands the
+    // segment is META saying so — a placeholder never wears payload styling,
+    // because payload styling means "the model received this" — and it turns
+    // into a `text` segment only with the bytes themselves. A fetch that comes
+    // back without them stays meta, in the state's words.
+    blob(digest, sig) { segs.push({ kind: "meta", text: "loading the exact bytes…", blob: { digest, sig } }); },
+  };
+}
+
+function ssBriefSegs(doc, step, b) {
+  const brief = (doc.given.briefs || [])[step.ref.brief];
+  if (!brief) {
+    b.meta(`THE BRIEF — ${SS_STATE_WORDS[doc.given.state] || "not recorded"}`);
+    return;
+  }
+  const options = brief.options || {};
+  const head = ["THE BRIEF — what the model was handed"
+    + (brief.written_here ? "" : ` (unchanged since turn ${brief.in_force_since} — this is what was still in force)`)];
+  head.push(`model ${options.model || "?"} on ${options.provider || "?"} · context ${options.num_ctx || "?"}`
+    + (options.window ? ` · window ${ssN(options.window)} (${options.window_source || "recorded"})` : "")
+    + ` · thinking ${options.think ? "on" : "off"}`);
+  if (options.system_role === "first_only") {
+    head.push(`on ${options.provider} the per-task reminder — which carries the rules in force — reached the model as one of your own messages, not as a system instruction`);
+  }
+  b.meta(...head);
+  const system = brief.system || { state: "not_recorded", parts: [] };
+  b.meta("SYSTEM TEXT" + (system.state !== "recorded" ? ` — ${SS_STATE_WORDS[system.state] || system.state}` : ""));
+  for (const part of system.parts || []) {
+    b.meta(`── system message ${part.at} · ${ssN(part.chars)} chars`);
+    if (part.state === "recorded") b.text(part.text || "", "markdown");
+    else b.meta(SS_STATE_WORDS[part.state] || part.state);
+  }
+  // The tool MENU is sent to the model (the `tools=` request field — it is why
+  // the model can call anything, and it counts toward the input tokens), so
+  // the definitions are PAYLOAD. They go as STRUCTURED JSON, so they are shown
+  // as that structure VERBATIM — never flattened to a bullet summary, which
+  // would invent structure the model never saw and hide the parameters it did.
+  // Only the count line and any state note are aish's account (meta).
+  const tools = brief.tools || {};
+  b.meta(`TOOLS ON THE MENU — ${tools.count === undefined ? "?" : tools.count}`
+    + (tools.state !== "recorded" ? ` — ${SS_STATE_WORDS[tools.state] || tools.state}` : ""));
+  if (tools.entries && tools.entries.length) {
+    b.text(ssJson(tools.entries), "json");
+  } else if (tools.names && tools.names.length) {
+    b.meta("names only — the menu's bytes are gone: " + tools.names.join(", "));
+  }
+  const rules = doc.given.rules || {};
+  const bound = ((rules.groups || {}).bind) || [];
+  if (rules.state === "recorded") {
+    const rows = [`RULES BOUND — ${bound.length}`];
+    for (const row of bound) rows.push(`· ${row.rule}: ${ssJson((row.binding || {}).obligations || [])}`);
+    b.meta(...rows);
+  }
+  for (const record of doc.given.context.records || []) {
+    const preload = record.preload || {};
+    b.meta(`KNOWLEDGE — ${((record.index || {}).items || []).length} offered, ${preload.count || 0} injected`
+      + (preload.names && preload.names.length ? `: ${preload.names.join(", ")}` : ""));
+  }
+  for (const trim of doc.given.trims || []) {
+    b.meta(`SEED TRIM — ${trim.affected} earlier result(s) were stubbed before the model was called at all`
+      + (trim.stubbed ? `: ${trim.stubbed.map((x) => `${x.tool} (#${x.at})`).join(", ")}` : "; which ones was not recorded"));
+  }
+}
+
+function ssCostMeta(doc, step) {
+  const cost = ssCostOf(doc, step);
+  const lines = [];
+  if (!cost) {
+    if ((doc.context_cost || {}).state === "not_recorded") {
+      lines.push("what filled this call is not recorded — the messages carry no model-call stamp");
+    }
+    return lines;
+  }
+  const by = cost.by_where || {};
+  const side = (key) => by[key] ? `${ssN(by[key].chars)} chars in ${by[key].items}` : "0";
+  lines.push(`measured: ${ssN(cost.accounted_chars)} chars in front of this call`
+    + ` (${cost.added_chars >= 0 ? "+" : ""}${ssN(cost.added_chars)} since the previous)`);
+  lines.push(`  carried from earlier turns ${side("carried")} · this turn ${side("turn")}`
+    + ` · system text ${side("system")} · tool menu ${side("tools")}`);
+  const reported = cost.reported || {};
+  const keys = Object.keys(reported);
+  if (keys.length) {
+    lines.push(`reported by the provider: ${keys.map((k) => `${ssN(reported[k])} ${k}`).join(" · ")}`
+      + (cost.chars_per_token ? ` · ${cost.chars_per_token} chars per input token` : ""));
+  } else {
+    lines.push("tokens: not reported by the provider for this call");
+  }
+  if (cost.unmeasured && cost.unmeasured.length) lines.push(`unmeasured: ${cost.unmeasured.join("; ")}`);
+  return lines;
+}
+
+function ssContextSegs(doc, step, whole) {
+  const ctx = step.context || { new: [], in_front: [], unstamped: 0, stubbed: [] };
+  const k = step.model_call;
+  if (ctx.source === "sent") {
+    const call = ssSentCall(doc, step);
+    if (call) return ssSentSegs(doc, step, call, whole);
+  }
+  const b = ssSegs();
+  const head = [];
+  if (whole) head.push(`THE WHOLE CONTEXT OF MODEL CALL ${k}`);
+  else head.push(k > 1 ? `WHAT CHANGED SINCE MODEL CALL ${k - 1}` : "WHAT MODEL CALL 1 STARTED FROM");
+  // Whatever the step says its source is, what THIS builder draws is the
+  // reconstruction, and it is labelled as one. A step that claims an exact
+  // request the document does not carry says that too, rather than wearing
+  // the exact request's label over reconstructed contents.
+  head.push("reconstructed from the message records and the brief — not the request as it left aish"
+    + (ctx.source === "sent"
+      ? "; the record says the exact request of this call exists, but this document does not carry it"
+      : ", which is not recorded for this call"));
+  if (step.numbering === "inferred") head.push("this call's number is inferred from the order the log was written");
+  head.push(...ssCostMeta(doc, step));
+  b.meta(...head);
+  if (!whole) {
+    if (ctx.brief_changed) b.meta("what the model was handed CHANGED at this call — the brief is in the whole context");
+    if (ctx.stubbed.length) {
+      b.meta(`stubbed before this call: ${ctx.stubbed.map((x) => `${x.tool} (#${x.at})`).join(", ")}`
+        + " — results the model had already read were replaced with a stub");
+    }
+    b.meta(`NEW TO THIS CALL — ${ctx.new.length} message(s)`
+      + (!ctx.new.length ? (k > 1 ? " · no message record is new to this call" : " · no message record precedes this call") : ""));
+    for (const index of ctx.new) {
+      const m = ssMessage(doc, index);
+      if (!m) continue;
+      b.meta(ssMsgHead(m));
+      if (m.text) b.text(m.text, "auto");
+      else b.meta("(this message had no text content)");
+    }
+    if (ctx.unstamped) {
+      b.meta(`${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
+    }
+    const older = ctx.in_front.length - ctx.new.length;
+    b.meta(`${ctx.in_front.length} message(s) of this turn were in front of this call`
+      + (older > 0 ? ` — ${older} from earlier calls; the whole context is one tap away` : "")
+      + (ctx.in_front.length === 0 && k > 1 ? " — none placed" : ""));
+  } else {
+    ssBriefSegs(doc, step, b);
+    const cost = ssCostOf(doc, step);
+    const carried = cost && cost.by_where && cost.by_where.carried;
+    b.meta("MESSAGES FROM EARLIER TURNS", carried
+      ? `${carried.items} message(s), ${ssN(carried.chars)} chars, carried from earlier turns of this chat are in front of this call and are not in this document — open those turns to read them`
+      : "how much earlier history was in front of this call is not recorded");
+    b.meta(`MESSAGES OF THIS TURN IN FRONT OF THIS CALL — ${ctx.in_front.length}`);
+    for (const index of ctx.in_front) {
+      const m = ssMessage(doc, index);
+      if (!m) continue;
+      b.meta(ssMsgHead(m) + (ctx.new.includes(index) ? " · new to this call" : ""));
+      if (m.text) b.text(m.text, "auto");
+      else b.meta("(this message had no text content)");
+    }
+    if (ctx.unstamped) {
+      b.meta(`${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
+    }
+  }
+  return b.segs;
+}
+
+// ---- the exact request (#352 slice 2) ---------------------------------------
+// What the `sent` record has: the request AS IT LEFT AISH, message by message
+// in the provider's own roles, each read back by digest from the chat's
+// evidence store. Nothing here is reconstructed: the headers are the
+// manifest's own facts (role, tool, size, state), the bytes are the blob. Each
+// provider message is its OWN payload segment — the provider received them as
+// separate units, and joining them would invent a structure it never saw.
+
+function ssBlobWords(doc, state) {
+  if (state === "evicted" && (doc.sent || {}).evicted_on) return `evicted on ${doc.sent.evicted_on} — the bytes of this chat's evidence were dropped`;
+  return SS_BLOB_WORDS[state] || String(state || "?");
+}
+
+function ssSentMsgHead(doc, m) {
+  const who = m.role + (m.tool_name ? ` · ${m.tool_name}` : (m.tool_names && m.tool_names.length ? ` · ${m.tool_names.join(", ")}` : ""));
+  let head = `── message ${m.at} · ${who} · ${ssN(m.chars)} chars · ${ssBlobWords(doc, m.state)}`;
+  if (m._new) head += " · new to this request";
+  if (m.stub) head += " · a trimmer's STUB — the model got this stub here, not the result it replaced";
+  if (m.scrubbed) head += ` · ${m.scrubbed} secret(s) scrubbed from the stored copy — the bytes sent differ from the bytes below only there`;
+  if (Array.isArray(m.origin)) head += ` · merged from aish-side messages #${m.origin.join(", #")}`;
+  else if (m.origin !== undefined && m.origin !== null) head += ` · from aish-side message #${m.origin}`;
+  return head;
+}
+
+// One provider message: its header (meta), its bytes (payload, by digest) or
+// the words for why there are none, and any media it carried.
+function ssSentMessage(doc, b, m) {
+  b.meta(ssSentMsgHead(doc, m));
+  if (m.state === "recorded") b.blob(m.digest, m.sig);
+  else if (m.state === "empty") b.meta("this message had no bytes");
+  else b.meta(`no bytes to show — ${ssBlobWords(doc, m.state)}`);
+  for (const item of m.media || []) {
+    const name = String(item.path || "").split("/").pop() || String(item.path || "?");
+    b.meta(`carried ${name} (${ssN(item.bytes)} bytes) — never stored: a picture or document the request carried as base64; the bytes are not in the text store, and a placeholder stands where they were in the message above`);
+  }
+}
+
+function ssSentSegs(doc, step, call, whole) {
+  const k = step.model_call;
+  const b = ssSegs();
+  const prev = ssSentPrev(doc, call);
+  const head = [];
+  if (whole) head.push(`THE EXACT REQUEST OF MODEL CALL ${k}`);
+  else head.push(prev ? `WHAT CHANGED SINCE MODEL CALL ${prev.model_call} — the exact request delta` : `WHAT MODEL CALL ${k} SENT — the exact request`);
+  head.push("the request as it left aish, exact — read back by digest from the record of what the provider was handed, not reconstructed");
+  head.push(`${call.provider || "?"} · ${call.model || "?"} · ${call.messages.length} message(s) · ${ssN(call.chars)} chars · request digest ${String(call.request || "").slice(0, 12)}…`);
+  if (call.state === "evicted") head.push(ssBlobWords(doc, "evicted") + " — the manifest below is intact; the bytes are not");
+  else if (call.state === "purged") head.push("some of the bytes were recorded, then deleted — the manifest below is intact");
+  if (step.numbering === "inferred") head.push("this call's number is inferred from the order the log was written");
+  head.push(...ssCostMeta(doc, step));
+  b.meta(...head);
+  const before = new Set((prev ? prev.messages : []).map((m) => m.digest));
+  if (!whole) {
+    const fresh = call.messages.filter((m) => !before.has(m.digest));
+    const gone = prev ? prev.messages.filter((m) => !call.messages.some((c) => c.digest === m.digest)).length : 0;
+    if (prev) {
+      const menu = (call.tools || {}).digest === (prev.tools || {}).digest ? "the same tool menu" : "a CHANGED tool menu — it is in the whole context";
+      const sys = call.system || prev.system
+        ? (((call.system || {}).digest === (prev.system || {}).digest) ? " · the same system parameter" : " · a CHANGED system parameter — it is in the whole context")
+        : "";
+      b.meta(`${menu}${sys}`);
+      if (gone) b.meta(`${gone} message(s) of the previous request are not in this one byte for byte — whatever stands in their place is among the new ones below`);
+    } else {
+      b.meta("no earlier request of this turn is on record — every message of this one is new");
+    }
+    b.meta(`NEW TO THIS REQUEST — ${fresh.length} message(s), by digest against the previous request`
+      + (!fresh.length ? " · every message was sent byte for byte before" : ""));
+    for (const m of fresh) ssSentMessage(doc, b, m);
+    if (prev) b.meta(`${call.messages.length - fresh.length} message(s) of this request were sent before, unchanged; the whole request is one tap away`);
+  } else {
+    b.meta("REQUEST OPTIONS — the request's other top-level fields, as recorded");
+    b.rec(call.options || {});
+    const system = call.system;
+    if (system) {
+      b.meta(`SYSTEM PARAMETER — ${ssN(system.chars)} chars · ${ssBlobWords(doc, system.state)}`,
+        "this provider carries the system text as a top-level parameter of the request, hoisted out of the messages — it is what the model is instructed with"
+        + (Array.isArray(system.origin) && system.origin.length ? ` (hoisted from aish-side message${system.origin.length > 1 ? "s" : ""} #${system.origin.join(", #")})` : "")
+        + (system.scrubbed ? ` · ${system.scrubbed} secret(s) scrubbed from the stored copy` : ""));
+      if (system.state === "recorded") b.blob(system.digest, system.sig);
+      else b.meta(`no bytes to show — ${ssBlobWords(doc, system.state)}`);
+    }
+    const tools = call.tools || { state: "empty" };
+    if (tools.state === "empty") {
+      b.meta("TOOLS — none were sent with this request");
+    } else {
+      b.meta(`TOOLS SENT — ${tools.count === undefined ? "?" : tools.count} · ${ssN(tools.chars)} chars · ${ssBlobWords(doc, tools.state)}`
+        + (tools.scrubbed ? ` · ${tools.scrubbed} secret(s) scrubbed from the stored copy` : ""),
+      "the tool menu travels beside the messages (the `tools` field) and counts toward the input tokens; below is its JSON verbatim");
+      if (tools.state === "recorded") b.blob(tools.digest, tools.sig);
+      else b.meta(`no bytes to show — ${ssBlobWords(doc, tools.state)}`);
+    }
+    b.meta(`MESSAGES — ${call.messages.length}, in the order sent`
+      + (prev ? "; new against the previous request is marked" : ""));
+    for (const m of call.messages) ssSentMessage(doc, b, prev && !before.has(m.digest) ? { ...m, _new: true } : m);
+  }
+  return b.segs;
+}
+
+function ssResponseSegs(doc, step) {
+  const th = ssThought(doc, step);
+  const b = ssSegs();
+  if (th) {
+    b.meta("REASONING" + (th.synthesized ? " — the text below is aish's own sentence, not the model's" : ""));
+    if (th.text) b.text(th.text, "markdown");
+    else b.meta("this call recorded no thinking");
+    if (th.truncated) b.meta(`… ${ssN(th.truncated)} characters were cut from this record by ${th.cap_source || "a cap"}`);
+    b.meta("SAID");
+    if (th.said) b.text(th.said, "markdown");
+    else b.meta("nothing was said on this call");
+    if (th.said_truncated) b.meta(`… ${ssN(th.said_truncated)} characters were cut from this record`);
+    const tail = [];
+    if (th.stop) tail.push(`stop reason: ${th.stop}`);
+    if (th.blocks && th.blocks.length) tail.push(`provider blocks: ${th.blocks.join(", ")}`);
+    if (th.malformed && th.malformed.length) tail.push(`arguments did not parse for: ${th.malformed.join(", ")}`);
+    if (tail.length) b.meta(...tail);
+  } else if (step.fragment) {
+    b.meta(SS_STATE_WORDS.fragments);
+    b.text(step.fragment, "markdown");
+  } else {
+    b.meta(SS_STATE_WORDS[doc.thought.state] || "no response was recorded for this call");
+  }
+  const issued = ssIssued(doc, step);
+  b.meta(`TOOL CALLS ISSUED — ${issued.length}`);
+  for (const s of issued) {
+    const c = ssCallOf(doc, s);
+    b.meta(`→ ${s.name} (tool call ${s.call})`);
+    if (c && c.args_state === "recorded") b.text(ssJson(c.args), "json");
+    else b.meta(SS_STATE_WORDS.not_recorded);
+  }
+  // THE COMPLETE RESPONSE (#355): everything the model produced, stored
+  // whole at the seam — so a response content type nothing above parses is
+  // still here, verbatim. The reasoning / said / tool-calls above are AISH'S
+  // PARSE of it (the readable view); this is the source they were read from.
+  // Fetched by digest via /evidence, its state said in words when gone.
+  const received = ssReceivedCall(doc, step);
+  if (received) {
+    b.meta("THE COMPLETE RESPONSE — everything the model produced, verbatim"
+      + " (the reasoning, said and tool calls above are aish's parse of this)");
+    if (received.state === "recorded" && received.digest) b.blob(received.digest, received.sig);
+    else b.meta(ssBlobWords(doc, received.state));
+  }
+  if (step.is_last) {
+    const produced = doc.produced || {};
+    b.meta("WHAT IT ANSWERED");
+    if (produced.answer) b.text(produced.answer, "markdown");
+    else b.meta(SS_STATE_WORDS[produced.answer_state] || "no answer was recorded for this turn");
+    const verify = produced.verify || {};
+    const tail = [];
+    for (const gate of verify.stopped || []) tail.push(`held by ${gate.rule || "a check"}`);
+    for (const gate of verify.advised || []) tail.push(`delivered with a note from ${gate.rule || "a check"}`);
+    if (verify.passed) tail.push(`${verify.passed} check(s) passed`);
+    if (produced.status === null || produced.status === undefined) {
+      tail.push("no end was recorded for this task — it was interrupted, or it is still running");
+    } else if (produced.status !== "ok") {
+      tail.push(`the task ended ${produced.status}: ${produced.error || ""}`);
+    }
+    if (tail.length) b.meta(...tail);
+  }
+  return b.segs;
+}
+
+// ---- pane segments: tool call -----------------------------------------------
+
+function ssCallSegs(doc, step) {
+  const c = ssCallOf(doc, step);
+  const b = ssSegs();
+  if (!c) { b.meta("the record has no call for this step"); return b.segs; }
+  const head = [`${c.name}` + (c.completed ? "" : " — proposed, and no result was recorded")];
+  if (SS_PLACEMENT_WORDS[step.placement]) head.push(SS_PLACEMENT_WORDS[step.placement]);
+  b.meta(...head);
+  b.meta("ARGUMENTS — as the model emitted them");
+  if (c.args_state === "recorded") b.text(ssJson(c.args), "json");
+  else b.meta(SS_STATE_WORDS.not_recorded);
+  if (c.args_truncated) {
+    b.meta(`… ${ssN(c.args_truncated)} characters of these arguments were cut from the record by ${c.cap_source || "a cap"} (applied per argument value)`);
+  }
+  if (c.command) { b.meta("COMMAND AS RUN"); b.text(c.command, "plain"); }
+  const decision = ["DECISION",
+    c.decision ? `${c.decision}` : "no decision recorded on the step (auto-approved, or a tool with no gate)"];
+  if (c.verdict_by) decision.push(`verdict by: ${c.verdict_by}`);
+  if (c.comment) decision.push(`you said: ${c.comment}`);
+  if (c.replaces) decision.push(`proposed after the held call ${c.replaces}`);
+  b.meta(...decision);
+  const gates = c.gates || [];
+  const refused = c.refused || [];
+  const allowed = gates.length - refused.length;
+  b.meta(`GATE VERDICTS — ${gates.length}` + (allowed ? ` (${allowed} allowed, collapsed)` : "")
+    + (!gates.length ? " · no gate verdict was recorded for this call" : ""));
+  for (const gate of refused) b.rec(gate);
+  return b.segs;
+}
+
+function ssShownText(doc, step) {
+  const c = ssCallOf(doc, step);
+  if (!c) return "";
+  const how = step.ref.shown_how;
+  if (how === "step_output") return c.output || "";
+  if (how === "step_error") return c.error || "";
+  const m = ssMessage(doc, step.ref.shown);
+  return m ? m.text : "";
+}
+
+function ssResultSegs(doc, step) {
+  const c = ssCallOf(doc, step);
+  const b = ssSegs();
+  if (!c) { b.meta("the record has no call for this step"); return b.segs; }
+  const how = step.ref.shown_how;
+  b.meta("WHAT THE MODEL WAS GIVEN — " + (SS_SHOWN_WORDS[how] || how));
+  if (!c.completed) b.meta("the call never completed, so nothing came back");
+  else if (how !== "not_matched") {
+    const shown = ssShownText(doc, step);
+    if (shown) b.text(shown, "auto");
+    else b.meta("(the model was given an empty result)");
+  }
+  if (c.bytes !== null && c.bytes !== undefined) b.meta(`payload before any cut: ${ssN(c.bytes)} bytes`);
+  const cut = c.truncation || {};
+  const lines = ["TRUNCATION"];
+  if (!Object.keys(cut).length) lines.push("no truncation block was recorded for this call");
+  else {
+    lines.push(`cut by ${cut.truncator || "a cap"}: kept ${ssN(cut.kept)} chars, omitted ${ssN(cut.omitted)}`
+      + (cut.cap_source ? ` (${cut.cap_source})` : ""));
+    lines.push(cut.offered
+      ? `a continuation was offered (${cut.continuation || "?"})`
+      : "no continuation was offered — the rest could not be read back");
+    if (step.continuation_read === true) lines.push("the continuation was read back in this turn");
+    else if (step.continuation_read === false) lines.push("nothing read the continuation back in this turn");
+  }
+  if (c.read) lines.push(`this call read back the continuation ${c.read}`);
+  lines.push("NOT RECORDED YET",
+    "the whole output before any cut: not recorded (part 3 of #352)",
+    "the text exactly as it was sent to the model: not recorded (part 2 of #352) — the text above is the record's copy");
+  b.meta(...lines);
+  return b.segs;
+}
+
+function ssPageBefore(c) {
+  if (!c || !c.frame || c.frame_state !== "recorded") return null;
+  return framePicture(c.frame, "the page as aish read it");
+}
+
+function ssPageSegs(doc, step) {
+  const c = ssCallOf(doc, step);
+  const b = ssSegs();
+  if (!c) { b.meta("the record has no call for this step"); return b.segs; }
+  const lines = ["THE PICTURE"];
+  if (c.frame && c.frame_state === "recorded") lines.push(`the page at the moment the model was shown it: ${c.frame}`);
+  else if (c.frame) lines.push(`a picture was recorded at ${c.frame} and the store has since cleared it (purged)`);
+  else if (c.frame_skipped) lines.push((typeof FRAME_ABSENT === "object" && FRAME_ABSENT[c.frame_skipped]) || `no picture — ${c.frame_skipped}`);
+  else lines.push("no picture and no reason recorded — a log written before frames, or a tool with no page");
+  if (c.frame_url) {
+    lines.push(c.frame_from
+      ? `${c.frame_url} — aish was on ${c.frame_from} before this`
+      : `${c.frame_url} — the address did not change`);
+  }
+  if (c.covered && c.covered.by) {
+    lines.push(`a click could not land — the page had "${c.covered.by}" on top of the control`
+      + (c.covered.dismissed ? " — aish dismissed it and clicked again" : ""));
+  }
+  b.meta(...lines);
+  if (c.problem) { b.meta("AISH'S OWN OBSERVATION"); b.text(c.problem, "plain"); }
+  if (c.unchanged) b.meta("nothing on the page changed when aish did this");
+  b.meta("THE PAGE'S WORDS — what it wrote to its own console (not aish's)");
+  if (c.console && c.console.length) b.text(c.console.join("\n"), "plain");
+  else if (c.console) b.meta("the page wrote nothing");
+  else b.meta("not recorded for this call");
+  const signin = c.signin;
+  if (signin && signin.host) {
+    const rows = [`SIGN-IN ATTEMPT AT ${signin.host} — a page of its own, not the one above`];
+    rows.push(signin.ok === true ? "the session was seen to come up"
+      : signin.ok === false ? "the session was not seen to come up"
+        : "whether the session came up was not recorded");
+    if (signin.verdict_said) rows.push(`verdict: ${signin.verdict_said} (${signin.verdict})`);
+    else if (signin.ok === false) rows.push("no verdict was recorded for this attempt — either it ended before aish judged it, or this log predates the record");
+    for (const said of signin.observed_said || []) rows.push(`· ${said}`);
+    if (signin.frame) rows.push(`its picture: ${signin.frame}` + (signin.frame_state === "purged" ? " (purged)" : ""));
+    else if (signin.frame_skipped) rows.push((typeof FRAME_ABSENT === "object" && FRAME_ABSENT[signin.frame_skipped]) || `no picture — ${signin.frame_skipped}`);
+    if (signin.covered) rows.push(`a click could not land — the page had "${signin.covered}" on top of the control`);
+    b.meta(...rows);
+    if (signin.console && signin.console.length) {
+      b.meta("the sign-in page's words — its own console (recorded for you; the model was never given the sign-in page):");
+      b.raw(signin.console.join("\n"));
+    }
+  }
+  if (c.phases) { b.meta("WHERE THE SECONDS WENT (ms)"); b.rec(c.phases); }
+  return b.segs;
+}
+
+function ssEventSegs(doc, step) {
+  const b = ssSegs();
+  const facts = (step.facts || []).map((fact) => `${fact.k}: ${fact.v}`);
+  if (facts.length) b.meta(...facts);
+  if (step.kind === "steering") { b.meta("YOU TYPED"); b.text(step.text || "", "markdown"); }
+  else if (step.kind === "model_error") {
+    const record = step.record || {};
+    if (record.text) { b.meta("WHAT THE PROVIDER SAID"); b.text(record.text, "plain"); }
+    if (record.truncated) b.meta(`… ${ssN(record.truncated)} characters were cut by ${record.cap_source || "a cap"}`);
+    b.meta("THE RECORD");
+    b.rec(record);
+  } else if (step.kind === "trim") {
+    b.meta("THE RECORD");
+    b.rec(step.record || {});
+  } else if (step.kind === "retry") {
+    b.meta("its records are kept, superseded", "THE RECORD");
+    b.rec(step.record || {});
+  } else if (step.kind === "brief_changed") {
+    b.meta("the brief this call was handed is in that model call's whole context");
+  }
+  return b.segs;
+}
+
+// Every pane of a step, as a SEGMENT LIST. `before` is a node drawn ABOVE the
+// segments — the page's picture through the trace card's own `framePicture`,
+// so there is one answer to which pictures may load. `more` is the pane's
+// other reading, the whole context, one tap away.
+function ssPanes(doc, step) {
+  const out = [];
+  for (const name of step.panes || []) {
+    if (name === "context") {
+      out.push({ name, label: SS_PANE_LABELS[name], segs: ssContextSegs(doc, step, false),
+                 more: { label: "whole context", segs: ssContextSegs(doc, step, true) } });
+    } else if (name === "response") out.push({ name, label: SS_PANE_LABELS[name], segs: ssResponseSegs(doc, step) });
+    else if (name === "call") out.push({ name, label: SS_PANE_LABELS[name], segs: ssCallSegs(doc, step) });
+    else if (name === "result") out.push({ name, label: SS_PANE_LABELS[name], segs: ssResultSegs(doc, step) });
+    else if (name === "page") {
+      out.push({ name, label: SS_PANE_LABELS[name], segs: ssPageSegs(doc, step),
+                 before: ssPageBefore(ssCallOf(doc, step)) });
+    } else out.push({ name, label: SS_PANE_LABELS[name] || name, segs: ssEventSegs(doc, step) });
+  }
+  return out;
+}
+
+// One line per pane for the row's in-place summary: what is in it, and how big.
+function ssPaneBrief(doc, step, pane) {
+  if (pane === "context") {
+    const cost = ssCostOf(doc, step);
+    const ctx = step.context || { new: [] };
+    const sent = ctx.source === "sent" ? ssSentCall(doc, step) : null;
+    if (sent) {
+      const prev = ssSentPrev(doc, sent);
+      const before = new Set((prev ? prev.messages : []).map((m) => m.digest));
+      const fresh = sent.messages.filter((m) => !before.has(m.digest)).length;
+      return `exact request · ${sent.messages.length} message(s), ${ssN(sent.chars)} chars · ${fresh} new`;
+    }
+    return (cost ? `${ssN(cost.accounted_chars)} chars in front · ` : "")
+      + `${ctx.new.length} new message(s)`
+      + (ctx.stubbed && ctx.stubbed.length ? ` · ${ctx.stubbed.length} stubbed` : "");
+  }
+  if (pane === "response") {
+    const th = ssThought(doc, step);
+    const issued = ssIssued(doc, step).length;
+    if (!th) return (step.fragment ? "a fragment" : (SS_STATE_WORDS[doc.thought.state] || "not recorded"))
+      + ` · ${issued} tool call(s)`;
+    return `reasoning ${ssN((th.text || "").length)} chars · said ${ssN((th.said || "").length)} · ${issued} tool call(s)`;
+  }
+  const c = ssCallOf(doc, step);
+  if (pane === "call") {
+    if (!c) return "not in the record";
+    return (c.args_state === "recorded" ? `args ${ssN(ssJson(c.args).length)} chars` : "args not recorded")
+      + (c.decision ? ` · ${c.decision}` : "")
+      + (c.verdict_by ? ` · by ${c.verdict_by}` : "")
+      + ((c.refused || []).length ? ` · ${c.refused.length} refused` : "");
+  }
+  if (pane === "result") {
+    if (!c) return "not in the record";
+    const cut = c.truncation || {};
+    return `${ssN(ssShownText(doc, step).length)} chars`
+      + (step.ref.shown_how === "not_matched" ? " (not matched)" : "")
+      + (cut.omitted ? ` · ${ssN(cut.omitted)} omitted by ${cut.truncator || "a cap"}` : "")
+      + (step.continuation_read === false ? " · continuation unread" : "");
+  }
+  if (pane === "page") {
+    if (!c) return "not in the record";
+    const bits = [];
+    if (c.frame) bits.push(c.frame_state === "recorded" ? "picture" : "picture purged");
+    else if (c.frame_skipped) bits.push("no picture");
+    if (c.console) bits.push(`console ${c.console.length} line(s)`);
+    if (c.signin && c.signin.host) bits.push(`sign-in at ${c.signin.host}`);
+    if (c.covered && c.covered.by) bits.push("covered");
+    if (c.problem) bits.push("problem");
+    if (c.phases) bits.push("phases");
+    return bits.join(" · ") || "recorded";
+  }
+  return (step.facts || []).map((f) => `${f.k} ${f.v}`).join(" · ");
+}
+
+// ---- the surface ----------------------------------------------------------
+
+function ssIsOpen() { return !!ssView; }
+
+// Open on the step `stepId` names (else the first), on `pane` where that step
+// has it (else its first). Synchronous: a worth-a-look tap lands on its first
+// pass, with no frame to wait for.
+function ssOpen(doc, stepId, pane, ref) {
+  const box = $("step-screen");
+  if (!box) return false;
+  const steps = doc.steps || [];
+  let index = steps.findIndex((s) => s.id === stepId);
+  if (index < 0) index = 0;
+  ssRef = ref || "";
+  ssView = { doc, index: 0, pane: "", text: "", nodes: [] };
+  ssFind = { query: "", hits: 0, at: -1, marks: [] };
+  ssWhole = false;
+  ssFindings = ssBuildFindings(doc);
+  ssFindingAt = -1;
+  const flist = $("ss-findings-list");
+  if (flist) flist.hidden = true;
+  ssGesture = null;
+  const find = $("ss-find");
+  if (find) find.value = "";
+  box.hidden = false;
+  ssStartPoll();
+  if (!steps.length) { ssPaint(); return true; }
+  return ssShow(index, pane || "");
+}
+
+// ---- live refresh (#354 follow-up) ------------------------------------------
+// Poll the record while it is open on a running turn, so steps performed after
+// you opened become reachable — you keep scrolling to them without exiting. The
+// pane you are READING is never repainted (completed steps do not change); only
+// the counter, the Next arrow and the findings bar update.
+function ssStartPoll() {
+  if (ssPollTimer) { clearInterval(ssPollTimer); ssPollTimer = null; }
+  if (!ssRef || !ssView || !ssView.doc.running) return;
+  ssPollTimer = setInterval(ssPoll, SS_POLL_MS);
+}
+
+function ssStopPoll() {
+  if (ssPollTimer) { clearInterval(ssPollTimer); ssPollTimer = null; }
+}
+
+function ssPoll() {
+  if (!ssView || !ssRef || !ssView.doc.running) { ssStopPoll(); return; }
+  if (ssPolling) return;
+  ssPolling = true;
+  const ref = ssRef;
+  fetchDossier(ref).then((fresh) => {
+    ssPolling = false;
+    if (!ssView || ssRef !== ref) return; // closed or moved on while in flight
+    ssView.doc = fresh;
+    ssFindings = ssBuildFindings(fresh);
+    ssPaintCount();
+    ssPaintFindings();
+    if (!fresh.running) ssStopPoll(); // the turn ended; the record is final
+  }, () => { ssPolling = false; });
+}
+
+// The door by id (`/explain <ref>`, and the card's Full record row): the first
+// worth-a-look row's step and pane, else the first step.
+function ssOpenDoc(doc, stepId, pane, ref) {
+  const note = !stepId && (((doc.notes || {}).rows) || [])[0];
+  const where = (note && note.where) || {};
+  return ssOpen(doc, stepId || where.step || (((doc.steps || [])[0]) || {}).id, pane || where.pane || "", ref);
+}
+
+// The one writer of what is on screen. Keeps the pane BY NAME where the step
+// has it, and lands on the first pane otherwise.
+function ssShow(index, pane) {
+  if (!ssView) return false;
+  const steps = ssView.doc.steps || [];
+  const step = steps[index];
+  if (!step) return false;
+  const panes = step.panes || [];
+  if (!panes.includes(pane)) pane = panes[0] || "";
+  ssView = { doc: ssView.doc, index, pane, text: "", nodes: [] };
+  ssPaint();
+  return true;
+}
+
+function ssGo(delta) {
+  if (!ssView) return false;
+  return ssShow(ssView.index + delta, ssView.pane);
+}
+
+// The TAPE (a swipe, and the arrow keys): the next pane of THIS step first;
+// past the last pane, the next step's FIRST pane — past the first, the
+// previous step's LAST — so one gesture reads context, response, next step.
+// The header's ‹ › stay whole-step moves (ssGo), pane kept by name.
+function ssTape(delta) {
+  if (!ssView) return false;
+  const steps = ssView.doc.steps || [];
+  const step = steps[ssView.index];
+  const panes = (step && step.panes) || [];
+  const at = panes.indexOf(ssView.pane) + delta;
+  if (at >= 0 && at < panes.length) return ssShow(ssView.index, panes[at]);
+  const next = steps[ssView.index + delta];
+  if (!next) return false;
+  const target = next.panes || [];
+  return ssShow(ssView.index + delta, delta > 0 ? (target[0] || "") : (target[target.length - 1] || ""));
+}
+
+function ssClose() {
+  if (!ssView) return false;
+  const box = $("step-screen");
+  if (box) box.hidden = true;
+  const body = $("ss-body");
+  if (body) body.textContent = ""; // a turn's context is hundreds of KB; drop it
+  // the node list holds the same text; drop it with the DOM
+  if (ssAbort) { ssAbort.abort(); ssAbort = null; }
+  ssView = null;
+  ssStopPoll();
+  ssRef = "";
+  ssFindings = [];
+  ssFindingAt = -1;
+  const list = $("ss-findings-list");
+  if (list) list.hidden = true;
+  return true;
+}
+
+// The step position, its duration, a flag marker, and — while the turn runs —
+// a "live" cue; plus the ‹ › enabled state, which grows as new steps arrive.
+// Called on every paint AND by the live poller (which never repaints the body).
+function ssPaintCount() {
+  const { doc, index } = ssView;
+  const steps = doc.steps || [];
+  const step = steps[index] || null;
+  const dur = step && typeof step.secs === "number" ? ssDur(step.secs) : "";
+  const flagged = ssFindings.some((f) => f.index === index);
+  $("ss-count").textContent = (steps.length ? `Step ${index + 1} of ${steps.length}` : "No steps")
+    + (dur ? ` · ${dur}` : "") + (flagged ? " · ⚠" : "") + (doc.running ? " · live" : "");
+  $("ss-prev").disabled = index <= 0;
+  $("ss-next").disabled = index >= steps.length - 1;
+}
+
+function ssPaint() {
+  const { doc, index, pane } = ssView;
+  const steps = doc.steps || [];
+  const step = steps[index] || null;
+  ssPaintCount();
+  const icon = $("ss-icon");
+  if (icon) icon.innerHTML = step ? ssStepIcon(doc, step) : "";
+  let title = step ? step.title : "nothing was recorded for this turn";
+  if (step && step.kind === "model_call" && step.numbering === "inferred") title += " · number inferred";
+  if (step && step.kind === "tool_call" && step.placement === "inferred") title += " · round inferred";
+  $("ss-title").textContent = title;
+
+  const facts = $("ss-facts");
+  facts.textContent = "";
+  for (const fact of (step && step.facts) || []) {
+    const chip = ssEl("span", "ss-fact");
+    chip.append(ssEl("span", "ss-fact-k", fact.k), ssEl("span", "ss-fact-v", fact.v));
+    facts.appendChild(chip);
+  }
+
+  const tabs = $("ss-panes");
+  tabs.textContent = "";
+  for (const name of (step && step.panes) || []) {
+    const tab = ssEl("button", "ss-tab" + (name === pane ? " on" : ""), SS_PANE_LABELS[name] || name);
+    tab.type = "button";
+    tab.dataset.pane = name;
+    tab.setAttribute("aria-selected", name === pane ? "true" : "false");
+    tab.onclick = () => ssShow(index, name);
+    tabs.appendChild(tab);
+  }
+
+  // The states, said out loud above the body: a running turn, a grouping that
+  // is an inference, a backend that records no rounds.
+  const note = $("ss-note");
+  note.textContent = "";
+  const sentences = [];
+  if (doc.running) sentences.push("this turn is still running — showing the steps recorded so far");
+  const grouping = (doc.flow || {}).grouping;
+  if (SS_GROUPING_WORDS[grouping]) sentences.push(SS_GROUPING_WORDS[grouping]);
+  if (step && step.kind === "tool_call" && SS_PLACEMENT_WORDS[step.placement]) sentences.push(SS_PLACEMENT_WORDS[step.placement]);
+  for (const sentence of sentences) note.appendChild(ssEl("p", "ss-state", sentence));
+  note.hidden = !sentences.length;
+
+  ssPaintBody(step ? ssPanes(doc, step).find((p) => p.name === pane) : null);
+  ssPaintFindings();
+}
+
+// ---- the findings navigator (#354 follow-up) --------------------------------
+// The turn's "worth a look" list, in the full screen where the details are. The
+// bar names the count and the current finding; the ‹ › cycle across them like a
+// browser's find; the label opens the whole list to pick one — the IDE Problems
+// model. Every jump lands on the flagged step and selects the pane it cites.
+function ssBuildFindings(doc) {
+  const steps = doc.steps || [];
+  const out = [];
+  for (const row of ((doc.notes || {}).rows || [])) {
+    const where = row.where || {};
+    const index = steps.findIndex((x) => x.id === where.step);
+    if (index < 0) continue;
+    out.push({ text: String(row.text || ""), pane: where.pane || "", index });
+  }
+  return out;
+}
+
+function ssPaintFindings() {
+  const bar = $("ss-findings");
+  if (!bar) return;
+  const list = $("ss-findings-list");
+  if (!ssFindings.length) { bar.hidden = true; if (list) list.hidden = true; return; }
+  bar.hidden = false;
+  const { index, pane } = ssView;
+  ssFindingAt = ssFindings.findIndex((f) => f.index === index && f.pane === pane);
+  if (ssFindingAt < 0) ssFindingAt = ssFindings.findIndex((f) => f.index === index);
+  const cur = ssFindingAt >= 0 ? ssFindings[ssFindingAt] : null;
+  $("ss-findings-toggle").textContent = `⚠ ${ssFindings.length} worth a look`;
+  $("ss-findings-cur").textContent = cur ? cur.text : "";
+  $("ss-findings-pos").textContent = cur ? `${ssFindingAt + 1} / ${ssFindings.length}` : `${ssFindings.length}`;
+  bar.classList.toggle("on-finding", !!cur);
+}
+
+// ‹ ›: jump to the previous/next finding, wrapping — from nowhere, forward
+// lands on the first and back on the last.
+function ssJumpFinding(delta) {
+  if (!ssFindings.length) return;
+  const from = ssFindingAt >= 0 ? ssFindingAt : (delta > 0 ? -1 : 0);
+  const n = ssFindings.length;
+  const at = ((from + delta) % n + n) % n;
+  const f = ssFindings[at];
+  ssShow(f.index, f.pane);
+}
+
+// The label opens the whole list — each finding's text and the step it is on;
+// a tap jumps to it and selects the pane it cites.
+function ssToggleFindings() {
+  const list = $("ss-findings-list");
+  if (!list) return;
+  const toggle = $("ss-findings-toggle");
+  if (!list.hidden) { list.hidden = true; if (toggle) toggle.setAttribute("aria-expanded", "false"); return; }
+  list.textContent = "";
+  const steps = (ssView && ssView.doc.steps) || [];
+  ssFindings.forEach((f, i) => {
+    const row = ssEl("button", "ss-finding" + (i === ssFindingAt ? " on" : ""));
+    row.type = "button";
+    row.append(
+      ssEl("span", "ss-finding-text", f.text),
+      ssEl("span", "ss-finding-where", (steps[f.index] || {}).title || ""),
+    );
+    row.onclick = () => { list.hidden = true; if (toggle) toggle.setAttribute("aria-expanded", "false"); ssShow(f.index, f.pane); };
+    list.appendChild(row);
+  });
+  list.hidden = false;
+  if (toggle) toggle.setAttribute("aria-expanded", "true");
+}
+
+function ssPaintBody(paneObj) {
+  const body = $("ss-body");
+  body.textContent = "";
+  body.scrollTop = 0;
+  ssLastScrollTop = 0;
+  ssChromeLast = 0;
+  const box = $("step-screen");
+  if (box) box.classList.remove("ss-collapsed");
+  ssFadeArrows();
+  const whole = $("ss-whole");
+  const segs = paneObj ? ((paneObj.more && ssWhole) ? paneObj.more.segs : paneObj.segs)
+    : [{ kind: "meta", text: "nothing was recorded for this turn" }];
+  // Copy and save join the segments; the DOM never does.
+  ssView.text = segs.map((seg) => seg.text).join("\n\n");
+  ssView.nodes = [];
+  if (whole) {
+    whole.hidden = !(paneObj && paneObj.more);
+    whole.textContent = ssWhole ? "what changed" : (paneObj && paneObj.more ? paneObj.more.label : "");
+  }
+  if (paneObj && paneObj.before) body.appendChild(paneObj.before);
+  const view = ssView;
+  for (const seg of segs) {
+    const entry = ssEntry(seg);
+    // A segment too large to colour says so, then shows the raw bytes — the
+    // readable layer is a lens, never a hidden truncation.
+    if (entry.capped) body.appendChild(ssEl("div", "ss-meta",
+      `shown raw — ${ssN(seg.text.length)} characters, too large to colour`));
+    body.appendChild(entry.node);
+    ssView.nodes.push(entry);
+    if (seg.kind !== "meta") ssFold(entry.node, seg.text);
+    // A blob of the exact request: fetched now, landed in place when it
+    // arrives — and dropped if the view has moved on by then (the reader
+    // swiped away, or toggled the reading), because landing bytes into a
+    // pane that no longer describes them is the wrong-pane-under-the-right-
+    // title bug the single writer exists to prevent.
+    if (seg.blob) {
+      ssEvidence(currentSession, seg.blob.digest, seg.blob.sig).then((got) => {
+        if (ssView !== view) return;
+        ssLand(entry, got);
+      });
+    }
+  }
+  const save = $("ss-save");
+  if (save) save.hidden = ssView.text.length < SS_SAVE_MIN_CHARS;
+  ssApplyFind();
+}
+
+// Meta is STRUCTURE: aish's own account around the exchange, drawn as a
+// bordered block in the UI font. Text is the exchange's bytes, verbatim,
+// monospace. A record is mono too but tinted like meta — it is a record, not
+// something a model said or was given.
+function ssSegNode(seg) {
+  return seg.kind === "meta"
+    ? ssEl("div", "ss-meta")
+    : ssEl("pre", seg.kind === "record" ? "ss-pre ss-rec mono" : "ss-pre mono");
+}
+
+// A rendered entry: the node, the RAW bytes (what copy/save carry), and — when
+// the readable layer is on and the segment has a known language small enough to
+// colour — the coloured pieces and the DISPLAY string find searches. Meta and
+// raw-mode segments have no pieces and render as plain text.
+function ssEntry(seg) {
+  const node = ssSegNode(seg);
+  const raw = seg.text || "";
+  const lang = seg.lang || "";
+  const readable = ssReadable && seg.kind !== "meta" && !!lang && raw.length <= SS_READ_MAX;
+  const capped = ssReadable && seg.kind !== "meta" && !!lang && raw.length > SS_READ_MAX;
+  const pieces = readable ? rdPieces(raw, lang) : null;
+  const display = pieces ? rdDisplay(pieces) : raw;
+  return { node, text: raw, lang, kind: seg.kind, pieces, display, capped };
+}
+
+// Fill one entry's node with its content and this query's find marks. The one
+// place text reaches a node: coloured pieces when readable, plain text + marks
+// otherwise. Every character is textContent; the only nodes minted are span, a
+// (safe schemes only) and mark.
+function ssFill(entry, query) {
+  const node = entry.node;
+  node.textContent = "";
+  if (entry.pieces) {
+    rdRenderInto(node, entry.pieces, query, ssFind.marks, SS_FIND_MAX_MARKS);
+    return;
+  }
+  const text = entry.display;
+  const q = String(query || "").toLowerCase();
+  if (!q) { node.textContent = text; return; }
+  const lower = text.toLowerCase();
+  let from = 0;
+  let at = lower.indexOf(q);
+  if (at === -1) { node.textContent = text; return; }
+  while (at !== -1 && ssFind.marks.length < SS_FIND_MAX_MARKS) {
+    if (at > from) node.appendChild(document.createTextNode(text.slice(from, at)));
+    const mark = ssEl("mark", "ss-hit", text.slice(at, at + q.length));
+    node.appendChild(mark);
+    ssFind.marks.push(mark);
+    from = at + q.length;
+    at = lower.indexOf(q, from);
+  }
+  if (from < text.length) node.appendChild(document.createTextNode(text.slice(from)));
+}
+
+// Folded, never truncated: the whole text is in the node; only the first look
+// is short.
+function ssFold(node, text) {
+  if (text.length <= SS_FOLD_CHARS) return;
+  node.classList.add("ss-clamped");
+  const more = ssEl("button", "ss-more", `show all (${ssN(text.length)} characters)`);
+  more.type = "button";
+  more.onclick = () => { node.classList.remove("ss-clamped"); more.remove(); };
+  node._moreBtn = more;
+  node.parentNode.insertBefore(more, node.nextSibling || null);
+}
+
+// One fetched blob arrives: with the bytes, the placeholder becomes a PAYLOAD
+// node holding exactly them; without, it stays meta and says which absence.
+// The find marks and the copy/save text are re-derived, so both stay true to
+// what is on screen.
+function ssLand(entry, got) {
+  // The exact-request/response blobs are the whole message as JSON, so they
+  // read as JSON when the readable layer is on.
+  const seg = got.state === "recorded"
+    ? { kind: "text", lang: "json", text: got.text }
+    : { kind: "meta", text: SS_FETCH_WORDS[got.state] || `the bytes could not be read (${got.state})` };
+  const fresh = ssEntry(seg);
+  const old = entry.node;
+  if (old.parentNode) { old.parentNode.insertBefore(fresh.node, old); old.remove(); }
+  entry.node = fresh.node;
+  entry.text = fresh.text;
+  entry.lang = fresh.lang;
+  entry.kind = fresh.kind;
+  entry.pieces = fresh.pieces;
+  entry.display = fresh.display;
+  if (seg.kind !== "meta") ssFold(fresh.node, seg.text);
+  ssView.text = ssView.nodes.map((n) => n.text).join("\n\n");
+  const save = $("ss-save");
+  if (save) save.hidden = ssView.text.length < SS_SAVE_MIN_CHARS;
+  ssApplyFind();
+}
+
+function ssToggleWhole() {
+  if (!ssView) return;
+  ssWhole = !ssWhole;
+  ssShow(ssView.index, ssView.pane);
+}
+
+// ---- find ---------------------------------------------------------------
+
+function ssSetFind(query) {
+  ssFind = { query: String(query || ""), hits: 0, at: -1, marks: [] };
+  ssApplyFind();
+}
+
+// Text nodes plus one <mark> per hit, never innerHTML: the text is a page's
+// own words. Every hit is COUNTED across all of the pane's segments; marking
+// is capped and the label says so.
+function ssApplyFind() {
+  if (!ssView) return;
+  const nodes = ssView.nodes || [];
+  const q = ssFind.query.toLowerCase();
+  ssFind.marks = [];
+  if (!q) {
+    for (const entry of nodes) ssFill(entry, "");
+    ssFind.hits = 0;
+    ssFind.at = -1;
+    ssFindLabel();
+    return;
+  }
+  // Count every hit across the DISPLAYED text (find searches what is on
+  // screen), then fill each node, marking up to the cap.
+  let count = 0;
+  for (const entry of nodes) {
+    const lower = String(entry.display || "").toLowerCase();
+    for (let i = lower.indexOf(q); i !== -1; i = lower.indexOf(q, i + q.length)) count += 1;
+  }
+  for (const entry of nodes) ssFill(entry, q);
+  ssFind.hits = count;
+  ssFind.at = count ? 0 : -1;
+  ssFindCurrent();
+}
+
+function ssFindLabel() {
+  const label = $("ss-find-count");
+  if (!label) return;
+  if (!ssFind.query) label.textContent = "";
+  else if (!ssFind.hits) label.textContent = "no match";
+  else {
+    label.textContent = `${ssFind.at + 1} of ${ssN(ssFind.hits)}`
+      + (ssFind.hits > SS_FIND_MAX_MARKS ? ` · first ${ssN(SS_FIND_MAX_MARKS)} marked` : "");
+  }
+}
+
+function ssFindCurrent() {
+  for (const mark of ssFind.marks) mark.classList.remove("ss-cur");
+  const mark = ssFind.marks[ssFind.at];
+  if (mark) {
+    mark.classList.add("ss-cur");
+    const holder = mark.parentNode;
+    if (holder && holder.classList && holder.classList.contains("ss-clamped")) {
+      holder.classList.remove("ss-clamped"); // a jump into a fold unfolds it
+      if (holder._moreBtn) holder._moreBtn.remove();
+    }
+    ssScrollTo(mark);
+  }
+  ssFindLabel();
+}
+
+function ssFindGo(delta) {
+  if (!ssFind.hits) return;
+  ssFind.at = (ssFind.at + delta + ssFind.hits) % ssFind.hits;
+  ssFindCurrent();
+}
+
+// Put `el` near the top of the pane's own scroller. offsetTop accumulation and
+// never scrollIntoView, which scrolls every scrollable ancestor and animates a
+// long jump into something that reads as a dead control (the dossier sheet's lesson,
+// carried over).
+function ssScrollTo(el) {
+  const body = $("ss-body");
+  if (!body || !el) return;
+  let top = 0;
+  for (let node = el; node && node !== body; node = node.offsetParent) top += node.offsetTop || 0;
+  body.scrollTop = Math.max(0, top - 40);
+}
+
+// ---- copy, save --------------------------------------------------------------
+
+function ssFileName() {
+  if (!ssView) return "step.txt";
+  const step = (ssView.doc.steps || [])[ssView.index] || {};
+  const turn = ssView.doc.ordinal || "";
+  return `turn-${turn}-step-${step.n || 0}-${ssView.pane || "pane"}${ssWhole ? "-whole" : ""}.txt`;
+}
+
+async function ssCopy() {
+  if (!ssView) return;
+  if (await copyText(ssView.text || "")) showToast("copied");
+  else showToast("copy failed — select the text manually");
+}
+
+function ssSave() {
+  if (!ssView) return;
+  saveBlob(new Blob([ssView.text || ""], { type: "text/plain;charset=utf-8" }), ssFileName());
+}
+
+// ---- the swipe -------------------------------------------------------------
+//
+// Claims only a near-horizontal move for the tape, decided ONCE at the first
+// SS_DECIDE_AT px of travel and never re-decided; everything else is yielded
+// to the pane's vertical scroll (the pane is `touch-action: pan-y`, so the
+// browser owns the scroll and nothing here needs preventDefault). Passive
+// listeners. Dismissal is NOT here: content touches never close the screen —
+// that is the sheet convention, and the header drag below owns it.
+function ssTouchStart(e) {
+  const t = e.touches && e.touches[0];
+  if (!t) return;
+  // The payload box under the finger, if any, and how far it can still scroll
+  // each way NOW: a horizontal drag scrolls the box (browser) until it is at
+  // the edge, and only then does a swipe turn the step (ssTouchEnd).
+  let pre = e.target;
+  while (pre && pre !== document && !(pre.classList && pre.classList.contains("ss-pre"))) pre = pre.parentNode;
+  const box = pre && pre.classList && pre.classList.contains("ss-pre") ? pre : null;
+  const room = (delta) => {
+    if (!box || (box.scrollWidth || 0) <= (box.clientWidth || 0) + 1) return false;
+    return delta < 0 ? (box.scrollLeft + box.clientWidth < box.scrollWidth - 1) : (box.scrollLeft > 0);
+  };
+  ssTouch = { x: t.clientX, y: t.clientY, room };
+  ssGesture = null;
+}
+
+function ssTouchMove(e) {
+  if (!ssTouch || ssGesture) return;
+  const t = e.touches && e.touches[0];
+  if (!t) return;
+  const dx = t.clientX - ssTouch.x;
+  const dy = t.clientY - ssTouch.y;
+  if (Math.abs(dx) < SS_DECIDE_AT && Math.abs(dy) < SS_DECIDE_AT) return;
+  ssGesture = Math.abs(dx) > SS_AXIS_LOCK * Math.abs(dy) ? "page" : "scroll";
+}
+
+function ssTouchEnd(e) {
+  if (!ssTouch) return;
+  const t = e.changedTouches && e.changedTouches[0];
+  const dx = t ? t.clientX - ssTouch.x : 0;
+  const claimed = ssGesture === "page";
+  // A horizontal swipe that began on a box with room to scroll that way did
+  // scroll the box, not turn the step — the tape waits for the scroll edge.
+  const scrolledBox = claimed && ssTouch.room && ssTouch.room(dx);
+  ssTouch = null;
+  if (claimed && !scrolledBox && Math.abs(dx) >= SS_SWIPE_MIN) ssTape(dx < 0 ? 1 : -1);
+}
+
+// ---- the sheet drag ---------------------------------------------------------
+// The COMMON dismissal for a full-screen sheet: a grabber, and a header drag
+// the screen visibly follows. Release past SS_SHEET_DISMISS closes; anything
+// less springs back. Content touches never dismiss — a drag that begins on the
+// pane is a scroll or the tape, exactly as everywhere else on a phone.
+let ssDrag = null;
+
+// The event's own clock where the world has one; tests pass timeStamp.
+function ssStamp(e) {
+  if (e && e.timeStamp) return e.timeStamp;
+  return (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+}
+
+function ssDragStart(e) {
+  const t = e.touches && e.touches[0];
+  if (!t) return;
+  const stamp = ssStamp(e);
+  ssDrag = { y: t.clientY, moved: 0, prev: 0, prevStamp: stamp, stamp };
+  const box = $("step-screen");
+  if (box) { box.classList.add("ss-dragging"); box.classList.remove("ss-settling"); }
+}
+
+function ssDragMove(e) {
+  if (!ssDrag) return;
+  const t = e.touches && e.touches[0];
+  if (!t) return;
+  ssDrag.prev = ssDrag.moved;
+  ssDrag.prevStamp = ssDrag.stamp;
+  ssDrag.moved = Math.max(0, t.clientY - ssDrag.y);
+  ssDrag.stamp = ssStamp(e);
+  const box = $("step-screen");
+  if (box) box.style.transform = ssDrag.moved ? `translateY(${ssDrag.moved}px)` : "";
+}
+
+function ssDragEnd(e) {
+  if (!ssDrag) return;
+  const { moved, prev, stamp, prevStamp } = ssDrag;
+  ssDrag = null;
+  const box = $("step-screen");
+  if (!box) return;
+  box.classList.remove("ss-dragging");
+  const release = ssStamp(e);
+  // Velocity over the last move segment, in px/ms — but only if the finger was
+  // still moving at release. A hold longer than SS_SHEET_REST_MS between the
+  // last move and the lift means the sheet was set down, not thrown, so its
+  // release velocity is zero (a real sheet does not fly on from a dead stop).
+  const rested = release - stamp > SS_SHEET_REST_MS;
+  const dt = stamp - prevStamp;
+  const velocity = rested || dt <= 0 ? 0 : (moved - prev) / dt;
+  const flick = velocity >= SS_SHEET_FLICK;
+  const returning = moved < prev; // the last move went back UP: brought it home
+  if (flick || (moved >= SS_SHEET_DISMISS && !returning)) {
+    box.style.transform = "";
+    ssClose();
+    return;
+  }
+  // Brought back up, or short of the threshold and set down: the sheet stays.
+  box.classList.add("ss-settling");
+  box.style.transform = "";
+}
+
+// ---- the scroll arrows ------------------------------------------------------
+// The CHAT's convention, mirrored: the down arrow appears while you scroll
+// DOWN and are still a viewport from the bottom; the up arrow while you scroll
+// UP and a viewport from the top; both fade a beat after scrolling stops, and
+// tap smooth-scrolls. One directional rule, not a new one.
+let ssLastScrollTop = 0;
+let ssArrowFadeTimer = null;
+// The scroll-away top bar (Material's collapsing app bar; Safari/Gmail): the
+// chrome hides when reading DOWN and returns on any upward scroll or at the
+// top. `ssChromeLast` is the last scrollTop the direction was measured against.
+let ssChromeLast = 0;
+const SS_CHROME_HIDE_AT = 48;
+
+function ssFadeArrows() {
+  $("ss-scroll-down").hidden = true;
+  $("ss-scroll-top").hidden = true;
+}
+
+function ssUpdateScrollArrows() {
+  const body = $("ss-body");
+  if (!body) return;
+  const top = body.scrollTop;
+  const fromBottom = (body.scrollHeight || 0) - top - (body.clientHeight || 0);
+  const vh = body.clientHeight || 0;
+  if (top > ssLastScrollTop && fromBottom > vh) $("ss-scroll-down").hidden = false;
+  else if (top < ssLastScrollTop || fromBottom < vh) $("ss-scroll-down").hidden = true;
+  if (top < ssLastScrollTop && top > vh) $("ss-scroll-top").hidden = false;
+  else if (top > ssLastScrollTop || top < vh) $("ss-scroll-top").hidden = true;
+  ssLastScrollTop = top;
+  if (ssArrowFadeTimer) clearTimeout(ssArrowFadeTimer);
+  if (!$("ss-scroll-down").hidden || !$("ss-scroll-top").hidden) {
+    ssArrowFadeTimer = setTimeout(ssFadeArrows, SS_ARROW_FADE_MS);
+  }
+}
+
+// Hide the chrome while reading down, reveal it on any upward scroll or at the
+// top — the native "scroll-away top bar". Horizontal swipe (the tape) is a
+// separate recogniser and is unaffected.
+function ssScrollChrome() {
+  const body = $("ss-body");
+  const box = $("step-screen");
+  if (!body || !box) return;
+  const top = body.scrollTop;
+  if (top <= 12) box.classList.remove("ss-collapsed");
+  else if (top > ssChromeLast + 4 && top > SS_CHROME_HIDE_AT) box.classList.add("ss-collapsed");
+  else if (top < ssChromeLast - 4) box.classList.remove("ss-collapsed");
+  ssChromeLast = top;
+}
+
+function ssScrollPage(delta) {
+  const body = $("ss-body");
+  if (!body) return;
+  body.scrollTop = Math.max(0, body.scrollTop + delta * Math.max(200, (body.clientHeight || 480) * 0.85));
+}
+
+// ---- text size -------------------------------------------------------------
+// A−/A+ scale the pane text (`#ss-body` inline font-size; the panes inherit).
+// Clamped to a range that stays readable on a phone; remembered per device,
+// because how large text must be is a fact about the SCREEN it is read on.
+const SS_FONT_MIN = 9;
+const SS_FONT_MAX = 22;
+const SS_FONT_DEFAULT = 12;
+const SS_FONT_KEY = "aish-ss-font";
+// Wrapping is ON by default — most panes are prose-bearing — and remembered
+// per device, like the text size: how text must flow is a fact about the
+// screen it is read on. "0" is the one stored value that turns it off.
+const SS_WRAP_KEY = "aish-ss-wrap";
+
+function ssReadRead() {
+  try { return localStorage.getItem(SS_READ_KEY) !== "0"; } catch (_err) { return true; }
+}
+
+function ssApplyRead() {
+  ssReadable = ssReadRead();
+  const btn = $("ss-read");
+  if (btn) { btn.classList.toggle("on", ssReadable); if (btn.setAttribute) btn.setAttribute("aria-pressed", ssReadable ? "true" : "false"); }
+}
+
+function ssFontRead() {
+  try {
+    const n = parseInt(localStorage.getItem(SS_FONT_KEY) || "", 10);
+    if (n >= SS_FONT_MIN && n <= SS_FONT_MAX) return n;
+  } catch (_err) { /* no storage: the default */ }
+  return SS_FONT_DEFAULT;
+}
+
+function ssApplyFont(px) {
+  $("ss-body").style.fontSize = px + "px";
+  $("ss-font-dec").disabled = px <= SS_FONT_MIN;
+  $("ss-font-inc").disabled = px >= SS_FONT_MAX;
+}
+
+function ssBumpFont(delta) {
+  const px = Math.min(SS_FONT_MAX, Math.max(SS_FONT_MIN, ssFontRead() + delta));
+  try { localStorage.setItem(SS_FONT_KEY, String(px)); } catch (_err) { /* still applies */ }
+  ssApplyFont(px);
+}
+
+function ssWire() {
+  const box = $("step-screen");
+  if (!box) return;
+  box.addEventListener("touchstart", ssTouchStart, { passive: true });
+  box.addEventListener("touchmove", ssTouchMove, { passive: true });
+  box.addEventListener("touchend", ssTouchEnd, { passive: true });
+  box.addEventListener("touchcancel", () => { ssTouch = null; ssGesture = null; }, { passive: true });
+  $("ss-close").onclick = () => ssClose();
+  $("ss-findings-toggle").onclick = () => ssToggleFindings();
+  $("ss-findings-prev").onclick = () => ssJumpFinding(-1);
+  $("ss-findings-next").onclick = () => ssJumpFinding(1);
+  $("ss-scroll-down").onclick = () => {
+    const body = $("ss-body");
+    if (body.scrollTo) body.scrollTo({ top: body.scrollHeight, behavior: "smooth" });
+    else body.scrollTop = body.scrollHeight || 1e9;
+  };
+  $("ss-scroll-top").onclick = () => {
+    $("ss-scroll-top").hidden = true;
+    const body = $("ss-body");
+    if (body.scrollTo) body.scrollTo({ top: 0, behavior: "smooth" });
+    else body.scrollTop = 0;
+  };
+  $("ss-body").addEventListener("scroll", ssUpdateScrollArrows, { passive: true });
+  $("ss-body").addEventListener("scroll", ssScrollChrome, { passive: true });
+  // The grabber is always visible (the chrome above it can collapse), so the
+  // sheet dismissal works whether the header is shown or hidden.
+  const grab = $("ss-grab");
+  if (grab) {
+    grab.addEventListener("touchstart", ssDragStart, { passive: true });
+    grab.addEventListener("touchmove", ssDragMove, { passive: true });
+    grab.addEventListener("touchend", ssDragEnd, { passive: true });
+    grab.addEventListener("touchcancel", ssDragEnd, { passive: true });
+  }
+  const head = $("ss-head");
+  head.addEventListener("touchstart", ssDragStart, { passive: true });
+  head.addEventListener("touchmove", ssDragMove, { passive: true });
+  head.addEventListener("touchend", ssDragEnd, { passive: true });
+  head.addEventListener("touchcancel", ssDragEnd, { passive: true });
+  $("ss-prev").onclick = () => ssGo(-1);
+  $("ss-next").onclick = () => ssGo(1);
+  let stored = null;
+  try { stored = localStorage.getItem(SS_WRAP_KEY); } catch (_err) { /* no storage */ }
+  if (stored !== "0") $("ss-body").classList.add("wrap-on");
+  $("ss-wrap").onclick = () => {
+    const cls = $("ss-body").classList;
+    cls.toggle("wrap-on");
+    try { localStorage.setItem(SS_WRAP_KEY, cls.contains("wrap-on") ? "1" : "0"); } catch (_err) { /* still applies */ }
+  };
+  $("ss-font-dec").onclick = () => ssBumpFont(-1);
+  $("ss-font-inc").onclick = () => ssBumpFont(1);
+  ssApplyFont(ssFontRead());
+  ssApplyRead();
+  $("ss-read").onclick = () => {
+    ssReadable = !ssReadable;
+    try { localStorage.setItem(SS_READ_KEY, ssReadable ? "1" : "0"); } catch (_err) { /* still applies */ }
+    ssApplyRead();
+    // Re-render the current pane from scratch so segments switch colouring.
+    if (ssView) ssShow(ssView.index, ssView.pane);
+  };
+  $("ss-whole").onclick = () => ssToggleWhole();
+  $("ss-copy").onclick = () => ssCopy();
+  $("ss-save").onclick = () => ssSave();
+  const find = $("ss-find");
+  find.oninput = () => ssSetFind(find.value.trim());
+  find.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); ssFindGo(e.shiftKey ? -1 : 1); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); find.value = ""; ssSetFind(""); find.blur(); }
+  };
+  $("ss-find-prev").onclick = () => ssFindGo(-1);
+  $("ss-find-next").onclick = () => ssFindGo(1);
+}
+ssWire();
+
+// ---- the door by id ---------------------------------------------------------
+// `ref` is the #202 string turn id, or empty for the chat's LAST turn — never a
+// client-counted ordinal, because the first paint is bounded and a browser's
+// fourth turn is not the log's fourth on a long chat ([FORK-ANCHOR]'s lesson).
+// For a turn outside the bounded first paint and for a log written before
+// cards existed, this is the only door.
+async function openExplain(ref) {
+  if (!currentSession) return;
+  if (ssAbort) ssAbort.abort();
+  ssAbort = new AbortController();
+  try {
+    const doc = await fetchDossier(ref, ssAbort.signal);
+    ssOpenDoc(doc, undefined, undefined, ref);
+  } catch (err) {
+    if (err && err.name === "AbortError") return;
+    showToast((err && err.message) || "the record could not be read");
+  }
+}
+// [STEP-SCREEN-END]
 
 // ---- sheets --------------------------------------------------------------
 function openSheet(id) {
@@ -13897,6 +15554,22 @@ document.addEventListener("keydown", (e) => {
   // takes Escape first — ahead even of the confirm modal, which cannot be
   // raised over it.
   if (e.key === "Escape" && closePreview()) { e.preventDefault(); return; }
+  // The step screen sits under the preview (a frame in its page pane opens the
+  // picture over it) and over everything else. Arrows move a step unless the
+  // find field has focus, where they move the caret.
+  if (ssIsOpen()) {
+    if (e.key === "Escape") { e.preventDefault(); ssClose(); return; }
+    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && document.activeElement !== $("ss-find")) {
+      e.preventDefault();
+      ssTape(e.key === "ArrowRight" ? 1 : -1);
+      return;
+    }
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && document.activeElement !== $("ss-find")) {
+      e.preventDefault();
+      ssScrollPage(e.key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+  }
   if (e.key === "Escape" && confirmIsOpen()) { e.preventDefault(); closeConfirm(); return; }
   // The console link menu is raised OVER the console, so Escape dismisses it
   // before Escape gets to mean anything to the terminal underneath.

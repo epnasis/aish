@@ -1,0 +1,16 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Content then noise</title></head>
+<body>
+  <h1>Wyniki</h1><div id="out"></div><div id="tick">0</div>
+  <script>
+    // Content lands once, early.
+    setTimeout(() => {
+      const d = document.createElement('div');
+      d.textContent = 'ECONOMY od 3334,67 PLN';
+      document.getElementById('out').appendChild(d);
+    }, 2000);
+    // …then a carousel-ish attribute churn keeps the DOM "moving" forever,
+    // which is what a plain MutationObserver cannot tell apart from the above.
+    let n = 0;
+    setInterval(() => { document.getElementById('tick').setAttribute('data-n', ++n); }, 200);
+  </script>
+</body></html>
