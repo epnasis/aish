@@ -125,7 +125,7 @@ function textNode(t) {
 
 const IDS = ["step-screen", "ss-count", "ss-title", "ss-prev", "ss-next", "ss-facts", "ss-panes",
   "ss-tools", "ss-find", "ss-find-count", "ss-find-prev", "ss-find-next", "ss-whole", "ss-copy",
-  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-jump-top", "ss-jump-bottom"];
+  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head"];
 
 function world(overrides = {}) {
   const ids = new Map();
@@ -152,6 +152,8 @@ function world(overrides = {}) {
     copyText: async () => true,
     saveBlob: (blob, name) => saved.push({ blob, name }),
     showToast: (text) => toasts.push(text),
+    setTimeout: () => 0,
+    clearTimeout: () => {},
     // Deliberately ABSENT: requestAnimationFrame. A landing that needs a frame
     // throws here, which is the point.
   };
@@ -656,50 +658,82 @@ check("wrap is on by default, the toggle is remembered, and \"0\" turns it off",
   assert.equal(store.get("aish-ss-wrap"), "1");
 });
 
-check("the jumps and the page keys move the scroller; a pull from the top closes", () => {
+check("the scroll arrows follow the chat's directional rule and the keys page", () => {
   const w = world();
   const s = w.sandbox;
   s.ssOpen(doc(), "c1", "result");
   const body = w.el("ss-body");
-  // ↓ jumps to the bottom, ↑ back to the top (scrollHeight is absent in this
-  // world, so the bottom is the large fallback).
-  w.el("ss-jump-bottom").onclick();
-  assert(body.scrollTop > 0, "jump to bottom must move the scroller");
-  w.el("ss-jump-top").onclick();
+  body.scrollHeight = 5000;
+  body.clientHeight = 600;
+  // Scrolling DOWN far from the bottom shows the down arrow; the up arrow stays hidden.
+  body.scrollTop = 800;
+  s.ssUpdateScrollArrows();
+  assert.equal(w.el("ss-scroll-down").hidden, false, "down arrow while scrolling down");
+  assert.equal(w.el("ss-scroll-top").hidden, true);
+  // Scrolling UP far from the top swaps them.
+  body.scrollTop = 700;
+  s.ssUpdateScrollArrows();
+  assert.equal(w.el("ss-scroll-down").hidden, true, "down arrow hides on an upward move");
+  assert.equal(w.el("ss-scroll-top").hidden, false, "up arrow while scrolling up");
+  // Near the top, the up arrow is not worth a button.
+  body.scrollTop = 100;
+  s.ssUpdateScrollArrows();
+  assert.equal(w.el("ss-scroll-top").hidden, true);
+  // Tapping an arrow moves the scroller (this world has no smooth scrollTo).
+  body.scrollTop = 800;
+  w.el("ss-scroll-down").onclick();
+  assert.equal(body.scrollTop, 5000);
+  w.el("ss-scroll-top").onclick();
   assert.equal(body.scrollTop, 0);
-  // Page keys move by a page and never below zero.
+  // Page keys move by a page and never above the top.
   s.ssScrollPage(1);
-  const page1 = body.scrollTop;
-  assert(page1 > 0);
+  assert(body.scrollTop > 0);
   s.ssScrollPage(-1);
   assert.equal(body.scrollTop, 0);
   s.ssScrollPage(-1);
   assert.equal(body.scrollTop, 0, "never scrolls above the top");
-  // A downward pull that BEGAN at the top closes the screen…
-  s.ssTouchStart({ touches: [{ clientX: 200, clientY: 200 }] });
-  s.ssTouchMove({ touches: [{ clientX: 202, clientY: 260 }] });
-  assert.equal(s.ssGesture, "dismiss");
-  s.ssTouchEnd({ changedTouches: [{ clientX: 203, clientY: 310 }] });
-  assert.equal(s.ssIsOpen(), false, "a pull from the top must close");
-  // …a pull from a SCROLLED pane is a scroll and closes nothing…
+  // A new step hides both arrows (the scroller is reset to the top).
+  w.el("ss-scroll-down").hidden = false;
+  s.ssGo(1);
+  assert.equal(w.el("ss-scroll-down").hidden, true);
+  assert.equal(w.el("ss-scroll-top").hidden, true);
+});
+
+check("the header drag is the sheet dismissal; content touches never close", () => {
+  const w = world();
+  const s = w.sandbox;
   s.ssOpen(doc(), "c1", "result");
-  body.scrollTop = 120;
-  s.ssTouchStart({ touches: [{ clientX: 200, clientY: 200 }] });
-  s.ssTouchMove({ touches: [{ clientX: 202, clientY: 260 }] });
-  assert.equal(s.ssGesture, "scroll", "scrolled anywhere else, down is a scroll");
-  s.ssTouchEnd({ changedTouches: [{ clientX: 203, clientY: 310 }] });
-  assert.equal(s.ssIsOpen(), true, "a scroll must not close");
-  // …and a short pull from the top is nothing at all.
+  const box = w.el("step-screen");
+  // The screen follows the finger, and past the threshold release closes it.
+  s.ssDragStart({ touches: [{ clientY: 100 }] });
+  s.ssDragMove({ touches: [{ clientY: 180 }] });
+  assert.equal(box.style.transform, "translateY(80px)", "the sheet follows the finger");
+  s.ssDragMove({ touches: [{ clientY: 260 }] });
+  s.ssDragEnd();
+  assert.equal(s.ssIsOpen(), false, "past the threshold, release closes");
+  assert.equal(box.style.transform, "", "the transform is reset for the next open");
+  // Below the threshold it springs back and stays open.
+  s.ssOpen(doc(), "c1", "result");
+  s.ssDragStart({ touches: [{ clientY: 100 }] });
+  s.ssDragMove({ touches: [{ clientY: 160 }] });
+  s.ssDragEnd();
+  assert.equal(s.ssIsOpen(), true, "below the threshold it stays open");
+  assert.equal(box.style.transform, "");
+  assert(box.classList.has("ss-settling"), "the spring-back is animated");
+  // An upward drag does nothing (the sheet only moves down).
+  s.ssDragStart({ touches: [{ clientY: 300 }] });
+  s.ssDragMove({ touches: [{ clientY: 100 }] });
+  assert.equal(box.style.transform, "");
+  s.ssDragEnd();
+  assert.equal(s.ssIsOpen(), true);
+  // A content pull — even from the very top — is a scroll, never a dismissal.
+  const body = w.el("ss-body");
   body.scrollTop = 0;
   s.ssTouchStart({ touches: [{ clientX: 200, clientY: 200 }] });
-  s.ssTouchMove({ touches: [{ clientX: 202, clientY: 240 }] });
-  assert.equal(s.ssGesture, "dismiss");
-  s.ssTouchEnd({ changedTouches: [{ clientX: 203, clientY: 260 }] });
-  assert.equal(s.ssIsOpen(), true, "below the threshold nothing happens");
-  // An upward pull at the top is a scroll, never a dismiss.
-  s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }] });
-  s.ssTouchMove({ touches: [{ clientX: 202, clientY: 240 }] });
+  s.ssTouchMove({ touches: [{ clientX: 202, clientY: 320 }] });
   assert.equal(s.ssGesture, "scroll");
+  s.ssTouchEnd({ changedTouches: [{ clientX: 203, clientY: 340 }] });
+  assert.equal(s.ssIsOpen(), true, "content touches never close the screen");
 });
 
 check("A−/A+ scale the pane text, clamp at both ends, and survive a reopen", async () => {

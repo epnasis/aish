@@ -3766,7 +3766,8 @@ body.console-open #backdrop { z-index: 63; }
 #step-screen[hidden] { display: none; }
 #ss-head {
   display: flex; align-items: center; gap: 8px;
-  padding: calc(env(safe-area-inset-top) + 8px) 10px 6px;
+  padding: 6px 10px 6px;
+  touch-action: none; /* the header is the sheet's drag surface */
   border-bottom: 0.5px solid var(--sep);
 }
 #ss-titles { flex: 1; min-width: 0; }
@@ -3842,17 +3843,37 @@ body.console-open #backdrop { z-index: 63; }
 /* A raw record: mono like the payload, tinted like meta — it is a record, not
    something a model said or was given. */
 .ss-rec { color: var(--dim); border-left: 3px solid var(--sep); padding-left: 10px; }
-/* The vertical jumps: floating bottom-right, in thumb reach, over the body. */
-#ss-jumps {
-  position: absolute; right: 12px; bottom: calc(16px + env(safe-area-inset-bottom));
-  display: flex; flex-direction: column; gap: 8px; z-index: 2;
+/* The scroll arrows: the CHAT's convention, not a new one — centered circles
+   that appear directionally while you scroll, fade after a beat, and smooth-
+   scroll on tap. Same look as #scroll-down/#scroll-top; positioned inside the
+   step screen (absolute against its fixed box). */
+#ss-scroll-down, #ss-scroll-top {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  width: 38px; height: 38px; border: none; border-radius: 50%;
+  background: rgba(44, 44, 46, 0.9);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  color: var(--fg); display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45); z-index: 3;
+  opacity: 1; transition: opacity 0.2s ease, visibility 0.2s ease;
 }
-#ss-jumps button {
-  width: 38px; height: 38px; border-radius: 50%;
-  border: 0.5px solid var(--sep); background: var(--bg2, var(--bg));
-  color: var(--dim); font-size: 17px; line-height: 1; cursor: pointer;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18); opacity: 0.85;
+#ss-scroll-down { bottom: calc(20px + env(safe-area-inset-bottom)); }
+/* Below the header rows (head + facts + tabs + tools, ~150px) with a gap. */
+#ss-scroll-top { top: calc(160px + env(safe-area-inset-top)); }
+#ss-scroll-down[hidden], #ss-scroll-top[hidden] {
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity 0.45s ease, visibility 0.45s ease;
 }
+#ss-scroll-down svg, #ss-scroll-top svg { width: 20px; height: 20px; }
+#ss-scroll-down:active, #ss-scroll-top:active { opacity: 0.6; }
+/* The grabber: the sheet convention's handle. The header under it is the drag
+   surface; the screen follows the finger and springs back below the threshold. */
+#ss-grab {
+  width: 36px; height: 5px; border-radius: 3px; background: var(--sep);
+  margin: calc(env(safe-area-inset-top) + 6px) auto 0;
+  flex: none;
+}
+#step-screen.ss-dragging { transition: none; }
+#step-screen.ss-settling { transition: transform 0.22s ease; }
 /* Folded, never truncated: the whole text is in the pre. */
 .ss-clamped {
   max-height: 70vh; overflow: hidden;

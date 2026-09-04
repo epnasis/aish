@@ -329,6 +329,7 @@
      is cached, while the record itself must never be. Below #preview, which
      the page pane's picture opens over it. -->
 <div id="step-screen" hidden role="dialog" aria-modal="true" aria-label="turn inspector">
+  <div id="ss-grab" aria-hidden="true"></div>
   <div id="ss-head">
     <button id="ss-close" type="button" aria-label="close">
       <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -358,10 +359,12 @@
   </div>
   <div id="ss-note" hidden></div>
   <div id="ss-body"></div>
-  <div id="ss-jumps">
-    <button id="ss-jump-top" type="button" aria-label="jump to top">&#8593;</button>
-    <button id="ss-jump-bottom" type="button" aria-label="jump to bottom">&#8595;</button>
-  </div>
+  <button id="ss-scroll-down" hidden aria-label="scroll to bottom">
+    <svg viewBox="0 0 24 24"><path d="M12 5.5v13M6.8 13.3 12 18.5l5.2-5.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <button id="ss-scroll-top" hidden aria-label="scroll to top">
+    <svg viewBox="0 0 24 24"><path d="M12 18.5v-13M6.8 10.7 12 5.5l5.2 5.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
 </div>
 
 <div id="backdrop" hidden></div>
