@@ -450,6 +450,32 @@ check("a step change keeps the pane by name where the next step has it, else the
   assert.equal(on[0].dataset.pane, "call");
 });
 
+check("a horizontal swipe scrolls a wide code box first, and turns the step only at its edge", () => {
+  const w = world();
+  const d = doc();
+  const s = w.sandbox;
+  const mkBox = (scrollLeft) => ({ classList: { contains: (c) => c === "ss-pre" }, parentNode: null,
+    scrollWidth: 1000, clientWidth: 300, scrollLeft });
+  const swipeLeftOn = (target) => {
+    s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }], target });
+    s.ssTouchMove({ touches: [{ clientX: 150, clientY: 302 }] });
+    s.ssTouchEnd({ changedTouches: [{ clientX: 100, clientY: 303 }] });
+  };
+  // A box with room to scroll RIGHT: a left swipe scrolls it, the tape does not
+  // advance (the pane stays where it was).
+  s.ssOpen(d, "c1", "call");
+  swipeLeftOn(mkBox(0));
+  assert.equal(s.ssView.pane, "call", "a swipe on a scrollable box does not advance the tape");
+  // At the RIGHT edge (scrollLeft at max), the left swipe advances the tape.
+  s.ssOpen(d, "c1", "call");
+  swipeLeftOn(mkBox(700));
+  assert.equal(s.ssView.pane, "result", "at the scroll edge the swipe advances the tape");
+  // No box under the touch: the tape works as before.
+  s.ssOpen(d, "c1", "call");
+  swipeLeftOn(undefined);
+  assert.equal(s.ssView.pane, "result", "no box under the touch: the tape works as before");
+});
+
 check("the recogniser claims only a near-horizontal move and yields the rest (L5)", () => {
   const w = world();
   const d = doc();

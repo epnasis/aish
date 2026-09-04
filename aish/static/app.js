@@ -13560,7 +13560,17 @@ function ssSave() {
 function ssTouchStart(e) {
   const t = e.touches && e.touches[0];
   if (!t) return;
-  ssTouch = { x: t.clientX, y: t.clientY };
+  // The payload box under the finger, if any, and how far it can still scroll
+  // each way NOW: a horizontal drag scrolls the box (browser) until it is at
+  // the edge, and only then does a swipe turn the step (ssTouchEnd).
+  let pre = e.target;
+  while (pre && pre !== document && !(pre.classList && pre.classList.contains("ss-pre"))) pre = pre.parentNode;
+  const box = pre && pre.classList && pre.classList.contains("ss-pre") ? pre : null;
+  const room = (delta) => {
+    if (!box || (box.scrollWidth || 0) <= (box.clientWidth || 0) + 1) return false;
+    return delta < 0 ? (box.scrollLeft + box.clientWidth < box.scrollWidth - 1) : (box.scrollLeft > 0);
+  };
+  ssTouch = { x: t.clientX, y: t.clientY, room };
   ssGesture = null;
 }
 
@@ -13579,8 +13589,11 @@ function ssTouchEnd(e) {
   const t = e.changedTouches && e.changedTouches[0];
   const dx = t ? t.clientX - ssTouch.x : 0;
   const claimed = ssGesture === "page";
+  // A horizontal swipe that began on a box with room to scroll that way did
+  // scroll the box, not turn the step — the tape waits for the scroll edge.
+  const scrolledBox = claimed && ssTouch.room && ssTouch.room(dx);
   ssTouch = null;
-  if (claimed && Math.abs(dx) >= SS_SWIPE_MIN) ssTape(dx < 0 ? 1 : -1);
+  if (claimed && !scrolledBox && Math.abs(dx) >= SS_SWIPE_MIN) ssTape(dx < 0 ? 1 : -1);
 }
 
 // ---- the sheet drag ---------------------------------------------------------
