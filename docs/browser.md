@@ -650,6 +650,16 @@ The declared set feeds two readers, and that shape has already cost this project
 
 `TestTheOwnersDeclaredValues`, `TestDeclaredPersonalValues`, `TestThePersonalCommand`.
 
+### The page's address says NOTHING about where its forms send (#346)
+
+The enumeration carries `Control.sends_to`: the form's `action` **resolved absolutely**, with a button's own `formaction` winning exactly as its `formmethod` already does in `methodOf`. It is resolved in the page and not in Python because only the page has the base that a relative `action="/checkout"` resolves against; the HOST is then read by `agent._exact_host`, the same parser the composed-address gate uses, so one site is never spelled two ways.
+
+**This is a known class here, and the code that rejects it predates the bug.** `SIGNIN_FORM_JS` has resolved each form's own origin since #273 with the reason written beside it — *page origin says nothing about where the form SENDS … could carry `<form action="https://evil/collect">`*. #295 M3's send gate then asked `Agent._driven_host`, which returned the host of the page aish was standing on, so on a **vouched** page a cross-origin form was filled and submitted with no card while the identical values in a composed URL to that destination drew one. The rationale for the whole gate is in `docs/agent-core.md`; what belongs here is the enumeration's half of it.
+
+**"" means aish could not read a destination, and the gate treats that as unvouched.** Three shapes produce it: a control with no `<form>` at all — which is submitted by script, to anywhere; an action with no host (`mailto:`, `javascript:`); and a string `URL` will not parse. The card then names `UNREADABLE_DESTINATION` and says exactly that, because *aish cannot say where this goes* is what a line established and *this is going somewhere hostile* is not.
+
+**Verified against real Chrome, not only in the suite.** The unit tests hand `controls_from` a `sends_to` that is already there, which pins the gate and pins nothing about the enumeration that fills it. `scripts/verify_sends_to.py` runs the shipped `CONTROLS_JS` over a **served** page whose forms are written six ways — no action, relative, cross-origin, same-origin, button `formaction`, `mailto:` — plus a field outside every form, and reads back what each reports. Its first run corrected an assumption of the fix's own: `form.action` with no action attribute returns the **document's** URL, so a page loaded into a blank document rather than served over a real origin reports `about:blank` — which has no host and fails closed. That is why the script serves the page instead.
+
 ### The commit verbs (#342)
 
 **A control whose OWN WORDS say it buys, pays, orders, books, reserves, subscribes, tops up or ends a contract — and any control that deletes — has no yes button.** It drew a card until now, and the card was the whole problem: measured this period, the owner's median tap on an approval card is **4.3 seconds**, and **11 of 34** were under three. There is no future in which aish pressing *Zapłać* was going to be wanted, so a popup offering a yes for it protects nothing and trains the tap that is waiting on the purchase. Moving it from approvable to unapprovable removes a decision instead of adding one, which is the only shape that survives cards going unread.

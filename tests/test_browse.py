@@ -26,6 +26,15 @@ def control(n=0, kind=browse.BUTTON, name="Przełącz lokal", **kw):
     return browse.controls_from([raw])[0]
 
 
+#: Where a form on the default `snapshot()` page really submits to. Since #346 a
+#: control carries the destination its `<form>` RESOLVES to, and the gate reads
+#: that rather than the page's own address — a form with no action, or a relative
+#: one, resolves to the page, which is the same-origin case these fixtures are
+#: about. A fixture that omits it is a form whose destination aish cannot read,
+#: and that fails closed on purpose.
+SAME_ORIGIN = "https://eon.pl/mojeon"
+
+
 def snapshot(url="https://eon.pl/mojeon", controls=(), **kw):
     return browse.Snapshot(
         url=url, title=kw.pop("title", ""), text=kw.pop("text", "Wyspowa"),
@@ -1196,8 +1205,10 @@ class TestFillingAFormIsOneAct:
             {"n": 0, "kind": "field", "name": "Skąd"},
             {"n": 1, "kind": "field", "name": "Dokąd"},
             {"n": 2, "kind": "check", "name": "Tylko bezpośrednie"},
-            {"n": 3, "kind": "button", "name": "Szukaj", "submits": True},
-            {"n": 4, "kind": "button", "name": "Zapłać", "submits": True},
+            {"n": 3, "kind": "button", "name": "Szukaj", "submits": True,
+             "sends_to": SAME_ORIGIN},
+            {"n": 4, "kind": "button", "name": "Zapłać", "submits": True,
+             "sends_to": SAME_ORIGIN},
         ])
 
     def test_a_whole_form_plans_as_one_batch(self):
@@ -2118,7 +2129,8 @@ class TestConsequencesWithNoYesButton:
         snap = snapshot(controls=[
             control(n=1, kind=browse.FIELD, name="Skąd"),
             control(n=2, kind=browse.FIELD, name="Dokąd"),
-            control(n=3, name="Szukaj", mutating=True, submits=True),
+            control(n=3, name="Szukaj", mutating=True, submits=True,
+                    sends_to=SAME_ORIGIN),
         ])
         agent, asked = self._agent(snap)
         # Vouched, which is the state seeding puts his own sites in (#295 M3):
@@ -3289,7 +3301,8 @@ class TestTheGrantIsWhereTheConsentLives:
         the model re-composed the same form with the same values."""
         snap = snapshot(controls=browse.controls_from([
             {"n": 1, "kind": "field", "name": "Skąd"},
-            {"n": 2, "kind": "button", "name": "Wyślij", "submits": True},
+            {"n": 2, "kind": "button", "name": "Wyślij", "submits": True,
+             "sends_to": SAME_ORIGIN},
         ]))
         agent, asked = self._agent(snap)
         steps = [{"target": "Skąd", "value": "WAW"}, {"target": "Wyślij", "do": "click"}]
@@ -3531,7 +3544,8 @@ class TestOneCardNotTwo:
     def _batch(self):
         return snapshot(controls=browse.controls_from([
             {"n": 1, "kind": "field", "name": "Skąd"},
-            {"n": 2, "kind": "button", "name": "Wyślij", "submits": True},
+            {"n": 2, "kind": "button", "name": "Wyślij", "submits": True,
+             "sends_to": SAME_ORIGIN},
         ]))
 
     STEPS = ({"target": "Skąd", "value": "WAW"}, {"target": "Wyślij", "do": "click"})
@@ -3571,7 +3585,7 @@ class TestOneCardNotTwo:
         snap = snapshot(controls=browse.controls_from([
             {"n": 1, "kind": "field", "name": "Skąd"},
             {"n": 2, "kind": "button", "name": "Search", "submits": True,
-             "method": "get"},
+             "method": "get", "sends_to": SAME_ORIGIN},
         ]))
         agent, asked, logged = self._agent(snap)
         agent._approved_hosts.add("eon.pl")  # the send clause has its own tests
@@ -3877,6 +3891,7 @@ class TestTheGrantIsCollectedOnTheFirstPressThatChanges:
                 {"n": 1, "kind": "field", "name": "Skąd"},
                 {"n": 2, "kind": "button", "submits": True,
                  "name": "Wyślij" if worded else "Szukaj",
+                 "sends_to": f"https://{self.HOST}/mojeon",
                  **({"method": "get"} if get else {})},
             ])
         ))
@@ -3981,9 +3996,11 @@ class TestTheGrantIsCollectedOnTheFirstPressThatChanges:
 
     def _enter_page(self, *, get, form="f1"):
         return snapshot(url=f"https://{self.HOST}/x", controls=browse.controls_from([
-            {"n": 1, "kind": "field", "name": "Skąd", "form": form},
+            {"n": 1, "kind": "field", "name": "Skąd", "form": form,
+             "sends_to": f"https://{self.HOST}/x"},
             {"n": 2, "kind": "button", "name": "Go", "submits": True,
-             "form": form, **({"method": "get"} if get else {})},
+             "form": form, "sends_to": f"https://{self.HOST}/x",
+             **({"method": "get"} if get else {})},
         ]))
 
     def _enter(self, snap, *, vouched=True, monkeypatch=None):
