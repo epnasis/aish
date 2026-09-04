@@ -200,7 +200,9 @@ function doc(overrides = {}) {
         { call: 1, name: "read_url", summary: "https://x", args: { url: `https://x/${HOSTILE}` }, args_state: "recorded", args_truncated: 0, cap_source: null,
           ok: false, status: "failed", secs: 1.2, command: "", error: `403 ${HOSTILE}`, output: "", decision: null, verdict_by: "prefix", problem: "", unchanged: false,
           truncation: { truncator: "web", kept: 4000, omitted: 2000, offered: true, continuation: "k1" }, read: "", bytes: 6000,
-          frame: "", frame_skipped: "hands", console: [`TypeError: boom ${HOSTILE}`], gates: [{ verdict: "allowed" }], refused: [], completed: true, model_call: 1 },
+          frame: "", frame_skipped: "hands", console: [`TypeError: boom ${HOSTILE}`],
+          signin: { host: "eon.pl", ok: false, console: ["sign-in page said no"] },
+          gates: [{ verdict: "allowed" }], refused: [], completed: true, model_call: 1 },
         { call: 2, name: "run_command", summary: "ls", args: { command: "ls" }, args_state: "recorded", args_truncated: 0, cap_source: null,
           ok: true, status: "ok", secs: 0.3, command: "ls", error: "", output: "needle two\nneedle three\nNEEDLE four", decision: "auto-approved", verdict_by: "prefix", problem: "", unchanged: false,
           truncation: {}, read: "", bytes: null, gates: [], refused: [], completed: true, model_call: 1 },
@@ -462,7 +464,7 @@ check("the panes say what the record can and cannot say", () => {
   text = bodyText(w);
   assert(text.includes("THE WHOLE CONTEXT OF MODEL CALL 2"));
   assert(text.includes("you are aish"), "the system text is the input of the call");
-  assert(text.includes("read_url — read a page"), "the tool menu is the input of the call");
+  assert(text.includes('"read_url"') && text.includes('"read a page"'), "the tool menu is the input of the call, verbatim JSON");
   assert(text.includes("6 message(s), 4,000 chars, carried from earlier turns"));
   // The model-call facts: retries and the context snapshot (#334) are on the strip.
   s.ssOpen(d, "m1", "context");
@@ -634,10 +636,13 @@ check("meta is structure, never concatenated with the exchange's bytes", () => {
   w.sandbox.ssToggleWhole();
   const wholeNodes = w.el("ss-body").children;
   assert(wholeNodes.some((n) => (n.className || "").includes("ss-meta") && n.textContent.includes("TOOLS ON THE MENU")));
-  assert(wholeNodes.some((n) => (n.className || "").includes("ss-pre") && n.textContent.includes("read_url — read a page")),
-    "the tool definitions must be payload, not meta");
+  assert(wholeNodes.some((n) => (n.className || "").includes("ss-pre") && n.textContent.includes('"read_url"')),
+    "the tool definitions must be payload JSON, not meta");
+  // The definitions are the VERBATIM menu structure, not a bullet reformatting.
+  const defsNode = wholeNodes.find((n) => (n.className || "").includes("ss-pre") && n.textContent.includes('"read_url"'));
+  assert(defsNode && !defsNode.textContent.includes("\u00b7 read_url \u2014"), "the menu must not be flattened to bullets");
   for (const n of wholeNodes) {
-    assert(!(n.textContent.includes("TOOLS ON THE MENU") && n.textContent.includes("read_url — read a page")),
+    assert(!(n.textContent.includes("TOOLS ON THE MENU") && n.textContent.includes('"read_url"')),
       "the menu header leaked into the definitions node");
   }
   w.sandbox.ssToggleWhole();
@@ -648,6 +653,23 @@ check("meta is structure, never concatenated with the exchange's bytes", () => {
   w.sandbox.ssOpen(dd, "c1", "call");
   const rec = w.el("ss-body").children.find((n) => (n.className || "").includes("ss-rec"));
   assert(rec && rec.textContent.includes("rule.x"), "a gate verdict must be a record node");
+});
+
+check("payload styling tracks what the model received, not merely verbatim bytes", () => {
+  const w = world();
+  const d = doc();
+  w.sandbox.ssOpen(d, "c1", "page");
+  const nodes = w.el("ss-body").children;
+  // The DRIVEN page's console IS composed into the tool result the model got
+  // (console_note), so it is payload — monospace .ss-pre.
+  const driven = nodes.find((n) => (n.textContent || "").includes("TypeError: boom"));
+  assert(driven && (driven.className || "").includes("ss-pre") && !(driven.className || "").includes("ss-rec"),
+    "the driven page's console reaches the model, so it is payload");
+  // The SIGN-IN page's console goes to the OWNER and NEVER to the model
+  // (browser.py), so it is EVIDENCE — a record node, never plain payload.
+  const signin = nodes.find((n) => (n.textContent || "").includes("sign-in page said no"));
+  assert(signin && (signin.className || "").includes("ss-rec"),
+    "the sign-in console never reached the model, so it must not wear payload styling");
 });
 
 check("wrap is on by default, the toggle is remembered, and \"0\" turns it off", () => {
