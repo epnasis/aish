@@ -12073,10 +12073,11 @@ let ssWhole = false;
 const SS_SWIPE_MIN = 56;
 const SS_AXIS_LOCK = 1.6;
 const SS_DECIDE_AT = 8;
-// How far a downward pull must travel to close the screen. It can only begin
-// with the pane ALREADY at its top — scrolled anywhere else, down is a scroll
-// and the browser keeps it — so the gesture can never eat a scroll.
-const SS_DISMISS_MIN = 90;
+// The sheet dismissal (the grabber/header drag): how far down the screen must
+// be dragged before release closes it, and how long an arrow lingers after
+// scrolling stops (the chat's SCROLL_FADE_MS, mirrored).
+const SS_SHEET_DISMISS = 120;
+const SS_ARROW_FADE_MS = 2500;
 // A body past this folds — max-height and a "show all" control. The whole text
 // stays in the DOM: folded, never truncated, the same law the sheet had.
 const SS_FOLD_CHARS = 20000;
@@ -12741,6 +12742,8 @@ function ssPaintBody(paneObj) {
   const body = $("ss-body");
   body.textContent = "";
   body.scrollTop = 0;
+  ssLastScrollTop = 0;
+  ssFadeArrows();
   const whole = $("ss-whole");
   const segs = paneObj ? ((paneObj.more && ssWhole) ? paneObj.more.segs : paneObj.segs)
     : [{ kind: "meta", text: "nothing was recorded for this turn" }];
@@ -12897,18 +12900,16 @@ function ssSave() {
 
 // ---- the swipe -------------------------------------------------------------
 //
-// Claims a near-horizontal move for the tape, and a downward pull that BEGAN
-// with the pane at its top for dismissal — the X sits top-left, out of thumb
-// reach on a phone, and a sheet-style pull-down is where the thumb already is.
-// Decided ONCE at the first SS_DECIDE_AT px of travel and never re-decided;
-// everything else is yielded to the pane's vertical scroll (the pane is
-// `touch-action: pan-y`, so the browser owns the scroll and nothing here needs
-// preventDefault). Passive listeners.
+// Claims only a near-horizontal move for the tape, decided ONCE at the first
+// SS_DECIDE_AT px of travel and never re-decided; everything else is yielded
+// to the pane's vertical scroll (the pane is `touch-action: pan-y`, so the
+// browser owns the scroll and nothing here needs preventDefault). Passive
+// listeners. Dismissal is NOT here: content touches never close the screen —
+// that is the sheet convention, and the header drag below owns it.
 function ssTouchStart(e) {
   const t = e.touches && e.touches[0];
   if (!t) return;
-  const body = $("ss-body");
-  ssTouch = { x: t.clientX, y: t.clientY, atTop: !body || !body.scrollTop };
+  ssTouch = { x: t.clientX, y: t.clientY };
   ssGesture = null;
 }
 
@@ -12919,35 +12920,87 @@ function ssTouchMove(e) {
   const dx = t.clientX - ssTouch.x;
   const dy = t.clientY - ssTouch.y;
   if (Math.abs(dx) < SS_DECIDE_AT && Math.abs(dy) < SS_DECIDE_AT) return;
-  if (Math.abs(dx) > SS_AXIS_LOCK * Math.abs(dy)) ssGesture = "page";
-  else if (dy > 0 && Math.abs(dy) > SS_AXIS_LOCK * Math.abs(dx) && ssTouch.atTop) ssGesture = "dismiss";
-  else ssGesture = "scroll";
+  ssGesture = Math.abs(dx) > SS_AXIS_LOCK * Math.abs(dy) ? "page" : "scroll";
 }
 
 function ssTouchEnd(e) {
   if (!ssTouch) return;
   const t = e.changedTouches && e.changedTouches[0];
   const dx = t ? t.clientX - ssTouch.x : 0;
-  const dy = t ? t.clientY - ssTouch.y : 0;
-  const gesture = ssGesture;
+  const claimed = ssGesture === "page";
   ssTouch = null;
-  if (gesture === "page" && Math.abs(dx) >= SS_SWIPE_MIN) ssTape(dx < 0 ? 1 : -1);
-  else if (gesture === "dismiss" && dy >= SS_DISMISS_MIN) {
-    // Still at the top at release: a pull that turned into a scroll mid-way
-    // would have moved the pane, and closing then would eat a scroll.
-    const body = $("ss-body");
-    if (!body || !body.scrollTop) ssClose();
-  }
+  if (claimed && Math.abs(dx) >= SS_SWIPE_MIN) ssTape(dx < 0 ? 1 : -1);
 }
 
-// ---- vertical jumps ---------------------------------------------------------
-// The chat's answer-top lesson, applied here: a long pane is minutes of
-// flicking, so ↑/↓ jump to the top and the bottom, floating bottom-right in
-// thumb reach. ArrowUp/ArrowDown page through the same scroller.
-function ssJump(toBottom) {
+// ---- the sheet drag ---------------------------------------------------------
+// The COMMON dismissal for a full-screen sheet: a grabber, and a header drag
+// the screen visibly follows. Release past SS_SHEET_DISMISS closes; anything
+// less springs back. Content touches never dismiss — a drag that begins on the
+// pane is a scroll or the tape, exactly as everywhere else on a phone.
+let ssDrag = null;
+
+function ssDragStart(e) {
+  const t = e.touches && e.touches[0];
+  if (!t) return;
+  ssDrag = { y: t.clientY, moved: 0 };
+  const box = $("step-screen");
+  if (box) { box.classList.add("ss-dragging"); box.classList.remove("ss-settling"); }
+}
+
+function ssDragMove(e) {
+  if (!ssDrag) return;
+  const t = e.touches && e.touches[0];
+  if (!t) return;
+  ssDrag.moved = Math.max(0, t.clientY - ssDrag.y);
+  const box = $("step-screen");
+  if (box) box.style.transform = ssDrag.moved ? `translateY(${ssDrag.moved}px)` : "";
+}
+
+function ssDragEnd() {
+  if (!ssDrag) return;
+  const moved = ssDrag.moved;
+  ssDrag = null;
+  const box = $("step-screen");
+  if (!box) return;
+  box.classList.remove("ss-dragging");
+  if (moved >= SS_SHEET_DISMISS) {
+    box.style.transform = "";
+    ssClose();
+    return;
+  }
+  // Spring back: the settle transition animates the transform home.
+  box.classList.add("ss-settling");
+  box.style.transform = "";
+}
+
+// ---- the scroll arrows ------------------------------------------------------
+// The CHAT's convention, mirrored: the down arrow appears while you scroll
+// DOWN and are still a viewport from the bottom; the up arrow while you scroll
+// UP and a viewport from the top; both fade a beat after scrolling stops, and
+// tap smooth-scrolls. One directional rule, not a new one.
+let ssLastScrollTop = 0;
+let ssArrowFadeTimer = null;
+
+function ssFadeArrows() {
+  $("ss-scroll-down").hidden = true;
+  $("ss-scroll-top").hidden = true;
+}
+
+function ssUpdateScrollArrows() {
   const body = $("ss-body");
   if (!body) return;
-  body.scrollTop = toBottom ? (body.scrollHeight || 1e9) : 0;
+  const top = body.scrollTop;
+  const fromBottom = (body.scrollHeight || 0) - top - (body.clientHeight || 0);
+  const vh = body.clientHeight || 0;
+  if (top > ssLastScrollTop && fromBottom > vh) $("ss-scroll-down").hidden = false;
+  else if (top < ssLastScrollTop || fromBottom < vh) $("ss-scroll-down").hidden = true;
+  if (top < ssLastScrollTop && top > vh) $("ss-scroll-top").hidden = false;
+  else if (top > ssLastScrollTop || top < vh) $("ss-scroll-top").hidden = true;
+  ssLastScrollTop = top;
+  if (ssArrowFadeTimer) clearTimeout(ssArrowFadeTimer);
+  if (!$("ss-scroll-down").hidden || !$("ss-scroll-top").hidden) {
+    ssArrowFadeTimer = setTimeout(ssFadeArrows, SS_ARROW_FADE_MS);
+  }
 }
 
 function ssScrollPage(delta) {
@@ -12997,8 +13050,23 @@ function ssWire() {
   box.addEventListener("touchend", ssTouchEnd, { passive: true });
   box.addEventListener("touchcancel", () => { ssTouch = null; ssGesture = null; }, { passive: true });
   $("ss-close").onclick = () => ssClose();
-  $("ss-jump-top").onclick = () => ssJump(false);
-  $("ss-jump-bottom").onclick = () => ssJump(true);
+  $("ss-scroll-down").onclick = () => {
+    const body = $("ss-body");
+    if (body.scrollTo) body.scrollTo({ top: body.scrollHeight, behavior: "smooth" });
+    else body.scrollTop = body.scrollHeight || 1e9;
+  };
+  $("ss-scroll-top").onclick = () => {
+    $("ss-scroll-top").hidden = true;
+    const body = $("ss-body");
+    if (body.scrollTo) body.scrollTo({ top: 0, behavior: "smooth" });
+    else body.scrollTop = 0;
+  };
+  $("ss-body").addEventListener("scroll", ssUpdateScrollArrows, { passive: true });
+  const head = $("ss-head");
+  head.addEventListener("touchstart", ssDragStart, { passive: true });
+  head.addEventListener("touchmove", ssDragMove, { passive: true });
+  head.addEventListener("touchend", ssDragEnd, { passive: true });
+  head.addEventListener("touchcancel", ssDragEnd, { passive: true });
   $("ss-prev").onclick = () => ssGo(-1);
   $("ss-next").onclick = () => ssGo(1);
   let stored = null;
