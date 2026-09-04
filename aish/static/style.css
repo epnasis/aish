@@ -3838,6 +3838,13 @@ body.console-open #backdrop { z-index: 63; }
      fences, so a payload reads as code like everywhere else in the app. */
   background: var(--ctp-mantle); color: var(--ctp-text);
   border-radius: 10px; padding: 10px 12px;
+  /* In nowrap mode a long line stays inside the box and scrolls there, on the
+     trackpad (desktop) or by a horizontal drag (mobile) — the box never
+     overflows the screen. `pan-x pan-y` lets a horizontal drag scroll the box
+     while a vertical one still pans #ss-body; the tape yields to it until the
+     box is at its scroll edge (ssTouchEnd). */
+  max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y;
 }
 .ss-pre .tok-em, .ss-pre .tok-strong, .ss-pre .tok-italic { color: var(--ctp-text); }
 #ss-body.wrap-on .ss-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
