@@ -3821,13 +3821,27 @@ body.console-open #backdrop { z-index: 63; }
   font-size: 12px;
 }
 #ss-font-dec, #ss-font-inc { white-space: nowrap; }
-/* Raw monospace text. No wrap by default — a page's console and JSON read
-   better with their shape kept — and the toggle turns wrapping on. */
+/* Raw monospace text — the exchange's bytes, verbatim. Wrapping defaults ON
+   (set in ssWire, remembered per device); the toggle turns it off for text
+   whose shape matters. */
 .ss-pre {
-  margin: 0; font-size: inherit; line-height: 1.45; white-space: pre; overflow-wrap: normal;
+  margin: 0 0 10px; font-size: inherit; line-height: 1.45; white-space: pre; overflow-wrap: normal;
   -webkit-user-select: text; user-select: text;
 }
 #ss-body.wrap-on .ss-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Meta is STRUCTURE: aish's own account around the exchange — headers, states,
+   truncation notes, verdicts. UI font and a border, so it can never be read as
+   text that was passed to or produced by the model. */
+.ss-meta {
+  margin: 10px 0 6px; padding: 4px 10px; border-left: 3px solid var(--sep);
+  color: var(--dim); font-family: inherit; font-size: inherit; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  -webkit-user-select: text; user-select: text;
+}
+.ss-meta:first-child { margin-top: 2px; }
+/* A raw record: mono like the payload, tinted like meta — it is a record, not
+   something a model said or was given. */
+.ss-rec { color: var(--dim); border-left: 3px solid var(--sep); padding-left: 10px; }
 /* Folded, never truncated: the whole text is in the pre. */
 .ss-clamped {
   max-height: 70vh; overflow: hidden;
