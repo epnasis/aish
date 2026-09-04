@@ -3814,6 +3814,12 @@ body.console-open #backdrop { z-index: 63; }
 .ss-state { margin: 4px 0; font-size: 12.5px; color: var(--dim); font-style: italic; }
 /* The pane body is the ONE scroller. pan-y: the browser owns the vertical
    scroll, and a horizontal move is what the swipe recogniser reads. */
+/* The scroller wraps the body and its arrows, so the arrows are positioned
+   against the SCROLL REGION — below the find box by construction — instead of
+   guessed offsets from the top of the screen that overlapped the header. */
+#ss-scroller {
+  position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column;
+}
 #ss-body {
   flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch;
   padding: 8px 12px calc(12px + env(safe-area-inset-bottom));
@@ -3856,9 +3862,11 @@ body.console-open #backdrop { z-index: 63; }
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45); z-index: 3;
   opacity: 1; transition: opacity 0.2s ease, visibility 0.2s ease;
 }
-#ss-scroll-down { bottom: calc(20px + env(safe-area-inset-bottom)); }
-/* Below the header rows (head + facts + tabs + tools, ~150px) with a gap. */
-#ss-scroll-top { top: calc(160px + env(safe-area-inset-top)); }
+/* Against the scroller: 12px inside its top and bottom edges, so the up arrow
+   sits just under the find box and the down arrow just above the bottom, with
+   no overlap of the header whatever its height. */
+#ss-scroll-down { bottom: calc(12px + env(safe-area-inset-bottom)); }
+#ss-scroll-top { top: 12px; }
 #ss-scroll-down[hidden], #ss-scroll-top[hidden] {
   opacity: 0; visibility: hidden; pointer-events: none;
   transition: opacity 0.45s ease, visibility 0.45s ease;
