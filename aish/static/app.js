@@ -12073,10 +12073,17 @@ let ssWhole = false;
 const SS_SWIPE_MIN = 56;
 const SS_AXIS_LOCK = 1.6;
 const SS_DECIDE_AT = 8;
-// The sheet dismissal (the grabber/header drag): how far down the screen must
-// be dragged before release closes it, and how long an arrow lingers after
-// scrolling stops (the chat's SCROLL_FADE_MS, mirrored).
+// The sheet dismissal (the grabber/header drag), judged like a NATIVE sheet:
+// position AND velocity AT RELEASE, not distance alone. A flick down past
+// SS_SHEET_FLICK closes from any distance; any upward motion at release
+// cancels even past the distance threshold (the sheet was brought back up,
+// so it stays — the physical model); otherwise resting past SS_SHEET_DISMISS
+// closes. Velocity is px/ms over the LAST move segment, and only when the
+// finger was still moving at release — a move then a hold before lifting has
+// rested (SS_SHEET_REST_MS), so its velocity is zero, exactly as a real sheet.
 const SS_SHEET_DISMISS = 120;
+const SS_SHEET_FLICK = 0.6;
+const SS_SHEET_REST_MS = 80;
 const SS_ARROW_FADE_MS = 2500;
 // A body past this folds — max-height and a "show all" control. The whole text
 // stays in the DOM: folded, never truncated, the same law the sheet had.
@@ -12939,10 +12946,17 @@ function ssTouchEnd(e) {
 // pane is a scroll or the tape, exactly as everywhere else on a phone.
 let ssDrag = null;
 
+// The event's own clock where the world has one; tests pass timeStamp.
+function ssStamp(e) {
+  if (e && e.timeStamp) return e.timeStamp;
+  return (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+}
+
 function ssDragStart(e) {
   const t = e.touches && e.touches[0];
   if (!t) return;
-  ssDrag = { y: t.clientY, moved: 0 };
+  const stamp = ssStamp(e);
+  ssDrag = { y: t.clientY, moved: 0, prev: 0, prevStamp: stamp, stamp };
   const box = $("step-screen");
   if (box) { box.classList.add("ss-dragging"); box.classList.remove("ss-settling"); }
 }
@@ -12951,24 +12965,37 @@ function ssDragMove(e) {
   if (!ssDrag) return;
   const t = e.touches && e.touches[0];
   if (!t) return;
+  ssDrag.prev = ssDrag.moved;
+  ssDrag.prevStamp = ssDrag.stamp;
   ssDrag.moved = Math.max(0, t.clientY - ssDrag.y);
+  ssDrag.stamp = ssStamp(e);
   const box = $("step-screen");
   if (box) box.style.transform = ssDrag.moved ? `translateY(${ssDrag.moved}px)` : "";
 }
 
-function ssDragEnd() {
+function ssDragEnd(e) {
   if (!ssDrag) return;
-  const moved = ssDrag.moved;
+  const { moved, prev, stamp, prevStamp } = ssDrag;
   ssDrag = null;
   const box = $("step-screen");
   if (!box) return;
   box.classList.remove("ss-dragging");
-  if (moved >= SS_SHEET_DISMISS) {
+  const release = ssStamp(e);
+  // Velocity over the last move segment, in px/ms — but only if the finger was
+  // still moving at release. A hold longer than SS_SHEET_REST_MS between the
+  // last move and the lift means the sheet was set down, not thrown, so its
+  // release velocity is zero (a real sheet does not fly on from a dead stop).
+  const rested = release - stamp > SS_SHEET_REST_MS;
+  const dt = stamp - prevStamp;
+  const velocity = rested || dt <= 0 ? 0 : (moved - prev) / dt;
+  const flick = velocity >= SS_SHEET_FLICK;
+  const returning = moved < prev; // the last move went back UP: brought it home
+  if (flick || (moved >= SS_SHEET_DISMISS && !returning)) {
     box.style.transform = "";
     ssClose();
     return;
   }
-  // Spring back: the settle transition animates the transform home.
+  // Brought back up, or short of the threshold and set down: the sheet stays.
   box.classList.add("ss-settling");
   box.style.transform = "";
 }
