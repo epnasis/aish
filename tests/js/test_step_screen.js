@@ -137,7 +137,7 @@ function textNode(t) {
 
 const IDS = ["step-screen", "ss-count", "ss-title", "ss-prev", "ss-next", "ss-facts", "ss-panes",
   "ss-tools", "ss-find", "ss-find-count", "ss-find-prev", "ss-find-next", "ss-whole", "ss-copy",
-  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head", "ss-read", "ss-findings", "ss-findings-toggle", "ss-findings-cur", "ss-findings-prev", "ss-findings-pos", "ss-findings-next", "ss-findings-list", "ss-icon", "ss-chrome", "ss-grab"];
+  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head", "ss-read", "ss-findings", "ss-findings-toggle", "ss-findings-cur", "ss-findings-prev", "ss-findings-pos", "ss-findings-next", "ss-findings-list", "ss-icon", "ss-chrome", "ss-grab", "ss-content"];
 
 function world(overrides = {}) {
   const ids = new Map();
@@ -358,18 +358,18 @@ function receivedDoc(overrides = {}) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-function nodesOf(w) { return w.el("ss-body").children; }
+function nodesOf(w) { return w.el("ss-content").children; }
 function presOf(w) { return nodesOf(w).filter((n) => (n.className || "").includes("ss-pre") && !(n.className || "").includes("ss-rec")); }
 function metasOf(w) { return nodesOf(w).filter((n) => (n.className || "").includes("ss-meta")); }
 
 function preOf(w) {
-  return w.el("ss-body").querySelector(".ss-pre");
+  return w.el("ss-content").querySelector(".ss-pre");
 }
 
 // The pane is SEGMENTS now — meta blocks around verbatim payload blocks — so
 // whole-pane assertions read every block's text, in order.
 function bodyText(w) {
-  return w.el("ss-body").children.map((n) => n.textContent).join("\n");
+  return w.el("ss-content").children.map((n) => n.textContent).join("\n");
 }
 
 // ---- 1. every kind renders -------------------------------------------------
@@ -426,7 +426,7 @@ check("every pane is textContent, and no interactive node is minted from content
   assert(onScreen >= 5, `the hostile string should be on screen as TEXT in many panes (saw ${onScreen})`);
   // …and the segments join to exactly the pane's text (what copy/save carry).
   w.sandbox.ssOpen(d, "c1", "result");
-  const joined = w.el("ss-body").children
+  const joined = w.el("ss-content").children
     .filter((n) => /ss-(pre|meta)/.test(n.className || ""))
     .map((n) => n.textContent).join("\n\n");
   assert.equal(joined, w.sandbox.ssView.text);
@@ -703,7 +703,7 @@ check("a long body folds and is never truncated", () => {
   const pre = preOf(w);
   assert(pre.classList.has("ss-clamped"), "a long body must fold");
   assert(pre.textContent.includes("line 2999"), "the whole text must be in the DOM");
-  const more = w.el("ss-body").children.find((n) => n.className === "ss-more");
+  const more = w.el("ss-content").children.find((n) => n.className === "ss-more");
   assert(more && more.textContent.startsWith("show all ("));
   more.onclick();
   assert(!pre.classList.has("ss-clamped"));
@@ -721,7 +721,7 @@ check("close hides the surface, clears the view and drops the body", () => {
   assert.equal(w.sandbox.ssClose(), true);
   assert.equal(w.el("step-screen").hidden, true);
   assert.equal(w.sandbox.ssView, null);
-  assert.equal(w.el("ss-body").children.length, 0);
+  assert.equal(w.el("ss-content").children.length, 0);
   assert.equal(w.sandbox.ssClose(), false, "a second close is a no-op");
   assert.equal(w.sandbox.ssGo(1), false);
 });
@@ -756,7 +756,7 @@ check("meta is structure, never concatenated with the exchange's bytes", () => {
   const w = world();
   const d = doc();
   w.sandbox.ssOpen(d, "c1", "result");
-  const nodes = w.el("ss-body").children;
+  const nodes = w.el("ss-content").children;
   const metas = nodes.filter((n) => (n.className || "").includes("ss-meta"));
   const pres = nodes.filter((n) => (n.className || "").includes("ss-pre"));
   // The provenance sentence is a meta block; the payload is its own pre; and
@@ -769,7 +769,7 @@ check("meta is structure, never concatenated with the exchange's bytes", () => {
   }
   // A message's head is meta; its text is payload — in the context pane too.
   w.sandbox.ssOpen(d, "m2", "context");
-  const ctxNodes = w.el("ss-body").children;
+  const ctxNodes = w.el("ss-content").children;
   assert(ctxNodes.some((n) => (n.className || "").includes("ss-meta") && n.textContent.includes("message #2 · tool/read_url")));
   for (const n of ctxNodes) {
     assert(!(n.textContent.includes("── message #") && (n.className || "").includes("ss-pre")),
@@ -779,7 +779,7 @@ check("meta is structure, never concatenated with the exchange's bytes", () => {
   // meta: the count line is a meta header, the tool entries are their own pre.
   w.sandbox.ssOpen(d, "m2", "context");
   w.sandbox.ssToggleWhole();
-  const wholeNodes = w.el("ss-body").children;
+  const wholeNodes = w.el("ss-content").children;
   assert(wholeNodes.some((n) => (n.className || "").includes("ss-meta") && n.textContent.includes("TOOLS ON THE MENU")));
   assert(wholeNodes.some((n) => (n.className || "").includes("ss-pre") && n.textContent.includes('"read_url"')),
     "the tool definitions must be payload JSON, not meta");
@@ -796,7 +796,7 @@ check("meta is structure, never concatenated with the exchange's bytes", () => {
   dd.did.calls[0].refused = [{ gate: "rule.x", verdict: "denied" }];
   dd.did.calls[0].gates = [{ gate: "rule.x", verdict: "denied" }];
   w.sandbox.ssOpen(dd, "c1", "call");
-  const rec = w.el("ss-body").children.find((n) => (n.className || "").includes("ss-rec"));
+  const rec = w.el("ss-content").children.find((n) => (n.className || "").includes("ss-rec"));
   assert(rec && rec.textContent.includes("rule.x"), "a gate verdict must be a record node");
 });
 
@@ -804,7 +804,7 @@ check("payload styling tracks what the model received, not merely verbatim bytes
   const w = world();
   const d = doc();
   w.sandbox.ssOpen(d, "c1", "page");
-  const nodes = w.el("ss-body").children;
+  const nodes = w.el("ss-content").children;
   // The DRIVEN page's console IS composed into the tool result the model got
   // (console_note), so it is payload — monospace .ss-pre.
   const driven = nodes.find((n) => (n.textContent || "").includes("TypeError: boom"));
@@ -997,7 +997,7 @@ check("a fetch that lands after the view moved on writes nothing into the new pa
   w3.sandbox.ssOpen(sentDoc(), "m2", "context");
   w3.sandbox.ssClose();
   await flush();
-  assert.equal(w3.el("ss-body").children.length, 0);
+  assert.equal(w3.el("ss-content").children.length, 0);
   assert.equal(w3.sandbox.ssView, null);
 });
 
@@ -1081,38 +1081,33 @@ check("each step shows the chat's icon, and the chrome collapses on scroll down"
   // A FAILED tool shows the denied glyph, exactly as the chat trace does.
   s.ssShow(d.steps.findIndex((x) => x.id === "c1"), "call");
   assert(w.el("ss-icon").innerHTML.includes('data-icon="denied"'), "a failed tool uses the denied glyph");
-  // Scroll-away top bar: down past the threshold collapses, up reveals, top shows.
-  const box = w.el("step-screen");
+  // The chrome slides at the SCROLL RATE: translated up 1:1 with the scroll
+  // delta (clamped to its height), back down the same pixels on scroll up, and
+  // fully shown at the very top. No class, no layout change.
+  const chrome = w.el("ss-chrome");
+  chrome.offsetHeight = 150; // the height it clamps the shift to
   const body = w.el("ss-body");
-  // A tall pane so these mid-scroll checks are clear of the bottom-lock zone.
-  body.scrollHeight = 3000; body.clientHeight = 600;
+  const shift = () => {
+    const m = /translateY\((-?\d+(?:\.\d+)?)px\)/.exec(chrome.style.transform || "");
+    return m ? -Number(m[1]) : 0;
+  };
   body.scrollTop = 0; s.ssScrollChrome();
-  assert(!box.classList.has("ss-collapsed"), "shown at the top");
-  body.scrollTop = 120; s.ssScrollChrome();
-  assert(box.classList.has("ss-collapsed"), "collapses when reading down");
-  body.scrollTop = 80; s.ssScrollChrome();
-  assert(!box.classList.has("ss-collapsed"), "reveals on any upward scroll");
-  body.scrollTop = 200; s.ssScrollChrome();
-  assert(box.classList.has("ss-collapsed"));
-  body.scrollTop = 4; s.ssScrollChrome();
-  assert(!box.classList.has("ss-collapsed"), "always shown at the top");
-  // A new pane paint reveals the chrome again (fresh read).
+  assert.equal(shift(), 0, "shown at the top");
+  body.scrollTop = 40; s.ssScrollChrome();
+  assert.equal(shift(), 40, "moves up pixel-for-pixel with the scroll");
+  body.scrollTop = 100; s.ssScrollChrome();
+  assert.equal(shift(), 100, "keeps tracking down");
   body.scrollTop = 300; s.ssScrollChrome();
-  assert(box.classList.has("ss-collapsed"));
+  assert.equal(shift(), 150, "fully hidden at its own height, no further");
+  body.scrollTop = 260; s.ssScrollChrome();
+  assert.equal(shift(), 110, "comes back the same pixels on scroll up");
+  body.scrollTop = 0; s.ssScrollChrome();
+  assert.equal(shift(), 0, "fully shown again at the very top");
+  // A new pane paint resets the chrome fully shown.
+  body.scrollTop = 300; s.ssScrollChrome();
+  assert(shift() > 0);
   s.ssShow(d.steps.findIndex((x) => x.id === "c1"), "result");
-  assert(!box.classList.has("ss-collapsed"), "a new pane starts with the chrome shown");
-  // Near the BOTTOM the collapse state is frozen — collapsing there changes the
-  // scroll height and knocks you off the end you are scrolling to reach.
-  body.scrollHeight = 2000; body.clientHeight = 600;
-  body.scrollTop = 300; s.ssScrollChrome();
-  assert(box.classList.has("ss-collapsed"), "collapses in the middle");
-  // now scroll down into the last stretch (within 40% of a screen of the end):
-  // the state does not flip, so the bottom is landable.
-  body.scrollTop = 1550; s.ssScrollChrome(); // fromBottom = 2000-1550-600 = -150 < lock
-  assert(box.classList.has("ss-collapsed"), "stays put near the bottom (was collapsed)");
-  box.classList.remove("ss-collapsed");
-  body.scrollTop = 1300; s.ssScrollChrome(); // fromBottom = 100, still within lock
-  assert(!box.classList.has("ss-collapsed"), "and does not collapse near the bottom either");
+  assert.equal(chrome.style.transform || "", "", "a new pane starts with the chrome fully shown");
 });
 
 check("a running turn refreshes its steps live in the detail, without repainting the pane", async () => {
@@ -1125,14 +1120,14 @@ check("a running turn refreshes its steps live in the detail, without repainting
   assert(w.el("ss-count").textContent.includes("live"), "a running turn shows the live cue");
   assert(w.el("ss-count").textContent.includes(`of ${soFar.steps.length}`), "starts at the steps so far");
   assert.equal(w.el("ss-next").disabled, true, "no next step yet");
-  const bodyBefore = w.el("ss-body").textContent;
+  const bodyBefore = w.el("ss-content").textContent;
   // poll pulls the fuller record.
   s.ssPoll();
   await flush();
   assert(w.el("ss-count").textContent.includes(`of ${full.steps.length}`), "the count grew: " + w.el("ss-count").textContent);
   assert.equal(w.el("ss-next").disabled, false, "new steps became reachable");
   assert(!w.el("ss-count").textContent.includes("live"), "the finished record drops the live cue");
-  assert.equal(w.el("ss-body").textContent, bodyBefore, "the pane being read is NOT repainted on a poll");
+  assert.equal(w.el("ss-content").textContent, bodyBefore, "the pane being read is NOT repainted on a poll");
   // navigation now reaches a step that arrived after opening.
   assert(s.ssShow(full.steps.length - 1, ""));
   assert.equal(s.ssView.doc.steps.length, full.steps.length);

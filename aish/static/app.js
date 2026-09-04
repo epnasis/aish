@@ -13269,9 +13269,10 @@ function ssClose() {
   if (!ssView) return false;
   const box = $("step-screen");
   if (box) box.hidden = true;
-  const body = $("ss-body");
-  if (body) body.textContent = ""; // a turn's context is hundreds of KB; drop it
-  // the node list holds the same text; drop it with the DOM
+  // Drop the pane content (a turn's context is hundreds of KB); the chrome and
+  // #ss-content wrapper stay, so #ss-body keeps its structure.
+  const content = $("ss-content");
+  if (content) content.textContent = "";
   if (ssAbort) { ssAbort.abort(); ssAbort = null; }
   ssView = null;
   ssStopPoll();
@@ -13414,12 +13415,14 @@ function ssToggleFindings() {
 
 function ssPaintBody(paneObj) {
   const body = $("ss-body");
-  body.textContent = "";
+  const content = $("ss-content") || body;
+  content.textContent = "";
   body.scrollTop = 0;
   ssLastScrollTop = 0;
   ssChromeLast = 0;
-  const box = $("step-screen");
-  if (box) box.classList.remove("ss-collapsed");
+  ssChromeShift = 0;
+  const chrome = $("ss-chrome");
+  if (chrome) chrome.style.transform = ""; // a fresh pane starts fully shown
   ssFadeArrows();
   const whole = $("ss-whole");
   const segs = paneObj ? ((paneObj.more && ssWhole) ? paneObj.more.segs : paneObj.segs)
@@ -13431,15 +13434,15 @@ function ssPaintBody(paneObj) {
     whole.hidden = !(paneObj && paneObj.more);
     whole.textContent = ssWhole ? "what changed" : (paneObj && paneObj.more ? paneObj.more.label : "");
   }
-  if (paneObj && paneObj.before) body.appendChild(paneObj.before);
+  if (paneObj && paneObj.before) content.appendChild(paneObj.before);
   const view = ssView;
   for (const seg of segs) {
     const entry = ssEntry(seg);
     // A segment too large to colour says so, then shows the raw bytes — the
     // readable layer is a lens, never a hidden truncation.
-    if (entry.capped) body.appendChild(ssEl("div", "ss-meta",
+    if (entry.capped) content.appendChild(ssEl("div", "ss-meta",
       `shown raw — ${ssN(seg.text.length)} characters, too large to colour`));
-    body.appendChild(entry.node);
+    content.appendChild(entry.node);
     ssView.nodes.push(entry);
     if (seg.kind !== "meta") ssFold(entry.node, seg.text);
     // A blob of the exact request: fetched now, landed in place when it
@@ -13773,9 +13776,10 @@ let ssLastScrollTop = 0;
 let ssArrowFadeTimer = null;
 // The scroll-away top bar (Material's collapsing app bar; Safari/Gmail): the
 // chrome hides when reading DOWN and returns on any upward scroll or at the
-// top. `ssChromeLast` is the last scrollTop the direction was measured against.
+// top. `ssChromeLast` is the last scrollTop the direction was measured against,
+// `ssChromeShift` the pixels the chrome is currently translated up (0..height).
 let ssChromeLast = 0;
-const SS_CHROME_HIDE_AT = 48;
+let ssChromeShift = 0;
 
 function ssFadeArrows() {
   $("ss-scroll-down").hidden = true;
@@ -13804,18 +13808,14 @@ function ssUpdateScrollArrows() {
 // separate recogniser and is unaffected.
 function ssScrollChrome() {
   const body = $("ss-body");
-  const box = $("step-screen");
-  if (!body || !box) return;
+  const chrome = $("ss-chrome");
+  if (!body || !chrome) return;
   const top = body.scrollTop;
-  // Never toggle within the last stretch before the bottom: collapsing or
-  // revealing there changes the scroll HEIGHT, which knocks you off the very
-  // end you are scrolling to reach. Freeze the state so the bottom is landable.
-  const fromBottom = (body.scrollHeight || 0) - top - (body.clientHeight || 0);
-  const lock = Math.max(160, (body.clientHeight || 0) * 0.4);
-  if (fromBottom < lock) { ssChromeLast = top; return; }
-  if (top <= 12) box.classList.remove("ss-collapsed");
-  else if (top > ssChromeLast + 4 && top > SS_CHROME_HIDE_AT) box.classList.add("ss-collapsed");
-  else if (top < ssChromeLast - 4) box.classList.remove("ss-collapsed");
+  const h = chrome.offsetHeight || 0;
+  const delta = top - ssChromeLast;
+  ssChromeShift = Math.min(h, Math.max(0, ssChromeShift + delta));
+  if (top <= 0) ssChromeShift = 0; // fully shown at the very top
+  chrome.style.transform = ssChromeShift ? `translateY(${-ssChromeShift}px)` : "";
   ssChromeLast = top;
 }
 

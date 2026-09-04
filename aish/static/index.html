@@ -330,48 +330,50 @@
      the page pane's picture opens over it. -->
 <div id="step-screen" hidden role="dialog" aria-modal="true" aria-label="turn inspector">
   <div id="ss-grab" aria-hidden="true"></div>
-  <div id="ss-chrome">
-  <div id="ss-head">
-    <button id="ss-close" type="button" aria-label="close">
-      <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-    </button>
-    <span id="ss-icon" aria-hidden="true"></span>
-    <div id="ss-titles">
-      <div id="ss-count"></div>
-      <div id="ss-title"></div>
-    </div>
-    <button id="ss-prev" type="button" aria-label="previous step">&#8249;</button>
-    <button id="ss-next" type="button" aria-label="next step">&#8250;</button>
-  </div>
-  <div id="ss-facts"></div>
-  <div id="ss-panes" role="tablist"></div>
-  <div id="ss-tools">
-    <button id="ss-font-dec" type="button" title="Smaller text" aria-label="smaller text">A&#8722;</button>
-    <button id="ss-font-inc" type="button" title="Larger text" aria-label="larger text">A+</button>
-    <button id="ss-read" type="button" title="Readable / raw" aria-label="readable or raw">Aa</button>
-    <button id="ss-wrap" type="button" title="Wrap lines" aria-label="wrap lines">
-      <svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    </button>
-    <input id="ss-find" type="search" placeholder="Find" autocomplete="off" autocapitalize="off" spellcheck="false">
-    <span id="ss-find-count"></span>
-    <button id="ss-find-prev" type="button" aria-label="previous match">&#8249;</button>
-    <button id="ss-find-next" type="button" aria-label="next match">&#8250;</button>
-    <button id="ss-whole" type="button" hidden></button>
-    <button id="ss-copy" type="button" title="Copy this pane">copy</button>
-    <button id="ss-save" type="button" title="Save this pane as a file" hidden>save</button>
-  </div>
-  <div id="ss-note" hidden></div>
-  <div id="ss-findings" hidden>
-    <button id="ss-findings-toggle" type="button" aria-expanded="false"></button>
-    <span id="ss-findings-cur"></span>
-    <button id="ss-findings-prev" type="button" aria-label="previous finding">&#8249;</button>
-    <span id="ss-findings-pos"></span>
-    <button id="ss-findings-next" type="button" aria-label="next finding">&#8250;</button>
-  </div>
-  <div id="ss-findings-list" hidden></div>
-  </div>
   <div id="ss-scroller">
-    <div id="ss-body"></div>
+    <div id="ss-body">
+    <div id="ss-chrome">
+    <div id="ss-head">
+      <button id="ss-close" type="button" aria-label="close">
+        <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <span id="ss-icon" aria-hidden="true"></span>
+      <div id="ss-titles">
+        <div id="ss-count"></div>
+        <div id="ss-title"></div>
+      </div>
+      <button id="ss-prev" type="button" aria-label="previous step">&#8249;</button>
+      <button id="ss-next" type="button" aria-label="next step">&#8250;</button>
+    </div>
+    <div id="ss-facts"></div>
+    <div id="ss-panes" role="tablist"></div>
+    <div id="ss-tools">
+      <button id="ss-font-dec" type="button" title="Smaller text" aria-label="smaller text">A&#8722;</button>
+      <button id="ss-font-inc" type="button" title="Larger text" aria-label="larger text">A+</button>
+      <button id="ss-read" type="button" title="Readable / raw" aria-label="readable or raw">Aa</button>
+      <button id="ss-wrap" type="button" title="Wrap lines" aria-label="wrap lines">
+        <svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <input id="ss-find" type="search" placeholder="Find" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <span id="ss-find-count"></span>
+      <button id="ss-find-prev" type="button" aria-label="previous match">&#8249;</button>
+      <button id="ss-find-next" type="button" aria-label="next match">&#8250;</button>
+      <button id="ss-whole" type="button" hidden></button>
+      <button id="ss-copy" type="button" title="Copy this pane">copy</button>
+      <button id="ss-save" type="button" title="Save this pane as a file" hidden>save</button>
+    </div>
+    <div id="ss-note" hidden></div>
+    <div id="ss-findings" hidden>
+      <button id="ss-findings-toggle" type="button" aria-expanded="false"></button>
+      <span id="ss-findings-cur"></span>
+      <button id="ss-findings-prev" type="button" aria-label="previous finding">&#8249;</button>
+      <span id="ss-findings-pos"></span>
+      <button id="ss-findings-next" type="button" aria-label="next finding">&#8250;</button>
+    </div>
+    <div id="ss-findings-list" hidden></div>
+    </div>
+      <div id="ss-content"></div>
+    </div>
     <button id="ss-scroll-down" hidden aria-label="scroll to bottom">
       <svg viewBox="0 0 24 24"><path d="M12 5.5v13M6.8 13.3 12 18.5l5.2-5.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
