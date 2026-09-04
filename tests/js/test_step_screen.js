@@ -168,6 +168,8 @@ function world(overrides = {}) {
     showToast: (text) => toasts.push(text),
     setTimeout: () => 0,
     clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
     // Deliberately ABSENT: requestAnimationFrame. A landing that needs a frame
     // throws here, which is the point.
   };
@@ -1097,6 +1099,34 @@ check("each step shows the chat's icon, and the chrome collapses on scroll down"
   assert(box.classList.has("ss-collapsed"));
   s.ssShow(d.steps.findIndex((x) => x.id === "c1"), "result");
   assert(!box.classList.has("ss-collapsed"), "a new pane starts with the chrome shown");
+});
+
+check("a running turn refreshes its steps live in the detail, without repainting the pane", async () => {
+  const w = world();
+  const s = w.sandbox;
+  const soFar = doc(); soFar.running = true; soFar.steps = soFar.steps.slice(0, 4); // recorded so far
+  const full = doc(); full.running = false; // the turn has since finished, all steps
+  s.fetchDossier = async (ref) => { assert.equal(ref, "turn-x"); return full; };
+  s.ssOpen(soFar, soFar.steps[3].id, "", "turn-x");
+  assert(w.el("ss-count").textContent.includes("live"), "a running turn shows the live cue");
+  assert(w.el("ss-count").textContent.includes(`of ${soFar.steps.length}`), "starts at the steps so far");
+  assert.equal(w.el("ss-next").disabled, true, "no next step yet");
+  const bodyBefore = w.el("ss-body").textContent;
+  // poll pulls the fuller record.
+  s.ssPoll();
+  await flush();
+  assert(w.el("ss-count").textContent.includes(`of ${full.steps.length}`), "the count grew: " + w.el("ss-count").textContent);
+  assert.equal(w.el("ss-next").disabled, false, "new steps became reachable");
+  assert(!w.el("ss-count").textContent.includes("live"), "the finished record drops the live cue");
+  assert.equal(w.el("ss-body").textContent, bodyBefore, "the pane being read is NOT repainted on a poll");
+  // navigation now reaches a step that arrived after opening.
+  assert(s.ssShow(full.steps.length - 1, ""));
+  assert.equal(s.ssView.doc.steps.length, full.steps.length);
+  // closing stops the poller; a stray poll after close is a no-op.
+  s.ssClose();
+  s.ssPoll();
+  await flush();
+  assert.equal(s.ssIsOpen(), false);
 });
 
 check("wrap is on by default, the toggle is remembered, and \"0\" turns it off", () => {
