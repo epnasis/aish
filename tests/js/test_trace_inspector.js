@@ -127,7 +127,7 @@ function walk(node, out = []) {
 
 const SS_IDS = ["step-screen", "ss-count", "ss-title", "ss-prev", "ss-next", "ss-facts", "ss-panes",
   "ss-tools", "ss-find", "ss-find-count", "ss-find-prev", "ss-find-next", "ss-whole", "ss-copy",
-  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head", "ss-read"];
+  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head", "ss-read", "ss-findings", "ss-findings-toggle", "ss-findings-cur", "ss-findings-prev", "ss-findings-pos", "ss-findings-next", "ss-findings-list"];
 
 function world() {
   const src = appSource();
@@ -276,7 +276,7 @@ check("a finished card's rows name the steps they are, and live and cold agree",
   // OPENED, never at finish (a replay finishes every card on screen).
   assert(rows(lt).every((r) => r.classList.has("inspectable")));
   assert(lt.el.querySelector(".trace-explain"), "no Full record door");
-  assert(!lt.inner.querySelector(".trace-notes"), "the strip must wait for the record");
+  assert(!lt.inner.querySelector(".trace-notes"), "no worth-a-look strip on the card — it lives in the detail now");
   assert.equal(lt.dossierFetch, undefined, "finishTrace must not fetch");
 });
 
@@ -336,22 +336,11 @@ check("one tap on a row opens the step screen on that step, and the record is fe
   // A finished card is immutable: the record is fetched once (for the strip)
   // and cached for every tap after.
   assert.equal(fetches, 1, "one fetch per finished card");
-  // Opening the card reveals the Worth-a-look strip at the top (one lazy fetch,
-  // cached from the tap above), and it opens the cited step and pane; the
-  // flagged step's row carries the in-context dot.
-  s.inspectReveal(t);
-  await settle();
-  const strip = t.inner.querySelector(".trace-notes");
-  assert(strip, "no worth-a-look strip");
-  assert(t.inner.children.indexOf(strip) < t.inner.children.indexOf(rows(t)[0]), "the strip is not above the rows");
-  const note = strip.querySelector(".trace-note");
-  assert.equal(note.textContent, "5 characters of read_url's result were cut");
-  s.ssClose();
-  note.onclick({ stopPropagation() {} });
-  assert.equal(d.steps[s.ssView.index].id, "c1");
-  assert.equal(s.ssView.pane, "result");
-  assert(c1.classList.has("flagged") && c1.querySelector(".step-flag"), "the flagged row carries a dot");
-  // The door opens on the first worth-a-look row too.
+  // No worth-a-look strip and no dots on the CARD — they moved into the
+  // full-screen detail (the findings navigator).
+  assert(!t.inner.querySelector(".trace-notes"), "no strip on the card");
+  assert(!rows(t).some((r) => r.querySelector(".step-flag")), "no flag dots on the card");
+  // The door opens on the first worth-a-look step in the full screen.
   s.ssClose();
   t.el.querySelector(".trace-explain").onclick({ stopPropagation() {} });
   await settle();
@@ -390,9 +379,6 @@ check("offline and a failed read toast; a running turn is reviewable step by ste
   fire(c1);
   await settle();
   assert(w.toasts.some((x) => x.includes("the server is needed to read this turn's record")), "offline tap toasts");
-  s.inspectReveal(t);
-  await settle();
-  assert(!t.inner.querySelector(".trace-notes"), "no strip when the record cannot be read");
   assert(!s.ssIsOpen());
   // Back online but the read fails: the next tap toasts the error, and nothing
   // was cached.
@@ -428,23 +414,6 @@ check("offline and a failed read toast; a running turn is reviewable step by ste
   await settle();
   assert(w2.toasts.some((x) => x.includes("still running")), "a not-yet-recorded step toasts");
   assert(liveFetches >= 2, "a running turn re-fetches to reflect the latest steps");
-});
-
-check("an empty notes list names its checks and never says all clear", async () => {
-  const w = world();
-  const s = w.sandbox;
-  const d = docFor();
-  d.notes = { rows: [], checks: [{ id: "a" }, { id: "b" }, { id: "c" }] };
-  s.fetchDossier = async () => d;
-  s.currentTurnId = "turn-a";
-  liveTurn(s);
-  const t = s.currentTrace;
-  s.finishTrace();
-  s.inspectReveal(t); // opening the card reveals the strip
-  await settle();
-  const strip = t.inner.querySelector(".trace-notes");
-  assert(strip.textContent.includes("nothing flagged by the 3 checks this reader runs"));
-  assert(!/nothing unusual/i.test(strip.textContent));
 });
 
 // ---- 5. the ordinary card is unchanged ------------------------------------------------

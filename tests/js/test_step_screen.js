@@ -137,7 +137,7 @@ function textNode(t) {
 
 const IDS = ["step-screen", "ss-count", "ss-title", "ss-prev", "ss-next", "ss-facts", "ss-panes",
   "ss-tools", "ss-find", "ss-find-count", "ss-find-prev", "ss-find-next", "ss-whole", "ss-copy",
-  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head", "ss-read"];
+  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-scroll-down", "ss-scroll-top", "ss-head", "ss-read", "ss-findings", "ss-findings-toggle", "ss-findings-cur", "ss-findings-prev", "ss-findings-pos", "ss-findings-next", "ss-findings-list"];
 
 function world(overrides = {}) {
   const ids = new Map();
@@ -1018,6 +1018,50 @@ check("the Response pane shows THE COMPLETE RESPONSE from the store, beside the 
   assert(metasOf(w).some((n) => n.textContent.includes("recorded, then deleted")),
     "a purged response is said in words");
   assert(!log.some((r) => r.digest === "d-resp2"), "a purged response is never fetched");
+});
+
+check("the findings navigator lists, jumps, cycles, and marks the flagged step", () => {
+  const w = world();
+  // two findings, on different steps and panes.
+  const d = doc({ notes: { rows: [
+    { text: "read_url's result was cut", where: { step: "c1", pane: "result" } },
+    { text: "the reminder reached the model as a user message", where: { step: "m2", pane: "context" } },
+  ], checks: [{ id: "a" }] } });
+  w.sandbox.ssOpen(d, "m1", "context");
+  const bar = w.el("ss-findings");
+  assert.equal(bar.hidden, false, "the bar shows when the turn has findings");
+  assert(w.el("ss-findings-toggle").textContent.includes("2 worth a look"), w.el("ss-findings-toggle").textContent);
+  // on a NON-flagged step the count shows but no current finding.
+  assert.equal(w.el("ss-findings-pos").textContent, "2");
+  assert(!w.el("ss-count").textContent.includes("⚠"), "an unflagged step has no marker");
+  // next jumps to the first finding's step AND pane, marks it current.
+  w.sandbox.ssJumpFinding(1);
+  assert.equal(d.steps[w.sandbox.ssView.index].id, "c1");
+  assert.equal(w.sandbox.ssView.pane, "result");
+  assert.equal(w.el("ss-findings-pos").textContent, "1 / 2");
+  assert(w.el("ss-count").textContent.includes("⚠"), "the flagged step is marked");
+  assert(w.el("ss-findings-cur").textContent.includes("result was cut"));
+  // next again → the second finding; wraps back with prev.
+  w.sandbox.ssJumpFinding(1);
+  assert.equal(d.steps[w.sandbox.ssView.index].id, "m2");
+  assert.equal(w.sandbox.ssView.pane, "context");
+  assert.equal(w.el("ss-findings-pos").textContent, "2 / 2");
+  w.sandbox.ssJumpFinding(1); // wraps
+  assert.equal(w.el("ss-findings-pos").textContent, "1 / 2");
+  // the list opens, names each finding and where, and a tap jumps.
+  w.sandbox.ssToggleFindings();
+  const list = w.el("ss-findings-list");
+  assert.equal(list.hidden, false);
+  const items = list.children.filter((n) => (n.className || "").includes("ss-finding"));
+  assert.equal(items.length, 2);
+  assert(items[1].textContent.includes("reached the model as a user message"));
+  items[1].onclick();
+  assert.equal(list.hidden, true, "picking a finding closes the list");
+  assert.equal(d.steps[w.sandbox.ssView.index].id, "m2");
+  // a turn with NO findings hides the bar entirely (never says "all clear").
+  const clean = doc({ notes: { rows: [], checks: [{ id: "a" }] } });
+  w.sandbox.ssOpen(clean, "m1", "context");
+  assert.equal(w.el("ss-findings").hidden, true);
 });
 
 check("wrap is on by default, the toggle is remembered, and \"0\" turns it off", () => {

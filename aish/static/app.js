@@ -2863,7 +2863,6 @@ function ensureTrace() {
     el.classList.toggle("open");
     t.autoCollapsed = false;
     t.userToggled = true;
-    if (el.classList.contains("open")) inspectReveal(t);
   };
   head.querySelector(".trace-stop").onclick = (e) => {
     e.stopPropagation();
@@ -4273,44 +4272,8 @@ function traceInspector(t) {
     row.dataset.inspect = ids[i];
     row.classList.add("inspectable");
   });
-  // If the card was already open at finish (the live turn you were watching),
-  // reveal the strip now; otherwise the header expand does it.
-  if (t.el.classList.contains("open")) inspectReveal(t);
 }
 
-// Fetch the record and draw the Worth-a-look strip and the flag markers, once,
-// for a FINISHED card the owner has opened. Lazy on purpose: a replay finishes
-// every card on screen, so fetching per card at finish would pull hundreds of
-// documents; fetching when a card is opened costs one fetch per card actually
-// read. A failure is not cached — the next open tries again.
-function inspectReveal(t) {
-  if (!t.finished || !t.turnId || t.revealed) return;
-  t.revealed = true;
-  inspectDossier(t).then(
-    (doc) => { inspectStrip(t, doc); inspectMark(t, doc); },
-    () => { t.revealed = false; },
-  );
-}
-
-// A dot on the rows a `notes` check flagged, so the timeline shows WHERE the
-// thing worth a look happened — the strip at the top is the index, this is the
-// in-context cue, and both open the same detail.
-function inspectMark(t, doc) {
-  const flagged = new Set(
-    ((doc.notes || {}).rows || []).map((r) => (r.where || {}).step).filter(Boolean));
-  if (!flagged.size) return;
-  const rows = [...t.body.querySelectorAll(".step")];
-  const ids = inspectKeys(rows);
-  rows.forEach((row, i) => {
-    if (!ids[i]) return;
-    const resolved = inspectResolve(ids[i], doc);
-    const main = row.querySelector(".step-main") || row;
-    if (flagged.has(resolved) && !row.querySelector(".step-flag")) {
-      row.classList.add("flagged");
-      main.appendChild(inspectEl("span", "step-flag", "•"));
-    }
-  });
-}
 
 function inspectEl(tag, cls, text) {
   const node = document.createElement(tag);
@@ -4403,34 +4366,6 @@ function inspectStepClick(t, e) {
   );
 }
 
-// Facts about this turn worth reading first, at the top of the card. Computed
-// in Python over the same document (`explain.notes`), so this is a renderer and
-// never a second opinion; rows state what happened and none of them says WHY.
-// The empty case names the checks it ran — "nothing unusual" is a claim no
-// checker is entitled to make.
-function inspectStrip(t, doc) {
-  if (t.inner.querySelector(".trace-notes")) return;
-  const notes = doc.notes || { rows: [], checks: [] };
-  const strip = inspectEl("div", "trace-notes");
-  strip.appendChild(inspectEl("div", "trace-notes-head", "Worth a look"));
-  if (!notes.rows.length) {
-    strip.appendChild(inspectEl("p", "step-xp-state",
-      `nothing flagged by the ${(notes.checks || []).length} checks this reader runs`));
-  }
-  for (const row of notes.rows) {
-    const note = inspectEl("button", "trace-note", row.text);
-    note.type = "button";
-    const where = row.where || {};
-    note.onclick = (e) => { e.stopPropagation(); ssOpen(doc, where.step, where.pane); };
-    strip.appendChild(note);
-  }
-  if (doc.running) {
-    strip.appendChild(inspectEl("p", "step-xp-state", "this turn is still running — the record so far"));
-  }
-  const first = t.inner.querySelector(".step");
-  if (first && typeof t.inner.insertBefore === "function") t.inner.insertBefore(strip, first);
-  else t.inner.appendChild(strip);
-}
 // [TRACE-CLOSE-END]
 
 function fmtSecs(s) {
@@ -12433,6 +12368,12 @@ let ssFind = { query: "", hits: 0, at: -1, marks: [] };
 // The context pane opens on what CHANGED since the previous call; the whole
 // context is one tap away, and this is that tap.
 let ssWhole = false;
+// The turn's findings (`explain.notes`), each resolved to a step index and the
+// pane it cites, and which one is current — the full-screen navigator across
+// "worth a look", the browser-find / IDE-Problems model. Not on the chat
+// timeline: they are detail, and detail belongs where the detail is.
+let ssFindings = [];
+let ssFindingAt = -1;
 
 // How far a claimed swipe must travel to turn the step, and how strongly
 // horizontal a move must be before it is claimed at all: a flick that is even
@@ -13221,6 +13162,10 @@ function ssOpen(doc, stepId, pane) {
   ssView = { doc, index: 0, pane: "", text: "", nodes: [] };
   ssFind = { query: "", hits: 0, at: -1, marks: [] };
   ssWhole = false;
+  ssFindings = ssBuildFindings(doc);
+  ssFindingAt = -1;
+  const flist = $("ss-findings-list");
+  if (flist) flist.hidden = true;
   ssGesture = null;
   const find = $("ss-find");
   if (find) find.value = "";
@@ -13282,6 +13227,10 @@ function ssClose() {
   // the node list holds the same text; drop it with the DOM
   if (ssAbort) { ssAbort.abort(); ssAbort = null; }
   ssView = null;
+  ssFindings = [];
+  ssFindingAt = -1;
+  const list = $("ss-findings-list");
+  if (list) list.hidden = true;
   return true;
 }
 
@@ -13290,8 +13239,9 @@ function ssPaint() {
   const steps = doc.steps || [];
   const step = steps[index] || null;
   const dur = step && typeof step.secs === "number" ? ssDur(step.secs) : "";
+  const flagged = ssFindings.some((f) => f.index === index);
   $("ss-count").textContent = (steps.length ? `Step ${index + 1} of ${steps.length}` : "No steps")
-    + (dur ? ` · ${dur}` : "");
+    + (dur ? ` · ${dur}` : "") + (flagged ? " · ⚠" : "");
   let title = step ? step.title : "nothing was recorded for this turn";
   if (step && step.kind === "model_call" && step.numbering === "inferred") title += " · number inferred";
   if (step && step.kind === "tool_call" && step.placement === "inferred") title += " · round inferred";
@@ -13331,6 +13281,74 @@ function ssPaint() {
   note.hidden = !sentences.length;
 
   ssPaintBody(step ? ssPanes(doc, step).find((p) => p.name === pane) : null);
+  ssPaintFindings();
+}
+
+// ---- the findings navigator (#354 follow-up) --------------------------------
+// The turn's "worth a look" list, in the full screen where the details are. The
+// bar names the count and the current finding; the ‹ › cycle across them like a
+// browser's find; the label opens the whole list to pick one — the IDE Problems
+// model. Every jump lands on the flagged step and selects the pane it cites.
+function ssBuildFindings(doc) {
+  const steps = doc.steps || [];
+  const out = [];
+  for (const row of ((doc.notes || {}).rows || [])) {
+    const where = row.where || {};
+    const index = steps.findIndex((x) => x.id === where.step);
+    if (index < 0) continue;
+    out.push({ text: String(row.text || ""), pane: where.pane || "", index });
+  }
+  return out;
+}
+
+function ssPaintFindings() {
+  const bar = $("ss-findings");
+  if (!bar) return;
+  const list = $("ss-findings-list");
+  if (!ssFindings.length) { bar.hidden = true; if (list) list.hidden = true; return; }
+  bar.hidden = false;
+  const { index, pane } = ssView;
+  ssFindingAt = ssFindings.findIndex((f) => f.index === index && f.pane === pane);
+  if (ssFindingAt < 0) ssFindingAt = ssFindings.findIndex((f) => f.index === index);
+  const cur = ssFindingAt >= 0 ? ssFindings[ssFindingAt] : null;
+  $("ss-findings-toggle").textContent = `⚠ ${ssFindings.length} worth a look`;
+  $("ss-findings-cur").textContent = cur ? cur.text : "";
+  $("ss-findings-pos").textContent = cur ? `${ssFindingAt + 1} / ${ssFindings.length}` : `${ssFindings.length}`;
+  bar.classList.toggle("on-finding", !!cur);
+}
+
+// ‹ ›: jump to the previous/next finding, wrapping — from nowhere, forward
+// lands on the first and back on the last.
+function ssJumpFinding(delta) {
+  if (!ssFindings.length) return;
+  const from = ssFindingAt >= 0 ? ssFindingAt : (delta > 0 ? -1 : 0);
+  const n = ssFindings.length;
+  const at = ((from + delta) % n + n) % n;
+  const f = ssFindings[at];
+  ssShow(f.index, f.pane);
+}
+
+// The label opens the whole list — each finding's text and the step it is on;
+// a tap jumps to it and selects the pane it cites.
+function ssToggleFindings() {
+  const list = $("ss-findings-list");
+  if (!list) return;
+  const toggle = $("ss-findings-toggle");
+  if (!list.hidden) { list.hidden = true; if (toggle) toggle.setAttribute("aria-expanded", "false"); return; }
+  list.textContent = "";
+  const steps = (ssView && ssView.doc.steps) || [];
+  ssFindings.forEach((f, i) => {
+    const row = ssEl("button", "ss-finding" + (i === ssFindingAt ? " on" : ""));
+    row.type = "button";
+    row.append(
+      ssEl("span", "ss-finding-text", f.text),
+      ssEl("span", "ss-finding-where", (steps[f.index] || {}).title || ""),
+    );
+    row.onclick = () => { list.hidden = true; if (toggle) toggle.setAttribute("aria-expanded", "false"); ssShow(f.index, f.pane); };
+    list.appendChild(row);
+  });
+  list.hidden = false;
+  if (toggle) toggle.setAttribute("aria-expanded", "true");
 }
 
 function ssPaintBody(paneObj) {
@@ -13769,6 +13787,9 @@ function ssWire() {
   box.addEventListener("touchend", ssTouchEnd, { passive: true });
   box.addEventListener("touchcancel", () => { ssTouch = null; ssGesture = null; }, { passive: true });
   $("ss-close").onclick = () => ssClose();
+  $("ss-findings-toggle").onclick = () => ssToggleFindings();
+  $("ss-findings-prev").onclick = () => ssJumpFinding(-1);
+  $("ss-findings-next").onclick = () => ssJumpFinding(1);
   $("ss-scroll-down").onclick = () => {
     const body = $("ss-body");
     if (body.scrollTo) body.scrollTo({ top: body.scrollHeight, behavior: "smooth" });
