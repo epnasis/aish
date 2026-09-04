@@ -271,6 +271,8 @@ const BLOBS = {
   "d-evicted": 410,
   "d-purged": 404,
   "d-broken": new Error("Failed to fetch"),
+  "d-resp1": JSON.stringify({ content: "look", tool_calls: [{ function: { name: "read_url" } }], raw_blocks: [{ type: "citation", url: "https://ex.com" }] }, null, 2),
+  "d-resp2": JSON.stringify({ content: "done" }, null, 2),
 };
 
 // A fetch that serves /evidence from BLOBS and nothing else. `log` records
@@ -329,6 +331,22 @@ function sentDoc(overrides = {}) {
     if (step.kind !== "model_call") continue;
     step.ref.sent = step.model_call;
     step.context.source = "sent";
+  }
+  return d;
+}
+
+// doc() with the complete response on record (#355): the model steps point at
+// their received call, exactly as explain._model_step does.
+function receivedDoc(overrides = {}) {
+  const d = doc(overrides);
+  const call = (mc, digest, state = "recorded") => ({ model_call: mc, provider: "ollama", model: "qwen3:8b",
+    digest, sig: `sig-${digest}`, chars: 40, state });
+  d.received = { state: "recorded", coverage: "seam", provider: "ollama", evicted_on: null,
+    calls: [call(1, "d-resp1"), call(2, "d-resp2", "purged")] };
+  for (const step of d.steps) {
+    if (step.kind !== "model_call") continue;
+    const c = d.received.calls.find((x) => x.model_call === step.model_call);
+    step.ref.received = c && c.state !== "not_recorded" ? step.model_call : null;
   }
   return d;
 }
@@ -948,6 +966,29 @@ check("a fetch that lands after the view moved on writes nothing into the new pa
   await flush();
   assert.equal(w3.el("ss-body").children.length, 0);
   assert.equal(w3.sandbox.ssView, null);
+});
+
+check("the Response pane shows THE COMPLETE RESPONSE from the store, beside the curated view", async () => {
+  const log = [];
+  const w = world({ fetch: evidenceFetch(log) });
+  const d = receivedDoc();
+  w.sandbox.ssOpen(d, "m1", "response");
+  // the curated view is present and labelled as aish's parse.
+  assert(metasOf(w).some((n) => n.textContent.includes("REASONING")), "curated reasoning stays");
+  const header = metasOf(w).find((n) => n.textContent.includes("THE COMPLETE RESPONSE"));
+  assert(header, "the complete response section is present");
+  assert(header.textContent.includes("aish's parse"), "it labels the curated view as the parse");
+  // the whole response was fetched by ITS digest and landed as payload.
+  await flush();
+  assert(log.some((r) => r.digest === "d-resp1"), "the response blob was fetched by digest");
+  const payload = presOf(w).find((n) => n.textContent.includes('"citation"'));
+  assert(payload, "the complete response (incl. new raw_blocks) is shown verbatim as payload");
+  // a purged response says so in words, never fake payload.
+  w.sandbox.ssOpen(d, "m2", "response");
+  await flush();
+  assert(metasOf(w).some((n) => n.textContent.includes("recorded, then deleted")),
+    "a purged response is said in words");
+  assert(!log.some((r) => r.digest === "d-resp2"), "a purged response is never fetched");
 });
 
 check("wrap is on by default, the toggle is remembered, and \"0\" turns it off", () => {

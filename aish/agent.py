@@ -4179,6 +4179,10 @@ class Agent:
                 # can forget it: _chat_turn is reached by the tool-call path,
                 # the text-only path and the final no-tools turn alike.
                 self._record_reasoning(turn)
+                # The COMPLETE response, stored whole beside the request (#355)
+                # — symmetric with _record_sent, so what came back is captured
+                # as completely as what went out, new content types included.
+                self._record_received(turn)
                 return turn
         raise ModelUnavailable(_unavailable_text(last, attempt))
 
@@ -4322,6 +4326,59 @@ class Agent:
             # The content is aish's sentence, not the model's.
             record["synthesized"] = True
         self._emit_record(**record)
+
+    def _record_received(self, turn: tuple) -> None:
+        """The COMPLETE response of one model call, stored whole (#355,
+        `docs/trace-contract.md` §3.13).
+
+        Symmetric with `_record_sent`: the point of a boundary snapshot is
+        COMPLETENESS, not a curated summary. `_record_reasoning` above keeps the
+        channels aish parsed out — thinking, said, the tool calls — which is the
+        readable view; this keeps the WHOLE thing, so a response content type
+        invented in the future is captured here without anyone writing a reader
+        for it. The forward-compatible channel is `raw_blocks`: each provider
+        content block `model_dump`'d verbatim, so a new block type is stored
+        entire rather than reduced to its name (the `reasoning` record keeps
+        block TYPES only, deliberately, and this is the copy that keeps content).
+
+        The bytes go to the per-chat store, scrubbed for stored secrets exactly
+        as the request and tool results are, and the record holds the digest and
+        the size. Renderless: the owner watches the tool result the model's
+        output produced, not this record. A log without it reads as *not
+        recorded*; claude-max writes a `coverage:"sdk"` marker instead (its loop
+        is the SDK's, not aish's), the same as `sent`.
+        """
+        if self.step_log is None:
+            return
+        content, calls, usage, raw_blocks, thinking = turn
+        meta = self._response_meta or {}
+        # The whole response, not a whitelist of channels: `raw_blocks` carries
+        # the provider's own content verbatim, and the assembled text/thinking/
+        # calls carry what aish reads a streamed answer into. Absent keys are
+        # dropped so the blob names only what was actually produced.
+        response: dict[str, Any] = {"content": content}
+        if thinking:
+            response["thinking"] = thinking
+        if calls:
+            response["tool_calls"] = calls
+        if raw_blocks:
+            response["raw_blocks"] = raw_blocks
+        if meta.get("stop"):
+            response["stop"] = meta["stop"]
+        if usage:
+            response["usage"] = list(usage)
+        stored, scrubbed = _scrub_tree(response)
+        blob = _canonical(stored)
+        session = self.current_session() if self.current_session is not None else None
+        record: dict[str, Any] = {
+            "provider": self.provider,
+            "model": self.model,
+            "digest": turns.put(blob, self.state_dir, session),
+            "chars": len(blob),
+        }
+        if scrubbed:
+            record["scrubbed"] = scrubbed
+        self._emit_record(kind="received", model_call=self._model_call, **record)
 
     def _one_chat(
         self, kwargs: dict

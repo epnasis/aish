@@ -401,6 +401,15 @@ class ClaudeMaxAgent:
             provider=self.provider,
             **({"model": self.model} if self.model else {}),
         )
+        # The response is the SDK's too (#355): symmetric with `sent`, one
+        # marker per turn so the received side reads as "not aish's loop"
+        # rather than a bare absence.
+        self.inner._emit_record(
+            kind="received",
+            coverage="sdk",
+            provider=self.provider,
+            **({"model": self.model} if self.model else {}),
+        )
         try:
             result = asyncio.run(self._run(prompt))
         except KeyboardInterrupt:

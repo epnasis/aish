@@ -5839,6 +5839,9 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
                 stamp(entry)
             stamp(call.get("tools"))
             stamp(call.get("system"))
+        # The complete response of each call (#355) is one blob; stamp it too.
+        for call in (doc.get("received") or {}).get("calls") or []:
+            stamp(call)
 
     async def handle_evidence(self, request) -> Response | JSONResponse:
         """GET /evidence/{session}/{digest}?sig=…&token=… — one blob from the

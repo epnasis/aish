@@ -12250,6 +12250,12 @@ function ssSentPrev(doc, call) {
   const earlier = ((doc.sent || {}).calls || []).filter((c) => c.model_call < call.model_call);
   return earlier.length ? earlier[earlier.length - 1] : null;
 }
+// The complete response of this model call (#355), read whole from the store.
+function ssReceivedCall(doc, step) {
+  const ref = step.ref || {};
+  if (ref.received === null || ref.received === undefined) return null;
+  return ((doc.received || {}).calls || []).find((c) => c.model_call === ref.received) || null;
+}
 function ssIssued(doc, step) {
   return (doc.steps || []).filter((s) => s.kind === "tool_call" && s.model_call === step.model_call);
 }
@@ -12556,6 +12562,18 @@ function ssResponseSegs(doc, step) {
     b.meta(`→ ${s.name} (tool call ${s.call})`);
     if (c && c.args_state === "recorded") b.text(ssJson(c.args));
     else b.meta(SS_STATE_WORDS.not_recorded);
+  }
+  // THE COMPLETE RESPONSE (#355): everything the model produced, stored
+  // whole at the seam — so a response content type nothing above parses is
+  // still here, verbatim. The reasoning / said / tool-calls above are AISH'S
+  // PARSE of it (the readable view); this is the source they were read from.
+  // Fetched by digest via /evidence, its state said in words when gone.
+  const received = ssReceivedCall(doc, step);
+  if (received) {
+    b.meta("THE COMPLETE RESPONSE — everything the model produced, verbatim"
+      + " (the reasoning, said and tool calls above are aish's parse of this)");
+    if (received.state === "recorded" && received.digest) b.blob(received.digest, received.sig);
+    else b.meta(ssBlobWords(doc, received.state));
   }
   if (step.is_last) {
     const produced = doc.produced || {};

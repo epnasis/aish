@@ -2327,6 +2327,53 @@ class TestSentRecord:
                 order.append((step["kind"], step.get("model_call")))
         assert order == [("sent", 1), ("reasoning", 1), ("sent", 2), ("reasoning", 2)]
 
+    def test_the_complete_response_is_stored_whole_beside_the_request(self, tmp_path):
+        """#355: every successful call writes a `received` record whose blob is
+        the whole response — content, and (where the provider gives them) the
+        raw_blocks that carry new content types verbatim — after its reasoning."""
+        from aish import turns
+        agent, _, log = self._agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("done")],
+            tmp_path,
+        )
+        agent.run_task("hello")
+        received = steps(log.path, "received")
+        assert [r["model_call"] for r in received] == [1, 2]
+        assert "received" in RENDERLESS_STEPS
+        # written AFTER the response's reasoning record, in exchange order.
+        order = []
+        for line in log.path.read_text().splitlines():
+            step = (json.loads(line).get("step") or {})
+            if step.get("kind") in ("reasoning", "received"):
+                order.append((step["kind"], step.get("model_call")))
+        assert order == [("reasoning", 1), ("received", 1), ("reasoning", 2), ("received", 2)]
+        # the blob resolves in the chat's directory and round-trips to a dict
+        # holding what the model produced.
+        for record in received:
+            blob = turns.get(record["digest"], tmp_path, log.path)
+            assert blob is not None
+            assert record["chars"] == len(blob)
+            body = json.loads(blob)
+            assert "content" in body
+        # the second call's response is the answer text, complete.
+        last = turns.get(received[-1]["digest"], tmp_path, log.path)
+        assert "done" in last
+
+    def test_the_reader_and_step_carry_the_complete_response(self, tmp_path):
+        agent, _, log = self._agent([model_says("hi there")], tmp_path)
+        agent.run_task("hello")
+        loaded = explain_mod.load(log.path)
+        turn = explain_mod.find(loaded, None)[0]
+        doc = explain_mod.dossier(turn, loaded, tmp_path, request_text=True)
+        received = doc["received"]
+        assert received["state"] == "recorded"
+        call = received["calls"][0]
+        assert call["state"] == "recorded"
+        assert "hi there" in call["text"]
+        # the model step points at it, so the pane can show it.
+        model_step = next(s for s in doc["steps"] if s["kind"] == "model_call")
+        assert model_step["ref"]["received"] == call["model_call"]
+
     def test_a_call_that_never_succeeded_records_no_request(self, tmp_path):
         """kwargs are built once and re-sent on every retry; a permanently
         failing call must not record a request the model never received."""
@@ -2398,10 +2445,13 @@ class TestSentRecord:
                 {k: v for k, v in m.items() if not k.startswith("_")} for m in sent["messages"]
             ]
             assert _canonical(rebuilt) == _canonical(sent)
-        # And the bytes are in the CHAT's directory, once each.
+        # And the bytes are in the CHAT's directory, once each. The `received`
+        # records (#355) store the response blobs in the same directory, so the
+        # expected set is the request blobs AND the response blobs.
         stored = [p for p in turns.chat_dir(tmp_path, log.path).iterdir() if p.is_file()]
         digests = {e["digest"] for s in steps(log.path, "sent") for e in s["messages"]}
         digests |= {s["tools"]["digest"] for s in steps(log.path, "sent")}
+        digests |= {s["digest"] for s in steps(log.path, "received") if s.get("digest")}
         assert {p.name for p in stored} == digests
 
     def test_origin_and_tool_name_point_back_at_the_aish_side(self, tmp_path):
