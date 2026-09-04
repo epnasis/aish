@@ -3728,38 +3728,6 @@ body.console-open #backdrop { z-index: 63; }
    and nothing else, because the row's own content is what a reader looks at. */
 .step.inspectable { cursor: pointer; }
 .step.inspectable:active { background: var(--row-sel-bg); border-radius: 8px; }
-/* A step a Worth-a-look check flagged: a small amber dot on the row, so the
-   timeline shows where the thing worth reading happened (the strip is the
-   index; both open the same detail). */
-.step.flagged .step-title { }
-.step-flag { color: var(--ctp-yellow); margin-left: 6px; font-size: 13px; line-height: 1; }
-/* The in-place summary: one line per pane, each a control into the step screen. */
-.step-xp { margin-top: 6px; padding: 6px 0 2px; border-top: 0.5px solid var(--sep); }
-.step-xp-head { font-size: 12px; color: var(--dim); margin-bottom: 4px; }
-.step-xp-pane {
-  display: flex; align-items: baseline; gap: 8px; width: 100%;
-  padding: 5px 0; background: none; border: 0; color: var(--fg);
-  font: inherit; font-size: 13px; text-align: left; cursor: pointer;
-}
-.step-xp-label { flex: 0 0 72px; font-weight: 600; }
-.step-xp-brief { flex: 1; min-width: 0; color: var(--dim); overflow-wrap: anywhere; }
-.step-xp-chev { color: var(--accent); opacity: 0.6; }
-.step-xp-state { margin: 4px 0; font-size: 12.5px; color: var(--dim); font-style: italic; }
-
-/* Worth a look — a shortcut INTO the evidence, so each row is a control. */
-.trace-notes { padding: 8px 0 6px 30px; border-bottom: 0.5px solid var(--sep); margin-bottom: 4px; }
-.trace-notes-head {
-  margin: 0 0 6px; font-size: 11px; font-weight: 600;
-  letter-spacing: 0.06em; text-transform: uppercase; color: var(--dim);
-}
-.trace-note {
-  display: block; width: 100%; margin: 0 0 5px; padding: 8px 10px;
-  background: var(--bg); border: 0; border-radius: 9px;
-  border-left: 2.5px solid var(--amber, #d08726);
-  color: var(--fg); font: inherit; font-size: 13px; line-height: 1.35;
-  text-align: left; cursor: pointer;
-}
-
 /* The step screen: a full-screen surface of its own, above the sheets and the
    rail (it is opened from a card under them) and BELOW #preview (a frame in
    the page pane opens the picture viewer over it). */
@@ -3817,6 +3785,42 @@ body.console-open #backdrop { z-index: 63; }
 #ss-note { padding: 4px 12px 0; }
 #ss-note[hidden] { display: none; }
 .ss-state { margin: 4px 0; font-size: 12.5px; color: var(--dim); font-style: italic; }
+/* The findings navigator (#354 follow-up): the turn's "worth a look" in the
+   full screen where the details are — a find-bar / Problems-panel model. */
+#ss-findings {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  border-bottom: 0.5px solid var(--sep);
+  font-size: 12.5px; color: var(--ctp-yellow);
+}
+#ss-findings[hidden] { display: none; }
+#ss-findings-toggle {
+  flex: none; background: none; border: 0.5px solid var(--ctp-yellow);
+  border-radius: 8px; color: var(--ctp-yellow); font: inherit; font-size: 12px;
+  padding: 3px 8px; cursor: pointer; white-space: nowrap;
+}
+#ss-findings-cur {
+  flex: 1; min-width: 0; color: var(--fg); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+#ss-findings-prev, #ss-findings-next {
+  flex: none; background: none; border: 0; color: var(--fg);
+  font-size: 17px; line-height: 1; padding: 2px 6px; cursor: pointer;
+}
+#ss-findings-pos { flex: none; font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+#ss-findings-list {
+  border-bottom: 0.5px solid var(--sep); max-height: 40vh; overflow-y: auto;
+  padding: 4px 8px 8px;
+}
+#ss-findings-list[hidden] { display: none; }
+.ss-finding {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  margin: 4px 0 0; padding: 8px 10px;
+  background: var(--ctp-mantle); border: 0; border-left: 2.5px solid var(--ctp-yellow);
+  border-radius: 8px; color: var(--fg); font: inherit; font-size: 13px;
+  text-align: left; cursor: pointer;
+}
+.ss-finding.on { border-left-width: 4px; }
+.ss-finding-where { font-size: 11.5px; color: var(--dim); }
 /* The pane body is the ONE scroller. pan-y: the browser owns the vertical
    scroll, and a horizontal move is what the swipe recogniser reads. */
 /* The scroller wraps the body and its arrows, so the arrows are positioned
