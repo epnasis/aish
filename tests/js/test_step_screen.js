@@ -125,7 +125,7 @@ function textNode(t) {
 
 const IDS = ["step-screen", "ss-count", "ss-title", "ss-prev", "ss-next", "ss-facts", "ss-panes",
   "ss-tools", "ss-find", "ss-find-count", "ss-find-prev", "ss-find-next", "ss-whole", "ss-copy",
-  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc"];
+  "ss-save", "ss-note", "ss-body", "ss-wrap", "ss-close", "ss-font-dec", "ss-font-inc", "ss-jump-top", "ss-jump-bottom"];
 
 function world(overrides = {}) {
   const ids = new Map();
@@ -359,7 +359,9 @@ check("the recogniser claims only a near-horizontal move and yields the rest (L5
   assert.equal(at(), "c2");
   assert.equal(s.ssView.pane, "call", "past the last pane, the next step's first");
   // A diagonal start is a scroll, decided ONCE: a big horizontal travel later
-  // does not turn it into a page.
+  // does not turn it into a page. (Scrolled off the top, so the downward pull
+  // cannot read as a dismiss — that case has its own check.)
+  w.el("ss-body").scrollTop = 50;
   s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }] });
   s.ssTouchMove({ touches: [{ clientX: 190, clientY: 320 }] });
   assert.equal(s.ssGesture, "scroll", "a diagonal move must be yielded");
@@ -368,6 +370,7 @@ check("the recogniser claims only a near-horizontal move and yields the rest (L5
   s.ssTouchEnd({ changedTouches: [{ clientX: 30, clientY: 340 }] });
   assert.equal(at(), "c2", "a yielded gesture must not move the step");
   assert.equal(s.ssView.pane, "call");
+  w.el("ss-body").scrollTop = 0;
   // A claimed move too short to be a swipe changes nothing.
   s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }] });
   s.ssTouchMove({ touches: [{ clientX: 180, clientY: 301 }] });
@@ -651,6 +654,52 @@ check("wrap is on by default, the toggle is remembered, and \"0\" turns it off",
   w.el("ss-wrap").onclick();
   assert(w.el("ss-body").classList.has("wrap-on"));
   assert.equal(store.get("aish-ss-wrap"), "1");
+});
+
+check("the jumps and the page keys move the scroller; a pull from the top closes", () => {
+  const w = world();
+  const s = w.sandbox;
+  s.ssOpen(doc(), "c1", "result");
+  const body = w.el("ss-body");
+  // ↓ jumps to the bottom, ↑ back to the top (scrollHeight is absent in this
+  // world, so the bottom is the large fallback).
+  w.el("ss-jump-bottom").onclick();
+  assert(body.scrollTop > 0, "jump to bottom must move the scroller");
+  w.el("ss-jump-top").onclick();
+  assert.equal(body.scrollTop, 0);
+  // Page keys move by a page and never below zero.
+  s.ssScrollPage(1);
+  const page1 = body.scrollTop;
+  assert(page1 > 0);
+  s.ssScrollPage(-1);
+  assert.equal(body.scrollTop, 0);
+  s.ssScrollPage(-1);
+  assert.equal(body.scrollTop, 0, "never scrolls above the top");
+  // A downward pull that BEGAN at the top closes the screen…
+  s.ssTouchStart({ touches: [{ clientX: 200, clientY: 200 }] });
+  s.ssTouchMove({ touches: [{ clientX: 202, clientY: 260 }] });
+  assert.equal(s.ssGesture, "dismiss");
+  s.ssTouchEnd({ changedTouches: [{ clientX: 203, clientY: 310 }] });
+  assert.equal(s.ssIsOpen(), false, "a pull from the top must close");
+  // …a pull from a SCROLLED pane is a scroll and closes nothing…
+  s.ssOpen(doc(), "c1", "result");
+  body.scrollTop = 120;
+  s.ssTouchStart({ touches: [{ clientX: 200, clientY: 200 }] });
+  s.ssTouchMove({ touches: [{ clientX: 202, clientY: 260 }] });
+  assert.equal(s.ssGesture, "scroll", "scrolled anywhere else, down is a scroll");
+  s.ssTouchEnd({ changedTouches: [{ clientX: 203, clientY: 310 }] });
+  assert.equal(s.ssIsOpen(), true, "a scroll must not close");
+  // …and a short pull from the top is nothing at all.
+  body.scrollTop = 0;
+  s.ssTouchStart({ touches: [{ clientX: 200, clientY: 200 }] });
+  s.ssTouchMove({ touches: [{ clientX: 202, clientY: 240 }] });
+  assert.equal(s.ssGesture, "dismiss");
+  s.ssTouchEnd({ changedTouches: [{ clientX: 203, clientY: 260 }] });
+  assert.equal(s.ssIsOpen(), true, "below the threshold nothing happens");
+  // An upward pull at the top is a scroll, never a dismiss.
+  s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }] });
+  s.ssTouchMove({ touches: [{ clientX: 202, clientY: 240 }] });
+  assert.equal(s.ssGesture, "scroll");
 });
 
 check("A−/A+ scale the pane text, clamp at both ends, and survive a reopen", async () => {
