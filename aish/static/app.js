@@ -4339,7 +4339,7 @@ function inspectDossier(t) {
 }
 
 function inspectOpen(t) {
-  inspectDossier(t).then((doc) => ssOpenDoc(doc), (err) => showToast((err && err.message) || "the record could not be read"));
+  inspectDossier(t).then((doc) => ssOpenDoc(doc, undefined, undefined, t.turnId), (err) => showToast((err && err.message) || "the record could not be read"));
 }
 
 function inspectStepClick(t, e) {
@@ -4359,7 +4359,7 @@ function inspectStepClick(t, e) {
     (doc) => {
       const resolved = inspectResolve(id, doc);
       const step = (doc.steps || []).find((x) => x.id === resolved);
-      if (step) ssOpenDoc(doc, step.id);
+      if (step) ssOpenDoc(doc, step.id, undefined, t.turnId);
       else showToast("not in the record yet — this step is still running");
     },
     (err) => showToast((err && err.message) || "the record could not be read"),
@@ -12374,6 +12374,14 @@ let ssWhole = false;
 // timeline: they are detail, and detail belongs where the detail is.
 let ssFindings = [];
 let ssFindingAt = -1;
+// While the step screen is open on a RUNNING turn, poll the record so new
+// steps become reachable without leaving the screen (#354 follow-up). `ssRef`
+// is the turn id to re-fetch; the poll updates the counter and the reachable
+// steps, never the pane you are reading.
+let ssRef = "";
+let ssPollTimer = null;
+let ssPolling = false;
+const SS_POLL_MS = 1500;
 
 // How far a claimed swipe must travel to turn the step, and how strongly
 // horizontal a move must be before it is claimed at all: a flick that is even
@@ -13171,12 +13179,13 @@ function ssIsOpen() { return !!ssView; }
 // Open on the step `stepId` names (else the first), on `pane` where that step
 // has it (else its first). Synchronous: a worth-a-look tap lands on its first
 // pass, with no frame to wait for.
-function ssOpen(doc, stepId, pane) {
+function ssOpen(doc, stepId, pane, ref) {
   const box = $("step-screen");
   if (!box) return false;
   const steps = doc.steps || [];
   let index = steps.findIndex((s) => s.id === stepId);
   if (index < 0) index = 0;
+  ssRef = ref || "";
   ssView = { doc, index: 0, pane: "", text: "", nodes: [] };
   ssFind = { query: "", hits: 0, at: -1, marks: [] };
   ssWhole = false;
@@ -13188,16 +13197,48 @@ function ssOpen(doc, stepId, pane) {
   const find = $("ss-find");
   if (find) find.value = "";
   box.hidden = false;
+  ssStartPoll();
   if (!steps.length) { ssPaint(); return true; }
   return ssShow(index, pane || "");
 }
 
+// ---- live refresh (#354 follow-up) ------------------------------------------
+// Poll the record while it is open on a running turn, so steps performed after
+// you opened become reachable — you keep scrolling to them without exiting. The
+// pane you are READING is never repainted (completed steps do not change); only
+// the counter, the Next arrow and the findings bar update.
+function ssStartPoll() {
+  if (ssPollTimer) { clearInterval(ssPollTimer); ssPollTimer = null; }
+  if (!ssRef || !ssView || !ssView.doc.running) return;
+  ssPollTimer = setInterval(ssPoll, SS_POLL_MS);
+}
+
+function ssStopPoll() {
+  if (ssPollTimer) { clearInterval(ssPollTimer); ssPollTimer = null; }
+}
+
+function ssPoll() {
+  if (!ssView || !ssRef || !ssView.doc.running) { ssStopPoll(); return; }
+  if (ssPolling) return;
+  ssPolling = true;
+  const ref = ssRef;
+  fetchDossier(ref).then((fresh) => {
+    ssPolling = false;
+    if (!ssView || ssRef !== ref) return; // closed or moved on while in flight
+    ssView.doc = fresh;
+    ssFindings = ssBuildFindings(fresh);
+    ssPaintCount();
+    ssPaintFindings();
+    if (!fresh.running) ssStopPoll(); // the turn ended; the record is final
+  }, () => { ssPolling = false; });
+}
+
 // The door by id (`/explain <ref>`, and the card's Full record row): the first
 // worth-a-look row's step and pane, else the first step.
-function ssOpenDoc(doc, stepId, pane) {
+function ssOpenDoc(doc, stepId, pane, ref) {
   const note = !stepId && (((doc.notes || {}).rows) || [])[0];
   const where = (note && note.where) || {};
-  return ssOpen(doc, stepId || where.step || (((doc.steps || [])[0]) || {}).id, pane || where.pane || "");
+  return ssOpen(doc, stepId || where.step || (((doc.steps || [])[0]) || {}).id, pane || where.pane || "", ref);
 }
 
 // The one writer of what is on screen. Keeps the pane BY NAME where the step
@@ -13245,6 +13286,8 @@ function ssClose() {
   // the node list holds the same text; drop it with the DOM
   if (ssAbort) { ssAbort.abort(); ssAbort = null; }
   ssView = null;
+  ssStopPoll();
+  ssRef = "";
   ssFindings = [];
   ssFindingAt = -1;
   const list = $("ss-findings-list");
@@ -13252,22 +13295,32 @@ function ssClose() {
   return true;
 }
 
-function ssPaint() {
-  const { doc, index, pane } = ssView;
+// The step position, its duration, a flag marker, and — while the turn runs —
+// a "live" cue; plus the ‹ › enabled state, which grows as new steps arrive.
+// Called on every paint AND by the live poller (which never repaints the body).
+function ssPaintCount() {
+  const { doc, index } = ssView;
   const steps = doc.steps || [];
   const step = steps[index] || null;
   const dur = step && typeof step.secs === "number" ? ssDur(step.secs) : "";
   const flagged = ssFindings.some((f) => f.index === index);
   $("ss-count").textContent = (steps.length ? `Step ${index + 1} of ${steps.length}` : "No steps")
-    + (dur ? ` · ${dur}` : "") + (flagged ? " · ⚠" : "");
+    + (dur ? ` · ${dur}` : "") + (flagged ? " · ⚠" : "") + (doc.running ? " · live" : "");
+  $("ss-prev").disabled = index <= 0;
+  $("ss-next").disabled = index >= steps.length - 1;
+}
+
+function ssPaint() {
+  const { doc, index, pane } = ssView;
+  const steps = doc.steps || [];
+  const step = steps[index] || null;
+  ssPaintCount();
   const icon = $("ss-icon");
   if (icon) icon.innerHTML = step ? ssStepIcon(doc, step) : "";
   let title = step ? step.title : "nothing was recorded for this turn";
   if (step && step.kind === "model_call" && step.numbering === "inferred") title += " · number inferred";
   if (step && step.kind === "tool_call" && step.placement === "inferred") title += " · round inferred";
   $("ss-title").textContent = title;
-  $("ss-prev").disabled = index <= 0;
-  $("ss-next").disabled = index >= steps.length - 1;
 
   const facts = $("ss-facts");
   facts.textContent = "";
@@ -13906,7 +13959,7 @@ async function openExplain(ref) {
   ssAbort = new AbortController();
   try {
     const doc = await fetchDossier(ref, ssAbort.signal);
-    ssOpenDoc(doc);
+    ssOpenDoc(doc, undefined, undefined, ref);
   } catch (err) {
     if (err && err.name === "AbortError") return;
     showToast((err && err.message) || "the record could not be read");
