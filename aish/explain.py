@@ -296,6 +296,9 @@ BASIS_RECORDED = "recorded"
 BASIS_INFERRED = "inferred"
 BASIS_MIXED = "mixed"
 COVERAGE_SDK = "sdk"
+# Where a model step's Context pane comes from (`steps[].context.source`).
+CONTEXT_SENT = "sent"
+CONTEXT_RECONSTRUCTED = "reconstructed"
 # A log written before #240 has no reasoning record, but its rendered
 # `thinking` step kept a fragment. Showing that fragment as "the reasoning"
 # is how someone concludes the model barely thought about it, so it is its
@@ -1886,6 +1889,16 @@ def _model_step(number: int, doc: dict, numbering: str, fragment: str = "") -> d
     unstamped = sum(1 for m in doc["messages"] if m["model_call"] is None and not m["superseded"])
     # `stubbed` is filled by _steps, which knows which trim preceded which call.
     stubbed: list[dict] = []
+    # The request as it LEFT aish, when the `sent` record has it (#352 slice
+    # 2): a manifest exists for this call, so the context is exact and a
+    # renderer shows the bytes by digest. Evicted or purged blobs still make
+    # it "sent" — the record says what was sent and what of it is gone; only
+    # a call with no manifest at all falls back to the reconstruction below.
+    sent_call = next(
+        (c for c in (doc.get("sent") or {}).get("calls") or []
+         if c.get("model_call") == number and c.get("state") not in (MISSING, EMPTY)),
+        None,
+    )
     return {
         "id": f"m{number}",
         "kind": STEP_MODEL_CALL,
@@ -1898,6 +1911,7 @@ def _model_step(number: int, doc: dict, numbering: str, fragment: str = "") -> d
             "thought": number if thought else None,
             "cost": number if cost else None,
             "brief": brief_at,
+            "sent": number if sent_call is not None else None,
         },
         "fragment": fragment,
         "errors": [],   # ids of the model_error steps that preceded this call
@@ -1910,10 +1924,12 @@ def _model_step(number: int, doc: dict, numbering: str, fragment: str = "") -> d
                 brief_at is not None and briefs[brief_at]["written_here"]
                 and briefs[brief_at].get("model_call") == number and number > 1
             ),
-            # Reconstructed from `message` records and the brief, never the
-            # request as sent — slice 2's `sent` record replaces this with the
-            # bytes that actually left. Said here so a renderer labels it.
-            "source": "reconstructed",
+            # "sent" when the request as it left aish is on record (the
+            # renderer reads the bytes by digest from `doc["sent"]`);
+            # "reconstructed" — from `message` records and the brief — is the
+            # fallback for a log without the record. The fields above stay
+            # either way. Said here so a renderer labels it.
+            "source": CONTEXT_SENT if sent_call is not None else CONTEXT_RECONSTRUCTED,
         },
         "is_last": False,
     }
