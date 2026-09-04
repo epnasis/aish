@@ -2527,7 +2527,7 @@ class TestSentRecord:
         token = "awov6ybawmor59a9d7u926vk1yfdsm"
         index = tmp_path / "names.txt"
         index.write_text("PUSHOVER_TOKEN\n", encoding="utf-8")
-        monkeypatch.setattr(secrets_module, "NAMES_INDEX", index)
+        monkeypatch.setattr(secrets_module, "names_index", lambda i=index: i)
         monkeypatch.setattr(
             secrets_module, "get", lambda name: token if name == "PUSHOVER_TOKEN" else None
         )

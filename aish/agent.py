@@ -1572,6 +1572,30 @@ PERSONAL_UNREADABLE = (
     "`aish personal list`."
 )
 
+# The same not-knowing when aish cannot even LIST the classes (#353). Its own
+# sentence rather than `PERSONAL_UNREADABLE` with a stand-in threaded through
+# `{what}`, because these are two different facts and only one of them was
+# checked: there, the Keychain refused a class aish can name; here, the name
+# index itself could not be read, so aish does not know what was declared.
+# Naming a class it had not read would be a cause no line established.
+PERSONAL_INDEX_UNREADABLE = (
+    "NOT EXECUTED: aish could not read the list of values the user declared as "
+    "their own, so it cannot tell whether this is one of them. Nothing was "
+    "typed, and aish does not know why the list could not be read. Tell the "
+    "user, and suggest they run `aish personal list`."
+)
+
+# The same not-knowing on the SEARCH channel (#353 items 2 and 3). A search
+# names a host and never reaches one, so the composed-address wording would
+# state something no line checked here — and the generic search preview states
+# two: that the turn has read the open web, and that aish composed an address.
+# In this fault neither was established, and the destination the old sentence
+# named was this file's own placeholder.
+PERSONAL_UNREADABLE_IN_A_SEARCH = (
+    "may put one of the values you declared into a web search — aish could not "
+    "read them just now, so it cannot tell"
+)
+
 # The same not-knowing on the address channel, as a FINDING rather than a
 # refusal, because that channel's verdict is a card.
 PERSONAL_UNREADABLE_CARRIES = (
@@ -2032,6 +2056,23 @@ REMEMBER_NO_APPROVER = (
     "write needs the owner's review and no approver is available. State the "
     "fact in your report instead; the owner can save it."
 )
+
+
+def _could_carry_a_value(parts: urllib.parse.SplitResult) -> bool:
+    """Is there anywhere in this address a declared value could be hiding?
+
+    Structural and deliberately crude: userinfo, a path past `/`, a query or a
+    fragment. A bare host carries nothing by construction, so the fault-state
+    clause has nothing to be uncertain about there (#353). Read only by the
+    unreadable arm — the arms that MATCH a value do not need it, because a match
+    is its own evidence."""
+    return bool(
+        parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+        or parts.path.strip("/")
+    )
 
 
 def _exact_host(url: str) -> str:
@@ -7331,6 +7372,19 @@ class Agent:
                 name, args, self._egress_hosts(name, args)
             ):
                 return PERSONAL_IN_A_SEARCH.format(what=_personal_words(said))
+            # **And the fault state, on the SAME branch (#353 F2).** The
+            # fail-closed arm lived only in `_egress_novel_hosts`' `not hosts`
+            # case, so a query that happened to NAME a host skipped it entirely
+            # and this function then found nothing to say — no payload, no card,
+            # in both taints, with the store unreadable. Three prose surfaces
+            # claimed closure on all four paths; the test that pinned it used a
+            # query with no host in it, which is why it passed.
+            #
+            # `_personal_outbound` answers "nothing" precisely BECAUSE nothing
+            # can be read, so the arm has to sit beside it rather than inside
+            # it, exactly as it does on the read paths.
+            if secrets.personal_unreadable():
+                return PERSONAL_UNREADABLE_IN_A_SEARCH
             return (
                 SEARCH_CARRIES
                 if any(
@@ -7456,9 +7510,17 @@ class Agent:
         # uses most, which is where a fence has to hold or it is decoration.
         if said := self._personal_in_url(url, {host}):
             carried.append(PERSONAL_CARRIES.format(what=_personal_words(said)))
-        elif secrets.personal_unreadable():
+        elif secrets.personal_unreadable() and _could_carry_a_value(parts):
             # Fails closed on the same terms the typing fence does: aish cannot
             # tell, which is not the same as there being nothing to find.
+            #
+            # …but only where there is somewhere for a value to BE (#353 F6).
+            # A bare `https://example.com/` has no path, query or fragment, so
+            # nothing about the store's readability changes what it carries —
+            # which is nothing. Saying "may carry one of the values you
+            # declared" there states a possibility the address itself rules
+            # out, and a fault must not make aish claim more than a fault
+            # allows.
             carried.append(PERSONAL_UNREADABLE_CARRIES)
         if _forwards_elsewhere(url):
             carried.append("has a second address written inside it")
@@ -7529,6 +7591,15 @@ class Agent:
             # search names a host and never reaches one, so the composed-address
             # wording below would state something no line checked here.
             preview = PERSONAL_IN_A_SEARCH.format(what=_personal_words(said))
+        elif name == "web_search" and secrets.personal_unreadable():
+            # **The fault state has its own sentence, and #353 F3 is why.** It
+            # used to fall through to the generic preview below, which asserted
+            # that the turn had READ THE OPEN WEB and that aish had COMPOSED AN
+            # ADDRESS — neither established here — and named the destination as
+            # `the search engine`, which is this file's own placeholder rather
+            # than anything a line found. Two causes nothing checked, in aish's
+            # own voice, which is exactly what L8 forbids.
+            preview = PERSONAL_UNREADABLE_IN_A_SEARCH
         elif name == "web_search":
             preview = (
                 f"this turn has read the open web, and now wants to put an "
@@ -7657,7 +7728,20 @@ class Agent:
 
         What is vouched is exactly the hosts the card NAMED — residual (c) in
         `docs/agent-core.md` — so the round trip through the log must not grow
-        the set either."""
+        the set either.
+
+        **NOTHING is vouched while the declared-value store cannot be read
+        (#353 F4), and the guard is here rather than at the call sites.** A card
+        drawn in that fault says *aish could not read your declared values, so
+        it cannot tell* — a yes to that is an answer about ONE action under a
+        fault, and writing it into a store that is machine-wide and PERMANENT
+        turns a transient Keychain failure into a standing grant for that host,
+        materially wider than the sentence he read. Both writers route through
+        here (`_egress_gate` and `_press_card`), so guarding the single write
+        point is what stops the next one forgetting. It can only ever cost a
+        card and can never grant one."""
+        if secrets.personal_unreadable():
+            return
         self._approved_hosts.update(hosts)
         vouches.add(list(hosts))
         if self.state_log is None:
@@ -8208,8 +8292,17 @@ class Agent:
         if (unreadable := secrets.personal_unreadable()) and any(
             value for _, value in browse.typed_values(name, args)
         ):
+            # **Two faults, two sentences (#353).** `INDEX_UNREADABLE` means the
+            # name index itself could not be read, so aish does not know what
+            # was declared — naming a class there would be a cause no line
+            # checked. Everything else is a class aish CAN name whose value the
+            # Keychain refused.
             return _gate_outcome(
-                PERSONAL_UNREADABLE.format(what=_personal_words(sorted(unreadable))),
+                PERSONAL_INDEX_UNREADABLE
+                if secrets.INDEX_UNREADABLE in unreadable
+                else PERSONAL_UNREADABLE.format(
+                    what=_personal_words(sorted(unreadable))
+                ),
                 decision="blocked",
             )
         classes = self._personal_pending(name, args, host)
