@@ -12243,18 +12243,21 @@ function ssBriefSegs(doc, step, b) {
     if (part.state === "recorded") b.text(part.text || "");
     else b.meta(SS_STATE_WORDS[part.state] || part.state);
   }
+  // The tool MENU is sent to the model (the `tools=` request field — it is why
+  // the model can call anything, and it counts toward the input tokens), so
+  // the definitions are PAYLOAD, not aish's account. Only the count line and
+  // any state note are meta — the same split as the system text above.
   const tools = brief.tools || {};
-  const menu = [`TOOLS ON THE MENU — ${tools.count === undefined ? "?" : tools.count}`];
-  if (tools.state !== "recorded") menu.push(SS_STATE_WORDS[tools.state] || tools.state);
+  b.meta(`TOOLS ON THE MENU — ${tools.count === undefined ? "?" : tools.count}`
+    + (tools.state !== "recorded" ? ` — ${SS_STATE_WORDS[tools.state] || tools.state}` : ""));
   if (tools.entries && tools.entries.length) {
-    for (const entry of tools.entries) {
+    b.text(tools.entries.map((entry) => {
       const fn = entry.function || {};
-      menu.push(`· ${fn.name || "?"} — ${fn.description || ""}`);
-    }
+      return `· ${fn.name || "?"} — ${fn.description || ""}`;
+    }).join("\n"));
   } else if (tools.names && tools.names.length) {
-    menu.push("names only — the menu's bytes are gone: " + tools.names.join(", "));
+    b.meta("names only — the menu's bytes are gone: " + tools.names.join(", "));
   }
-  b.meta(...menu);
   const rules = doc.given.rules || {};
   const bound = ((rules.groups || {}).bind) || [];
   if (rules.state === "recorded") {

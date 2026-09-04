@@ -628,6 +628,19 @@ check("meta is structure, never concatenated with the exchange's bytes", () => {
     assert(!(n.textContent.includes("── message #") && (n.className || "").includes("ss-pre")),
       "a message head leaked into a payload node");
   }
+  // The tool menu is SENT to the model, so its definitions are payload, not
+  // meta: the count line is a meta header, the tool entries are their own pre.
+  w.sandbox.ssOpen(d, "m2", "context");
+  w.sandbox.ssToggleWhole();
+  const wholeNodes = w.el("ss-body").children;
+  assert(wholeNodes.some((n) => (n.className || "").includes("ss-meta") && n.textContent.includes("TOOLS ON THE MENU")));
+  assert(wholeNodes.some((n) => (n.className || "").includes("ss-pre") && n.textContent.includes("read_url — read a page")),
+    "the tool definitions must be payload, not meta");
+  for (const n of wholeNodes) {
+    assert(!(n.textContent.includes("TOOLS ON THE MENU") && n.textContent.includes("read_url — read a page")),
+      "the menu header leaked into the definitions node");
+  }
+  w.sandbox.ssToggleWhole();
   // A refused gate verdict is a RECORD node, tinted like meta, never plain payload.
   const dd = doc();
   dd.did.calls[0].refused = [{ gate: "rule.x", verdict: "denied" }];
