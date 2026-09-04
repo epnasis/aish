@@ -699,32 +699,54 @@ check("the scroll arrows follow the chat's directional rule and the keys page", 
   assert.equal(w.el("ss-scroll-top").hidden, true);
 });
 
-check("the header drag is the sheet dismissal; content touches never close", () => {
+check("the header drag acts like a physical sheet: position AND velocity decide", () => {
   const w = world();
   const s = w.sandbox;
   s.ssOpen(doc(), "c1", "result");
   const box = w.el("step-screen");
-  // The screen follows the finger, and past the threshold release closes it.
-  s.ssDragStart({ touches: [{ clientY: 100 }] });
-  s.ssDragMove({ touches: [{ clientY: 180 }] });
+  // The screen follows the finger, and a slow release past the threshold closes.
+  s.ssDragStart({ touches: [{ clientY: 100 }], timeStamp: 0 });
+  s.ssDragMove({ touches: [{ clientY: 180 }], timeStamp: 100 });
   assert.equal(box.style.transform, "translateY(80px)", "the sheet follows the finger");
-  s.ssDragMove({ touches: [{ clientY: 260 }] });
-  s.ssDragEnd();
-  assert.equal(s.ssIsOpen(), false, "past the threshold, release closes");
+  s.ssDragMove({ touches: [{ clientY: 260 }], timeStamp: 200 });
+  s.ssDragEnd({ timeStamp: 700 }); // set down (rested) past the threshold
+  assert.equal(s.ssIsOpen(), false, "resting past the threshold, release closes");
   assert.equal(box.style.transform, "", "the transform is reset for the next open");
-  // Below the threshold it springs back and stays open.
+  // Brought down PAST the threshold and back up: the sheet STAYS — the
+  // physical model, and the case the owner named.
   s.ssOpen(doc(), "c1", "result");
-  s.ssDragStart({ touches: [{ clientY: 100 }] });
-  s.ssDragMove({ touches: [{ clientY: 160 }] });
-  s.ssDragEnd();
+  s.ssDragStart({ touches: [{ clientY: 100 }], timeStamp: 0 });
+  s.ssDragMove({ touches: [{ clientY: 400 }], timeStamp: 150 });
+  s.ssDragMove({ touches: [{ clientY: 250 }], timeStamp: 300 });
+  s.ssDragEnd({ timeStamp: 340 });
+  assert.equal(s.ssIsOpen(), true, "a sheet brought back up stays");
+  assert(box.classList.has("ss-settling"), "the return is animated");
+  // A quick flick down closes from any distance (released mid-motion).
+  s.ssDragStart({ touches: [{ clientY: 100 }], timeStamp: 0 });
+  s.ssDragMove({ touches: [{ clientY: 140 }], timeStamp: 20 });
+  s.ssDragMove({ touches: [{ clientY: 180 }], timeStamp: 40 });
+  s.ssDragEnd({ timeStamp: 48 });
+  assert.equal(s.ssIsOpen(), false, "a flick closes short of the threshold");
+  // A quick move DOWN then a HOLD before lifting is NOT a flick: the finger
+  // rested, so at release the sheet is set down, not thrown — and short of the
+  // threshold it stays. This is the case release-timing exists for.
+  s.ssOpen(doc(), "c1", "result");
+  s.ssDragStart({ touches: [{ clientY: 100 }], timeStamp: 0 });
+  s.ssDragMove({ touches: [{ clientY: 150 }], timeStamp: 15 });
+  s.ssDragEnd({ timeStamp: 400 }); // held 385ms at rest before lifting
+  assert.equal(s.ssIsOpen(), true, "a move then a hold is not a flick");
+  // Below the threshold, slow, it springs back and stays open.
+  s.ssOpen(doc(), "c1", "result");
+  s.ssDragStart({ touches: [{ clientY: 100 }], timeStamp: 0 });
+  s.ssDragMove({ touches: [{ clientY: 160 }], timeStamp: 400 });
+  s.ssDragEnd({ timeStamp: 450 });
   assert.equal(s.ssIsOpen(), true, "below the threshold it stays open");
   assert.equal(box.style.transform, "");
-  assert(box.classList.has("ss-settling"), "the spring-back is animated");
   // An upward drag does nothing (the sheet only moves down).
-  s.ssDragStart({ touches: [{ clientY: 300 }] });
-  s.ssDragMove({ touches: [{ clientY: 100 }] });
+  s.ssDragStart({ touches: [{ clientY: 300 }], timeStamp: 0 });
+  s.ssDragMove({ touches: [{ clientY: 100 }], timeStamp: 100 });
   assert.equal(box.style.transform, "");
-  s.ssDragEnd();
+  s.ssDragEnd({ timeStamp: 120 });
   assert.equal(s.ssIsOpen(), true);
   // A content pull — even from the very top — is a scroll, never a dismissal.
   const body = w.el("ss-body");
