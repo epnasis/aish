@@ -12215,8 +12215,13 @@ function ssSegs() {
   return {
     segs,
     meta(...lines) { segs.push({ kind: "meta", text: lines.join("\n") }); },
+    // PAYLOAD: verbatim bytes the model was sent or produced. Never reformat.
     text(t) { segs.push({ kind: "text", text: t === undefined || t === null ? "" : String(t) }); },
+    // A raw record (aish's structured account), pretty-printed.
     rec(v) { segs.push({ kind: "record", text: ssJson(v) }); },
+    // Verbatim external bytes the model did NOT receive — evidence. Shown as-is
+    // but tinted like a record, so it never reads as the model's own input.
+    raw(t) { segs.push({ kind: "record", text: t === undefined || t === null ? "" : String(t) }); },
   };
 }
 
@@ -12245,16 +12250,15 @@ function ssBriefSegs(doc, step, b) {
   }
   // The tool MENU is sent to the model (the `tools=` request field — it is why
   // the model can call anything, and it counts toward the input tokens), so
-  // the definitions are PAYLOAD, not aish's account. Only the count line and
-  // any state note are meta — the same split as the system text above.
+  // the definitions are PAYLOAD. They go as STRUCTURED JSON, so they are shown
+  // as that structure VERBATIM — never flattened to a bullet summary, which
+  // would invent structure the model never saw and hide the parameters it did.
+  // Only the count line and any state note are aish's account (meta).
   const tools = brief.tools || {};
   b.meta(`TOOLS ON THE MENU — ${tools.count === undefined ? "?" : tools.count}`
     + (tools.state !== "recorded" ? ` — ${SS_STATE_WORDS[tools.state] || tools.state}` : ""));
   if (tools.entries && tools.entries.length) {
-    b.text(tools.entries.map((entry) => {
-      const fn = entry.function || {};
-      return `· ${fn.name || "?"} — ${fn.description || ""}`;
-    }).join("\n"));
+    b.text(ssJson(tools.entries));
   } else if (tools.names && tools.names.length) {
     b.meta("names only — the menu's bytes are gone: " + tools.names.join(", "));
   }
@@ -12328,7 +12332,8 @@ function ssContextSegs(doc, step, whole) {
       const m = ssMessage(doc, index);
       if (!m) continue;
       b.meta(ssMsgHead(m));
-      b.text(m.text || "(empty)");
+      if (m.text) b.text(m.text);
+      else b.meta("(this message had no text content)");
     }
     if (ctx.unstamped) {
       b.meta(`${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
@@ -12349,7 +12354,8 @@ function ssContextSegs(doc, step, whole) {
       const m = ssMessage(doc, index);
       if (!m) continue;
       b.meta(ssMsgHead(m) + (ctx.new.includes(index) ? " · new to this call" : ""));
-      b.text(m.text || "(empty)");
+      if (m.text) b.text(m.text);
+      else b.meta("(this message had no text content)");
     }
     if (ctx.unstamped) {
       b.meta(`${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
@@ -12457,7 +12463,11 @@ function ssResultSegs(doc, step) {
   const how = step.ref.shown_how;
   b.meta("WHAT THE MODEL WAS GIVEN — " + (SS_SHOWN_WORDS[how] || how));
   if (!c.completed) b.meta("the call never completed, so nothing came back");
-  else if (how !== "not_matched") b.text(ssShownText(doc, step) || "(empty)");
+  else if (how !== "not_matched") {
+    const shown = ssShownText(doc, step);
+    if (shown) b.text(shown);
+    else b.meta("(the model was given an empty result)");
+  }
   if (c.bytes !== null && c.bytes !== undefined) b.meta(`payload before any cut: ${ssN(c.bytes)} bytes`);
   const cut = c.truncation || {};
   const lines = ["TRUNCATION"];
@@ -12523,8 +12533,8 @@ function ssPageSegs(doc, step) {
     if (signin.covered) rows.push(`a click could not land — the page had "${signin.covered}" on top of the control`);
     b.meta(...rows);
     if (signin.console && signin.console.length) {
-      b.meta("the sign-in page's words — its own console:");
-      b.text(signin.console.join("\n"));
+      b.meta("the sign-in page's words — its own console (recorded for you; the model was never given the sign-in page):");
+      b.raw(signin.console.join("\n"));
     }
   }
   if (c.phases) { b.meta("WHERE THE SECONDS WENT (ms)"); b.rec(c.phases); }
