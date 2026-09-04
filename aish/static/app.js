@@ -12123,6 +12123,23 @@ const SS_SHOWN_WORDS = {
   message_by_name: "from the tool-role message record, matched by tool name as the only call of that tool in its model call — the message carries no call id",
   not_matched: "not matched — the record has no text that can be joined to this call (the message carries no call id)",
 };
+// The states of one blob of the exact request (explain._sent): what the store
+// can say about the bytes a provider message, the tool menu or the hoisted
+// system text were. "evicted" carries the date from `doc.sent.evicted_on`.
+const SS_BLOB_WORDS = {
+  recorded: "recorded",
+  empty: "recorded, and there was none",
+  not_recorded: "not recorded — the aish that wrote this log did not keep it",
+  evicted: "evicted — the bytes of this chat's evidence were dropped",
+  purged: "recorded, then deleted",
+  never_stored: "never stored",
+};
+// What a fetch of one blob came back as (ssEvidence).
+const SS_FETCH_WORDS = {
+  evicted: "the bytes are gone: this chat's evidence was evicted",
+  purged: "the bytes are gone: recorded, then deleted",
+  error: "the bytes could not be read — the server did not answer, or this device is offline",
+};
 const SS_PANE_LABELS = {
   context: "Context", response: "Response", call: "Call", result: "Result", page: "Page", event: "Event",
 };
@@ -12178,6 +12195,26 @@ async function fetchDossier(ref, signal) {
   return response.json();
 }
 
+// One blob of the exact request by digest (#352 slice 2). Never throws: the
+// answer is a STATE the pane says in words — recorded (the bytes), evicted
+// (410, the chat's evidence was dropped), purged (404, redacted or never
+// written) or error (no answer at all) — because a blank where a message was
+// is what lets someone read "it was told nothing" off a fetch that failed.
+async function ssEvidence(session, digest, sig) {
+  try {
+    const url = new URL(BASE + "evidence/" + encodeURIComponent(session) + "/" + digest, location.href);
+    url.searchParams.set("sig", sig || "");
+    if (token) url.searchParams.set("token", token);
+    const response = await fetch(url.toString(), { cache: "no-store" });
+    if (response.status === 200) return { state: "recorded", text: await response.text() };
+    if (response.status === 410) return { state: "evicted", text: "" };
+    if (response.status === 404) return { state: "purged", text: "" };
+    return { state: "error", text: "" };
+  } catch (_err) {
+    return { state: "error", text: "" };
+  }
+}
+
 // ---- lookups by reference ------------------------------------------------
 
 // An event step carries no `ref` at all, and every lookup tolerates that.
@@ -12202,6 +12239,17 @@ function ssMsgHead(m) {
     + (m.interim ? " · interim" : "")
     + (m.images ? ` · ${m.images} image(s)` : "");
 }
+// The exact request of this model call, where the `sent` record has it; and
+// the one sent before it in this turn, for the delta.
+function ssSentCall(doc, step) {
+  const ref = step.ref || {};
+  if (ref.sent === null || ref.sent === undefined) return null;
+  return ((doc.sent || {}).calls || []).find((c) => c.model_call === ref.sent) || null;
+}
+function ssSentPrev(doc, call) {
+  const earlier = ((doc.sent || {}).calls || []).filter((c) => c.model_call < call.model_call);
+  return earlier.length ? earlier[earlier.length - 1] : null;
+}
 function ssIssued(doc, step) {
   return (doc.steps || []).filter((s) => s.kind === "tool_call" && s.model_call === step.model_call);
 }
@@ -12222,6 +12270,13 @@ function ssSegs() {
     // Verbatim external bytes the model did NOT receive — evidence. Shown as-is
     // but tinted like a record, so it never reads as the model's own input.
     raw(t) { segs.push({ kind: "record", text: t === undefined || t === null ? "" : String(t) }); },
+    // PAYLOAD that is not here yet: one blob of the exact request, fetched by
+    // digest when the pane is painted (ssPaintBody). Until it lands the
+    // segment is META saying so — a placeholder never wears payload styling,
+    // because payload styling means "the model received this" — and it turns
+    // into a `text` segment only with the bytes themselves. A fetch that comes
+    // back without them stays meta, in the state's words.
+    blob(digest, sig) { segs.push({ kind: "meta", text: "loading the exact bytes…", blob: { digest, sig } }); },
   };
 }
 
@@ -12310,13 +12365,22 @@ function ssCostMeta(doc, step) {
 function ssContextSegs(doc, step, whole) {
   const ctx = step.context || { new: [], in_front: [], unstamped: 0, stubbed: [] };
   const k = step.model_call;
+  if (ctx.source === "sent") {
+    const call = ssSentCall(doc, step);
+    if (call) return ssSentSegs(doc, step, call, whole);
+  }
   const b = ssSegs();
   const head = [];
   if (whole) head.push(`THE WHOLE CONTEXT OF MODEL CALL ${k}`);
   else head.push(k > 1 ? `WHAT CHANGED SINCE MODEL CALL ${k - 1}` : "WHAT MODEL CALL 1 STARTED FROM");
-  head.push(ctx.source === "reconstructed"
-    ? "reconstructed from the message records and the brief — not the request as it left aish, which is not recorded yet"
-    : `source: ${ctx.source}`);
+  // Whatever the step says its source is, what THIS builder draws is the
+  // reconstruction, and it is labelled as one. A step that claims an exact
+  // request the document does not carry says that too, rather than wearing
+  // the exact request's label over reconstructed contents.
+  head.push("reconstructed from the message records and the brief — not the request as it left aish"
+    + (ctx.source === "sent"
+      ? "; the record says the exact request of this call exists, but this document does not carry it"
+      : ", which is not recorded for this call"));
   if (step.numbering === "inferred") head.push("this call's number is inferred from the order the log was written");
   head.push(...ssCostMeta(doc, step));
   b.meta(...head);
@@ -12360,6 +12424,104 @@ function ssContextSegs(doc, step, whole) {
     if (ctx.unstamped) {
       b.meta(`${ctx.unstamped} message(s) in this turn carry no model-call stamp and cannot be placed`);
     }
+  }
+  return b.segs;
+}
+
+// ---- the exact request (#352 slice 2) ---------------------------------------
+// What the `sent` record has: the request AS IT LEFT AISH, message by message
+// in the provider's own roles, each read back by digest from the chat's
+// evidence store. Nothing here is reconstructed: the headers are the
+// manifest's own facts (role, tool, size, state), the bytes are the blob. Each
+// provider message is its OWN payload segment — the provider received them as
+// separate units, and joining them would invent a structure it never saw.
+
+function ssBlobWords(doc, state) {
+  if (state === "evicted" && (doc.sent || {}).evicted_on) return `evicted on ${doc.sent.evicted_on} — the bytes of this chat's evidence were dropped`;
+  return SS_BLOB_WORDS[state] || String(state || "?");
+}
+
+function ssSentMsgHead(doc, m) {
+  const who = m.role + (m.tool_name ? ` · ${m.tool_name}` : (m.tool_names && m.tool_names.length ? ` · ${m.tool_names.join(", ")}` : ""));
+  let head = `── message ${m.at} · ${who} · ${ssN(m.chars)} chars · ${ssBlobWords(doc, m.state)}`;
+  if (m._new) head += " · new to this request";
+  if (m.stub) head += " · a trimmer's STUB — the model got this stub here, not the result it replaced";
+  if (m.scrubbed) head += ` · ${m.scrubbed} secret(s) scrubbed from the stored copy — the bytes sent differ from the bytes below only there`;
+  if (Array.isArray(m.origin)) head += ` · merged from aish-side messages #${m.origin.join(", #")}`;
+  else if (m.origin !== undefined && m.origin !== null) head += ` · from aish-side message #${m.origin}`;
+  return head;
+}
+
+// One provider message: its header (meta), its bytes (payload, by digest) or
+// the words for why there are none, and any media it carried.
+function ssSentMessage(doc, b, m) {
+  b.meta(ssSentMsgHead(doc, m));
+  if (m.state === "recorded") b.blob(m.digest, m.sig);
+  else if (m.state === "empty") b.meta("this message had no bytes");
+  else b.meta(`no bytes to show — ${ssBlobWords(doc, m.state)}`);
+  for (const item of m.media || []) {
+    const name = String(item.path || "").split("/").pop() || String(item.path || "?");
+    b.meta(`carried ${name} (${ssN(item.bytes)} bytes) — never stored: a picture or document the request carried as base64; the bytes are not in the text store, and a placeholder stands where they were in the message above`);
+  }
+}
+
+function ssSentSegs(doc, step, call, whole) {
+  const k = step.model_call;
+  const b = ssSegs();
+  const prev = ssSentPrev(doc, call);
+  const head = [];
+  if (whole) head.push(`THE EXACT REQUEST OF MODEL CALL ${k}`);
+  else head.push(prev ? `WHAT CHANGED SINCE MODEL CALL ${prev.model_call} — the exact request delta` : `WHAT MODEL CALL ${k} SENT — the exact request`);
+  head.push("the request as it left aish, exact — read back by digest from the record of what the provider was handed, not reconstructed");
+  head.push(`${call.provider || "?"} · ${call.model || "?"} · ${call.messages.length} message(s) · ${ssN(call.chars)} chars · request digest ${String(call.request || "").slice(0, 12)}…`);
+  if (call.state === "evicted") head.push(ssBlobWords(doc, "evicted") + " — the manifest below is intact; the bytes are not");
+  else if (call.state === "purged") head.push("some of the bytes were recorded, then deleted — the manifest below is intact");
+  if (step.numbering === "inferred") head.push("this call's number is inferred from the order the log was written");
+  head.push(...ssCostMeta(doc, step));
+  b.meta(...head);
+  const before = new Set((prev ? prev.messages : []).map((m) => m.digest));
+  if (!whole) {
+    const fresh = call.messages.filter((m) => !before.has(m.digest));
+    const gone = prev ? prev.messages.filter((m) => !call.messages.some((c) => c.digest === m.digest)).length : 0;
+    if (prev) {
+      const menu = (call.tools || {}).digest === (prev.tools || {}).digest ? "the same tool menu" : "a CHANGED tool menu — it is in the whole context";
+      const sys = call.system || prev.system
+        ? (((call.system || {}).digest === (prev.system || {}).digest) ? " · the same system parameter" : " · a CHANGED system parameter — it is in the whole context")
+        : "";
+      b.meta(`${menu}${sys}`);
+      if (gone) b.meta(`${gone} message(s) of the previous request are not in this one byte for byte — whatever stands in their place is among the new ones below`);
+    } else {
+      b.meta("no earlier request of this turn is on record — every message of this one is new");
+    }
+    b.meta(`NEW TO THIS REQUEST — ${fresh.length} message(s), by digest against the previous request`
+      + (!fresh.length ? " · every message was sent byte for byte before" : ""));
+    for (const m of fresh) ssSentMessage(doc, b, m);
+    if (prev) b.meta(`${call.messages.length - fresh.length} message(s) of this request were sent before, unchanged; the whole request is one tap away`);
+  } else {
+    b.meta("REQUEST OPTIONS — the request's other top-level fields, as recorded");
+    b.rec(call.options || {});
+    const system = call.system;
+    if (system) {
+      b.meta(`SYSTEM PARAMETER — ${ssN(system.chars)} chars · ${ssBlobWords(doc, system.state)}`,
+        "this provider carries the system text as a top-level parameter of the request, hoisted out of the messages — it is what the model is instructed with"
+        + (Array.isArray(system.origin) && system.origin.length ? ` (hoisted from aish-side message${system.origin.length > 1 ? "s" : ""} #${system.origin.join(", #")})` : "")
+        + (system.scrubbed ? ` · ${system.scrubbed} secret(s) scrubbed from the stored copy` : ""));
+      if (system.state === "recorded") b.blob(system.digest, system.sig);
+      else b.meta(`no bytes to show — ${ssBlobWords(doc, system.state)}`);
+    }
+    const tools = call.tools || { state: "empty" };
+    if (tools.state === "empty") {
+      b.meta("TOOLS — none were sent with this request");
+    } else {
+      b.meta(`TOOLS SENT — ${tools.count === undefined ? "?" : tools.count} · ${ssN(tools.chars)} chars · ${ssBlobWords(doc, tools.state)}`
+        + (tools.scrubbed ? ` · ${tools.scrubbed} secret(s) scrubbed from the stored copy` : ""),
+      "the tool menu travels beside the messages (the `tools` field) and counts toward the input tokens; below is its JSON verbatim");
+      if (tools.state === "recorded") b.blob(tools.digest, tools.sig);
+      else b.meta(`no bytes to show — ${ssBlobWords(doc, tools.state)}`);
+    }
+    b.meta(`MESSAGES — ${call.messages.length}, in the order sent`
+      + (prev ? "; new against the previous request is marked" : ""));
+    for (const m of call.messages) ssSentMessage(doc, b, prev && !before.has(m.digest) ? { ...m, _new: true } : m);
   }
   return b.segs;
 }
@@ -12590,6 +12752,13 @@ function ssPaneBrief(doc, step, pane) {
   if (pane === "context") {
     const cost = ssCostOf(doc, step);
     const ctx = step.context || { new: [] };
+    const sent = ctx.source === "sent" ? ssSentCall(doc, step) : null;
+    if (sent) {
+      const prev = ssSentPrev(doc, sent);
+      const before = new Set((prev ? prev.messages : []).map((m) => m.digest));
+      const fresh = sent.messages.filter((m) => !before.has(m.digest)).length;
+      return `exact request · ${sent.messages.length} message(s), ${ssN(sent.chars)} chars · ${fresh} new`;
+    }
     return (cost ? `${ssN(cost.accounted_chars)} chars in front · ` : "")
       + `${ctx.new.length} new message(s)`
       + (ctx.stubbed && ctx.stubbed.length ? ` · ${ctx.stubbed.length} stubbed` : "");
@@ -12775,27 +12944,67 @@ function ssPaintBody(paneObj) {
     whole.textContent = ssWhole ? "what changed" : (paneObj && paneObj.more ? paneObj.more.label : "");
   }
   if (paneObj && paneObj.before) body.appendChild(paneObj.before);
+  const view = ssView;
   for (const seg of segs) {
-    // Meta is STRUCTURE: aish's own account around the exchange, drawn as a
-    // bordered block in the UI font. Text is the exchange's bytes, verbatim,
-    // monospace. A record is mono too but tinted like meta — it is a record,
-    // not something a model said or was given.
-    const node = seg.kind === "meta"
-      ? ssEl("div", "ss-meta", seg.text)
-      : ssEl("pre", seg.kind === "record" ? "ss-pre ss-rec mono" : "ss-pre mono", seg.text);
+    const node = ssSegNode(seg);
     body.appendChild(node);
-    ssView.nodes.push({ node, text: seg.text });
-    if (seg.kind !== "meta" && seg.text.length > SS_FOLD_CHARS) {
-      // Folded, never truncated: the whole text is in the node; only the
-      // first look is short.
-      node.classList.add("ss-clamped");
-      const more = ssEl("button", "ss-more", `show all (${ssN(seg.text.length)} characters)`);
-      more.type = "button";
-      more.onclick = () => { node.classList.remove("ss-clamped"); more.remove(); };
-      node._moreBtn = more;
-      body.appendChild(more);
+    const entry = { node, text: seg.text };
+    ssView.nodes.push(entry);
+    if (seg.kind !== "meta") ssFold(node, seg.text);
+    // A blob of the exact request: fetched now, landed in place when it
+    // arrives — and dropped if the view has moved on by then (the reader
+    // swiped away, or toggled the reading), because landing bytes into a
+    // pane that no longer describes them is the wrong-pane-under-the-right-
+    // title bug the single writer exists to prevent.
+    if (seg.blob) {
+      ssEvidence(currentSession, seg.blob.digest, seg.blob.sig).then((got) => {
+        if (ssView !== view) return;
+        ssLand(entry, got);
+      });
     }
   }
+  const save = $("ss-save");
+  if (save) save.hidden = ssView.text.length < SS_SAVE_MIN_CHARS;
+  ssApplyFind();
+}
+
+// Meta is STRUCTURE: aish's own account around the exchange, drawn as a
+// bordered block in the UI font. Text is the exchange's bytes, verbatim,
+// monospace. A record is mono too but tinted like meta — it is a record, not
+// something a model said or was given.
+function ssSegNode(seg) {
+  return seg.kind === "meta"
+    ? ssEl("div", "ss-meta", seg.text)
+    : ssEl("pre", seg.kind === "record" ? "ss-pre ss-rec mono" : "ss-pre mono", seg.text);
+}
+
+// Folded, never truncated: the whole text is in the node; only the first look
+// is short.
+function ssFold(node, text) {
+  if (text.length <= SS_FOLD_CHARS) return;
+  node.classList.add("ss-clamped");
+  const more = ssEl("button", "ss-more", `show all (${ssN(text.length)} characters)`);
+  more.type = "button";
+  more.onclick = () => { node.classList.remove("ss-clamped"); more.remove(); };
+  node._moreBtn = more;
+  node.parentNode.insertBefore(more, node.nextSibling || null);
+}
+
+// One fetched blob arrives: with the bytes, the placeholder becomes a PAYLOAD
+// node holding exactly them; without, it stays meta and says which absence.
+// The find marks and the copy/save text are re-derived, so both stay true to
+// what is on screen.
+function ssLand(entry, got) {
+  const seg = got.state === "recorded"
+    ? { kind: "text", text: got.text }
+    : { kind: "meta", text: SS_FETCH_WORDS[got.state] || `the bytes could not be read (${got.state})` };
+  const node = ssSegNode(seg);
+  const old = entry.node;
+  if (old.parentNode) { old.parentNode.insertBefore(node, old); old.remove(); }
+  entry.node = node;
+  entry.text = seg.text;
+  if (seg.kind !== "meta") ssFold(node, seg.text);
+  ssView.text = ssView.nodes.map((n) => n.text).join("\n\n");
   const save = $("ss-save");
   if (save) save.hidden = ssView.text.length < SS_SAVE_MIN_CHARS;
   ssApplyFind();

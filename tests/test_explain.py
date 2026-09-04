@@ -1441,8 +1441,48 @@ class TestTheStepList:
         roles = sorted(messages[i]["role"] for i in m2["context"]["new"])
         assert roles == ["assistant", "tool"]
         assert set(m1["context"]["new"]) <= set(m2["context"]["in_front"])
-        assert m1["context"]["source"] == "reconstructed"
+        # This loop writes a `sent` record, so the context is the exact request
+        # (below); the reconstructed fields stay beside it as the fallback.
+        assert m1["context"]["source"] == explain_mod.CONTEXT_SENT
         assert m1["context"]["unstamped"] == 0
+
+    def test_the_context_is_the_exact_request_where_the_sent_record_has_it(self, tmp_path):
+        """#352 slice 2: a model step whose call the `sent` record covers says
+        `source: sent` and points at the call, so the web pane shows the bytes
+        that LEFT aish instead of a reconstruction — and a log with no such
+        record (one written before the writer existed) stays reconstructed,
+        with the reconstruction's fields intact in both cases."""
+        session = tmp_path / "session-20260101-000000-000000.jsonl"
+        agent, _, log = make_logged_agent(
+            [model_says(tool_calls=[tool_call("read_docs", topic="a")]), model_says("ok")],
+            tmp_path, current_session=lambda: session,
+        )
+        agent.run_task("go")
+        doc = self._doc(log, tmp_path)
+        assert [c["model_call"] for c in doc["sent"]["calls"]] == [1, 2]
+        for step in (s for s in doc["steps"] if s["kind"] == "model_call"):
+            assert step["context"]["source"] == explain_mod.CONTEXT_SENT
+            assert step["ref"]["sent"] == step["model_call"]
+            assert "new" in step["context"] and "in_front" in step["context"]
+        # The same records with every `sent` line dropped: the fallback.
+        stripped = tmp_path / "session-20260102-000000-000000.jsonl"
+        kept = [
+            line for line in log.path.read_text().splitlines()
+            if (json.loads(line).get("step") or {}).get("kind") != "sent"
+        ]
+        stripped.write_text("\n".join(kept) + "\n")
+        lg = explain_mod.load(stripped)
+        old = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        assert old["sent"]["calls"] == []
+        before = [s for s in old["steps"] if s["kind"] == "model_call"]
+        after = [s for s in doc["steps"] if s["kind"] == "model_call"]
+        for step, exact in zip(before, after, strict=True):
+            assert step["context"]["source"] == explain_mod.CONTEXT_RECONSTRUCTED
+            assert step["ref"]["sent"] is None
+            # The reconstruction is the same list either way — it is not
+            # replaced, only labelled.
+            assert step["context"]["new"] == exact["context"]["new"]
+            assert step["context"]["in_front"] == exact["context"]["in_front"]
 
     def test_stubbed_results_are_attached_to_the_call_they_preceded(self, tmp_path):
         path = tmp_path / "session-stub.jsonl"

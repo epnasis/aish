@@ -19,6 +19,11 @@
 //      synchronous pass.
 //   5. The states — running, inferred, not recorded, purged, not matched,
 //      offline, a failed read — are said in words, never as a blank.
+//   6. The EXACT request (#352 slice 2): where the record has the bytes that
+//      left aish, the Context pane shows them by digest from /evidence — each
+//      provider message its own payload node, the reconstruction caveat gone,
+//      an absent blob said in words, the delta an exact set difference on
+//      digests, and a fetch that lands after the view moved on dropped.
 //
 // Run manually: node tests/js/test_step_screen.js
 "use strict";
@@ -88,6 +93,13 @@ function fakeEl(tag) {
     querySelectorAll(sel) { return walk(this).slice(1).filter((n) => matches(n, sel)); },
     classList: null,
   };
+  Object.defineProperty(el, "nextSibling", {
+    get() {
+      if (!el.parentNode) return null;
+      const i = el.parentNode.children.indexOf(el);
+      return i === -1 ? null : (el.parentNode.children[i + 1] || null);
+    },
+  });
   // textContent = "" on a real node drops its children; the block relies on it.
   let text = "";
   Object.defineProperty(el, "textContent", {
@@ -244,6 +256,88 @@ function doc(overrides = {}) {
   };
   return Object.assign(d, overrides);
 }
+
+// ---- the exact request: the `sent` block and an /evidence server ----------------
+//
+// Digests are opaque keys here (the real ones are sha256 hex); what matters is
+// that a message is fetched by ITS digest and lands in ITS node. `blobs` maps a
+// digest to the bytes, a status (410 evicted / 404 purged) or a thrown error.
+const BLOBS = {
+  "d-sys": `you are aish, exactly ${HOSTILE}`,
+  "d-user": "go",
+  "d-asst": "look",
+  "d-tool": `page text needle one ${HOSTILE}`,
+  "d-tools": JSON.stringify([{ type: "function", function: { name: "read_url", description: "read a page" } }], null, 2),
+  "d-evicted": 410,
+  "d-purged": 404,
+  "d-broken": new Error("Failed to fetch"),
+};
+
+// A fetch that serves /evidence from BLOBS and nothing else. `log` records
+// every URL asked for; `gate` (optional) is awaited before each answer so a
+// check can hold a fetch back and move the view under it.
+function evidenceFetch(log, gate) {
+  return async (url) => {
+    const m = String(url).match(/\/evidence\/([^/]+)\/([^?]+)\?(.*)$/);
+    if (!m) throw new Error("no fetch in this world: " + url);
+    log.push({ session: decodeURIComponent(m[1]), digest: m[2], query: m[3] });
+    if (gate) await gate;
+    const blob = BLOBS[m[2]];
+    if (blob instanceof Error) throw blob;
+    if (blob === undefined) return { ok: false, status: 403, text: async () => "bad sig" };
+    if (typeof blob === "number") return { ok: false, status: blob, text: async () => `${blob} body` };
+    return { ok: true, status: 200, text: async () => blob };
+  };
+}
+
+// The dossier's `sent` block for the two calls of doc(): call 1 sent the
+// system text and the prompt; call 2 re-sent both and added the assistant's
+// message, the read_url result (a secret scrubbed from the stored copy), a
+// stubbed second result whose bytes were purged, and a third whose bytes were
+// evicted with the chat.
+function sentBlock() {
+  const msg = (at, role, digest, chars, extra = {}) => ({ at, role, digest, chars, sig: `sig-${digest}`, state: "recorded", ...extra });
+  return {
+    state: "recorded", coverage: "seam", provider: "ollama", evicted_on: null,
+    calls: [
+      { model_call: 1, provider: "ollama", model: "qwen3:8b", options: { model: "qwen3:8b", options: { num_ctx: 32768 }, think: true },
+        request: "req-1-abcdef0123456789", chars: 900, state: "recorded",
+        messages: [msg(0, "system", "d-sys", 40, { origin: 0 }), msg(1, "user", "d-user", 2, { origin: 1 })],
+        tools: { digest: "d-tools", sig: "sig-d-tools", chars: 120, count: 1, state: "recorded" }, system: null },
+      { model_call: 2, provider: "ollama", model: "qwen3:8b", options: { model: "qwen3:8b", options: { num_ctx: 32768 }, think: true },
+        request: "req-2-abcdef0123456789", chars: 1400, state: "purged",
+        messages: [
+          msg(0, "system", "d-sys", 40, { origin: 0 }),
+          msg(1, "user", "d-user", 2, { origin: 1 }),
+          msg(2, "assistant", "d-asst", 4, { origin: 2 }),
+          msg(3, "tool", "d-tool", 30, { origin: 3, tool_name: "read_url", scrubbed: 1 }),
+          msg(4, "tool", "d-purged", 12, { origin: 4, tool_name: "run_command", stub: true, state: "purged" }),
+          msg(5, "tool", "d-evicted", 9, { origin: 5, tool_name: "run_command", state: "evicted",
+            media: [{ path: "/tmp/shot.png", bytes: 20480, state: "never_stored" }] }),
+        ],
+        tools: { digest: "d-tools", sig: "sig-d-tools", chars: 120, count: 1, state: "recorded" }, system: null },
+    ],
+  };
+}
+
+// doc() with the exact request on record: the model steps say `source: sent`
+// and point at their call, exactly as explain._model_step does.
+function sentDoc(overrides = {}) {
+  const d = doc(overrides);
+  d.sent = sentBlock();
+  for (const step of d.steps) {
+    if (step.kind !== "model_call") continue;
+    step.ref.sent = step.model_call;
+    step.context.source = "sent";
+  }
+  return d;
+}
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+function nodesOf(w) { return w.el("ss-body").children; }
+function presOf(w) { return nodesOf(w).filter((n) => (n.className || "").includes("ss-pre") && !(n.className || "").includes("ss-rec")); }
+function metasOf(w) { return nodesOf(w).filter((n) => (n.className || "").includes("ss-meta")); }
 
 function preOf(w) {
   return w.el("ss-body").querySelector(".ss-pre");
@@ -670,6 +764,190 @@ check("payload styling tracks what the model received, not merely verbatim bytes
   const signin = nodes.find((n) => (n.textContent || "").includes("sign-in page said no"));
   assert(signin && (signin.className || "").includes("ss-rec"),
     "the sign-in console never reached the model, so it must not wear payload styling");
+});
+
+// ---- 8. the exact request ------------------------------------------------------
+
+check("an exact request renders each provider message as its own payload node, fetched by its digest", async () => {
+  const asked = [];
+  const w = world({ fetch: evidenceFetch(asked) });
+  const d = sentDoc();
+  w.sandbox.ssOpen(d, "m2", "context");
+  asked.length = 0; // the "what changed" reading asked for its own two; the whole reading is under test
+  w.sandbox.ssToggleWhole();
+  // Before anything lands: every recorded blob is a META placeholder saying so,
+  // and nothing wears payload styling yet — a placeholder is not the bytes.
+  assert.equal(presOf(w).length, 0, "no payload node before the bytes arrive");
+  assert(metasOf(w).some((n) => n.textContent === "loading the exact bytes…"));
+  // Asked for by digest, in the chat's own directory, with the sig /explain minted.
+  assert.deepEqual(asked.map((a) => a.digest), ["d-tools", "d-sys", "d-user", "d-asst", "d-tool"],
+    "every RECORDED blob is fetched once, by digest; purged and evicted ones are never asked for");
+  assert(asked.every((a) => a.session === "session-x.jsonl" && a.query.includes(`sig=sig-${a.digest}`)), JSON.stringify(asked[0]));
+  await flush();
+  // Landed: one .ss-pre per provider message, holding exactly the blob's bytes.
+  const pres = presOf(w);
+  assert.deepEqual(pres.map((n) => n.textContent), [BLOBS["d-tools"], BLOBS["d-sys"], BLOBS["d-user"], BLOBS["d-asst"], BLOBS["d-tool"]],
+    "the bytes, verbatim, one node each, in the order sent");
+  assert(!metasOf(w).some((n) => n.textContent === "loading the exact bytes…"), "no placeholder survives a landing");
+  // The headers are meta, in the provider's role, with the manifest's facts.
+  const heads = metasOf(w).map((n) => n.textContent);
+  assert(heads.some((t) => t.startsWith("── message 0 · system · 40 chars · recorded")), heads.join("\n"));
+  assert(heads.some((t) => t.includes("── message 3 · tool · read_url · 30 chars · recorded") && t.includes("1 secret(s) scrubbed from the stored copy")));
+  assert(heads.some((t) => t.includes("── message 4 · tool · run_command · 12 chars · recorded, then deleted") && t.includes("STUB")));
+  assert(heads.some((t) => t.includes("TOOLS SENT — 1 · 120 chars · recorded")));
+  assert(heads.some((t) => t.includes("MESSAGES — 6, in the order sent")));
+  // Meta and payload never share a node; nothing is concatenated across messages.
+  for (const n of nodesOf(w)) {
+    assert(!(n.textContent.includes("── message") && (n.className || "").includes("ss-pre")), "a header leaked into payload");
+  }
+  assert(!pres.some((n) => n.textContent.includes("go") && n.textContent.includes("look")), "two messages were joined into one node");
+  // Copy/save carry what is on screen — the landed bytes, not the placeholders.
+  assert(w.sandbox.ssView.text.includes(BLOBS["d-tool"]));
+  assert(!w.sandbox.ssView.text.includes("loading the exact bytes"));
+  assert.equal(nodesOf(w).filter((n) => /ss-(pre|meta)/.test(n.className || "")).map((n) => n.textContent).join("\n\n"), w.sandbox.ssView.text);
+  // Find runs over the landed text.
+  w.sandbox.ssSetFind("needle");
+  assert.equal(w.sandbox.ssFind.hits, 1);
+  // The pane's one-line brief says it is the exact request.
+  assert(w.sandbox.ssPaneBrief(d, d.steps[7], "context").startsWith("exact request · 6 message(s)"));
+});
+
+check("the reconstruction caveat is gone when the request is exact, and stays when it is not", async () => {
+  const w = world({ fetch: evidenceFetch([]) });
+  const d = sentDoc();
+  w.sandbox.ssOpen(d, "m2", "context");
+  await flush();
+  let text = bodyText(w);
+  assert(text.includes("the request as it left aish, exact"), text.slice(0, 300));
+  assert(!text.includes("reconstructed from the message records"), "the caveat must not be said of an exact request");
+  assert(!text.includes("not the request as it left aish"));
+  w.sandbox.ssToggleWhole();
+  await flush();
+  text = bodyText(w);
+  assert(text.includes("THE EXACT REQUEST OF MODEL CALL 2"));
+  assert(!text.includes("reconstructed from the message records"));
+  // A step the record does not cover (source: reconstructed) keeps the caveat,
+  // in the same document.
+  const mixed = sentDoc();
+  mixed.steps[2].context.source = "reconstructed";
+  mixed.steps[2].ref.sent = null;
+  w.sandbox.ssOpen(mixed, "m1", "context");
+  text = bodyText(w);
+  assert(text.includes("reconstructed from the message records and the brief"), "the caveat must stay for a reconstruction");
+  assert(!text.includes("the request as it left aish, exact"));
+  // …and a source that says "sent" but names a call the block does not have
+  // falls back to the reconstruction rather than an empty pane.
+  const orphan = sentDoc();
+  orphan.sent.calls = [];
+  w.sandbox.ssOpen(orphan, "m1", "context");
+  assert(bodyText(w).includes("reconstructed from the message records and the brief"));
+});
+
+check("an evicted, purged or unreadable blob is said in words and never rendered as payload", async () => {
+  const w = world({ fetch: evidenceFetch([]) });
+  const d = sentDoc();
+  d.sent.evicted_on = "2026-09-01";
+  // A recorded manifest entry whose fetch comes back 410 / 404 / thrown.
+  d.sent.calls[1].messages[2].digest = "d-broken";
+  d.sent.calls[1].messages[3].digest = "d-evicted";
+  d.sent.calls[1].messages[3].state = "recorded";
+  w.sandbox.ssOpen(d, "m2", "context");
+  w.sandbox.ssToggleWhole();
+  await flush();
+  const pres = presOf(w).map((n) => n.textContent);
+  assert.deepEqual(pres, [BLOBS["d-tools"], BLOBS["d-sys"], BLOBS["d-user"]], "only bytes that ARRIVED are payload");
+  const metas = metasOf(w).map((n) => n.textContent);
+  assert(metas.some((t) => t.includes("the bytes are gone: this chat's evidence was evicted")), "410 said in words");
+  assert(metas.some((t) => t.includes("the bytes could not be read")), "a thrown fetch said in words");
+  // The manifest's own states, never fetched: purged and evicted with the date.
+  assert(metas.some((t) => t.includes("no bytes to show — recorded, then deleted")));
+  assert(metas.some((t) => t.includes("no bytes to show — evicted on 2026-09-01")));
+  // Media the request carried: named, sized, and said to be never stored.
+  assert(metas.some((t) => t.includes("carried shot.png (20,480 bytes) — never stored")));
+  // No node anywhere presents a status body or a state word as the model's input.
+  for (const t of pres) assert(!/410 body|404 body|evicted|deleted|could not be read/.test(t), t);
+  // A purged call is said at the head, without inventing bytes.
+  assert(metas[0].includes("some of the bytes were recorded, then deleted"));
+});
+
+check("what changed is the exact set difference on digests against the previous request", async () => {
+  const w = world({ fetch: evidenceFetch([]) });
+  const d = sentDoc();
+  w.sandbox.ssOpen(d, "m2", "context");
+  await flush();
+  const metas = metasOf(w).map((n) => n.textContent);
+  assert(metas[0].includes("WHAT CHANGED SINCE MODEL CALL 1 — the exact request delta"), metas[0]);
+  assert(metas.some((t) => t.includes("NEW TO THIS REQUEST — 4 message(s), by digest against the previous request")), metas.join("\n"));
+  const heads = metas.filter((t) => t.startsWith("── message "));
+  assert.deepEqual(heads.map((t) => t.split(" · ")[0]), ["── message 2", "── message 3", "── message 4", "── message 5"],
+    "exactly the messages whose digest call 1 did not send");
+  assert(metas.some((t) => t.includes("the same tool menu")));
+  assert(metas.some((t) => t.includes("2 message(s) of this request were sent before, unchanged")));
+  assert.deepEqual(presOf(w).map((n) => n.textContent), [BLOBS["d-asst"], BLOBS["d-tool"]], "only the new messages' bytes are fetched and shown");
+  // The first call has no previous request: everything is new, and it says so.
+  w.sandbox.ssOpen(d, "m1", "context");
+  await flush();
+  const first = metasOf(w).map((n) => n.textContent);
+  assert(first[0].includes("WHAT MODEL CALL 1 SENT — the exact request"));
+  assert(first.some((t) => t.includes("no earlier request of this turn is on record")));
+  assert(first.some((t) => t.includes("NEW TO THIS REQUEST — 2 message(s)")));
+  // A message the previous request had and this one lacks is counted, with no
+  // cause asserted.
+  const dropped = sentDoc();
+  dropped.sent.calls[1].messages = dropped.sent.calls[1].messages.filter((m) => m.digest !== "d-user");
+  w.sandbox.ssOpen(dropped, "m2", "context");
+  assert(bodyText(w).includes("1 message(s) of the previous request are not in this one byte for byte"));
+  // A changed menu is said, and pointed at the whole context.
+  const menu = sentDoc();
+  menu.sent.calls[1].tools.digest = "d-tools-2";
+  w.sandbox.ssOpen(menu, "m2", "context");
+  assert(bodyText(w).includes("a CHANGED tool menu — it is in the whole context"));
+});
+
+check("a fetch that lands after the view moved on writes nothing into the new pane", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const asked = [];
+  const w = world({ fetch: evidenceFetch(asked, gate) });
+  const d = sentDoc();
+  w.sandbox.ssOpen(d, "m2", "context");
+  assert(asked.length > 0, "the fetches were started");
+  // The reader swipes on before any blob arrives.
+  w.sandbox.ssShow(7, "response");
+  const before = nodesOf(w).map((n) => n.textContent);
+  const textBefore = w.sandbox.ssView.text;
+  release();
+  await flush();
+  await flush();
+  assert.deepEqual(nodesOf(w).map((n) => n.textContent), before, "a stale landing changed the pane");
+  assert.equal(w.sandbox.ssView.text, textBefore);
+  assert(!presOf(w).some((n) => n.textContent === BLOBS["d-tool"]));
+  // The same for the whole/changed toggle: a new reading is a new view.
+  let release2;
+  const gate2 = new Promise((resolve) => { release2 = resolve; });
+  const w2 = world({ fetch: evidenceFetch([], gate2) });
+  w2.sandbox.ssOpen(sentDoc(), "m2", "context");
+  w2.sandbox.ssToggleWhole();
+  const placeholders = () => metasOf(w2).filter((n) => n.textContent === "loading the exact bytes…").length;
+  const pending = placeholders();
+  release2();
+  await flush();
+  await flush();
+  // The whole reading's own fetches landed (started at its paint); the
+  // earlier, changed reading's did not land here — the count of placeholders
+  // fell to zero by landings, not by stray writes, so no node holds a blob
+  // the whole reading did not ask for twice.
+  assert.equal(placeholders(), 0);
+  assert(pending > 0);
+  const texts = presOf(w2).map((n) => n.textContent);
+  assert.equal(texts.length, 5, `one payload node per recorded blob of the whole reading, got ${texts.length}`);
+  // …and a closed screen takes nothing either.
+  const w3 = world({ fetch: evidenceFetch([]) });
+  w3.sandbox.ssOpen(sentDoc(), "m2", "context");
+  w3.sandbox.ssClose();
+  await flush();
+  assert.equal(w3.el("ss-body").children.length, 0);
+  assert.equal(w3.sandbox.ssView, null);
 });
 
 check("wrap is on by default, the toggle is remembered, and \"0\" turns it off", () => {
