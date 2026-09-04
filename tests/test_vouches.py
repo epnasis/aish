@@ -260,17 +260,52 @@ class TestTheStoreSeedsFromHisOwnRecordedActs:
         assert SessionLog.approved_read_hosts(log.path) == ["drop.example"]
         assert vouches.hosts() == ["drop.example"]
 
-    def test_a_feedback_comment_still_counts_as_approved(self, machine):
-        """`server.py` writes `approved (feedback: …)`, so a reader matching the
-        whole word would silently drop every commented yes."""
+    def test_a_commented_yes_never_seeds_because_the_call_never_RAN(self, machine):
+        """**This assertion is INVERTED from what it said at `977f3c1` (#346).**
+
+        It used to pin `approved (feedback: …)` as a commented yes that must
+        still seed, on the reasoning that a reader matching the whole word would
+        drop every one of them. That reasoning read the string and not the
+        verdict. `server.py` writes that decision for `Approved(comment)`, and
+        on the live path `Approved(comment)` is a **HOLD**: the read never
+        happens, the owner is asking for it to be reworked, and `_egress_gate`
+        writes no vouch there in as many words. So the record is of a call that
+        did not run, and seeding a permanent machine-wide send vouch from it
+        grants a permission the live gate refuses to grant.
+
+        Iterated over `READ_TOOLS`, because a sampled guard is not a guard —
+        each tool gets one commented yes and one clean one, and only the clean
+        ones may appear."""
+        log = SessionLog.new(machine)
+        log.task_start("x")
+        for tool in SessionLog.READ_TOOLS:
+            log.command(
+                f"tool {tool}(url='https://held-{tool}.example/x')",
+                "approved (feedback: use the invoice page instead)",
+            )
+            log.command(f"tool {tool}(url='https://ran-{tool}.example/x')", "approved")
+        log.task_end()
+        log.close()
+        seeded = SessionLog.approved_read_hosts(log.path)
+        for tool in SessionLog.READ_TOOLS:
+            assert f"held-{tool}.example" not in seeded, tool
+            assert f"ran-{tool}.example" in seeded, tool
+        assert not any(host.startswith("held-") for host in vouches.hosts())
+
+    def test_a_denial_with_a_comment_seeds_nothing_either(self, machine):
+        """The other half of the same decision string. `denied (feedback: …)` is
+        the opposite of consent and never came close to seeding; it is asserted
+        here so the equality above is read as *the gate's rule* and not as a
+        string trick that happens to exclude one spelling."""
         log = SessionLog.new(machine)
         log.task_start("x")
         log.command(
-            "tool read_url(url='https://eon.pl/faktury')", "approved (feedback: ok)"
+            "tool read_url(url='https://no.example/x')", "denied (feedback: no)"
         )
         log.task_end()
         log.close()
-        assert vouches.hosts() == ["eon.pl"]
+        assert SessionLog.approved_read_hosts(log.path) == []
+        assert vouches.hosts() == []
 
     def test_an_approved_shell_command_carrying_a_url_seeds_nothing(self, machine):
         """The defect a delivery review found. `kind: "command"` is the audit
@@ -447,9 +482,15 @@ class TestTheGoogleFlightsRegressionAndTheCorpus:
             agent._browse_view.remember(browse.Snapshot(
                 url=f"https://{host}/", title="", text="t",
                 controls=browse.controls_from([
-                    {"n": 1, "kind": "field", "name": "Search", "form": "f"},
+                    {"n": 1, "kind": "field", "name": "Search", "form": "f",
+                     "sends_to": f"https://{host}/"},
+                    # SAME-ORIGIN, which is what a real search form on the
+                    # owner's own sites resolves to — the seeded vouch is what
+                    # frees it, and since #346 that is asked of where the form
+                    # SENDS rather than of the page it sits on.
                     {"n": 2, "kind": "button", "name": "Go", "submits": True,
-                     "method": "get", "form": "f"},
+                     "method": "get", "form": "f",
+                     "sends_to": f"https://{host}/"},
                 ]),
             ))
             assert agent._browse_gate("browse_fill", {"steps": [

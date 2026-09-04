@@ -95,7 +95,7 @@ def no_real_secrets(tmp_path_factory, monkeypatch):
     # no output — the hang signature this repo already knows. A second FILE in
     # a directory that is being created anyway costs nothing.
     index_dir = tmp_path_factory.mktemp("secret-names")
-    monkeypatch.setattr(secrets_module, "NAMES_INDEX", index_dir / "secret-names.txt")
+    monkeypatch.setattr(secrets_module, "names_index", lambda p=index_dir / "secret-names.txt": p)
     # The SAME guard, one store over (#280). Site sign-ins are scrubbed on the
     # same terms as named secrets, so the scrub asks `signin.origins()` on every
     # tool result — and that reads a real file in the developer's state dir,
@@ -113,7 +113,9 @@ def no_real_secrets(tmp_path_factory, monkeypatch):
     # suite run would shell out to `security` for their home address to decide
     # that a fixture's search term is not it.
     monkeypatch.setattr(
-        secrets_module, "PERSONAL_NAMES_INDEX", index_dir / "personal-names.txt"
+        secrets_module,
+        "personal_names_index",
+        lambda p=index_dir / "personal-names.txt": p,
     )
     secrets_module._invalidate()  # the cache outlives a test; the patch does not
     secrets_module._invalidate_personal()

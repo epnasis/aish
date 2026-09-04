@@ -32,6 +32,7 @@ live attacker already running as the user. That is out of scope by design.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -53,10 +54,36 @@ SIGNIN_SERVICE = "aish-signin"
 # off the wire would be injected into a wrapper's environment by declaring it.
 PERSONAL_SERVICE = "aish-personal"
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # env-var-shaped
-NAMES_INDEX = Path.home() / ".local" / "state" / "aish" / "secret-names.txt"
-PERSONAL_NAMES_INDEX = (
-    Path.home() / ".local" / "state" / "aish" / "personal-names.txt"
-)
+
+
+def state_dir() -> Path:
+    """Where aish keeps machine-wide state — resolved at CALL time (#353).
+
+    `vouches.state_dir`, `browser.state_dir` and `explain.state_dir` all resolve
+    it this way and for this reason: `create_app` exports `AISH_STATE_DIR` at
+    startup, so a path frozen at import points the web server's store somewhere
+    the CLI's is not.
+
+    **These two indexes did NOT, and it was not cosmetic.** They were
+    `Path.home() / ".local" / "state" / "aish" / …` bound at import, so a
+    process that had set `AISH_STATE_DIR` to a sandbox still read and WROTE the
+    owner's real name index — which is exactly how a probe run against #343
+    wrote into his live state directory believing it was isolated. `server.py`'s
+    own comment already claimed `secrets` resolved it at call time; now it
+    does."""
+    return Path(
+        os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
+    )
+
+
+def names_index() -> Path:
+    return state_dir() / "secret-names.txt"
+
+
+def personal_names_index() -> Path:
+    return state_dir() / "personal-names.txt"
+
+
 _SECURITY = "/usr/bin/security"
 
 # Below this length a stored "secret" collides with ordinary text — scrubbing
@@ -161,29 +188,57 @@ def delete_signin(origin: str) -> bool:
 
 
 def names() -> list[str]:
-    """Names of stored secrets (from the state-dir index), sorted."""
-    return _read_index(NAMES_INDEX)
+    """Names of stored secrets (from the state-dir index), sorted.
+
+    **This one SWALLOWS an unreadable index, unlike `personal_names` (#353).**
+    The stored-secret list feeds `scrub`, which runs over every tool result and
+    every console line, so a raise here turns a file-permission glitch into a
+    failed turn on every call. The trade is genuinely different from the
+    declared-value fence's: `scrub` degrades REDACTION, while `personal_names`
+    decides a PERMISSION, and only the second can be silently granted.
+
+    **What that leaves open, said rather than left to be found:** `contains`
+    reads this list too, and it is a gate input (arm 3 of `_value_finding`, the
+    stored-secret arm of `_driven_finding`, `_command_has_a_secret`). An index
+    that exists and cannot be read therefore disarms those arms silently — the
+    same fault as #353 item 1, one namespace over, with a blast radius that
+    makes the same fix wrong. It is NOT fixed here and is not claimed to be."""
+    try:
+        return _read_index(names_index())
+    except (OSError, ValueError):
+        return []
 
 
 def _read_index(index: Path) -> list[str]:
-    # ValueError as well as OSError: `read_text(encoding="utf-8")` raises
-    # UnicodeDecodeError — a ValueError — on an index that is not UTF-8, and
-    # that used to propagate through both declared-value gates to `_dispatch`'s
-    # generic handler. It was contained by accident rather than by design, and
-    # an accident is not a failure direction.
+    """The names in an index file, sorted — or `[]` when there is no such file.
+
+    **Anything else RAISES, and that is the whole of #353 item 1.** It used to
+    answer `[]` for every `OSError` and `ValueError`, so an index that EXISTED
+    and could not be read — bad permissions, corrupt bytes — was
+    indistinguishable from one that had never been written. For the declared
+    values that meant `personal_names()` and `personal_unreadable()` were BOTH
+    empty: the fence switched itself off on every channel and `aish personal
+    list` printed nothing declared, with no error anywhere. Reproduced on a real
+    index at `chmod 000`.
+
+    The previous round added the `ValueError` catch deliberately, to stop a
+    non-UTF-8 index propagating to `_dispatch`'s generic handler. That was the
+    right observation about the wrong thing: being contained by accident is not
+    a failure direction, but neither is being answered with a lie. Absent and
+    unreadable are two different facts, and only one of them means *nothing is
+    declared*."""
     try:
-        return sorted(
-            n for n in index.read_text(encoding="utf-8").splitlines() if n.strip()
-        )
-    except (OSError, ValueError):
+        text = index.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return []
+    return sorted(n for n in text.splitlines() if n.strip())
 
 
 def _index_add(name: str, index: Path | None = None) -> None:
     # Resolved at CALL time, never as a default argument: a default binds the
     # module constant at import, and the suite-wide guard that redirects the
     # index away from the developer's real state dir rebinds that constant.
-    index = NAMES_INDEX if index is None else index
+    index = names_index() if index is None else index
     current = set(_read_index(index))
     if name in current:
         return
@@ -192,7 +247,7 @@ def _index_add(name: str, index: Path | None = None) -> None:
 
 
 def _index_remove(name: str, index: Path | None = None) -> None:
-    index = NAMES_INDEX if index is None else index
+    index = names_index() if index is None else index
     current = set(_read_index(index))
     if name in current:
         current.discard(name)
@@ -200,7 +255,7 @@ def _index_remove(name: str, index: Path | None = None) -> None:
 
 
 def _write_index(name_set: set[str], index: Path | None = None) -> None:
-    index = NAMES_INDEX if index is None else index
+    index = names_index() if index is None else index
     try:
         index.parent.mkdir(parents=True, exist_ok=True)
         index.write_text("\n".join(sorted(name_set)) + "\n", encoding="utf-8")
@@ -398,9 +453,22 @@ def fold_value(text: str) -> str:
     return "".join(c for c in kept.casefold() if c.isalnum())
 
 
+#: The stand-in `personal_unreadable` reports when the INDEX ITSELF could not be
+#: read (#353). It is not a class name and can never collide with one —
+#: `valid_name` forbids spaces — because in this fault aish does not know what
+#: the classes ARE. A card that named one would state something no line checked.
+INDEX_UNREADABLE = "the list of declared values"
+
+
 def personal_names() -> list[str]:
-    """Names of the declared value classes, sorted. Names, never values."""
-    return _read_index(PERSONAL_NAMES_INDEX)
+    """Names of the declared value classes, sorted. Names, never values.
+
+    **Raises when the index exists and cannot be read**, deliberately (#353):
+    that is a different fact from *nothing is declared*, and answering the
+    second for the first switches the whole fence off with no error anywhere.
+    `personal_unreadable` is the fail-closed reader over this one, and
+    `aish personal list` catches it to say the index could not be read."""
+    return _read_index(personal_names_index())
 
 
 def get_personal(name: str) -> str | None:
@@ -440,7 +508,7 @@ def put_personal(name: str, value: str) -> None:
     )
     if proc.returncode != 0:
         raise SecretError(proc.stderr.strip() or "failed to store value")
-    _index_add(name, PERSONAL_NAMES_INDEX)
+    _index_add(name, personal_names_index())
     _invalidate_personal()
 
 
@@ -449,7 +517,7 @@ def delete_personal(name: str) -> bool:
     if not valid_name(name):
         return False
     proc = _security(["delete-generic-password", "-a", name, "-s", PERSONAL_SERVICE])
-    _index_remove(name, PERSONAL_NAMES_INDEX)
+    _index_remove(name, personal_names_index())
     _invalidate_personal()
     return proc.returncode == 0
 
@@ -495,18 +563,29 @@ def _personal_matchable() -> list[tuple[str, str]]:
 
 
 def personal_unreadable() -> list[str]:
-    """Declared classes the Keychain would not hand over.
+    """Declared classes aish CANNOT CHECK a value against right now.
 
-    Non-empty means aish CANNOT TELL whether a value is one of his, which is a
-    different fact from "it is not" — the gate fails closed on it and says so,
+    Non-empty means aish cannot tell whether a value is one of his, which is a
+    different fact from "it is not" — every gate fails closed on it and says so,
     rather than typing the value and recording nothing.
 
-    An exception refreshing the cache is answered with every declared name, for
-    the same reason: not knowing is not the same as knowing there is nothing."""
+    Three sources, and the third is #353's HIGH item. A class the Keychain would
+    not hand over. An exception refreshing the cache, answered with every
+    declared name, because not knowing is not knowing there is nothing. And the
+    INDEX ITSELF being unreadable, answered with `INDEX_UNREADABLE`: aish cannot
+    even list the classes, so it names the list rather than inventing a class.
+
+    This function never raises. It is the one every gate asks, and a fence whose
+    fault path throws is a fence whose fault path is decided by whoever happens
+    to catch."""
+    try:
+        declared = personal_names()
+    except (OSError, ValueError):
+        return [INDEX_UNREADABLE]
     try:
         _personal_matchable()
     except Exception:  # noqa: BLE001 — cannot check is never "nothing to check"
-        return list(personal_names())
+        return list(declared)
     return list(_personal_cache["unreadable"])
 
 

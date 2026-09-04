@@ -1814,7 +1814,20 @@ def _personal_cli(args: list[str]) -> int:
         return 2
     cmd, rest = args[0], args[1:]
     if cmd == "list":
-        found = secrets.personal_names()
+        # **An index that cannot be READ is not an empty one (#353).** It used
+        # to print "(no values declared)" while the gates were refusing every
+        # typed value — the listing said the opposite of what the code was
+        # doing, which is worse than no listing. The cause is not guessed at:
+        # the exception is what is shown, because aish does not know why.
+        try:
+            found = secrets.personal_names()
+        except (OSError, ValueError) as exc:
+            print(
+                "error: the list of declared values could not be read "
+                f"({exc}).\naish will NOT type into any form until it can. "
+                f"The index is at {secrets.personal_names_index()}."
+            )
+            return 1
         if not found:
             print("(no values declared)")
             return 0

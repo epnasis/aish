@@ -31,7 +31,7 @@ def store(tmp_path, monkeypatch):
         raise AssertionError(f"unexpected security call: {cmd}")
 
     monkeypatch.setattr(secrets, "_security", fake_security)
-    monkeypatch.setattr(secrets, "NAMES_INDEX", tmp_path / "names.txt")
+    monkeypatch.setattr(secrets, "names_index", lambda p=tmp_path / "names.txt": p)
     return kc
 
 
@@ -95,8 +95,10 @@ def personal(tmp_path, monkeypatch):
         raise AssertionError(f"unexpected security call: {cmd}")
 
     monkeypatch.setattr(secrets, "_security", fake_security)
-    monkeypatch.setattr(secrets, "NAMES_INDEX", tmp_path / "names.txt")
-    monkeypatch.setattr(secrets, "PERSONAL_NAMES_INDEX", tmp_path / "personal.txt")
+    monkeypatch.setattr(secrets, "names_index", lambda p=tmp_path / "names.txt": p)
+    monkeypatch.setattr(
+        secrets, "personal_names_index", lambda p=tmp_path / "personal.txt": p
+    )
     secrets._invalidate()
     secrets._invalidate_personal()
     yield kc
@@ -139,7 +141,7 @@ class TestDeclaredPersonalValues:
             "add-generic-password", "-a", "initials",
             "-s", secrets.PERSONAL_SERVICE, "-U", "-w", "PW",
         ])
-        secrets._index_add("initials", secrets.PERSONAL_NAMES_INDEX)
+        secrets._index_add("initials", secrets.personal_names_index())
         secrets._invalidate_personal()
         assert secrets.personal_names() == ["initials"]
         assert secrets.personal_status("initials") == secrets.TOO_SHORT
@@ -271,7 +273,7 @@ class TestThePersonalCommand:
             "add-generic-password", "-a", "initials",
             "-s", secrets.PERSONAL_SERVICE, "-U", "-w", "PW",
         ])
-        secrets._index_add("initials", secrets.PERSONAL_NAMES_INDEX)
+        secrets._index_add("initials", secrets.personal_names_index())
         secrets._invalidate_personal()
         assert cli._personal_cli(["list"]) == 0
         assert "NOT fenced" in capsys.readouterr().out

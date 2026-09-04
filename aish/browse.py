@@ -712,6 +712,13 @@ class Control:
     # `n` stays the tag that finds the element; this is the address, and
     # `address_controls` is where it is worked out. Empty only until then.
     address: str = ""
+    # WHERE pressing this would send the form, as an absolute URL — "" when
+    # this control submits nothing, or when the page gave no readable
+    # destination to resolve. **Never the address of the page it is on**: a
+    # form's `action` may point anywhere, so the page's host answers a
+    # different question (#346). Carried rather than re-derived because only
+    # the page can resolve a relative action against its own base.
+    sends_to: str = ""
     # Does pressing this just GO somewhere — a real http href to another page?
     # Carried rather than re-derived from `kind`/`detail` because `<a href="#">`
     # is a JavaScript button wearing a link's clothes, and only the enumeration
@@ -2023,6 +2030,20 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
       // default and would report a form nobody wrote a method on as a GET,
       // which is the one case that must stay ambiguous.
       method: methodOf(el),
+      // WHERE pressing this would send the form — the page's own address says
+      // NOTHING about it (#346). A page on a host the owner vouched may carry
+      // `<form action="https://evil.example/collect">`, and a gate that read
+      // the page's host would free that submit while the identical values in a
+      // composed URL to `evil.example` drew a card. `SIGNIN_FORM_JS` has
+      // resolved the form's own destination since #273 for exactly this
+      // reason; this is the same resolution for the same class.
+      //
+      // The RESOLVED ABSOLUTE URL, not a host: the vocabulary that decides the
+      // vouch is `urlsplit(...).hostname`, and it must be the SAME parser the
+      // composed twin uses or the two paths spell one site two ways. Resolution
+      // needs the document's base, which only the page can supply, so the
+      // resolving happens here and the reading happens in Python.
+      sends_to: sendsTo(el),
     });
   };
 
@@ -2048,6 +2069,30 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     if (own) return own;
     const form = el.form;
     return (form && form.getAttribute && form.getAttribute('method')) || '';
+  };
+
+  // Where this control's form would SEND, absolute, or '' when there is
+  // nothing to read. A button's own `formaction` wins, exactly as the browser
+  // resolves it and exactly as `methodOf` reads `formmethod` one line up —
+  // otherwise a `<button formaction="https://evil.example/">` inside an
+  // innocent form is the same defect one attribute over.
+  //
+  // `form.action` is the IDL attribute, so a form with NO action attribute
+  // reports the document's own URL, which is where such a form really submits.
+  // That is why a relative `action="/checkout"` resolves against the page
+  // rather than to nothing, and why "no action written" is not the same fact
+  // as "no destination readable".
+  //
+  // '' means aish could not read one: no form at all (a script may submit it
+  // anywhere), or an action with no host in it — `mailto:`, `javascript:`, a
+  // string `URL` will not parse. The gate treats that as UNVOUCHED, because a
+  // destination aish cannot read is not a destination it may assume.
+  const sendsTo = (el) => {
+    const form = el.form;
+    if (!form) return '';
+    const own = el.getAttribute && el.getAttribute('formaction');
+    try { return new URL(own || form.action, document.baseURI).href; }
+    catch (e) { return ''; }
   };
 
   const walk = (root) => {
@@ -2584,6 +2629,7 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                 option=bool(raw.get("option")),
                 navigates=bool(raw.get("href")),
                 form=str(raw.get("form") or ""),
+                sends_to=str(raw.get("sends_to") or ""),
                 row=[str(line) for line in (raw.get("row") or [])][:ROW_LINES_MAX],
             )
         )

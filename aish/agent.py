@@ -1497,8 +1497,16 @@ EGRESS_NO_APPROVER = (
 
 # The DRIVEN TWIN of the composed address (#295 M3). Same question, same vouch,
 # different mechanism: a form submit carrying values aish itself typed is a
-# composed query URL that a page built instead of a string concatenation. The
-# sentence never names a tool (P1) — it says what would leave the machine and
+# composed query URL that a page built instead of a string concatenation.
+#
+# `{host}` is where the FORM sends, never the page the button sits on (#346) —
+# the prose above claims parity and the two mechanisms have to resolve the
+# destination the same way for it to be true. The
+# composed twin parses the host out of the address; this one reads it off the
+# form's own resolved action, which is what `browser.SIGNIN_FORM_JS` has done
+# for the password path since #273.
+#
+# The sentence never names a tool (P1) — it says what would leave the machine and
 # where it would go, exactly as the composed-address card does, and it rides the
 # press card rather than drawing a second one (M1's law: one press, one card).
 SEND_GRANT = "send data to {host} — pressing this {finding}."
@@ -1564,6 +1572,30 @@ PERSONAL_UNREADABLE = (
     "`aish personal list`."
 )
 
+# The same not-knowing when aish cannot even LIST the classes (#353). Its own
+# sentence rather than `PERSONAL_UNREADABLE` with a stand-in threaded through
+# `{what}`, because these are two different facts and only one of them was
+# checked: there, the Keychain refused a class aish can name; here, the name
+# index itself could not be read, so aish does not know what was declared.
+# Naming a class it had not read would be a cause no line established.
+PERSONAL_INDEX_UNREADABLE = (
+    "NOT EXECUTED: aish could not read the list of values the user declared as "
+    "their own, so it cannot tell whether this is one of them. Nothing was "
+    "typed, and aish does not know why the list could not be read. Tell the "
+    "user, and suggest they run `aish personal list`."
+)
+
+# The same not-knowing on the SEARCH channel (#353 items 2 and 3). A search
+# names a host and never reaches one, so the composed-address wording would
+# state something no line checked here — and the generic search preview states
+# two: that the turn has read the open web, and that aish composed an address.
+# In this fault neither was established, and the destination the old sentence
+# named was this file's own placeholder.
+PERSONAL_UNREADABLE_IN_A_SEARCH = (
+    "may put one of the values you declared into a web search — aish could not "
+    "read them just now, so it cannot tell"
+)
+
 # The same not-knowing on the address channel, as a FINDING rather than a
 # refusal, because that channel's verdict is a card.
 PERSONAL_UNREADABLE_CARRIES = (
@@ -1595,6 +1627,18 @@ DRIVEN_CARRIES = (
 # strict unattended rule gates a payload at a host the owner DID name, so
 # saying "you have never agreed" there would state something no line checked.
 DRIVEN_UNATTENDED_CARRIES = "would send {n} value(s) aish typed into the page"
+
+# What the send clause names when the form's own destination could not be read
+# (#346). It is a DESTINATION for the card to name and never a host: it can
+# never be in `_approved_hosts`, so the press is treated as unvouched and asks;
+# and `_press_card` keeps it out of `_vouch_hosts`, because the vouch store is
+# machine-wide and permanent and a sentence is not a host — the same rule
+# `SEARCH_ENGINE_DESTINATION` is held to, for the same reason.
+#
+# It says what was actually established. aish did not find a hostile
+# destination; it found that it cannot say where the form goes, and a card that
+# claimed more than that would be a cause no line checked.
+UNREADABLE_DESTINATION = "a destination aish cannot read"
 
 # `_payload_finding` returns the sentence the ATTENDED card says. These three
 # are its findings for the cases the attended card does not word: a search
@@ -2012,6 +2056,40 @@ REMEMBER_NO_APPROVER = (
     "write needs the owner's review and no approver is available. State the "
     "fact in your report instead; the owner can save it."
 )
+
+
+def _could_carry_a_value(parts: urllib.parse.SplitResult) -> bool:
+    """Is there anywhere in this address a declared value could be hiding?
+
+    Structural and deliberately crude: userinfo, a path past `/`, a query or a
+    fragment. A bare host carries nothing by construction, so the fault-state
+    clause has nothing to be uncertain about there (#353). Read only by the
+    unreadable arm — the arms that MATCH a value do not need it, because a match
+    is its own evidence."""
+    return bool(
+        parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+        or parts.path.strip("/")
+    )
+
+
+def _exact_host(url: str) -> str:
+    """The host of an address in `_approved_hosts`' vocabulary, or "".
+
+    ONE reader for every path that decides a send vouch — the composed address,
+    the page a value was typed at, and the form's own destination (#346) — so
+    the three cannot spell one site three ways. Lowercase, no port, no
+    www-stripping: the vouch is EXACT-matched, and `_browse_host` speaks the
+    other, suffix-matched vocabulary.
+
+    "" for anything with no host in it, which every caller reads as *nothing was
+    established here* rather than as an answer."""
+    try:
+        return (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
 
 
 def _hosts_in_text(text: str) -> set[str]:
@@ -7294,6 +7372,19 @@ class Agent:
                 name, args, self._egress_hosts(name, args)
             ):
                 return PERSONAL_IN_A_SEARCH.format(what=_personal_words(said))
+            # **And the fault state, on the SAME branch (#353 F2).** The
+            # fail-closed arm lived only in `_egress_novel_hosts`' `not hosts`
+            # case, so a query that happened to NAME a host skipped it entirely
+            # and this function then found nothing to say — no payload, no card,
+            # in both taints, with the store unreadable. Three prose surfaces
+            # claimed closure on all four paths; the test that pinned it used a
+            # query with no host in it, which is why it passed.
+            #
+            # `_personal_outbound` answers "nothing" precisely BECAUSE nothing
+            # can be read, so the arm has to sit beside it rather than inside
+            # it, exactly as it does on the read paths.
+            if secrets.personal_unreadable():
+                return PERSONAL_UNREADABLE_IN_A_SEARCH
             return (
                 SEARCH_CARRIES
                 if any(
@@ -7419,9 +7510,17 @@ class Agent:
         # uses most, which is where a fence has to hold or it is decoration.
         if said := self._personal_in_url(url, {host}):
             carried.append(PERSONAL_CARRIES.format(what=_personal_words(said)))
-        elif secrets.personal_unreadable():
+        elif secrets.personal_unreadable() and _could_carry_a_value(parts):
             # Fails closed on the same terms the typing fence does: aish cannot
             # tell, which is not the same as there being nothing to find.
+            #
+            # …but only where there is somewhere for a value to BE (#353 F6).
+            # A bare `https://example.com/` has no path, query or fragment, so
+            # nothing about the store's readability changes what it carries —
+            # which is nothing. Saying "may carry one of the values you
+            # declared" there states a possibility the address itself rules
+            # out, and a fault must not make aish claim more than a fault
+            # allows.
             carried.append(PERSONAL_UNREADABLE_CARRIES)
         if _forwards_elsewhere(url):
             carried.append("has a second address written inside it")
@@ -7492,6 +7591,15 @@ class Agent:
             # search names a host and never reaches one, so the composed-address
             # wording below would state something no line checked here.
             preview = PERSONAL_IN_A_SEARCH.format(what=_personal_words(said))
+        elif name == "web_search" and secrets.personal_unreadable():
+            # **The fault state has its own sentence, and #353 F3 is why.** It
+            # used to fall through to the generic preview below, which asserted
+            # that the turn had READ THE OPEN WEB and that aish had COMPOSED AN
+            # ADDRESS — neither established here — and named the destination as
+            # `the search engine`, which is this file's own placeholder rather
+            # than anything a line found. Two causes nothing checked, in aish's
+            # own voice, which is exactly what L8 forbids.
+            preview = PERSONAL_UNREADABLE_IN_A_SEARCH
         elif name == "web_search":
             preview = (
                 f"this turn has read the open web, and now wants to put an "
@@ -7620,7 +7728,20 @@ class Agent:
 
         What is vouched is exactly the hosts the card NAMED — residual (c) in
         `docs/agent-core.md` — so the round trip through the log must not grow
-        the set either."""
+        the set either.
+
+        **NOTHING is vouched while the declared-value store cannot be read
+        (#353 F4), and the guard is here rather than at the call sites.** A card
+        drawn in that fault says *aish could not read your declared values, so
+        it cannot tell* — a yes to that is an answer about ONE action under a
+        fault, and writing it into a store that is machine-wide and PERMANENT
+        turns a transient Keychain failure into a standing grant for that host,
+        materially wider than the sentence he read. Both writers route through
+        here (`_egress_gate` and `_press_card`), so guarding the single write
+        point is what stops the next one forgetting. It can only ever cost a
+        card and can never grant one."""
+        if secrets.personal_unreadable():
+            return
         self._approved_hosts.update(hosts)
         vouches.add(list(hosts))
         if self.state_log is None:
@@ -7640,12 +7761,48 @@ class Agent:
         An EMPTY value is not recorded. Clearing a field sends nothing, and the
         question this record answers is what would ride the submit."""
         typed = [(target, value) for target, value in browse.typed_values(name, args) if value]
-        host = self._driven_host(name, args)
+        host = self._typed_at_host(name, args)
         if host and typed:
             self._typed_this_task.setdefault(host, []).extend(typed)
 
+    def _typed_at_host(self, name: str, args: dict) -> str:
+        """The EXACT host of the page these values are being typed INTO.
+
+        The ledger key, and only that: it answers *what has aish typed here*,
+        which is a fact about the page in front of it. Where those values would
+        GO is a different question with a different answer, and `_driven_host`
+        is the one that asks it (#346) — a form on this page may post anywhere.
+
+        EXACT, never `_browse_host`'s www-stripped spelling, so a value typed at
+        `www.shop.example` and a value typed at `shop.example` are not silently
+        pooled into one press."""
+        if name == "browse":
+            url = str(args.get("url", "") or "")
+        else:
+            current = self._browse_view.shown
+            url = current.url if current is not None else ""
+        return _exact_host(url)
+
     def _driven_host(self, name: str, args: dict) -> str:
-        """The EXACT host a submit would send to, `_approved_hosts`' vocabulary.
+        """The EXACT host a submit would SEND to, `_approved_hosts`' vocabulary
+        — or "" when this call submits nothing.
+
+        **The form's own destination, never the page's address (#346).** A
+        page's origin says nothing about where its forms send: a page on a host
+        the owner vouched may carry `<form action="https://evil.example/collect">`,
+        and reading the page's host there freed the submit while the identical
+        values in a composed URL to `evil.example` drew a card. That is the
+        assumption `browser.SIGNIN_FORM_JS` has existed to reject since #273,
+        reintroduced one gate over. `Control.sends_to` carries the resolved
+        destination out of the enumeration, because only the page can resolve a
+        relative `action="/checkout"` against its own base.
+
+        **It FAILS CLOSED.** A control that submits but whose destination could
+        not be read — no `<form>` at all (a script may submit it anywhere), a
+        `mailto:`/`javascript:` action, a string no parser accepts — comes back
+        as `UNREADABLE_DESTINATION`, which is in no vouch set and never will be,
+        so the press asks. A destination aish cannot read is not a destination
+        it may assume.
 
         Deliberately NOT `_browse_host`, which strips `www.` — that one speaks
         `_approved_sites`' vocabulary, where the grant is suffix-matched and the
@@ -7655,16 +7812,16 @@ class Agent:
         naming one host while vouching another breaks the invariant that what
         enters `_approved_hosts` is exactly what the preview put in front of
         him. So a merged card can name two spellings of the same site, one per
-        clause, because the two clauses grant differently matched things."""
-        if name == "browse":
-            url = str(args.get("url", "") or "")
-        else:
-            current = self._browse_view.shown
-            url = current.url if current is not None else ""
-        try:
-            return (urllib.parse.urlsplit(url).hostname or "").lower()
-        except ValueError:
+        clause, because the two clauses grant differently matched things.
+
+        And the host is read with the SAME parser the composed twin uses
+        (`urlsplit(...).hostname` — lowercase, no port), because parity is the
+        whole claim: a second spelling here would make one site two hosts and a
+        yes given on one channel fail to answer the other."""
+        control = self._submitting_control(name, args)
+        if control is None:
             return ""
+        return _exact_host(getattr(control, "sends_to", "")) or UNREADABLE_DESTINATION
 
     def _submitting_control(self, name: str, args: dict):
         """The control this call would press to SEND a form, or None.
@@ -7773,10 +7930,17 @@ class Agent:
         Unattended keeps the strict rule reads already keep: every submit
         carrying typed values gates, vouch or no vouch, because nobody is going
         to read the answer either way."""
-        host = self._driven_host(name, args)
-        if not host or self._submitting_control(name, args) is None:
+        # TWO hosts, and conflating them is the defect this pair exists to
+        # prevent (#346). The LEDGER is keyed by the page the values were typed
+        # at; the VOUCH is asked about where the form would send them. A form
+        # on a vouched page may post cross-origin, so one answer cannot serve
+        # both questions.
+        destination = self._driven_host(name, args)
+        if not destination:
             return ""
-        carried = self._values_riding_this_press(name, args, host)
+        carried = self._values_riding_this_press(
+            name, args, self._typed_at_host(name, args)
+        )
         if not carried:
             return ""
         for value in (v for _, v in carried):
@@ -7793,7 +7957,10 @@ class Agent:
             if _addresses_in_text(urllib.parse.unquote(value)):
                 return "has a second address written inside it"
         attended = self.origin == "user"
-        if attended and host in self._approved_hosts:
+        # The DESTINATION is what a vouch answers for. `UNREADABLE_DESTINATION`
+        # is in no vouch set, so a submit aish cannot read the destination of
+        # asks — fail closed, by the value it carries rather than by a branch.
+        if attended and destination in self._approved_hosts:
             return ""
         template = DRIVEN_CARRIES if attended else DRIVEN_UNATTENDED_CARRIES
         return template.format(n=len(carried))
@@ -8007,8 +8174,10 @@ class Agent:
         approval record, and a record quoting his address would be the leak this
         whole slice exists to prevent."""
         key = _ledger_host(host)
+        # The page these values are being typed AT, which is what the ledger is
+        # keyed by — never where a form on it would send them (#346).
         riding = self._values_riding_this_press(
-            name, args, self._driven_host(name, args)
+            name, args, self._typed_at_host(name, args)
         )
         typed = [value for _, value in riding]
         found: list[str] = []
@@ -8123,8 +8292,17 @@ class Agent:
         if (unreadable := secrets.personal_unreadable()) and any(
             value for _, value in browse.typed_values(name, args)
         ):
+            # **Two faults, two sentences (#353).** `INDEX_UNREADABLE` means the
+            # name index itself could not be read, so aish does not know what
+            # was declared — naming a class there would be a cause no line
+            # checked. Everything else is a class aish CAN name whose value the
+            # Keychain refused.
             return _gate_outcome(
-                PERSONAL_UNREADABLE.format(what=_personal_words(sorted(unreadable))),
+                PERSONAL_INDEX_UNREADABLE
+                if secrets.INDEX_UNREADABLE in unreadable
+                else PERSONAL_UNREADABLE.format(
+                    what=_personal_words(sorted(unreadable))
+                ),
                 decision="blocked",
             )
         classes = self._personal_pending(name, args, host)
@@ -8448,9 +8626,11 @@ class Agent:
         would read as part of that value."""
         granted = self._site_granted(host)
         sending = self._driven_finding(name, args)
-        # The EXACT host, never `host`: the send vouch is exact-matched and the
-        # press grant is suffix-matched, so the two clauses of one card may
-        # legitimately spell the same site differently (see `_driven_host`).
+        # The EXACT host the FORM would send to, never `host` — which is the
+        # page the button sits on, and says nothing about where it posts
+        # (#346). The send vouch is also exact-matched where the press grant is
+        # suffix-matched, so the two clauses of one card may legitimately spell
+        # the same site differently (see `_driven_host`).
         send_host = self._driven_host(name, args)
         # An inert press on a site with no grant asks nothing and RECORDS
         # nothing (#295 M4) — see `_grant_is_due`. The send clause below is a
@@ -8525,7 +8705,16 @@ class Agent:
             # — the two grants stay disjoint (`_grant_site` above writes the
             # other one), and neither is ever filled from the other. Exactly the
             # host the clause NAMED, which is residual (c)'s invariant.
-            self._vouch_hosts([send_host])
+            #
+            # …unless the clause named the PLACEHOLDER, which is not a host and
+            # must never enter a store that is machine-wide and permanent
+            # (#346). A yes there answers for this one press and vouches
+            # nothing, because aish cannot say what it would be vouching for.
+            # Filtered at the one call site that writes it, exactly as
+            # `SEARCH_ENGINE_DESTINATION` is, and pinned by a test.
+            self._vouch_hosts(
+                [] if send_host == UNREADABLE_DESTINATION else [send_host]
+            )
         if typing:
             # Per (class, host), for this task — exactly what the clause said,
             # and no wider. It is the SAME ledger the composed-address arm reads

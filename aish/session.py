@@ -1192,6 +1192,20 @@ class SessionLog:
     #: the two were indistinguishable in the log.
     NEVER_SEEDS = ("mail-link",)
 
+    #: The ONE decision that seeds — a PLAIN yes, and nothing else (#346). The
+    #: live gate's own rule: `server.py` writes `approved (feedback: …)` when the
+    #: owner typed a comment, and on the live path that verdict is
+    #: `Approved(comment)`, which is a HOLD — the call never ran, and
+    #: `_egress_gate` deliberately writes no vouch there ("writing a vouch there
+    #: would record a permission for an action the owner asked to have
+    #: reworked"). A reader that accepted any decision STARTING with `approved`
+    #: seeded exactly the yes the live gate refuses to.
+    #:
+    #: Measured before this changed: no host in the owner's live store came in
+    #: this way, so there was nothing to clean up. The reader simply matches the
+    #: gate.
+    VOUCHING_DECISION = "approved"
+
     #: Which tool the approval was FOR, anchored at the start of the command
     #: string exactly as `server.py` and `cli.py` write it: `tool read_url(`.
     #: `browse` here never matches `browse_act(`/`browse_fill(` — those press
@@ -1208,11 +1222,20 @@ class SessionLog:
 
         Read by the machine-wide vouch store's one-time seeding (#295 M3), and
         the rule it implements is *only his own acts count*: a `command` record
-        whose decision starts with `approved`, whose command string is an
+        whose decision is `VOUCHING_DECISION`, whose command string is an
         approval OF ONE OF `READ_TOOLS`, and which names a URL. No heuristics,
         no external list, nothing inferred from what he happened to READ — an
         auto-approved fetch is not an answer he gave, and a denial is the
         opposite of one.
+
+        **And a COMMENTED yes is not one either (#346).** It used to accept any
+        decision starting with `approved`, which includes
+        `approved (feedback: …)` — the record of an `Approved(comment)`. On the
+        live path that verdict HOLDS the call: it never runs, the owner is
+        asking for it to be reworked, and `_egress_gate` writes no vouch there
+        on purpose. The reader now matches the gate exactly. Measured before it
+        changed: no host in the owner's live store came in this way, so this
+        cleans nothing up — it stops a future one arriving.
 
         **Both halves of that, and the second one was learned the hard way.**
         `kind: "command"` is the audit trail's record for SHELL approvals as
@@ -1260,7 +1283,7 @@ class SessionLog:
                 record is None
                 or _is_superseded(record)
                 or record.get("kind") != "command"
-                or not str(record.get("decision", "")).startswith("approved")
+                or str(record.get("decision", "")) != SessionLog.VOUCHING_DECISION
             ):
                 continue
             command = str(record.get("command", ""))
