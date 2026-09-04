@@ -454,6 +454,28 @@ check("a step change keeps the pane by name where the next step has it, else the
   assert.equal(on[0].dataset.pane, "call");
 });
 
+check("an active text selection stays put — a copy drag never turns the step", () => {
+  const w = world();
+  const d = doc();
+  const s = w.sandbox;
+  s.ssOpen(d, "c1", "call");
+  // The finger is dragging to SELECT text (a live, non-collapsed selection),
+  // which reads as a near-horizontal swipe — but the tape must yield to it.
+  let selText = "some copied text";
+  s.window.getSelection = () => ({ isCollapsed: false, toString: () => selText });
+  s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }] });
+  s.ssTouchMove({ touches: [{ clientX: 150, clientY: 302 }] });
+  s.ssTouchEnd({ changedTouches: [{ clientX: 100, clientY: 303 }] });
+  assert.equal(s.ssView.pane, "call", "a swipe while selecting text does not turn the step");
+  // With the selection cleared, the same swipe advances the tape as usual.
+  selText = "";
+  s.ssTouchStart({ touches: [{ clientX: 200, clientY: 300 }] });
+  s.ssTouchMove({ touches: [{ clientX: 150, clientY: 302 }] });
+  s.ssTouchEnd({ changedTouches: [{ clientX: 100, clientY: 303 }] });
+  assert.equal(s.ssView.pane, "result", "with no selection the swipe turns the step");
+  delete s.window.getSelection;
+});
+
 check("a horizontal swipe scrolls a wide code box first, and turns the step only at its edge", () => {
   const w = world();
   const d = doc();
@@ -1091,14 +1113,18 @@ check("each step shows the chat's icon, and the chrome collapses on scroll down"
     const m = /translateY\((-?\d+(?:\.\d+)?)px\)/.exec(chrome.style.transform || "");
     return m ? -Number(m[1]) : 0;
   };
+  const opacity = () => (chrome.style.opacity === "" ? 1 : Number(chrome.style.opacity));
   body.scrollTop = 0; s.ssScrollChrome();
   assert.equal(shift(), 0, "shown at the top");
+  assert.equal(opacity(), 1, "fully opaque at the top");
   body.scrollTop = 40; s.ssScrollChrome();
   assert.equal(shift(), 40, "moves up pixel-for-pixel with the scroll");
+  assert(Math.abs(opacity() - (1 - 40 / 150)) < 1e-6, "fades as it slides: " + opacity());
   body.scrollTop = 100; s.ssScrollChrome();
   assert.equal(shift(), 100, "keeps tracking down");
   body.scrollTop = 300; s.ssScrollChrome();
   assert.equal(shift(), 150, "fully hidden at its own height, no further");
+  assert.equal(opacity(), 0, "faded out when fully up");
   body.scrollTop = 260; s.ssScrollChrome();
   assert.equal(shift(), 110, "comes back the same pixels on scroll up");
   body.scrollTop = 0; s.ssScrollChrome();
@@ -1108,6 +1134,7 @@ check("each step shows the chat's icon, and the chrome collapses on scroll down"
   assert(shift() > 0);
   s.ssShow(d.steps.findIndex((x) => x.id === "c1"), "result");
   assert.equal(chrome.style.transform || "", "", "a new pane starts with the chrome fully shown");
+  assert.equal(chrome.style.opacity || "", "", "and fully opaque");
 });
 
 check("a running turn refreshes its steps live in the detail, without repainting the pane", async () => {

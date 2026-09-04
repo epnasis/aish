@@ -13422,7 +13422,7 @@ function ssPaintBody(paneObj) {
   ssChromeLast = 0;
   ssChromeShift = 0;
   const chrome = $("ss-chrome");
-  if (chrome) chrome.style.transform = ""; // a fresh pane starts fully shown
+  if (chrome) { chrome.style.transform = ""; chrome.style.opacity = ""; } // fresh pane: fully shown
   ssFadeArrows();
   const whole = $("ss-whole");
   const segs = paneObj ? ((paneObj.more && ssWhole) ? paneObj.more.segs : paneObj.segs)
@@ -13659,6 +13659,14 @@ function ssSave() {
   saveBlob(new Blob([ssView.text || ""], { type: "text/plain;charset=utf-8" }), ssFileName());
 }
 
+// True while text is selected — the step screen is a full-screen sheet, so a
+// live selection is necessarily within it: the user is dragging to COPY, not to
+// turn the step, and the tape must yield to them.
+function ssHasSelection() {
+  const sel = typeof window !== "undefined" && window.getSelection && window.getSelection();
+  return !!(sel && !sel.isCollapsed && sel.toString().trim());
+}
+
 // ---- the swipe -------------------------------------------------------------
 //
 // Claims only a near-horizontal move for the tape, decided ONCE at the first
@@ -13703,6 +13711,7 @@ function ssTouchEnd(e) {
   // scroll the box, not turn the step — the tape waits for the scroll edge.
   const scrolledBox = claimed && ssTouch.room && ssTouch.room(dx);
   ssTouch = null;
+  if (ssHasSelection()) return; // selecting text to copy — never turn the step
   if (claimed && !scrolledBox && Math.abs(dx) >= SS_SWIPE_MIN) ssTape(dx < 0 ? 1 : -1);
 }
 
@@ -13816,6 +13825,8 @@ function ssScrollChrome() {
   ssChromeShift = Math.min(h, Math.max(0, ssChromeShift + delta));
   if (top <= 0) ssChromeShift = 0; // fully shown at the very top
   chrome.style.transform = ssChromeShift ? `translateY(${-ssChromeShift}px)` : "";
+  // Fade as it slides, like a native top bar: opaque when shown, gone when up.
+  chrome.style.opacity = ssChromeShift && h ? String(Math.max(0, 1 - ssChromeShift / h)) : "";
   ssChromeLast = top;
 }
 
