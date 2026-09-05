@@ -98,6 +98,11 @@ _EXTERNAL_SYMBOLS: set[str] = {
     "UserPromptSubmit",
     "open_process",
     "hook_callback",
+    # launchd plist key and gws CLI env var — docs/web-server.md names them to
+    # record where the email poller's gws credentials must come from: the
+    # deployment's plist, not this tree. Neither can appear in the code.
+    "EnvironmentVariables",
+    "GOOGLE_WORKSPACE_CLI_CONFIG_DIR",
 }
 
 # The trailing `()` is optional because docs spell a function both ways, and
