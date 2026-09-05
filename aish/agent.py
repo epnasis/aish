@@ -2859,6 +2859,13 @@ class Agent:
         self.max_steps = max_steps
         self.think = think
         self.cwd = cwd or os.getcwd()
+        # Non-secret, per-session context injected into plugin-tool subprocess
+        # environments (never args, never the model). Empty by default and for
+        # triggered sessions; a user-facing transport (server.py) may set it
+        # for attended turns — e.g. the owner's browser User-Agent, which lets
+        # the bank tools claim PSU-present access. A plugin cannot otherwise
+        # tell an attended turn from a background one.
+        self.plugin_env: dict[str, str] = {}
         # Session roots: auto-approved reads/commands are confined to these
         # trees. Seeded with the launch dir; they only widen on an explicit
         # user decision — /cd, /add-dir, or "trust this directory" answered on
@@ -6184,6 +6191,7 @@ class Agent:
             caps=caps,
             cap_source=cap_source,
             store_dir=self.tool_output_dir,
+            extra_env=self.plugin_env or None,
         )
 
     def _history_budget(self) -> tuple[int, str]:
