@@ -34,6 +34,7 @@ module knows what the page says, the agent knows who is watching.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -1201,6 +1202,13 @@ class Snapshot:
     title: str
     text: str
     controls: list[Control] = field(default_factory=list)
+    # The page as (name, text) tiles (#361 slice 2), when the walk could tile
+    # it; `text` is then `sections_render(sections)` and this list is the
+    # AUTHORITY a collapsing renderer reads — never re-parsed from the text,
+    # so a page whose words imitate a marker line forges nothing. Empty means
+    # the page would not tile (no body, a walk that failed, coverage too poor)
+    # and everything downstream keeps yesterday's flat-text behaviour.
+    sections: list[tuple[str, str]] = field(default_factory=list)
     status: int | None = None
     # Controls the cap left out. Never silent: see MAX_CONTROLS.
     hidden: int = 0
@@ -2573,6 +2581,142 @@ def strip_option_floods(text: str, floods: list[dict[str, Any]]) -> str:
             block, f"[dropdown{named}: {count} options — see the control list]", 1
         )
     return text
+
+
+# ------------------------------------------------------------------ sections
+#
+# The page as named tiles (#361 slice 2). Framework-era pages declare their
+# structure — landmarks, headings, labelled regions — and a declared name costs
+# a few tokens against the hundreds it lets a later render collapse. The walk
+# TILES the body: a candidate element becomes one tile (outermost wins, so a
+# nav inside a header rides the header's tile), and any subtree holding no
+# candidate becomes an anonymous tile, in document order. Only structure the
+# page STATES is read — no "looks like a header" classifier, because identity
+# and declaration are facts and appearance is a guess a redesign breaks.
+#
+# The name ladder mirrors NAME_JS's reasoning at region scale: the page's own
+# label first (aria-label / aria-labelledby), then the region's first heading,
+# then the landmark word its tag or role declares, then a READABLE id —
+# framework-hashed identifiers ("css-x1z9q", "sc-bdfBwQ") are noise, not names,
+# so an id must look like a word to count. Anything else is anonymous, which is
+# not a failure: an anonymous tile still collapses by content identity once it
+# has been shown (see `web._present_page`).
+SECTIONS_JS = """(opts) => {
+  const NAME_MAX = 60;
+  const clean = (s) => (s || '').replace(/\\s+/g, ' ').replace(/[\\[\\]]/g, '')
+    .trim().slice(0, NAME_MAX);
+  const LANDMARK = {header: 'header', nav: 'navigation', footer: 'footer',
+                    aside: 'sidebar', main: 'main'};
+  const ROLE = {banner: 'header', navigation: 'navigation',
+                contentinfo: 'footer', complementary: 'sidebar',
+                main: 'main', search: 'search'};
+  const CANDIDATE = 'header,nav,main,footer,aside,section,article,form,' +
+    '[role=banner],[role=navigation],[role=main],[role=contentinfo],' +
+    '[role=complementary],[role=region],[role=search],[role=form]';
+  const isCandidate = (el) => el.matches && el.matches(CANDIDATE);
+  const readableId = (id) => {
+    if (!/^[a-zA-Z][\\w-]{2,24}$/.test(id)) return '';
+    if ((id.match(/[0-9]/g) || []).length > 2) return '';
+    if (/^(css|sc|jss|mui|ember|radix)/i.test(id)) return '';
+    return id.replace(/[-_]+/g, ' ');
+  };
+  const nameOf = (el) => {
+    const aria = el.getAttribute('aria-label');
+    if (aria && aria.trim()) return clean(aria);
+    const by = el.getAttribute('aria-labelledby');
+    if (by) {
+      // The element's OWN root, not the document: a labelled region inside a
+      // shadow root keeps its label in that root (the #273 lesson, at region
+      // scale).
+      const root = el.getRootNode();
+      const text = by.split(/\\s+/).map((id) => {
+        const named = root.getElementById ? root.getElementById(id) : null;
+        return named ? named.innerText : '';
+      }).join(' ');
+      if (text.trim()) return clean(text);
+    }
+    const heading = el.querySelector('h1,h2,h3,h4,h5,h6');
+    if (heading && heading.innerText && heading.innerText.trim()) {
+      return clean(heading.innerText);
+    }
+    const tag = el.tagName.toLowerCase();
+    if (LANDMARK[tag]) return LANDMARK[tag];
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (ROLE[role]) return ROLE[role];
+    const id = el.getAttribute('id');
+    if (id) return clean(readableId(id));
+    return '';
+  };
+  const tiles = [];
+  const push = (name, text) => {
+    text = (text || '').trim();
+    if (text) tiles.push({name: name, text: text});
+  };
+  const walk = (el) => {
+    for (const child of el.children) {
+      if (tiles.length >= opts.max) return;
+      if (isCandidate(child)) { push(nameOf(child), child.innerText); continue; }
+      // A child holding a candidate somewhere below is descended into so the
+      // candidate tiles on its own; one holding none is a single anonymous
+      // tile, whole.
+      if (child.querySelector && child.querySelector(CANDIDATE)) {
+        walk(child);
+        continue;
+      }
+      push('', child.innerText);
+    }
+  };
+  if (document.body) walk(document.body);
+  return tiles;
+}"""
+
+# A tile smaller than this keeps no name and never collapses: naming a
+# ten-word block spends more than it could ever save, and collapsing one
+# hides content for a rounding-error gain.
+SECTION_MIN_CHARS = 200
+
+# How many tiles one page may become. A bound against pathological DOMs, not a
+# target; past it the rest of the page rides the last anonymous tile.
+SECTIONS_MAX = 60
+
+
+def sections_from(tiles: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """The JS tiles as (name, text) sections: consecutive anonymous tiles
+    merged, names on tiles too small to be worth one dropped. Split from the
+    walk so the rules are testable without a browser."""
+    sections: list[tuple[str, str]] = []
+    for tile in tiles:
+        name = str(tile.get("name") or "")
+        text = str(tile.get("text") or "").strip()
+        if not text:
+            continue
+        if len(text) < SECTION_MIN_CHARS:
+            name = ""
+        if not name and sections and not sections[-1][0]:
+            sections[-1] = ("", sections[-1][1] + "\n" + text)
+            continue
+        sections.append((name, text))
+    return sections
+
+
+def sections_render(sections: list[tuple[str, str]]) -> str:
+    """The page text a tiled snapshot carries: each named section under its
+    marker line. The markers ride the TEXT — they are what tells the model the
+    page has structure — but a renderer that collapses never re-parses them
+    back out: `Snapshot.sections` is the authority, so a page whose own text
+    contains a line shaped like a marker forges nothing."""
+    parts = []
+    for name, text in sections:
+        parts.append(f"[section: {name}]\n{text}" if name else text)
+    return "\n".join(parts)
+
+
+def section_key(text: str) -> str:
+    """Content identity for one section — what licenses a collapse. Exact
+    modulo trailing whitespace: a similarity judgement would be a channel for
+    a page to hide a change inside a "mostly the same" block."""
+    normalized = "\n".join(line.rstrip() for line in text.splitlines()).strip()
+    return hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()
 
 
 # The same predicate, run on ONE element at act time. The tag outlives the

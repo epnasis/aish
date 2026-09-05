@@ -2547,6 +2547,14 @@ class BrowseView:
         # pass down, and it cannot go out of step with what the gate reads.
         self.key = uuid.uuid4().hex
         self.shown: Any = None
+        # The shown ledger (#361 slice 2): content identities of every page
+        # section THIS chat's model was handed in full. It is the one thing
+        # that licenses collapsing a section to a placeholder — naming never
+        # does — so every placeholder in a transcript resolves to content
+        # visible in that same transcript. Per chat on purpose; the per-SITE
+        # structure memory (names, not content) is slice 3's and lives
+        # elsewhere.
+        self.sections_seen: set[str] = set()
         # The document this chat's `shown` belongs to, as the browser counted
         # it. Compared before an act so a page another chat drove is refused
         # rather than acted on — see `browser.PAGE_TAKEN`.
@@ -2637,6 +2645,7 @@ class BrowseView:
         """Next page presented is presented in full."""
         self.shown = None
         self.epoch = None
+        self.sections_seen.clear()
         self.start_call()
 
 
@@ -2691,6 +2700,7 @@ def _present_snapshot(
     acted: bool = False,
     cut: PageCut | None = None,
     view: BrowseView | None = None,
+    asked_whole: bool = False,
 ) -> str:
     """A driven page, as the model receives it — the whole page, or only what
     an action revealed about it.
@@ -2727,7 +2737,9 @@ def _present_snapshot(
         seen.unchanged = delta.empty()
         return _present_change(snapshot, delta)
     seen.remember(snapshot)
-    return _present_page(snapshot, topic=topic, cut=cut)
+    return _present_page(
+        snapshot, topic=topic, cut=cut, view=view, asked_whole=asked_whole
+    )
 
 
 # What each reason `unreachable` records means for the model's NEXT MOVE (#350).
@@ -2935,10 +2947,60 @@ def _snapshot_notes(snapshot) -> str:
     return problem + downloaded_note(snapshot.downloads, "this action downloaded")
 
 
+def _collapsed_sections(
+    sections, seen_keys: set[str], collapse: bool
+) -> tuple[str, list[tuple[str, int]]]:
+    """The page body from its tiles, sections this chat already saw collapsed.
+
+    Collapse is licensed by CONTENT IDENTITY alone (#361 slice 2): a section
+    collapses only when its exact text was handed to this chat's model before
+    — its hash is in the shown ledger — and it is big enough for the
+    placeholder to be a saving. A name never licenses omission, and there is
+    no similarity judgement a page could hide a change inside: one changed
+    character is a different identity and the section arrives whole.
+
+    Returns the body and, for every section shown IN FULL by this render, its
+    identity plus the offset its text ends at — the caller records into the
+    ledger only what survived the page cap, because content the cap removed
+    was not shown to anyone."""
+    parts: list[str] = []
+    shown: list[tuple[str, int]] = []
+    offset = 0
+    for name, text in sections:
+        key = browse_mod.section_key(text)
+        small = len(text) < browse_mod.SECTION_MIN_CHARS
+        if collapse and not small and key in seen_keys:
+            if name:
+                placeholder = (
+                    f"[section: {name} — unchanged, already shown in this chat]"
+                )
+            else:
+                first = next(
+                    (line for line in text.splitlines() if line.strip()), ""
+                )[:60]
+                placeholder = (
+                    f"[unchanged, already shown in this chat: {first!r} — "
+                    f"{len(text.splitlines())} lines]"
+                )
+            parts.append(placeholder)
+            offset += len(placeholder) + 1
+            continue
+        rendered = f"[section: {name}]\n{text}" if name else text
+        parts.append(rendered)
+        offset += len(rendered) + 1
+        shown.append((key, offset - 1))
+    return "\n".join(parts), shown
+
+
 def _present_page(
-    snapshot, *, topic: str | None = None, cut: PageCut | None = None
+    snapshot,
+    *,
+    topic: str | None = None,
+    cut: PageCut | None = None,
+    view: BrowseView | None = None,
+    asked_whole: bool = False,
 ) -> str:
-    """The whole page.
+    """The whole page — minus the sections this chat has already been shown.
 
     The control list is appended AFTER truncation, for the same reason a read's
     links and images are: the controls are the entire point of the call, and a
@@ -2946,11 +3008,26 @@ def _present_page(
     is meant to act on. It is also why the control list is the one half that is
     never PAGED away — an address resolves against the page in front of the
     model, so a control on page 3 of a continuation is a control it cannot act
-    on and would only be tempted to name."""
+    on and would only be tempted to name.
+
+    Sections (#361 slice 2): on a tiled page, a section whose exact content
+    this chat's model already holds collapses to a one-line placeholder — a
+    site's header, nav and footer arrive once per chat, not once per
+    navigation. `action="read"` is the model asking for the whole page and is
+    honoured verbatim (`asked_whole`); a topic-narrowed body is already a
+    filter and collapses nothing. Bad news is never section-shaped: problems,
+    notices, the sign-in wall and the control list ride every render
+    untouched."""
     head = f"[{snapshot.url} — you are driving this page]"
     if snapshot.title:
         head += f"\n{snapshot.title}"
     body = snapshot.text
+    shown_sections: list[tuple[str, int]] = []
+    seen = _seen(view)
+    if getattr(snapshot, "sections", None) and not topic:
+        body, shown_sections = _collapsed_sections(
+            snapshot.sections, seen.sections_seen, collapse=not asked_whole
+        )
     hint = ""
     if topic:
         matched = _filter_topic(body, topic)
@@ -2966,6 +3043,12 @@ def _present_page(
             cut.keep(whole, PAGE_MAX_CHARS, "constant:PAGE_MAX_CHARS") if cut else "",
             extra=CONTROLS_COMPLETE if complete else f"{CONTROLS_CUT} {NARROW_CONTROLS}",
         )
+    for key, end in shown_sections:
+        # Only what the cap actually delivered: a section past the cut was not
+        # shown, and recording it would license collapsing content the model
+        # never saw.
+        if end <= len(body):
+            seen.sections_seen.add(key)
     lines = [c.line() for c in snapshot.controls]
     if getattr(snapshot, "unreachable", 0):
         # The sentence a small model needs in order to do the right thing: not
@@ -3223,7 +3306,14 @@ def _browse_act(
             f"{type(exc).__name__}: {exc}"
         )
     return _present_snapshot(
-        snapshot, topic=topic, acted=action != "read", cut=cut, view=view
+        snapshot,
+        topic=topic,
+        acted=action != "read",
+        cut=cut,
+        view=view,
+        # An explicit read is the model asking for the whole page, and it is
+        # honoured verbatim — no section this render carries is collapsed.
+        asked_whole=action == "read",
     )
 
 
