@@ -3735,6 +3735,10 @@ body.console-open #backdrop { z-index: 63; }
   position: fixed; inset: 0; z-index: 110;
   display: flex; flex-direction: column;
   background: var(--bg); color: var(--fg);
+  /* The notch/safe-area inset is the screen's own opaque bg, so the header sits
+     flush to it with nothing (no gap, no floating grabber, no content) leaking
+     above its top edge. The header itself covers everything below. */
+  padding-top: env(safe-area-inset-top);
 }
 #step-screen[hidden] { display: none; }
 #ss-head {
@@ -3749,15 +3753,14 @@ body.console-open #backdrop { z-index: 63; }
 #ss-icon { flex: none; width: 18px; height: 18px; display: inline-flex; align-items: center; }
 #ss-icon svg { width: 16px; height: 16px; display: block; }
 #ss-icon:empty { display: none; }
-/* The collapsing top bar: the whole chrome hides while reading down and slides
-   back on scroll up (ssScrollChrome). max-height animates from a generous cap;
-   the flex scroller below grows to fill the space. */
-/* The chrome lives INSIDE the scroll container and sticks to the top, so it can
-   slide away at the SCROLL RATE (a translateY driven pixel-for-pixel by scroll,
-   ssScrollChrome) with no layout change and no gap — the native quick-return
-   top bar. Its own background covers the content scrolling under it. */
+/* The chrome is a FIXED OVERLAY over the scroller, NOT a child of the scrolling
+   #ss-body — so the content rubber-bands on overscroll but the header never does
+   (a sticky child rides the container's bounce; native chrome must stay put).
+   `ssScrollChrome` translates it up pixel-for-pixel with the scroll (the
+   quick-return top bar); `ssFitChrome` pads #ss-body by its height so nothing
+   hides beneath it and the layout never changes (the bottom stays reachable). */
 #ss-chrome {
-  position: sticky; top: 0; z-index: 3;
+  position: absolute; top: 0; left: 0; right: 0; z-index: 3;
   display: flex; flex-direction: column;
   background: var(--bg);
   border-bottom: 0.5px solid var(--sep);
@@ -3788,6 +3791,7 @@ body.console-open #backdrop { z-index: 63; }
 #ss-tools {
   display: flex; align-items: center; gap: 6px; padding: 2px 10px 6px;
   border-bottom: 0.5px solid var(--sep);
+  flex-wrap: wrap; /* never overflow the width — wrap so the header can't scroll sideways */
 }
 #ss-tools button {
   background: none; border: 0.5px solid var(--sep); border-radius: 8px;
@@ -3849,7 +3853,7 @@ body.console-open #backdrop { z-index: 63; }
   position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column;
 }
 #ss-body {
-  flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch;
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
   padding: 8px 12px calc(12px + env(safe-area-inset-bottom));
   touch-action: pan-y;
   /* The A−/A+ buttons set an inline font-size here; the panes inherit it. */
@@ -3938,9 +3942,11 @@ body.console-open #backdrop { z-index: 63; }
 #ss-scroll-down:active, #ss-scroll-top:active { opacity: 0.6; }
 /* The grabber: the sheet convention's handle. The header under it is the drag
    surface; the screen follows the finger and springs back below the threshold. */
+/* The grabber now rides on the header itself (first child of #ss-chrome), so
+   the bar is one continuous surface to the top edge and slides away as a whole. */
 #ss-grab {
   width: 36px; height: 5px; border-radius: 3px; background: var(--sep);
-  margin: calc(env(safe-area-inset-top) + 6px) auto 0;
+  margin: 6px auto 2px;
   flex: none;
 }
 #step-screen.ss-dragging { transition: none; }

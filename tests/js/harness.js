@@ -259,6 +259,9 @@ function hostileWorld({ visible = false, width = 1100, globals = {} } = {}) {
     clearTimeout: (id) => { if (id) timers[id - 1] = null; },
     setInterval: (fn, ms) => { timers.push({ fn, ms, repeating: true }); return timers.length; },
     clearInterval: (id) => { if (id) timers[id - 1] = null; },
+    // A real window has these; extracted blocks wire resize/keydown at load.
+    addEventListener() {},
+    removeEventListener() {},
     // A hidden page runs no frames. Collected, never drained by default.
     requestAnimationFrame: (fn) => { frames.push(fn); return frames.length; },
     cancelAnimationFrame: (id) => { if (id) frames[id - 1] = null; },
