@@ -1337,6 +1337,44 @@ async def _body_text(page: Any) -> str:
         return ""
 
 
+# Tiles must carry at least this share of the flat text's length, or the flat
+# text stands. Tiling reads element-by-element, and a page drawn inside one
+# closed shadow root would tile to almost nothing — handing that over as "the
+# page" would silently shrink it, which no compression here is licensed to do.
+SECTION_COVERAGE = 0.6
+
+
+async def _sections(page: Any, flat_text: str) -> list[tuple[str, str]]:
+    """The page as named (name, text) tiles (#361 slice 2), or [] to keep the
+    flat text — the floor is yesterday's behaviour, never less.
+
+    The option-flood scrub is applied per tile with one fetch of the flood
+    list, so a tiled page and a flat one hand the model the same scrubbed
+    words and a section's content identity is the identity of what was
+    SHOWN."""
+    if not flat_text:
+        return []
+    try:
+        raw = await page.evaluate(
+            browse_mod.SECTIONS_JS, {"max": browse_mod.SECTIONS_MAX}
+        )
+        floods = await page.evaluate(
+            browse_mod.FLOOD_JS, {"inlineChoices": browse_mod.CHOICE_INLINE_MAX}
+        )
+    except Exception:  # noqa: BLE001 — a page that will not answer keeps its text
+        return []
+    tiles = [tile for tile in (raw or []) if isinstance(tile, dict)]
+    for tile in tiles:
+        tile["text"] = browse_mod.strip_option_floods(
+            str(tile.get("text") or ""), list(floods or [])
+        )
+    sections = browse_mod.sections_from(tiles)
+    tiled = sum(len(text) for _, text in sections)
+    if tiled < SECTION_COVERAGE * len(flat_text):
+        return []
+    return sections
+
+
 async def _without_option_floods(page: Any, text: str) -> str:
     """The page text with long dropdowns collapsed to a count.
 
@@ -5134,6 +5172,9 @@ async def _snapshot(
         inflight=lambda: session.inflight,
     )
     text = await _without_option_floods(page, settled_text)
+    sections = await _sections(page, text)
+    if sections:
+        text = browse_mod.sections_render(sections)
     after_settle = clock()
     raw, matched, unreached, matching, commit, dialog, reasons = await _enumerate(
         page, match
@@ -5161,6 +5202,7 @@ async def _snapshot(
         url=str(page.url or ""),
         title=str(await page.title() or ""),
         text=text,
+        sections=sections,
         controls=controls,
         hidden=max(0, matched - len(controls)),
         narrowed=match or "",
