@@ -3587,10 +3587,16 @@ def form_note(
     return header + "\n" + "\n".join(lines)
 
 
-# How much of a change report is worth sending AS a change report. Past this the
-# delta has stopped being cheaper than the thing it describes, and the caller
-# sends the page instead — see `worth_sending`.
+# How much page TEXT one change report may carry. Past this the count of unsent
+# new lines is stated — the report is bounded and always sendable; it never
+# falls back to re-sending the page (#361: the fallback was the leak — ~44
+# over-cap deltas in one measured session each re-sent a 6-12k page).
 DELTA_MAX_CHARS = 1500
+
+# How many control lines one change report may carry, bounded for the same
+# reason the text is: a date picker opening adds ~90 day cells, and the uncapped
+# control block is what used to blow every report past the cap (#361).
+DELTA_CONTROLS_MAX = 40
 
 # Lines of unchanged text kept around each change. Zero would be cheapest and
 # useless: "+ 63,19 zł" means nothing without the line above it saying what is
@@ -3600,38 +3606,65 @@ DELTA_CONTEXT_LINES = 1
 
 @dataclass
 class Delta:
-    """What one action did to the page — the whole result of an action, and
-    not a summary of one.
+    """What one action did to the page, reported ADDITIVELY (#361): what
+    appeared and what changed state, as its NEW state only.
 
-    **The page is re-sent in full only when it is a different page.** Measured
-    on the session that filed this: nine clicks and types on lot.com cost 44 788
-    characters, ~5 000 per action, because every one of them re-sent the entire
-    page and its entire control list to report that a dropdown had opened. What
-    the model needed each time was the handful of lines that were not there
-    before.
+    The conversation already holds everything the model was shown, so a
+    report owes it only what is new — the before-state of a change is in its
+    context from when it appeared, and repeating it sends content the model
+    holds twice. What merely stopped being visible is NOT reported at all:
+    not visible is not the same fact as no longer true, and a count of
+    unidentified gone lines is unactionable (the model can only ignore it or
+    re-read "in case", which re-creates the waste this class exists to cut).
+    Pressing a control that is gone is refused live at act time, which is the
+    correction, delivered at the moment it matters.
 
-    Two properties make that safe to do. It is diffed against WHAT THE MODEL WAS
-    LAST SHOWN, never against the page as it was a moment before the click — so
-    a change the page made on its own, while nobody was acting, still arrives
-    rather than falling into the gap between two reads. And nothing is ever
-    dropped silently: past the cap the count of unsent changed lines is stated,
-    the same way `MAX_CONTROLS` states what it left out. A diff that quietly
-    decides which changes matter would be a channel for a page to hide one."""
+    Two properties carry over unchanged from the diff this replaces. It is
+    computed against WHAT THE MODEL WAS LAST SHOWN, never against the page as
+    it was a moment before the click — so a change the page made on its own,
+    while nobody was acting, still arrives rather than falling into the gap
+    between two reads. And no ADDITION is dropped silently: past either cap
+    the count of unsent new lines or controls is stated, the way
+    `MAX_CONTROLS` states what it left out. Dropping removals is a category
+    rule the channel states about itself (the tool contract says so), never a
+    per-change judgement a page could game — a diff that quietly decides
+    which changes matter would be a channel for a page to hide one, and this
+    one decides nothing.
+
+    A report is bounded by construction and therefore ALWAYS sendable: the
+    old `worth_sending` fallback re-sent the whole 6-12k page whenever a
+    dropdown's controls blew the cap, ~44 times in the session that filed
+    #361, and was most of what the delta was built to prevent."""
 
     added: list[Control] = field(default_factory=list)
+    # Observed for truthful wording, never rendered (#361).
     removed: list[Control] = field(default_factory=list)
     changed: list[tuple[Control, Control]] = field(default_factory=list)
+    # Additions with context only; vanished text is counted, never listed.
     text: list[str] = field(default_factory=list)
-    # Changed lines the cap left out. Never silent: see the class docstring.
+    # New lines the cap left out. Never silent: see the class docstring.
     more_text: int = 0
+    # Lines that went away. Distinguishes "nothing changed" (a fact about the
+    # page, recorded) from "nothing NEW appeared" (all that additive reporting
+    # may claim when something left) — a report must not state stasis it did
+    # not observe.
+    removed_text: int = 0
 
     def empty(self) -> bool:
         """Did nothing at all change?
 
         This is the answer to "did that click work" — delivered on the FIRST
         click, as a fact the page reported, rather than inferred by a counter
-        three identical calls later."""
-        return not (self.added or self.removed or self.changed or self.text)
+        three identical calls later. True stasis only: a page that shows less
+        than before did change, and saying otherwise would be a claim this
+        side cannot make."""
+        return not (
+            self.added
+            or self.removed
+            or self.changed
+            or self.text
+            or self.removed_text
+        )
 
     def render(self) -> str:
         if self.empty():
@@ -3641,30 +3674,31 @@ class Delta:
             body = "\n".join(self.text)
             if self.more_text:
                 body += (
-                    f"\n[{self.more_text} more changed line(s) not shown — "
+                    f"\n[{self.more_text} more new line(s) not shown — "
                     'use action="read" to see the whole page]'
                 )
             parts.append("page text:\n" + body)
-        control_lines = (
-            [f"+ {c.line()}" for c in self.added]
-            + [f"- {c.line()}" for c in self.removed]
-            + [f"~ {new.line()}" for _, new in self.changed]
-        )
+        control_lines = [f"+ {c.line()}" for c in self.added] + [
+            f"~ {new.line()}" for _, new in self.changed
+        ]
         if control_lines:
-            parts.append("controls:\n" + "\n".join(control_lines))
+            shown = control_lines[:DELTA_CONTROLS_MAX]
+            left = len(control_lines) - len(shown)
+            if left > 0:
+                shown.append(
+                    f"[{left} more new/changed control(s) not shown — "
+                    'use action="read" to see the whole page]'
+                )
+            parts.append("controls:\n" + "\n".join(shown))
+        if not parts:
+            # Something left the view and nothing arrived. Not "nothing
+            # changed" — that would be false — and not a tally of what went.
+            return "nothing new appeared on the page"
         return "\n".join(parts)
-
-    def worth_sending(self) -> bool:
-        """Is the change still smaller than the page?
-
-        A click that rebuilds the whole page produces a diff the size of two
-        pages. At that point the honest and the cheap answer are the same one:
-        send the page."""
-        return len(self.render()) <= DELTA_MAX_CHARS
 
 
 def diff_snapshots(before: Snapshot, after: Snapshot) -> Delta:
-    """What changed between the page the model was last shown and this one."""
+    """What is new between the page the model was last shown and this one."""
     delta = Delta()
     was = {c.address: c for c in before.controls}
     now = {c.address: c for c in after.controls}
@@ -3675,7 +3709,9 @@ def diff_snapshots(before: Snapshot, after: Snapshot) -> Delta:
         for a, c in now.items()
         if a in was and _control_state(was[a]) != _control_state(c)
     ]
-    delta.text, delta.more_text = _text_delta(before.text, after.text)
+    delta.text, delta.more_text, delta.removed_text = _text_delta(
+        before.text, after.text
+    )
     return delta
 
 
@@ -3685,11 +3721,36 @@ def _control_state(control: Control) -> tuple:
     return (control.kind, control.detail, control.disabled, control.mutating)
 
 
-def _text_delta(before: str, after: str) -> tuple[list[str], int]:
-    """Changed lines of page text, with context, and how many were left out."""
+def _text_delta(before: str, after: str) -> tuple[list[str], int, int]:
+    """Lines of page text that APPEARED, with context; how many more appeared
+    than the cap let through; and how many lines went away.
+
+    Vanished lines are counted for truthful wording and never listed (#361):
+    a hunk in which nothing appeared — a pure disappearance — is skipped
+    whole, so closing a dropdown does not arrive as three lines of context
+    around an absence. A line that CHANGED surfaces as its new state, because
+    the unified diff writes it as a removal plus an addition and only the
+    addition is kept — with its context, which is what makes "+ 63,19 zł"
+    readable as the price of something."""
     lines: list[str] = []
     spent = 0
     dropped = 0
+    vanished = 0
+    hunk: list[str] = []
+
+    def flush() -> None:
+        nonlocal spent, dropped
+        if not any(line.startswith("+") for line in hunk):
+            return
+        # "…" stands in for the hunk header: the model needs to know only
+        # that the next lines are from somewhere else on the page.
+        for line in ["…"] + [line for line in hunk if not line.startswith("-")]:
+            if spent + len(line) > DELTA_MAX_CHARS:
+                dropped += int(line.startswith("+"))
+                continue
+            spent += len(line) + 1
+            lines.append(line)
+
     for line in difflib.unified_diff(
         (before or "").splitlines(),
         (after or "").splitlines(),
@@ -3699,18 +3760,16 @@ def _text_delta(before: str, after: str) -> tuple[list[str], int]:
         if line.startswith(("---", "+++")):
             continue
         if line.startswith("@@"):
-            # The hunk header is line arithmetic for a patch program. The model
-            # needs to know only that the next lines are from somewhere else.
-            line = "…"
-        changed = line.startswith(("+", "-"))
-        if spent + len(line) > DELTA_MAX_CHARS:
-            dropped += int(changed)
+            flush()
+            hunk = []
             continue
-        spent += len(line) + 1
-        lines.append(line)
+        if line.startswith("-"):
+            vanished += 1
+        hunk.append(line)
+    flush()
     while lines and lines[-1] == "…":
         lines.pop()
-    return lines, dropped
+    return lines, dropped, vanished
 
 
 # How many candidates a failed choice hands back. The failure message IS the

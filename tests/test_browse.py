@@ -1142,15 +1142,16 @@ class TestWhatChangedRatherThanThePageAgain:
         return web_module._present_snapshot(snap)
 
     def test_an_action_reports_only_what_it_changed(self):
-        before = snapshot(text="From\nTo", controls=[control(n=0, name="Szukaj")])
+        page = "\n".join(["From", "To"] + [f"promo banner {i}" for i in range(10)])
+        before = snapshot(text=page, controls=[control(n=0, name="Szukaj")])
         self._show(before)
         after = snapshot(
-            text="From\nTo\nParis (CDG)",
+            text="From\nTo\nParis (CDG)\n" + "\n".join(f"promo banner {i}" for i in range(10)),
             controls=[control(n=0, name="Szukaj"), control(n=1, name="Paris (CDG)")],
         )
         out = web_module._present_snapshot(after, acted=True)
         assert "Paris (CDG)" in out
-        assert "what your action changed" in out
+        assert "what your action added or changed" in out
         # The page it did NOT change is not sent again.
         assert out.count("From") == 0
         assert len(out) < len(self._show(after))
@@ -1165,15 +1166,20 @@ class TestWhatChangedRatherThanThePageAgain:
         )
         assert "nothing on the page changed" in out
 
-    def test_a_change_bigger_than_the_page_sends_the_page(self):
+    def test_a_change_bigger_than_the_cap_is_capped_never_the_page(self):
+        """#361: the over-cap fallback used to re-send the whole 6-12k page —
+        ~44 times in the measured session — to report a change a bounded
+        report described in 2k. The report is now bounded by construction and
+        always sent; what the cap left out is counted, never silent."""
         self._show(snapshot(text="a\nb\nc", controls=[control(n=0)]))
         rebuilt = snapshot(
             text="\n".join(f"line {i} of a completely different page" for i in range(200)),
-            controls=[control(n=0, name="Dalej")],
+            controls=[control(n=0)],
         )
         out = web_module._present_snapshot(rebuilt, acted=True)
-        assert "what your action changed" not in out
-        assert "controls on this page" in out
+        assert "what your action added or changed" in out
+        assert "controls on this page" not in out
+        assert "more new line(s) not shown" in out
 
     def test_a_different_page_is_sent_whole(self):
         self._show(snapshot(url="https://lot.com/a", controls=[control(n=0)]))
@@ -1191,18 +1197,21 @@ class TestWhatChangedRatherThanThePageAgain:
         )
         assert "controls on this page" in out
 
-    def test_the_picture_cannot_drift_for_long(self):
-        """A chain of deltas is a reconstruction, so the page comes back whole
-        every DELTA_RUN_MAX reports whether anything asked for it or not."""
+    def test_there_is_no_scheduled_full_resend(self):
+        """#361 retired the every-DELTA_RUN_MAX refresh: it re-sent a page the
+        model already held, on a timer. The model's picture cannot rot into a
+        wrong press — acting re-resolves live — and a fact that must be
+        current is re-read on demand, so no run of reports, however long,
+        earns the page again unasked."""
         self._show(snapshot(text="a", controls=[control(n=0)]))
         outs = [
             web_module._present_snapshot(
                 snapshot(text=f"a{i}", controls=[control(n=0)]), acted=True
             )
-            for i in range(web_module.DELTA_RUN_MAX + 1)
+            for i in range(30)
         ]
-        assert all("what your action changed" in o for o in outs[:-1])
-        assert "controls on this page" in outs[-1]
+        assert all("what your action added or changed" in o for o in outs)
+        assert all("controls on this page" not in o for o in outs)
 
     def test_the_diff_is_against_what_the_model_was_last_shown(self):
         """Not against the page a moment before the click: a page that moves on
@@ -1215,16 +1224,20 @@ class TestWhatChangedRatherThanThePageAgain:
             acted=True,
         )
         assert "63,19" in out
-        assert "49,49" in out
+        assert "Dodano do koszyka" in out
+        # The NEW state only (#361): the before-price is already in the
+        # model's context from when it was shown, so repeating it sends
+        # content the model holds twice.
+        assert "49,49" not in out
 
-    def test_no_change_is_ever_dropped_silently(self):
-        """The `MAX_CONTROLS` principle applied to text: a diff that quietly
-        decides which changes matter is a channel for a page to hide one."""
+    def test_no_addition_is_ever_dropped_silently(self):
+        """The `MAX_CONTROLS` principle applied to text: a report that quietly
+        decides which additions matter is a channel for a page to hide one."""
         before = snapshot(text="\n".join(f"row {i}" for i in range(400)))
         after = snapshot(text="\n".join(f"row {i} changed" for i in range(400)))
         delta = browse.diff_snapshots(before, after)
         assert delta.more_text > 0
-        assert f"{delta.more_text} more changed line(s) not shown" in delta.render()
+        assert f"{delta.more_text} more new line(s) not shown" in delta.render()
 
     def test_the_page_is_told_how_to_send_the_form(self):
         """A change report stops re-listing what did not change, and the submit
@@ -1253,6 +1266,85 @@ class TestWhatChangedRatherThanThePageAgain:
             snapshot(text="Wyspowa zmieniona", controls=[control(n=0)]), acted=True
         )
         assert out.index(web_module.UNTRUSTED_NOTE) < out.index("Wyspowa zmieniona")
+
+
+class TestTheReportIsAdditive:
+    """#361: a report owes the model only what is NEW. The conversation
+    already holds everything it was shown, so the before-state of a change is
+    in its context, and what merely stopped being visible is not reported —
+    not visible is not the same fact as no longer true. Pressing a gone
+    control is refused live at act time; that is the correction, delivered at
+    the moment it matters."""
+
+    def setup_method(self):
+        web_module.forget_shown_page()
+
+    def _show(self, snap):
+        return web_module._present_snapshot(snap)
+
+    def test_vanished_text_is_not_listed(self):
+        self._show(
+            snapshot(text="nagłówek\nTylko 3 sztuki\nstopka", controls=[control(n=0)])
+        )
+        out = web_module._present_snapshot(
+            snapshot(text="nagłówek\nstopka", controls=[control(n=0)]), acted=True
+        )
+        assert "Tylko 3 sztuki" not in out
+        assert "nothing new appeared on the page" in out
+
+    def test_a_disappearance_is_not_reported_as_stasis(self):
+        """"Nothing on the page changed" is a recorded fact about the page;
+        a page that shows less than before did change, and the report must
+        not state stasis it did not observe."""
+        self._show(snapshot(text="a\nb", controls=[control(n=0)]))
+        out = web_module._present_snapshot(
+            snapshot(text="a", controls=[control(n=0)]), acted=True
+        )
+        assert "nothing on the page changed" not in out
+        assert "nothing new appeared on the page" in out
+        assert web_module._DEFAULT_VIEW.unchanged is False
+
+    def test_true_stasis_is_still_a_recorded_fact(self):
+        self._show(snapshot(text="a", controls=[control(n=0)]))
+        out = web_module._present_snapshot(
+            snapshot(text="a", controls=[control(n=0)]), acted=True
+        )
+        assert "nothing on the page changed" in out
+        assert web_module._DEFAULT_VIEW.unchanged is True
+
+    def test_a_removed_control_is_not_listed(self):
+        self._show(
+            snapshot(
+                controls=[control(n=0, name="Szukaj"), control(n=1, name="Anuluj")]
+            )
+        )
+        out = web_module._present_snapshot(
+            snapshot(controls=[control(n=0, name="Szukaj")]), acted=True
+        )
+        assert "- button 'Anuluj'" not in out
+        assert "Anuluj" not in out
+
+    def test_a_pure_disappearance_hunk_costs_no_context_lines(self):
+        """Closing a dropdown must not arrive as lines of context around an
+        absence — a hunk in which nothing appeared is skipped whole."""
+        before = "\n".join(["top", "menu open", "entry one", "entry two", "bottom"])
+        after = "\n".join(["top", "bottom"])
+        lines, more, vanished = browse._text_delta(before, after)
+        assert lines == []
+        assert vanished == 3
+
+    def test_control_additions_are_capped_with_an_honest_count(self):
+        """The uncapped control block is what used to blow every report past
+        the cap and re-send the page — a date picker opening adds ~90 cells."""
+        self._show(snapshot(controls=[control(n=0, name="Data")]))
+        opened = snapshot(
+            controls=[control(n=0, name="Data")]
+            + [control(n=i, name=f"day {i}") for i in range(1, 92)]
+        )
+        out = web_module._present_snapshot(opened, acted=True)
+        assert "controls on this page" not in out
+        left = 91 - browse.DELTA_CONTROLS_MAX
+        assert f"[{left} more new/changed control(s) not shown" in out
 
 
 class TestFillingAFormIsOneAct:
