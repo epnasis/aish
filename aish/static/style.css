@@ -3753,20 +3753,18 @@ body.console-open #backdrop { z-index: 63; }
 #ss-icon { flex: none; width: 18px; height: 18px; display: inline-flex; align-items: center; }
 #ss-icon svg { width: 16px; height: 16px; display: block; }
 #ss-icon:empty { display: none; }
-/* The collapsing top bar: the whole chrome hides while reading down and slides
-   back on scroll up (ssScrollChrome). max-height animates from a generous cap;
-   the flex scroller below grows to fill the space. */
-/* The chrome lives INSIDE the scroll container and sticks to the top, so it can
-   slide away at the SCROLL RATE (a translateY driven pixel-for-pixel by scroll,
-   ssScrollChrome) with no layout change and no gap — the native quick-return
-   top bar. Its own background covers the content scrolling under it. */
+/* The chrome is a FIXED OVERLAY over the scroller, NOT a child of the scrolling
+   #ss-body — so the content rubber-bands on overscroll but the header never does
+   (a sticky child rides the container's bounce; native chrome must stay put).
+   `ssScrollChrome` translates it up pixel-for-pixel with the scroll (the
+   quick-return top bar); `ssFitChrome` pads #ss-body by its height so nothing
+   hides beneath it and the layout never changes (the bottom stays reachable). */
 #ss-chrome {
-  position: sticky; top: 0; z-index: 3;
+  position: absolute; top: 0; left: 0; right: 0; z-index: 3;
   display: flex; flex-direction: column;
   background: var(--bg);
   border-bottom: 0.5px solid var(--sep);
   will-change: transform;
-  max-width: 100%;
 }
 #ss-count { font-size: 12px; color: var(--dim); }
 #ss-title { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }

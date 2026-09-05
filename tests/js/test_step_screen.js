@@ -170,6 +170,8 @@ function world(overrides = {}) {
     clearTimeout: () => {},
     setInterval: () => 1,
     clearInterval: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
     // Deliberately ABSENT: requestAnimationFrame. A landing that needs a frame
     // throws here, which is the point.
   };
@@ -1147,6 +1149,23 @@ check("each step shows the chat's icon, and the chrome collapses on scroll down"
   assert.equal(chrome.style.transform || "", "", "a new pane starts with the chrome fully shown");
   assert.equal(chrome.style.opacity || "", "", "and fully opaque");
   assert.equal(up.style.top || "", "", "and the arrow back at its resting spot");
+});
+
+check("the overlay header reserves its height on the body, so nothing hides beneath it", () => {
+  const w = world();
+  const d = doc();
+  const s = w.sandbox;
+  const chrome = w.el("ss-chrome");
+  const body = w.el("ss-body");
+  // The header is an overlay (not a child of the scrolling body), so the body
+  // must pad its top by the header height — else the first lines hide under it.
+  chrome.offsetHeight = 190;
+  s.ssOpen(d, "c1", "call");
+  assert.equal(body.style.paddingTop, "190px", "body reserves the header height");
+  // When the findings bar grows the header, the reservation follows.
+  chrome.offsetHeight = 240;
+  s.ssPaintFindings();
+  assert.equal(body.style.paddingTop, "240px", "the reservation tracks a taller header");
 });
 
 check("a running turn refreshes its steps live in the detail, without repainting the pane", async () => {

@@ -13377,6 +13377,7 @@ function ssPaintFindings() {
   $("ss-findings-cur").textContent = cur ? cur.text : "";
   $("ss-findings-pos").textContent = cur ? `${ssFindingAt + 1} / ${ssFindings.length}` : `${ssFindings.length}`;
   bar.classList.toggle("on-finding", !!cur);
+  ssFitChrome(); // the bar changes the header height
 }
 
 // ‹ ›: jump to the previous/next finding, wrapping — from nowhere, forward
@@ -13396,7 +13397,7 @@ function ssToggleFindings() {
   const list = $("ss-findings-list");
   if (!list) return;
   const toggle = $("ss-findings-toggle");
-  if (!list.hidden) { list.hidden = true; if (toggle) toggle.setAttribute("aria-expanded", "false"); return; }
+  if (!list.hidden) { list.hidden = true; if (toggle) toggle.setAttribute("aria-expanded", "false"); ssFitChrome(); return; }
   list.textContent = "";
   const steps = (ssView && ssView.doc.steps) || [];
   ssFindings.forEach((f, i) => {
@@ -13411,6 +13412,7 @@ function ssToggleFindings() {
   });
   list.hidden = false;
   if (toggle) toggle.setAttribute("aria-expanded", "true");
+  ssFitChrome(); // the expanded list changes the header height
 }
 
 function ssPaintBody(paneObj) {
@@ -13462,6 +13464,7 @@ function ssPaintBody(paneObj) {
   const save = $("ss-save");
   if (save) save.hidden = ssView.text.length < SS_SAVE_MIN_CHARS;
   ssApplyFind();
+  ssFitChrome(); // reserve the overlay header's height on the fresh body
 }
 
 // Meta is STRUCTURE: aish's own account around the exchange, drawn as a
@@ -13820,6 +13823,16 @@ function ssUpdateScrollArrows() {
 // Hide the chrome while reading down, reveal it on any upward scroll or at the
 // top — the native "scroll-away top bar". Horizontal swipe (the tape) is a
 // separate recogniser and is unaffected.
+// The header is an overlay, so #ss-body must reserve its height as top padding
+// (else the content's first lines hide beneath it). Re-run whenever the header
+// height can change: a new pane, the findings bar appearing, a resize.
+function ssFitChrome() {
+  const body = $("ss-body");
+  const chrome = $("ss-chrome");
+  if (!body || !chrome) return;
+  body.style.paddingTop = `${chrome.offsetHeight}px`;
+}
+
 function ssScrollChrome() {
   const body = $("ss-body");
   const chrome = $("ss-chrome");
@@ -13918,8 +13931,8 @@ function ssWire() {
   };
   $("ss-body").addEventListener("scroll", ssUpdateScrollArrows, { passive: true });
   $("ss-body").addEventListener("scroll", ssScrollChrome, { passive: true });
-  // The grabber is always visible (the chrome above it can collapse), so the
-  // sheet dismissal works whether the header is shown or hidden.
+  // The grabber rides on the header bar itself; the header drag is the sheet's
+  // dismissal surface, and the ✕ is one scroll-up away when the bar has slid off.
   const grab = $("ss-grab");
   if (grab) {
     grab.addEventListener("touchstart", ssDragStart, { passive: true });
@@ -13964,6 +13977,11 @@ function ssWire() {
   };
   $("ss-find-prev").onclick = () => ssFindGo(-1);
   $("ss-find-next").onclick = () => ssFindGo(1);
+  // A resize can rewrap the title/tools and change the overlay header's height,
+  // so re-reserve it while the screen is open.
+  if (typeof window !== "undefined" && window.addEventListener) {
+    window.addEventListener("resize", () => { if (!box.hidden) ssFitChrome(); });
+  }
 }
 ssWire();
 
