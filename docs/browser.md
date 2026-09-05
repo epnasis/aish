@@ -207,6 +207,12 @@ Two defects, one session, and they are the same defect: driving a page was addre
 
 `TestSectionsCollapseWhatWasAlreadyShown` pins all of it browserlessly: first sight full and marked, identity-only collapse, the honoured read, the topic and cap exclusions, the per-chat ledger, and the forged marker.
 
+**The pull side (#361 slice 4): the model asks for a section and gets exactly that.** `browse(url, section=…)` and `browse_act(action="read", section=…)` deliver one section's text and the controls INSIDE it; `browse_act(action="sections")` is the index alone — names, sizes, control counts, no content. The page is fully loaded and fully checked either way (both are reads in `_browse_gate`'s `reading` set, gated exactly as `action="read"` is), and **the filter applies to content, never to bad news**: problems, the batch ledger, redirect and download notes ride a section render exactly as a whole-page one. Matching is `find_section` — exact, then folded, then unique-substring, never fuzzy — and **a miss is answered with the index**: the failure message IS the map the model needed, which is also why the index is pulled rather than appended to routine reads (a model that navigates by sections knows what it wants; one that cannot will not ask, and blind page-reading remains its floor). A section served whole records into the shown ledger like any full render, so it may collapse later.
+
+**The control map is DEEP because the numbering is.** Each tile carries the `data-aish-n` numbers inside it, collected with `deepAll` and a containment climb that crosses shadow boundaries the way the stamp did — a light reader would misfile every shadow-rooted control as "elsewhere on the page", the exact #292 failure shape (the writer/reader reach table in `TestATagsWriterAndItsReadersHaveTheSameReach` now names `SECTIONS_JS`). `ns` empty means UNMAPPED, never control-free, and an unmapped section lists the whole control list — the act surface is never hidden on a guess. Controls genuinely outside the served section are a counted line, not a silence.
+
+`TestSectionAddressedReads` pins the pull side browserlessly; the deep mapping was verified in real Chrome including a control inside an open shadow root.
+
 ### Filling a form is ONE act (`browse_fill`)
 
 A person searching for a flight sets origin, destination, both dates, passengers and cabin, then presses search. Doing that one call at a time cost six model round trips and six echo lines — and on lot.pl it did not finish at all, which is the session that filed this.

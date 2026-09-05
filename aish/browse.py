@@ -1202,13 +1202,13 @@ class Snapshot:
     title: str
     text: str
     controls: list[Control] = field(default_factory=list)
-    # The page as (name, text) tiles (#361 slice 2), when the walk could tile
-    # it; `text` is then `sections_render(sections)` and this list is the
-    # AUTHORITY a collapsing renderer reads — never re-parsed from the text,
-    # so a page whose words imitate a marker line forges nothing. Empty means
-    # the page would not tile (no body, a walk that failed, coverage too poor)
-    # and everything downstream keeps yesterday's flat-text behaviour.
-    sections: list[tuple[str, str]] = field(default_factory=list)
+    # The page as tiles (#361 slice 2), when the walk could tile it; `text`
+    # is then `sections_render(sections)` and this list is the AUTHORITY a
+    # collapsing or section-addressed renderer reads — never re-parsed from
+    # the text, so a page whose words imitate a marker line forges nothing.
+    # Empty means the page would not tile (no body, a walk that failed,
+    # coverage too poor) and everything downstream keeps flat-text behaviour.
+    sections: list[Section] = field(default_factory=list)
     status: int | None = None
     # Controls the cap left out. Never silent: see MAX_CONTROLS.
     hidden: int = 0
@@ -2601,7 +2601,7 @@ def strip_option_floods(text: str, floods: list[dict[str, Any]]) -> str:
 # so an id must look like a word to count. Anything else is anonymous, which is
 # not a failure: an anonymous tile still collapses by content identity once it
 # has been shown (see `web._present_page`).
-SECTIONS_JS = """(opts) => {
+SECTIONS_JS = "(opts) => {" + DEEP_JS + """
   const NAME_MAX = 60;
   const clean = (s) => (s || '').replace(/\\s+/g, ' ').replace(/[\\[\\]]/g, '')
     .trim().slice(0, NAME_MAX);
@@ -2648,14 +2648,34 @@ SECTIONS_JS = """(opts) => {
     return '';
   };
   const tiles = [];
-  const push = (name, text) => {
-    text = (text || '').trim();
-    if (text) tiles.push({name: name, text: text});
+  // Which enumerated controls live in each tile — the map a section-
+  // addressed read serves controls by. DEEP, to match the writer: the
+  // numbering is stamped through shadow roots (`CONTROLS_JS`), so a light
+  // lookup here would misfile every shadow-rooted control as "elsewhere on
+  // the page" — the exact #292 failure shape, surfacing as a fact about the
+  // page. The climb crosses boundaries the way the stamp did: a ShadowRoot
+  // has no parentNode, only a host.
+  const tagged = deepAll('[data-aish-n]');
+  const within = (el, root) => {
+    for (let node = el; node; node = node.parentNode || node.host || null) {
+      if (node === root) return true;
+    }
+    return false;
+  };
+  const push = (name, el) => {
+    const text = (el.innerText || '').trim();
+    if (!text) return;
+    // Empty when the walk runs before enumeration has tagged anything:
+    // unmapped, not control-free.
+    const ns = tagged.filter((c) => within(c, el))
+      .map((c) => parseInt(c.getAttribute('data-aish-n'), 10))
+      .filter((n) => !isNaN(n));
+    tiles.push({name: name, text: text, ns: ns});
   };
   const walk = (el) => {
     for (const child of el.children) {
       if (tiles.length >= opts.max) return;
-      if (isCandidate(child)) { push(nameOf(child), child.innerText); continue; }
+      if (isCandidate(child)) { push(nameOf(child), child); continue; }
       // A child holding a candidate somewhere below is descended into so the
       // candidate tiles on its own; one holding none is a single anonymous
       // tile, whole.
@@ -2663,7 +2683,7 @@ SECTIONS_JS = """(opts) => {
         walk(child);
         continue;
       }
-      push('', child.innerText);
+      push('', child);
     }
   };
   if (document.body) walk(document.body);
@@ -2680,35 +2700,81 @@ SECTION_MIN_CHARS = 200
 SECTIONS_MAX = 60
 
 
-def sections_from(tiles: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """The JS tiles as (name, text) sections: consecutive anonymous tiles
-    merged, names on tiles too small to be worth one dropped. Split from the
-    walk so the rules are testable without a browser."""
-    sections: list[tuple[str, str]] = []
+@dataclass
+class Section:
+    """One tile of a page: what the page calls it ("" = anonymous), what it
+    says, and the numbers of the controls that live inside it — the third
+    fact is what lets a section-addressed read arrive with ITS controls
+    (#361 slice 4). `ns` empty means unmapped, never "no controls": the map
+    is collected only after enumeration has tagged the page."""
+
+    name: str
+    text: str
+    ns: list[int] = field(default_factory=list)
+
+    def label(self) -> str:
+        """How the model refers to it: its name, or its own first line."""
+        if self.name:
+            return self.name
+        first = next(
+            (line for line in self.text.splitlines() if line.strip()), ""
+        )
+        return first[:60]
+
+
+def sections_from(tiles: list[dict[str, Any]]) -> list[Section]:
+    """The JS tiles as sections: consecutive anonymous tiles merged, names on
+    tiles too small to be worth one dropped. Split from the walk so the rules
+    are testable without a browser."""
+    sections: list[Section] = []
     for tile in tiles:
         name = str(tile.get("name") or "")
         text = str(tile.get("text") or "").strip()
+        ns = [int(n) for n in (tile.get("ns") or [])]
         if not text:
             continue
         if len(text) < SECTION_MIN_CHARS:
             name = ""
-        if not name and sections and not sections[-1][0]:
-            sections[-1] = ("", sections[-1][1] + "\n" + text)
+        if not name and sections and not sections[-1].name:
+            sections[-1].text += "\n" + text
+            sections[-1].ns.extend(ns)
             continue
-        sections.append((name, text))
+        sections.append(Section(name=name, text=text, ns=ns))
     return sections
 
 
-def sections_render(sections: list[tuple[str, str]]) -> str:
+def sections_render(sections: list[Section]) -> str:
     """The page text a tiled snapshot carries: each named section under its
     marker line. The markers ride the TEXT — they are what tells the model the
     page has structure — but a renderer that collapses never re-parses them
     back out: `Snapshot.sections` is the authority, so a page whose own text
     contains a line shaped like a marker forges nothing."""
     parts = []
-    for name, text in sections:
-        parts.append(f"[section: {name}]\n{text}" if name else text)
+    for section in sections:
+        parts.append(
+            f"[section: {section.name}]\n{section.text}"
+            if section.name
+            else section.text
+        )
     return "\n".join(parts)
+
+
+def find_section(sections: list[Section], asked: str) -> Section | None:
+    """The section the model asked for, matched the way `choose` matches: the
+    exact name first, then folded. Never fuzzy — the miss ANSWER is the index
+    the model needed, and a guess would silently hand it the wrong part of
+    the page."""
+    for section in sections:
+        if section.name == asked:
+            return section
+    wanted = fold(asked)
+    if not wanted:
+        return None
+    hits = [s for s in sections if s.name and fold(s.name) == wanted]
+    if len(hits) == 1:
+        return hits[0]
+    hits = [s for s in sections if s.name and wanted in fold(s.name)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def section_key(text: str) -> str:

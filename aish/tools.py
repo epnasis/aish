@@ -1016,6 +1016,18 @@ TOOL_SCHEMAS = [
                             "capped."
                         ),
                     },
+                    "section": {
+                        "type": "string",
+                        "description": (
+                            "Optional: the one section of the page you want — "
+                            "pages arrive tiled into named sections and this "
+                            "returns just that section and its controls. Use it "
+                            "when you already know the page's shape and want one "
+                            "part of it. A name that does not match answers with "
+                            "the page's section index, so asking costs one call "
+                            "either way."
+                        ),
+                    },
                 },
                 "required": ["url"],
             },
@@ -1065,11 +1077,21 @@ TOOL_SCHEMAS = [
                     },
                     "action": {
                         "type": "string",
-                        "enum": ["click", "type", "choose", "read"],
+                        "enum": ["click", "type", "choose", "read", "sections"],
                         "description": (
                             "click a link/button/checkbox, type into a field, "
-                            "choose an option in a dropdown, or read the whole "
-                            "page again (touching nothing). Default: click."
+                            "choose an option in a dropdown, read the whole "
+                            "page again (touching nothing), or list the page's "
+                            "sections without their content. Default: click."
+                        ),
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": (
+                            "With action=read: return only this named section "
+                            "of the page and the controls inside it, instead of "
+                            "the whole page. A name that does not match answers "
+                            "with the section index."
                         ),
                     },
                     "text": {
