@@ -3735,6 +3735,10 @@ body.console-open #backdrop { z-index: 63; }
   position: fixed; inset: 0; z-index: 110;
   display: flex; flex-direction: column;
   background: var(--bg); color: var(--fg);
+  /* The notch/safe-area inset is the screen's own opaque bg, so the header sits
+     flush to it with nothing (no gap, no floating grabber, no content) leaking
+     above its top edge. The header itself covers everything below. */
+  padding-top: env(safe-area-inset-top);
 }
 #step-screen[hidden] { display: none; }
 #ss-head {
@@ -3940,9 +3944,11 @@ body.console-open #backdrop { z-index: 63; }
 #ss-scroll-down:active, #ss-scroll-top:active { opacity: 0.6; }
 /* The grabber: the sheet convention's handle. The header under it is the drag
    surface; the screen follows the finger and springs back below the threshold. */
+/* The grabber now rides on the header itself (first child of #ss-chrome), so
+   the bar is one continuous surface to the top edge and slides away as a whole. */
 #ss-grab {
   width: 36px; height: 5px; border-radius: 3px; background: var(--sep);
-  margin: calc(env(safe-area-inset-top) + 6px) auto 0;
+  margin: 6px auto 2px;
   flex: none;
 }
 #step-screen.ss-dragging { transition: none; }
