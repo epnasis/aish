@@ -655,6 +655,7 @@ def execute(
     caps: tuple[int, int] | None = None,
     cap_source: str = "",
     store_dir=None,
+    extra_env: dict | None = None,
 ) -> ToolOutcome:
     """Run the tool: validated args as JSON on stdin, raw output + exit code
     back. No shell — the args never pass through shell word-splitting.
@@ -683,12 +684,19 @@ def execute(
             error="unresolved_executable",
         )
     env = None
+    if extra_env:
+        # Non-secret per-session context (e.g. the owner's browser User-Agent
+        # on an attended turn). Merged first so a manifest-declared secret,
+        # applied below, can never be shadowed by it.
+        env = dict(os.environ)
+        env.update(extra_env)
     if tool.secrets:
         if get_secret is None:
             from . import secrets as secrets_store
 
             get_secret = secrets_store.get
-        env = dict(os.environ)
+        if env is None:
+            env = dict(os.environ)
         for sec in tool.secrets:
             value = get_secret(sec)
             if value is None:

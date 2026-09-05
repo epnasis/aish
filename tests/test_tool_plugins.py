@@ -552,6 +552,35 @@ class TestSecretInjection:
         assert "[exit code: 0]" in out
 
 
+CONTEXT_SCRIPT = '#!/bin/sh\nprintf %s "${AISH_BANK_PSU_UA:-none}"\n'
+
+
+class TestExtraEnv:
+    """#360 — non-secret per-session context (e.g. the owner's browser UA on
+    an attended turn) reaches the wrapper env, and secrets still win."""
+
+    def test_extra_env_injected(self, tmp_path):
+        tool, _ = _parse_tool(write_tool(tmp_path / "c", VALID, script=CONTEXT_SCRIPT))
+        out = execute(
+            tool, {"text": "x"}, cwd=str(tmp_path),
+            extra_env={"AISH_BANK_PSU_UA": "Mozilla/5.0 (owner)"},
+        )
+        assert "Mozilla/5.0 (owner)" in out
+
+    def test_absent_extra_env_leaves_it_unset(self, tmp_path):
+        tool, _ = _parse_tool(write_tool(tmp_path / "c", VALID, script=CONTEXT_SCRIPT))
+        out = execute(tool, {"text": "x"}, cwd=str(tmp_path))
+        assert "none" in out
+
+    def test_secret_is_not_shadowed_by_extra_env(self, tmp_path):
+        tool, _ = _parse_tool(write_tool(tmp_path / "s", SECRET_TOOL, script=SECRET_SCRIPT))
+        out = execute(
+            tool, {}, cwd=str(tmp_path), get_secret=lambda n: "sk-live",
+            extra_env={"MY_TOKEN": "attacker", "AISH_BANK_PSU_UA": "ua"},
+        )
+        assert "sk-live" in out and "attacker" not in out
+
+
 class TestCollision:
     """Shadowing across scopes (#178 P1-3): `mutating` is a monotone floor —
     a project shadow may RAISE a global tool to mutating, never lower it."""

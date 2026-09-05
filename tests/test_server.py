@@ -397,6 +397,26 @@ class TestReceipts:
             recv_until(ws, "done")
 
 
+class TestAttendedContext:
+    """#360 — an attended (browser) turn stamps the session's agent with the
+    client's User-Agent, so plugin tools (the bank tools) can claim
+    PSU-present access. Triggered sessions never get it."""
+
+    def test_task_stamps_browser_user_agent(self, app_env):
+        client, _ = make_client(app_env, [model_says("ok")])
+        ua = "Mozilla/5.0 (iPhone; owner)"
+        with client, client.websocket_connect(
+            "/ws", headers={"user-agent": ua}
+        ) as ws:
+            hello = ws.receive_json()
+            ws.receive_json()  # replay
+            assert hello["type"] == "hello"
+            ws.send_json({"type": "task", "text": "hi"})
+            recv_until(ws, "done")
+            session = client.app.state.server.sessions[hello["session"]]
+            assert session.agent.plugin_env.get("AISH_BANK_PSU_UA") == ua
+
+
 class TestConnect:
     def test_hello_carries_model_session_scope(self, app_env):
         client, _ = make_client(app_env, [])

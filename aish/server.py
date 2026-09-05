@@ -3228,6 +3228,15 @@ class WebServer:
         session = client.viewing
         if session is None:
             return
+        # An attended turn: this message came from a live browser, so stamp the
+        # session's agent with that browser's User-Agent (#360). Plugin tools
+        # that distinguish attended from background access read it from their
+        # subprocess env — the bank tools use it (with the home public IP) to
+        # claim PSU-present access and lift the bank's unattended fetch cap.
+        # Triggered sessions never reach here, so their agent stays unstamped.
+        ua = client.ws.headers.get("user-agent", "").strip()
+        if ua:
+            session.agent.plugin_env["AISH_BANK_PSU_UA"] = ua
         if session.busy:
             if len(session.queue) >= MAX_QUEUE:
                 await self._refuse(client, f"queue full ({MAX_QUEUE} waiting)")
