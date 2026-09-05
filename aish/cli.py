@@ -1741,9 +1741,16 @@ def _backend_hint(agent) -> str:
 
 def _secret_cli(args: list[str]) -> int:
     """`aish secret <set|get|list|rm> [NAME]` — manage Keychain-backed secrets
-    (issue #142). `set` reads the value via getpass (never echoed, never in
-    shell history). Tools reference these by name via a `secrets:` manifest
-    field; the value is injected into the wrapper's env, never the model."""
+    (issue #142). `set` reads the value via getpass on a terminal, or from
+    stdin when piped (never echoed, never in shell history either way). The
+    pipe path exists because getpass cannot take a long value at all: the
+    macOS canonical tty line buffer tops out at 1024 bytes, and a paste past
+    it is discarded wholesale — Enter appears dead (measured: a 1000-byte
+    line arrives, a 1024-byte line never does). A base64-encoded RSA key is
+    ~4300 bytes, so `base64 < key.pem | tr -d '\\n' | aish secret set NAME`
+    is the supported route. Tools reference these by name via a `secrets:`
+    manifest field; the value is injected into the wrapper's env, never the
+    model."""
     import getpass
 
     from . import secrets
@@ -1763,7 +1770,10 @@ def _secret_cli(args: list[str]) -> int:
             print(f"error: invalid secret name {name!r}")
             return 1
         if cmd == "set":
-            value = getpass.getpass(f"value for {name} (hidden): ")
+            if sys.stdin.isatty():
+                value = getpass.getpass(f"value for {name} (hidden): ")
+            else:
+                value = sys.stdin.read().strip()
             if not value:
                 print("aborted (empty value)")
                 return 1
