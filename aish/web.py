@@ -2701,9 +2701,10 @@ def _present_snapshot(
     cut: PageCut | None = None,
     view: BrowseView | None = None,
     asked_whole: bool = False,
+    section: str | None = None,
 ) -> str:
-    """A driven page, as the model receives it — the whole page, or only what
-    an action revealed about it.
+    """A driven page, as the model receives it — the whole page, one section
+    of it, or only what an action revealed about it.
 
     Sending the page back after every click is what made driving one expensive:
     nine actions on lot.com cost 44 788 characters, most of it the same page
@@ -2718,6 +2719,8 @@ def _present_snapshot(
     acting re-resolves against the live page and refuses with a fresh view —
     and a fact that must be current is re-read on demand."""
     seen = _seen(view)
+    if section is not None and not acted:
+        return _present_section(snapshot, section, view)
     if (
         acted
         and seen.shown is not None
@@ -2966,30 +2969,133 @@ def _collapsed_sections(
     parts: list[str] = []
     shown: list[tuple[str, int]] = []
     offset = 0
-    for name, text in sections:
-        key = browse_mod.section_key(text)
-        small = len(text) < browse_mod.SECTION_MIN_CHARS
+    for section in sections:
+        key = browse_mod.section_key(section.text)
+        small = len(section.text) < browse_mod.SECTION_MIN_CHARS
         if collapse and not small and key in seen_keys:
-            if name:
+            if section.name:
                 placeholder = (
-                    f"[section: {name} — unchanged, already shown in this chat]"
+                    f"[section: {section.name} — unchanged, already shown in "
+                    "this chat]"
                 )
             else:
-                first = next(
-                    (line for line in text.splitlines() if line.strip()), ""
-                )[:60]
                 placeholder = (
-                    f"[unchanged, already shown in this chat: {first!r} — "
-                    f"{len(text.splitlines())} lines]"
+                    f"[unchanged, already shown in this chat: "
+                    f"{section.label()!r} — "
+                    f"{len(section.text.splitlines())} lines]"
                 )
             parts.append(placeholder)
             offset += len(placeholder) + 1
             continue
-        rendered = f"[section: {name}]\n{text}" if name else text
+        rendered = (
+            f"[section: {section.name}]\n{section.text}"
+            if section.name
+            else section.text
+        )
         parts.append(rendered)
         offset += len(rendered) + 1
         shown.append((key, offset - 1))
     return "\n".join(parts), shown
+
+
+def _section_index_lines(sections) -> list[str]:
+    """The page's sections, one line each — the index the model pulls, and
+    the answer a section miss is given. Names only, no content: the index is
+    a map, and the territory is read on demand."""
+    lines = []
+    for section in sections:
+        kind = "section" if section.name else "unnamed"
+        lines.append(
+            f"{kind}: {section.label()!r} — "
+            f"{len(section.text.splitlines())} line(s), "
+            f"{len(section.ns)} control(s)"
+        )
+    return lines
+
+
+def _present_sections_index(snapshot, view: BrowseView | None) -> str:
+    """`action="sections"`: the index alone, pulled on demand (#361 slice 4).
+    Never pushed onto routine reads — a model that navigates by sections
+    already knows what it is looking for, and one that cannot will not ask."""
+    seen = _seen(view)
+    seen.remember(snapshot)
+    sections = getattr(snapshot, "sections", None) or []
+    if not sections:
+        return (
+            _snapshot_notes(snapshot)
+            + f"[{snapshot.url} did not tile into sections — use "
+            'action="read" for the whole page]'
+        )
+    return (
+        _snapshot_notes(snapshot)
+        + UNTRUSTED_NOTE
+        + f"[{snapshot.url} — sections on this page]\n"
+        + "\n".join(_section_index_lines(sections))
+        + '\n[aish: read one with browse_act(action="read", '
+        'section="<name>"); the whole page with action="read" alone]'
+    )
+
+
+def _present_section(snapshot, asked: str, view: BrowseView | None) -> str:
+    """One section of the page, with ITS controls — the pull side of #361:
+    the model states what it is interested in and gets exactly that.
+
+    The page was fully loaded and fully checked before this filter ran, and
+    the filter applies to CONTENT only, never to bad news: aish's own notes
+    (problems, batch ledgers, redirects, downloads) ride above the banner
+    exactly as on a whole-page render. A miss is answered with the index —
+    the failure message IS the map the model needed — and matching is
+    strict-then-folded, never fuzzy, because a guess would silently hand the
+    model the wrong part of the page."""
+    seen = _seen(view)
+    seen.remember(snapshot)
+    sections = getattr(snapshot, "sections", None) or []
+    notes = _snapshot_notes(snapshot)
+    if not sections:
+        return (
+            notes
+            + f"[no section called {asked!r} — {snapshot.url} did not tile "
+            'into sections. Use action="read" for the whole page]'
+        )
+    hit = browse_mod.find_section(sections, asked)
+    if hit is None:
+        return (
+            notes
+            + UNTRUSTED_NOTE
+            + f"[no section called {asked!r} on {snapshot.url} — its "
+            "sections:]\n"
+            + "\n".join(_section_index_lines(sections))
+            + '\n[aish: ask for one of those, or action="read" for the '
+            "whole page]"
+        )
+    head = f"[{snapshot.url} — you are driving this page, showing one section]"
+    body = (
+        f"[section: {hit.name}]\n{hit.text}" if hit.name else hit.text
+    )
+    # Shown whole: this section may collapse on a later full render.
+    seen.sections_seen.add(browse_mod.section_key(hit.text))
+    if hit.ns:
+        inside = set(hit.ns)
+        lines = [c.line() for c in snapshot.controls if c.n in inside]
+        elsewhere = len(snapshot.controls) - len(lines)
+        if elsewhere:
+            lines.append(
+                f"[{elsewhere} more control(s) elsewhere on the page — ask "
+                'another section, or action="read" for everything]'
+            )
+        controls = (
+            BROWSE_CONTROLS_NOTE + "\n".join(lines)
+            if lines
+            else "\n\n[no controls in this section]"
+        )
+    else:
+        # Unmapped tiles (the walk ran before enumeration tagged anything, or
+        # the controls live in shadow roots the light-DOM map cannot see).
+        # The safe floor is the whole list: the act surface is never hidden.
+        controls = BROWSE_CONTROLS_NOTE + "\n".join(
+            c.line() for c in snapshot.controls
+        )
+    return notes + UNTRUSTED_NOTE + head + "\n" + body + controls + _submit_hint(snapshot)
 
 
 def _present_page(
@@ -3113,6 +3219,7 @@ def browse(
     url: str,
     topic: str | None = None,
     *,
+    section: str | None = None,
     cut: PageCut | None = None,
     view: BrowseView | None = None,
 ) -> str:
@@ -3124,7 +3231,9 @@ def browse(
     # renew a session (renewal belongs on the open, never on an act), so it is
     # the only one that can have a sign-in to show for itself.
     signin_seen = SignInSeen()
-    text = _browse(url, topic, cut=cut, view=view, signin_seen=signin_seen)
+    text = _browse(
+        url, topic, section=section, cut=cut, view=view, signin_seen=signin_seen
+    )
     return sealed(
         text,
         cut,
@@ -3145,6 +3254,7 @@ def _browse(
     url: str,
     topic: str | None = None,
     *,
+    section: str | None = None,
     cut: PageCut | None = None,
     view: BrowseView | None = None,
     signin_seen: SignInSeen | None = None,
@@ -3173,7 +3283,9 @@ def _browse(
         note, snapshot = _renew_driving(
             url, snapshot, topic=topic, view=view, signin_seen=signin_seen
         )
-    return note + _present_snapshot(snapshot, topic=topic, cut=cut, view=view)
+    return note + _present_snapshot(
+        snapshot, topic=topic, cut=cut, view=view, section=section
+    )
 
 
 def _renew_driving(url, snapshot, *, topic, view, signin_seen=None):
@@ -3231,13 +3343,16 @@ def browse_act(
     value: str = "",
     submit: bool = False,
     topic: str | None = None,
+    section: str | None = None,
     cut: PageCut | None = None,
     view: BrowseView | None = None,
 ) -> str:
     """Do one thing to the control the model named, and hand back what changed."""
     seen = _seen(view)
     seen.start_call()
-    text_out = _browse_act(target, action, text, value, submit, topic, cut, view)
+    text_out = _browse_act(
+        target, action, text, value, submit, topic, cut, view, section=section
+    )
     # No `signin=`: renewal happens on the OPEN and never on an act, so an act
     # that claimed a sign-in block would be claiming something that cannot have
     # happened inside it.
@@ -3265,7 +3380,11 @@ def _browse_act(
     topic: str | None = None,
     cut: PageCut | None = None,
     view: BrowseView | None = None,
+    section: str | None = None,
 ) -> str:
+    # The pull side of #361 (slice 4): both are reads — the page is fully
+    # loaded and fully checked either way, and only what is DELIVERED narrows.
+    reading = action in ("read", "sections")
     # Read off the SNAPSHOT, not the live DOM: `_press` may fall back to a link's
     # own destination, and the thing the gate classified has to be the thing that
     # runs. A destination the SSRF guard would refuse is simply not offered as a
@@ -3293,7 +3412,10 @@ def _browse_act(
                 href = control.detail
     try:
         snapshot = browser.browse_act(
-            str(target), action, text=text, value=value, submit=submit,
+            # "sections" touches the page exactly as much as "read" does:
+            # not at all. The browser side knows one verb for that.
+            str(target), "read" if action == "sections" else action,
+            text=text, value=value, submit=submit,
             href=href, mutating=mutating, topic=topic or "",
             expect_download=expect_download, expect_epoch=seen.epoch,
             key=_key(view),
@@ -3305,15 +3427,18 @@ def _browse_act(
             f"ERROR: could not {action} {target!r}: "
             f"{type(exc).__name__}: {exc}"
         )
+    if action == "sections":
+        return _present_sections_index(snapshot, view)
     return _present_snapshot(
         snapshot,
         topic=topic,
-        acted=action != "read",
+        acted=not reading,
         cut=cut,
         view=view,
         # An explicit read is the model asking for the whole page, and it is
         # honoured verbatim — no section this render carries is collapsed.
-        asked_whole=action == "read",
+        asked_whole=action == "read" and section is None,
+        section=section if action == "read" else None,
     )
 
 

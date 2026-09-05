@@ -1361,7 +1361,7 @@ class TestSectionsCollapseWhatWasAlreadyShown:
         web_module.forget_shown_page()
 
     def _page(self, url, *sections):
-        listed = list(sections)
+        listed = [browse.Section(name=name, text=text) for name, text in sections]
         return snapshot(
             url=url,
             text=browse.sections_render(listed),
@@ -1480,14 +1480,22 @@ class TestSectionsCollapseWhatWasAlreadyShown:
 
     def test_tiles_merge_and_small_names_drop(self):
         tiles = [
-            {"name": "", "text": "a"},
-            {"name": "", "text": "b"},
-            {"name": "tiny", "text": "krótki"},
-            {"name": "navigation", "text": self.NAV},
+            {"name": "", "text": "a", "ns": [1]},
+            {"name": "", "text": "b", "ns": [2]},
+            {"name": "tiny", "text": "krótki", "ns": []},
+            {"name": "navigation", "text": self.NAV, "ns": [5]},
         ]
         sections = browse.sections_from(tiles)
-        assert sections[0] == ("", "a\nb\nkrótki")
-        assert sections[1] == ("navigation", self.NAV)
+        assert (sections[0].name, sections[0].text) == ("", "a\nb\nkrótki")
+        # A merged anonymous run keeps every member's controls.
+        assert sections[0].ns == [1, 2]
+        assert (sections[1].name, sections[1].ns) == ("navigation", [5])
+
+    def test_the_walk_maps_each_tiles_controls(self):
+        """#361 slice 4: the tile carries the numbers of the tagged controls
+        inside it, which is what lets a section read arrive with ITS
+        controls."""
+        assert "data-aish-n" in browse.SECTIONS_JS
 
     def test_the_walk_reads_declared_structure_only(self):
         source = browse.SECTIONS_JS
@@ -1502,6 +1510,110 @@ class TestSectionsCollapseWhatWasAlreadyShown:
         # …and a framework-hashed id is not a name.
         for token in ("css", "sc", "jss", "mui"):
             assert token in source
+
+
+class TestSectionAddressedReads:
+    """#361 slice 4, the pull side: the model states which part of the page
+    it wants and gets exactly that — the section's text and ITS controls.
+    The page is fully loaded and fully checked first; filtering applies to
+    content, never to bad news. A miss is answered with the index, and the
+    index itself is pulled, never pushed."""
+
+    RESULTS = "\n".join(f"lot {i}: WAW-NRT {600 + i} PLN" for i in range(12))
+    FOOTER = "\n".join(f"stopka wiersz {i} kontakt regulamin" for i in range(8))
+
+    def setup_method(self):
+        web_module.forget_shown_page()
+
+    def _page(self):
+        sections = [
+            browse.Section(
+                name="Wyniki wyszukiwania", text=self.RESULTS, ns=[0, 1]
+            ),
+            browse.Section(name="footer", text=self.FOOTER, ns=[2]),
+        ]
+        return snapshot(
+            url="https://lot.com/wyniki",
+            text=browse.sections_render(sections),
+            sections=sections,
+            controls=[
+                control(n=0, name="Wybierz #1"),
+                control(n=1, name="Wybierz #2"),
+                control(n=2, name="Regulamin"),
+            ],
+        )
+
+    def test_a_hit_returns_the_section_and_its_controls_alone(self):
+        out = web_module._present_snapshot(
+            self._page(), section="Wyniki wyszukiwania"
+        )
+        assert "lot 3" in out
+        assert "stopka wiersz 3" not in out
+        assert "Wybierz #1" in out
+        assert "Regulamin" not in out
+        assert "1 more control(s) elsewhere on the page" in out
+
+    def test_a_folded_name_still_finds_it(self):
+        out = web_module._present_snapshot(self._page(), section="wyniki")
+        assert "lot 3" in out
+
+    def test_a_miss_is_answered_with_the_index(self):
+        out = web_module._present_snapshot(self._page(), section="Profil")
+        assert "no section called 'Profil'" in out
+        assert "'Wyniki wyszukiwania'" in out
+        assert "lot 3" not in out  # the index is a map, not the territory
+
+    def test_bad_news_rides_a_section_read(self):
+        page = self._page()
+        page.problem = "that control is gone"
+        out = web_module._present_snapshot(page, section="Wyniki wyszukiwania")
+        assert "that control is gone" in out
+
+    def test_a_section_read_licenses_a_later_collapse(self):
+        web_module._present_snapshot(self._page(), section="footer")
+        out = web_module._present_snapshot(self._page())
+        assert "[section: footer — unchanged, already shown in this chat]" in out
+        assert "lot 3" in out  # the section never shown still arrives whole
+
+    def test_an_unmapped_section_lists_every_control(self):
+        """`ns` empty means UNMAPPED, never control-free — the act surface is
+        never hidden on a guess."""
+        sections = [browse.Section(name="główna", text=self.RESULTS)]
+        page = snapshot(
+            url="https://lot.com/a",
+            text=browse.sections_render(sections),
+            sections=sections,
+            controls=[control(n=0, name="Szukaj")],
+        )
+        out = web_module._present_snapshot(page, section="główna")
+        assert "Szukaj" in out
+
+    def test_the_index_is_names_only(self):
+        out = web_module._present_sections_index(self._page(), None)
+        assert "'Wyniki wyszukiwania'" in out
+        assert "12 line(s), 2 control(s)" in out
+        assert "lot 3" not in out
+
+    def test_an_untiled_page_says_so_instead_of_pretending(self):
+        page = snapshot(url="https://lot.com/a", text="płaska strona")
+        out = web_module._present_sections_index(page, None)
+        assert "did not tile into sections" in out
+        out = web_module._present_snapshot(page, section="Profil")
+        assert "did not tile into sections" in out
+
+    def test_matching_is_strict_then_folded_never_fuzzy(self):
+        sections = [
+            browse.Section(name="Wyniki wyszukiwania", text="a"),
+            browse.Section(name="Wyniki archiwalne", text="b"),
+        ]
+        # Ambiguous substring: no guess, and the caller answers with the index.
+        assert browse.find_section(sections, "Wyniki") is None
+        assert browse.find_section(sections, "wyniki wyszukiwania") is sections[0]
+        assert browse.find_section(sections, "archiwalne") is sections[1]
+
+    def test_the_act_gate_treats_sections_as_a_read(self):
+        source = open("aish/agent.py", encoding="utf-8").read()
+        assert '("read", "sections")' in source
 
 
 class TestFillingAFormIsOneAct:
@@ -4977,7 +5089,10 @@ class TestATagsWriterAndItsReadersHaveTheSameReach:
         # walk; `CALENDAR_JS` looks the field up to find whose picker is open.
         "data-aish-n": {
             "writes": {"CONTROLS_JS": DEEP},
-            "reads": {"CONTROLS_JS": DEEP, "CALENDAR_JS": DEEP},
+            # `SECTIONS_JS` maps which controls live in which tile (#361
+            # slice 4); a light reader there would misfile every
+            # shadow-rooted control as "elsewhere on the page".
+            "reads": {"CONTROLS_JS": DEEP, "CALENDAR_JS": DEEP, "SECTIONS_JS": DEEP},
         },
         # The picker's own numbering, written and cleared entirely inside
         # `CALENDAR_JS`. LIGHT on both sides, and consistent with itself: the

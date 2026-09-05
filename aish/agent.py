@@ -289,6 +289,16 @@ Rules:
    DID NOTHING — pressing it again will do nothing again. Try what would open
    it first, or another route to the same thing. Call browse_act(action="read")
    when you need the whole page back.
+   WHEN YOU WANT ONE PART OF A PAGE, ASK FOR THAT SECTION — never re-read the
+   whole page to see one block of it. Pages arrive tiled into named sections
+   ("[section: Wyniki wyszukiwania]"); browse_act(action="read",
+   section="Wyniki wyszukiwania") returns that section and its controls
+   alone, and browse(url, section="...") opens a page already narrowed to it.
+   If the name does not match, you get the page's section index back — you
+   do not need to have seen the page first. browse_act(action="sections")
+   lists a page's sections without its content. A section you were already
+   shown may later arrive as one line saying it is unchanged; that is not an
+   error — you have its content in this conversation.
    A control marked "(needs approval)" will ask the user; that is expected, not
    an error.
    AISH REFUSES TO PRESS A CONTROL WHOSE OWN WORDS SAY IT BUYS, PAYS, ORDERS,
@@ -5941,9 +5951,16 @@ class Agent:
         if name == "browse":
             url = str(args.get("url", ""))
             topic = str(args.get("topic", "") or "")
+            section = str(args.get("section", "") or "")
             label = f"→ browse: {url}" + (f" (topic: {topic})" if topic else "")
+            if section:
+                label += f" (section: {section})"
             return label, lambda: web.browse(
-                url, topic or None, cut=self._page_cut(name, args), view=self._browse_view
+                url,
+                topic or None,
+                section=section or None,
+                cut=self._page_cut(name, args),
+                view=self._browse_view,
             )
         if name == "browse_fill":
             steps = list(args.get("steps") or [])
@@ -5971,6 +5988,7 @@ class Agent:
             value=str(args.get("value", "") or ""),
             submit=bool(args.get("submit")),
             topic=str(args.get("topic", "") or "") or None,
+            section=str(args.get("section", "") or "") or None,
             cut=self._page_cut(name, args),
             view=self._browse_view,
         )
@@ -8438,9 +8456,11 @@ class Agent:
         refusal = self._personal_refused(name, args, host)
         if refusal is not None:
             return refusal
-        # Opening a page, and re-reading the one already open, are reads.
+        # Opening a page, and re-reading the one already open — whole, one
+        # section of it, or just its section index — are reads.
         reading = name == "browse" or (
-            name == "browse_act" and str(args.get("action", "")) == "read"
+            name == "browse_act"
+            and str(args.get("action", "")) in ("read", "sections")
         )
         if name == "browse_fill":
             return self._browse_batch_gate(args, host)

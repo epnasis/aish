@@ -1344,9 +1344,9 @@ async def _body_text(page: Any) -> str:
 SECTION_COVERAGE = 0.6
 
 
-async def _sections(page: Any, flat_text: str) -> list[tuple[str, str]]:
-    """The page as named (name, text) tiles (#361 slice 2), or [] to keep the
-    flat text — the floor is yesterday's behaviour, never less.
+async def _sections(page: Any, flat_text: str) -> list[browse_mod.Section]:
+    """The page as named tiles (#361 slice 2), or [] to keep the flat text —
+    the floor is yesterday's behaviour, never less.
 
     The option-flood scrub is applied per tile with one fetch of the flood
     list, so a tiled page and a flat one hand the model the same scrubbed
@@ -1369,7 +1369,7 @@ async def _sections(page: Any, flat_text: str) -> list[tuple[str, str]]:
             str(tile.get("text") or ""), list(floods or [])
         )
     sections = browse_mod.sections_from(tiles)
-    tiled = sum(len(text) for _, text in sections)
+    tiled = sum(len(section.text) for section in sections)
     if tiled < SECTION_COVERAGE * len(flat_text):
         return []
     return sections
@@ -5172,14 +5172,17 @@ async def _snapshot(
         inflight=lambda: session.inflight,
     )
     text = await _without_option_floods(page, settled_text)
-    sections = await _sections(page, text)
-    if sections:
-        text = browse_mod.sections_render(sections)
     after_settle = clock()
     raw, matched, unreached, matching, commit, dialog, reasons = await _enumerate(
         page, match
     )
     controls = browse_mod.controls_from(raw)
+    # AFTER enumeration, deliberately (#361 slice 4): the walk maps each
+    # tile's controls by the data-aish-n tags enumeration just wrote, so a
+    # section-addressed read can serve a section WITH its controls.
+    sections = await _sections(page, text)
+    if sections:
+        text = browse_mod.sections_render(sections)
     after_enumerate = clock()
     # What the MODEL is told about the page being a wall. The capture no longer
     # consults it (#320): a browse-path login form is an EMPTY login form, and
