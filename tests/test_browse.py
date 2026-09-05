@@ -1512,6 +1512,45 @@ class TestSectionsCollapseWhatWasAlreadyShown:
             assert token in source
 
 
+class TestAnOptionFloodIsAChooser:
+    """#361 slice 5: the model knows what it wants before it opens a country
+    picker — it needs the format, not the census. An opened list the page
+    DECLARED as options arrives as one line with a count and examples; a
+    flood of plain buttons is not for this line to judge."""
+
+    def _delta(self, added):
+        delta = browse.Delta()
+        delta.added = added
+        return delta
+
+    def test_a_declared_option_flood_collapses_to_a_summary(self):
+        added = [
+            control(n=i, name=f"Kraj {i}", option=True) for i in range(40)
+        ]
+        out = self._delta(added).render()
+        assert "a list of 40 options appeared" in out
+        assert "'Kraj 0', 'Kraj 1', 'Kraj 2'" in out
+        assert "+ button 'Kraj 5'" not in out
+
+    def test_a_short_option_list_is_better_read_than_counted(self):
+        added = [control(n=i, name=f"Opcja {i}", option=True) for i in range(5)]
+        out = self._delta(added).render()
+        assert "options appeared" not in out
+        assert "+ button 'Opcja 3'" in out
+
+    def test_plain_buttons_are_never_summarised(self):
+        added = [control(n=i, name=f"Dzień {i}") for i in range(40)]
+        out = self._delta(added).render()
+        assert "options appeared" not in out
+
+    def test_mixed_additions_keep_the_rest_listed(self):
+        added = [control(n=i, name=f"Kraj {i}", option=True) for i in range(20)]
+        added.append(control(n=99, name="Wyczyść"))
+        out = self._delta(added).render()
+        assert "a list of 20 options appeared" in out
+        assert "+ button 'Wyczyść'" in out
+
+
 class TestSectionAddressedReads:
     """#361 slice 4, the pull side: the model states which part of the page
     it wants and gets exactly that — the section's text and ITS controls.

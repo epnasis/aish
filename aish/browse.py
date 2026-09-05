@@ -3888,9 +3888,29 @@ class Delta:
                     'use action="read" to see the whole page]'
                 )
             parts.append("page text:\n" + body)
-        control_lines = [f"+ {c.line()}" for c in self.added] + [
+        added = self.added
+        options = [c for c in added if c.option]
+        # An opened option flood is a CHOOSER, not controls (#361 slice 5):
+        # the model knows what it wants before it opens a country picker — it
+        # needs the format, not the census. Same threshold as a `<select>`'s
+        # inlining (`CHOICE_INLINE_MAX`), same honesty: the count is stated
+        # and the full list is one `action="read"` away. Only what the page
+        # DECLARED as options (`Control.option`) collapses; a flood of plain
+        # buttons is not for this line to judge.
+        summary = ""
+        if len(options) > CHOICE_INLINE_MAX:
+            added = [c for c in added if not c.option]
+            sample = ", ".join(repr(c.name) for c in options[:3])
+            summary = (
+                f"[a list of {len(options)} options appeared, e.g. {sample} — "
+                'press the one you want by name with browse_act(target="…"); '
+                'action="read" shows the full list]'
+            )
+        control_lines = [f"+ {c.line()}" for c in added] + [
             f"~ {new.line()}" for _, new in self.changed
         ]
+        if summary:
+            control_lines.insert(0, summary)
         if control_lines:
             shown = control_lines[:DELTA_CONTROLS_MAX]
             left = len(control_lines) - len(shown)

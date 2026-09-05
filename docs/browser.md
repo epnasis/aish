@@ -213,6 +213,8 @@ Two defects, one session, and they are the same defect: driving a page was addre
 
 `TestSectionAddressedReads` pins the pull side browserlessly; the deep mapping was verified in real Chrome including a control inside an open shadow root.
 
+**An opened option flood is a chooser, not controls (#361 slice 5).** A change report whose additions include more than `CHOICE_INLINE_MAX` controls the page DECLARED as options (`Control.option` — `role=option`/`treeitem`) collapses them to one line: the count, three example names, and how to press one by name. The model knows what it wants before it opens a country picker; it needs the format, not the census — the same reasoning that already collapses a long `<select>` on the snapshot, at the same threshold, with the same honesty (count stated, full list one `action="read"` away). A flood of plain buttons is deliberately NOT summarised: "looks like a list" is a judgement, `role=option` is the page's own word. `TestAnOptionFloodIsAChooser`.
+
 ### Filling a form is ONE act (`browse_fill`)
 
 A person searching for a flight sets origin, destination, both dates, passengers and cabin, then presses search. Doing that one call at a time cost six model round trips and six echo lines — and on lot.pl it did not finish at all, which is the session that filed this.
