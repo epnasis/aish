@@ -1114,27 +1114,39 @@ check("each step shows the chat's icon, and the chrome collapses on scroll down"
     return m ? -Number(m[1]) : 0;
   };
   const opacity = () => (chrome.style.opacity === "" ? 1 : Number(chrome.style.opacity));
+  // The scroll-to-top arrow rides with the header's bottom edge (h - shift + 8,
+  // never above 12) so it never overlaps the bar.
+  const up = w.el("ss-scroll-top");
+  const arrowTop = () => (up.style.top === "" ? null : Number(up.style.top.replace("px", "")));
   body.scrollTop = 0; s.ssScrollChrome();
   assert.equal(shift(), 0, "shown at the top");
   assert.equal(opacity(), 1, "fully opaque at the top");
+  assert.equal(arrowTop(), 150 + 8, "arrow rests below the fully-shown header");
   body.scrollTop = 40; s.ssScrollChrome();
   assert.equal(shift(), 40, "moves up pixel-for-pixel with the scroll");
-  assert(Math.abs(opacity() - (1 - 40 / 150)) < 1e-6, "fades as it slides: " + opacity());
+  // Below the fade-from point (0.6 * 150 = 90) the bar STAYS OPAQUE — a
+  // half-faded bar leaks the content scrolling under it.
+  assert.equal(opacity(), 1, "opaque while it still covers content: " + opacity());
+  assert.equal(arrowTop(), 150 - 40 + 8, "arrow tracks the header bottom");
   body.scrollTop = 100; s.ssScrollChrome();
   assert.equal(shift(), 100, "keeps tracking down");
+  // Past the fade-from point it eases out over the last stretch.
+  assert(Math.abs(opacity() - (1 - (100 - 90) / (150 - 90))) < 1e-6, "fades the last stretch: " + opacity());
   body.scrollTop = 300; s.ssScrollChrome();
   assert.equal(shift(), 150, "fully hidden at its own height, no further");
   assert.equal(opacity(), 0, "faded out when fully up");
+  assert.equal(arrowTop(), 12, "arrow rides up to the top once the header is gone");
   body.scrollTop = 260; s.ssScrollChrome();
   assert.equal(shift(), 110, "comes back the same pixels on scroll up");
   body.scrollTop = 0; s.ssScrollChrome();
   assert.equal(shift(), 0, "fully shown again at the very top");
-  // A new pane paint resets the chrome fully shown.
+  // A new pane paint resets the chrome fully shown and the arrow to rest.
   body.scrollTop = 300; s.ssScrollChrome();
   assert(shift() > 0);
   s.ssShow(d.steps.findIndex((x) => x.id === "c1"), "result");
   assert.equal(chrome.style.transform || "", "", "a new pane starts with the chrome fully shown");
   assert.equal(chrome.style.opacity || "", "", "and fully opaque");
+  assert.equal(up.style.top || "", "", "and the arrow back at its resting spot");
 });
 
 check("a running turn refreshes its steps live in the detail, without repainting the pane", async () => {

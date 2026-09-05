@@ -13423,6 +13423,8 @@ function ssPaintBody(paneObj) {
   ssChromeShift = 0;
   const chrome = $("ss-chrome");
   if (chrome) { chrome.style.transform = ""; chrome.style.opacity = ""; } // fresh pane: fully shown
+  const up = $("ss-scroll-top");
+  if (up) up.style.top = ""; // and the arrow returns to its resting spot
   ssFadeArrows();
   const whole = $("ss-whole");
   const segs = paneObj ? ((paneObj.more && ssWhole) ? paneObj.more.segs : paneObj.segs)
@@ -13789,6 +13791,9 @@ let ssArrowFadeTimer = null;
 // `ssChromeShift` the pixels the chrome is currently translated up (0..height).
 let ssChromeLast = 0;
 let ssChromeShift = 0;
+// Hold the bar fully opaque until it is this far slid away (fraction of its
+// height); only the last stretch fades, so it never leaks content half-faded.
+const SS_CHROME_FADE_FROM = 0.6;
 
 function ssFadeArrows() {
   $("ss-scroll-down").hidden = true;
@@ -13825,8 +13830,18 @@ function ssScrollChrome() {
   ssChromeShift = Math.min(h, Math.max(0, ssChromeShift + delta));
   if (top <= 0) ssChromeShift = 0; // fully shown at the very top
   chrome.style.transform = ssChromeShift ? `translateY(${-ssChromeShift}px)` : "";
-  // Fade as it slides, like a native top bar: opaque when shown, gone when up.
-  chrome.style.opacity = ssChromeShift && h ? String(Math.max(0, 1 - ssChromeShift / h)) : "";
+  // Fade like a native top bar — but the bar STAYS OPAQUE while it still covers
+  // content, or the payload scrolling under it bleeds through a half-faded bar.
+  // Hold full opacity until it is mostly slid away, then fade the last stretch
+  // (by then only a thin sliver near the top edge is still on screen).
+  const fadeFrom = h * SS_CHROME_FADE_FROM;
+  const op = h && ssChromeShift > fadeFrom
+    ? Math.max(0, 1 - (ssChromeShift - fadeFrom) / (h - fadeFrom)) : 1;
+  chrome.style.opacity = ssChromeShift && h ? String(op) : "";
+  // The scroll-to-top arrow rides with the header's bottom edge, so it never
+  // overlaps the bar: below the bar when shown, up near the top when hidden.
+  const up = $("ss-scroll-top");
+  if (up) up.style.top = `${Math.max(12, h - ssChromeShift + 8)}px`;
   ssChromeLast = top;
 }
 
