@@ -1028,8 +1028,11 @@ TOOL_SCHEMAS = [
             "description": (
                 "Do ONE thing to ONE control on the page browse opened, naming "
                 "it the way it is written in the list — browse_act(target=\"Log "
-                "in\"). You get back WHAT CHANGED on the page, not the whole "
-                "page again: if it says nothing changed, the control did "
+                "in\"). You get back WHAT IS NEW on the page, not the whole "
+                "page again: what is not listed is what you last saw — keep "
+                "using it, but the page can change or drop things without "
+                "telling you, so re-read anything that must be current. If it "
+                "says nothing changed, the control did "
                 "nothing and pressing it again will not help — find another "
                 "route. When the reply carries a section headed \"the page's own "
                 "console\", READ IT before deciding what to do next — a line "

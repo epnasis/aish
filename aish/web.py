@@ -2515,14 +2515,6 @@ BROWSE_CONTROLS_NOTE = (
     "it.]\n"
 )
 
-# How many change reports in a row before the whole page is sent again. A chain
-# of deltas is a reconstruction, and a reconstruction drifts: the model stops
-# being able to see what it has not been reminded of. Ten is a compromise
-# between that and the bill the whole feature exists to cut — and it is a floor
-# under drift, not the only cure, since a delta bigger than the cap and any
-# change of page both send the page anyway.
-DELTA_RUN_MAX = 10
-
 class BrowseView:
     """ONE CHAT's view of the browsed page — what it was last shown, and which
     document that was.
@@ -2555,7 +2547,6 @@ class BrowseView:
         # pass down, and it cannot go out of step with what the gate reads.
         self.key = uuid.uuid4().hex
         self.shown: Any = None
-        self.runs = 0
         # The document this chat's `shown` belongs to, as the browser counted
         # it. Compared before an act so a page another chat drove is refused
         # rather than acted on — see `browser.PAGE_TAKEN`.
@@ -2645,7 +2636,6 @@ class BrowseView:
     def forget(self) -> None:
         """Next page presented is presented in full."""
         self.shown = None
-        self.runs = 0
         self.epoch = None
         self.start_call()
 
@@ -2703,15 +2693,20 @@ def _present_snapshot(
     view: BrowseView | None = None,
 ) -> str:
     """A driven page, as the model receives it — the whole page, or only what
-    an action changed about it.
+    an action revealed about it.
 
     Sending the page back after every click is what made driving one expensive:
     nine actions on lot.com cost 44 788 characters, most of it the same page
     text and the same control list, re-sent to say that a dropdown had opened.
-    So an action reports its CHANGES, and the page comes back whole only when
-    it is genuinely a different page, when the change is bigger than the page,
-    when something went wrong, when the model asks, or every DELTA_RUN_MAX
-    reports so its picture cannot drift for long."""
+    So an action reports what is NEW (#361), and the page comes back whole only
+    when it is genuinely a different page, when something went wrong, or when
+    the model asks. The change report is bounded by construction and always
+    sendable — there is no over-cap fallback to the page, and no scheduled
+    re-send either: the retired every-DELTA_RUN_MAX refresh re-sent a page the
+    model already held, on a timer, which is the repetition the whole design
+    exists to cut. The model's picture cannot silently rot into a wrong press —
+    acting re-resolves against the live page and refuses with a fresh view —
+    and a fact that must be current is re-read on demand."""
     seen = _seen(view)
     if (
         acted
@@ -2719,23 +2714,19 @@ def _present_snapshot(
         and not topic
         and not snapshot.problem
         and seen.shown.url == snapshot.url
-        and seen.runs < DELTA_RUN_MAX
     ):
         delta = browse_mod.diff_snapshots(seen.shown, snapshot)
-        if delta.worth_sending():
-            runs = seen.runs + 1
-            seen.remember(snapshot)
-            seen.runs = runs
-            # The delta coming back empty is recorded, not only spoken: it is
-            # the "did that click work" fact, and the one anomaly on this path
-            # that no other field carries — a press that landed and was ignored
-            # sets no problem, no cover and no error. Written only where a
-            # delta was actually computed; a full-page report observes nothing
-            # about change and writes nothing (corollary 2).
-            seen.unchanged = delta.empty()
-            return _present_change(snapshot, delta)
+        seen.remember(snapshot)
+        # The delta coming back empty is recorded, not only spoken: it is
+        # the "did that click work" fact, and the one anomaly on this path
+        # that no other field carries — a press that landed and was ignored
+        # sets no problem, no cover and no error. Written only where a
+        # delta was actually computed; a full-page report observes nothing
+        # about change and writes nothing (corollary 2). True stasis only:
+        # a page that shows less than before is not "unchanged".
+        seen.unchanged = delta.empty()
+        return _present_change(snapshot, delta)
     seen.remember(snapshot)
-    seen.runs = 0
     return _present_page(snapshot, topic=topic, cut=cut)
 
 
@@ -2851,7 +2842,12 @@ def _present_change(snapshot, delta) -> str:
         said
         + UNTRUSTED_NOTE
         + head
-        + "\n[what your action changed — everything else is as you last saw it]\n"
+        # The frame line is the channel contract in one sentence (#361): what
+        # is listed is new; what is not listed is what the model last saw —
+        # which is its knowledge of the page, not a promise of stasis, so it
+        # must not claim "everything else is unchanged".
+        + "\n[what your action added or changed — anything not listed is as "
+        "you last saw it, though the page may show less]\n"
         + delta.render()
         # Only when the delta came back EMPTY, and immediately after it,
         # because then the two are one answer: an empty delta and a thrown
