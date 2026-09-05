@@ -191,6 +191,8 @@ Draft-and-hold, built out of the existing gate: `_triggered_safe` plus a branch 
 
 Testable by construction: both effectful edges are `run_poll(gws=…, post=…)` parameter seams, so `tests/test_email_poll.py` needs no subprocess and no network. Its `trigger()` helper takes an `origin`, which is how `curate.py` posts `origin="schedule"`.
 
+**gws credentials must come from the poller's launchd environment.** `default_gws` runs bare `gws` with inherited env, and gws's default credential store is the macOS Keychain — whose secret needs a GUI prompt a launchd child can never answer, so from launchd it presents as "no credentials" while a terminal login looks fine. From 2026-08-16 to 2026-09-05 the poller failed exactly this way every 3 minutes, visibly in its own log and nowhere else. The deployment (com.aish.email-poll.plist `EnvironmentVariables`) must therefore carry `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` plus `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` pointing at a file-backend account store (this machine: `~/.config/gws-accounts/<email>/`, written by `~/.config/aish/tools/_gws/login.sh`). Any future non-wrapper gws consumer needs the same two variables.
+
 ---
 
 ## Notifications

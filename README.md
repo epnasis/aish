@@ -732,7 +732,10 @@ ingress is hardened against delivery storms: a repeat POST carrying the same
 each origin is rate-limited, and concurrently running automated sessions are
 capped — over either limit the endpoint answers 429 with a Retry-After, and a
 well-behaved source just retries later. The bundled `aish-email-poll` command
-is the email source: it polls the bot mailbox via `gws`, accepts only
+is the email source: it polls the bot mailbox via `gws` (whose credentials
+must be readable headless — a file-backend store supplied through the poller's
+launchd environment, since a Keychain-backed `gws auth login` cannot be read
+without a GUI prompt), accepts only
 DMARC-authenticated mail from the owner's addresses, and fires `/trigger` with
 the Gmail message id as the dedup key; a message is marked processed only
 after a successful trigger, so a refused or failed delivery retries on the
