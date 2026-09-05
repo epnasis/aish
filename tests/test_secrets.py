@@ -3,6 +3,7 @@ store so tests never touch the real login Keychain.
 """
 
 import subprocess
+import sys
 
 import pytest
 
@@ -104,6 +105,51 @@ def personal(tmp_path, monkeypatch):
     yield kc
     secrets._invalidate()
     secrets._invalidate_personal()
+
+
+class TestSecretCliSet:
+    """`aish secret set` must accept a piped value. getpass reads the tty in
+    canonical mode, whose line buffer on macOS tops out at 1024 bytes; a
+    pasted line past that is discarded wholesale and Enter never registers
+    (measured 2026-09-05: a 1000-byte line arrives, a 1024-byte line never
+    does). A base64-encoded RSA key is ~4300 bytes, so the pipe is the only
+    route for it: `base64 < key.pem | tr -d '\\n' | aish secret set NAME`."""
+
+    def test_piped_value_longer_than_a_tty_line_is_stored(self, store, monkeypatch):
+        import io
+
+        from aish import cli
+
+        long_value = "A" * 4356
+        monkeypatch.setattr(sys, "stdin", io.StringIO(long_value + "\n"))
+        assert cli._secret_cli(["set", "BIG_KEY"]) == 0
+        assert secrets.get("BIG_KEY") == long_value
+
+    def test_a_tty_still_prompts_hidden(self, store, monkeypatch, capsys):
+        import getpass
+
+        from aish import cli
+
+        class Tty:
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(sys, "stdin", Tty())
+        monkeypatch.setattr(getpass, "getpass", lambda prompt="": "v123")
+        assert cli._secret_cli(["set", "SMALL"]) == 0
+        assert secrets.get("SMALL") == "v123"
+        # The value must never have been echoed.
+        assert "v123" not in capsys.readouterr().out
+
+    def test_a_piped_empty_value_aborts(self, store, monkeypatch, capsys):
+        import io
+
+        from aish import cli
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO("\n"))
+        assert cli._secret_cli(["set", "EMPTY"]) == 1
+        assert "aborted" in capsys.readouterr().out
+        assert secrets.get("EMPTY") is None
 
 
 class TestDeclaredPersonalValues:
