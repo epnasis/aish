@@ -11383,7 +11383,7 @@ function previewShow(i) {
   const save = $("preview-save");
   if (save) {
     save.hidden = !item.file;
-    save.title = item.file ? `Save ${item.name || "this file"}` : "";
+    save.title = item.file ? `Save ${item.name || "this file"}${previewSaveHint()}` : "";
   }
   // Share rides along with Save — same file, same moment — but is drawn only
   // where the browser can actually hand a FILE to a share sheet ([ATTACH-SHARE]).
@@ -11478,13 +11478,26 @@ function previewSaveTarget() {
 // pushed, the new one comes in from the other side. Done on the single <img>
 // rather than two elements — a viewer that keeps both loaded is a memory
 // problem on a phone for a nicety nobody asked for.
+//
+// A step in flight owns the picture until it lands. The slide is a three-stage
+// sequence on one element, and a second step begun inside the first repaints
+// the slide from its middle and queues a move to the page already being moved
+// to — a finger cannot do that, but a HELD-DOWN arrow key fires every few
+// milliseconds and does it a dozen times.
+let previewStepping = false;
+
 function previewStep(direction) {
   const box = previewBox();
   const next = previewIndex + direction;
-  if (!box || !previewGroup[next]) return false;
+  if (previewStepping || !box || !previewGroup[next]) return false;
+  previewStepping = true;
   previewState = { scale: 1, x: -direction * box.view.w, y: 0 };
   previewPaint(true, 0, true);
   setTimeout(() => {
+    // Cleared here rather than when the incoming picture finishes animating:
+    // that last stage runs in a requestAnimationFrame, which a hidden page
+    // never runs at all — a flag left set there would wedge the pager.
+    previewStepping = false;
     previewShow(next);
     previewState = { scale: 1, x: direction * box.view.w, y: 0 };
     previewPaint(false, 0, true);      // placed off-screen with no animation…
@@ -11497,6 +11510,46 @@ function previewStep(direction) {
 }
 
 const PREVIEW_SLIDE_MS = 200;
+
+// The keyboard's half of the two gestures a desktop has no fingers for: ← / →
+// turn the page a swipe would, and Cmd/Ctrl+S saves what the Save button saves.
+//
+// While it is up the preview OWNS these keys, because it is the topmost layer —
+// it is opened FROM every other one. So an arrow is consumed even at the ends of
+// the set, where the swipe merely gives: falling through would turn "there is no
+// page 10" into the step screen underneath silently moving a step.
+//
+// Cmd/Ctrl+S is the exception that must NOT be consumed unconditionally. It maps
+// to exactly what the Save button does, and only where that button is drawn — a
+// picture with no file behind it has nothing to hand over, and swallowing the
+// chord there is a shortcut that silently does nothing, which is
+// indistinguishable from one that missed.
+function previewKey(e) {
+  if (!previewIsOpen() || e.altKey || e.shiftKey) return false;
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+    const target = previewSaveTarget();
+    if (!target) return false;
+    saveAttachment(target.file, target.name);
+    return true;
+  }
+  if (e.metaKey || e.ctrlKey) return false;
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    previewStep(e.key === "ArrowRight" ? 1 : -1);
+    return true;
+  }
+  return false;
+}
+
+// The chord is otherwise invisible: there is nothing on a photograph to say a
+// key does anything, and this one is TAKEN from the browser's own Save. Shown
+// only on a pointer that has a modifier key beside it — a phone would be
+// advertising a chord it cannot type.
+function previewSaveHint() {
+  if (typeof matchMedia !== "function" || !matchMedia("(pointer: fine)").matches) return "";
+  return /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "")
+    ? " (⌘S)"
+    : " (Ctrl+S)";
+}
 
 function closePreview() {
   const box = $("preview");
@@ -15592,6 +15645,10 @@ document.addEventListener("keydown", (e) => {
   // takes Escape first — ahead even of the confirm modal, which cannot be
   // raised over it.
   if (e.key === "Escape" && closePreview()) { e.preventDefault(); return; }
+  // …and the rest of what the preview answers to while it is up: ← / → turn the
+  // page, Cmd/Ctrl+S saves the file. Ahead of the step screen for the same
+  // reason Escape is — the arrows mean the picture, not what is behind it.
+  if (previewKey(e)) { e.preventDefault(); return; }
   // The step screen sits under the preview (a frame in its page pane opens the
   // picture over it) and over everything else. Arrows move a step unless the
   // find field has focus, where they move the caret.
