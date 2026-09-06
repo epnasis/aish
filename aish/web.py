@@ -3098,6 +3098,50 @@ def _present_section(snapshot, asked: str, view: BrowseView | None) -> str:
     return notes + UNTRUSTED_NOTE + head + "\n" + body + controls + _submit_hint(snapshot)
 
 
+def _control_lines(snapshot) -> list[str]:
+    """The control list, grouped under the section each control lives in.
+
+    The flat footer was the owner's complaint in #364 verbatim: nothing tied a
+    control to the part of the page it belongs to, so neither he nor the model
+    could say which text lines were pressable — on LinkedIn the model read a
+    label in the TEXT and pressed it in vain, twice. Each `Section` already
+    carries `ns`, the numbers enumeration tagged inside it, so grouping is a
+    re-arrangement of lines that all still ship: every control is listed
+    exactly once, the caps and the never-truncated property are untouched, and
+    the anchor is DOM containment — the map the page itself was measured to
+    have — never a search for the label in the text, which would fabricate
+    ties ("Archive" appears in twenty rows).
+
+    A narrowed list stays flat: its promise is "matches first", which a
+    section order would silently break. So does a page with fewer than two
+    sections, or one whose section map covers none of the controls — a lone
+    header is noise, not a map."""
+    controls = list(snapshot.controls)
+    sections = getattr(snapshot, "sections", None) or []
+    mapped = {n for s in sections for n in s.ns}
+    if (
+        getattr(snapshot, "narrowed", "")
+        or len(sections) < 2
+        or not any(c.n in mapped for c in controls)
+    ):
+        return [c.line() for c in controls]
+    lines: list[str] = []
+    left = controls
+    for section in sections:
+        ns = set(section.ns)
+        inside = [c for c in left if c.n in ns]
+        if not inside:
+            continue
+        left = [c for c in left if c.n not in ns]
+        lines.append(f"[in section: {section.label()}]")
+        lines.extend(c.line() for c in inside)
+    if left:
+        if lines:
+            lines.append("[elsewhere on the page]")
+        lines.extend(c.line() for c in left)
+    return lines
+
+
 def _present_page(
     snapshot,
     *,
@@ -3155,7 +3199,7 @@ def _present_page(
         # never saw.
         if end <= len(body):
             seen.sections_seen.add(key)
-    lines = [c.line() for c in snapshot.controls]
+    lines = _control_lines(snapshot)
     if getattr(snapshot, "unreachable", 0):
         # The sentence a small model needs in order to do the right thing: not
         # "that control does not exist" (which sends it back to guessing URLs)

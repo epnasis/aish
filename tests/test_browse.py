@@ -6510,3 +6510,85 @@ class TestAKeyboardOrderRowIsListed:
         # Each of the two distinct addresses still resolves exactly.
         assert browse.resolve(controls, controls[0].address).control is controls[0]
         assert browse.resolve(controls, controls[1].address).control is controls[1]
+
+
+class TestControlsAreGroupedByTheirSection:
+    """#364 / #372 pillar SEE. The flat footer tied nothing to anything: the
+    model read a control's label in the page TEXT and pressed it in vain,
+    and the owner reading the same render could not say which lines were
+    pressable. Each `Section` already knows the control numbers inside it —
+    DOM containment, measured — so the footer groups under those names.
+    Never by label search: "Archive" appears in twenty rows, and a searched
+    anchor would fabricate a tie."""
+
+    def _snap(self, **kw):
+        controls = browse.controls_from(
+            [{"n": 0, "kind": "button", "name": "Maciej Pawłowski"},
+             {"n": 1, "kind": "link", "name": "Jobs",
+              "detail": "https://x.example/jobs"},
+             {"n": 2, "kind": "button", "name": "Wyloguj"}]
+        )
+        sections = [
+            browse.Section(name="Messaging", text="x" * 200, ns=[0]),
+            browse.Section(name="header", text="y" * 200, ns=[1]),
+        ]
+        return snapshot(controls=controls, sections=sections, **kw)
+
+    def test_the_footer_groups_and_lists_every_control_once(self):
+        out = web_module._present_page(self._snap())
+        lines = out.splitlines()
+        assert "[in section: Messaging]" in lines
+        assert "[in section: header]" in lines
+        assert "[elsewhere on the page]" in lines
+        assert lines.index("[in section: Messaging]") < lines.index(
+            "[in section: header]"
+        ) < lines.index("[elsewhere on the page]")
+        assert out.count("'Maciej Pawłowski'") == 1
+        assert out.count("'Jobs'") == 1
+        assert out.count("'Wyloguj'") == 1
+        # The group header sits directly over its control.
+        maciej = next(
+            i for i, line in enumerate(lines)
+            if "Maciej" in line and "button" in line
+        )
+        assert lines[maciej - 1] == "[in section: Messaging]"
+
+    def test_a_narrowed_list_stays_flat(self):
+        """Narrowing promises "matches first"; a section order would silently
+        break it."""
+        snap = self._snap(narrowed="Maciej", matching=1)
+        out = web_module._present_page(snap)
+        assert "[in section:" not in out
+        assert "'Maciej Pawłowski'" in out
+
+    def test_a_page_without_a_section_map_stays_flat(self):
+        controls = browse.controls_from([{"n": 0, "kind": "button", "name": "OK"}])
+        out = web_module._present_page(snapshot(controls=controls))
+        assert "[in section:" not in out
+        assert "elsewhere on the page" not in out
+        assert "'OK'" in out
+
+    def test_a_map_covering_no_control_stays_flat(self):
+        """`ns` empty means unmapped, never "no controls" — a lone
+        'elsewhere' header over the whole list is noise, not a map."""
+        controls = browse.controls_from([{"n": 5, "kind": "button", "name": "OK"}])
+        sections = [
+            browse.Section(name="a", text="x" * 200, ns=[]),
+            browse.Section(name="b", text="y" * 200, ns=[]),
+        ]
+        out = web_module._present_page(snapshot(controls=controls, sections=sections))
+        assert "[in section:" not in out
+        assert "'OK'" in out
+
+    def test_a_collapsed_section_still_names_its_controls(self):
+        """The payoff for #361's placeholders: a section this chat already saw
+        collapses to one line, and the grouped footer is now what says which
+        controls live behind that placeholder."""
+        snap = self._snap()
+        view = web_module.BrowseView()
+        for section in snap.sections:
+            view.sections_seen.add(browse.section_key(section.text))
+        out = web_module._present_page(snap, view=view)
+        assert "unchanged, already shown in this chat" in out
+        assert "[in section: Messaging]" in out
+        assert "'Maciej Pawłowski'" in out
