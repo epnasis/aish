@@ -3121,6 +3121,18 @@ class Agent:
             if state_dir is not None
             else self.scratch_dir / "transcripts"
         )
+        # Files a plugin tool DOWNLOADED for the model to open (#375): a mail
+        # attachment, a Drive export. The tools-layer sibling of the browser's
+        # downloads store, and in the workspace boundary for the same reason —
+        # the tool names the file and tells the model to read_pdf it, and a
+        # bare temp directory would make that instruction a refusal (#220's
+        # asymmetry). Under scratch when stateless: reachability is WANTED
+        # here, unlike the tool-output cache directly above.
+        self.tool_downloads_dir = (
+            Path(state_dir) / "tool-downloads"
+            if state_dir is not None
+            else self.scratch_dir / "downloads"
+        )
         # Probed recordings, keyed by the source the model named -> (what it
         # is, when we asked). Per-session and in memory only: the expensive
         # half is resolving a SIGNED stream URL that expires, so there is
@@ -5032,6 +5044,14 @@ class Agent:
             # only what a browse action pulled down through a session the owner
             # approved, so reading it back grants nothing new.
             browser.downloads_dir(),
+            # …and a downloading plugin tool (gmail_attachments, drive_read)
+            # does exactly what browse_act does: names a file and tells the
+            # model to open it (#375). The justification stands on this list's
+            # governing sentence alone — the model asked, by calling the tool —
+            # NOT on the browse precedent's "session the owner approved":
+            # read-only plugin tools auto-run, unattended included. Reads
+            # inside it are outside content (see _outside_populated_stores).
+            self.tool_downloads_dir,
         ]
 
     def _execute_tool_calls(self, tool_calls: list[dict], model_call: int = 0) -> list[str]:
@@ -5354,7 +5374,16 @@ class Agent:
         if name in UNTRUSTED_SOURCE_TOOLS:
             if name in DUAL_SOURCE_TOOLS and args is not None:
                 source = str(args.get("url") or args.get("source") or "")
-                return source.lower().startswith(("http://", "https://"))
+                if source.lower().startswith(("http://", "https://")):
+                    return True
+                # A LOCAL source can still be outside content wearing a local
+                # path (#319): a mail attachment in the tool-downloads store, a
+                # file a browse action pulled down. The stores outlive the task
+                # that filled them, so without this a later chat's read_pdf or
+                # show_image delivered the same bytes untainted (#375 review,
+                # finding 2 — the read_file branch below had this, the other
+                # three doors did not).
+                return self._reads_outside_content(source)
             return True
         if name in self._plugin_tools:
             return True
@@ -6214,6 +6243,7 @@ class Agent:
             cap_source=cap_source,
             store_dir=self.tool_output_dir,
             extra_env=self.plugin_env or None,
+            downloads_dir=self.tool_downloads_dir,
         )
 
     def _history_budget(self) -> tuple[int, str]:
@@ -9215,7 +9245,28 @@ class Agent:
         The media store is deliberately absent — a picture is not text read back
         into context, and #318 settled it separately.
         """
-        return [self.documents_dir, self.transcripts_dir, browser.downloads_dir()]
+        return [
+            self.documents_dir,
+            self.transcripts_dir,
+            browser.downloads_dir(),
+            self.tool_downloads_dir,
+        ]
+
+    def _recordless_stores(self) -> list[Path]:
+        """The outside-populated stores whose provenance records are IGNORED,
+        because outside parties hold the pen there (#375 review, finding 1).
+
+        `_artefact_source`'s fallback — absent record = outside — is only half
+        the invariant: a PRESENT record beats it, and in a store whose files
+        arrive with attacker-chosen names and bytes, `invoice.pdf` plus a
+        forged `invoice.pdf.src` saying `outside: false` would launder exactly
+        the bytes the fence went up for. Nothing legitimately writes a record
+        into either store — the browser one has had no write site by design all
+        along — so in these two a record is not evidence of anything and is
+        never read. documents/ and transcripts/ stay record-reading: their
+        records are written by aish itself at conversion time, and their leaf
+        names are content hashes no sender chooses."""
+        return [browser.downloads_dir(), self.tool_downloads_dir]
 
     def _artefact_source(self, path: str) -> "provenance.ArtefactSource | None":
         """Where the bytes at `path` came from, or None when the path is not in
@@ -9234,6 +9285,8 @@ class Agent:
         """
         for store in self._outside_populated_stores():
             if files.contains(store, path, self.cwd):
+                if store in self._recordless_stores():
+                    return provenance.UNKNOWN_ARTEFACT
                 target = files.resolved(path, self.cwd)
                 found = provenance.artefact_source(target) if target else None
                 return found or provenance.UNKNOWN_ARTEFACT

@@ -581,6 +581,72 @@ class TestExtraEnv:
         assert "sk-live" in out and "attacker" not in out
 
 
+DOWNLOADS_SCRIPT = '#!/bin/sh\nprintf %s "${AISH_TOOL_DOWNLOADS_DIR:-none}"\n'
+
+
+class TestDownloadsDir:
+    """#375 — the tool-downloads store reaches every wrapper as
+    AISH_TOOL_DOWNLOADS_DIR, exists by the time the wrapper runs, and is
+    pruned after each call by the same authority as the browser store."""
+
+    def test_downloads_dir_reaches_the_wrapper_and_exists(self, tmp_path):
+        tool, _ = _parse_tool(write_tool(tmp_path / "d", VALID, script=DOWNLOADS_SCRIPT))
+        store = tmp_path / "state" / "tool-downloads"
+        out = execute(tool, {"text": "x"}, cwd=str(tmp_path), downloads_dir=store)
+        assert str(store) in out
+        assert store.is_dir(), "created before the wrapper runs, not by it"
+
+    def test_a_bare_call_leaves_the_variable_unset(self, tmp_path):
+        """Standalone runs (tests, `aish tool check`) have no store; wrappers
+        are contracted to fall back rather than crash."""
+        tool, _ = _parse_tool(write_tool(tmp_path / "d", VALID, script=DOWNLOADS_SCRIPT))
+        out = execute(tool, {"text": "x"}, cwd=str(tmp_path))
+        assert "none" in out
+
+    def test_a_secret_by_the_same_name_still_wins(self, tmp_path):
+        """Same shadowing rule as extra_env: manifest secrets are applied last.
+        Negligible in practice — manifest authorship is gated — pinned so the
+        ordering cannot silently flip."""
+        manifest = write_tool(
+            tmp_path / "d",
+            SECRET_TOOL.replace("secrets: MY_TOKEN", "secrets: AISH_TOOL_DOWNLOADS_DIR"),
+            script='#!/bin/sh\nprintf %s "$AISH_TOOL_DOWNLOADS_DIR"\n',
+        )
+        tool, errors = _parse_tool(manifest)
+        assert errors == []
+        out = execute(
+            tool, {}, cwd=str(tmp_path), get_secret=lambda n: "from-keychain",
+            downloads_dir=tmp_path / "store",
+        )
+        assert "from-keychain" in out
+
+    def test_the_store_is_pruned_after_every_call(self, tmp_path, monkeypatch):
+        from aish import browse
+
+        pruned = []
+        monkeypatch.setattr(browse, "prune_downloads", lambda d: pruned.append(d))
+        tool, _ = _parse_tool(write_tool(tmp_path / "d", VALID, script=DOWNLOADS_SCRIPT))
+        store = tmp_path / "store"
+        execute(tool, {"text": "x"}, cwd=str(tmp_path), downloads_dir=store)
+        assert pruned == [store]
+
+    def test_a_preview_does_not_carry_the_store(self, tmp_path):
+        """A preview is contracted not to mutate, which includes not writing
+        downloads — the variable is chosen to be absent there, not forgotten."""
+        script = (
+            "#!/bin/sh\n"
+            'if [ -n "$AISH_TOOL_PREVIEW" ]; then'
+            ' printf %s "preview:${AISH_TOOL_DOWNLOADS_DIR:-none}"; else cat; fi\n'
+        )
+        manifest = write_tool(
+            tmp_path / "d", VALID.replace("mutating: no", "mutating: yes\npreview: yes"),
+            script=script,
+        )
+        tool, errors = _parse_tool(manifest)
+        assert errors == []
+        assert tp.preview(tool, {"text": "x"}, cwd=str(tmp_path)) == "preview:none"
+
+
 class TestCollision:
     """Shadowing across scopes (#178 P1-3): `mutating` is a monotone floor —
     a project shadow may RAISE a global tool to mutating, never lower it."""
