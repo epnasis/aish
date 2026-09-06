@@ -656,6 +656,7 @@ def execute(
     cap_source: str = "",
     store_dir=None,
     extra_env: dict | None = None,
+    downloads_dir=None,
 ) -> ToolOutcome:
     """Run the tool: validated args as JSON on stdin, raw output + exit code
     back. No shell — the args never pass through shell word-splitting.
@@ -669,6 +670,23 @@ def execute(
     truncated result can be paged WITHOUT re-running the wrapper. All three are
     optional so a bare call still works (tests, `aish tool check`), falling back
     to the flat floor.
+
+    ``downloads_dir`` is the tool-downloads store (#375): where a wrapper that
+    DOWNLOADS a file for the model to open (a mail attachment, an exported
+    document) must put it, because the store is inside `Agent.workspace_roots`
+    and a bare temp directory is not — read_pdf refuses a path it cannot reach,
+    so a tool writing elsewhere names a file the model is not allowed to open.
+    Exposed to the wrapper as ``AISH_TOOL_DOWNLOADS_DIR`` (created here; absent
+    on bare calls, so wrappers need a fallback), and pruned oldest-first after
+    each run through the same `browse.prune_downloads` the browser store uses.
+    The CONTRACT for wrappers: write FLAT (the pruner does not recurse), under
+    a SANITIZED basename — attachment names are sender-chosen, and a traversal
+    in one must never escape the store (`browse.safe_filename` is the model) —
+    and never overwrite an existing entry. Reads of the store are treated as
+    outside content by the agent regardless of any provenance record, so a
+    forged record saved as an attachment grants nothing (#375 review).
+    `preview()` deliberately does NOT carry the variable: a preview is
+    contracted not to mutate, which includes not writing downloads.
 
     Any secrets the manifest declares are resolved (default: the macOS Keychain
     via ``secrets.get``) and injected into ONLY this subprocess's environment —
@@ -684,11 +702,16 @@ def execute(
             error="unresolved_executable",
         )
     env = None
+    if downloads_dir is not None:
+        Path(downloads_dir).mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        env["AISH_TOOL_DOWNLOADS_DIR"] = str(downloads_dir)
     if extra_env:
         # Non-secret per-session context (e.g. the owner's browser User-Agent
         # on an attended turn). Merged first so a manifest-declared secret,
         # applied below, can never be shadowed by it.
-        env = dict(os.environ)
+        if env is None:
+            env = dict(os.environ)
         env.update(extra_env)
     if tool.secrets:
         if get_secret is None:
@@ -732,6 +755,13 @@ def execute(
             verdict_by=VERDICT_EXCEPTION,
             error="start_failed",
         )
+    if downloads_dir is not None:
+        # Oldest-first, same cap and same authority as the browser store. Run
+        # after every call rather than only ones that downloaded: the wrapper's
+        # own report is not evidence of whether it wrote files.
+        from . import browse
+
+        browse.prune_downloads(Path(downloads_dir))
     out = (proc.stdout or "") + (proc.stderr or "")
     return envelope(
         tool.name,
