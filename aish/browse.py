@@ -727,6 +727,11 @@ class Control:
     # from the commit refusal: a GET to another page is what `read_url` does
     # unasked, so it cannot itself be the commit.
     navigates: bool = False
+    # A row the page put in the keyboard order (#372): admitted by its explicit
+    # tabindex, named by its first text line, and pressed focus-then-Enter
+    # FIRST — a centre click on a composite row lands on whichever child sits
+    # there, and the act performed must be the act the gate classified.
+    focus_row: bool = False
 
     def row_note(self) -> str:
         """The row this control sits in, bounded — and saying what it left out.
@@ -2033,7 +2038,7 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     return '';
   };
 
-  const emit = (el, tagOn, kind, name, href, row) => {
+  const emit = (el, tagOn, kind, name, href, row, focusRow) => {
     // Offset by what earlier FRAMES already numbered, so one page has one
     // numbering however many documents it is made of.
     const n = opts.offset + out.length;
@@ -2061,6 +2066,11 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
       // calendar — rather than on the page proper? Only chrome words are
       // demoted by this, and never on something that submits.
       in_widget: !!(el.closest && el.closest(WIDGET)),
+      // A keyboard-order row (#372): pressed focus-then-Enter FIRST, because
+      // a centre click on a composite row lands on whichever child sits
+      // there — the profile link, not the row — and the act performed must
+      // be the act the gate classified.
+      focus_row: !!focusRow,
       option: ['option', 'treeitem'].indexOf(
         (el.getAttribute('role') || '').toLowerCase()) >= 0,
       // A form submit is gated whatever it is called: the nondescript "Dalej"
@@ -2137,6 +2147,43 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     catch (e) { return ''; }
   };
 
+  // A row the page put in the KEYBOARD ORDER (#372): an explicit tabindex >= 0
+  // on an element no other selector admits is the page declaring that a
+  // keyboard user will reach it and press Enter — LinkedIn's own accessibility
+  // text spells that out for its conversation list, whose rows are plain
+  // <div tabindex="0"> that no enumeration rule used to see. Admission is
+  // bounded by STRUCTURE, not by guessing at handlers: a focusable container
+  // whose subtree already holds several ordinary controls is furniture — a
+  // scrollable region, a whole card of buttons — not a pressable row.
+  const ROW_MAX_INNER = 5;
+  const focusRow = (el) => {
+    if (!el.getAttribute) return false;
+    const t = el.getAttribute('tabindex');
+    if (t === null || t === '') return false;
+    const v = parseInt(t, 10);
+    if (isNaN(v) || v < 0) return false;
+    try { return el.querySelectorAll(SEL).length <= ROW_MAX_INNER; }
+    catch (e) { return false; }
+  };
+  // A row is NAMED by its title — the page's own label when it wrote one,
+  // else the row's FIRST TEXT NODE — never by its whole content. A name built
+  // from everything the row says would hand the commit-word classifier prose
+  // to misread, and would swallow the labels of every control inside the row.
+  // The first *line* of innerText was tried and failed in real Chrome: a row
+  // of inline <span>s renders as one line, so "first line" WAS the whole
+  // content (the verify_browse messaging fixture pins this).
+  const firstLineOf = (el) => {
+    const labelled = clean((el.getAttribute && el.getAttribute('aria-label')) || '');
+    if (labelled) return labelled;
+    const scan = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = scan.nextNode())) {
+      const said = clean(node.textContent);
+      if (said) return said;
+    }
+    return '';
+  };
+
   const walk = (root) => {
     for (const el of root.querySelectorAll('*')) {
       if (el.shadowRoot) walk(el.shadowRoot);
@@ -2152,7 +2199,27 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
       if (seen.has(el)) continue;
       let matches = false;
       try { matches = el.matches(SEL); } catch (e) { matches = false; }
-      if (!matches) continue;
+      if (!matches) {
+        // The focusable-row branch (#372). Same reachability law as every
+        // other control — an unreachable row is counted with its reason and
+        // never collected — and a nameless row cannot be asked for, so it is
+        // not listed. Everything else about a row rides the ordinary path:
+        // the same candidate list, the same budget, the same single `emit`.
+        if (!focusRow(el)) continue;
+        seen.add(el);
+        const whyRow = unreachable(el);
+        if (whyRow) {
+          unreached += 1;
+          reasons[whyRow] = (reasons[whyRow] || 0) + 1;
+          continue;
+        }
+        const title = firstLineOf(el);
+        if (!title) continue;
+        matched += 1;
+        found.push({el: el, tagOn: el, kind: 'button', name: title, href: '',
+                    focusRow: true});
+        continue;
+      }
       seen.add(el);
       const type = type_(el);
       if (el.tagName === 'INPUT' && type === 'hidden') continue;
@@ -2278,7 +2345,8 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
   // one dead end for another.
   const room = Math.max(0, opts.max - opts.offset);
   const take = wanted.concat(rest).slice(0, room);
-  for (const c of take) emit(c.el, c.tagOn, c.kind, c.name, c.href, c.row || []);
+  for (const c of take) emit(c.el, c.tagOn, c.kind, c.name, c.href, c.row || [],
+                             c.focusRow);
   // EVIDENCE THAT THIS PAGE COMMITS SOMETHING, read only in the direction that
   // ADDS a card. Absence proves nothing and must never un-gate: a card-on-file
   // checkout has no payment field at all, a PSP's card form is in a
@@ -2917,6 +2985,7 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                 form=str(raw.get("form") or ""),
                 sends_to=str(raw.get("sends_to") or ""),
                 row=[str(line) for line in (raw.get("row") or [])][:ROW_LINES_MAX],
+                focus_row=bool(raw.get("focus_row")),
             )
         )
     return address_controls(controls)

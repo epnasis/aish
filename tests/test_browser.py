@@ -2260,7 +2260,7 @@ class TestTheThingApprovedIsTheThingPressed:
             browser, "_adopt_new_tab", lambda o, k, p, b: _done(p)
         )
 
-        async def press(_page, target, *, mutating, href):
+        async def press(_page, target, *, mutating, href, **_kw):
             pressed.append((target, mutating, href))
             return browse_mod.Pressed()
 
@@ -2388,7 +2388,7 @@ class TestFillingAFormAsOneAct:
             did.append(("type", target, text))
             return browse_mod.Pressed()
 
-        async def pressed(_page, target, *, mutating, href):
+        async def pressed(_page, target, *, mutating, href, **_kw):
             did.append(("press", target))
             return browse_mod.Pressed()
 
@@ -2520,7 +2520,7 @@ class TestFillingAFormAsOneAct:
         so it can reach the trace."""
         from aish import browse as browse_mod
 
-        async def stuck(_page, _target, *, mutating, href):
+        async def stuck(_page, _target, *, mutating, href, **_kw):
             raise browser.Stuck(browse_mod.Cover(by="clb clb-container"))
 
         out, _did, snaps = self._drive(
@@ -2545,7 +2545,7 @@ class TestFillingAFormAsOneAct:
         one."""
         from aish import browse as browse_mod
 
-        async def stuck(_page, _target, *, mutating, href):
+        async def stuck(_page, _target, *, mutating, href, **_kw):
             raise browser.Stuck()
 
         out, _did, snaps = self._drive(
@@ -2968,7 +2968,7 @@ class TestAReadsTabIsNotAdopted:
                 url=session.page.url, title="", text="", problem=problem
             )
 
-        async def press(_page, _target, *, mutating, href):
+        async def press(_page, _target, *, mutating, href, **_kw):
             during(owner, context)
             return browse_mod.Pressed()
 
@@ -4431,3 +4431,68 @@ class TestWhatTheSettleWasWaitingFor:
         stamp = source.index('act_ms = round(')
         snap = source.index("snapshot = await _snapshot(*a, match=topic, **kw)")
         assert stamp < snap, "act_ms must be taken BEFORE the closing snapshot"
+
+
+class TestAKeyboardOrderRowIsPressedEnterFirst:
+    """#372 slice C, the press half. A row's box is a composite: a centre
+    click lands on whichever CHILD sits there — measured on LinkedIn, the
+    profile link, not the conversation — so for a `focus_row` control the
+    ladder inverts: the tab-order gesture the page advertises (verified
+    focus, then Enter) is the real thing and the click is the fallback."""
+
+    def _fakes(self, *, focus_lands=True):
+        calls = []
+
+        class Target:
+            async def click(self, timeout=None):
+                calls.append("click")
+
+            async def evaluate(self, js, *a):
+                if "el.focus()" in js:
+                    calls.append("focus")
+                    return focus_lands
+                return "state"
+
+            async def dispatch_event(self, name):
+                calls.append("dispatch")
+
+        class Keyboard:
+            async def press(self, key):
+                calls.append(f"key:{key}")
+
+        class Page:
+            keyboard = Keyboard()
+
+            async def wait_for_timeout(self, ms):
+                pass
+
+        return Page(), Target(), calls
+
+    def test_a_row_is_focused_and_entered_never_centre_clicked(self):
+        page, target, calls = self._fakes()
+        pressed = _run(
+            browser._press(page, target, mutating=False, href="", enter_first=True)
+        )
+        assert calls[:2] == ["focus", "key:Enter"]
+        assert "click" not in calls
+        assert "aish focused it and pressed Enter" in pressed.note
+
+    def test_a_row_whose_focus_does_not_take_falls_back_to_the_click(self):
+        """Focus is verified before Enter for the reason the keyboard rung
+        always has: a blind Enter goes to the document. A row that will not
+        focus gets the ordinary ladder, where the click may still land on
+        its listener."""
+        page, target, calls = self._fakes(focus_lands=False)
+        pressed = _run(
+            browser._press(page, target, mutating=False, href="", enter_first=True)
+        )
+        assert calls[0] == "focus"
+        assert "key:Enter" not in calls
+        assert "click" in calls
+        assert pressed.note == ""
+
+    def test_an_ordinary_control_still_clicks_first(self):
+        page, target, calls = self._fakes()
+        pressed = _run(browser._press(page, target, mutating=False, href=""))
+        assert calls == ["click"]
+        assert pressed.note == ""

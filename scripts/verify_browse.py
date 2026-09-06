@@ -424,6 +424,69 @@ def absent(snapshot, name):
     assert not hits, f"{name!r} should not be listed, got {[c.line() for c in hits]}"
 
 
+# A page shaped like LinkedIn messaging (#372): conversation rows that are
+# plain <div tabindex="0"> with click+Enter listeners — no href, no role — a
+# child link sharing the row's title line, a focusable toolbar that is
+# furniture, and a tabindex="-1" element that script alone can focus.
+MESSAGING = """<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><title>Wiadomości</title></head>
+<body>
+<h1>Wiadomości</h1>
+<div id="list">
+  <div class="row" tabindex="0" data-open="conv-maciej">
+    <span>Maciej Pawłowski</span>
+    <span>Maciej: super, dzięki, widzę</span>
+    <a href="/hard.html?profile=maciej">Maciej Pawłowski</a>
+  </div>
+  <div class="row" tabindex="0" data-open="conv-akanksha">
+    <span>Akanksha Yadav</span>
+    <span>Akanksha: Hello Pawel</span>
+  </div>
+</div>
+<div id="toolbar" tabindex="0">
+  <span>Pasek narzędzi</span>
+  <button>B1</button><button>B2</button><button>B3</button>
+  <button>B4</button><button>B5</button><button>B6</button>
+</div>
+<div id="ghost" tabindex="-1">Widmo</div>
+<p id="status">closed</p>
+<script>
+  for (const row of document.querySelectorAll('.row')) {
+    const open = () => {
+      document.getElementById('status').textContent = 'opened ' + row.dataset.open;
+    };
+    row.addEventListener('click', open);
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+  }
+</script>
+</body></html>
+"""
+
+
+def check_focus_rows(url: str) -> None:
+    """A row in the keyboard order is a control, pressed Enter-first (#372)."""
+    page = browser.browse_open(url + "messaging.html")
+    rows = [c for c in page.controls if c.focus_row]
+    assert len(rows) == 2, [c.line() for c in page.controls]
+
+    # The row and the link inside it share the title; each is separately
+    # addressable, and neither silently stands in for the other.
+    twins = [c for c in page.controls if c.name == "Maciej Pawłowski"]
+    assert len(twins) == 2, [c.line() for c in page.controls]
+    assert len({c.address for c in twins}) == 2, [c.address for c in twins]
+    absent(page, "Pasek narzędzi")  # a toolbar full of buttons is not a row
+    absent(page, "Widmo")           # tabindex=-1 is not the keyboard order
+    for control in rows:
+        print("keyboard-order row →", control.line())
+
+    maciej = next(c for c in rows if c.name == "Maciej Pawłowski")
+    after = browser.browse_act(maciej.address, "click")
+    assert "opened conv-maciej" in after.text, after.text[-300:]
+    assert "profile=" not in after.url, "the press fell on the child link"
+    assert "focused it and pressed Enter" in (after.notice or ""), after.notice
+    print("pressed Enter-first →", after.notice)
+
+
 # A page shaped like imdb.com/user/<id>/ratings/: a long NUMBERED list whose
 # rows each carry several controls, so it blows both budgets at once — the page
 # text cap and the control cap (#268-#271). The row the checks reach for sits
@@ -1100,6 +1163,7 @@ def main() -> int:
     Path(root, "ratings.html").write_text(long_list_html(), encoding="utf-8")
     Path(root, "podsumowanie.html").write_text(KASA, encoding="utf-8")
     Path(root, "shadow.html").write_text(SHADOW, encoding="utf-8")
+    Path(root, "messaging.html").write_text(MESSAGING, encoding="utf-8")
     port = serve(root)
     url = f"http://127.0.0.1:{port}/"
 
@@ -1111,6 +1175,7 @@ def main() -> int:
     check_long_list(url)
     check_calendar(url)
     check_rows(url)
+    check_focus_rows(url)
     check_spinner(url)
     check_submit_gating(url)
     check_grant_scope(url)

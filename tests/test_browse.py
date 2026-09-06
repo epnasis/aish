@@ -6429,3 +6429,84 @@ class TestAnOutOfReachChangeIsNotNothing:
         after = snapshot(controls=[control(n=0)], unreachable=180)
         assert browse.diff_snapshots(before, after).reach_grew == 0
         assert browse.diff_snapshots(before, after).render() == "nothing on the page changed"
+
+
+class TestAKeyboardOrderRowIsListed:
+    """#372 slice C. A conversation row on LinkedIn is a <div tabindex="0">
+    with a click listener: pressable by any person via the tab order the site
+    itself advertises ("Press return to go to conversation details"), and
+    invisible to an enumeration built from control markup. Admission is the
+    page's own declaration — an explicit tabindex — never a guess at
+    handlers."""
+
+    def test_the_walk_admits_an_explicit_tabindex(self):
+        source = browse.CONTROLS_JS
+        assert "const focusRow = (el)" in source
+        assert "el.getAttribute('tabindex')" in source
+        # tabindex="-1" is focusable only by script — not in the keyboard
+        # order, so not the page telling users to press it.
+        assert "v < 0) return false" in source
+
+    def test_a_focusable_container_full_of_controls_is_not_a_row(self):
+        """The containment rule: a scrollable region or a whole card with
+        tabindex is furniture. The bound is structural — how many ordinary
+        controls its subtree holds — never a class-name guess."""
+        source = browse.CONTROLS_JS
+        assert "const ROW_MAX_INNER = 5" in source
+        assert "el.querySelectorAll(SEL).length <= ROW_MAX_INNER" in source
+
+    def test_a_row_is_named_by_its_first_line_only(self):
+        """A name built from the row's whole content would hand the
+        commit-word classifier prose to misread ("zapłać mi jutro" in a
+        message preview is not a payment button) and would swallow the labels
+        of the row's own children."""
+        source = browse.CONTROLS_JS
+        assert "const firstLineOf = (el)" in source
+        row_branch = source[source.index("if (!focusRow(el)) continue;"):]
+        push = row_branch[:row_branch.index("continue;\n      }")]
+        assert "firstLineOf(el)" in push
+        assert "focusRow: true" in push
+
+    def test_an_unreachable_row_is_counted_and_never_collected(self):
+        """The same law as every other control: reachability filters what is
+        OFFERED, with the reason tallied — the row branch must not become a
+        second door past it."""
+        walk = browse.CONTROLS_JS[
+            browse.CONTROLS_JS.index("const walk ="):browse.CONTROLS_JS.index(
+                "walk(document);")
+        ]
+        row = walk[walk.index("if (!focusRow(el)) continue;"):]
+        row = row[:row.index("seen.add(el);", row.index("found.push"))]
+        assert row.index("unreachable(el)") < row.index("found.push(")
+        assert "unreached += 1" in row
+        assert "reasons[whyRow]" in row
+
+    def test_focus_row_reaches_the_typed_control(self):
+        controls = browse.controls_from(
+            [{"n": 0, "kind": "button", "name": "Maciej Pawłowski",
+              "focus_row": True},
+             {"n": 1, "kind": "button", "name": "Wyślij"}]
+        )
+        assert controls[0].focus_row is True
+        assert controls[1].focus_row is False
+
+    def test_a_row_and_a_link_sharing_a_name_get_distinct_addresses(self):
+        """The collision the design review predicted: the row's first line IS
+        often the text of a link inside it. `address_controls` already owns
+        duplicate names — the two must come out separately addressable, so an
+        exact ask fails loudly with both candidates instead of silently
+        picking either."""
+        controls = browse.controls_from(
+            [{"n": 0, "kind": "button", "name": "Maciej Pawłowski",
+              "focus_row": True, "row": ["super, dzięki, widzę"]},
+             {"n": 1, "kind": "link", "name": "Maciej Pawłowski",
+              "detail": "https://www.linkedin.com/in/maciej"}]
+        )
+        assert controls[0].address != controls[1].address
+        found = browse.resolve(controls, "Maciej Pawłowski")
+        assert found.control is None
+        assert controls[0].address in found.problem
+        assert controls[1].address in found.problem
+        # Each of the two distinct addresses still resolves exactly.
+        assert browse.resolve(controls, controls[0].address).control is controls[0]
+        assert browse.resolve(controls, controls[1].address).control is controls[1]

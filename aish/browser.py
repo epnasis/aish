@@ -5606,7 +5606,7 @@ async def _took(page: Any, target: Any, before: str | None) -> str:
 
 
 async def _press(
-    page: Any, target: Any, *, mutating: bool, href: str
+    page: Any, target: Any, *, mutating: bool, href: str, enter_first: bool = False
 ) -> browse_mod.Pressed:
     """Press it, escalating cheaply. Returns how it went, or raises Stuck.
 
@@ -5637,7 +5637,22 @@ async def _press(
     one fact that says why — the element sitting on top of the control — was
     computed here, reduced to a bool, and dropped. It is carried out on
     `Pressed.cover` so it reaches the trace as well as the model: a press that
-    never landed is precisely the failure nobody can reconstruct afterwards."""
+    never landed is precisely the failure nobody can reconstruct afterwards.
+
+    `enter_first` inverts the top of the ladder for a keyboard-order row
+    (#372): its box is a composite — a centre click lands on whichever CHILD
+    happens to sit there, the profile link rather than the row — so the way
+    the page's own tab order offers it (focus, then Enter) is the real thing
+    here and the click is the fallback. Focus is still verified before Enter,
+    for the reason the keyboard rung always has."""
+    if enter_first and await _focus(target):
+        before = await _activation(target)
+        with contextlib.suppress(Exception):
+            await page.keyboard.press("Enter")
+            return browse_mod.Pressed(
+                note="a keyboard-order row: aish focused it and pressed Enter"
+                + await _took(page, target, before),
+            )
     with contextlib.suppress(Exception):
         await target.click(timeout=ACT_TIMEOUT_MS)
         return browse_mod.Pressed()
@@ -5904,7 +5919,9 @@ def browse_act(
         try:
             if action == "click":
                 pressed = await _press(
-                    page, target, mutating=mutating, href=approved_href if top else ""
+                    page, target, mutating=mutating,
+                    href=approved_href if top else "",
+                    enter_first=control.focus_row,
                 )
             elif action == "type":
                 pressed = await _type(page, target, text=text, submit=submit)
@@ -6311,7 +6328,10 @@ async def _run_step(
         # flat "pressed 'Potwierdź'" inside a fill. The model believed the
         # batch, said the dates were set, and they were not. A batch must never
         # be more confident than the single act it is made of.
-        pressed = await _press(page, target, mutating=control.mutating, href="")
+        pressed = await _press(
+            page, target, mutating=control.mutating, href="",
+            enter_first=control.focus_row,
+        )
         said = f"pressed {control.address!r}"
         return f"{said} — {pressed.note}" if pressed.note else said
     await _type(page, target, text=value, submit=False)
