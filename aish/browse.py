@@ -727,6 +727,21 @@ class Control:
     # from the commit refusal: a GET to another page is what `read_url` does
     # unasked, so it cannot itself be the commit.
     navigates: bool = False
+    # A row the page put in the keyboard order (#372): admitted by its explicit
+    # tabindex, named by its first text line, and pressed focus-then-Enter
+    # FIRST — a centre click on a composite row lands on whichever child sits
+    # there, and the act performed must be the act the gate classified.
+    focus_row: bool = False
+    # Hidden now, and the page ITSELF says how it becomes pressable (#372):
+    # "hover" (a ':hover' rule names an ancestor revealer) or "focus" (hidden
+    # by opacity alone, so still focusable). "" for every ordinary control.
+    # The press path performs the reveal and REFUSES unless reachability
+    # measurably flips — the reveal-flip is the only door, and the synthetic
+    # -event and link-destination rungs are never used on one of these.
+    reveal: str = ""
+    # The revealer as DESCRIBED to the owner and model (an id or class word).
+    # Display only: the press path re-derives the element from the live page.
+    revealer: str = ""
 
     def row_note(self) -> str:
         """The row this control sits in, bounded — and saying what it left out.
@@ -755,6 +770,11 @@ class Control:
             bits += f" → {short_detail(self.detail)}"
         if said := self.row_note():
             bits += f" — in: {said}"
+        if self.reveal == "hover":
+            named = f" {self.revealer!r}" if self.revealer else ""
+            bits += f"  (hidden now — revealed by hovering{named})"
+        elif self.reveal == "focus":
+            bits += "  (hidden now — revealed by focusing it)"
         if self.disabled:
             bits += "  (disabled)"
         if self.mutating:
@@ -1236,6 +1256,12 @@ class Snapshot:
     title: str
     text: str
     controls: list[Control] = field(default_factory=list)
+    # Hidden-but-revealable controls (#372), NEVER in `controls`: their own
+    # list is what keeps a hidden twin from renaming a visible control's
+    # address or winning a resolution tie (#347's regressions). Addressed by
+    # `resolve_two_tier`, where visible always wins; pressed only through the
+    # reveal-flip door in the act path.
+    revealable: list[Control] = field(default_factory=list)
     # The page as tiles (#361 slice 2), when the walk could tile it; `text`
     # is then `sections_render(sections)` and this list is the AUTHORITY a
     # collapsing or section-addressed renderer reads — never re-parsed from
@@ -1792,6 +1818,92 @@ REACH_JS = DEEP_JS + """
     return '';
   };
 """
+# #372: the CHECKED signals for a control that is invisible NOW but that the
+# page ITSELF says is revealable. Two signals, both validated on real pages
+# (the probes are recorded on #372); anything neither proves stays a plain
+# unreachable, reported and never guessed around — LinkedIn's row-action
+# buttons are exactly such a miss (React delegates events to the document
+# root, so the page is structurally silent about its hover reveal), and they
+# stay unlisted on purpose.
+#
+# Shared by enumeration AND the press-time reveal for the same reason
+# `REACH_JS` is: two scripts that answer "what reveals this" differently
+# disagree about what is there. Requires `REACH_JS` before it (styleOf,
+# unreachable).
+#
+# Signal 1 — the stylesheet says hovering an ancestor shows it: a ':hover'
+# rule that sets display/visibility/opacity and whose de-hovered selector
+# matches the element OR AN ANCESTOR (`closest`, not `matches` — the
+# revealing rule usually addresses a container; the first probe draft used
+# `matches` and missed). The compound before ':hover' names the REVEALER —
+# the element aish must hover — and it must itself be reachable now.
+#
+# Signal 2 — the element is focusable while hidden: every hiding ancestor
+# hides by OPACITY alone. display:none and visibility:hidden make an element
+# unfocusable, so opacity-only is exactly "still in the keyboard order" —
+# the shape LinkedIn's thread-action buttons were measured to have
+# (opacity:0 container, explicit tabindex). Focus is then the reveal, and
+# the press-time re-measure is the door.
+REVEAL_JS = """
+  let hoverRules = null;
+  const hoverRulesOf = () => {
+    if (hoverRules) return hoverRules;
+    hoverRules = [];
+    for (const sheet of document.styleSheets) {
+      let rules; try { rules = sheet.cssRules; } catch (e) { continue; }
+      // A rule's own selector AND its children, both: since CSS nesting,
+      // EVERY style rule carries a `cssRules` list (empty but truthy), so
+      // the once-idiomatic "if (rule.cssRules) recurse-and-continue" skips
+      // every plain rule on a modern Chrome. That exact bug shipped in the
+      // first census probe and read LinkedIn's stylesheets as having no
+      // hover rules at all — a broken instrument, not a fact about the page.
+      const scan = (list) => {
+        for (const rule of list) {
+          const sel = rule.selectorText;
+          if (sel && sel.indexOf(':hover') >= 0) {
+            const s = rule.style;
+            if (s && (s.display || s.visibility || s.opacity)) {
+              for (const one of sel.split(',')) {
+                if (one.indexOf(':hover') >= 0) hoverRules.push(one.trim());
+              }
+            }
+          }
+          if (rule.cssRules && rule.cssRules.length) scan(rule.cssRules);
+        }
+      };
+      scan(rules);
+    }
+    return hoverRules;
+  };
+  const hoverRevealer = (el) => {
+    for (const one of hoverRulesOf()) {
+      let subject;
+      try { subject = el.closest(one.replace(/:hover/g, '')); }
+      catch (e) { continue; }
+      if (!subject) continue;
+      const before = one.slice(0, one.indexOf(':hover')).trim();
+      let revealer;
+      try { revealer = before ? el.closest(before) : null; }
+      catch (e) { continue; }
+      if (revealer && !unreachable(revealer)) return revealer;
+    }
+    return null;
+  };
+  const focusRevealable = (el) => {
+    for (let n = el; n && n.tagName !== 'BODY'; n = n.parentElement) {
+      const s = styleOf(n);
+      if (s.display === 'none' || s.visibility === 'hidden') return false;
+    }
+    return true;
+  };
+  // How the revealer is DESCRIBED to the owner and the model — never acted
+  // on by this string: the press path re-derives the element live.
+  const revealerSaid = (el) => (
+    (el.id || String(el.className).split(' ')[0] || el.tagName || '')
+      .slice(0, 60)
+  );
+"""
+
 # A dropdown's options are not the page. An airport picker is 312 of them and a
 # country-code picker is 250, and inlining that spends the control budget on
 # data the model does not need until the moment it chooses — on qatarairways.com
@@ -1945,7 +2057,7 @@ NAME_JS = r"""
 # Enumerate, tag, and describe. Runs in the page, walks open shadow roots the
 # same way `_LINKS_JS` does, and reports both what the cap left out and what the
 # page is currently hiding rather than quietly stopping.
-CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
+CONTROLS_JS = "(opts) => {" + REACH_JS + REVEAL_JS + NAME_JS + r"""
   const SEL = [
     'a[href]', 'button', 'input', 'select', 'textarea', 'summary',
     '[role=button]', '[role=link]', '[role=menuitem]', '[role=tab]',
@@ -1960,6 +2072,12 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     '[role=option]', '[role=treeitem]',
   ].join(', ');
   const out = [];
+  // Hidden-but-revealable controls (#372), apart from `out` in every way that
+  // matters: their own candidate list, their own cap, their own output — so a
+  // hidden twin can never rename a visible control's address or win a
+  // resolution tie, which is what listing them naively regresses (#347).
+  const outReveal = [];
+  const revealFound = [];
   // Every control that could be listed, in document order, BEFORE the budget
   // is spent. Collected first so `opts.match` can decide which ones the budget
   // buys: the cap used to run inside the walk, so a control past it was never
@@ -2033,12 +2151,16 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     return '';
   };
 
-  const emit = (el, tagOn, kind, name, href, row) => {
+  const emit = (el, tagOn, kind, name, href, row, focusRow, reveal, revealer) => {
     // Offset by what earlier FRAMES already numbered, so one page has one
-    // numbering however many documents it is made of.
-    const n = opts.offset + out.length;
+    // numbering however many documents it is made of — revealable included,
+    // because the tag is what acting resolves and two elements must never
+    // share a number.
+    const n = opts.offset + out.length + outReveal.length;
     tagOn.setAttribute('data-aish-n', String(n));
-    out.push({
+    (reveal ? outReveal : out).push({
+      reveal: reveal || '',
+      revealer: revealer || '',
       n: n,
       kind: kind,
       name: name,
@@ -2061,6 +2183,11 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
       // calendar — rather than on the page proper? Only chrome words are
       // demoted by this, and never on something that submits.
       in_widget: !!(el.closest && el.closest(WIDGET)),
+      // A keyboard-order row (#372): pressed focus-then-Enter FIRST, because
+      // a centre click on a composite row lands on whichever child sits
+      // there — the profile link, not the row — and the act performed must
+      // be the act the gate classified.
+      focus_row: !!focusRow,
       option: ['option', 'treeitem'].indexOf(
         (el.getAttribute('role') || '').toLowerCase()) >= 0,
       // A form submit is gated whatever it is called: the nondescript "Dalej"
@@ -2137,6 +2264,43 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
     catch (e) { return ''; }
   };
 
+  // A row the page put in the KEYBOARD ORDER (#372): an explicit tabindex >= 0
+  // on an element no other selector admits is the page declaring that a
+  // keyboard user will reach it and press Enter — LinkedIn's own accessibility
+  // text spells that out for its conversation list, whose rows are plain
+  // <div tabindex="0"> that no enumeration rule used to see. Admission is
+  // bounded by STRUCTURE, not by guessing at handlers: a focusable container
+  // whose subtree already holds several ordinary controls is furniture — a
+  // scrollable region, a whole card of buttons — not a pressable row.
+  const ROW_MAX_INNER = 5;
+  const focusRow = (el) => {
+    if (!el.getAttribute) return false;
+    const t = el.getAttribute('tabindex');
+    if (t === null || t === '') return false;
+    const v = parseInt(t, 10);
+    if (isNaN(v) || v < 0) return false;
+    try { return el.querySelectorAll(SEL).length <= ROW_MAX_INNER; }
+    catch (e) { return false; }
+  };
+  // A row is NAMED by its title — the page's own label when it wrote one,
+  // else the row's FIRST TEXT NODE — never by its whole content. A name built
+  // from everything the row says would hand the commit-word classifier prose
+  // to misread, and would swallow the labels of every control inside the row.
+  // The first *line* of innerText was tried and failed in real Chrome: a row
+  // of inline <span>s renders as one line, so "first line" WAS the whole
+  // content (the verify_browse messaging fixture pins this).
+  const firstLineOf = (el) => {
+    const labelled = clean((el.getAttribute && el.getAttribute('aria-label')) || '');
+    if (labelled) return labelled;
+    const scan = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = scan.nextNode())) {
+      const said = clean(node.textContent);
+      if (said) return said;
+    }
+    return '';
+  };
+
   const walk = (root) => {
     for (const el of root.querySelectorAll('*')) {
       if (el.shadowRoot) walk(el.shadowRoot);
@@ -2152,7 +2316,27 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
       if (seen.has(el)) continue;
       let matches = false;
       try { matches = el.matches(SEL); } catch (e) { matches = false; }
-      if (!matches) continue;
+      if (!matches) {
+        // The focusable-row branch (#372). Same reachability law as every
+        // other control — an unreachable row is counted with its reason and
+        // never collected — and a nameless row cannot be asked for, so it is
+        // not listed. Everything else about a row rides the ordinary path:
+        // the same candidate list, the same budget, the same single `emit`.
+        if (!focusRow(el)) continue;
+        seen.add(el);
+        const whyRow = unreachable(el);
+        if (whyRow) {
+          unreached += 1;
+          reasons[whyRow] = (reasons[whyRow] || 0) + 1;
+          continue;
+        }
+        const title = firstLineOf(el);
+        if (!title) continue;
+        matched += 1;
+        found.push({el: el, tagOn: el, kind: 'button', name: title, href: '',
+                    focusRow: true});
+        continue;
+      }
       seen.add(el);
       const type = type_(el);
       if (el.tagName === 'INPUT' && type === 'hidden') continue;
@@ -2167,6 +2351,26 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
           ? labelElement(el) : null;
         const labWhy = lab ? unreachable(lab) : null;
         if (!lab || labWhy) {
+          // #372: `invisible` — and ONLY `invisible`, never the page's own
+          // semantic statements (aria-hidden, inert, [hidden], a closed
+          // details) — may still be a revealable control, when a CHECKED
+          // signal proves it and it has a name to be asked for by. Admitted
+          // ones go to their own list and are not counted out of reach: the
+          // trace distinguishes "listed as revealable" from "unreachable" so
+          // the #370 diagnostic keeps meaning what it measured.
+          if (why === 'invisible') {
+            const revealer = hoverRevealer(el);
+            const canFocus = revealer ? null : focusRevealable(el);
+            const revealName = (revealer || canFocus) ? nameOf(el) : '';
+            if (revealName) {
+              revealFound.push({
+                el: el, tagOn: el, kind: kindOf(el, type), name: revealName,
+                href: '', reveal: revealer ? 'hover' : 'focus',
+                revealer: revealer ? revealerSaid(revealer) : '',
+              });
+              continue;
+            }
+          }
           unreached += 1;
           // WHY, not just how many (#350). This predicate already decided the
           // reason and the count threw it away, so the sentence built on the
@@ -2278,7 +2482,23 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
   // one dead end for another.
   const room = Math.max(0, opts.max - opts.offset);
   const take = wanted.concat(rest).slice(0, room);
-  for (const c of take) emit(c.el, c.tagOn, c.kind, c.name, c.href, c.row || []);
+  // The revealable list rides the SAME single emit under its own cap — one
+  // writer of the tag, however many lists it fills. Topic-matched first for
+  // the same reason the visible budget is, and never competing with it: a
+  // page of a hundred visible controls still lists its revealable ones.
+  const revealTake = (needle
+    ? revealFound.filter(hit).concat(revealFound.filter((c) => !hit(c)))
+    : revealFound).slice(0, opts.maxReveal || 12);
+  // A revealable candidate the cap leaves out is not listed, so it goes back
+  // to being what it is: an invisible control out of reach, counted as one.
+  if (revealFound.length > revealTake.length) {
+    const left = revealFound.length - revealTake.length;
+    unreached += left;
+    reasons['invisible'] = (reasons['invisible'] || 0) + left;
+  }
+  for (const c of revealTake) take.push(c);
+  for (const c of take) emit(c.el, c.tagOn, c.kind, c.name, c.href, c.row || [],
+                             c.focusRow, c.reveal, c.revealer);
   // EVIDENCE THAT THIS PAGE COMMITS SOMETHING, read only in the direction that
   // ADDS a card. Absence proves nothing and must never un-gate: a card-on-file
   // checkout has no payment field at all, a PSP's card form is in a
@@ -2366,6 +2586,7 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
 
   return {
     controls: out,
+    revealable: outReveal,
     commit: commitEvidence(),
     matched: matched,
     unreachable: unreached,
@@ -2867,6 +3088,16 @@ def section_key(text: str) -> str:
 # costs ~50ms and replaces a 45-second timeout with a sentence.
 REACHABLE_JS = "(el) => {" + REACH_JS + "  return unreachable(el);\n}"
 
+# The press-time half of the hover signal (#372): the LIVE revealer element
+# for a hidden control, re-derived from the live page's own stylesheets —
+# never remembered from enumeration, because the page may have re-rendered
+# between the card and the press. Same shared constants as enumeration, for
+# the reason REACH_JS is shared: two scripts answering "what reveals this"
+# differently disagree about what is there.
+REVEALER_ELEMENT_JS = (
+    "(el) => {" + REACH_JS + REVEAL_JS + "  return hoverRevealer(el);\n}"
+)
+
 # `block: 'center'` is the sticky-header dodge — the middle of the viewport is
 # the one place a pinned bar is not. It also takes a different code path from the
 # CDP scroll Playwright uses internally, which is the one that has been silently
@@ -2917,6 +3148,9 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                 form=str(raw.get("form") or ""),
                 sends_to=str(raw.get("sends_to") or ""),
                 row=[str(line) for line in (raw.get("row") or [])][:ROW_LINES_MAX],
+                focus_row=bool(raw.get("focus_row")),
+                reveal=str(raw.get("reveal") or ""),
+                revealer=str(raw.get("revealer") or ""),
             )
         )
     return address_controls(controls)
@@ -2992,6 +3226,11 @@ class Resolution:
 
     control: Control | None = None
     problem: str = ""
+    # The ask matched SEVERAL controls — a loud, final answer carrying the
+    # candidates. Carried as a fact rather than sniffed out of the sentence,
+    # because the two-tier resolve must stop on it: an ambiguity among
+    # visible controls is not a license to go looking in the hidden ones.
+    ambiguous: bool = False
 
 
 def resolve(controls: list[Control], target: Any) -> Resolution:
@@ -3023,7 +3262,7 @@ def resolve(controls: list[Control], target: Any) -> Resolution:
         if settled is not None:
             return Resolution(control=settled)
         if hits:
-            return Resolution(problem=_ambiguous(asked, hits))
+            return Resolution(problem=_ambiguous(asked, hits), ambiguous=True)
 
     digits = asked.lstrip("#")
     if digits.isdigit():
@@ -3045,7 +3284,7 @@ def resolve(controls: list[Control], target: Any) -> Resolution:
     if settled is not None:
         return Resolution(control=settled)
     if loose:
-        return Resolution(problem=_ambiguous(asked, loose))
+        return Resolution(problem=_ambiguous(asked, loose), ambiguous=True)
     if digits.isdigit():
         return Resolution(
             problem=f"there is no control {asked!r} on this page any more"
@@ -3054,6 +3293,26 @@ def resolve(controls: list[Control], target: Any) -> Resolution:
         problem=f"no control on this page is called {asked!r}. This page has: "
         f"{_addresses(controls)}."
     )
+
+
+def resolve_two_tier(
+    controls: list[Control], revealable: list[Control], target: Any
+) -> Resolution:
+    """The visible list first, the revealable list only when it says nothing.
+
+    VISIBLE ALWAYS WINS — the tie rule that keeps #347's regressions closed: a
+    hidden twin must never stand in for the control that works today. An
+    ambiguity among visible controls is final (going on to the hidden list
+    would answer a question the loud refusal already asked the model), and a
+    name found in neither list gets the visible list's refusal, which is the
+    one that names what IS pressable."""
+    found = resolve(controls, target)
+    if found.control is not None or found.ambiguous or not revealable:
+        return found
+    second = resolve(revealable, target)
+    if second.control is not None or second.ambiguous:
+        return second
+    return found
 
 
 def _one_of(hits: list[Control]) -> Control | None:

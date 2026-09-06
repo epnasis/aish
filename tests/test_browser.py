@@ -2249,7 +2249,7 @@ class TestTheThingApprovedIsTheThingPressed:
             )
 
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _done((live, len(live), 0, 0, ""))
+            browser, "_enumerate", lambda p, m="": _done((live, [], len(live), 0, 0, ""))
         )
         monkeypatch.setattr(browser, "_snapshot", snapshot)
         monkeypatch.setattr(browser, "_find", lambda p, n: _done((f"locator-{n}", True)))
@@ -2260,7 +2260,7 @@ class TestTheThingApprovedIsTheThingPressed:
             browser, "_adopt_new_tab", lambda o, k, p, b: _done(p)
         )
 
-        async def press(_page, target, *, mutating, href):
+        async def press(_page, target, *, mutating, href, **_kw):
             pressed.append((target, mutating, href))
             return browse_mod.Pressed()
 
@@ -2375,7 +2375,7 @@ class TestFillingAFormAsOneAct:
             )
 
         async def enumerate_(_page, _match=""):
-            return (next(rounds), 0, 0, 0, "")
+            return (next(rounds), [], 0, 0, 0, "")
 
         monkeypatch.setattr(browser, "_enumerate", enumerate_)
         monkeypatch.setattr(browser, "_snapshot", snapshot)
@@ -2388,7 +2388,7 @@ class TestFillingAFormAsOneAct:
             did.append(("type", target, text))
             return browse_mod.Pressed()
 
-        async def pressed(_page, target, *, mutating, href):
+        async def pressed(_page, target, *, mutating, href, **_kw):
             did.append(("press", target))
             return browse_mod.Pressed()
 
@@ -2520,7 +2520,7 @@ class TestFillingAFormAsOneAct:
         so it can reach the trace."""
         from aish import browse as browse_mod
 
-        async def stuck(_page, _target, *, mutating, href):
+        async def stuck(_page, _target, *, mutating, href, **_kw):
             raise browser.Stuck(browse_mod.Cover(by="clb clb-container"))
 
         out, _did, snaps = self._drive(
@@ -2545,7 +2545,7 @@ class TestFillingAFormAsOneAct:
         one."""
         from aish import browse as browse_mod
 
-        async def stuck(_page, _target, *, mutating, href):
+        async def stuck(_page, _target, *, mutating, href, **_kw):
             raise browser.Stuck()
 
         out, _did, snaps = self._drive(
@@ -2688,7 +2688,7 @@ class TestAPageAnotherChatTookIsNotActedOn:
             )
 
         async def nothing(page, match=""):
-            return [], 0, 0, 0, ""
+            return [], [], 0, 0, 0, ""
 
         monkeypatch.setattr(browser, "_enumerate", nothing)
         monkeypatch.setattr(browser, "_snapshot", snapshot)
@@ -2734,7 +2734,7 @@ class TestAPageAnotherChatTookIsNotActedOn:
 
         async def watched(page, match=""):
             looked.append(page)
-            return [], 0, 0, 0, ""
+            return [], [], 0, 0, 0, ""
 
         monkeypatch.setattr(browser, "_enumerate", watched)
         with pytest.raises(browser.BrowserUnavailable):
@@ -2968,13 +2968,13 @@ class TestAReadsTabIsNotAdopted:
                 url=session.page.url, title="", text="", problem=problem
             )
 
-        async def press(_page, _target, *, mutating, href):
+        async def press(_page, _target, *, mutating, href, **_kw):
             during(owner, context)
             return browse_mod.Pressed()
 
         live = [{"n": 1, "kind": "button", "name": "Pobierz e-fakturę"}]
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _done((live, 1, 0, 0, ""))
+            browser, "_enumerate", lambda p, m="": _done((live, [], 1, 0, 0, ""))
         )
         monkeypatch.setattr(browser, "_snapshot", snapshot)
         monkeypatch.setattr(browser, "_find", lambda p, n: _done((f"locator-{n}", True)))
@@ -3373,7 +3373,7 @@ class TestTheEvidenceFrame:
             browser, "_without_option_floods", lambda p, t: _resolved(t)
         )
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", "", {}))
+            browser, "_enumerate", lambda p, m="": _resolved(([], [], 0, 0, 0, "", "", {}))
         )
         monkeypatch.setattr(
             browser, "_save_downloads", lambda o, **kw: _resolved([])
@@ -3514,7 +3514,7 @@ class TestThePagesConsoleIsCapturedPerAction:
             browser, "_without_option_floods", lambda p, t: _resolved(t)
         )
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", "", {}))
+            browser, "_enumerate", lambda p, m="": _resolved(([], [], 0, 0, 0, "", "", {}))
         )
         monkeypatch.setattr(
             browser, "_save_downloads", lambda o, **kw: _resolved([])
@@ -4035,7 +4035,7 @@ class TestASuggestionThePageDrewAsAButton:
         control = before[0] if before else self._controls([{"name": "Lot do:"}])[0]
         monkeypatch.setattr(browser, "_settle", lambda p, **kw: _resolved(browser.Settled()))
         monkeypatch.setattr(browser, "_enumerate",
-                            lambda p, m="": _resolved(([], 0, 0, 0, "", "", {})))
+                            lambda p, m="": _resolved(([], [], 0, 0, 0, "", "", {})))
         monkeypatch.setattr(browse_mod, "controls_from", lambda raw: after)
         monkeypatch.setattr(browser, "_find", lambda p, n: _resolved((object(), True)))
         monkeypatch.setattr(browser, "_centre", lambda t: _resolved(None))
@@ -4239,7 +4239,7 @@ class TestAStoppedBatchIsStillTimed:
         )
         monkeypatch.setattr(browser, "_without_option_floods", lambda p, t: _resolved(t))
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _resolved(([], 0, 0, 0, "", "", {}))
+            browser, "_enumerate", lambda p, m="": _resolved(([], [], 0, 0, 0, "", "", {}))
         )
         monkeypatch.setattr(browser, "_save_downloads", lambda o, **kw: _resolved([]))
 
@@ -4431,3 +4431,183 @@ class TestWhatTheSettleWasWaitingFor:
         stamp = source.index('act_ms = round(')
         snap = source.index("snapshot = await _snapshot(*a, match=topic, **kw)")
         assert stamp < snap, "act_ms must be taken BEFORE the closing snapshot"
+
+
+class TestAKeyboardOrderRowIsPressedEnterFirst:
+    """#372 slice C, the press half. A row's box is a composite: a centre
+    click lands on whichever CHILD sits there — measured on LinkedIn, the
+    profile link, not the conversation — so for a `focus_row` control the
+    ladder inverts: the tab-order gesture the page advertises (verified
+    focus, then Enter) is the real thing and the click is the fallback."""
+
+    def _fakes(self, *, focus_lands=True):
+        calls = []
+
+        class Target:
+            async def click(self, timeout=None):
+                calls.append("click")
+
+            async def evaluate(self, js, *a):
+                if "el.focus()" in js:
+                    calls.append("focus")
+                    return focus_lands
+                return "state"
+
+            async def dispatch_event(self, name):
+                calls.append("dispatch")
+
+        class Keyboard:
+            async def press(self, key):
+                calls.append(f"key:{key}")
+
+        class Page:
+            keyboard = Keyboard()
+
+            async def wait_for_timeout(self, ms):
+                pass
+
+        return Page(), Target(), calls
+
+    def test_a_row_is_focused_and_entered_never_centre_clicked(self):
+        page, target, calls = self._fakes()
+        pressed = _run(
+            browser._press(page, target, mutating=False, href="", enter_first=True)
+        )
+        assert calls[:2] == ["focus", "key:Enter"]
+        assert "click" not in calls
+        assert "aish focused it and pressed Enter" in pressed.note
+
+    def test_a_row_whose_focus_does_not_take_falls_back_to_the_click(self):
+        """Focus is verified before Enter for the reason the keyboard rung
+        always has: a blind Enter goes to the document. A row that will not
+        focus gets the ordinary ladder, where the click may still land on
+        its listener."""
+        page, target, calls = self._fakes(focus_lands=False)
+        pressed = _run(
+            browser._press(page, target, mutating=False, href="", enter_first=True)
+        )
+        assert calls[0] == "focus"
+        assert "key:Enter" not in calls
+        assert "click" in calls
+        assert pressed.note == ""
+
+    def test_an_ordinary_control_still_clicks_first(self):
+        page, target, calls = self._fakes()
+        pressed = _run(browser._press(page, target, mutating=False, href=""))
+        assert calls == ["click"]
+        assert pressed.note == ""
+
+
+class TestARevealedPressGoesThroughTheFlipDoorOnly:
+    """#372 slice B. A hidden control is the canonical bot honeypot, so the
+    press path for one has exactly one door: perform the gesture the page's
+    own signal named, re-measure, and press only on a measured flip — a real
+    click or a real Enter, never the synthetic-event or link-destination
+    rungs, and every refusal states what was done, never a cause."""
+
+    def _control(self, reveal, revealer=""):
+        from aish import browse as browse_mod
+
+        return browse_mod.controls_from(
+            [{"n": 7, "kind": "button", "name": "Open the options list",
+              "reveal": reveal, "revealer": revealer}]
+        )[0]
+
+    def _fakes(self, *, flips=True, focus_lands=True, revealer_found=True):
+        calls = []
+
+        class Revealer:
+            async def hover(self, timeout=None):
+                calls.append("hover")
+
+        class Handle:
+            def as_element(self):
+                return Revealer() if revealer_found else None
+
+        class Target:
+            def __init__(self):
+                self.revealed = False
+
+            async def evaluate_handle(self, js):
+                calls.append("derive-revealer")
+                return Handle()
+
+            async def evaluate(self, js, *a):
+                if "el.focus()" in js:
+                    calls.append("focus")
+                    if focus_lands:
+                        self.revealed = True
+                    return focus_lands
+                if "return unreachable(el)" in js:
+                    if "hover" in calls:
+                        self.revealed = flips
+                    return "" if (self.revealed and flips) else "invisible"
+                return "state"
+
+            async def click(self, timeout=None):
+                calls.append("click")
+
+            async def dispatch_event(self, name):
+                calls.append("dispatch")
+
+        class Keyboard:
+            async def press(self, key):
+                calls.append(f"key:{key}")
+
+        class Page:
+            keyboard = Keyboard()
+
+            async def wait_for_timeout(self, ms):
+                pass
+
+        return Page(), Target(), calls
+
+    def test_a_hover_reveal_that_flips_is_clicked_for_real(self):
+        page, target, calls = self._fakes(flips=True)
+        pressed = _run(
+            browser._press_revealed(page, target, self._control("hover", "cssrow"))
+        )
+        assert "hover" in calls and "click" in calls
+        assert calls.index("hover") < calls.index("click")
+        assert "dispatch" not in calls
+        assert "aish hovered 'cssrow'" in pressed.note
+        assert "became pressable" in pressed.note
+
+    def test_a_hover_reveal_that_does_not_take_presses_nothing(self):
+        page, target, calls = self._fakes(flips=False)
+        with pytest.raises(browser.Refused) as caught:
+            _run(
+                browser._press_revealed(
+                    page, target, self._control("hover", "cssrow")
+                )
+            )
+        assert "click" not in calls and "key:Enter" not in calls
+        said = str(caught.value)
+        assert "aish hovered 'cssrow'" in said
+        assert "stayed out of reach (invisible)" in said
+        assert "Nothing was pressed" in said
+
+    def test_a_missing_live_revealer_presses_nothing(self):
+        page, target, calls = self._fakes(revealer_found=False)
+        with pytest.raises(browser.Refused, match="no longer names one"):
+            _run(
+                browser._press_revealed(page, target, self._control("hover"))
+            )
+        assert "hover" not in calls and "click" not in calls
+
+    def test_a_focus_reveal_that_flips_presses_enter(self):
+        page, target, calls = self._fakes(flips=True)
+        pressed = _run(
+            browser._press_revealed(page, target, self._control("focus"))
+        )
+        assert "focus" in calls and "key:Enter" in calls
+        assert "click" not in calls and "dispatch" not in calls
+        assert "aish focused it" in pressed.note
+
+    def test_a_focus_that_does_not_land_presses_nothing(self):
+        page, target, calls = self._fakes(focus_lands=False)
+        with pytest.raises(browser.Refused, match="would not take focus"):
+            _run(
+                browser._press_revealed(page, target, self._control("focus"))
+            )
+        assert "key:Enter" not in calls

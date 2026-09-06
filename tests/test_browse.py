@@ -5028,6 +5028,13 @@ class TestEveryPageReaderLooksThroughShadowRoots:
         "_COVERED_JS": "walks el's own host chain — see the `chain` set",
         "_DEEP_ACTIVE_JS": "IS the descent, for focus",
         "NAME_JS": "closest('label') — a label is in its control's own root",
+        "REVEAL_JS": (
+            "closest() and document.styleSheets both stop at a shadow "
+            "boundary ON PURPOSE: the checked signal admits a hidden control "
+            "only when it can SEE the rule, so a boundary it cannot cross "
+            "is a miss that narrows — the control stays plain unreachable — "
+            "and never a wrong admission"
+        ),
     }
 
     def _snippets(self):
@@ -6429,3 +6436,304 @@ class TestAnOutOfReachChangeIsNotNothing:
         after = snapshot(controls=[control(n=0)], unreachable=180)
         assert browse.diff_snapshots(before, after).reach_grew == 0
         assert browse.diff_snapshots(before, after).render() == "nothing on the page changed"
+
+
+class TestAKeyboardOrderRowIsListed:
+    """#372 slice C. A conversation row on LinkedIn is a <div tabindex="0">
+    with a click listener: pressable by any person via the tab order the site
+    itself advertises ("Press return to go to conversation details"), and
+    invisible to an enumeration built from control markup. Admission is the
+    page's own declaration — an explicit tabindex — never a guess at
+    handlers."""
+
+    def test_the_walk_admits_an_explicit_tabindex(self):
+        source = browse.CONTROLS_JS
+        assert "const focusRow = (el)" in source
+        assert "el.getAttribute('tabindex')" in source
+        # tabindex="-1" is focusable only by script — not in the keyboard
+        # order, so not the page telling users to press it.
+        assert "v < 0) return false" in source
+
+    def test_a_focusable_container_full_of_controls_is_not_a_row(self):
+        """The containment rule: a scrollable region or a whole card with
+        tabindex is furniture. The bound is structural — how many ordinary
+        controls its subtree holds — never a class-name guess."""
+        source = browse.CONTROLS_JS
+        assert "const ROW_MAX_INNER = 5" in source
+        assert "el.querySelectorAll(SEL).length <= ROW_MAX_INNER" in source
+
+    def test_a_row_is_named_by_its_first_line_only(self):
+        """A name built from the row's whole content would hand the
+        commit-word classifier prose to misread ("zapłać mi jutro" in a
+        message preview is not a payment button) and would swallow the labels
+        of the row's own children."""
+        source = browse.CONTROLS_JS
+        assert "const firstLineOf = (el)" in source
+        row_branch = source[source.index("if (!focusRow(el)) continue;"):]
+        push = row_branch[:row_branch.index("continue;\n      }")]
+        assert "firstLineOf(el)" in push
+        assert "focusRow: true" in push
+
+    def test_an_unreachable_row_is_counted_and_never_collected(self):
+        """The same law as every other control: reachability filters what is
+        OFFERED, with the reason tallied — the row branch must not become a
+        second door past it."""
+        walk = browse.CONTROLS_JS[
+            browse.CONTROLS_JS.index("const walk ="):browse.CONTROLS_JS.index(
+                "walk(document);")
+        ]
+        row = walk[walk.index("if (!focusRow(el)) continue;"):]
+        row = row[:row.index("seen.add(el);", row.index("found.push"))]
+        assert row.index("unreachable(el)") < row.index("found.push(")
+        assert "unreached += 1" in row
+        assert "reasons[whyRow]" in row
+
+    def test_focus_row_reaches_the_typed_control(self):
+        controls = browse.controls_from(
+            [{"n": 0, "kind": "button", "name": "Maciej Pawłowski",
+              "focus_row": True},
+             {"n": 1, "kind": "button", "name": "Wyślij"}]
+        )
+        assert controls[0].focus_row is True
+        assert controls[1].focus_row is False
+
+    def test_a_row_and_a_link_sharing_a_name_get_distinct_addresses(self):
+        """The collision the design review predicted: the row's first line IS
+        often the text of a link inside it. `address_controls` already owns
+        duplicate names — the two must come out separately addressable, so an
+        exact ask fails loudly with both candidates instead of silently
+        picking either."""
+        controls = browse.controls_from(
+            [{"n": 0, "kind": "button", "name": "Maciej Pawłowski",
+              "focus_row": True, "row": ["super, dzięki, widzę"]},
+             {"n": 1, "kind": "link", "name": "Maciej Pawłowski",
+              "detail": "https://www.linkedin.com/in/maciej"}]
+        )
+        assert controls[0].address != controls[1].address
+        found = browse.resolve(controls, "Maciej Pawłowski")
+        assert found.control is None
+        assert controls[0].address in found.problem
+        assert controls[1].address in found.problem
+        # Each of the two distinct addresses still resolves exactly.
+        assert browse.resolve(controls, controls[0].address).control is controls[0]
+        assert browse.resolve(controls, controls[1].address).control is controls[1]
+
+
+class TestControlsAreGroupedByTheirSection:
+    """#364 / #372 pillar SEE. The flat footer tied nothing to anything: the
+    model read a control's label in the page TEXT and pressed it in vain,
+    and the owner reading the same render could not say which lines were
+    pressable. Each `Section` already knows the control numbers inside it —
+    DOM containment, measured — so the footer groups under those names.
+    Never by label search: "Archive" appears in twenty rows, and a searched
+    anchor would fabricate a tie."""
+
+    def _snap(self, **kw):
+        controls = browse.controls_from(
+            [{"n": 0, "kind": "button", "name": "Maciej Pawłowski"},
+             {"n": 1, "kind": "link", "name": "Jobs",
+              "detail": "https://x.example/jobs"},
+             {"n": 2, "kind": "button", "name": "Wyloguj"}]
+        )
+        sections = [
+            browse.Section(name="Messaging", text="x" * 200, ns=[0]),
+            browse.Section(name="header", text="y" * 200, ns=[1]),
+        ]
+        return snapshot(controls=controls, sections=sections, **kw)
+
+    def test_the_footer_groups_and_lists_every_control_once(self):
+        out = web_module._present_page(self._snap())
+        lines = out.splitlines()
+        assert "[in section: Messaging]" in lines
+        assert "[in section: header]" in lines
+        assert "[elsewhere on the page]" in lines
+        assert lines.index("[in section: Messaging]") < lines.index(
+            "[in section: header]"
+        ) < lines.index("[elsewhere on the page]")
+        assert out.count("'Maciej Pawłowski'") == 1
+        assert out.count("'Jobs'") == 1
+        assert out.count("'Wyloguj'") == 1
+        # The group header sits directly over its control.
+        maciej = next(
+            i for i, line in enumerate(lines)
+            if "Maciej" in line and "button" in line
+        )
+        assert lines[maciej - 1] == "[in section: Messaging]"
+
+    def test_a_narrowed_list_stays_flat(self):
+        """Narrowing promises "matches first"; a section order would silently
+        break it."""
+        snap = self._snap(narrowed="Maciej", matching=1)
+        out = web_module._present_page(snap)
+        assert "[in section:" not in out
+        assert "'Maciej Pawłowski'" in out
+
+    def test_a_page_without_a_section_map_stays_flat(self):
+        controls = browse.controls_from([{"n": 0, "kind": "button", "name": "OK"}])
+        out = web_module._present_page(snapshot(controls=controls))
+        assert "[in section:" not in out
+        assert "elsewhere on the page" not in out
+        assert "'OK'" in out
+
+    def test_a_map_covering_no_control_stays_flat(self):
+        """`ns` empty means unmapped, never "no controls" — a lone
+        'elsewhere' header over the whole list is noise, not a map."""
+        controls = browse.controls_from([{"n": 5, "kind": "button", "name": "OK"}])
+        sections = [
+            browse.Section(name="a", text="x" * 200, ns=[]),
+            browse.Section(name="b", text="y" * 200, ns=[]),
+        ]
+        out = web_module._present_page(snapshot(controls=controls, sections=sections))
+        assert "[in section:" not in out
+        assert "'OK'" in out
+
+    def test_a_collapsed_section_still_names_its_controls(self):
+        """The payoff for #361's placeholders: a section this chat already saw
+        collapses to one line, and the grouped footer is now what says which
+        controls live behind that placeholder."""
+        snap = self._snap()
+        view = web_module.BrowseView()
+        for section in snap.sections:
+            view.sections_seen.add(browse.section_key(section.text))
+        out = web_module._present_page(snap, view=view)
+        assert "unchanged, already shown in this chat" in out
+        assert "[in section: Messaging]" in out
+        assert "'Maciej Pawłowski'" in out
+
+
+class TestAHiddenControlIsListedOnlyOnACheckedSignal:
+    """#372 slices A+B. A control that is invisible NOW may be listed as
+    revealable only when the PAGE ITSELF proves how it becomes pressable:
+    a ':hover' rule that sets a visibility property and names a reachable
+    revealer, or a hiding chain of opacity alone (still focusable). A
+    JS-driven reveal — LinkedIn's own row actions, React root delegation —
+    proves nothing and stays a plain unreachable, reported and never
+    guessed around."""
+
+    def test_only_invisible_may_be_admitted_never_the_semantic_reasons(self):
+        """aria-hidden, inert, [hidden] and a closed details are the page's
+        own statement that this is not interactive content; the walk admits
+        revealable candidates only under the literal `invisible` reason."""
+        walk = browse.CONTROLS_JS[
+            browse.CONTROLS_JS.index("const walk ="):browse.CONTROLS_JS.index(
+                "walk(document);")
+        ]
+        assert "if (why === 'invisible')" in walk
+        gate = walk[walk.index("if (why === 'invisible')"):]
+        gate = gate[:gate.index("unreached += 1")]
+        assert "revealFound.push(" in gate
+
+    def test_a_hover_rule_must_set_a_visibility_property(self):
+        """A ':hover' that recolors a link reveals nothing; only rules that
+        touch display, visibility or opacity are signals."""
+        assert "if (s && (s.display || s.visibility || s.opacity))" in (
+            browse.REVEAL_JS
+        )
+
+    def test_the_revealer_must_be_reachable_now(self):
+        assert "if (revealer && !unreachable(revealer)) return revealer;" in (
+            browse.REVEAL_JS
+        )
+
+    def test_focus_signal_requires_an_opacity_only_hiding_chain(self):
+        """display:none and visibility:hidden make an element unfocusable —
+        the signal is exactly 'still in the keyboard order while hidden'."""
+        assert (
+            "if (s.display === 'none' || s.visibility === 'hidden') return false;"
+            in browse.REVEAL_JS
+        )
+
+    def test_the_press_time_revealer_is_rederived_live(self):
+        """The revealer travels as a display string only; the element is
+        re-derived from the live page by the same shared scan."""
+        assert browse.REVEALER_ELEMENT_JS.endswith(
+            "  return hoverRevealer(el);\n}"
+        )
+        assert browse.REVEAL_JS in browse.REVEALER_ELEMENT_JS
+
+    def test_reveal_fields_reach_the_typed_control_and_its_line(self):
+        hover = browse.controls_from(
+            [{"n": 3, "kind": "button", "name": "Open the options list",
+              "reveal": "hover", "revealer": "cssrow"}]
+        )[0]
+        focus = browse.controls_from(
+            [{"n": 4, "kind": "button", "name": "Star this",
+              "reveal": "focus"}]
+        )[0]
+        assert hover.reveal == "hover" and hover.revealer == "cssrow"
+        assert "(hidden now — revealed by hovering 'cssrow')" in hover.line()
+        assert "(hidden now — revealed by focusing it)" in focus.line()
+
+    def test_an_over_cap_revealable_goes_back_to_the_unreachable_tally(self):
+        """Listed or counted, never neither: a candidate the reveal cap left
+        out is what it always was — an invisible control out of reach."""
+        select = browse.CONTROLS_JS[browse.CONTROLS_JS.index("walk(document);"):]
+        assert "unreached += left;" in select
+        assert "reasons['invisible'] = (reasons['invisible'] || 0) + left;" in select
+
+
+class TestVisibleAlwaysWinsResolution:
+    """#372: the tie rule that keeps #347's regressions closed. A hidden twin
+    must never stand in for the control that works today, an ambiguity among
+    visible controls is final, and a name in neither list gets the refusal
+    that names what IS pressable."""
+
+    def _lists(self):
+        visible = browse.controls_from(
+            [{"n": 0, "kind": "button", "name": "Wyślij"},
+             {"n": 1, "kind": "link", "name": "Maciej Pawłowski",
+              "detail": "https://x.example/in/maciej"}]
+        )
+        hidden = browse.controls_from(
+            [{"n": 2, "kind": "button", "name": "Wyślij",
+              "reveal": "hover", "revealer": "row"},
+             {"n": 3, "kind": "button", "name": "Open the options list",
+              "reveal": "focus"}]
+        )
+        return visible, hidden
+
+    def test_a_visible_control_wins_its_name_outright(self):
+        visible, hidden = self._lists()
+        found = browse.resolve_two_tier(visible, hidden, "Wyślij")
+        assert found.control is visible[0]
+
+    def test_a_name_only_the_hidden_list_answers_is_found_there(self):
+        visible, hidden = self._lists()
+        found = browse.resolve_two_tier(visible, hidden, "Open the options list")
+        assert found.control is hidden[1]
+        assert found.control.reveal == "focus"
+
+    def test_a_visible_ambiguity_is_final(self):
+        visible = browse.controls_from(
+            [{"n": 0, "kind": "button", "name": "Zapisz",
+              "row": ["wiersz A"]},
+             {"n": 1, "kind": "button", "name": "Zapisz",
+              "detail": "inny", "row": ["wiersz B"]}]
+        )
+        hidden = browse.controls_from(
+            [{"n": 2, "kind": "button", "name": "Zapisz", "reveal": "hover"}]
+        )
+        found = browse.resolve_two_tier(visible, hidden, "Zapisz")
+        assert found.control is None
+        assert found.ambiguous
+        for candidate in visible:
+            assert candidate.address in found.problem
+
+    def test_a_name_in_neither_list_gets_the_visible_refusal(self):
+        visible, hidden = self._lists()
+        found = browse.resolve_two_tier(visible, hidden, "Nie ma takiego")
+        assert found.control is None
+        assert "'Wyślij'" in found.problem
+
+    def test_the_revealable_group_is_its_own_footer_section(self):
+        controls = browse.controls_from([{"n": 0, "kind": "button", "name": "OK"}])
+        revealable = browse.controls_from(
+            [{"n": 1, "kind": "button", "name": "Open the options list",
+              "reveal": "hover", "revealer": "row"}]
+        )
+        out = web_module._present_page(
+            snapshot(controls=controls, revealable=revealable)
+        )
+        assert "the page hides but its own CSS or keyboard order says how" in out
+        assert "Open the options list" in out
+        assert "refuses the press unless the control measurably" in out
