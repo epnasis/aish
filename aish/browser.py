@@ -5198,6 +5198,11 @@ async def _snapshot(
         "controls": len(controls),
         "settle": settled.record(),
     }
+    if sections:
+        # Named vs anonymous, counted per call so the logs keep answering
+        # whether per-site structure memory has a customer (#361 — deferred
+        # on measured 87-99% proactive naming; this is the standing check).
+        phases["sections"] = browse_mod.sections_tally(sections)
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
     # control the model is looking for is very often in the header the narrowing
     # would drop — "Przełącz lokal" sits beside the account name, not in <main>.

@@ -2635,9 +2635,14 @@ SECTIONS_JS = "(opts) => {" + DEEP_JS + """
       }).join(' ');
       if (text.trim()) return clean(text);
     }
-    const heading = el.querySelector('h1,h2,h3,h4,h5,h6');
-    if (heading && heading.innerText && heading.innerText.trim()) {
-      return clean(heading.innerText);
+    // The first VISIBLE heading: pages keep hidden error/dialog templates in
+    // the DOM, and naming GitHub's repo content "[Uh oh!]" after one was the
+    // measured cost of taking the first match.
+    for (const heading of el.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
+      if (heading.checkVisibility && !heading.checkVisibility()) continue;
+      if (heading.innerText && heading.innerText.trim()) {
+        return clean(heading.innerText);
+      }
     }
     const tag = el.tagName.toLowerCase();
     if (LANDMARK[tag]) return LANDMARK[tag];
@@ -2675,6 +2680,17 @@ SECTIONS_JS = "(opts) => {" + DEEP_JS + """
   const walk = (el) => {
     for (const child of el.children) {
       if (tiles.length >= opts.max) return;
+      // A script, style or template child is not page content — and worse
+      // than nothing: `innerText` on a NON-RENDERED element falls back to
+      // `textContent`, so a top-level `<script>` tile is its whole source.
+      // Measured on lot.com: a 21k-char `__nghData__` state blob arrived as
+      // an anonymous tile the flat body text never contained. The same
+      // fallback fires for a hidden container, so invisible children are
+      // skipped too — the flat text (body.innerText) never showed them.
+      const tag = child.tagName || '';
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT'
+          || tag === 'TEMPLATE') continue;
+      if (child.checkVisibility && !child.checkVisibility()) continue;
       if (isCandidate(child)) { push(nameOf(child), child); continue; }
       // A child holding a candidate somewhere below is descended into so the
       // candidate tiles on its own; one holding none is a single anonymous
@@ -2743,6 +2759,25 @@ def sections_from(tiles: list[dict[str, Any]]) -> list[Section]:
     return sections
 
 
+def sections_tally(sections: list[Section]) -> dict:
+    """How much of this page the walk could NAME, for the trace (#361).
+
+    The number that decides whether per-site structure memory has a customer:
+    content named proactively on first sight needs no store, content that
+    only repetition can identify might. Measured 2026-09-06 on lot.com,
+    wikipedia, github and allegro: 87-99% of content chars arrived named, so
+    the store stayed deferred — these counters are what re-opens the question
+    if organic browsing disagrees."""
+    named = [s for s in sections if s.name]
+    anon = [s for s in sections if not s.name]
+    return {
+        "named": len(named),
+        "anon": len(anon),
+        "named_chars": sum(len(s.text) for s in named),
+        "anon_chars": sum(len(s.text) for s in anon),
+    }
+
+
 def sections_render(sections: list[Section]) -> str:
     """The page text a tiled snapshot carries: each named section under its
     marker line. The markers ride the TEXT — they are what tells the model the
@@ -2761,19 +2796,26 @@ def sections_render(sections: list[Section]) -> str:
 
 def find_section(sections: list[Section], asked: str) -> Section | None:
     """The section the model asked for, matched the way `choose` matches: the
-    exact name first, then folded. Never fuzzy — the miss ANSWER is the index
-    the model needed, and a guess would silently hand it the wrong part of
-    the page."""
+    exact address first, then folded. Never fuzzy — the miss ANSWER is the
+    index the model needed, and a guess would silently hand it the wrong part
+    of the page.
+
+    Matched on `label()`, not `name`, because the label is what the INDEX
+    prints: an anonymous section is advertised by its first line, and a
+    resolver that only knew names refused exactly the address it had just
+    handed out — the model asked twice, verbatim as printed, and was told
+    "ask for one of those" both times (#365). One authority for what a
+    section is called, on both sides of the round trip."""
     for section in sections:
-        if section.name == asked:
+        if section.label() == asked:
             return section
     wanted = fold(asked)
     if not wanted:
         return None
-    hits = [s for s in sections if s.name and fold(s.name) == wanted]
+    hits = [s for s in sections if fold(s.label()) == wanted]
     if len(hits) == 1:
         return hits[0]
-    hits = [s for s in sections if s.name and wanted in fold(s.name)]
+    hits = [s for s in sections if wanted in fold(s.label())]
     return hits[0] if len(hits) == 1 else None
 
 

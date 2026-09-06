@@ -1650,6 +1650,30 @@ class TestSectionAddressedReads:
         assert browse.find_section(sections, "wyniki wyszukiwania") is sections[0]
         assert browse.find_section(sections, "archiwalne") is sections[1]
 
+    def test_an_anonymous_section_is_served_by_the_line_the_index_printed(self):
+        """#365: the index advertises an anonymous section by its first line,
+        and the resolver must accept exactly that address — on linkedin.com
+        the model asked twice, verbatim as printed, and was refused twice
+        with 'ask for one of those'."""
+        body = "0 notifications total\n" + "\n".join(
+            f"wątek {i} — nowa wiadomość" for i in range(10)
+        )
+        sections = [
+            browse.Section(name="", text=body),
+            browse.Section(name="Messaging", text="rozmowy " * 40),
+        ]
+        page = snapshot(
+            url="https://linkedin.com/messaging",
+            text=browse.sections_render(sections),
+            sections=sections,
+            controls=[control(n=0)],
+        )
+        printed = sections[0].label()
+        assert printed == "0 notifications total"
+        out = web_module._present_snapshot(page, section=printed)
+        assert "wątek 3" in out
+        assert "rozmowy" not in out
+
     def test_the_act_gate_treats_sections_as_a_read(self):
         source = open("aish/agent.py", encoding="utf-8").read()
         assert '("read", "sections")' in source
@@ -6287,3 +6311,39 @@ class TestWhenAishMaySayADialogIsOpen:
         out = web_module._present_snapshot(snapshot(unreachable=7, dialog=""))
         assert "Press whatever opens them first" in out
         assert "Close it to reach them" not in out
+
+
+class TestSectionsTally:
+    """#361: the per-call counter that keeps the persistence question
+    answerable from the logs — named vs anonymous content per snapshot."""
+
+    def test_counts_tiles_and_chars_by_naming(self):
+        sections = [
+            browse.Section(name="header", text="a" * 300),
+            browse.Section(name="", text="b" * 50),
+            browse.Section(name="footer", text="c" * 200),
+        ]
+        tally = browse.sections_tally(sections)
+        assert tally == {
+            "named": 2, "anon": 1, "named_chars": 500, "anon_chars": 50,
+        }
+
+
+class TestTheWalkSkipsWhatIsNotContent:
+    """Measured 2026-09-06: `innerText` on a NON-RENDERED element falls back
+    to `textContent`, so a top-level `<script>` arrived as a 21k-char state
+    blob on lot.com and a hidden container as 1.4M chars on allegro — text
+    the flat body read never contained. The walk skips script/style/template
+    children and invisible children; the naming ladder takes the first
+    VISIBLE heading (GitHub's repo content was named '[Uh oh!]' after a
+    hidden error template's heading)."""
+
+    def test_script_style_and_hidden_children_are_skipped(self):
+        source = browse.SECTIONS_JS
+        for token in ("'SCRIPT'", "'STYLE'", "'NOSCRIPT'", "'TEMPLATE'"):
+            assert token in source
+        assert "checkVisibility" in source
+
+    def test_the_heading_rung_requires_visibility(self):
+        heading_rung = browse.SECTIONS_JS.split("h1,h2,h3,h4,h5,h6")[1][:200]
+        assert "checkVisibility" in heading_rung
