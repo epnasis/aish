@@ -6347,3 +6347,85 @@ class TestTheWalkSkipsWhatIsNotContent:
     def test_the_heading_rung_requires_visibility(self):
         heading_rung = browse.SECTIONS_JS.split("h1,h2,h3,h4,h5,h6")[1][:200]
         assert "checkVisibility" in heading_rung
+
+
+class TestALongHrefIsElidedInTheLine:
+    """#370: the control list was 68% of all browse bytes on a LinkedIn
+    messaging session, and single tracking URLs ran to 2 632 characters —
+    ~40% of the whole transcript, none of it usable (the model acts by name,
+    not by URL). The DISPLAY is bounded; `detail` is untouched, so the gate
+    and navigation still read the whole resolved href."""
+
+    def test_a_tracking_url_is_elided_to_origin_and_path(self):
+        url = "https://www.linkedin.com/li/tscp/sct?destinationUrl=" + "A" * 2600
+        c = control(n=0, kind=browse.LINK, name="Redeem offer", detail=url)
+        line = c.line()
+        assert "https://www.linkedin.com/li/tscp/sct" in line
+        assert "A" * 100 not in line
+        assert "chars)" in line
+        assert len(line) < 200
+        # The stored detail — what the gate navigates by — is untouched.
+        assert c.detail == url
+
+    def test_a_short_url_and_a_query_worth_seeing_pass_through(self):
+        short = "https://lot.com/pl/loty"
+        assert browse.short_detail(short) == short
+        q = "https://www.linkedin.com/search/results/all/?keywords=Maciej+Pawlowski"
+        assert browse.short_detail(q) == q
+
+    def test_a_non_url_detail_is_never_touched(self):
+        assert browse.short_detail("currently: WAW") == "currently: WAW"
+        assert browse.short_detail("312 options") == "312 options"
+
+
+class TestUnreachabilityIsRecorded:
+    """#370: `Snapshot.reasons` was computed since #350 and written to no
+    trace record, so 'why was that card not pressable' could not be answered
+    from the log. It now rides `phases.reach`."""
+
+    def test_the_reach_block_names_the_counts_and_reasons(self):
+        meta = web_module.sealed(
+            "body", None,
+            phases={"reach": {"hidden": 4, "unreachable": 50,
+                              "reasons": {"off-canvas": 30, "clipped": 20}}},
+        ).meta
+        reach = meta["phases"]["reach"]
+        assert reach["hidden"] == 4
+        assert reach["unreachable"] == 50
+        assert reach["reasons"]["off-canvas"] == 30
+
+
+class TestAnOutOfReachChangeIsNotNothing:
+    """#370: a click opened a LinkedIn overlay whose ~27 controls landed
+    off-screen and past the cap; the captured page did not move, and aish
+    reported 'nothing new appeared' while its own reach counts climbed
+    (closed-away 182→308). Claiming stasis its numbers denied is the L8
+    violation."""
+
+    def test_a_rise_in_out_of_reach_controls_is_reported_not_hidden(self):
+        before = snapshot(controls=[control(n=0)], unreachable=180)
+        after = snapshot(controls=[control(n=0)], unreachable=308)
+        delta = browse.diff_snapshots(before, after)
+        assert not delta.empty()
+        out = delta.render()
+        assert "out of reach" in out
+        assert "128 control(s) appeared" in out
+        assert "nothing new appeared" not in out
+        assert "nothing on the page changed" not in out
+
+    def test_the_cap_counts_too(self):
+        before = snapshot(controls=[control(n=0)], hidden=0, unreachable=0)
+        after = snapshot(controls=[control(n=0)], hidden=30, unreachable=0)
+        assert browse.diff_snapshots(before, after).reach_grew == 30
+
+    def test_a_genuinely_dead_click_still_says_nothing_changed(self):
+        before = snapshot(controls=[control(n=0)], unreachable=50)
+        after = snapshot(controls=[control(n=0)], unreachable=50)
+        out = browse.diff_snapshots(before, after).render()
+        assert out == "nothing on the page changed"
+
+    def test_reach_falling_is_not_reported(self):
+        before = snapshot(controls=[control(n=0)], unreachable=308)
+        after = snapshot(controls=[control(n=0)], unreachable=180)
+        assert browse.diff_snapshots(before, after).reach_grew == 0
+        assert browse.diff_snapshots(before, after).render() == "nothing on the page changed"

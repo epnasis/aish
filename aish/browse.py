@@ -752,7 +752,7 @@ class Control:
         """One line, as the model reads it."""
         bits = f"{self.kind} {(self.address or self.name)!r}"
         if self.detail:
-            bits += f" → {self.detail}"
+            bits += f" → {short_detail(self.detail)}"
         if said := self.row_note():
             bits += f" — in: {said}"
         if self.disabled:
@@ -760,6 +760,40 @@ class Control:
         if self.mutating:
             bits += "  (needs approval)"
         return bits
+
+
+# How much of a link's href the control line SHOWS. The model acts by name, not
+# by URL — the href is context, "where does this go", and origin+path answers
+# that. A tracking query does not: measured on a LinkedIn messaging session
+# (#370), the control list was 68% of all browse bytes and single
+# `li/tscp/sct` redirect URLs ran to 2 632 characters each, ~40% of the whole
+# transcript's bytes, none of it anything the model could use. This is a
+# DISPLAY bound only — `detail` is untouched, so the gate and the navigation
+# still read the whole resolved href (`_browse_act` reads `control.detail`).
+DETAIL_URL_MAX = 140
+# How much of the query string survives, so `?keywords=Maciej` stays legible
+# while a 2 500-char tracking token does not.
+DETAIL_QUERY_KEEP = 40
+
+
+def short_detail(detail: str) -> str:
+    """A control's detail as the line SHOWS it: a long href elided to
+    origin+path plus a little query, everything else verbatim.
+
+    Only http(s) URLs are shortened, and only long ones — a field's
+    "currently: …" or a choice's "312 options" is not a URL and passes
+    through. The elision states the character count it dropped, the way every
+    other cap in this file does, so a link the model wants in full is one
+    `read_url` away and it knows there is more."""
+    if not detail.startswith(("http://", "https://")) or len(detail) <= DETAIL_URL_MAX:
+        return detail
+    base, sep, query = detail.partition("?")
+    if not sep:
+        # No query — a genuinely long PATH. Keep the front, count the rest.
+        return f"{base[:DETAIL_URL_MAX]}…(+{len(base) - DETAIL_URL_MAX} chars)"
+    if len(query) <= DETAIL_QUERY_KEEP:
+        return detail
+    return f"{base}?{query[:DETAIL_QUERY_KEEP]}…(+{len(query) - DETAIL_QUERY_KEEP} chars)"
 
 
 # A downloaded file is bounded twice: one file may not be enormous, and the
@@ -3901,6 +3935,15 @@ class Delta:
     # may claim when something left) — a report must not state stasis it did
     # not observe.
     removed_text: int = 0
+    # Net rise in controls the page put OUT OF REACH since the last snapshot —
+    # the cap's `hidden` plus the walk's `unreachable` (#370). aish holds these
+    # numbers, so a report that said "nothing new" while they climbed was
+    # claiming a stasis its own counts denied: on a LinkedIn messaging session
+    # an overlay rendered, ~27 controls landed off-screen/past the cap, the
+    # captured text and control list did not move, and aish reported that
+    # nothing happened. The visible page did not change; the model needs to
+    # know the page did.
+    reach_grew: int = 0
 
     def empty(self) -> bool:
         """Did nothing at all change?
@@ -3916,6 +3959,10 @@ class Delta:
             or self.changed
             or self.text
             or self.removed_text
+            # A click that pushed controls off-screen or opened an overlay past
+            # the cap DID something, even when the captured page did not move
+            # (#370).
+            or self.reach_grew
         )
 
     def render(self) -> str:
@@ -3963,6 +4010,15 @@ class Delta:
                 )
             parts.append("controls:\n" + "\n".join(shown))
         if not parts:
+            if self.reach_grew > 0:
+                # Controls appeared but the page put them out of reach — an
+                # overlay off-screen, a panel past the cap. Never "nothing
+                # new": aish's own reach counts moved (#370).
+                return (
+                    f"{self.reach_grew} control(s) appeared but are out of "
+                    'reach (off-screen, in an overlay, or past the list cap). '
+                    'Use action="read" to see the whole page.'
+                )
             # Something left the view and nothing arrived. Not "nothing
             # changed" — that would be false — and not a tally of what went.
             return "nothing new appeared on the page"
@@ -3984,6 +4040,12 @@ def diff_snapshots(before: Snapshot, after: Snapshot) -> Delta:
     delta.text, delta.more_text, delta.removed_text = _text_delta(
         before.text, after.text
     )
+    # Only a RISE counts: controls coming back into reach is ordinary and needs
+    # no sentence, but controls the page put out of reach while the visible
+    # page held still is the "nothing new" the model must not be told (#370).
+    before_reach = before.hidden + before.unreachable
+    after_reach = after.hidden + after.unreachable
+    delta.reach_grew = max(0, after_reach - before_reach)
     return delta
 
 
