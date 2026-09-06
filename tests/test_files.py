@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+from aish import files
 from aish.files import (
     commit,
     contains,
@@ -357,3 +358,71 @@ class TestOnePathContainment:
             "    return root in Path(p).parents\n"
         )
         assert sorted(_containment_in([planted])["rogue.py"]) == sorted(CONTAINMENT)
+
+
+class TestMarkdownSections:
+    """#361 slice 6: a Markdown file's headings are its declared structure,
+    and section= serves one heading's range through the same numbered window
+    as any other read. A miss is answered with the heading index."""
+
+    MD = "\n".join([
+        "# Raport",             # 1
+        "wstęp raportu",        # 2
+        "## Wyniki",            # 3
+        "przychody rosną",      # 4
+        "```",                  # 5
+        "# to jest kod, nie nagłówek",  # 6
+        "```",                  # 7
+        "koniec wyników",       # 8
+        "## Koszty",            # 9
+        "koszty spadają",       # 10
+        "# Załącznik",          # 11
+        "treść załącznika",     # 12
+    ])
+
+    def _md(self, tmp_path):
+        target = tmp_path / "raport.md"
+        target.write_text(self.MD, encoding="utf-8")
+        return target
+
+    def test_a_section_is_served_with_true_line_numbers(self, tmp_path):
+        out = files.read_file(str(self._md(tmp_path)), str(tmp_path), section="Wyniki")
+        assert "    3  ## Wyniki" in out
+        assert "przychody rosną" in out
+        assert "koniec wyników" in out
+        assert "Koszty" not in out
+        assert "wstęp raportu" not in out
+
+    def test_a_heading_inside_a_code_fence_is_not_structure(self, tmp_path):
+        headings = files.markdown_headings(self.MD.splitlines())
+        titles = [title for _, _, title in headings]
+        assert "to jest kod, nie nagłówek" not in titles
+        assert titles == ["Raport", "Wyniki", "Koszty", "Załącznik"]
+
+    def test_a_top_heading_ends_at_its_peer_not_a_child(self, tmp_path):
+        out = files.read_file(str(self._md(tmp_path)), str(tmp_path), section="Raport")
+        assert "koszty spadają" in out
+        assert "Załącznik" not in out
+
+    def test_a_miss_is_answered_with_the_heading_index(self, tmp_path):
+        out = files.read_file(str(self._md(tmp_path)), str(tmp_path), section="Bilans")
+        assert "no heading called 'Bilans'" in out
+        assert "'Wyniki' — line 3" in out
+        assert "przychody" not in out  # the index is a map, not the territory
+
+    def test_matching_folds_diacritics(self, tmp_path):
+        out = files.read_file(str(self._md(tmp_path)), str(tmp_path), section="zalacznik")
+        assert "treść załącznika" in out
+
+    def test_a_non_markdown_file_says_what_section_is_for(self, tmp_path):
+        target = tmp_path / "notes.txt"
+        target.write_text("# not markdown", encoding="utf-8")
+        out = files.read_file(str(target), str(tmp_path), section="x")
+        assert out.startswith("ERROR:")
+        assert "Markdown" in out
+
+    def test_a_headingless_markdown_file_says_so(self, tmp_path):
+        target = tmp_path / "flat.md"
+        target.write_text("tylko tekst\nbez nagłówków", encoding="utf-8")
+        out = files.read_file(str(target), str(tmp_path), section="x")
+        assert "declares no headings" in out

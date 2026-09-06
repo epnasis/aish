@@ -461,3 +461,62 @@ class TestMarkdownTable:
         table = documents._markdown_table([["1", "2"]], header=("Item", "Qty"))
         assert table.splitlines()[0] == "| Item | Qty |"
         assert table.splitlines()[2] == "| 1 | 2 |"
+
+
+class TestOutlineSections:
+    """#361 slice 6: the document's own declared outline is the addressing
+    scheme — a section resolves to its page range and is served by the pages
+    mechanism. A miss is answered with the outline, never a guess."""
+
+    def _toc_pdf(self, tmp_path):
+        doc = pymupdf.open()
+        for n in range(1, 7):
+            _text_page(doc.new_page(), f"Treść strony {n}. " * 20)
+        doc.set_toc([
+            [1, "Wstęp", 1],
+            [1, "Wyniki finansowe", 2],
+            [2, "Przychody", 2],
+            [2, "Koszty", 4],
+            [1, "Podsumowanie", 5],
+        ])
+        return _save(doc, tmp_path, "raport.pdf")
+
+    def test_the_outline_is_read_from_the_document(self, tmp_path):
+        path = self._toc_pdf(tmp_path)
+        entries = documents.outline(path)
+        assert (1, 1, "Wstęp") in entries
+        assert (2, 4, "Koszty") in entries
+
+    def test_a_section_spans_to_the_next_peer(self, tmp_path):
+        path = self._toc_pdf(tmp_path)
+        entries = documents.outline(path)
+        title, pages = documents.outline_section(entries, "Wyniki finansowe", 6)
+        assert title == "Wyniki finansowe"
+        assert pages == [2, 3, 4]
+
+    def test_the_last_section_runs_to_the_end(self, tmp_path):
+        entries = documents.outline(self._toc_pdf(tmp_path))
+        _, pages = documents.outline_section(entries, "Podsumowanie", 6)
+        assert pages == [5, 6]
+
+    def test_matching_folds_but_never_guesses(self, tmp_path):
+        entries = documents.outline(self._toc_pdf(tmp_path))
+        title, _ = documents.outline_section(entries, "wstep", 6)
+        assert title == "Wstęp"
+        # Ambiguous: "Wy" prefixes nothing uniquely? "koszty" folds exactly.
+        title, pages = documents.outline_section(entries, "koszty", 6)
+        assert title == "Koszty"
+        assert pages == [4]  # a level-2 entry ends at its level-1 successor
+        assert documents.outline_section(entries, "nic takiego", 6) is None
+
+    def test_a_document_without_an_outline_returns_nothing(self, tmp_path):
+        doc = pymupdf.open()
+        _text_page(doc.new_page(), "bez spisu treści")
+        path = _save(doc, tmp_path, "plain.pdf")
+        assert documents.outline(path) == []
+
+    def test_outline_lines_are_an_index_not_content(self, tmp_path):
+        entries = documents.outline(self._toc_pdf(tmp_path))
+        lines = documents.outline_lines(entries)
+        assert "'Wstęp' — page 1" in lines[0]
+        assert any(line.startswith("  ") for line in lines)  # levels indent

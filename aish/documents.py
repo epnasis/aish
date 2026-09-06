@@ -796,6 +796,69 @@ def page_png(pdf_path: Path | str, number: int, dpi: int = PAGE_RASTER_DPI) -> b
             dpi = max(PAGE_RASTER_MIN_DPI, dpi // 2)
 
 
+def outline(pdf_path: Path | str) -> list[tuple[int, int, str]]:
+    """(level, page, title) for every entry the document DECLARES in its own
+    outline (#361 slice 6) — the addressing scheme a `section=` read resolves
+    against. Read live from the PDF rather than cached on the rendition: it
+    costs milliseconds and keying it into the rendition would invalidate every
+    cached conversion for a feature that does not change the text."""
+    try:
+        with _open(pdf_path) as doc:
+            toc = doc.get_toc(simple=True) or []
+    except DocumentError:
+        return []
+    entries = []
+    for row in toc:
+        try:
+            level, title, page = int(row[0]), str(row[1]).strip(), int(row[2])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if title and page >= 1:
+            entries.append((max(1, level), page, title))
+    return entries
+
+
+def outline_lines(entries: list[tuple[int, int, str]]) -> list[str]:
+    """The outline as the model sees it — the index, names and pages only."""
+    return [
+        f"{'  ' * (level - 1)}{title!r} — page {page}"
+        for level, page, title in entries
+    ]
+
+
+def outline_section(
+    entries: list[tuple[int, int, str]], asked: str, total: int
+) -> tuple[str, list[int]] | None:
+    """(title, page numbers) for the outline entry `asked` names — from its
+    page to just before the next entry at the same or higher level — or None:
+    the caller answers a miss with the index, never with a guess. Matching
+    mirrors `browse.find_section`: exact, then folded, then unique folded
+    substring."""
+    from .browse import fold
+
+    hit = next((e for e in entries if e[2] == asked), None)
+    if hit is None:
+        wanted = fold(asked)
+        exact = [e for e in entries if fold(e[2]) == wanted]
+        if len(exact) == 1:
+            hit = exact[0]
+        elif not exact and wanted:
+            loose = [e for e in entries if wanted in fold(e[2])]
+            if len(loose) == 1:
+                hit = loose[0]
+    if hit is None:
+        return None
+    level, start, title = hit
+    end = total
+    for other_level, page, _title in entries[entries.index(hit) + 1:]:
+        if other_level <= level and page >= start:
+            # An entry pointing at the section's own first page means the next
+            # section starts mid-page; the page still belongs to both.
+            end = max(start, page - 1 if page > start else start)
+            break
+    return title, list(range(start, min(end, total) + 1))
+
+
 # ----------------------------------------------------------------- reading
 
 
@@ -889,6 +952,11 @@ def _ranges(numbers: list[int]) -> str:
         else:
             spans.append((number, number))
     return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in spans)
+
+
+# The public face of `_ranges`: a section= result names the pages it serves
+# (#361 slice 6), and that sentence is composed outside this module.
+page_ranges = _ranges
 
 
 def summary(rendition: Rendition) -> str:

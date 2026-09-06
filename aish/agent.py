@@ -6137,16 +6137,18 @@ class Agent:
             source = str(args.get("source", ""))
             pages_spec = str(args.get("pages", "") or "").strip()
             query = str(args.get("search", "") or "").strip()
+            section = str(args.get("section", "") or "").strip()
             detail = ", ".join(
                 part
                 for part in (
                     f"pages {pages_spec}" if pages_spec else "",
                     f"search {query!r}" if query else "",
+                    f"section {section!r}" if section else "",
                 )
                 if part
             )
             label = f"→ read_pdf: {source}" + (f" ({detail})" if detail else "")
-            return label, partial(self._read_pdf, source, pages_spec, query)
+            return label, partial(self._read_pdf, source, pages_spec, query, section)
         if name == "read_media":
             source = str(args.get("source", ""))
             at = str(args.get("at", "") or "").strip()
@@ -6777,7 +6779,9 @@ class Agent:
 
     # --------------------------------------------------------------- PDFs (#219)
 
-    def _read_pdf(self, source: str, pages_spec: str, query: str) -> str:
+    def _read_pdf(
+        self, source: str, pages_spec: str, query: str, section: str = ""
+    ) -> str:
         """Read a PDF as text, with what the document IS stated before any of it.
 
         The result always leads with the structural map, because the failure
@@ -6807,18 +6811,54 @@ class Agent:
         ]
         if query:
             return "\n\n".join(header + [self._pdf_search(rendition, query)])
-        if pages_spec:
+        numbers: list[int] = []
+        if section:
+            # The document's own declared outline is the addressing scheme
+            # (#361 slice 6): a section resolves to its page range and is
+            # served by the same pages mechanism. A miss is answered with the
+            # index — never a guess — and a document with no outline says so
+            # instead of pretending.
+            entries = documents.outline(path)
+            if not entries:
+                return "\n\n".join(header + [
+                    f"no section called {section!r} — this document declares "
+                    "no outline. Use search= to find it, or pages=."
+                ])
+            found = documents.outline_section(
+                entries, section, rendition.total_pages
+            )
+            if found is None:
+                return "\n\n".join(header + [
+                    f"no section called {section!r} — the document's outline:\n"
+                    + "\n".join(documents.outline_lines(entries))
+                ])
+            title, numbers = found
+            header.append(
+                f"[section: {title} — page(s) {documents.page_ranges(numbers)}]"
+            )
+        if pages_spec and not numbers:
             try:
                 numbers = documents.parse_pages(pages_spec, rendition.total_pages)
             except documents.DocumentError as exc:
                 return f"ERROR: {exc}"
+        if numbers:
             body = documents.pages_text(rendition, numbers)
             lines, page_images = self._pdf_page_images(path, rendition, numbers)
             text = "\n\n".join(header + [body] + lines)
             # Built LAST: ToolOutcome is a str subclass, so the join above would
             # have dropped the envelope carrying the pages.
             return tools.ToolOutcome(text, images=tuple(page_images)) if page_images else text
-        return "\n\n".join(header + [self._pdf_opening(rendition)])
+        # The bare call is the model asking what this document IS, so the
+        # outline — when the document declares one — rides it as the index a
+        # section= read then addresses. Never appended to a pages/search
+        # result: the index is pulled, not pushed.
+        opening = [self._pdf_opening(rendition)]
+        entries = documents.outline(path)
+        if entries:
+            opening.insert(0, "Outline (read one part with section=…):\n" + "\n".join(
+                documents.outline_lines(entries)
+            ))
+        return "\n\n".join(header + opening)
 
     def _resolve_pdf(self, source: str) -> tuple[Path, str | None]:
         """A local PDF path for `source`, fetching it first when it is a URL.
@@ -9229,8 +9269,16 @@ class Agent:
         path = str(args.get("path", ""))
         offset = self._int_arg(args, "offset", 1)
         limit = self._int_arg(args, "limit", files.READ_MAX_LINES)
-        label = f"→ read_file: {path}" + (f" (from line {offset})" if offset > 1 else "")
-        read = partial(files.read_file, path, self.cwd, offset=offset, limit=limit)
+        section = str(args.get("section", "") or "")
+        label = f"→ read_file: {path}" + (
+            f" (section {section!r})"
+            if section
+            else (f" (from line {offset})" if offset > 1 else "")
+        )
+        read = partial(
+            files.read_file, path, self.cwd, offset=offset, limit=limit,
+            section=section,
+        )
         # Wrapped HERE rather than in `_dispatch`, because read_file also runs on
         # the parallel read-only path and a marking only the sequential door
         # applied would be a marking that depends on how many tools the model

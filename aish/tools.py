@@ -727,6 +727,15 @@ TOOL_SCHEMAS = [
                         "type": "integer",
                         "description": "Max lines to return (default 2000).",
                     },
+                    "section": {
+                        "type": "string",
+                        "description": (
+                            "For a Markdown file: return only the section under "
+                            "this heading, instead of the whole file. A name "
+                            "that does not match answers with the file's "
+                            "heading index."
+                        ),
+                    },
                 },
                 "required": ["path"],
             },
@@ -780,6 +789,15 @@ TOOL_SCHEMAS = [
                             "insensitive), each with its page number. Use it to "
                             "locate something in a long document before reading a "
                             "page in full."
+                        ),
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": (
+                            "Return one section of the document by the name in "
+                            "its own outline (the bare call shows the outline). "
+                            "A name that does not match answers with the "
+                            "outline; a document with no outline says so."
                         ),
                     },
                 },

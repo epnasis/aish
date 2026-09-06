@@ -84,6 +84,16 @@ A fetched PDF is saved into the document store rather than a temp file, so a re-
 
 ---
 
+## Sections: the document's own outline is an address (#361 slice 6)
+
+`read_pdf(source, section="Wyniki finansowe")` serves one section by name. The addressing scheme is the outline the document DECLARES (`doc.get_toc`) — no heading inference, for the reason the browser's sections read only declared structure: identity and declaration are facts, "looks like a heading" is a guess. A section resolves to its page range (its page up to the next entry at the same or higher level) and is served by the **existing pages mechanism** — same rendition, same structural-map header, same scan escalation — so it is a resolver, not a second reader. The result names what it resolved (`[section: … — page(s) 2-4]`).
+
+Three honest endings, none a guess: a hit; a miss answered with the outline (the failure message IS the index the model needed); and a document with no outline, which says so and points at `search=`/`pages=`. The **bare** call — the "what is this document" call — carries the outline when there is one; a pages/search result never does, because the index is pulled, not pushed. The outline is read live from the PDF (milliseconds) rather than keyed into the rendition, where it would invalidate every cached conversion for a feature that does not change the text. Matching is exact → folded → unique folded substring (`browse.fold`, one authority for diacritics). `TestOutlineSections`.
+
+The same argument exists on `read_file` for Markdown, where the declared structure is the ATX headings (`files.markdown_headings` — code fences excluded, so a `#` inside a fence is code, not a phantom index entry). The section is served through the same numbered window as any read, so line numbers, `limit` and the continuation offset keep their meaning. `TestMarkdownSections` in `tests/test_files.py`.
+
+---
+
 ## The owner reads it too (#218)
 
 `page_png` was built so the MODEL could see a page it could not read. The web
