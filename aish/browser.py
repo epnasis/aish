@@ -5203,6 +5203,17 @@ async def _snapshot(
         # whether per-site structure memory has a customer (#361 — deferred
         # on measured 87-99% proactive naming; this is the standing check).
         phases["sections"] = browse_mod.sections_tally(sections)
+    # Why controls did not make the list — computed since #350, recorded
+    # nowhere until #370, so "why wasn't that card pressable" could not be
+    # answered from the log. `hidden` is the cap's doing, `unreachable` the
+    # reachability walk's, and `reasons` names which reasons and how many.
+    hidden = max(0, matched - len(controls))
+    if reasons or hidden or unreached:
+        phases["reach"] = {
+            "hidden": hidden,
+            "unreachable": unreached,
+            "reasons": dict(reasons),
+        }
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
     # control the model is looking for is very often in the header the narrowing
     # would drop — "Przełącz lokal" sits beside the account name, not in <main>.
@@ -5212,7 +5223,7 @@ async def _snapshot(
         text=text,
         sections=sections,
         controls=controls,
-        hidden=max(0, matched - len(controls)),
+        hidden=hidden,
         narrowed=match or "",
         matching=matching,
         unreachable=unreached,

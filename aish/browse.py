@@ -752,7 +752,7 @@ class Control:
         """One line, as the model reads it."""
         bits = f"{self.kind} {(self.address or self.name)!r}"
         if self.detail:
-            bits += f" → {self.detail}"
+            bits += f" → {short_detail(self.detail)}"
         if said := self.row_note():
             bits += f" — in: {said}"
         if self.disabled:
@@ -760,6 +760,40 @@ class Control:
         if self.mutating:
             bits += "  (needs approval)"
         return bits
+
+
+# How much of a link's href the control line SHOWS. The model acts by name, not
+# by URL — the href is context, "where does this go", and origin+path answers
+# that. A tracking query does not: measured on a LinkedIn messaging session
+# (#370), the control list was 68% of all browse bytes and single
+# `li/tscp/sct` redirect URLs ran to 2 632 characters each, ~40% of the whole
+# transcript's bytes, none of it anything the model could use. This is a
+# DISPLAY bound only — `detail` is untouched, so the gate and the navigation
+# still read the whole resolved href (`_browse_act` reads `control.detail`).
+DETAIL_URL_MAX = 140
+# How much of the query string survives, so `?keywords=Maciej` stays legible
+# while a 2 500-char tracking token does not.
+DETAIL_QUERY_KEEP = 40
+
+
+def short_detail(detail: str) -> str:
+    """A control's detail as the line SHOWS it: a long href elided to
+    origin+path plus a little query, everything else verbatim.
+
+    Only http(s) URLs are shortened, and only long ones — a field's
+    "currently: …" or a choice's "312 options" is not a URL and passes
+    through. The elision states the character count it dropped, the way every
+    other cap in this file does, so a link the model wants in full is one
+    `read_url` away and it knows there is more."""
+    if not detail.startswith(("http://", "https://")) or len(detail) <= DETAIL_URL_MAX:
+        return detail
+    base, sep, query = detail.partition("?")
+    if not sep:
+        # No query — a genuinely long PATH. Keep the front, count the rest.
+        return f"{base[:DETAIL_URL_MAX]}…(+{len(base) - DETAIL_URL_MAX} chars)"
+    if len(query) <= DETAIL_QUERY_KEEP:
+        return detail
+    return f"{base}?{query[:DETAIL_QUERY_KEEP]}…(+{len(query) - DETAIL_QUERY_KEEP} chars)"
 
 
 # A downloaded file is bounded twice: one file may not be enormous, and the
