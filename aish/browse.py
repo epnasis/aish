@@ -3935,6 +3935,15 @@ class Delta:
     # may claim when something left) — a report must not state stasis it did
     # not observe.
     removed_text: int = 0
+    # Net rise in controls the page put OUT OF REACH since the last snapshot —
+    # the cap's `hidden` plus the walk's `unreachable` (#370). aish holds these
+    # numbers, so a report that said "nothing new" while they climbed was
+    # claiming a stasis its own counts denied: on a LinkedIn messaging session
+    # an overlay rendered, ~27 controls landed off-screen/past the cap, the
+    # captured text and control list did not move, and aish reported that
+    # nothing happened. The visible page did not change; the model needs to
+    # know the page did.
+    reach_grew: int = 0
 
     def empty(self) -> bool:
         """Did nothing at all change?
@@ -3950,6 +3959,10 @@ class Delta:
             or self.changed
             or self.text
             or self.removed_text
+            # A click that pushed controls off-screen or opened an overlay past
+            # the cap DID something, even when the captured page did not move
+            # (#370).
+            or self.reach_grew
         )
 
     def render(self) -> str:
@@ -3997,6 +4010,15 @@ class Delta:
                 )
             parts.append("controls:\n" + "\n".join(shown))
         if not parts:
+            if self.reach_grew > 0:
+                # Controls appeared but the page put them out of reach — an
+                # overlay off-screen, a panel past the cap. Never "nothing
+                # new": aish's own reach counts moved (#370).
+                return (
+                    f"{self.reach_grew} control(s) appeared but are out of "
+                    'reach (off-screen, in an overlay, or past the list cap). '
+                    'Use action="read" to see the whole page.'
+                )
             # Something left the view and nothing arrived. Not "nothing
             # changed" — that would be false — and not a tally of what went.
             return "nothing new appeared on the page"
@@ -4018,6 +4040,12 @@ def diff_snapshots(before: Snapshot, after: Snapshot) -> Delta:
     delta.text, delta.more_text, delta.removed_text = _text_delta(
         before.text, after.text
     )
+    # Only a RISE counts: controls coming back into reach is ordinary and needs
+    # no sentence, but controls the page put out of reach while the visible
+    # page held still is the "nothing new" the model must not be told (#370).
+    before_reach = before.hidden + before.unreachable
+    after_reach = after.hidden + after.unreachable
+    delta.reach_grew = max(0, after_reach - before_reach)
     return delta
 
 

@@ -6393,3 +6393,39 @@ class TestUnreachabilityIsRecorded:
         assert reach["hidden"] == 4
         assert reach["unreachable"] == 50
         assert reach["reasons"]["off-canvas"] == 30
+
+
+class TestAnOutOfReachChangeIsNotNothing:
+    """#370: a click opened a LinkedIn overlay whose ~27 controls landed
+    off-screen and past the cap; the captured page did not move, and aish
+    reported 'nothing new appeared' while its own reach counts climbed
+    (closed-away 182→308). Claiming stasis its numbers denied is the L8
+    violation."""
+
+    def test_a_rise_in_out_of_reach_controls_is_reported_not_hidden(self):
+        before = snapshot(controls=[control(n=0)], unreachable=180)
+        after = snapshot(controls=[control(n=0)], unreachable=308)
+        delta = browse.diff_snapshots(before, after)
+        assert not delta.empty()
+        out = delta.render()
+        assert "out of reach" in out
+        assert "128 control(s) appeared" in out
+        assert "nothing new appeared" not in out
+        assert "nothing on the page changed" not in out
+
+    def test_the_cap_counts_too(self):
+        before = snapshot(controls=[control(n=0)], hidden=0, unreachable=0)
+        after = snapshot(controls=[control(n=0)], hidden=30, unreachable=0)
+        assert browse.diff_snapshots(before, after).reach_grew == 30
+
+    def test_a_genuinely_dead_click_still_says_nothing_changed(self):
+        before = snapshot(controls=[control(n=0)], unreachable=50)
+        after = snapshot(controls=[control(n=0)], unreachable=50)
+        out = browse.diff_snapshots(before, after).render()
+        assert out == "nothing on the page changed"
+
+    def test_reach_falling_is_not_reported(self):
+        before = snapshot(controls=[control(n=0)], unreachable=308)
+        after = snapshot(controls=[control(n=0)], unreachable=180)
+        assert browse.diff_snapshots(before, after).reach_grew == 0
+        assert browse.diff_snapshots(before, after).render() == "nothing on the page changed"
