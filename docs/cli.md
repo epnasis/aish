@@ -10,6 +10,8 @@
 
 **L1 · The CLI and the web must gate identically.** `cli.make_approver` and `server.make_web_approvers` implement the same policy in two renderings. The CLI's approvers return bool/str/None; the web's may also return `Denied(comment)`/`Approved(comment)`. Anything that changes what is auto-approved must change both, or the same command behaves differently depending on which surface you happen to be on. `TestDenylistApprover`.
 
+This law reaches plugin tools too, and #377 is the case that proved it. `make_tool_approver` auto-approves exactly one mutation — a `gmail_send` whose every recipient is the owner (`recipients.owner_scoped_send`, the same import the web uses) — because that send cannot reach past him and so is not a decision he has. Fixing it in the web alone would have moved the asymmetry rather than closed it: an identical mail needing no approval in the browser and a `[y/N]` in the terminal. `tests/test_recipients.py` drives both approvers over one table and fails if they ever disagree. The CLI has no unattended origin, so the origin-scoped half of the policy (`TRIGGERED_SAFE_TOOLS`) has nothing to say here. Rationale in `docs/agent-core.md`.
+
 **L2 · A terminal session dies with its terminal.** No restart recovery, no task markers, no resurrection — the web writes `task_start`/`task_end`, the CLI deliberately does not. There is nobody to watch a resumed run.
 
 **L3 · The gate must see the REAL command.** Aliases are expanded before approval, never after.

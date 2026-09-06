@@ -1663,6 +1663,26 @@ def test_the_tool_prompt_prints_it_too(tmp_path, monkeypatch, capsys):
     assert "credit, overpayment" in capsys.readouterr().out
 
 
+def test_an_owner_only_send_needs_no_terminal_prompt(monkeypatch, capsys):
+    """#377: the terminal gives the same answer the web does — a mail that can
+    reach nobody but the owner runs with no prompt. `input` is left unscripted
+    on purpose: if the approver asks anything, the test errors rather than
+    quietly consuming a scripted 'y' and passing for the wrong reason."""
+    def refuse(_prompt=""):
+        raise AssertionError("prompted for an owner-only send")
+    monkeypatch.setattr(builtins, "input", refuse)
+    approve_tool = make_tool_approver(None)
+    assert approve_tool("gmail_send", {"to": "pawel@wenda.eu", "body": "hi"}) is True
+    assert "auto-approved" in capsys.readouterr().out
+
+
+def test_a_third_party_send_still_prompts_in_the_terminal(monkeypatch, capsys):
+    approve_tool = make_tool_approver(None)
+    scripted_input(monkeypatch, ["n"])
+    assert approve_tool("gmail_send", {"to": "stranger@evil.com", "body": "hi"}) is False
+    assert "run tool?" in capsys.readouterr().out
+
+
 def test_a_silent_step_prints_no_empty_box(tmp_path, monkeypatch, capsys):
     """No reason means nothing extra on the prompt — a labelled blank line is
     noise in a terminal, where the missing line is itself legible."""

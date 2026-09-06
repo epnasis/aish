@@ -6945,7 +6945,9 @@ class TestApprovalIntentOnTheCard:
 
 
 class TestTriggeredCapabilityPolicy:
-    """The #160 draft-and-hold policy, unit-tested on approve_tool directly."""
+    """The capability policy, unit-tested on approve_tool directly: the #160
+    draft-and-hold half (origin-scoped) and the #377 half (consequence-scoped,
+    and therefore the SAME answer in the owner's own session)."""
 
     def _approver(self, origin, answer=None):
         bridge, log = _FakeBridge(answer), _FakeLog()
@@ -6961,7 +6963,7 @@ class TestTriggeredCapabilityPolicy:
         result = approve_tool("gmail_label", {"message_id": "m1", "add": "Receipts"})
         assert result is True
         assert bridge.asked == []  # no card — auto-run, no human needed
-        assert log.records and log.records[0][1] == "auto (email)"
+        assert log.records and log.records[0][1] == "auto (unattended: email)"
 
     def test_draft_recipients_are_checked_too(self):
         # #178 P0-3: a draft addressed to a third party is a staged
@@ -6986,38 +6988,70 @@ class TestTriggeredCapabilityPolicy:
         approve_tool("gmail_trash", {"message_id": "m1"})
         assert len(bridge.asked) == 1  # trash always prompts, even when triggered
 
-    def test_remember_is_never_triggered_safe(self):
+    def test_remember_is_never_auto_safe(self):
         """#196 routes a triggered session's memory write through this same
         channel, so the capability policy must not shortcut it: a memory
         persists into every future session, which is exactly what the owner
         needs to see. (Deletion never reaches here — it is refused outright.)"""
-        assert not server_module._triggered_safe("remember", {"note": "a fact"})
+        assert server_module._auto_safe("remember", {"note": "a fact"}, "email") is None
         approve_tool, bridge, _ = self._approver("email")
         approve_tool("remember", {"note": "a fact", "name": "from-mail"}, "preview text")
         assert len(bridge.asked) == 1
         assert bridge.asked[0]["tool"] == "remember"
         assert bridge.asked[0]["preview"] == "preview text"
 
-    def test_user_session_always_prompts_even_for_safe_tools(self):
-        # The policy is scoped to NON-user origins; a human-driven session gates
-        # every mutation as before (no silent auto-run).
+    def test_user_session_still_cards_the_origin_scoped_half(self):
+        # Relabeling is auto-safe BECAUSE nobody is there to answer a card. In
+        # the owner's own session he is there, so he still sees it (#377).
         approve_tool, bridge, _ = self._approver("user")
         approve_tool("gmail_label", {"message_id": "m1", "add": "Receipts"})
         assert len(bridge.asked) == 1
 
-    def test_triggered_safe_helper(self):
-        assert server_module._triggered_safe("gmail_label", {})
+    def test_auto_safe_helper(self):
+        f = server_module._auto_safe
+        assert f("gmail_label", {}, "email") == "unattended: email"
+        assert f("gmail_label", {}, "user") is None  # origin-scoped
         # A draft is no longer auto-safe on the draft flag alone (#178 P0-3):
         # its recipients must be verifiably the owner, like a live send.
-        assert not server_module._triggered_safe("gmail_send", {"draft": True})
-        assert server_module._triggered_safe(
-            "gmail_send", {"draft": True, "to": "pawel@wenda.eu"}
-        )
-        assert not server_module._triggered_safe(
-            "gmail_send", {"draft": True, "to": "x@evil.com"}
-        )
-        assert not server_module._triggered_safe("gmail_send", {})
-        assert not server_module._triggered_safe("gmail_trash", {"message_id": "m"})
+        assert f("gmail_send", {"draft": True}, "email") is None
+        assert f("gmail_send", {"draft": True, "to": "pawel@wenda.eu"}, "email")
+        assert f("gmail_send", {"draft": True, "to": "x@evil.com"}, "email") is None
+        assert f("gmail_send", {}, "email") is None
+        assert f("gmail_trash", {"message_id": "m"}, "email") is None
+
+    def test_owner_only_send_is_origin_INDEPENDENT(self):
+        """#377, the property this whole split exists for: an owner-only send is
+        safe because of where it can land, so every origin gets one answer."""
+        f = server_module._auto_safe
+        for origin in ("user", "email", "schedule", "webhook"):
+            assert f("gmail_send", {"to": "pawel@wenda.eu", "body": "x"}, origin) == (
+                "owner-only recipients"
+            )
+            assert f("gmail_send", {"to": "stranger@evil.com"}, origin) is None
+
+    def test_owner_only_send_needs_no_card_in_the_owners_own_session(self):
+        # The bug as reported: mailing himself, nobody on cc/bcc, drew a card in
+        # his own chat while the poller sent the same mail with none.
+        approve_tool, bridge, log = self._approver("user")
+        assert approve_tool(
+            "gmail_send", {"to": "pawel@wenda.eu", "body": "here you go"}
+        ) is True
+        assert bridge.asked == []
+        # And the record names the POLICY: "auto (user)" would read as a human
+        # decision, which is the one thing that did not happen.
+        assert log.records[0][1] == "auto (owner-only recipients)"
+
+    def test_third_party_send_still_cards_in_the_owners_own_session(self):
+        approve_tool, bridge, _ = self._approver("user")
+        approve_tool("gmail_send", {"to": "stranger@evil.com", "body": "x"})
+        assert len(bridge.asked) == 1
+
+    def test_the_bot_mailbox_is_not_an_owner_address(self):
+        """aish@/bot@ is what `email_poll` READS BACK IN, so a send there is
+        aish talking to itself, not aish answering him — it cards."""
+        approve_tool, bridge, _ = self._approver("user")
+        approve_tool("gmail_send", {"to": "aish@wenda.eu", "body": "x"})
+        assert len(bridge.asked) == 1
 
     def test_owner_scoped_send_auto_runs(self):
         # A live send to the owner needs no approval (recipient-scoped autonomy).

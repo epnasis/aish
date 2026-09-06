@@ -260,6 +260,30 @@ What it costs: nothing on an ordinary form, which posts back to the site it is o
 
 **Unattended got the same question, in the stricter direction (#293).** The triggered branch returned on `novel or None`, so a host already in provenance was freed with **no payload check at all** — laxer, unattended, than the attended path it exists to be stricter than, and an injected worker could put anything it liked into an address at a host the owner had once mentioned. It now asks `_carries_payload` of a known host exactly as the attended path does. The novel-host rule is untouched: every novel host still gates, payload or not, because nobody sees the answer either way. `TestSearchingIsReading`.
 
+## Recipient scope: what the mail can REACH is not who is watching (#377)
+
+`recipients.py` answers one question — can this outbound mail land anywhere but the owner's own inbox? — and a No means it runs with **no approval card at all**. `owner_scoped_send` is `gmail_send` plus `all_owner`, which parses `to`/`cc`/`bcc` and requires every address to be in `OWNER_ADDRESSES`. **Recipient-scoped autonomy**: the whole exfiltration risk the card exists for is aish being steered into mailing a third party, and a send that cannot reach one removes it.
+
+**It shipped as a conjunct of the triggered-session policy, and that was the wrong half of the sentence.** `server.approve_tool` read `if origin != "user" and _triggered_safe(...)`, so the recipients were never even looked at in the owner's own chat: mailing himself, nobody on cc, drew a card when HE asked for it and none when the email poller asked for the same thing. The stated justification was *"there is no human to answer a card"* — an argument about the card, never about the send. It also pointed the wrong way. Prompt injection lives on the **unattended** path; that is the path the exemption was trusting, while the attended path, where the owner composed the request in his own words, was the one being gated. This is the same lesson as **the question is TAINT, not who pressed start** above, applied in the other direction: there it made an attended turn stricter, here it makes one freer, and both times because *who started the session* was standing in for a question about the action.
+
+So the licence is **origin-independent**, and `_auto_safe(name, args, origin)` now keeps the two reasons apart rather than in one list:
+
+| policy | why it is safe | scope |
+|---|---|---|
+| `TRIGGERED_SAFE_TOOLS` (relabeling) | reversible, and *nobody is there to answer a card* | non-`user` origins only |
+| `recipients.owner_scoped_send` | *the action cannot reach past the owner* | every origin, web and CLI |
+
+**Both surfaces import the module, and a test asserts they agree.** Leaving the CLI out would have rebuilt the same asymmetry one surface down — an identical send needing no approval in the web and a `[y/N]` in the terminal. `tests/test_recipients.py` drives both approvers over one table of sends and fails if they ever answer differently.
+
+**The audit record names the POLICY, not the origin.** It was `auto ({origin})`, which under an origin-independent licence would read `auto (user)` — asserting a human decided, which is the one thing that did not happen. It reads `auto (owner-only recipients)` or `auto (unattended: email)`, so the ledger says which of the two licensed the run (L8; `docs/trace-contract.md` §6.11 still wants this as structured evidence rather than prose).
+
+**What stays exactly as strict, and why none of it moved:**
+
+- **Recipient validation is a parse, never a regex find (#178 P0-3).** `recipients.parse` uses `email.utils.getaddresses`, rejects quoted and multi-`@` local-parts and any field that re-serializing does not reproduce, and any unclean parse counts as not-owner (L6). The old `findall` passed `"pawel@wenda.eu"@evil.com` — valid RFC 5322, routes to evil.com — as owner-only. `test_adversarial_recipients_never_pass_as_owner` pins the table. **This got MORE load-bearing, not less**: it now stands in front of attended sessions too, so it is the only thing between a composed recipient and a cardless send.
+- **A reply is never auto-safe**, even with an owner `to`: a threaded reply also goes to the original sender, which the args cannot show.
+- **Drafts are checked like live sends** — a fully-addressed draft is one tap from sending.
+- **`aish@wenda.eu` / `bot@wenda.eu` are NOT owner addresses.** They are the bot mailbox `email_poll.py` reads back in, so a send there is aish talking to itself and it cards. Adding them would wire a cardless send straight into the trigger ingress — aish mailing itself a new instruction, `dmarc=pass`, indefinitely. They look like the owner's own addresses, which is exactly why `test_the_bot_mailbox_is_never_an_owner_address` pins it against the next reader who adds them. **What this does NOT establish** is that no such loop exists: it closes the direct send, and whether the owner's own mailbox forwards anywhere that lands back in the bot's inbox is a mail-server fact no line here can see.
+
 ## The payload predicate reads the VALUE, not the shape of the address (#341)
 
 **The measured failure.** `_address_carries_payload` fired on any query, any fragment, userinfo, a path past `PLAIN_PATH_MAX` or a host label past `HOST_LABEL_MAX`. Run against the five distinct real URLs the owner was carded on between 2026-08-24 and 08-30 — a GitHub blob path, a Reddit thread, an Amazon product page and two Allegro listing searches — **all five return True**, and the card then asserted *"wants to send something"* about every one of them. That is a cause no line of code established, on 18 of the 33 web-acting cards in a week, and it is an L8 violation before it is a usability one: a card that describes something nobody is doing is how the words on every other card stop meaning anything.
