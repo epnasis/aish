@@ -122,7 +122,80 @@ def is_outside_roots(path: str, cwd: str, roots) -> bool:
     return not within_roots(roots, path, cwd)
 
 
-def read_file(path: str, cwd: str, offset: int = 1, limit: int = READ_MAX_LINES) -> str:
+# The files a `section=` read addresses by heading. Declared, not sniffed: an
+# extension is the author saying what the file is, and content-sniffing would
+# make the same call answer differently as a file is edited.
+MARKDOWN_SUFFIXES = (".md", ".markdown")
+
+
+def markdown_headings(lines: list[str]) -> list[tuple[int, int, str]]:
+    """(1-based line, level, title) for every ATX heading — the file's own
+    declared structure (#361 slice 6).
+
+    Fenced code blocks are skipped: a `# comment` inside one is code quoting a
+    heading, not the file declaring a section, and counting it would hand the
+    model an index with phantom entries."""
+    headings: list[tuple[int, int, str]] = []
+    fence = ""
+    for number, line in enumerate(lines, 1):
+        stripped = line.lstrip()
+        if fence:
+            if stripped.startswith(fence):
+                fence = ""
+            continue
+        if stripped.startswith(("```", "~~~")):
+            fence = stripped[:3]
+            continue
+        if not line.startswith("#"):
+            continue
+        marks = len(line) - len(line.lstrip("#"))
+        title = line[marks:].strip()
+        if 1 <= marks <= 6 and title:
+            headings.append((number, marks, title))
+    return headings
+
+
+def markdown_section(
+    lines: list[str], asked: str
+) -> "tuple[int, int] | list[tuple[int, int, str]]":
+    """The (start, end) 1-based line range of the heading `asked` names — from
+    its heading line to just before the next heading of the same or higher
+    level — or the full heading index when it matches nothing or matches
+    ambiguously: the miss ANSWER is the index the model needed.
+
+    Matching mirrors `browse.find_section`: exact, then folded, then unique
+    folded substring, never fuzzy."""
+    from .browse import fold
+
+    headings = markdown_headings(lines)
+    hit = next((h for h in headings if h[2] == asked), None)
+    if hit is None:
+        wanted = fold(asked)
+        exact = [h for h in headings if fold(h[2]) == wanted]
+        if len(exact) == 1:
+            hit = exact[0]
+        elif not exact and wanted:
+            loose = [h for h in headings if wanted in fold(h[2])]
+            if len(loose) == 1:
+                hit = loose[0]
+    if hit is None:
+        return headings
+    start, level, _ = hit
+    end = len(lines)
+    for number, other_level, _title in headings:
+        if number > start and other_level <= level:
+            end = number - 1
+            break
+    return (start, end)
+
+
+def read_file(
+    path: str,
+    cwd: str,
+    offset: int = 1,
+    limit: int = READ_MAX_LINES,
+    section: str = "",
+) -> str:
     target = resolve(path, cwd)
     try:
         text = target.read_text(encoding="utf-8", errors="replace")
@@ -134,6 +207,34 @@ def read_file(path: str, cwd: str, offset: int = 1, limit: int = READ_MAX_LINES)
         return f"ERROR: cannot read {target}: {exc}"
 
     lines = text.splitlines()
+    if section:
+        if target.suffix.lower() not in MARKDOWN_SUFFIXES:
+            return (
+                f"ERROR: section= addresses Markdown headings and {target.name} "
+                "is not a Markdown file. Use offset/limit here — or read_pdf's "
+                "own section= for a PDF."
+            )
+        found = markdown_section(lines, section)
+        if isinstance(found, list):
+            if not found:
+                return (
+                    f"ERROR: {target.name} declares no headings — read it with "
+                    "offset/limit instead."
+                )
+            index = "\n".join(
+                f"{'  ' * (level - 1)}{title!r} — line {number}"
+                for number, level, title in found
+            )
+            return (
+                f"no heading called {section!r} in {target.name} — its "
+                f"headings:\n{index}"
+            )
+        start, end = found
+        # Served through the same numbered window as any other read, with the
+        # section's end as a second ceiling — so the line numbers, the limit
+        # and the continuation offset all keep their ordinary meaning.
+        offset = start
+        limit = min(max(1, limit), end - start + 1)
     offset = max(1, offset)
     limit = max(1, min(limit, READ_MAX_LINES))
     if offset > len(lines) and lines:
