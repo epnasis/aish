@@ -5028,6 +5028,13 @@ class TestEveryPageReaderLooksThroughShadowRoots:
         "_COVERED_JS": "walks el's own host chain — see the `chain` set",
         "_DEEP_ACTIVE_JS": "IS the descent, for focus",
         "NAME_JS": "closest('label') — a label is in its control's own root",
+        "REVEAL_JS": (
+            "closest() and document.styleSheets both stop at a shadow "
+            "boundary ON PURPOSE: the checked signal admits a hidden control "
+            "only when it can SEE the rule, so a boundary it cannot cross "
+            "is a miss that narrows — the control stays plain unreachable — "
+            "and never a wrong admission"
+        ),
     }
 
     def _snippets(self):
@@ -6592,3 +6599,141 @@ class TestControlsAreGroupedByTheirSection:
         assert "unchanged, already shown in this chat" in out
         assert "[in section: Messaging]" in out
         assert "'Maciej Pawłowski'" in out
+
+
+class TestAHiddenControlIsListedOnlyOnACheckedSignal:
+    """#372 slices A+B. A control that is invisible NOW may be listed as
+    revealable only when the PAGE ITSELF proves how it becomes pressable:
+    a ':hover' rule that sets a visibility property and names a reachable
+    revealer, or a hiding chain of opacity alone (still focusable). A
+    JS-driven reveal — LinkedIn's own row actions, React root delegation —
+    proves nothing and stays a plain unreachable, reported and never
+    guessed around."""
+
+    def test_only_invisible_may_be_admitted_never_the_semantic_reasons(self):
+        """aria-hidden, inert, [hidden] and a closed details are the page's
+        own statement that this is not interactive content; the walk admits
+        revealable candidates only under the literal `invisible` reason."""
+        walk = browse.CONTROLS_JS[
+            browse.CONTROLS_JS.index("const walk ="):browse.CONTROLS_JS.index(
+                "walk(document);")
+        ]
+        assert "if (why === 'invisible')" in walk
+        gate = walk[walk.index("if (why === 'invisible')"):]
+        gate = gate[:gate.index("unreached += 1")]
+        assert "revealFound.push(" in gate
+
+    def test_a_hover_rule_must_set_a_visibility_property(self):
+        """A ':hover' that recolors a link reveals nothing; only rules that
+        touch display, visibility or opacity are signals."""
+        assert "if (s && (s.display || s.visibility || s.opacity))" in (
+            browse.REVEAL_JS
+        )
+
+    def test_the_revealer_must_be_reachable_now(self):
+        assert "if (revealer && !unreachable(revealer)) return revealer;" in (
+            browse.REVEAL_JS
+        )
+
+    def test_focus_signal_requires_an_opacity_only_hiding_chain(self):
+        """display:none and visibility:hidden make an element unfocusable —
+        the signal is exactly 'still in the keyboard order while hidden'."""
+        assert (
+            "if (s.display === 'none' || s.visibility === 'hidden') return false;"
+            in browse.REVEAL_JS
+        )
+
+    def test_the_press_time_revealer_is_rederived_live(self):
+        """The revealer travels as a display string only; the element is
+        re-derived from the live page by the same shared scan."""
+        assert browse.REVEALER_ELEMENT_JS.endswith(
+            "  return hoverRevealer(el);\n}"
+        )
+        assert browse.REVEAL_JS in browse.REVEALER_ELEMENT_JS
+
+    def test_reveal_fields_reach_the_typed_control_and_its_line(self):
+        hover = browse.controls_from(
+            [{"n": 3, "kind": "button", "name": "Open the options list",
+              "reveal": "hover", "revealer": "cssrow"}]
+        )[0]
+        focus = browse.controls_from(
+            [{"n": 4, "kind": "button", "name": "Star this",
+              "reveal": "focus"}]
+        )[0]
+        assert hover.reveal == "hover" and hover.revealer == "cssrow"
+        assert "(hidden now — revealed by hovering 'cssrow')" in hover.line()
+        assert "(hidden now — revealed by focusing it)" in focus.line()
+
+    def test_an_over_cap_revealable_goes_back_to_the_unreachable_tally(self):
+        """Listed or counted, never neither: a candidate the reveal cap left
+        out is what it always was — an invisible control out of reach."""
+        select = browse.CONTROLS_JS[browse.CONTROLS_JS.index("walk(document);"):]
+        assert "unreached += left;" in select
+        assert "reasons['invisible'] = (reasons['invisible'] || 0) + left;" in select
+
+
+class TestVisibleAlwaysWinsResolution:
+    """#372: the tie rule that keeps #347's regressions closed. A hidden twin
+    must never stand in for the control that works today, an ambiguity among
+    visible controls is final, and a name in neither list gets the refusal
+    that names what IS pressable."""
+
+    def _lists(self):
+        visible = browse.controls_from(
+            [{"n": 0, "kind": "button", "name": "Wyślij"},
+             {"n": 1, "kind": "link", "name": "Maciej Pawłowski",
+              "detail": "https://x.example/in/maciej"}]
+        )
+        hidden = browse.controls_from(
+            [{"n": 2, "kind": "button", "name": "Wyślij",
+              "reveal": "hover", "revealer": "row"},
+             {"n": 3, "kind": "button", "name": "Open the options list",
+              "reveal": "focus"}]
+        )
+        return visible, hidden
+
+    def test_a_visible_control_wins_its_name_outright(self):
+        visible, hidden = self._lists()
+        found = browse.resolve_two_tier(visible, hidden, "Wyślij")
+        assert found.control is visible[0]
+
+    def test_a_name_only_the_hidden_list_answers_is_found_there(self):
+        visible, hidden = self._lists()
+        found = browse.resolve_two_tier(visible, hidden, "Open the options list")
+        assert found.control is hidden[1]
+        assert found.control.reveal == "focus"
+
+    def test_a_visible_ambiguity_is_final(self):
+        visible = browse.controls_from(
+            [{"n": 0, "kind": "button", "name": "Zapisz",
+              "row": ["wiersz A"]},
+             {"n": 1, "kind": "button", "name": "Zapisz",
+              "detail": "inny", "row": ["wiersz B"]}]
+        )
+        hidden = browse.controls_from(
+            [{"n": 2, "kind": "button", "name": "Zapisz", "reveal": "hover"}]
+        )
+        found = browse.resolve_two_tier(visible, hidden, "Zapisz")
+        assert found.control is None
+        assert found.ambiguous
+        for candidate in visible:
+            assert candidate.address in found.problem
+
+    def test_a_name_in_neither_list_gets_the_visible_refusal(self):
+        visible, hidden = self._lists()
+        found = browse.resolve_two_tier(visible, hidden, "Nie ma takiego")
+        assert found.control is None
+        assert "'Wyślij'" in found.problem
+
+    def test_the_revealable_group_is_its_own_footer_section(self):
+        controls = browse.controls_from([{"n": 0, "kind": "button", "name": "OK"}])
+        revealable = browse.controls_from(
+            [{"n": 1, "kind": "button", "name": "Open the options list",
+              "reveal": "hover", "revealer": "row"}]
+        )
+        out = web_module._present_page(
+            snapshot(controls=controls, revealable=revealable)
+        )
+        assert "the page hides but its own CSS or keyboard order says how" in out
+        assert "Open the options list" in out
+        assert "refuses the press unless the control measurably" in out

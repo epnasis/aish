@@ -3200,6 +3200,19 @@ def _present_page(
         if end <= len(body):
             seen.sections_seen.add(key)
     lines = _control_lines(snapshot)
+    revealable = getattr(snapshot, "revealable", None) or []
+    if revealable:
+        # Their own group, under their own sentence — never mixed into the
+        # ordinary list, because they are not pressable as the page stands
+        # and the act path holds them to the reveal-flip door (#372).
+        lines.append(
+            f"[{len(revealable)} control(s) the page hides but its own CSS or "
+            "keyboard order says how to reveal. Act on one like any control "
+            "(single acts only, not batch steps): aish performs the reveal "
+            "first and refuses the press unless the control measurably "
+            "becomes pressable.]"
+        )
+        lines.extend(c.line() for c in revealable)
     if getattr(snapshot, "unreachable", 0):
         # The sentence a small model needs in order to do the right thing: not
         # "that control does not exist" (which sends it back to guessing URLs)
@@ -3437,7 +3450,11 @@ def _browse_act(
     seen = _seen(view)
     current = seen.shown
     control = (
-        browse_mod.resolve(current.controls, target).control if current else None
+        browse_mod.resolve_two_tier(
+            current.controls, getattr(current, "revealable", None) or [], target
+        ).control
+        if current
+        else None
     )
     if control is not None:
         mutating = control.mutating
@@ -3447,7 +3464,14 @@ def _browse_act(
         expect_download = action == "click" and browse_mod.wants_download(
             control.name, control.detail
         )
-        if control.kind == "link" and control.detail.startswith(("http://", "https://")):
+        # Never for a hidden-but-revealable control: the link-destination
+        # fallback is one of the two rungs the reveal door structurally lacks
+        # (#372) — a hidden href is the honeypot shape.
+        if (
+            control.kind == "link"
+            and not control.reveal
+            and control.detail.startswith(("http://", "https://"))
+        ):
             try:
                 _require_public(control.detail)
             except BlockedURLError:

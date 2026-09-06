@@ -4993,7 +4993,7 @@ MAX_FRAMES = 12
 
 async def _enumerate(
     page: Any, match: str = ""
-) -> tuple[list[dict], int, int, int, str, str, dict]:
+) -> tuple[list[dict], list[dict], int, int, int, str, str, dict]:
     """Every control on the page, across its frames, in one numbering.
 
     The count continues across frames rather than restarting, so `[14]` means
@@ -5005,6 +5005,7 @@ async def _enumerate(
     never tagged, and an untagged control cannot be acted on however cleverly
     Python filters the list afterwards (#270)."""
     raw: list[dict] = []
+    raw_reveal: list[dict] = []
     matched = unreached = matching = 0
     commit = ""
     dialog = ""
@@ -5021,12 +5022,15 @@ async def _enumerate(
     except Exception:  # noqa: BLE001 — a page that will not list frames has one
         frames = [page.main_frame]
     for frame in frames:
-        options["offset"] = len(raw)
+        # Both lists share one numbering: the tag is what acting resolves,
+        # and two elements must never share a number (#372).
+        options["offset"] = len(raw) + len(raw_reveal)
         try:
             found = await frame.evaluate(browse_mod.CONTROLS_JS, options)
         except Exception:  # noqa: BLE001 — a frame that will not answer has none
             continue
         raw += list(found.get("controls") or [])
+        raw_reveal += list(found.get("revealable") or [])
         matched += int(found.get("matched") or 0)
         unreached += int(found.get("unreachable") or 0)
         matching += int(found.get("matching") or 0)
@@ -5037,7 +5041,7 @@ async def _enumerate(
         dialog = dialog or str(found.get("dialog") or "")
         for why, count in (found.get("reasons") or {}).items():
             reasons[str(why)] = reasons.get(str(why), 0) + int(count or 0)
-    return raw, matched, unreached, matching, commit, dialog, reasons
+    return raw, raw_reveal, matched, unreached, matching, commit, dialog, reasons
 
 
 async def _find(page: Any, n: int) -> tuple[Any, bool]:
@@ -5173,10 +5177,13 @@ async def _snapshot(
     )
     text = await _without_option_floods(page, settled_text)
     after_settle = clock()
-    raw, matched, unreached, matching, commit, dialog, reasons = await _enumerate(
+    raw, raw_reveal, matched, unreached, matching, commit, dialog, reasons = await _enumerate(
         page, match
     )
     controls = browse_mod.controls_from(raw)
+    # A SEPARATE addressing pass (#372): controls_from runs address_controls
+    # per list, so a hidden twin can never rename a visible control's address.
+    revealable = browse_mod.controls_from(raw_reveal)
     # AFTER enumeration, deliberately (#361 slice 4): the walk maps each
     # tile's controls by the data-aish-n tags enumeration just wrote, so a
     # section-addressed read can serve a section WITH its controls.
@@ -5214,6 +5221,16 @@ async def _snapshot(
             "unreachable": unreached,
             "reasons": dict(reasons),
         }
+    if raw_reveal:
+        # Apart from `unreachable` on purpose (#372): an admitted revealable
+        # control is LISTED, so counting it out of reach would rewrite the
+        # instrument that produced this design's own evidence (#370's
+        # `invisible` tally). Additive key, aish's own count.
+        reach = phases.get("reach")
+        if not isinstance(reach, dict):
+            reach = {}
+            phases["reach"] = reach
+        reach["revealable"] = len(raw_reveal)
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
     # control the model is looking for is very often in the header the narrowing
     # would drop — "Przełącz lokal" sits beside the account name, not in <main>.
@@ -5223,6 +5240,7 @@ async def _snapshot(
         text=text,
         sections=sections,
         controls=controls,
+        revealable=revealable,
         hidden=hidden,
         narrowed=match or "",
         matching=matching,
@@ -5701,6 +5719,79 @@ class Refused(Exception):
     model, and it carries what it needs to try again."""
 
 
+async def _press_revealed(
+    page: Any, target: Any, control: Any
+) -> browse_mod.Pressed:
+    """Slice B of #372: the page's own reveal, the re-measure, and only then a
+    real press.
+
+    The reveal-flip is the ONLY door. A control admitted to the revealable
+    list was invisible when it was listed; here aish performs exactly the
+    gesture the page's own signal named — hover the revealer the stylesheet
+    addresses, or focus the control the keyboard order holds — and re-runs
+    the reachability predicate. No flip, no press, and the refusal carries
+    what was actually done, never a cause. The synthetic-event and
+    link-destination rungs are structurally absent: a hidden control is the
+    canonical bot honeypot, and the measured flip is what separates "the page
+    reveals this for a person" from "no person could ever press this".
+
+    The gesture and the press stay on the same element cluster on purpose —
+    the pointer lands inside the hovered revealer, focus is not moved between
+    the reveal and the Enter — because both reveals were measured to RETRACT
+    (pointer-leave, blur) on the pages that shaped this."""
+    if control.reveal == "hover":
+        element = None
+        with contextlib.suppress(Exception):
+            handle = await target.evaluate_handle(browse_mod.REVEALER_ELEMENT_JS)
+            element = handle.as_element()
+        if element is None:
+            raise Refused(
+                f"{control.address!r} is hidden, and the stylesheet rule that "
+                "promised a revealer no longer names one on the live page. "
+                "Nothing was pressed."
+            )
+        did = (
+            f"aish hovered {control.revealer!r}"
+            if control.revealer
+            else "aish hovered the revealer the page's stylesheet names"
+        )
+        with contextlib.suppress(Exception):
+            await element.hover(timeout=ACT_TIMEOUT_MS)
+    else:
+        if not await _focus(target):
+            raise Refused(
+                f"{control.address!r} is hidden and would not take focus. "
+                "Nothing was pressed."
+            )
+        did = "aish focused it"
+    gone = await _reachable_now(target)
+    if gone:
+        raise Refused(
+            f"{did} and {control.address!r} stayed out of reach ({gone}). "
+            "Nothing was pressed."
+        )
+    before = await _activation(target)
+    if control.reveal == "hover":
+        try:
+            await target.click(timeout=ACT_TIMEOUT_MS)
+        except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
+            raise Refused(
+                f"{did} and {control.address!r} became pressable, but the "
+                f"click would not land ({type(exc).__name__}). Nothing was "
+                "pressed."
+            ) from exc
+        how = "clicked it"
+    else:
+        await page.keyboard.press("Enter")
+        how = "pressed Enter"
+    return browse_mod.Pressed(
+        note=(
+            f"a hidden control: {did}, it became pressable, and aish {how}"
+            + await _took(page, target, before)
+        )
+    )
+
+
 async def _type(
     page: Any, target: Any, *, text: str, submit: bool
 ) -> browse_mod.Pressed:
@@ -5849,9 +5940,10 @@ def browse_act(
         # the very one the narrowing existed to reach (#270). Falling back to
         # the address costs nothing: a name the matcher cannot see simply
         # leaves the selection in document order, which is what it was before.
-        raw, *_ = await _enumerate(page, topic or address)
+        raw, raw_reveal, *_ = await _enumerate(page, topic or address)
         live = browse_mod.controls_from(raw)
-        found = browse_mod.resolve(live, address)
+        live_reveal = browse_mod.controls_from(raw_reveal)
+        found = browse_mod.resolve_two_tier(live, live_reveal, address)
         if found.control is None:
             session.epoch += 1
             return await shot(
@@ -5896,7 +5988,7 @@ def browse_act(
                 ),
             )
         gone = await _reachable_now(target)
-        if gone:
+        if gone and not control.reveal:
             session.epoch += 1
             return await shot(
                 owner,
@@ -5912,12 +6004,29 @@ def browse_act(
                     "now; act on something from THIS list."
                 ),
             )
+        if control.reveal and action != "click":
+            # The reveal door is built for a press. Typing into a control the
+            # page is hiding is not offered — reveal it by acting on whatever
+            # shows it, then type into what appears.
+            session.epoch += 1
+            return await shot(
+                owner,
+                session,
+                problem=(
+                    f"{control.address!r} is hidden until revealed and takes a "
+                    "plain click only. Nothing was typed."
+                ),
+            )
         await _centre(target)
         before = list(page.context.pages)
         session.epoch += 1
         pressed = browse_mod.Pressed()
         try:
-            if action == "click":
+            if action == "click" and control.reveal:
+                # Slice B (#372): reveal, re-measure, and only then a real
+                # press — never the synthetic-event or link-destination rungs.
+                pressed = await _press_revealed(page, target, control)
+            elif action == "click":
                 pressed = await _press(
                     page, target, mutating=mutating,
                     href=approved_href if top else "",

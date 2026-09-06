@@ -429,7 +429,14 @@ def absent(snapshot, name):
 # child link sharing the row's title line, a focusable toolbar that is
 # furniture, and a tabindex="-1" element that script alone can focus.
 MESSAGING = """<!doctype html>
-<html lang="pl"><head><meta charset="utf-8"><title>Wiadomości</title></head>
+<html lang="pl"><head><meta charset="utf-8"><title>Wiadomości</title>
+<style>
+  .row .actions { display: none; }
+  .row:hover .actions { display: inline-block; }
+  #fbtn { opacity: 0; }
+  #fbtn:focus { opacity: 1; }
+</style>
+</head>
 <body>
 <h1>Wiadomości</h1>
 <div id="list">
@@ -437,6 +444,7 @@ MESSAGING = """<!doctype html>
     <span>Maciej Pawłowski</span>
     <span>Maciej: super, dzięki, widzę</span>
     <a href="/hard.html?profile=maciej">Maciej Pawłowski</a>
+    <span class="actions"><button id="hbtn">Open options for Maciej</button></span>
   </div>
   <div class="row" tabindex="0" data-open="conv-akanksha">
     <span>Akanksha Yadav</span>
@@ -449,8 +457,20 @@ MESSAGING = """<!doctype html>
   <button>B4</button><button>B5</button><button>B6</button>
 </div>
 <div id="ghost" tabindex="-1">Widmo</div>
+<button id="fbtn">Star the Maciej conversation</button>
+<span class="jshidden"><button id="jbtn">Archive via JS reveal</button></span>
 <p id="status">closed</p>
 <script>
+  document.getElementById('hbtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('status').textContent = 'options for maciej';
+  });
+  document.getElementById('fbtn').addEventListener('click', () => {
+    document.getElementById('status').textContent = 'starred maciej';
+  });
+  // Hidden by JS state alone: no CSS rule, no opacity-only chain — the page
+  // is structurally silent, so aish must NOT list it as revealable.
+  document.querySelector('.jshidden').style.display = 'none';
   for (const row of document.querySelectorAll('.row')) {
     const open = () => {
       document.getElementById('status').textContent = 'opened ' + row.dataset.open;
@@ -934,6 +954,48 @@ def check_rows(url: str) -> None:
     print("asked for by price →", cheapest.control.address)
 
 
+
+def check_revealable(url: str) -> None:
+    """Hidden controls on a checked signal only, pressed through the
+    reveal-flip door (#372 A+B)."""
+    page = browser.browse_open(url + "messaging.html")
+    by_name = {c.name: c for c in page.revealable}
+
+    hover = by_name.get("Open options for Maciej")
+    assert hover is not None and hover.reveal == "hover", [
+        c.line() for c in page.revealable
+    ]
+    focus = by_name.get("Star the Maciej conversation")
+    assert focus is not None and focus.reveal == "focus", [
+        c.line() for c in page.revealable
+    ]
+    # The JS-hidden button proves nothing and is listed NOWHERE: not a
+    # control, not revealable — an unreachable, counted with its reason.
+    all_names = [c.name for c in page.controls] + [c.name for c in page.revealable]
+    assert "Archive via JS reveal" not in all_names
+    assert page.unreachable >= 1, page.unreachable
+    for control in page.revealable:
+        print("revealable →", control.line())
+
+    after = browser.browse_act(hover.address, "click")
+    assert "options for maciej" in after.text, after.text[-300:]
+    assert "hovered" in (after.notice or "") and "became pressable" in (
+        after.notice or ""
+    ), after.notice
+    print("hover-revealed pressed →", after.notice)
+
+    after = browser.browse_act(focus.address, "click")
+    assert "starred maciej" in after.text, after.text[-300:]
+    assert "focused it" in (after.notice or ""), after.notice
+    print("focus-revealed pressed →", after.notice)
+
+    missing = browser.browse_act("Archive via JS reveal", "click")
+    assert "no control on this page is called" in (missing.problem or ""), (
+        missing.problem
+    )
+    print("JS-hidden refused →", (missing.problem or "")[:80])
+
+
 def check_spinner(url: str) -> None:
     """A page that finishes after its DOM has gone quiet (#251)."""
     browser.browse_open(url + "hard.html")
@@ -1176,6 +1238,7 @@ def main() -> int:
     check_calendar(url)
     check_rows(url)
     check_focus_rows(url)
+    check_revealable(url)
     check_spinner(url)
     check_submit_gating(url)
     check_grant_scope(url)
