@@ -62,7 +62,9 @@ Read-only tools auto-run. **Mutating tools are gated by `approve_tool`**, a four
 
 `_dispatch_plugin_tool` mirrors `run_command`'s #81 verdict semantics exactly: `True` runs, `None`/`False` denies, `Denied(comment)` STOPS and arms the stop gate, `Approved(comment)` HOLDS — the args are not run, the model reworks and re-proposes, and the adjusted call is approved again before it runs.
 
-**Mutating tools are exposed to the model ONLY when a tool approver is wired.** Without one they stay hidden and also fail closed in dispatch, so a mutation can never run ungated. There is deliberately **no denylist and no auto-approval** on tools — a mutating tool always prompts. Their safety is manifest review at authoring time plus this per-call gate. `TestPluginTools`, `TestToolApproval`.
+**Mutating tools are exposed to the model ONLY when a tool approver is wired.** Without one they stay hidden and also fail closed in dispatch, so a mutation can never run ungated. There is deliberately **no denylist** on tools, and `_dispatch` itself has no auto-approval — `if tool.mutating:` goes to the approver, always. Their safety is manifest review at authoring time plus this per-call gate. `TestPluginTools`, `TestToolApproval`.
+
+**The two exemptions live in the APPROVER, not here, and that is the fence.** `server.py` and `cli.py` may answer a card without showing it — a triggered session's relabeling, and a `gmail_send` that can reach nobody but the owner (#377). Both are keyed on the CALL, never on the manifest: a plugin author cannot declare his tool exempt, because nothing in `TOOL.md` is read when that decision is made. See `docs/agent-core.md` for why the second one is origin-independent.
 
 **Read-only plugin tools parallelize** exactly like native ones: `_execute_tool_calls`' concurrent filter includes `_is_readonly_plugin`, and `_read_only_call` has a plugin branch (`_run_readonly_plugin` = validate + execute, thread-safe subprocess). `TestReadonlyPluginParallel`.
 

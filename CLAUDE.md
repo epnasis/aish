@@ -62,7 +62,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 
 | Touching… | Read first |
 |---|---|
-| `agent.py`, `claude_max.py`, `approval.py`, `tools.py`, `files.py`, `web.py`, `backends.py`, `provenance.py`, `vouches.py` | `docs/agent-core.md` |
+| `agent.py`, `claude_max.py`, `approval.py`, `tools.py`, `files.py`, `web.py`, `backends.py`, `provenance.py`, `vouches.py`, `recipients.py` | `docs/agent-core.md` |
 | `browser.py`, `browse.py`, `signin.py`, `_browser_read`, `_login_gate`, `_browse_gate`, anything that renders or drives a page in Chrome | `docs/browser.md` |
 | `cli.py`, `prompt.py`, `aliases.py`, `dir_ignore.py`, `notify.py` | `docs/cli.md` |
 | `media.py`, `show_image`, anything that renders an image | `docs/media-and-images.md` |
@@ -104,6 +104,9 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`vouches.py`** — the hosts the owner has agreed data may ride an address to: machine-wide,
   permanent, EXACT-matched, and seeded once from his own recorded approvals. His answer, not a
   judgement, which is what lets it grant. → `docs/agent-core.md`
+- **`recipients.py`** — whether an outbound mail can reach anybody but the owner, and the
+  cardless send that a No licenses. Origin-independent by construction (#377): the licence is a
+  property of the ACTION, so the web and the CLI import the same answer. → `docs/agent-core.md`
 - **`web.py`** — `web_search`/`read_url`/`fetch_binary`: auto-approved, but their inputs leave the machine, so every call is echoed and fetched content is wrapped in an untrusted-content banner. http/https only, one SSRF guard, one TLS trust store. → `docs/agent-core.md`
 - **`browser.py`** — the real Chrome behind `read_url` when a fetch is not enough: JavaScript-only pages and sites the owner is signed into. Headful but off-screen (headless is what such sites block), one owner thread, one persistent profile that is never in the git-backed config tree. Reading as the signed-in owner is gated in EVERY session. → `docs/browser.md`
 - **`signin.py`** — sign-ins aish may re-establish by itself when a site expires the session. Bound to an exact ORIGIN, replayed only at the login page the owner recorded, written only after it was seen to work, and tried exactly once. → `docs/browser.md`

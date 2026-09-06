@@ -14,7 +14,7 @@ import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import aliases, backends, browser, term_image, tools, turns
+from . import aliases, backends, browser, recipients, term_image, tools, turns
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
@@ -657,17 +657,32 @@ def make_import_approver(log, get_intent=None):
 def make_tool_approver(log, get_intent=None, get_gate=None):
     """Gate a mutating plugin tool call (issue #141). Reuses the command
     prompt's shape — the tool name + its structured args stand in for a shell
-    string — but there is no denylist or auto-approval: a mutating tool always
-    prompts. CLI stays y/N (the comment/adjust verdicts are web-card-only).
+    string — and there is no denylist. CLI stays y/N (the comment/adjust
+    verdicts are web-card-only).
 
     Unlike the three approvers around it, this one is a CHANNEL rather than a
     gate: seven different gates in `agent.py` reach it. So it is the one that
     asks the agent who is holding the card (#295 M3), late-bound exactly as
-    `get_intent` is."""
+    `get_intent` is.
+
+    The one auto-approval is a mail that can reach nobody but the owner (#377),
+    the same answer `server.py` gives — an identical action must not need an
+    approval here and none there, or the terminal simply inherits the asymmetry
+    the web one just shed. The CLI has no unattended origin, so the
+    origin-scoped half of that policy has nothing to say here."""
 
     def approve_tool(name: str, args: dict, preview: "str | None" = None) -> bool:
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         said = (get_intent() if get_intent else "") or ""
+        if recipients.owner_scoped_send(name, args):
+            print(f"\n{DIM}✓ auto-approved ({recipients.OWNER_ONLY}): "
+                  f"{name}({shown}){RESET}")
+            if log:
+                log.command(
+                    f"tool {name}({shown})", f"auto ({recipients.OWNER_ONLY})", said,
+                    asked_by=(get_gate() if get_gate else "") or "",
+                )
+            return True
         print_intent(said)
         print(f"\n{YELLOW}{BOLD}▶ run tool?{RESET} {BOLD}{name}{RESET}({shown})")
         if preview:

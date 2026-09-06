@@ -781,13 +781,13 @@ Covered in §3.8. Records the winners with good diagnostics; records neither the
 
 ### 6.11 · Recipient-scoped autonomy · ~
 
-*Today:* `record(f"tool {name}({shown})", f"auto ({origin})")` — a prose string whose args repr happens to contain the recipients. The parse verdict itself (clean vs residue, the property `test_adversarial_recipients_never_pass_as_owner` pins) is not recorded.
+*Today:* `record(f"tool {name}({shown})", "auto (owner-only recipients)")` — a prose string whose args repr happens to contain the recipients. It names the POLICY since #377 made the licence origin-independent (`auto ({origin})` would have read `auto (user)`, asserting a human decided), but that is still prose: the parse verdict itself (clean vs residue, the property `test_adversarial_recipients_never_pass_as_owner` pins) is not recorded. **The gap widened with #377** — this licence now covers attended sessions too, so it is the reading that answers "was this send ever seen by anyone".
 
 *Must log:* `gate{gate:"recipient_scope", at:"approval", verdict:"allowed", tier:0, evidence:{recipients:[…], parse:"clean", all_owner:true, checked:"to,cc,bcc"}}`. Autonomy grants are Tier 0 forever (#190 decision 7); a licensing grant that leaves no structured evidence cannot be audited, and this is the one gate where a silent regression is a security regression.
 
 ### 6.12 · Draft-and-hold safe list · ~
 
-Same record and same gap as 6.11; `evidence:{safe_list:"TRIGGERED_SAFE_TOOLS", hit:"gmail_send", origin:"email"}`.
+Same record and same gap as 6.11; `evidence:{safe_list:"TRIGGERED_SAFE_TOOLS", hit:"gmail_label", origin:"email"}`. Since #377 this is the origin-scoped half ALONE — `gmail_send` moved to 6.11's consequence-scoped licence and is no longer on this list — and the record reads `auto (unattended: {origin})`.
 
 ### 6.13 · Plugin-tool verdicts (#141) — the green-lie corollary · ✓ *(closed by #192)*
 

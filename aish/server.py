@@ -44,7 +44,6 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from email.utils import formataddr, getaddresses
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
@@ -60,7 +59,18 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from uvicorn.protocols.utils import ClientDisconnected
 
-from . import backends, browser, dir_ignore, explain, export, files, notify, tools, turns
+from . import (
+    backends,
+    browser,
+    dir_ignore,
+    explain,
+    export,
+    files,
+    notify,
+    recipients,
+    tools,
+    turns,
+)
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
@@ -1062,91 +1072,29 @@ class WebStatus:
         self.bridge.emit({"type": "status", "state": "idle"}, record=False)
 
 
-# Triggered-session capability policy (#160): a session NOT started by the user
-# (origin email/schedule/webhook) runs with no human at the keyboard. These
-# mutating tools are SAFE to auto-run there — reversible and non-exfiltrating:
-# relabeling mail, and mail (draft or live) whose every recipient is verifiably
-# the owner. Everything else (any send or draft addressed beyond the owner,
-# trashing, creating filters, sharing to Drive) falls through to the normal
-# approval card, which simply HOLDS pending until the owner opens the automated
-# session and answers — the draft-and-hold model, built out of the existing
-# gate rather than a bespoke hold flow.
+# The ORIGIN-SCOPED half of the capability policy (#160): a session NOT started
+# by the user (origin email/schedule/webhook) runs with no human at the keyboard,
+# and these mutating tools are safe to auto-run there for exactly that reason —
+# reversible bookkeeping not worth blocking an overnight session on. In the
+# owner's own session he still sees the card, because there he is the one who
+# can cheaply say no. Everything else (trashing, creating filters, sharing to
+# Drive) falls through to the normal card, which simply HOLDS pending until the
+# owner opens the automated session and answers — the draft-and-hold model,
+# built out of the existing gate rather than a bespoke hold flow.
+#
+# Mail to the owner used to be on this list and is NOT any more (#377): it is
+# safe because of what it can REACH, which is true in every session, so it
+# belongs to the consequence-scoped half below. See `_auto_safe`.
 TRIGGERED_SAFE_TOOLS = frozenset({"gmail_label"})
 
-# Recipient-scoped autonomy (#160 follow-up): a triggered session may send a
-# real email WITHOUT approval as long as EVERY recipient is the owner — the whole
-# prompt-injection risk is aish being steered into mailing a third party, and a
-# send that can only ever land in the owner's own inbox removes it. A send to
-# anyone else still holds. Override the address set with AISH_OWNER_ADDRESSES
-# (comma-separated); defaults to the wenda owner addresses.
-OWNER_ADDRESSES = frozenset(
-    a.strip().lower()
-    for a in os.environ.get(
-        "AISH_OWNER_ADDRESSES", "pawel@wenda.eu,pawel@wenda.email"
-    ).split(",")
-    if a.strip()
-)
-
-def _parse_recipients(field: str) -> list[str] | None:
-    """Every address a recipient header field routes to, or None when the field
-    does not parse CLEANLY — the security rule (#178 P0-3): a decision about
-    what a string IS must never be made by a regex that finds things IN it.
-    The old `findall` approach saw the owner inside `"pawel@wenda.eu"@evil.com`
-    (a valid RFC 5322 quoted local-part routed to evil.com) and concluded the
-    send was owner-only. This parses with email.utils.getaddresses and then
-    rejects anything exotic: a parse-failure pair, a quoted local-part, a
-    local-part containing `@`, or a field that re-serializing the parsed
-    addresses does not reproduce (residue = something escaped the parse, which
-    lenient/older parsers are known to do). Rejection is safe — the caller
-    falls through to the approval card, never to an auto-send."""
-    pairs = getaddresses([field])
-    if not pairs:
-        return None
-    addrs: list[str] = []
-    for _display, addr in pairs:
-        if not addr:
-            return None  # ('', '') is getaddresses' malformed-input marker
-        local, sep, domain = addr.rpartition("@")
-        if not sep or not local or not domain:
-            return None
-        if "@" in local or '"' in addr or "'" in addr:
-            return None  # quoted/multi-@ local-parts route elsewhere than they read
-        addrs.append(addr)
-    # Residue check: rebuilding the field from what we parsed must reproduce it
-    # (whitespace/comma spacing normalized). Anything dropped or reinterpreted
-    # by the parser fails the comparison and the send holds for approval.
-    normalize = lambda s: re.sub(r"\s*,\s*", ", ", re.sub(r"\s+", " ", s.strip()))  # noqa: E731
-    rebuilt = ", ".join(formataddr(pair) for pair in pairs)
-    if normalize(field) != normalize(rebuilt):
-        return None
-    return addrs
-
-
-def _all_recipients_owner(args: dict) -> bool:
-    """True iff the send has at least one recipient and every address across
-    to/cc/bcc is an owner address. A reply (reply_to_msg_id) is NEVER auto-safe,
-    even with an explicit owner `to`: a threaded reply ALSO goes to the original
-    message's sender, which is not verifiable from args (if the replied-to
-    message is from a third party, an owner-looking `to` would still exfiltrate
-    to them). Autonomous owner answers must therefore be a NEW email addressed
-    explicitly to an owner address — the model is told this in the trigger.
-    Any field that does not parse cleanly (see _parse_recipients) counts as
-    not-owner, so a malformed/adversarial recipient holds instead of sending."""
-    if args.get("reply_to_msg_id"):
-        return False
-    recips: list[str] = []
-    for field in ("to", "cc", "bcc"):
-        val = args.get(field)
-        if val is None or val == "" or val == []:
-            continue
-        text = ", ".join(str(v) for v in val) if isinstance(val, list) else str(val)
-        parsed = _parse_recipients(text)
-        if parsed is None:
-            return False
-        recips += parsed
-    if not recips:
-        return False
-    return all(addr.lower() in OWNER_ADDRESSES for addr in recips)
+# Recipient-scoped autonomy (#160 follow-up, #377) lives in `recipients.py`,
+# because it is a property of the ACTION and not of the session: a mail that can
+# only reach the owner is safe to send with no card whoever asked for it, so the
+# CLI needs the same answer this module does. Re-exported under the old names so
+# a reader following #178 P0-3 still lands on them.
+OWNER_ADDRESSES = recipients.OWNER_ADDRESSES
+_parse_recipients = recipients.parse
+_all_recipients_owner = recipients.all_owner
 
 
 def _host_arg(event: dict) -> str:
@@ -1221,19 +1169,26 @@ def _describe_hold(event: dict, *, terse: bool = False) -> str:
     return "an action"
 
 
-def _triggered_safe(name: str, args: dict) -> bool:
-    """Whether tool `name` with `args` may auto-run in a triggered session."""
-    if name in TRIGGERED_SAFE_TOOLS:
-        return True
-    if name == "gmail_send":
-        # Safe only when it can never leave the owner's own control: every
-        # recipient verifiably the owner (recipient-scoped autonomy — aish can
-        # answer YOU without approval; mailing anyone else still holds). The
-        # recipient check applies to DRAFTS too (#178 P0-3): a draft addressed
-        # to a third party is a fully-staged exfiltration one mistaken tap from
-        # sending, so it stays draftable but through the card, never silently.
-        return _all_recipients_owner(args)
-    return False
+def _auto_safe(name: str, args: dict, origin: str) -> str | None:
+    """The policy that lets this call run with NO approval card, named — or None
+    when it must be carded. Two policies, deliberately not one list, because
+    they are safe for unrelated reasons (#377):
+
+    ORIGIN-SCOPED (`TRIGGERED_SAFE_TOOLS`): reversible bookkeeping that is safe
+    BECAUSE nobody is at the keyboard to answer a card. Relabeling mail is not
+    worth blocking an overnight session on; in the owner's own session he still
+    sees the card, because there he is the one who can cheaply say no.
+
+    CONSEQUENCE-SCOPED (`recipients.owner_scoped_send`): safe because of what
+    the action can REACH, which does not change with who started the session.
+
+    The returned string is the AUDIT REASON, so the log says which of the two
+    licensed the run rather than restating the origin (#377)."""
+    if recipients.owner_scoped_send(name, args):
+        return recipients.OWNER_ONLY
+    if origin != "user" and name in TRIGGERED_SAFE_TOOLS:
+        return f"unattended: {origin}"
+    return None
 
 
 def card_latency(answer: dict) -> dict:
@@ -1510,19 +1465,22 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         name: str, args: dict, preview: "str | None" = None
     ) -> "bool | Approved | Denied":
         # Reuses the command card verbatim (issue #141): same approve/deny +
-        # comment verdicts, no denylist/auto-approval — a mutating tool always
-        # prompts. Comment semantics match commands: deny+comment = STOP,
-        # approve+comment = HOLD-and-adjust. A ground-truth preview (#157), when
-        # the tool provides one, gives the human a legible description of an
-        # otherwise-opaque (e.g. id-addressed) action.
+        # comment verdicts, no denylist. Comment semantics match commands:
+        # deny+comment = STOP, approve+comment = HOLD-and-adjust. A ground-truth
+        # preview (#157), when the tool provides one, gives the human a legible
+        # description of an otherwise-opaque (e.g. id-addressed) action. The one
+        # way past the card is `_auto_safe` below, which names its own reason.
         origin = get_origin() if get_origin else "user"
-        if origin != "user" and _triggered_safe(name, args):
-            # Triggered-session capability policy (#160): a safe mutation runs
-            # without a card since there is no human to answer one. Recorded as
-            # auto so the audit trail shows it was policy, not a human decision.
+        auto = _auto_safe(name, args, origin)
+        if auto:
+            # Capability policy (#160, #377): a safe mutation runs without a
+            # card — either because nobody is there to answer one, or because
+            # the action cannot reach past the owner. Recorded as auto, NAMING
+            # the policy, so the audit trail shows which one licensed it and
+            # never implies a human decided.
             shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
-            record(f"tool {name}({shown})", f"auto ({origin})", asked_by=gate())
-            bridge.emit({"type": "echo", "text": f"✓ auto-approved ({origin}): {name}"})
+            record(f"tool {name}({shown})", f"auto ({auto})", asked_by=gate())
+            bridge.emit({"type": "echo", "text": f"✓ auto-approved ({auto}): {name}"})
             return True
         request: dict[str, Any] = {
             "type": "approval_request",
