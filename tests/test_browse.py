@@ -1650,6 +1650,30 @@ class TestSectionAddressedReads:
         assert browse.find_section(sections, "wyniki wyszukiwania") is sections[0]
         assert browse.find_section(sections, "archiwalne") is sections[1]
 
+    def test_an_anonymous_section_is_served_by_the_line_the_index_printed(self):
+        """#365: the index advertises an anonymous section by its first line,
+        and the resolver must accept exactly that address — on linkedin.com
+        the model asked twice, verbatim as printed, and was refused twice
+        with 'ask for one of those'."""
+        body = "0 notifications total\n" + "\n".join(
+            f"wątek {i} — nowa wiadomość" for i in range(10)
+        )
+        sections = [
+            browse.Section(name="", text=body),
+            browse.Section(name="Messaging", text="rozmowy " * 40),
+        ]
+        page = snapshot(
+            url="https://linkedin.com/messaging",
+            text=browse.sections_render(sections),
+            sections=sections,
+            controls=[control(n=0)],
+        )
+        printed = sections[0].label()
+        assert printed == "0 notifications total"
+        out = web_module._present_snapshot(page, section=printed)
+        assert "wątek 3" in out
+        assert "rozmowy" not in out
+
     def test_the_act_gate_treats_sections_as_a_read(self):
         source = open("aish/agent.py", encoding="utf-8").read()
         assert '("read", "sections")' in source

@@ -2796,19 +2796,26 @@ def sections_render(sections: list[Section]) -> str:
 
 def find_section(sections: list[Section], asked: str) -> Section | None:
     """The section the model asked for, matched the way `choose` matches: the
-    exact name first, then folded. Never fuzzy — the miss ANSWER is the index
-    the model needed, and a guess would silently hand it the wrong part of
-    the page."""
+    exact address first, then folded. Never fuzzy — the miss ANSWER is the
+    index the model needed, and a guess would silently hand it the wrong part
+    of the page.
+
+    Matched on `label()`, not `name`, because the label is what the INDEX
+    prints: an anonymous section is advertised by its first line, and a
+    resolver that only knew names refused exactly the address it had just
+    handed out — the model asked twice, verbatim as printed, and was told
+    "ask for one of those" both times (#365). One authority for what a
+    section is called, on both sides of the round trip."""
     for section in sections:
-        if section.name == asked:
+        if section.label() == asked:
             return section
     wanted = fold(asked)
     if not wanted:
         return None
-    hits = [s for s in sections if s.name and fold(s.name) == wanted]
+    hits = [s for s in sections if fold(s.label()) == wanted]
     if len(hits) == 1:
         return hits[0]
-    hits = [s for s in sections if s.name and wanted in fold(s.name)]
+    hits = [s for s in sections if wanted in fold(s.label())]
     return hits[0] if len(hits) == 1 else None
 
 
