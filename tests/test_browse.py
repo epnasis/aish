@@ -2253,11 +2253,21 @@ class TestARowIsWhatTellsTwoIdenticalButtonsApart:
     def test_the_row_is_found_from_tree_shape_not_from_class_names(self):
         """So a <table> of <tr>, a flex list of <div>s and a grid of <li> tiles
         all work by one rule — and an injected ad row is simply a child nobody's
-        control lives in."""
+        control lives in. Found LOCALLY (#372, 2026-09-07): the nearest ancestor
+        holding ANOTHER member, so same-named controls spanning two sibling
+        containers (eon's current + paid invoice tables) no longer collapse to
+        one useless table-sized 'row'."""
         source = browse.CONTROLS_JS
-        assert "root.contains(el)" in source
-        assert "row.parentElement !== root" in source
+        assert "holdsOther(shared, el)" in source
+        assert "o !== self && ancestor.contains(o)" in source
+        assert "row.parentElement !== shared" in source
         assert "new Set(rows).size !== rows.length" in source
+
+    def test_the_semantic_row_unit_is_preferred_over_a_wrapper(self):
+        """A one-row table has no sibling row to reveal the <tr> level, so the
+        climb lands on the whole table and the header pollutes the digest; the
+        nearest <tr>/<li> is the unit a person would name."""
+        assert "n.tagName === 'TR' || n.tagName === 'LI'" in browse.CONTROLS_JS
 
     def test_a_line_every_row_carries_cannot_tell_them_apart(self):
         assert "shared.get(line) === texts.length" in browse.CONTROLS_JS

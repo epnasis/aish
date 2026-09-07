@@ -2418,11 +2418,19 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + REVEAL_JS + NAME_JS + r"""
   // meant to end, reappearing at the step where the choice is actually made.
   //
   // Both halves are deterministic and content-blind. The ROW is found from
-  // tree shape: take the lowest ancestor holding every control in the group,
-  // and each control's row is the child of that ancestor containing it. No
-  // class-name guessing, so a <table> of <tr>, a flex list of <div>s and a
-  // grid of <li> tiles all work by the same rule — and an injected ad row is
-  // simply a child nobody's control lives in. The DIGEST is a difference: a
+  // tree shape, LOCALLY: each control's row is the child of its NEAREST
+  // ancestor that also holds another control from the group. A single global
+  // common ancestor was wrong the moment the same-named controls span two
+  // sibling containers — eon's invoices are a "current" <table> and a "paid"
+  // <table> under one <section>, so the global ancestor was the section, the
+  // "row" became a whole TABLE, nine of them collided, and every download
+  // link fell back to a bare ordinal `Pobierz e-fakturę #7` with nothing to
+  // say which invoice it was (measured 2026-09-07). The nearest-shared
+  // ancestor is the <tbody> for the paid rows (row = the <tr>) and the
+  // <section> for the lone current row (row = its table) — each control gets
+  // the tightest unit that still has a neighbour, so a <table> of <tr>, a
+  // flex list of <div>s and a grid of <li> tiles all work by the same rule.
+  // The DIGEST is a difference: a
   // line every row carries ("Wybierz", "Bagaż wliczony", "Cena od") cannot
   // tell them apart, so drop exactly those and keep the rest. Line-level and
   // never word-level: `640 PLN` and `720 PLN` differ as lines, so both keep
@@ -2443,19 +2451,43 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + REVEAL_JS + NAME_JS + r"""
     for (const group of groups.values()) {
       if (group.length < 2) continue;
       const els = group.map((c) => c.el);
-      let root = els[0].parentElement;
-      while (root && !els.every((el) => root.contains(el))) root = root.parentElement;
-      if (!root) continue;
+      // Does `ancestor` hold a member OTHER than `self`? `self` must be
+      // excluded, not the ancestor: a <td> contains its OWN link, so testing
+      // only `o !== ancestor` calls every cell "shared" and the row collapses
+      // to the cell — nothing distinguished.
+      const holdsOther = (ancestor, self) =>
+        els.some((o) => o !== self && ancestor.contains(o));
       const rows = [];
+      let ok = true;
       for (const el of els) {
+        // Climb to the nearest ancestor that ALSO holds another member; the
+        // row is the child of it that this control sits in — the tightest
+        // repeated unit local to this control, whichever container it lives
+        // in. No global root, so two sibling tables no longer collapse into
+        // one useless "row".
+        let shared = el.parentElement;
+        while (shared && !holdsOther(shared, el)) shared = shared.parentElement;
+        if (!shared) { ok = false; break; }
         let row = el;
-        while (row && row.parentElement !== root) row = row.parentElement;
-        if (!row) break;
+        while (row && row.parentElement !== shared) row = row.parentElement;
+        if (!row) { ok = false; break; }
+        // Prefer the SEMANTIC row unit when the climb landed on a wrapper: a
+        // one-row table (eon's single current invoice) has no sibling row to
+        // reveal the <tr> level, so the climb stops at the whole table and
+        // the digest picks up the header — `Pobierz — Rachunki Termin Kwota`
+        // instead of the invoice number. The nearest <tr>/<li> between the
+        // control and that row is the unit a person would name; it equals the
+        // climbed row on a normal multi-row list, so this only ever tightens.
+        for (let n = el; n && n !== row.parentElement; n = n.parentElement) {
+          if (n.tagName === 'TR' || n.tagName === 'LI') { row = n; break; }
+        }
         rows.push(row);
       }
-      // One row each, or this is not a repeated structure and there is no
-      // honest digest to take — the ordinals stand.
-      if (rows.length !== els.length) continue;
+      if (!ok || rows.length !== els.length) continue;
+      // Rows must be distinct units — two controls in one row cannot be told
+      // apart by that row, so the ordinals stand for them (the earlier
+      // global-root version bailed for the WHOLE group here; now only a true
+      // same-row collision does).
       if (new Set(rows).size !== rows.length) continue;
       const texts = rows.map(linesOf);
       const shared = new Map();
