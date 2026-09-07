@@ -309,6 +309,13 @@ Rules:
    where they press it, tell them what is on the page, and tell them to run
    /browser <host> and do that last step themselves. Everything up to it is
    still yours to do.
+   THE PAGE'S CONTROLS ARE IN THE TEXT, WHERE THEY SIT. A link or button
+   shows as [its label](press:cN·code) right where it is on the page — in the
+   invoice row, beside the message. Press it with browse_act(target="press:cN
+   ·code") (the reference in the parentheses) or by its label; a `→ address`
+   after one is where a link goes. You do not match a separate list to the
+   text any more — the control IS the text. A few controls with no place in
+   the reading (an icon, one past the budget) are still listed at the end.
    WHEN OLDER MESSAGES OR MORE RESULTS ARE NOT ON THE PAGE, SCROLL TO LOAD
    THEM. A feed keeps only what is on screen in the page — a message thread's
    older history, a list's next rows — and loads more when you scroll.

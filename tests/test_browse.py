@@ -1187,7 +1187,7 @@ class TestWhatChangedRatherThanThePageAgain:
         out = web_module._present_snapshot(
             snapshot(url="https://lot.com/b", controls=[control(n=0)]), acted=True
         )
-        assert "controls on this page" in out
+        assert "Przełącz lokal" in out  # the control is listed (overflow footer)
 
     def test_a_problem_is_never_reported_as_a_diff(self):
         """The model's next move depends on seeing where it actually is."""
@@ -1196,7 +1196,7 @@ class TestWhatChangedRatherThanThePageAgain:
             snapshot(controls=[control(n=0)], problem="that control is gone"),
             acted=True,
         )
-        assert "controls on this page" in out
+        assert "Przełącz lokal" in out  # the control is listed (overflow footer)
 
     def test_there_is_no_scheduled_full_resend(self):
         """#361 retired the every-DELTA_RUN_MAX refresh: it re-sent a page the
@@ -5172,8 +5172,16 @@ class TestATagsWriterAndItsReadersHaveTheSameReach:
             "writes": {"CONTROLS_JS": DEEP},
             # `SECTIONS_JS` maps which controls live in which tile (#361
             # slice 4); a light reader there would misfile every
-            # shadow-rooted control as "elsewhere on the page".
-            "reads": {"CONTROLS_JS": DEEP, "CALENDAR_JS": DEEP, "SECTIONS_JS": DEEP},
+            # shadow-rooted control as "elsewhere on the page". `STRUCT_JS`
+            # (and `STRUCT_PAGE_JS`, which embeds it) marks each tagged
+            # control's position for the inline reference (#364), and reaches
+            # controls through shadow roots the same way — its walk already
+            # descends open shadow roots, so a control stamped there is a
+            # control it can mark.
+            "reads": {
+                "CONTROLS_JS": DEEP, "CALENDAR_JS": DEEP, "SECTIONS_JS": DEEP,
+                "STRUCT_JS": DEEP, "STRUCT_PAGE_JS": DEEP,
+            },
         },
         # The picker's own numbering, written and cleared entirely inside
         # `CALENDAR_JS`. LIGHT on both sides, and consistent with itself: the
@@ -6810,7 +6818,7 @@ class TestTheStructuredReaderIsInnerTextPlusStructure:
         """Two readers that disagree about what the page says is the defect
         REACH_JS/NAME_JS sharing exists to prevent, at text scale."""
         assert browse.STRUCT_JS in browse.SECTIONS_JS
-        assert "structuredTextIn(el, 0, {unread: 0})" in browse.SECTIONS_JS
+        assert "structuredTextIn(el, 0, {unread: 0}, opts.mark)" in browse.SECTIONS_JS
         assert browse.STRUCT_JS in browse.STRUCT_PAGE_JS
         assert "el.innerText" not in browse.SECTIONS_JS.replace(
             browse.STRUCT_JS, ""
@@ -6872,3 +6880,121 @@ class TestScrollLoadsMoreAndReportsHonestly:
         area — so the answer can say 'at the top', not 'nothing scrolls'."""
         assert "el.scrollHeight - el.clientHeight" in browse.SCROLL_JS
         assert "span > bestSpan" in browse.SCROLL_JS
+
+
+class TestInlineControlReferences:
+    """#364. Controls are shown IN PLACE in the reading, addressed by an
+    aish-minted reference `[label](press:cN·nonce)` — a markdown link whose
+    target is not a real URL (so it can't be fetched) and whose nonce the page
+    cannot forge (it never appears in the page's own HTML). Position carries
+    identity; the reference carries the handle; the real name is kept."""
+
+    MARK = browse.MARK
+
+    def _controls(self):
+        return browse.controls_from([
+            {"n": 0, "kind": "link", "name": "Pobierz e-fakturę",
+             "detail": "https://eon.example/d?id=249", "href": "https://eon.example/d?id=249"},
+            {"n": 1, "kind": "button", "name": "Zapłać wybrane"},
+        ])
+
+    def test_a_reference_round_trips(self):
+        assert browse.parse_ref("press:c7·ab12") == (7, "ab12")
+        assert browse.parse_ref("[Pobierz](press:c7·ab12)") == (7, "ab12")
+        assert browse.parse_ref("just a label") is None
+        assert browse.press_ref(7, "ab12") == "press:c7·ab12"
+
+    def test_sentinels_become_inline_references(self):
+        controls = self._controls()
+        marked = f"Nr 249 {self.MARK}0{self.MARK} to pay {self.MARK}1{self.MARK}"
+        text, inlined = browse.substitute_controls(marked, controls, "ab12")
+        assert "[Pobierz e-fakturę](press:c0·ab12)" in text
+        assert "[Zapłać wybrane](press:c1·ab12)" in text
+        assert inlined == {0, 1}
+
+    def test_a_nav_link_shows_its_destination_as_context(self):
+        controls = self._controls()
+        text, _ = browse.substitute_controls(f"{self.MARK}0{self.MARK}", controls, "n")
+        # the link keeps its real name AND shows where it goes, elided
+        assert "[Pobierz e-fakturę](press:c0·n) → eon.example/d" in text
+        # a plain button carries no destination
+        button, _ = browse.substitute_controls(f"{self.MARK}1{self.MARK}", controls, "n")
+        assert "→" not in button
+
+    def test_the_plain_form_carries_no_nonce_for_stable_keys(self):
+        """Section keys hash the plain label, never the reference — a nonce in
+        the hash would make a section never match itself and collapse would
+        die."""
+        controls = self._controls()
+        marked = f"Nr 249 {self.MARK}0{self.MARK}"
+        plain = browse.strip_controls(marked, controls)
+        assert plain == "Nr 249 Pobierz e-fakturę"
+        assert "press:" not in plain
+        # the same page, rendered twice, hashes identically — no nonce leaks in
+        assert browse.strip_controls(marked, controls) == plain
+
+    def test_a_vanished_control_drops_its_marker(self):
+        text, inlined = browse.substitute_controls(f"x {self.MARK}9{self.MARK} y",
+                                                    self._controls(), "n")
+        assert text == "x  y"
+        assert inlined == set()
+
+
+class TestPressingByInlineReference:
+    """#364. The model presses an inline `[label](press:cN·nonce)` by its
+    reference. The nonce is the session's, carried on the snapshot the chat
+    was shown; a reference with the wrong nonce — stale, or a page that
+    printed a control-shaped link into its own untrusted text — is refused
+    BEFORE it resolves to anything."""
+
+    def _view(self, nonce="abc123"):
+        view = web_module.BrowseView()
+        snap = snapshot(controls=[control(n=1, name="Pobierz e-fakturę")])
+        snap.nonce = nonce
+        snap.inlined = {1}
+        view.remember(snap)
+        return view
+
+    def _capture(self, monkeypatch, seen):
+        def fake(address, action, **kw):
+            seen["address"] = address
+            return snapshot(controls=[control(n=1)])
+        monkeypatch.setattr(web_module.browser, "browse_act", fake)
+
+    def test_a_valid_reference_is_translated_to_its_control(self, monkeypatch):
+        seen = {}
+        self._capture(monkeypatch, seen)
+        web_module.browse_act("press:c1·abc123", "click", view=self._view())
+        assert seen["address"] == "1", "a validated reference presses control 1"
+
+    def test_the_whole_markdown_link_also_works(self, monkeypatch):
+        seen = {}
+        self._capture(monkeypatch, seen)
+        web_module.browse_act(
+            "[Pobierz e-fakturę](press:c1·abc123)", "click", view=self._view()
+        )
+        assert seen["address"] == "1"
+
+    def test_a_wrong_nonce_is_refused_before_it_resolves(self, monkeypatch):
+        called = {"n": 0}
+        monkeypatch.setattr(
+            web_module.browser, "browse_act",
+            lambda *a, **kw: called.__setitem__("n", called["n"] + 1)
+            or snapshot(controls=[]),
+        )
+        out = web_module.browse_act(
+            "press:c1·WRONGNONCE", "click", view=self._view()
+        )
+        assert "not from the page in front of you" in out
+        assert called["n"] == 0, "a forged reference never reaches the browser"
+
+    def test_a_reference_with_no_nonce_is_refused(self, monkeypatch):
+        called = {"n": 0}
+        monkeypatch.setattr(
+            web_module.browser, "browse_act",
+            lambda *a, **kw: called.__setitem__("n", called["n"] + 1)
+            or snapshot(controls=[]),
+        )
+        out = web_module.browse_act("press:c1", "click", view=self._view())
+        assert "not from the page" in out
+        assert called["n"] == 0

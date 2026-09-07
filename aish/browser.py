@@ -52,6 +52,7 @@ import re
 import threading
 import time
 import urllib.parse
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
@@ -1349,19 +1350,24 @@ async def _body_text(page: Any) -> str:
 SECTION_COVERAGE = 0.6
 
 
-async def _sections(page: Any, flat_text: str) -> list[browse_mod.Section]:
+async def _sections(
+    page: Any, flat_text: str, controls: list[browse_mod.Control] | None = None
+) -> list[browse_mod.Section]:
     """The page as named tiles (#361 slice 2), or [] to keep the flat text —
     the floor is yesterday's behaviour, never less.
 
     The option-flood scrub is applied per tile with one fetch of the flood
     list, so a tiled page and a flat one hand the model the same scrubbed
     words and a section's content identity is the identity of what was
-    SHOWN."""
+    SHOWN. Tiles come back MARKED (#364): each control is a sentinel at its
+    position, which is why coverage is measured on the STRIPPED length — a
+    3-char sentinel standing in for a long label must not shrink a tile below
+    the floor and drop the whole page back to flat text."""
     if not flat_text:
         return []
     try:
         raw = await page.evaluate(
-            browse_mod.SECTIONS_JS, {"max": browse_mod.SECTIONS_MAX}
+            browse_mod.SECTIONS_JS, {"max": browse_mod.SECTIONS_MAX, "mark": True}
         )
         floods = await page.evaluate(
             browse_mod.FLOOD_JS, {"inlineChoices": browse_mod.CHOICE_INLINE_MAX}
@@ -1374,7 +1380,10 @@ async def _sections(page: Any, flat_text: str) -> list[browse_mod.Section]:
             str(tile.get("text") or ""), list(floods or [])
         )
     sections = browse_mod.sections_from(tiles)
-    tiled = sum(len(section.text) for section in sections)
+    tiled = sum(
+        len(browse_mod.strip_controls(section.text, controls or []))
+        for section in sections
+    )
     if tiled < SECTION_COVERAGE * len(flat_text):
         return []
     return sections
@@ -1803,6 +1812,11 @@ class _Session:
         self.inflight = 0
         self.adopt(page)
         self.epoch = 0
+        # This session's reference nonce (#364): minted here, never in any
+        # page's HTML, so a page cannot forge a valid inline control reference.
+        # Stable for the session, so a reference the model reads keeps working
+        # across its own reads and acts.
+        self.nonce = uuid.uuid4().hex[:8]
         self.touched = time.monotonic()
 
     def adopt(self, page: Any) -> None:
@@ -5190,17 +5204,6 @@ async def _snapshot(
     # the tiles would go blind with it (the correlated-failure objection
     # from this design's review).
     native = await _without_option_floods(page, settled_text)
-    frames_unread = 0
-    struct_text = ""
-    try:
-        got = await page.evaluate(browse_mod.STRUCT_PAGE_JS)
-        struct_text = str((got or {}).get("text") or "")
-        frames_unread = int((got or {}).get("unread") or 0)
-    except Exception:  # noqa: BLE001 — a page that will not answer keeps its text
-        struct_text = ""
-    text = (
-        await _without_option_floods(page, struct_text) if struct_text else native
-    )
     after_settle = clock()
     raw, raw_reveal, matched, unreached, matching, commit, dialog, reasons = await _enumerate(
         page, match
@@ -5209,12 +5212,38 @@ async def _snapshot(
     # A SEPARATE addressing pass (#372): controls_from runs address_controls
     # per list, so a hidden twin can never rename a visible control's address.
     revealable = browse_mod.controls_from(raw_reveal)
-    # AFTER enumeration, deliberately (#361 slice 4): the walk maps each
-    # tile's controls by the data-aish-n tags enumeration just wrote, so a
-    # section-addressed read can serve a section WITH its controls.
-    sections = await _sections(page, native)
+    # The structured read runs AFTER enumeration now (#364): it MARKS each
+    # control's position with a sentinel, which needs the `data-aish-n` tags
+    # enumeration just wrote. The sentinels become inline references in
+    # `substitute_controls` below — the page reader replaces what is HANDED
+    # OVER, never what is judged (still-loading and thin-page ran on the
+    # native settled text above), and the native text stays the coverage
+    # denominator so a reader-blind page is still caught.
+    frames_unread = 0
+    struct_marked = ""
+    try:
+        got = await page.evaluate(browse_mod.STRUCT_PAGE_JS, True)
+        struct_marked = str((got or {}).get("text") or "")
+        frames_unread = int((got or {}).get("unread") or 0)
+    except Exception:  # noqa: BLE001 — a page that will not answer keeps its text
+        struct_marked = ""
+    # Each tile carries sentinels too; coverage is measured on the stripped
+    # length so replacing a button's label with a 3-char sentinel cannot
+    # falsely fail the floor and drop the whole page back to flat text.
+    sections = await _sections(page, native, controls)
+    inlined: set[int] = set()
     if sections:
+        for section in sections:
+            section.text, got_ns = browse_mod.substitute_controls(
+                section.text, controls, session.nonce
+            )
+            inlined |= got_ns
         text = browse_mod.sections_render(sections)
+    elif struct_marked:
+        flat = await _without_option_floods(page, struct_marked)
+        text, inlined = browse_mod.substitute_controls(flat, controls, session.nonce)
+    else:
+        text = native
     after_enumerate = clock()
     # What the MODEL is told about the page being a wall. The capture no longer
     # consults it (#320): a browse-path login form is an EMPTY login form, and
@@ -5266,6 +5295,8 @@ async def _snapshot(
         sections=sections,
         controls=controls,
         frames_unread=frames_unread,
+        inlined=inlined,
+        nonce=session.nonce,
         revealable=revealable,
         hidden=hidden,
         narrowed=match or "",

@@ -809,6 +809,21 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md .md-file-chip.attachment-openable { cursor: pointer; }
 .msg.md .md-file-chip.attachment-openable:active { background: var(--bg-elev2); }
 
+/* ---- control chips ([label](press:cN·…) links in a browsed page, #364) ----
+   Read-only: the model presses these, the owner just sees what is pressable,
+   the way a real page styles a button or link in place. */
+.msg.md .ctrl-chip {
+  display: inline;
+  padding: 1px 7px;
+  margin: 0 1px;
+  background: rgba(10, 132, 255, 0.10);
+  border: 1px solid rgba(10, 132, 255, 0.30);
+  border-radius: 7px;
+  color: var(--accent, #0a84ff);
+  font-size: calc(14px * var(--fs));
+  white-space: normal;
+}
+
 /* ---- quick-reply chips (aish-reply:// links) ---- */
 .msg.md .quick-reply {
   display: inline-block;
