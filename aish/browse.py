@@ -661,13 +661,15 @@ def refuses_to_type(value: str) -> str:
 # Words that are chrome as often as they are commitments. A date picker's
 # "Confirm" and a wizard's "Accept" are these; so is the button that ends a
 # purchase, which is why they are demoted only INSIDE a widget the page has
-# just opened and never on a control that submits a form.
+# just opened, and — when they submit — only the widget's own non-modal state
+# form (#349), never the page's form and never a modal's confirm.
 CHROME_WORDS = vocab.declare(
     "browse.CHROME_WORDS",
     languages="Polish + English",
     on_miss=vocab.FRICTION,
-    structural="`submits` and `in_widget` — the demotion cannot reach a control "
-    "that submits a form",
+    structural="`in_widget` with `submits`/`widget_form`/`in_modal` — the "
+    "demotion reaches a submitting control only when it submits the widget's "
+    "own state form (`widget_form`) and nothing modal is around it (`in_modal`)",
     note="A miss means a date picker's Confirm keeps its card. Costs a prompt, "
     "never a consequence.",
     entries=(
@@ -727,6 +729,14 @@ class Control:
     # from the commit refusal: a GET to another page is what `read_url` does
     # unasked, so it cannot itself be the commit.
     navigates: bool = False
+    # This submit is the widget's OWN state form (#349) — a picker's number
+    # spinners and its "Potwierdź", confirming the popup rather than posting
+    # the page. What lets a chrome-word submit be demoted, but only off a modal.
+    widget_form: bool = False
+    # Inside something modal (#349): a checkout confirm keeps its card here
+    # even when its form is the dialog's own, because a modal that took the
+    # page over is where a real commit lives.
+    in_modal: bool = False
     # A row the page put in the keyboard order (#372): admitted by its explicit
     # tabindex, named by its first text line, and pressed focus-then-Enter
     # FIRST — a centre click on a composite row lands on whichever child sits
@@ -1489,6 +1499,8 @@ def says_it_commits(
     submits: bool = False,
     in_widget: bool = False,
     navigates: bool = False,
+    widget_form: bool = False,
+    in_modal: bool = False,
 ) -> bool:
     """Does this control's NAME commit something, given where it sits?
 
@@ -1528,9 +1540,25 @@ def says_it_commits(
     today."""
     if navigates and not submits:
         return False
-    if in_widget and not submits and _only_chrome(name):
+    if in_widget and _only_chrome(name) and (
+        not submits or _popup_confirm(submits, widget_form, in_modal)
+    ):
         return False
     return is_worded(name)
+
+
+def _popup_confirm(submits: bool, widget_form: bool, in_modal: bool) -> bool:
+    """The one submit a chrome word may be demoted on (#349): the OK of a
+    non-modal widget's own state form. lot.com's passenger picker is a popover
+    holding number spinners and a `<button type=submit>Potwierdź</button>` in
+    the popover's OWN form; pressing it confirms the popup and commits nothing
+    on the site, yet it drew a card twice (12s, 256s) because `submits` was read
+    as *posts the page's form*. The demotion reaches this and nothing else: not
+    a submit whose form is the page's (`widget_form` false), not one in a modal
+    dialog where a real commit lives (`in_modal` true — a checkout's
+    "Potwierdź"), and — through `_only_chrome` at the call site — never a submit
+    whose name says it buys, pays or deletes."""
+    return submits and widget_form and not in_modal
 
 
 def is_mutating(
@@ -1541,6 +1569,8 @@ def is_mutating(
     navigates: bool = False,
     method: str = "",
     in_widget: bool = False,
+    widget_form: bool = False,
+    in_modal: bool = False,
 ) -> bool:
     """Would pressing this change something the owner would mind?
 
@@ -1578,11 +1608,23 @@ def is_mutating(
         return False
     if navigates:
         return False
-    if submits and method.strip().lower() != QUERY_METHOD:
+    if (
+        submits
+        and method.strip().lower() != QUERY_METHOD
+        and not (
+            _popup_confirm(submits, widget_form, in_modal) and _only_chrome(name)
+        )
+    ):
+        # A non-GET submit posts the page's form and is gated on that alone —
+        # EXCEPT the OK of a non-modal widget's own state form, whose name is
+        # nothing but chrome (#349): that confirms a popup, not a transaction.
         return True
     # Measured: of the five cards one flight search drew, the only word from
     # the list that fired at all was the date picker's "Confirm".
-    return says_it_commits(name, submits=submits, in_widget=in_widget)
+    return says_it_commits(
+        name, submits=submits, in_widget=in_widget,
+        widget_form=widget_form, in_modal=in_modal,
+    )
 
 
 # What a control that is supposed to produce a FILE is called, and what its
@@ -2196,6 +2238,27 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + REVEAL_JS + NAME_JS + r"""
       // calendar — rather than on the page proper? Only chrome words are
       // demoted by this, and never on something that submits.
       in_widget: !!(el.closest && el.closest(WIDGET)),
+      // The submit is the WIDGET'S OWN state form (#349): its form sits inside
+      // the widget AND holds a field the owner can set — a passenger picker's
+      // number spinners, a date range's inputs. Pressing it confirms the
+      // popup, not the page. False when the form reaches outside the widget
+      // (the page's form) or holds nothing but the button (an "are you sure"
+      // partial), so the demotion cannot reach a real submit dressed as chrome.
+      widget_form: (() => {
+        const form = el.form;
+        if (!form || !form.closest || !form.closest(WIDGET)) return false;
+        return !!form.querySelector('input:not([type=hidden]):not([type=submit])'
+          + ':not([type=button]):not([type=reset]), select, textarea,'
+          + ' [contenteditable=true]');
+      })(),
+      // Inside something MODAL — a declared aria-modal, an alertdialog, a
+      // <dialog> opened modally (#349). Read at a low bar deliberately: here
+      // modality KEEPS a card (a checkout confirm named "Potwierdź" is not a
+      // picker's OK), so over-reading it costs a prompt and never a
+      // consequence — the safe direction.
+      in_modal: !!(el.closest && (el.closest('[aria-modal="true"], [role=alertdialog]')
+        || (el.closest('dialog') && el.closest('dialog').matches
+            && el.closest('dialog').matches(':modal')))),
       // A keyboard-order row (#372): pressed focus-then-Enter FIRST, because
       // a centre click on a composite row lands on whichever child sits
       // there — the profile link, not the row — and the act performed must
@@ -3563,6 +3626,8 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                     navigates=bool(raw.get("href")),
                     method=str(raw.get("method") or ""),
                     in_widget=bool(raw.get("in_widget")),
+                    widget_form=bool(raw.get("widget_form")),
+                    in_modal=bool(raw.get("in_modal")),
                 ),
                 worded=says_it_commits(
                     name,
@@ -3572,6 +3637,8 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                     # enumeration's own answer to "does pressing this GO
                     # somewhere", never the kind the page called it.
                     navigates=bool(raw.get("href")),
+                    widget_form=bool(raw.get("widget_form")),
+                    in_modal=bool(raw.get("in_modal")),
                 ),
                 disabled=bool(raw.get("disabled")),
                 submits=bool(raw.get("submits")),
@@ -3579,6 +3646,8 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                 navigates=bool(raw.get("href")),
                 form=str(raw.get("form") or ""),
                 sends_to=str(raw.get("sends_to") or ""),
+                widget_form=bool(raw.get("widget_form")),
+                in_modal=bool(raw.get("in_modal")),
                 row=[str(line) for line in (raw.get("row") or [])][:ROW_LINES_MAX],
                 focus_row=bool(raw.get("focus_row")),
                 reveal=str(raw.get("reveal") or ""),
