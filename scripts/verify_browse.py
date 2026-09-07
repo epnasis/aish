@@ -1234,6 +1234,42 @@ def check_invoice_rows(url: str) -> None:
     assert current.control is not None, current.problem
 
 
+# A picker popover and a checkout modal that share a confirm word (#349): the
+# non-modal picker's own-form "Potwierdź" commits nothing and must draw no
+# card; the modal's identical word, and the page's own form, still do.
+PICKER = """<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><title>Pasażerowie</title></head>
+<body>
+<div role="dialog" class="picker">
+  <form>
+    <label>Dorośli <input type="number" value="1"></label>
+    <label>Dzieci <input type="number" value="0"></label>
+    <button type="submit">Potwierdź</button>
+    <button type="button">Gotowe</button>
+  </form>
+</div>
+<div role="dialog" aria-modal="true" class="modal">
+  <form><input type="text" placeholder="karta">
+  <button type="submit">Potwierdź</button></form>
+</div>
+</body></html>
+"""
+
+
+def check_picker_confirm(url: str) -> None:
+    """A non-modal picker's own-form OK is not a commit; a modal's identical
+    word still is (#349)."""
+    page = browser.browse_open(url + "picker.html")
+    confirms = [c for c in page.controls if c.name == "Potwierdź"]
+    assert len(confirms) == 2, [c.line() for c in page.controls]
+    picker = next(c for c in confirms if not c.in_modal)
+    modal = next(c for c in confirms if c.in_modal)
+    assert not picker.mutating, "a non-modal picker's confirm drew a card"
+    assert modal.mutating, "a modal checkout confirm must keep its card"
+    print("picker confirm →", picker.line())
+    print("modal confirm  →", modal.line())
+
+
 def check_submit_gating(url: str) -> None:
     """A search is not a commit (#251)."""
     page = browser.browse_open(url + "hard.html")
@@ -1458,6 +1494,7 @@ def main() -> int:
     Path(root, "framed.html").write_text(FRAMED, encoding="utf-8")
     Path(root, "lazyfeed.html").write_text(LAZYFEED, encoding="utf-8")
     Path(root, "invoices.html").write_text(INVOICES, encoding="utf-8")
+    Path(root, "picker.html").write_text(PICKER, encoding="utf-8")
     port = serve(root)
     url = f"http://127.0.0.1:{port}/"
     Path(root, "structured.html").write_text(
@@ -1477,6 +1514,7 @@ def main() -> int:
     check_structured_text(url, port)
     check_scroll(url)
     check_invoice_rows(url)
+    check_picker_confirm(url)
     check_spinner(url)
     check_submit_gating(url)
     check_grant_scope(url)

@@ -6998,3 +6998,46 @@ class TestPressingByInlineReference:
         out = web_module.browse_act("press:c1", "click", view=self._view())
         assert "not from the page" in out
         assert called["n"] == 0
+
+
+class TestAPickerConfirmIsNotACommit:
+    """#349. A control named only chrome ('Potwierdź', 'Confirm') that submits
+    a WIDGET's own state form — a passenger picker's number spinners and its
+    OK — confirms the popup, not the page, and must draw NO card: a card that
+    fires on nothing trains the owner to tap through, and the tap he learns is
+    the one waiting on the purchase. The guard must not under-gate: the page's
+    own form, a modal's confirm, and any name that says it buys still card."""
+
+    def _c(self, **kw):
+        raw = {"n": 0, "kind": "button", "name": kw.pop("name", "Potwierdź"),
+               "submits": True}
+        raw.update(kw)
+        return browse.controls_from([raw])[0]
+
+    def test_a_picker_own_form_confirm_draws_no_card(self):
+        c = self._c(widget_form=True, in_widget=True, in_modal=False)
+        assert not c.mutating, "a non-modal picker's OK is not a commit"
+        assert not c.worded
+
+    def test_the_pages_own_form_still_cards(self):
+        # widget_form False: the submit posts a form outside any widget.
+        c = self._c(widget_form=False, in_widget=True, in_modal=False)
+        assert c.mutating, "a submit of the page's form is gated on that alone"
+
+    def test_a_modal_confirm_still_cards(self):
+        # A checkout modal's 'Potwierdź' submits the dialog's own form, but the
+        # dialog is modal — a real commit lives there.
+        c = self._c(widget_form=True, in_widget=True, in_modal=True)
+        assert c.mutating
+
+    def test_a_naming_word_that_buys_still_cards_in_a_picker(self):
+        # Only-chrome is required: 'Zapłać' inside a non-modal widget form is
+        # still a commit by its NAME.
+        c = self._c(name="Zapłać", widget_form=True, in_widget=True, in_modal=False)
+        assert c.mutating
+
+    def test_a_get_search_in_a_widget_is_still_not_a_commit(self):
+        # The pre-existing GET exemption is untouched.
+        c = self._c(name="Szukaj", widget_form=True, in_widget=True,
+                    in_modal=False, method="get")
+        assert not c.mutating
