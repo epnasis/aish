@@ -1165,6 +1165,59 @@ def check_scroll(url: str) -> None:
     print("scroll at top reported honestly →", at_top.notice)
 
 
+# eon's invoice page shape (#372, 2026-09-07): the same "Pobierz e-fakturę"
+# link on every invoice row, split across TWO tables — the current unpaid
+# invoice in one, the paid history in another, under one section. The row
+# digest must tell each link apart by its invoice number, current one
+# included, and never collapse to a bare ordinal.
+INVOICES = """<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><title>Faktury</title></head>
+<body><section><h2>Finanse</h2>
+<table>
+  <tr><th>Rachunki</th><th>Termin</th><th>Do zapłaty</th><th>Do pobrania</th></tr>
+  <tr><td>Prognoza zuzycia numer 249000930656</td><td>12.10.2026</td>
+      <td>388,25</td>
+      <td><a href="https://eon.example/doc?id=249">Pobierz e-fakturę</a></td></tr>
+</table>
+<table>
+  <tr><th>Rachunki</th><th>Data</th><th>Uregulowano</th><th>Do pobrania</th></tr>
+  <tr><td>Prognoza zuzycia numer 228500965415</td><td>10.08.2026</td>
+      <td>290,13</td>
+      <td><a href="https://eon.example/doc?id=228">Pobierz e-fakturę</a></td></tr>
+  <tr><td>Faktura rozliczeniowa numer 225751192991</td><td>06.05.2026</td>
+      <td>0,00</td>
+      <td><a href="https://eon.example/doc?id=225">Pobierz e-fakturę</a></td></tr>
+  <tr><td>Prognoza zuzycia numer 244250530763</td><td>10.04.2026</td>
+      <td>394,10</td>
+      <td><a href="https://eon.example/doc?id=244">Pobierz e-fakturę</a></td></tr>
+</table>
+</section></body></html>
+"""
+
+
+def check_invoice_rows(url: str) -> None:
+    """Every 'Pobierz e-fakturę' is addressed by its invoice, current one
+    included — never a bare ordinal (#372, 2026-09-07)."""
+    page = browser.browse_open(url + "invoices.html")
+    links = [c for c in page.controls if c.name == "Pobierz e-fakturę"]
+    assert len(links) == 4, [c.line() for c in page.controls]
+    for control in links:
+        assert " — " in control.address, "bare ordinal, no invoice: " + control.address
+        assert "numer" in control.address, control.address
+    numbers = {"249000930656", "228500965415", "225751192991", "244250530763"}
+    got = {n for n in numbers if any(n in c.address for c in links)}
+    assert got == numbers, f"missing invoice numbers in addresses: {numbers - got}"
+    for control in links:
+        print("invoice link →", control.address)
+
+    # And the current invoice is addressable by its number, not the header.
+    current = browse.resolve(
+        page.controls,
+        "Pobierz e-fakturę — Prognoza zuzycia numer 249000930656",
+    )
+    assert current.control is not None, current.problem
+
+
 def check_submit_gating(url: str) -> None:
     """A search is not a commit (#251)."""
     page = browser.browse_open(url + "hard.html")
@@ -1386,6 +1439,7 @@ def main() -> int:
     Path(root, "messaging.html").write_text(MESSAGING, encoding="utf-8")
     Path(root, "framed.html").write_text(FRAMED, encoding="utf-8")
     Path(root, "lazyfeed.html").write_text(LAZYFEED, encoding="utf-8")
+    Path(root, "invoices.html").write_text(INVOICES, encoding="utf-8")
     port = serve(root)
     url = f"http://127.0.0.1:{port}/"
     Path(root, "structured.html").write_text(
@@ -1404,6 +1458,7 @@ def main() -> int:
     check_revealable(url)
     check_structured_text(url, port)
     check_scroll(url)
+    check_invoice_rows(url)
     check_spinner(url)
     check_submit_gating(url)
     check_grant_scope(url)
