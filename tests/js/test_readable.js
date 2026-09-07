@@ -127,3 +127,26 @@ check("find marks compose with highlighting and stay within the cap", () => {
 
 if (failures) { console.error(`${failures} failed`); process.exit(1); }
 console.log("readable: all checks passed");
+
+// [label](press:cN·nonce) — an inline control on a browsed page (#364) —
+// renders as its label styled as a chip; the reference is machinery and never
+// shown. Lossy on the reference ALONE (copy/save use the raw segment), so
+// everything else stays lossless.
+check("an inline control reference renders as a chip label", () => {
+  const pieces = rdPieces("Prognoza 249 | 388,25 | [Pobierz e-fakturę](press:c7·ab12)", "auto");
+  const chip = pieces.find((p) => p.cls === "tok-ctrl");
+  assert(chip && chip.text === "Pobierz e-fakturę", "the label is chipped");
+  const disp = rdDisplay(pieces);
+  assert(!disp.includes("press:c7"), "the reference is not shown");
+  assert(disp.includes("Pobierz e-fakturę") && disp.includes("388,25"), "surroundings kept");
+});
+
+check("plain text with no control reference is still lossless", () => {
+  const plain = "just some | table | text with no controls at all";
+  assert.equal(rdDisplay(rdPieces(plain, "auto")), plain);
+});
+
+check("a real http link in a browse result still linkifies", () => {
+  const pieces = rdPieces("see https://example.com/x for more", "auto");
+  assert(pieces.some((p) => p.href === "https://example.com/x"), "url still a link");
+});

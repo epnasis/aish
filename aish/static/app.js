@@ -12197,6 +12197,17 @@ function rdInline(line, out) {
     const bang = m[1];
     const label = m[2];
     const url = m[3];
+    // A control on a browsed page (#364): render it as a chip — the label
+    // alone, styled — so a control looks like a control in the trace and the
+    // page reads the way it does in the chat, not as raw `[label](press:…)`
+    // that scrolls its reference off the edge. This ONE token is lossy on
+    // purpose (the reference is machinery, like a link's href); copy/save use
+    // the raw segment text, so nothing is lost from what leaves the screen.
+    if (/^\s*press:c\d+/.test(url)) {
+      out.push({ cls: "tok-ctrl", text: label });
+      last = m.index + m[0].length;
+      continue;
+    }
     const href = rdSafeHref(url.trim());
     // Every character kept: the brackets and parens are punctuation, the url is
     // the clickable part. An image is the SAME shape — a link, never an <img>.
@@ -12281,6 +12292,31 @@ function rdFlushFence(fence, out) {
   for (const piece of pieces) out.push(piece);
 }
 
+// Plain text that may hold inline control references (#364): a browse result
+// is lang "auto", so it never went through the markdown link path — its
+// `[label](press:cN·nonce)` controls showed as raw text with the reference
+// scrolling off the edge, and next to a checkbox's row description the two
+// were indistinguishable (the owner's "missing buttons"). Each control renders
+// as the LABEL styled as a chip; the gaps are linkified as before. Lossy on
+// the reference alone, on purpose — copy/save use the raw segment text.
+const RD_CTRL_RE = /\[([^\]\n]+)\]\(press:c\d+[^)\n]*\)/g;
+function rdPlain(text) {
+  const src = String(text);
+  if (src.indexOf("](press:c") < 0) return rdLinkify(src, "");
+  const out = [];
+  let last = 0;
+  let m;
+  RD_CTRL_RE.lastIndex = 0;
+  while ((m = RD_CTRL_RE.exec(src)) !== null) {
+    if (m.index > last) for (const p of rdLinkify(src.slice(last, m.index), "")) out.push(p);
+    out.push({ cls: "tok-ctrl", text: m[1] });
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) for (const p of rdLinkify(src.slice(last), "")) out.push(p);
+  if (!out.length) out.push({ cls: "", text: src });
+  return out;
+}
+
 // ---- dispatch --------------------------------------------------------------
 function rdPieces(text, lang) {
   if (lang === "auto") {
@@ -12288,12 +12324,12 @@ function rdPieces(text, lang) {
     if (t && (t[0] === "{" || t[0] === "[")) {
       try { JSON.parse(text); return rdJson(text); } catch (_e) { /* not json: plain */ }
     }
-    return rdLinkify(String(text), "");
+    return rdPlain(String(text));
   }
   if (lang === "json") return rdJson(text);
   if (lang === "yaml") return rdYaml(text);
   if (lang === "markdown") return rdMarkdown(text);
-  return rdLinkify(String(text), ""); // plain: linkify only, lossless
+  return rdPlain(String(text)); // plain: linkify + control chips, lossless bytes
 }
 
 // The display string the pieces render to — what find searches, and what a
