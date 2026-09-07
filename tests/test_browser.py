@@ -4463,10 +4463,21 @@ class TestAKeyboardOrderRowIsPressedEnterFirst:
         class Page:
             keyboard = Keyboard()
 
+            def __init__(self, moves):
+                self._moves = moves
+                self._sig = 0
+
             async def wait_for_timeout(self, ms):
                 pass
 
-        return Page(), Target(), calls
+            async def evaluate(self, js):
+                if self._moves:
+                    self._sig += 1
+                return f"sig{self._sig}"
+
+        return Page(self.page_moves), Target(), calls
+
+    page_moves = True
 
     def test_a_row_is_focused_and_entered_never_centre_clicked(self):
         page, target, calls = self._fakes()
@@ -4476,6 +4487,34 @@ class TestAKeyboardOrderRowIsPressedEnterFirst:
         assert calls[:2] == ["focus", "key:Enter"]
         assert "click" not in calls
         assert "aish focused it and pressed Enter" in pressed.note
+
+    def test_an_enter_nothing_reacted_to_escalates_to_the_real_click(self):
+        """The first live session's defect: LinkedIn rows take focus, swallow
+        the Enter, and serve their click listener only — the first draft
+        stopped at the Enter, four presses, four dead ends. When neither the
+        control's readback nor the page-level signature moved, the click is
+        the honest next rung, and the note reports the whole ladder."""
+        self.page_moves = False
+        try:
+            page, target, calls = self._fakes()
+            pressed = _run(
+                browser._press(
+                    page, target, mutating=False, href="", enter_first=True
+                )
+            )
+        finally:
+            self.page_moves = True
+        assert calls[:2] == ["focus", "key:Enter"]
+        assert "click" in calls
+        assert "nothing reacted, so aish clicked it" in pressed.note
+
+    def test_a_page_that_moved_suppresses_the_click_escalation(self):
+        """A row's press usually changes the pane BESIDE it, not the row —
+        the page signal is what keeps a row that did react from being
+        activated a second time by the click."""
+        page, target, calls = self._fakes()
+        _run(browser._press(page, target, mutating=False, href="", enter_first=True))
+        assert "click" not in calls
 
     def test_a_row_whose_focus_does_not_take_falls_back_to_the_click(self):
         """Focus is verified before Enter for the reason the keyboard rung

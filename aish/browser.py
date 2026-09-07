@@ -5623,6 +5623,24 @@ async def _took(page: Any, target: Any, before: str | None) -> str:
     )
 
 
+# WHETHER THE PAGE MOVED, not what moved: the address plus the body text's
+# length. A row's press usually changes the pane beside it, so the control's
+# own readback misses it; this is the cheap page-scale complement. A page
+# that moves on its own (a ticker) reads as "reacted" and suppresses the
+# click escalation — the safe direction, since the cost is one un-escalated
+# press and the alternative is a double activation.
+_PAGE_SIGNATURE_JS = (
+    "() => location.href + '|' + (document.body ? document.body.innerText.length : 0)"
+)
+
+
+async def _page_signature(page: Any) -> str | None:
+    try:
+        return str(await page.evaluate(_PAGE_SIGNATURE_JS))
+    except Exception:  # noqa: BLE001 — a page that will not answer is unreadable
+        return None
+
+
 async def _press(
     page: Any, target: Any, *, mutating: bool, href: str, enter_first: bool = False
 ) -> browse_mod.Pressed:
@@ -5660,17 +5678,49 @@ async def _press(
     `enter_first` inverts the top of the ladder for a keyboard-order row
     (#372): its box is a composite — a centre click lands on whichever CHILD
     happens to sit there, the profile link rather than the row — so the way
-    the page's own tab order offers it (focus, then Enter) is the real thing
-    here and the click is the fallback. Focus is still verified before Enter,
-    for the reason the keyboard rung always has."""
+    the page's own tab order offers it (focus, then Enter) is tried first.
+    Focus is still verified before Enter, for the reason the keyboard rung
+    always has. **And an Enter nothing reacted to escalates to the real
+    click**: in the first live session after this shipped, LinkedIn's rows
+    took focus, swallowed the Enter, and served their click listener only —
+    four presses, four dead ends, because the first draft stopped at the
+    Enter. "Reacted" is read at BOTH scales — the control's own readback and
+    a page-level signature (address + body-text length) captured before the
+    Enter — because a row's press usually changes the pane beside it, not the
+    row: the page signal is what keeps a row that DID react from being
+    activated a second time by the click."""
     if enter_first and await _focus(target):
         before = await _activation(target)
+        page_before = await _page_signature(page)
+        entered = False
         with contextlib.suppress(Exception):
             await page.keyboard.press("Enter")
-            return browse_mod.Pressed(
-                note="a keyboard-order row: aish focused it and pressed Enter"
-                + await _took(page, target, before),
+            entered = True
+        if entered:
+            await page.wait_for_timeout(SETTLE_MS)
+            after = await _activation(target)
+            row_reacted = (
+                before is not None and after is not None and before != after
             )
+            page_reacted = (
+                page_before is not None
+                and page_before != await _page_signature(page)
+            )
+            if row_reacted or page_reacted:
+                return browse_mod.Pressed(
+                    note="a keyboard-order row: aish focused it and pressed "
+                    "Enter"
+                )
+            with contextlib.suppress(Exception):
+                await target.click(timeout=ACT_TIMEOUT_MS)
+                return browse_mod.Pressed(
+                    note="a keyboard-order row: aish focused it and pressed "
+                    "Enter, nothing reacted, so aish clicked it"
+                    + await _took(page, target, before),
+                )
+            # The click would not land either — the ordinary ladder below
+            # owns what happens next (uncover, then refusal), same as any
+            # stuck control.
     with contextlib.suppress(Exception):
         await target.click(timeout=ACT_TIMEOUT_MS)
         return browse_mod.Pressed()

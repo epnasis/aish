@@ -431,6 +431,8 @@ def absent(snapshot, name):
 MESSAGING = """<!doctype html>
 <html lang="pl"><head><meta charset="utf-8"><title>Wiadomości</title>
 <style>
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden;
+        clip: rect(0, 0, 0, 0); }
   .row .actions { display: none; }
   .row:hover .actions { display: inline-block; }
   #fbtn { opacity: 0; }
@@ -441,6 +443,7 @@ MESSAGING = """<!doctype html>
 <h1>Wiadomości</h1>
 <div id="list">
   <div class="row" tabindex="0" data-open="conv-maciej">
+    <span class="sr">Status is offline</span>
     <span>Maciej Pawłowski</span>
     <span>Maciej: super, dzięki, widzę</span>
     <a href="/hard.html?profile=maciej">Maciej Pawłowski</a>
@@ -449,6 +452,10 @@ MESSAGING = """<!doctype html>
   <div class="row" tabindex="0" data-open="conv-akanksha">
     <span>Akanksha Yadav</span>
     <span>Akanksha: Hello Pawel</span>
+  </div>
+  <div class="row" id="deafrow" tabindex="0" data-open="conv-deaf">
+    <span>Deaf Row</span>
+    <span>opens on click only, swallows Enter</span>
   </div>
 </div>
 <div id="toolbar" tabindex="0">
@@ -473,10 +480,14 @@ MESSAGING = """<!doctype html>
   document.querySelector('.jshidden').style.display = 'none';
   for (const row of document.querySelectorAll('.row')) {
     const open = () => {
-      document.getElementById('status').textContent = 'opened ' + row.dataset.open;
+      row.dataset.opens = String((parseInt(row.dataset.opens || '0', 10)) + 1);
+      document.getElementById('status').textContent =
+        'opened ' + row.dataset.open + ' x' + row.dataset.opens;
     };
     row.addEventListener('click', open);
-    row.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    if (row.id !== 'deafrow') {
+      row.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    }
   }
 </script>
 </body></html>
@@ -487,7 +498,12 @@ def check_focus_rows(url: str) -> None:
     """A row in the keyboard order is a control, pressed Enter-first (#372)."""
     page = browser.browse_open(url + "messaging.html")
     rows = [c for c in page.controls if c.focus_row]
-    assert len(rows) == 2, [c.line() for c in page.controls]
+    assert len(rows) == 3, [c.line() for c in page.controls]
+    # The sr-only status span is skipped: the row is named by its person,
+    # not by "Status is offline" (the first live session's defect).
+    assert not any("Status is offline" in c.name for c in rows), [
+        c.name for c in rows
+    ]
 
     # The row and the link inside it share the title; each is separately
     # addressable, and neither silently stands in for the other.
@@ -501,10 +517,20 @@ def check_focus_rows(url: str) -> None:
 
     maciej = next(c for c in rows if c.name == "Maciej Pawłowski")
     after = browser.browse_act(maciej.address, "click")
-    assert "opened conv-maciej" in after.text, after.text[-300:]
+    # Exactly ONE activation: the page-level signature saw the status line
+    # change, so the click escalation must not have fired a second open.
+    assert "opened conv-maciej x1" in after.text, after.text[-300:]
     assert "profile=" not in after.url, "the press fell on the child link"
     assert "focused it and pressed Enter" in (after.notice or ""), after.notice
     print("pressed Enter-first →", after.notice)
+
+    deaf = next(c for c in rows if c.name == "Deaf Row")
+    after = browser.browse_act(deaf.address, "click")
+    assert "opened conv-deaf x1" in after.text, after.text[-300:]
+    assert "nothing reacted, so aish clicked it" in (after.notice or ""), (
+        after.notice
+    )
+    print("Enter-deaf row escalated →", after.notice)
 
 
 # A page shaped like imdb.com/user/<id>/ratings/: a long NUMBERED list whose
