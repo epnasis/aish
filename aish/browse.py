@@ -2511,6 +2511,19 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + REVEAL_JS + NAME_JS + r"""
     .filter(Boolean));
 
   const digestRows = (all) => {
+    // The LABELS of every listed control (#364 follow-up): a row digest must
+    // not repeat a NEIGHBOUR control's label as plain text. eon's bulk-select
+    // checkbox and the row's "Pobierz e-fakturę" download link share a <tr>,
+    // so the checkbox's row read "… | 226,89 | Pobierz e-fakturę" — a stray,
+    // reference-less label that reads exactly like a missing download button
+    // (the owner's report, and it misled the diagnosis twice). The download
+    // link is listed on its own with its reference; its label belongs to IT,
+    // not to the description of the control beside it.
+    const controlLabels = new Set();
+    for (const c of all) {
+      const nm = (c.name || '').trim();
+      if (nm) controlLabels.add(nm);
+    }
     const groups = new Map();
     for (const c of all) {
       const key = (c.name || '').toLowerCase();
@@ -2570,6 +2583,8 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + REVEAL_JS + NAME_JS + r"""
         const distinct = [];
         for (const line of texts[i]) {
           if (shared.get(line) === texts.length) continue;
+          // A neighbour control's own label is not this row's description.
+          if (controlLabels.has(line)) continue;
           if (distinct.indexOf(line) >= 0) continue;
           distinct.push(line.slice(0, opts.nameMax));
           if (distinct.length >= opts.rowLines) break;

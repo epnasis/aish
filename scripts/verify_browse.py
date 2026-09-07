@@ -1181,9 +1181,11 @@ INVOICES = """<!doctype html>
 </table>
 <table>
   <tr><th>Rachunki</th><th>Data</th><th>Uregulowano</th><th>Do pobrania</th></tr>
-  <tr><td>Prognoza zuzycia numer 228500965415</td><td>10.08.2026</td>
-      <td>290,13</td>
-      <td><a href="https://eon.example/doc?id=228">Pobierz e-fakturę</a></td></tr>
+  <tr><td><input type="checkbox" aria-label="wybierz 228"></td>
+      <td style="display:block">Prognoza zuzycia numer 228500965415</td>
+      <td style="display:block">290,13</td>
+      <td style="display:block">
+        <a href="https://eon.example/doc?id=228">Pobierz e-fakturę</a></td></tr>
   <tr><td>Faktura rozliczeniowa numer 225751192991</td><td>06.05.2026</td>
       <td>0,00</td>
       <td><a href="https://eon.example/doc?id=225">Pobierz e-fakturę</a></td></tr>
@@ -1225,6 +1227,15 @@ def check_invoice_rows(url: str) -> None:
     ), "the current invoice's link is not inline beside its number"
     assert set(int(n) for n in inline) <= page.inlined
     print("inline references →", len(inline), "in place; nonce", page.nonce)
+    # A neighbour control's label must not appear in another control's row
+    # digest (#364 follow-up): the bulk-select checkbox's row must not carry
+    # "Pobierz e-fakturę".
+    boxes = [c for c in page.controls if c.kind == "check"]
+    for box in boxes:
+        assert not any("Pobierz e-fakturę" in ln for ln in box.row), (
+            "a checkbox row digest carried a neighbour download label: " + str(box.row)
+        )
+    print("checkbox rows clean of neighbour labels:", [b.row for b in boxes][:2])
 
     # And the current invoice is addressable by its number, not the header.
     current = browse.resolve(

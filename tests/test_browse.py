@@ -2263,6 +2263,15 @@ class TestARowIsWhatTellsTwoIdenticalButtonsApart:
         assert "row.parentElement !== shared" in source
         assert "new Set(rows).size !== rows.length" in source
 
+    def test_a_row_digest_drops_a_neighbour_controls_label(self):
+        """#364 follow-up: a control's row description must not repeat the
+        LABEL of another listed control (eon's bulk-select checkbox carried
+        '… | 226,89 | Pobierz e-fakturę', a stray reference-less label that
+        reads like a missing download button)."""
+        source = browse.CONTROLS_JS
+        assert "const controlLabels = new Set();" in source
+        assert "if (controlLabels.has(line)) continue;" in source
+
     def test_the_semantic_row_unit_is_preferred_over_a_wrapper(self):
         """A one-row table has no sibling row to reveal the <tr> level, so the
         climb lands on the whole table and the header pollutes the digest; the

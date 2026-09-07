@@ -3938,6 +3938,15 @@ body.console-open #backdrop { z-index: 63; }
 .ss-pre .tok-code { color: var(--ctp-peach); }
 .ss-pre .tok-em { color: var(--ctp-text); }
 .ss-pre a.tok-link { color: var(--ctp-sky); text-decoration: underline; text-underline-offset: 2px; }
+/* A control on a browsed page (#364), shown in the trace as a chip so a control
+   reads as a control and a description reads as prose — the reference itself is
+   machinery and never shown. */
+.ss-pre .tok-ctrl {
+  color: var(--ctp-sky);
+  background: rgba(137, 180, 250, 0.12);
+  border: 1px solid rgba(137, 180, 250, 0.32);
+  border-radius: 5px; padding: 0 4px;
+}
 /* A record stays tinted as a record even when its JSON is coloured: the token
    colours read against the border-left that marks it as aish's own account. */
 .ss-rec .tok-key { color: var(--ctp-blue); }
