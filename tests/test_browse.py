@@ -858,7 +858,8 @@ class TestTheInjectedJavaScriptParses:
 
     @pytest.mark.parametrize(
         "name",
-        ["CONTROLS_JS", "REACHABLE_JS", "CENTRE_JS", "OPTIONS_JS", "FLOOD_JS"],
+        ["CONTROLS_JS", "REACHABLE_JS", "CENTRE_JS", "OPTIONS_JS", "FLOOD_JS",
+         "SCROLL_JS", "STRUCT_PAGE_JS", "REVEALER_ELEMENT_JS"],
     )
     def test_every_injected_script_is_valid_javascript(self, name):
         node = shutil.which("node")
@@ -6815,3 +6816,49 @@ class TestTheStructuredReaderIsInnerTextPlusStructure:
         assert browse.STRUCT_JS.count("getComputedStyle") == 1
         assert "display === 'contents'" in browse.STRUCT_JS
         assert "'table, [role=table], iframe, frame'" in browse.STRUCT_JS
+
+
+class TestScrollLoadsMoreAndReportsHonestly:
+    """#372 slice D. A feed keeps only what is on screen in the DOM; older
+    messages and next results load on scroll. The model has no wheel, so
+    `browse_act(action="scroll")` is the one gesture that materialises them —
+    and it reports what it OBSERVED (pixels moved, whether at the end), never
+    a hope, so the model does not scroll a wall forever."""
+
+    def test_a_real_scroll_says_what_it_moved(self):
+        note = browse.scroll_note(
+            {"found": True, "moved": 320, "atEnd": False, "name": "pane"}, up=True
+        )
+        assert "scrolled 'pane' up" in note
+        assert "anything new is below" in note
+
+    def test_the_two_zero_move_facts_are_kept_apart(self):
+        at_end = browse.scroll_note(
+            {"found": True, "moved": 0, "atEnd": True, "name": "pane"}, up=True
+        )
+        assert "already at the top" in at_end
+        dead = browse.scroll_note(
+            {"found": True, "moved": 0, "atEnd": False, "name": "pane"}, up=False
+        )
+        assert "did not move" in dead
+        assert "not scroll it again" in dead
+        assert at_end != dead
+
+    def test_nothing_scrollable_is_its_own_answer(self):
+        note = browse.scroll_note(
+            {"found": False, "moved": 0, "atEnd": False, "name": ""}, up=False
+        )
+        assert "nothing on this page scrolls down" in note
+
+    def test_direction_words_are_a_counted_closed_set(self):
+        from aish import browser as browser_mod
+
+        assert "up" in browser_mod._SCROLL_UP
+        assert "older" in browser_mod._SCROLL_UP
+        assert "down" not in browser_mod._SCROLL_UP
+
+    def test_scroll_picks_the_region_by_total_span_not_direction(self):
+        """A pane already at its top is still the pane — chosen by scrollable
+        area — so the answer can say 'at the top', not 'nothing scrolls'."""
+        assert "el.scrollHeight - el.clientHeight" in browse.SCROLL_JS
+        assert "span > bestSpan" in browse.SCROLL_JS

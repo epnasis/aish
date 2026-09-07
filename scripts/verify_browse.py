@@ -1099,6 +1099,72 @@ def check_spinner(url: str) -> None:
           [ln for ln in after.text.splitlines() if "Znaleziono" in ln])
 
 
+# A message thread that lazy-loads OLDER messages when the pane scrolls up
+# (#372 slice D) — the LinkedIn shape. The pane is a fixed-height scroll
+# container; only the newest messages are in the DOM until it scrolls to the
+# top, which prepends the older ones.
+LAZYFEED = """<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><title>Wątek</title>
+<style>
+  #pane { height: 80px; overflow-y: auto; border: 1px solid #ccc; width: 500px; }
+  .msg { padding: 6px; height: 20px; }
+</style></head>
+<body>
+<h1>Rozmowa z Maciej</h1>
+<div id="pane">
+  <div id="top"></div>
+  <div class="msg">wiadomość 6 (najnowsza widoczna)</div>
+  <div class="msg">wiadomość 7</div>
+  <div class="msg">wiadomość 8</div>
+  <div class="msg">wiadomość 9</div>
+  <div class="msg">wiadomość 10 (dół)</div>
+</div>
+<script>
+  const pane = document.getElementById('pane');
+  pane.scrollTop = pane.scrollHeight;  // start at the bottom, newest in view
+  let oldest = 6, loaded = false;
+  pane.addEventListener('scroll', () => {
+    if (pane.scrollTop < 40 && !loaded) {
+      loaded = true;
+      const top = document.getElementById('top');
+      for (let i = 5; i >= 1; i--) {
+        const d = document.createElement('div');
+        d.className = 'msg';
+        d.textContent = 'wiadomość ' + i + ' (starsza, doładowana)';
+        top.after(d);
+      }
+    }
+  });
+</script>
+</body></html>
+"""
+
+
+def check_scroll(url: str) -> None:
+    """Scrolling a thread up loads older messages; a wall that will not move
+    says so instead of pretending (#372 slice D)."""
+    page = browser.browse_open(url + "lazyfeed.html")
+    assert "wiadomość 10" in page.text, page.text[:400]
+    assert "wiadomość 1 (starsza" not in page.text, "older messages should not be loaded yet"
+
+    after = browser.browse_act("Maciej", "scroll", text="up")
+    assert "wiadomość 1 (starsza, doładowana)" in after.text, (
+        "scrolling up did not load older messages: " + after.text[:500]
+    )
+    assert "scrolled" in (after.notice or ""), after.notice
+    print("scroll up loaded older →", after.notice)
+
+    # Scrolling up again, now at the top: the honest "did not move" answer,
+    # never a claim that more loaded.
+    at_top = browser.browse_act("Maciej", "scroll", text="up")
+    note = (at_top.notice or "").lower()
+    assert "top" in note or "did not move" in note, at_top.notice
+    assert "nothing on this page scrolls" not in note, (
+        "a pane at its top is not 'nothing scrolls': " + at_top.notice
+    )
+    print("scroll at top reported honestly →", at_top.notice)
+
+
 def check_submit_gating(url: str) -> None:
     """A search is not a commit (#251)."""
     page = browser.browse_open(url + "hard.html")
@@ -1319,6 +1385,7 @@ def main() -> int:
     Path(root, "shadow.html").write_text(SHADOW, encoding="utf-8")
     Path(root, "messaging.html").write_text(MESSAGING, encoding="utf-8")
     Path(root, "framed.html").write_text(FRAMED, encoding="utf-8")
+    Path(root, "lazyfeed.html").write_text(LAZYFEED, encoding="utf-8")
     port = serve(root)
     url = f"http://127.0.0.1:{port}/"
     Path(root, "structured.html").write_text(
@@ -1336,6 +1403,7 @@ def main() -> int:
     check_focus_rows(url)
     check_revealable(url)
     check_structured_text(url, port)
+    check_scroll(url)
     check_spinner(url)
     check_submit_gating(url)
     check_grant_scope(url)

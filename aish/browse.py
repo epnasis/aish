@@ -3339,6 +3339,127 @@ REVEALER_ELEMENT_JS = (
 # failing to move anything.
 CENTRE_JS = "(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); }"
 
+
+def scroll_note(result: dict[str, Any], *, up: bool) -> str:
+    """What the scroll OBSERVED, never what it hoped — the two zero-move facts
+    kept apart so the model does not scroll a wall forever.
+
+    `moved` pixels is the fact; `atEnd` distinguishes "no more this way" from
+    "nothing here scrolls". The new content itself arrives in the snapshot's
+    change report, so this says only what the gesture DID, not what it found."""
+    way = "up" if up else "down"
+    if not result.get("found"):
+        return (
+            f"nothing on this page scrolls {way} — there is no more to load "
+            "this way."
+        )
+    where = str(result.get("name") or "a region")
+    moved = int(result.get("moved") or 0)
+    if moved == 0:
+        if result.get("atEnd"):
+            return (
+                f"'{where}' is already at the {'top' if up else 'bottom'} — "
+                "there is nothing further this way."
+            )
+        return (
+            f"'{where}' did not move — nothing more loaded this way. Do not "
+            "scroll it again expecting a different result."
+        )
+    end = " (and it is now at the end this way)" if result.get("atEnd") else ""
+    return f"aish scrolled '{where}' {way}{end}; anything new is below."
+
+
+# Show more of a lazily-loaded region (#372 slice D). A modern feed does not
+# have all its rows in the DOM: older messages load when the thread scrolls
+# UP, more results when a list scrolls DOWN, and until then they are not text
+# aish can read or controls it can press — they do not exist yet. The model
+# has no pointer and no wheel, so this is the one physical gesture that
+# materialises them, and like `scrollIntoView` and `focus` it changes nothing
+# and needs no approval.
+#
+# WHICH region: the biggest thing that can actually scroll the requested way
+# and is on screen — a message thread's own pane, not the whole document,
+# which on an app shell does not move at all. An explicit anchor (the section
+# or text the model named) picks the scrollable ancestor of THAT instead, so
+# "show me older messages in the Maciej thread" scrolls the thread and not
+# the sidebar. The document scroller is the floor when nothing else qualifies.
+#
+# Reports what it OBSERVED, never a hope: the pixels it actually moved, and
+# whether the region was already at the end that way. `moved == 0` with
+# `atEnd` is "there is no more this way"; `moved == 0` without it is "nothing
+# here scrolls" — different facts the model needs kept apart, so it does not
+# scroll a wall forever.
+SCROLL_JS = "(opts) => {" + DEEP_JS + r"""
+  const dir = opts.dir < 0 ? -1 : 1;
+  const canScroll = (el, s) => {
+    const o = s.overflowY;
+    if (o !== 'auto' && o !== 'scroll') return false;
+    return el.scrollHeight > el.clientHeight + 1;
+  };
+  const roomThisWay = (el) => (dir < 0
+    ? el.scrollTop
+    : el.scrollHeight - el.clientHeight - el.scrollTop);
+  const onScreen = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width > 2 && r.height > 2
+      && r.bottom > 0 && r.top < innerHeight
+      && r.right > 0 && r.left < innerWidth;
+  };
+
+  // The anchored case: the scrollable ancestor of what the model named.
+  const anchoredScroller = () => {
+    const needle = (opts.anchor || '').toLowerCase();
+    if (!needle) return null;
+    let hit = null;
+    for (const el of deepAll('*')) {
+      const t = (el.textContent || '').toLowerCase();
+      if (t.indexOf(needle) >= 0) { hit = el; break; }
+    }
+    for (let n = hit; n; n = n.parentElement) {
+      let s; try { s = getComputedStyle(n); } catch (e) { continue; }
+      if (canScroll(n, s)) return n;
+    }
+    return null;
+  };
+
+  // Chosen by TOTAL scrollable area, not by room in this direction: a pane
+  // already at its top is still the pane, and picking it is what lets the
+  // answer say "already at the top" instead of "nothing scrolls" — different
+  // facts. The anchor wins when the model named one.
+  let target = anchoredScroller();
+  if (!target) {
+    let best = null, bestSpan = 0;
+    for (const el of deepAll('*')) {
+      let s; try { s = getComputedStyle(el); } catch (e) { continue; }
+      if (!canScroll(el, s) || !onScreen(el)) continue;
+      const span = el.scrollHeight - el.clientHeight;
+      if (span > bestSpan) { best = el; bestSpan = span; }
+    }
+    target = best;
+  }
+  // The document itself is the floor: an ordinary long page scrolls the
+  // window, and there is no inner region to prefer.
+  const docEl = document.scrollingElement || document.documentElement;
+  if (!target && docEl && (docEl.scrollHeight - docEl.clientHeight) > 1) {
+    target = docEl;
+  }
+  if (!target) return {found: false, moved: 0, atEnd: false, name: ''};
+
+  const step = Math.max(200, Math.round((target.clientHeight || innerHeight) * 0.8));
+  const before = target.scrollTop;
+  target.scrollBy(0, dir * step);
+  const moved = target.scrollTop - before;
+  const name = (target === docEl) ? 'the page'
+    : ((target.getAttribute && (target.getAttribute('aria-label')
+        || target.getAttribute('id'))) || target.tagName || 'a region');
+  return {
+    found: true,
+    moved: moved,
+    atEnd: roomThisWay(target) <= 1,
+    name: String(name).slice(0, 60),
+  };
+}"""
+
 # Options as (label, value), read once at CHOOSE time rather than carried on
 # every snapshot — see CHOICE_INLINE_MAX.
 OPTIONS_JS = """(el) => Array.from(el.options || []).map(
