@@ -51,12 +51,29 @@ const NOW = 1_700_000_000_000;      // fixed clock: these are all comparisons
 const at = (msAgo) => (NOW - msAgo) / SEC; // a row's ts, in epoch SECONDS
 
 // ---- 1. the unread decision ----------------------------------------------
-const state = (over) => Object.assign({ seen: {}, since: NOW - 10_000, current: null }, over);
+const state = (over) =>
+  Object.assign({ seen: {}, since: NOW - 10_000, floor: 0, current: null }, over);
 
 ok("activity newer than the last look here is unread",
   sessionUnread({ name: "a", ts: at(1_000) }, state({ seen: { a: NOW - 5_000 } })) === true);
 ok("activity older than the last look is read",
   sessionUnread({ name: "a", ts: at(9_000) }, state({ seen: { a: NOW - 5_000 } })) === false);
+
+// The forgotten-look floor (#378). The seen map is capped, so a chat read long
+// enough ago has no stamp left — and with only the device floor to fall back
+// on, an old chat on an old device stayed unread forever, one fresh batch per
+// reconnect. The floor is what still speaks for those looks.
+ok("a chat whose look was forgotten, but which has said nothing since, is read",
+  sessionUnread({ name: "gone", ts: at(40_000) },
+    state({ since: NOW - 1_000_000, floor: NOW - 30_000 })) === false);
+ok("…and one that spoke AFTER the floor is still unread, stamp or no stamp",
+  sessionUnread({ name: "gone", ts: at(20_000) },
+    state({ since: NOW - 1_000_000, floor: NOW - 30_000 })) === true);
+ok("a floor never overrides a look that is newer than it",
+  sessionUnread({ name: "a", ts: at(4_000) },
+    state({ seen: { a: NOW - 3_000 }, floor: NOW - 30_000 })) === false);
+ok("a server too old to send one is exactly the old behaviour",
+  sessionUnread({ name: "a", ts: at(1_000) }, state({ floor: undefined })) === true);
 
 // The floor is what keeps day one sane: on a device that has never seen ANY of
 // these chats, the whole archive would otherwise arrive unread and the band —
@@ -126,7 +143,7 @@ ok("a row with no timestamp at all is not unread (nothing to compare)",
 }
 
 function partitionAll(rows) {
-  return s.partitionSessions(rows, { seen: {}, since: NOW - 10_000, current: null });
+  return s.partitionSessions(rows, { seen: {}, since: NOW - 10_000, floor: 0, current: null });
 }
 
 console.log(`test_session_unread.js: ${passed} ok — all checks passed`);

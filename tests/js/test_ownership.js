@@ -60,6 +60,13 @@ const OWNED = {
       + " mark silently, and the dot the owner already answered comes back on every"
       + " other screen they own",
   },
+  seenFloor: {
+    owners: ["SEEN"],
+    instead: "let trimSeen() or applySeenMarks(seen, floor) raise it — it only ever rises",
+    why: "it is what speaks for every look the cap has FORGOTTEN (#378); a writer that"
+      + " lowers it resurrects month-old chats under 'Needs you', and one that raises it"
+      + " past what was actually dropped hides output the owner has never seen",
+  },
   clockSkew: {
     owners: ["SEEN"],
     instead: "let syncSeen(serverNow) / onSeenLedger() adopt it from a hello or the ledger",

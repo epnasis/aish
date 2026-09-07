@@ -1605,7 +1605,7 @@ function handle(event) {
     case "session_deleted": onSessionDeleted(event); break;
     case "session_changed": onSessionChanged(event); break;
     // The owner read a chat — here, or on the other device (#232).
-    case "seen_marked": applySeenMarks(event.seen); break;
+    case "seen_marked": applySeenMarks(event.seen, event.floor); break;
     case "seen_ledger": onSeenLedger(event); break;
     case "peek": onPeek(event); break;
     case "session_renamed": onSessionRenamed(event); break;
@@ -16315,10 +16315,26 @@ $("session-menu").addEventListener("click", (e) => {
 // so a new phone does not render the whole archive unread, which is a claim
 // about what this screen has had a chance to show — and it can only ever move
 // something toward READ, never resurrect a dot.
+//
+// `seenFloor` is the OTHER floor, and it is the owner's rather than this
+// screen's: the newest look that has been FORGOTTEN, on either side of the wire
+// (#378). The map is capped, so looks are dropped — and a dropped look used to
+// read as "never read", which is [FORGET-SESSION]'s defect arriving through the
+// back door. Measured, not supposed: 300 stamps against 576 listed chats, and
+// every stampless chat had last spoken before the oldest surviving stamp.
+//
+// Why it presented as a DEPLOY bug is a separate question, and the answer is
+// where the rows come from rather than what the map says. The affected chats
+// rank around 240th by recency; the offline mirror the rail paints from holds
+// OFFLINE_MAX_SESSIONS (200), so a local paint cannot contain them at all. They
+// appear only on a paint fed by the SERVER's list — and a restart is what asks
+// for one: the hello's roster sequence no longer matches, [ROSTER] marks itself
+// incomplete, and the next rail open requests the full list.
 const SEEN_KEY = "aish-seen";
 const SEEN_MAX = 300; // names kept; oldest views dropped first — matches aish/seen.py
 let seenAt = {};      // name → ms the OWNER last read it (server's ledger, cached)
 let seenSince = 0;    // this device started tracking here; older activity is read
+let seenFloor = 0;    // ms: the newest look that has been forgotten (server + local trims)
 let pendingSeen = {}; // marks the server has not confirmed yet — offered on connect
 // The server's clock minus this device's, in ms. Every stamp unread compares —
 // a row's last output, the owner's last look — is written by the server now, so
@@ -16330,7 +16346,7 @@ let clockSkew = 0;
 function saveSeen() {
   try {
     localStorage.setItem(SEEN_KEY, JSON.stringify({
-      at: seenAt, since: seenSince, pending: pendingSeen,
+      at: seenAt, since: seenSince, floor: seenFloor, pending: pendingSeen,
     }));
   } catch { /* private mode: unread degrades to in-memory only */ }
 }
@@ -16341,6 +16357,9 @@ function saveSeen() {
     if (raw && raw.at && raw.since) {
       seenAt = raw.at;
       seenSince = raw.since;
+      // Absent on a map written before the floor existed, and 0 is the honest
+      // answer there: it claims nothing, and the first ledger sync fills it in.
+      seenFloor = Number(raw.floor) || 0;
       // No `pending` key means this map was written by a build that kept
       // unread to itself. Everything in it is therefore unknown to the server,
       // and offering the lot is what SEEDS the ledger from whichever device
@@ -16380,21 +16399,30 @@ function markSeen(name) {
 // back to unread when an older stamp for it arrives from somewhere else.
 // A stamp the server confirms is no longer pending — that is what stops the
 // outbox growing forever on a device that reads a lot.
-function applySeenMarks(seen) {
-  if (!seen) return;
-  let moved = false;
-  for (const [name, at] of Object.entries(seen)) {
+function applySeenMarks(seen, floor) {
+  let moved = raiseSeenFloor(Number(floor) * 1000); // seconds on the wire, ms here
+  for (const [name, at] of Object.entries(seen || {})) {
     const ms = Number(at) * 1000; // the ledger is in epoch SECONDS
     if (!ms) continue;
     if (ms > (seenAt[name] || 0)) { seenAt[name] = ms; moved = true; }
     if (pendingSeen[name] && pendingSeen[name] <= ms) delete pendingSeen[name];
   }
-  trimSeen();
+  if (trimSeen()) moved = true;
   saveSeen();
   if (moved) {
     refreshBadge();
     if (railIsOpen()) renderSessionsFromCache();
   }
+}
+
+// The forgotten-look floor, merged by MAX like everything else here: it is a
+// claim that only ever grows, so a stale copy arriving late cannot resurrect a
+// dot. Returns whether it moved, because a floor that rises can drop rows out
+// of "Needs you" with no stamp having changed at all.
+function raiseSeenFloor(ms) {
+  if (!(ms > seenFloor)) return false;
+  seenFloor = ms;
+  return true;
 }
 
 // Hand over what the server has not confirmed, and on a connect ask for the
@@ -16422,17 +16450,23 @@ function syncSeen(serverSeconds) {
 // arriving together — the stamps and the frame they mean anything in.
 function onSeenLedger(event) {
   if (Number(event.now)) clockSkew = Number(event.now) * 1000 - Date.now();
-  applySeenMarks(event.seen);
+  applySeenMarks(event.seen, event.floor);
 }
 
+// Drops the oldest looks past the cap — and RAISES THE FLOOR to the newest one
+// it dropped, which is the whole of the fix for #378. Forgetting a look while
+// saying nothing about it is what made an evicted chat read as never-read.
 function trimSeen() {
   const names = Object.keys(seenAt);
-  if (names.length <= SEEN_MAX) return;
+  if (names.length <= SEEN_MAX) return false;
   names.sort((a, b) => seenAt[b] - seenAt[a]);
-  for (const stale of names.slice(SEEN_MAX)) {
+  const dropped = names.slice(SEEN_MAX);
+  const newest = Math.max(...dropped.map((name) => seenAt[name] || 0));
+  for (const stale of dropped) {
     delete seenAt[stale];
     delete pendingSeen[stale];
   }
+  return raiseSeenFloor(newest);
 }
 
 // PURE: the whole unread decision, testable with no DOM and no clock. `current`
@@ -16451,7 +16485,13 @@ function sessionUnread(info, state) {
   // as "nothing here is ever new".
   const at = (Number(info.out) || Number(info.ts) || 0) * 1000; // epoch SECONDS
   if (!at) return false;
-  return at > Math.max(state.seen[info.name] || 0, state.since);
+  // Three floors, and the chat has to beat all of them. Its own last look, if
+  // the ledger still holds one; this device's first-run floor, which says what
+  // this screen has had a chance to show; and the forgotten-look floor, which
+  // speaks for the looks the cap has dropped (#378). A chat with no stamp is
+  // not a chat that was never read — it may simply be older than what either
+  // side still remembers, and then the floors are the only honest answer.
+  return at > Math.max(state.seen[info.name] || 0, state.since, state.floor || 0);
 }
 // [SEEN-END]
 
@@ -16658,7 +16698,7 @@ function forgetAttention(name) {
 }
 
 function refreshBadge() {
-  const state = { seen: seenAt, since: seenSince, current: currentSession };
+  const state = { seen: seenAt, since: seenSince, floor: seenFloor, current: currentSession };
   attentionSessions.clear();
   for (const info of attentionRows) {
     // The chat on screen is never counted, whatever its state: an approval it
@@ -17255,7 +17295,7 @@ function renderSessions(event) {
   // the server's here would undo refreshRailCurrent on the very next list that
   // arrives — and a list arrives right after every switch.
   const current = currentSession || event.current;
-  const unreadState = { seen: seenAt, since: seenSince, current };
+  const unreadState = { seen: seenAt, since: seenSince, floor: seenFloor, current };
   const query = $("sessions-search").value.trim();
   const searching = Boolean(query);
   const match = query.toLowerCase().split(/\s+/).filter(Boolean);

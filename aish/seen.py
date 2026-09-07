@@ -8,7 +8,7 @@ whose dot is still on the laptop is the app making a false claim about the
 person using it, and the attention band — whose entire value is being short and
 true — fills with chats they already know about.
 
-So the ledger lives on the server, where every device can agree with it. Two
+So the ledger lives on the server, where every device can agree with it. Three
 properties are what make sharing it safe:
 
 **Monotonic.** A stamp only ever moves FORWARD, so every merge is a `max`.
@@ -22,10 +22,23 @@ to now. A phone running five minutes fast would otherwise write a seen time
 from the future and hide new output in that chat permanently. Clamping can only
 leave something unread, which is the direction a mistake is allowed to go.
 
-A deleted chat's stamp deliberately SURVIVES, for the reason `[FORGET-SESSION]`
-gives on the client: unread is "output newer than the last look", so dropping
-the look is what turns a leftover row into an *alarming* one. There is nothing
-to reclaim — the ledger is capped and session names are never reused.
+**Forgetting says so.** The map is capped, so looks are eventually dropped —
+and a dropped look must not read as "never read". `floor` is the newest look
+the ledger has FORGOTTEN, and a chat whose output predates it reads as read.
+Without it, eviction was silently the same defect `[FORGET-SESSION]` names on
+the client: unread is *output newer than the last look*, so dropping the look
+is what turns an old, read chat into an ALARMING one. That is not theoretical
+— 300 stamps against 576 listed chats, and every chat with no stamp had last
+spoken before the oldest stamp still held, with no exceptions (#378).
+
+What the floor claims is what a per-chat stamp claims, applied to what was
+dropped: every forgotten look happened at or before it. It costs one case,
+and it is a POLICY rather than an accident — a chat that was never opened and
+has said nothing since expires from the unread band after SEEN_MAX other looks
+instead of holding its dot forever. On this ledger that is about five weeks.
+
+A deleted chat's stamp deliberately SURVIVES, for the same reason. There is
+nothing to reclaim — the ledger is capped and session names are never reused.
 """
 
 from __future__ import annotations
@@ -37,8 +50,9 @@ from pathlib import Path
 
 # Chats remembered, oldest look dropped first. Matches the client's own cap:
 # both sides forget in the same order, so neither can resurrect what the other
-# has let go. A chat beyond it falls back to the device's first-run floor,
-# which reads as "read" — the conservative direction.
+# has let go. A chat beyond it is answered by `floor` instead of by its own
+# stamp — the cap bounds how many looks are remembered INDIVIDUALLY, not how
+# far back the ledger can speak.
 SEEN_MAX = 300
 
 
@@ -53,6 +67,7 @@ class SeenLedger:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._seen: dict[str, float] = {}
+        self._floor = 0.0
         self._load()
 
     # ---- reading -------------------------------------------------------
@@ -61,6 +76,17 @@ class SeenLedger:
 
     def stamp(self, name: str) -> float:
         return self._seen.get(name, 0.0)
+
+    def floor(self) -> float:
+        """The newest look this ledger has forgotten; 0.0 while it still holds
+        everything it was ever told.
+
+        Read as a claim about chats it can no longer name: *the owner's look at
+        any of them happened at or before this instant*. So output older than
+        the floor has been read, and output newer than it has not — which is
+        the same test the per-chat stamp answers, applied to what was dropped.
+        """
+        return self._floor
 
     # ---- writing -------------------------------------------------------
     def merge(self, marks: dict[str, float | None], now: float | None = None) -> dict[str, float]:
@@ -90,6 +116,11 @@ class SeenLedger:
                 at = stamped
             if at <= self._seen.get(name, 0.0):
                 continue
+            # Below the floor and not held: this look is already covered by
+            # what the floor claims, and taking it would only hand it straight
+            # back to `_trim`. Saying nothing changed is the truth here.
+            if name not in self._seen and at <= self._floor:
+                continue
             self._seen[name] = at
             changed[name] = at
         if changed:
@@ -101,8 +132,14 @@ class SeenLedger:
     def _trim(self) -> None:
         if len(self._seen) <= SEEN_MAX:
             return
-        keep = sorted(self._seen.items(), key=lambda kv: kv[1], reverse=True)[:SEEN_MAX]
+        ranked = sorted(self._seen.items(), key=lambda kv: kv[1], reverse=True)
+        keep, dropped = ranked[:SEEN_MAX], ranked[SEEN_MAX:]
         self._seen = dict(keep)
+        # The floor rises to the NEWEST look being dropped, which is the most
+        # this can honestly claim: every forgotten look happened at or before
+        # it. Monotonic like the stamps themselves, and for the same reason —
+        # a floor that walked backwards would un-read whatever it passed.
+        self._floor = max(self._floor, max(at for _, at in dropped))
 
     def _load(self) -> None:
         # A missing or unreadable ledger is not an error: the clients hold the
@@ -117,6 +154,20 @@ class SeenLedger:
         for name, at in (raw.get("seen") or {}).items():
             if isinstance(name, str) and isinstance(at, (int, float)) and at > 0:
                 self._seen[name] = float(at)
+        floor = raw.get("floor")
+        if isinstance(floor, (int, float)) and floor > 0:
+            self._floor = float(floor)
+        elif len(self._seen) >= SEEN_MAX:
+            # A ledger written before the floor existed, sitting AT the cap: it
+            # has been dropping looks all along and recorded nothing about it.
+            # The oldest look it still holds is the honest reading of what it
+            # forgot — everything evicted was older than that survivor.
+            #
+            # Without this seam the fix ships INERT: the floor would stay 0
+            # until the next eviction, so the deploy that carries it leaves
+            # every already-wrong dot exactly where it was, which is the one
+            # outcome that looks identical to not fixing it at all.
+            self._floor = min(self._seen.values())
         self._trim()
 
     def _save(self) -> None:
@@ -125,7 +176,7 @@ class SeenLedger:
         tmp = self.path.with_suffix(".json.tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps({"seen": self._seen}))
+            tmp.write_text(json.dumps({"seen": self._seen, "floor": self._floor}))
             os.replace(tmp, self.path)
         except OSError:
             # The dots stay right for this run either way; losing the file

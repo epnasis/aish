@@ -53,6 +53,7 @@ function rosterWorld() {
   const s = w.sandbox;
   s.seenAt = {};
   s.seenSince = Date.now() - 3600 * SEC;
+  s.seenFloor = 0; // nothing forgotten (#378) — this world is about the roster
   s.currentSession = "here.jsonl";
   return w;
 }

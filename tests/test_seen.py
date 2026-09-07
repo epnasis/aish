@@ -100,8 +100,8 @@ class TestStorage:
 
     def test_the_oldest_looks_are_dropped_first(self, tmp_path):
         # Capped like the client's map, and in the same order: neither side can
-        # resurrect what the other has let go. A chat past the cap falls back to
-        # the device's first-run floor, which reads as READ.
+        # resurrect what the other has let go. What SPEAKS for a dropped look is
+        # the floor below, not the chat's own stamp.
         path = tmp_path / "seen.json"
         ledger = SeenLedger(path)
         ledger.merge({f"s{i}.jsonl": float(i + 1) for i in range(SEEN_MAX + 50)}, now=1e9)
@@ -110,3 +110,90 @@ class TestStorage:
         assert "s0.jsonl" not in held
         assert f"s{SEEN_MAX + 49}.jsonl" in held
         assert len(SeenLedger(path).snapshot()) == SEEN_MAX
+
+
+class TestForgettingSaysSo:
+    """A dropped look must not read as "never read" (#378).
+
+    The cap is what the owner actually hit — 300 stamps against 851 chats — and
+    every eviction silently turned an old, read chat back into an unread one,
+    because the only evidence it had been read was the stamp being thrown away.
+    `floor` is what the ledger says INSTEAD: the newest look it has forgotten.
+    Everything here is about that claim staying honest.
+    """
+
+    def test_a_fresh_ledger_claims_nothing(self, tmp_path):
+        # Zero is not "1970": it is the floor asserting nothing at all, which is
+        # the only truthful answer while nothing has been forgotten.
+        assert SeenLedger(tmp_path / "seen.json").floor() == 0.0
+
+    def test_forgetting_a_look_raises_the_floor_to_it(self, tmp_path):
+        # The NEWEST dropped look, which is the most this can honestly claim:
+        # every forgotten look happened at or before it.
+        ledger = SeenLedger(tmp_path / "seen.json")
+        ledger.merge({f"s{i}.jsonl": float(i + 1) for i in range(SEEN_MAX + 50)}, now=1e9)
+        assert ledger.floor() == 50.0  # s0..s49 dropped; s49's stamp is 50.0
+
+    def test_the_floor_survives_a_restart(self, tmp_path):
+        # Without this the very first reconnect after a restart re-opens the
+        # whole hole: the stamps are gone from disk and nothing speaks for them.
+        path = tmp_path / "seen.json"
+        ledger = SeenLedger(path)
+        ledger.merge({f"s{i}.jsonl": float(i + 1) for i in range(SEEN_MAX + 50)}, now=1e9)
+        assert SeenLedger(path).floor() == ledger.floor() == 50.0
+
+    def test_the_floor_never_walks_backwards(self, tmp_path):
+        # Monotonic for the same reason the stamps are: a floor that fell would
+        # un-read whatever it passed on the way down. Here a ledger that has
+        # already forgotten as far as 1000 drops a batch of much older looks —
+        # a device that was offline for a month coming back is exactly this.
+        path = tmp_path / "seen.json"
+        path.write_text(json.dumps({
+            "floor": 1000.0,
+            "seen": {f"s{i}.jsonl": float(i + 1) for i in range(SEEN_MAX + 50)},
+        }))
+        assert SeenLedger(path).floor() == 1000.0
+
+    def test_a_look_below_the_floor_is_not_taken_back(self, tmp_path):
+        # A device re-offering its whole map on connect will keep offering the
+        # ones the ledger dropped. Taking them would evict them again on the
+        # next trim and broadcast a stamp with a lifetime of microseconds; the
+        # floor already covers them, so nothing changed is the truth.
+        ledger = SeenLedger(tmp_path / "seen.json")
+        ledger.merge({f"s{i}.jsonl": float(i + 1) for i in range(SEEN_MAX + 50)}, now=1e9)
+        assert ledger.merge({"s0.jsonl": 1.0}, now=1e9) == {}
+        assert "s0.jsonl" not in ledger.snapshot()
+
+    def test_a_held_chat_is_still_updated_below_the_floor(self, tmp_path):
+        # The guard is about names the ledger has FORGOTTEN. A chat it still
+        # holds keeps taking marks normally, floor or no floor.
+        ledger = SeenLedger(tmp_path / "seen.json")
+        ledger.merge({f"s{i}.jsonl": float(i + 1) for i in range(SEEN_MAX + 50)}, now=1e9)
+        held = f"s{SEEN_MAX + 49}.jsonl"
+        assert ledger.merge({held: 40.0}, now=1e9) == {}  # older than its own stamp
+        assert ledger.merge({held: 1e8}, now=1e9) == {held: 1e8}
+
+    def test_a_ledger_written_before_the_floor_gets_one_on_load(self, tmp_path):
+        # The upgrade seam, and the reason it is not optional: the file on the
+        # owner's machine had 300 stamps and no floor, so without this the fix
+        # would ship INERT — the floor would stay 0 until the next eviction and
+        # the deploy carrying it would change nothing anybody could see.
+        path = tmp_path / "seen.json"
+        path.write_text(json.dumps({
+            "seen": {f"s{i}.jsonl": float(i + 1) for i in range(SEEN_MAX)},
+        }))
+        assert SeenLedger(path).floor() == 1.0  # its oldest surviving look
+
+    def test_a_ledger_below_the_cap_claims_nothing_on_load(self, tmp_path):
+        # It has never dropped anything, so there is nothing to speak for. A
+        # floor invented here would mark chats read on no evidence at all.
+        path = tmp_path / "seen.json"
+        path.write_text(json.dumps({"seen": {"a.jsonl": 5.0, "b.jsonl": 9.0}}))
+        assert SeenLedger(path).floor() == 0.0
+
+    def test_a_new_look_still_lands_after_forgetting(self, tmp_path):
+        # The floor must not become a wall: reading a chat now is newer than
+        # anything forgotten, so it is recorded and published as usual.
+        ledger = SeenLedger(tmp_path / "seen.json")
+        ledger.merge({f"s{i}.jsonl": float(i + 1) for i in range(SEEN_MAX + 50)}, now=1e9)
+        assert ledger.merge({"s0.jsonl": None}, now=1e9) == {"s0.jsonl": 1e9}

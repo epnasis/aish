@@ -3313,6 +3313,36 @@ class TestSeenLedger:
             # The ledger answer arrives; a second seen_marked never does.
             assert recv_until(ws, "seen_ledger")["seen"]["chat.jsonl"] == stamp
 
+    def test_forgetting_a_look_is_published_with_the_ledger(self, app_env):
+        # The cap is not hypothetical — the owner ran 300 stamps against 851
+        # chats, and every evicted look came back as an unread month-old chat
+        # under "Needs you" after each ship (#378). What crosses the wire now is
+        # the floor: the newest look the ledger has forgotten, which is what
+        # speaks for every chat whose own stamp is gone.
+        from aish.seen import SEEN_MAX
+
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, _, _):
+            marks = {f"s{i}.jsonl": float(i + 1) for i in range(SEEN_MAX + 50)}
+            ws.send_json({"type": "seen", "marks": marks})
+            # The eviction happens as the mark lands, so the broadcast that
+            # reports it carries the floor: every device is about to drop the
+            # same stamps and needs the thing that replaces them.
+            assert recv_until(ws, "seen_marked")["floor"] == 50.0
+            ws.send_json({"type": "seen", "marks": {}, "full": True})
+            ledger = recv_until(ws, "seen_ledger")
+            assert ledger["floor"] == 50.0
+            assert "s0.jsonl" not in ledger["seen"]  # forgotten, and spoken for
+
+    def test_an_ordinary_mark_carries_no_floor(self, app_env):
+        # It is stated only when it MOVES. A client merges by max, so a repeated
+        # floor would be harmless — but a field that appears on every message
+        # stops being read as the event it is.
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "seen", "marks": {"chat.jsonl": None}})
+            assert "floor" not in recv_until(ws, "seen_marked")
+
     def test_it_survives_a_restart(self, app_env):
         client, _ = make_client(app_env, [model_says("hi")])
         with client, connected(client) as (ws, _, _):
