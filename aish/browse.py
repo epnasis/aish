@@ -2296,7 +2296,17 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + REVEAL_JS + NAME_JS + r"""
     let node;
     while ((node = scan.nextNode())) {
       const said = clean(node.textContent);
-      if (said) return said;
+      if (!said) continue;
+      // Not a screen-reader-only span: those are 1px clipped boxes that
+      // checkVisibility calls visible, and taking the first one named every
+      // LinkedIn search-result row "Status is offline #1" (measured in the
+      // first live session after this shipped, 2026-09-06). Zero-size is the
+      // same structural test REACH_JS applies to controls.
+      const box = node.parentElement
+        && node.parentElement.getBoundingClientRect
+        && node.parentElement.getBoundingClientRect();
+      if (box && (box.width < 2 || box.height < 2)) continue;
+      return said;
     }
     return '';
   };

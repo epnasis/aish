@@ -6462,6 +6462,13 @@ class TestAKeyboardOrderRowIsListed:
         assert "const ROW_MAX_INNER = 5" in source
         assert "el.querySelectorAll(SEL).length <= ROW_MAX_INNER" in source
 
+    def test_a_screen_reader_only_span_never_names_a_row(self):
+        """The first live session's defect: LinkedIn search-result rows all
+        arrived as "Status is offline #1" because their first text node is a
+        1px clipped a11y span that checkVisibility calls visible. Zero-size
+        is the same structural test REACH_JS applies to controls."""
+        assert "box.width < 2 || box.height < 2" in browse.CONTROLS_JS
+
     def test_a_row_is_named_by_its_first_line_only(self):
         """A name built from the row's whole content would hand the
         commit-word classifier prose to misread ("zapłać mi jutro" in a
