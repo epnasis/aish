@@ -66,6 +66,11 @@ from . import signin as signin_mod
 # it does not stay warm for long. See the module docstring on the memory
 # ceiling this box actually runs against.
 IDLE_SECONDS = 180.0
+# The words the model may use for "scroll up" — toward older messages and
+# the top of a history. Anything else scrolls down (more results). A small
+# closed set, counted like every other word list (docs/vocabularies.md).
+_SCROLL_UP = frozenset({"up", "older", "earlier", "top", "history", "back"})
+
 NAV_TIMEOUT_MS = 45_000
 # What an ELEMENT gets to become actionable, which is a different question
 # from how long a page may take to load. One 45-second click was the whole
@@ -6004,6 +6009,24 @@ def browse_act(
             # task — so this one waits for a finished page.
             session.epoch += 1
             return await shot(owner, session, started_work=True)
+        if action == "scroll":
+            # Show more of a lazily-loaded region (#372 slice D). A gesture,
+            # not a press: it resolves no control, spends no gate, and — like
+            # scrollIntoView and focus — changes nothing. `text` carries the
+            # direction ("up" for older/history, else down); `address` is an
+            # optional anchor naming which region to move.
+            direction = -1 if str(text or "").strip().lower() in _SCROLL_UP else 1
+            try:
+                result = await page.evaluate(
+                    browse_mod.SCROLL_JS, {"dir": direction, "anchor": address or ""}
+                )
+            except Exception:  # noqa: BLE001 — a page that will not scroll is not a crash
+                result = {"found": False, "moved": 0, "atEnd": False, "name": ""}
+            session.epoch += 1
+            return await shot(
+                owner, session, started_work=True,
+                notice=browse_mod.scroll_note(result, up=direction < 0),
+            )
         if action not in ("click", "type", "choose"):
             return await shot(owner, session, problem=f"unknown action {action!r}")
         # Narrowed the same way the listing the model read was, or the act

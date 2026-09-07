@@ -309,6 +309,13 @@ Rules:
    where they press it, tell them what is on the page, and tell them to run
    /browser <host> and do that last step themselves. Everything up to it is
    still yours to do.
+   WHEN OLDER MESSAGES OR MORE RESULTS ARE NOT ON THE PAGE, SCROLL TO LOAD
+   THEM. A feed keeps only what is on screen in the page — a message thread's
+   older history, a list's next rows — and loads more when you scroll.
+   browse_act(target="<the thread or list>", action="scroll", text="up")
+   brings in older messages; text="down" brings in more results. The reply
+   says what loaded, or says the region did not move (you are at the end that
+   way — do not scroll it again).
    IF THE CONTROL YOU WANT IS NOT IN THE LIST, IT IS CLOSED AWAY — NOT ABSENT.
    The list ends with a line saying how many controls are shut in a collapsed
    menu, an off-screen panel or behind a dialog. Press the thing that opens

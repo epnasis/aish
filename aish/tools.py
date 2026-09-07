@@ -1095,12 +1095,18 @@ TOOL_SCHEMAS = [
                     },
                     "action": {
                         "type": "string",
-                        "enum": ["click", "type", "choose", "read", "sections"],
+                        "enum": [
+                            "click", "type", "choose", "read", "sections",
+                            "scroll",
+                        ],
                         "description": (
                             "click a link/button/checkbox, type into a field, "
                             "choose an option in a dropdown, read the whole "
-                            "page again (touching nothing), or list the page's "
-                            "sections without their content. Default: click."
+                            "page again (touching nothing), list the page's "
+                            "sections without their content, or scroll a "
+                            "region to load more of it (a feed's older "
+                            "messages or next results that are not in the DOM "
+                            "yet). Default: click."
                         ),
                     },
                     "section": {
@@ -1114,7 +1120,14 @@ TOOL_SCHEMAS = [
                     },
                     "text": {
                         "type": "string",
-                        "description": "What to type, for action=type.",
+                        "description": (
+                            "What to type, for action=type. For action=scroll, "
+                            "the direction: 'up' for older messages or the top "
+                            "of a history, anything else for down (more "
+                            "results). With action=scroll, `target` names the "
+                            "region to move — the thread, the list — or the "
+                            "page if you do not know which."
+                        ),
                     },
                     "value": {
                         "type": "string",
