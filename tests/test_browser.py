@@ -4650,3 +4650,39 @@ class TestARevealedPressGoesThroughTheFlipDoorOnly:
                 browser._press_revealed(page, target, self._control("focus"))
             )
         assert "key:Enter" not in calls
+
+
+class TestChromePrefersPdfDownload:
+    """#3. A driven-browser PDF must be SAVED, not opened in Chrome's viewer:
+    eon serves invoices as inline application/pdf, and the file is the
+    deliverable (downloads dir, read_pdf, handed to the owner). The pref is
+    merged into the profile's Preferences, never overwritten."""
+
+    def test_the_pref_is_written_into_a_fresh_profile(self, tmp_path):
+        browser._prefer_pdf_download(tmp_path)
+        import json
+        prefs = json.loads((tmp_path / "Default" / "Preferences").read_text())
+        assert prefs["plugins"]["always_open_pdf_externally"] is True
+
+    def test_it_merges_and_never_overwrites_existing_settings(self, tmp_path):
+        import json
+        default = tmp_path / "Default"
+        default.mkdir(parents=True)
+        (default / "Preferences").write_text(json.dumps({
+            "profile": {"name": "Pawel"},
+            "plugins": {"something_else": 1},
+        }))
+        browser._prefer_pdf_download(tmp_path)
+        prefs = json.loads((default / "Preferences").read_text())
+        assert prefs["profile"]["name"] == "Pawel", "existing settings preserved"
+        assert prefs["plugins"]["something_else"] == 1
+        assert prefs["plugins"]["always_open_pdf_externally"] is True
+
+    def test_a_corrupt_preferences_file_is_not_fatal(self, tmp_path):
+        default = tmp_path / "Default"
+        default.mkdir(parents=True)
+        (default / "Preferences").write_text("{ not json")
+        browser._prefer_pdf_download(tmp_path)  # must not raise
+        import json
+        prefs = json.loads((default / "Preferences").read_text())
+        assert prefs["plugins"]["always_open_pdf_externally"] is True

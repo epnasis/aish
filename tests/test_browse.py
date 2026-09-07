@@ -7041,3 +7041,51 @@ class TestAPickerConfirmIsNotACommit:
         c = self._c(name="Szukaj", widget_form=True, in_widget=True,
                     in_modal=False, method="get")
         assert not c.mutating
+
+
+class TestAReferenceIsGatedLikeItsName:
+    """#364 safety fix. A control pressed by its inline reference must reach
+    the SAME approval gate as one pressed by name — the gate resolves the
+    target through `resolve_ref_or_name`, so a page's 'Zapłać' is refused
+    whether the model types the label or the reference. Before this, the gate
+    resolved the raw `press:` string, matched nothing, saw no control, and
+    skipped the commit refusal and the card entirely."""
+
+    def _pay(self):
+        return browse.controls_from(
+            [{"n": 3, "kind": "button", "name": "Zapłać", "submits": True}]
+        )
+
+    def test_the_gate_sees_the_control_behind_a_reference(self):
+        ctrls = self._pay()
+        by_name = browse.resolve_ref_or_name(ctrls, None, "Zapłać", "abcd1234")
+        by_ref = browse.resolve_ref_or_name(ctrls, None, "press:c3·abcd1234", "abcd1234")
+        assert by_name.control is by_ref.control, "same control both ways"
+        assert by_ref.control.mutating and by_ref.control.worded
+
+    def test_the_echo_shows_the_address_not_the_reference(self):
+        """What the owner watches in the trace: the resolver hands the echo the
+        control, whose descriptive address is shown, not `press:c3`."""
+        ctrls = browse.controls_from([
+            {"n": 0, "kind": "link", "name": "Pobierz e-fakturę",
+             "detail": "https://x/d?id=222", "href": "https://x/d?id=222",
+             "row": ["Faktura rozliczeniowa numer 222751249513"]},
+            {"n": 1, "kind": "link", "name": "Pobierz e-fakturę",
+             "detail": "https://x/d?id=243", "href": "https://x/d?id=243",
+             "row": ["Prognoza numer 243750706864"]},
+        ])
+        found = browse.resolve_ref_or_name(ctrls, None, "press:c0·f4a1b2c3", "f4a1b2c3")
+        assert "222751249513" in found.control.address
+
+    def test_a_wrong_or_missing_nonce_is_refused_not_resolved(self):
+        ctrls = self._pay()
+        assert browse.resolve_ref_or_name(ctrls, None, "press:c3·BADD", "abcd1234").control is None
+        assert browse.resolve_ref_or_name(ctrls, None, "press:c3", "abcd1234").control is None
+        # and a page-forged reference (no session nonce to match) never resolves
+        assert browse.resolve_ref_or_name(ctrls, None, "press:c3·abcd1234", "").control is None
+
+    def test_a_name_still_resolves_and_a_gone_reference_says_so(self):
+        ctrls = self._pay()
+        assert browse.resolve_ref_or_name(ctrls, None, "Zapłać", "abcd1234").control is not None
+        gone = browse.resolve_ref_or_name(ctrls, None, "press:c9·abcd1234", "abcd1234")
+        assert gone.control is None and "any more" in gone.problem

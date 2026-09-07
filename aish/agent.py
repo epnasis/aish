@@ -8961,7 +8961,17 @@ class Agent:
         current = self._browse_view.shown
         if current is None:
             return None
-        return browse.resolve(current.controls, args.get("target")).control
+        # Reference-aware (#364 safety fix): a `press:cN·nonce` target is
+        # validated and resolved to its control HERE, so the gate, the echo and
+        # the call see the SAME control. Resolving the raw `press:` string
+        # matched nothing, so a control pressed by reference reached no commit
+        # refusal and no card.
+        return browse.resolve_ref_or_name(
+            current.controls,
+            getattr(current, "revealable", None),
+            args.get("target"),
+            getattr(current, "nonce", ""),
+        ).control
 
     def _browse_approval(
         self, name: str, args: dict, preview: str, denial: str

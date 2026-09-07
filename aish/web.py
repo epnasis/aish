@@ -3507,33 +3507,29 @@ def _browse_act(
     href, mutating, expect_download = "", False, False
     seen = _seen(view)
     current = seen.shown
-    # An inline control reference (#364): validate the per-render nonce against
-    # the page THIS chat was shown, then act on it by number. A reference with
-    # the wrong nonce — stale, or forged by the page into its own text — is
-    # refused here, before it can resolve to anything. Reads/scrolls carry no
-    # target, so this only ever runs for a real act.
-    ref = (
-        browse_mod.parse_ref(str(target))
-        if action not in ("read", "sections", "scroll")
-        else None
+    # Resolve the target the SAME way the gate did (#364 safety fix): the one
+    # resolver understands an inline `press:cN·nonce` reference and a name
+    # alike, validating a reference's nonce before it can resolve to anything.
+    # Reads/scrolls carry no reference — scroll's `target` is a text anchor —
+    # so reference handling is scoped to a real act.
+    is_ref = action not in ("read", "sections", "scroll") and (
+        browse_mod.parse_ref(str(target)) is not None
     )
-    if ref is not None:
-        n, nonce = ref
-        shown_nonce = getattr(current, "nonce", "") if current else ""
-        if not nonce or not shown_nonce or nonce != shown_nonce:
-            return (
-                "ERROR: that control reference is not from the page in front of "
-                "you (its code does not match). Read the page again and use a "
-                "reference or label from what it shows now."
-            )
-        target = str(n)
-    control = (
-        browse_mod.resolve_two_tier(
-            current.controls, getattr(current, "revealable", None) or [], target
-        ).control
-        if current
-        else None
-    )
+    control = None
+    if current:
+        found = browse_mod.resolve_ref_or_name(
+            current.controls,
+            getattr(current, "revealable", None),
+            target,
+            getattr(current, "nonce", ""),
+        )
+        control = found.control
+        if is_ref:
+            if control is None:
+                return f"ERROR: {found.problem}"
+            # The browser re-resolves the target on the LIVE page; a reference
+            # is not a name it knows, so hand it the resolved number.
+            target = str(control.n)
     if control is not None:
         mutating = control.mutating
         # Read off the snapshot for the same reason as `href`: what the model
