@@ -5630,7 +5630,12 @@ const INLINE_RE = new RegExp(
   // in one real answer, every one of them inert, because a page cannot link to
   // the filesystem. A chat log is never rewritten, so that answer has to keep
   // rendering for as long as the chat exists — and now it renders as the files.
-  "|\\[([^\\]\\n]+)\\]\\((?:file:\\/\\/)?(\\/[^)\\n]+)\\)"
+  "|\\[([^\\]\\n]+)\\]\\((?:file:\\/\\/)?(\\/[^)\\n]+)\\)" +
+  // A control ON THE BROWSED PAGE (#364), shown in place: [label](press:cN·…).
+  // The model presses these; to the owner they render as a read-only chip so
+  // the reading shows what is pressable, the way the real page does. Appended
+  // LAST so no existing branch's group number moves (group 13 = the label).
+  "|\\[([^\\]\\n]+)\\]\\(press:c\\d+[^)\\n]*\\)"
 );
 
 // Every external http(s) link the transcript renders opens in the user's real
@@ -6045,6 +6050,20 @@ function fileChip(label, url) {
 }
 // [FILE-LINK-END]
 
+// [CONTROL-CHIP-START]
+// A control on the browsed page, shown in place (#364). It is the MODEL's to
+// press, not the owner's, so this is a read-only marker — no href, no click —
+// that just shows the reading which words are a control, the way a real page
+// styles its buttons and links. The reference and its nonce are machinery and
+// never shown.
+function controlChip(label) {
+  const chip = document.createElement("span");
+  chip.className = "ctrl-chip";
+  chip.textContent = label;
+  return chip;
+}
+// [CONTROL-CHIP-END]
+
 // How long the player gets before the card admits nothing is happening.
 //
 // This is the WEAK net, and knowing why matters: a cross-origin frame cannot be
@@ -6434,6 +6453,8 @@ function inlineMd(text) {
       // own origin, which is what it did before.
       frag.appendChild(fileChip(match[11], match[12])
                        || document.createTextNode(match[0]));
+    } else if (match[13] !== undefined) {
+      frag.appendChild(controlChip(match[13]));
     } else {
       const embed = embedForLink(match[5], match[6]);
       if (embed) {

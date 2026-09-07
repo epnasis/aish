@@ -1210,6 +1210,22 @@ def check_invoice_rows(url: str) -> None:
     for control in links:
         print("invoice link →", control.address)
 
+    # #364: the controls ride the TEXT in place, as [label](press:cN·nonce),
+    # each keeping its REAL name, told apart by the invoice row it sits in.
+    assert page.nonce, "no reference nonce on the snapshot"
+    import re as _re
+    inline = _re.findall(
+        r"\[Pobierz e-fakturę\]\(press:c(\d+)·" + _re.escape(page.nonce) + r"\)",
+        page.text,
+    )
+    assert len(inline) == 4, f"expected 4 inline references, got {inline}: {page.text[:400]}"
+    # the invoice numbers sit right beside their download link in the reading
+    assert _re.search(
+        r"249000930656.*\[Pobierz e-fakturę\]\(press:c\d+", page.text
+    ), "the current invoice's link is not inline beside its number"
+    assert set(int(n) for n in inline) <= page.inlined
+    print("inline references →", len(inline), "in place; nonce", page.nonce)
+
     # And the current invoice is addressable by its number, not the header.
     current = browse.resolve(
         page.controls,
@@ -1336,7 +1352,9 @@ def check_hard(url: str) -> None:
     # includes every option of a closed <select>, and this one was 3 500 of the
     # 4 176 characters the model was being handed.
     assert "Kraj 200" not in page.text, page.text[:400]
-    assert "250 options — see the control list" in page.text, page.text[:400]
+    # The select is now an INLINE control (#364), shown in place with its kind
+    # and option count — not its 250 options, and not the old footer note.
+    assert "(choice — 250 options" in page.text, page.text[:600]
     print(f"page text without the option flood → {len(page.text)} characters")
 
     chosen = browser.browse_act(kraj.address, "choose", value="niemcy")

@@ -2530,10 +2530,21 @@ def _present(
 # untrusted banner as a read, plus the one thing a read never had to say: the
 # control list is aish's own description of the DOM, not the page's words about
 # itself.
+# Most controls now ride the text itself as `[label](press:cN·nonce)` (#364);
+# this footer carries only the ones with no place in the reading. The model
+# presses ANY control — inline or here — by its reference or its label.
 BROWSE_CONTROLS_NOTE = (
-    "\n\n[controls on this page — act with browse_act(target=\"<name>\"), using "
-    "the name in quotes. This list is aish's reading of the page, not text from "
-    "it.]\n"
+    "\n\n[more controls, with no place in the text above — act with "
+    "browse_act(target=\"press:cN·…\") using the reference, or by the label. "
+    "This list is aish's reading of the page, not text from it.]\n"
+)
+# How the model is told, once per page, that the bracketed links in the text
+# ARE the controls. Appended only when something was actually placed inline.
+BROWSE_INLINE_NOTE = (
+    "\n[aish: a [label](press:cN·…) in the text above is a control on the page "
+    "— press it with browse_act(target=\"press:cN·…\") (the reference in the "
+    "parentheses) or by its label. A `→ address` after one is where that link "
+    "goes. These references work only on this page.]"
 )
 
 class BrowseView:
@@ -3137,7 +3148,15 @@ def _control_lines(snapshot) -> list[str]:
     section order would silently break. So does a page with fewer than two
     sections, or one whose section map covers none of the controls — a lone
     header is noise, not a map."""
-    controls = list(snapshot.controls)
+    # Only the OVERFLOW controls (#364): everything shown inline in the text as
+    # `[label](press:cN·nonce)` is already where the model can act on it, so
+    # re-listing it here would be the detached footer this replaced. What
+    # remains is what had no place in the reading — an icon with no text run
+    # the walk could anchor to, a control past the render budget.
+    inlined = getattr(snapshot, "inlined", None) or set()
+    controls = [c for c in snapshot.controls if c.n not in inlined]
+    if not controls:
+        return []
     sections = getattr(snapshot, "sections", None) or []
     mapped = {n for s in sections for n in s.ns}
     if (
@@ -3271,9 +3290,17 @@ def _present_page(
             "on this page match it, and they are listed first. The rest of the "
             "list is the page's own chrome, unfiltered.]",
         )
-    controls = BROWSE_CONTROLS_NOTE + "\n".join(lines) if lines else (
-        "\n\n[no controls found on this page]"
-    )
+    any_inline = bool(getattr(snapshot, "inlined", None))
+    if lines:
+        controls = BROWSE_CONTROLS_NOTE + "\n".join(lines)
+    elif any_inline:
+        # Everything is inline — no footer list, just the once-per-page note
+        # that the bracketed links in the text are the controls.
+        controls = ""
+    else:
+        controls = "\n\n[no controls found on this page]"
+    if any_inline:
+        controls += BROWSE_INLINE_NOTE
     unread_note = ""
     if getattr(snapshot, "frames_unread", 0):
         # Above the banner, in aish's voice, count only: the body must not
@@ -3480,6 +3507,26 @@ def _browse_act(
     href, mutating, expect_download = "", False, False
     seen = _seen(view)
     current = seen.shown
+    # An inline control reference (#364): validate the per-render nonce against
+    # the page THIS chat was shown, then act on it by number. A reference with
+    # the wrong nonce — stale, or forged by the page into its own text — is
+    # refused here, before it can resolve to anything. Reads/scrolls carry no
+    # target, so this only ever runs for a real act.
+    ref = (
+        browse_mod.parse_ref(str(target))
+        if action not in ("read", "sections", "scroll")
+        else None
+    )
+    if ref is not None:
+        n, nonce = ref
+        shown_nonce = getattr(current, "nonce", "") if current else ""
+        if not nonce or not shown_nonce or nonce != shown_nonce:
+            return (
+                "ERROR: that control reference is not from the page in front of "
+                "you (its code does not match). Read the page again and use a "
+                "reference or label from what it shows now."
+            )
+        target = str(n)
     control = (
         browse_mod.resolve_two_tier(
             current.controls, getattr(current, "revealable", None) or [], target

@@ -1262,6 +1262,13 @@ class Snapshot:
     # cannot know, where the page could forge it. Rendered as an aish note
     # above the untrusted banner on full-page renders.
     frames_unread: int = 0
+    # The control numbers shown INLINE in the text (#364) as
+    # `[label](press:cN·nonce)`. Everything not here is overflow — a control
+    # with no place in the reading — and rides the footer list. The nonce is
+    # the session's, carried so the act path can validate a reference the
+    # model copies back and refuse a stale or page-forged one.
+    inlined: set[int] = field(default_factory=set)
+    nonce: str = ""
     # Hidden-but-revealable controls (#372), NEVER in `controls`: their own
     # list is what keeps a hidden twin from renaming a visible control's
     # address or winning a resolution tie (#347's regressions). Addressed by
@@ -2969,7 +2976,16 @@ STRUCT_JS = r"""
     catch (e) { return false; }
   };
 
-  const structuredTextIn = (rootEl, depth, tally) => {
+  // The sentinel a MARKED render drops where a control sits (#364): the
+  // control's number wrapped in a private-use codepoint that cannot occur in
+  // page text. The walk only marks the POSITION; Python substitutes the
+  // control's real label and its reference token, because the final address
+  // (row digests, ordinals) is decided there and the ref carries a per-render
+  // nonce the page must never be able to forge. A control is emitted as its
+  // sentinel and NOT descended into, so its own text — a <select>'s 250
+  // options, a button's icon glyph — never floods the reading.
+  const S_MARK = String.fromCharCode(0xE000);
+  const structuredTextIn = (rootEl, depth, tally, mark) => {
     // Which elements contain special content, precomputed once per root:
     // walking up from each special node costs O(specials x depth) here and
     // makes the per-node question O(1) — querying every spine element's
@@ -2983,6 +2999,12 @@ STRUCT_JS = r"""
       for (const el of rootEl.querySelectorAll(S_SPECIAL)) markUp(el);
       for (const el of rootEl.querySelectorAll('*')) {
         if (el.shadowRoot) { holds.add(el); markUp(el); }
+      }
+      // A control is special too when marking: the spine holding it must be
+      // descended so the sentinel lands at the control's own position instead
+      // of being swallowed into an innerText blob.
+      if (mark) {
+        for (const el of rootEl.querySelectorAll('[data-aish-n]')) markUp(el);
       }
     }
     if (rootEl.shadowRoot) holds.add(rootEl);
@@ -3000,7 +3022,7 @@ STRUCT_JS = r"""
         return '';
       }
       if (!doc.body) return '';
-      return structuredTextIn(doc.body, depth + 1, tally);
+      return structuredTextIn(doc.body, depth + 1, tally, mark);
     };
 
     const tableText = (el) => {
@@ -3037,7 +3059,7 @@ STRUCT_JS = r"""
       // new clothes. Slotted light content arrives through its <slot>.
       const parts = [];
       for (const child of el.shadowRoot.children) {
-        const said = structuredTextIn(child, depth, tally);
+        const said = structuredTextIn(child, depth, tally, mark);
         if (said) parts.push(said);
       }
       return parts.join('\n');
@@ -3065,6 +3087,13 @@ STRUCT_JS = r"""
       const tag = el.tagName || '';
       if (S_SKIP[tag]) return '';
       if (!sVisible(el)) return '';
+      // A control marks its POSITION and is not descended into (#364): its
+      // real label and reference are substituted in Python from the
+      // enumeration, which is the one place that knows the final address and
+      // holds the per-render nonce.
+      if (mark && el.hasAttribute && el.hasAttribute('data-aish-n')) {
+        return S_MARK + el.getAttribute('data-aish-n') + S_MARK;
+      }
       if (tag === 'IFRAME' || tag === 'FRAME') return frameText(el);
       if (tag === 'SLOT') return slotText(el);
       let tableish = tag === 'TABLE';
@@ -3113,10 +3142,10 @@ STRUCT_JS = r"""
 # reader made; an in-text sentence naming an origin would be a claim it
 # cannot check, printed where the page could forge it.
 STRUCT_PAGE_JS = (
-    "() => {" + STRUCT_JS
+    "(mark) => {" + STRUCT_JS
     + "  const tally = {unread: 0};\n"
     + "  const text = document.body"
-    + " ? structuredTextIn(document.body, 0, tally) : '';\n"
+    + " ? structuredTextIn(document.body, 0, tally, mark) : '';\n"
     + "  return {text: text, unread: tally.unread};\n}"
 )
 
@@ -3190,7 +3219,7 @@ SECTIONS_JS = "(opts) => {" + DEEP_JS + STRUCT_JS + """
     // The structured reader, not bare innerText (#372 SEE): a tile's tables
     // keep their rows, its shadow-rooted and framed text is read, and an
     // ordinary tile is byte-identical to what innerText said — see STRUCT_JS.
-    const text = (structuredTextIn(el, 0, {unread: 0}) || '').trim();
+    const text = (structuredTextIn(el, 0, {unread: 0}, opts.mark) || '').trim();
     if (!text) return;
     // Empty when the walk runs before enumeration has tagged anything:
     // unmapped, not control-free.
@@ -3341,11 +3370,26 @@ def find_section(sections: list[Section], asked: str) -> Section | None:
     return hits[0] if len(hits) == 1 else None
 
 
+# A control reference in rendered text, reduced back to its bare label. The
+# per-render nonce inside it must never reach a content hash (#364) — it
+# changes every session, so a section carrying one would never match itself
+# and collapse would die — and the elided `→ destination` is display context,
+# not content identity. `[Pobierz](press:c7·ab12) → eon.example/d` → `Pobierz`.
+_REF_MARKUP_RE = re.compile(r"\[([^\]]*)\]\(press:c\d+[^)]*\)(?: → \S+)?")
+
+
+def _plain_of(text: str) -> str:
+    return _REF_MARKUP_RE.sub(r"\1", text)
+
+
 def section_key(text: str) -> str:
     """Content identity for one section — what licenses a collapse. Exact
     modulo trailing whitespace: a similarity judgement would be a channel for
-    a page to hide a change inside a "mostly the same" block."""
-    normalized = "\n".join(line.rstrip() for line in text.splitlines()).strip()
+    a page to hide a change inside a "mostly the same" block. References are
+    reduced to their labels first, so the identity is the section's CONTENT
+    and not its per-render reference nonces."""
+    stripped = _plain_of(text)
+    normalized = "\n".join(line.rstrip() for line in stripped.splitlines()).strip()
     return hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()
 
 
@@ -3701,6 +3745,106 @@ def resolve_two_tier(
     if second.control is not None or second.ambiguous:
         return second
     return found
+
+
+# Inline control references (#364). The page's controls are shown IN PLACE in
+# the reading — `[Pobierz e-fakturę](press:c7·<nonce>)` right in the invoice
+# row — because a control divorced from its position is a control the model
+# (and the owner) cannot tell from the row beside it. The marker is a markdown
+# link whose target is NOT a real URL: it is a reference that only aish can
+# resolve, so the model cannot feed it to read_url to slip the session, and
+# the `press:` scheme bounces off the http/https-only fetch guard for free.
+#
+# The nonce is the safety. It is minted per browse view, never appears in the
+# page's own HTML (the page is captured before aish assigns references), so a
+# hostile page physically cannot print a valid reference — a forged
+# `[Zapłać](press:c3)` in the page's own prose has the wrong nonce and is
+# refused, not pressed. That is the inversion #364 turns on: putting controls
+# INTO the untrusted text is safer than the detached footer, because forgery
+# goes from plausible to impossible.
+MARK = "\ue000"
+_SENTINEL_RE = re.compile(MARK + r"(\d+)" + MARK)
+# The middle dot separates the control number from the nonce — a character the
+# model will not confuse for part of either, and one no address carries.
+_REF_SEP = "·"
+_REF_RE = re.compile(r"press:c(\d+)(?:" + _REF_SEP + r"([0-9a-f]+))?")
+
+
+def press_ref(n: int, nonce: str) -> str:
+    """The reference token for control `n` in a render stamped `nonce`."""
+    return f"press:c{n}{_REF_SEP}{nonce}"
+
+
+def parse_ref(target: str) -> tuple[int, str] | None:
+    """`(n, nonce)` if the target names a control by reference, else None.
+
+    Accepts the bare token `press:c7·ab12` and the whole markdown link
+    `[label](press:c7·ab12)` — the model may copy back either."""
+    match = _REF_RE.search(target or "")
+    if not match:
+        return None
+    return int(match.group(1)), (match.group(2) or "")
+
+
+def _inline_detail(control: Control) -> str:
+    """What follows an inline reference so the KIND is not lost (#364): a link
+    shows where it goes, a choice/field/check says it is one — otherwise the
+    model reads `[kraj](press:c5)` and cannot tell it takes `action=choose`.
+    Kept OUTSIDE the `[label](ref)` so the label stays the control's real name
+    and the chip renders it alone."""
+    if control.navigates and control.detail.startswith(("http://", "https://")):
+        # Origin+path, scheme dropped — "where does this go" the way a person
+        # reads a link, elided so a tracking query cannot dominate.
+        return " → " + re.sub(r"^https?://", "", short_detail(control.detail))
+    if control.kind == CHOICE:
+        return f" (choice — {short_detail(control.detail)})" if control.detail else " (choice)"
+    if control.kind == FIELD:
+        return f" ({control.detail})" if control.detail else " (field)"
+    if control.kind in (CHECK,):
+        return f" ({control.detail})" if control.detail else " (checkbox)"
+    if control.kind == PASSWORD:
+        return " (password)"
+    return ""
+
+
+def substitute_controls(
+    marked: str, controls: list[Control], nonce: str
+) -> tuple[str, set[int]]:
+    """Sentinels → inline references, for what the MODEL and owner read.
+
+    Each `\\ue000n\\ue000` becomes `[label](press:cn·nonce)`, plus ` → dest`
+    for a real navigation so the destination stays visible as context (never
+    as the handle — the handle is the reference, which cannot be fetched).
+    Returns the text and the set of control numbers that were placed inline,
+    so the caller knows which ones still need the overflow list."""
+    by_n = {c.n: c for c in controls}
+    inlined: set[int] = set()
+
+    def _repl(match: re.Match[str]) -> str:
+        n = int(match.group(1))
+        control = by_n.get(n)
+        if control is None:
+            # A control that left the page between enumeration and this
+            # render: drop the marker rather than point at nothing.
+            return ""
+        inlined.add(n)
+        label = control.name or _numbered(n)
+        return f"[{label}]({press_ref(n, nonce)}){_inline_detail(control)}"
+
+    return _SENTINEL_RE.sub(_repl, marked), inlined
+
+
+def strip_controls(marked: str, controls: list[Control]) -> str:
+    """Sentinels → the plain label, for section keys and the coverage floor —
+    the reference and its per-render nonce must never reach a content hash, or
+    a section would never match itself twice and collapse would die."""
+    by_n = {c.n: c for c in controls}
+
+    def _repl(match: re.Match[str]) -> str:
+        control = by_n.get(int(match.group(1)))
+        return control.name if control else ""
+
+    return _SENTINEL_RE.sub(_repl, marked)
 
 
 def _one_of(hits: list[Control]) -> Control | None:
