@@ -3808,16 +3808,30 @@ class WebServer:
         costs one small broadcast rather than the ledger twice.
         """
         marks = message.get("marks")
+        floor_was = self.seen.floor()
         changed = self.seen.merge(marks) if isinstance(marks, dict) else {}
         if changed:
             # To EVERY client, the sender included: it already holds these, and
             # a merge that is a max cannot be hurt by hearing its own mark. The
             # alternative — remembering who to skip — is the kind of bookkeeping
             # that goes wrong the first time a device has two tabs open.
-            self._broadcast({"type": "seen_marked", "seen": changed})
+            #
+            # A mark can push the ledger past its cap, which FORGETS a look and
+            # raises the floor (#378). That has to ride the same message: the
+            # dropped stamp is about to vanish from every device's copy too, and
+            # the floor is the only thing that still speaks for it.
+            event = {"type": "seen_marked", "seen": changed}
+            if self.seen.floor() > floor_was:
+                event["floor"] = self.seen.floor()
+            self._broadcast(event)
         if message.get("full"):
             await client.ws.send_json(
-                {"type": "seen_ledger", "seen": self.seen.snapshot(), "now": time.time()}
+                {
+                    "type": "seen_ledger",
+                    "seen": self.seen.snapshot(),
+                    "floor": self.seen.floor(),
+                    "now": time.time(),
+                }
             )
 
     def _broadcast(self, event: dict) -> None:

@@ -35,6 +35,7 @@ function badgeWorld() {
   const s = w.sandbox;
   s.seenAt = {};
   s.seenSince = Date.now() - 3600 * SEC; // this device's first-run floor, an hour back
+  s.seenFloor = 0; // nothing forgotten yet (#378); section 5 is where it bites
   s.currentSession = null;
   return w;
 }
@@ -67,7 +68,9 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
   ];
   s.setAttentionRows(rows);
 
-  const state = { seen: s.seenAt, since: s.seenSince, current: s.currentSession };
+  const state = {
+    seen: s.seenAt, since: s.seenSince, floor: s.seenFloor, current: s.currentSession,
+  };
   const band = s.partitionSessions(rows, state).bands.needsYou.map((r) => r.name);
 
   ok("every counted chat is in the band",
@@ -293,6 +296,46 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
                          src.indexOf("\n// THE COUNT'S OWN ROWS"));
   ok("the client prefers the stated stamp and only falls back to its own",
     /Number\(pushed\.out\)/.test(body) && /spoke \|\| now/.test(body));
+}
+
+// ---- 6. a look the cap forgot (#378) -------------------------------------
+// The owner ran 300 stamps against 576 listed chats, so the map dropped its
+// oldest looks continuously — and a dropped look read as "never read", which
+// put month-old chats back under "Needs you" on a device whose own floor was
+// older still. (It surfaced after a ship because those rows rank ~240th and the
+// offline mirror holds 200, so only a server-fed list paints them — a restart
+// is what asks for one.) The REAL map is loaded here: forgetting must SAY so.
+{
+  const w = badgeWorld();
+  const s = w.sandbox;
+  w.load("// [SEEN-START]", "// [SEEN-END]"); // the REAL seen map and its trim
+  s.seenSince = Date.now() - 400 * 24 * 3600 * SEC; // an old device: its floor claims nothing
+
+  const week = 7 * 24 * 3600 * SEC;
+  s.seenAt = { "ancient.jsonl": Date.now() - 2 * week };
+  for (let i = 0; i < s.SEEN_MAX; i++) s.seenAt[`s${i}.jsonl`] = Date.now() - week + i;
+  ok("evicting the oldest look raises the floor to it", s.trimSeen() === true);
+  ok("…and the look itself is gone", !("ancient.jsonl" in s.seenAt));
+
+  s.setAttentionRows([
+    row("ancient.jsonl", { ago: 3 * week }),  // read long ago, silent ever since
+    row("spoke-later.jsonl", { ago: 2 * SEC }), // forgotten too, but it has news
+  ]);
+  ok("a chat whose look was forgotten does not come back as Needs you",
+    !counted(w).includes("ancient.jsonl"));
+  ok("…while one that spoke after the floor still raises its dot",
+    counted(w).join() === "spoke-later.jsonl");
+
+  // The other half: the floor the SERVER publishes, which is how a device that
+  // never did the eviction itself learns what the owner has already read.
+  const fresh = badgeWorld();
+  fresh.load("// [SEEN-START]", "// [SEEN-END]");
+  fresh.sandbox.seenSince = Date.now() - 400 * 24 * 3600 * SEC;
+  fresh.sandbox.setAttentionRows([row("ancient.jsonl", { ago: 3 * week })]);
+  ok("with no floor it is unread, which is the bug", counted(fresh).length === 1);
+  fresh.sandbox.applySeenMarks({}, (Date.now() - 2 * week) / SEC);
+  ok("a floor from the server clears it with no per-chat stamp at all",
+    counted(fresh).length === 0);
 }
 
 report("test_attention_badge.js");
