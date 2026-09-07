@@ -1582,3 +1582,52 @@ class TestGuardedFetchArguments:
         monkeypatch.setattr(web._opener, "open", boom)
         with pytest.raises(web.BlockedURLError):
             web.fetch_binary("file:///etc/passwd", 10)
+
+
+class TestAFetchedTableKeepsItsRowsAndCells:
+    """#372 pillar SEE, fetch-path half. The owner's complaint verbatim: a
+    page with tables came through as a wall of text — `td` was not even a
+    block boundary, so a row's cells ran together into one word soup. A row
+    is one line, its cells told apart; a list item says it is one."""
+
+    def test_cells_are_separated_and_rows_are_lines(self):
+        text = web.html_to_text(
+            "<table><tr><th>Konto</th><th>Saldo</th></tr>"
+            "<tr><td>Główne</td><td>1 200 PLN</td></tr>"
+            "<tr><td>Oszczędności</td><td>500 PLN</td></tr></table>"
+        )
+        lines = [line for line in text.splitlines() if line]
+        assert "Konto | Saldo" in lines
+        assert "Główne | 1 200 PLN" in lines
+        assert "Oszczędności | 500 PLN" in lines
+
+    def test_the_old_run_together_defect_stays_dead(self):
+        text = web.html_to_text("<table><tr><td>abc</td><td>def</td></tr></table>")
+        assert "abcdef" not in text
+        assert "abc | def" in text
+
+    def test_a_list_item_declares_itself(self):
+        text = web.html_to_text("<ul><li>pierwszy</li><li>drugi</li></ul>")
+        lines = [line for line in text.splitlines() if line]
+        assert "- pierwszy" in lines
+        assert "- drugi" in lines
+
+    def test_a_skipped_subtree_sheds_no_separators(self):
+        """The separator is visible text; a table inside <noscript> must not
+        leave ' | ' tokens behind after its data was skipped."""
+        text = web.html_to_text(
+            "<noscript><table><tr><td>x</td><td>y</td></tr></table></noscript>"
+            "<p>widoczny</p>"
+        )
+        assert "|" not in text
+        assert "widoczny" in text
+
+    def test_a_multi_block_cell_degrades_to_lines_not_soup(self):
+        """A cell holding block elements splits across lines — a known,
+        honest degradation; the neighbouring cells must still not fuse."""
+        text = web.html_to_text(
+            "<table><tr><td><p>a</p><p>b</p></td><td>c</td></tr></table>"
+        )
+        squeezed = [ln.replace(" ", "") for ln in text.splitlines()]
+        assert "bc" not in squeezed
+        assert any("|c" in ln for ln in squeezed), text

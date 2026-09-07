@@ -1010,6 +1010,9 @@ class _TextExtractor(HTMLParser):
         self._chrome_depth = 0
         self._in_title = False
         self._anchor: tuple[int, str] | None = None
+        # Whether the current table row has already emitted a cell — the
+        # separator goes BETWEEN cells, never before the first.
+        self._cell_seen = False
 
     @property
     def title(self) -> str:
@@ -1048,7 +1051,25 @@ class _TextExtractor(HTMLParser):
             self._chrome_depth += 1
         if tag in _SKIP_TAGS:
             self._skip_depth += 1
+        elif self._skip_depth:
+            # Structure markers are VISIBLE text; a table inside a skipped
+            # subtree must not shed " | " tokens into the page (the bare
+            # newlines the old code emitted here collapsed harmlessly —
+            # pipes would not).
+            pass
+        elif tag in ("td", "th"):
+            # The owner's wall-of-text complaint, fetch-path half (#372 SEE):
+            # `td` was not even a boundary, so a row's cells ran together.
+            # One line per row, cells told apart — the same shape the
+            # browser path renders.
+            if self._cell_seen:
+                self.parts.append(" | ")
+            self._cell_seen = True
+        elif tag == "li":
+            self.parts.append("\n- ")
         elif tag in _BLOCK_TAGS:
+            if tag == "tr":
+                self._cell_seen = False
             self.parts.append("\n")
 
     def handle_endtag(self, tag):
@@ -3253,8 +3274,18 @@ def _present_page(
     controls = BROWSE_CONTROLS_NOTE + "\n".join(lines) if lines else (
         "\n\n[no controls found on this page]"
     )
+    unread_note = ""
+    if getattr(snapshot, "frames_unread", 0):
+        # Above the banner, in aish's voice, count only: the body must not
+        # carry an aish-shaped sentence the page could forge, and the reader
+        # cannot know a cross-origin frame's real address anyway (#371).
+        unread_note = (
+            f"[aish: {snapshot.frames_unread} embedded frame(s) on this page "
+            "could not be read — their content is not in the text below]\n"
+        )
     return (
         _snapshot_notes(snapshot)
+        + unread_note
         + UNTRUSTED_NOTE
         + head
         + "\n"

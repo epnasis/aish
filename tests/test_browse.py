@@ -6744,3 +6744,74 @@ class TestVisibleAlwaysWinsResolution:
         assert "the page hides but its own CSS or keyboard order says how" in out
         assert "Open the options list" in out
         assert "refuses the press unless the control measurably" in out
+
+
+class TestTheStructuredReaderIsInnerTextPlusStructure:
+    """#372 pillar SEE / #371. One reader for everything HANDED OVER — the
+    flat page and every section tile — whose contract is: native innerText,
+    verbatim, for ordinary subtrees (byte-identical, so flood-block
+    matching, section keys and the coverage floor keep meaning what they
+    measured), plus the three things innerText cannot say: a table's rows,
+    a shadow root's rendered text, and a frame's text — read when
+    reachable, NAMED AS UNREAD when not."""
+
+    def test_ordinary_subtrees_return_native_innertext_verbatim(self):
+        assert "return el.innerText || '';" in browse.STRUCT_JS
+
+    def test_the_363_law_holds_in_the_reader(self):
+        """Script/style/noscript/template contribute nothing, and an element
+        checkVisibility calls hidden contributes nothing — the custom path
+        only walks what the ordinary path would have rendered."""
+        assert "const S_SKIP = {SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1};" in (
+            browse.STRUCT_JS
+        )
+        # checkVisibilityCSS on purpose: bare checkVisibility() does not test
+        # the visibility property, and the raw-text-node path would leak the
+        # text innerText excludes under a visibility:hidden spine. Opacity
+        # stays OFF — innerText includes opacity:0 text, and parity with
+        # innerText is the contract.
+        assert "el.checkVisibility({checkVisibilityCSS: true})" in browse.STRUCT_JS
+        assert "if (!sVisible(el)) return '';" in browse.STRUCT_JS
+        assert "checkOpacity: true" not in browse.STRUCT_JS
+
+    def test_a_cross_origin_frame_is_counted_never_narrated(self):
+        """The review inverted the first draft: an in-text sentence would
+        name an origin the reader cannot know (the src attribute is
+        page-authored and stale), in the one region where the page could
+        forge an aish-shaped line. The reader COUNTS what it observed; the
+        aish note above the banner says it."""
+        assert "tally.unread += 1;" in browse.STRUCT_JS
+        assert "was not read" not in browse.STRUCT_JS
+        assert "el.src" not in browse.STRUCT_JS
+
+    def test_frame_nesting_is_bounded_and_the_cut_is_counted(self):
+        assert "const S_FRAME_DEPTH = 3;" in browse.STRUCT_JS
+        assert (
+            "if (depth >= S_FRAME_DEPTH) { tally.unread += 1; return ''; }"
+            in browse.STRUCT_JS
+        )
+
+    def test_a_nested_tables_rows_are_not_printed_twice(self):
+        assert "if (row.closest(S_SPECIAL) !== el) continue;" in browse.STRUCT_JS
+        assert "if (cell.closest(S_ROWS) !== row) continue;" in browse.STRUCT_JS
+
+    def test_the_tiles_and_the_flat_page_share_the_one_reader(self):
+        """Two readers that disagree about what the page says is the defect
+        REACH_JS/NAME_JS sharing exists to prevent, at text scale."""
+        assert browse.STRUCT_JS in browse.SECTIONS_JS
+        assert "structuredTextIn(el, 0, {unread: 0})" in browse.SECTIONS_JS
+        assert browse.STRUCT_JS in browse.STRUCT_PAGE_JS
+        assert "el.innerText" not in browse.SECTIONS_JS.replace(
+            browse.STRUCT_JS, ""
+        ).split("const push")[1].split("const walk")[0], (
+            "the tile text must come from the shared reader, not bare innerText"
+        )
+
+    def test_only_declared_tables_are_tables(self):
+        """Identity is a fact, appearance is a guess a redesign breaks — the
+        same law the sections walk follows. No display:table sniffing."""
+        # One computed-style read exists and it is the display:contents
+        # visibility exception, never table sniffing.
+        assert browse.STRUCT_JS.count("getComputedStyle") == 1
+        assert "display === 'contents'" in browse.STRUCT_JS
+        assert "'table, [role=table], iframe, frame'" in browse.STRUCT_JS

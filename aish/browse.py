@@ -1256,6 +1256,12 @@ class Snapshot:
     title: str
     text: str
     controls: list[Control] = field(default_factory=list)
+    # VISIBLE frames on this page whose documents the reader could not open
+    # (#371) — counted by the reader itself, never narrated in the body: an
+    # in-text sentence naming a frame's origin would state what the reader
+    # cannot know, where the page could forge it. Rendered as an aish note
+    # above the untrusted banner on full-page renders.
+    frames_unread: int = 0
     # Hidden-but-revealable controls (#372), NEVER in `controls`: their own
     # list is what keeps a hidden twin from renaming a visible control's
     # address or winning a resolution tie (#347's regressions). Addressed by
@@ -2866,7 +2872,223 @@ def strip_option_floods(text: str, floods: list[dict[str, Any]]) -> str:
 # so an id must look like a word to count. Anything else is anonymous, which is
 # not a failure: an anonymous tile still collapses by content identity once it
 # has been shown (see `web._present_page`).
-SECTIONS_JS = "(opts) => {" + DEEP_JS + """
+# The structured page reader (#372 pillar SEE, #371). One reader for the
+# text that is HANDED OVER — the flat page and every section tile — so the
+# two can never disagree about what the page says.
+#
+# The contract: **native `innerText`, verbatim, for every ordinary subtree.**
+# A subtree holding no table, no frame and no shadow root returns
+# `el.innerText` byte-for-byte, so on the pages that work today the output
+# is IDENTICAL — which is what keeps the option-flood block matching, the
+# section content keys and the tiling coverage floor meaning what they
+# measured. The reader adds three things `innerText` cannot say:
+#
+# - a TABLE is one line per row, cells joined with " | " — declared
+#   structure only (`<table>`/`[role=table]`), matching the sections
+#   philosophy: identity is a fact, appearance is a guess a redesign breaks;
+# - a SHADOW ROOT's rendered content is read (#371: `innerText` pierces
+#   neither shadow roots nor iframes while control enumeration pierces both,
+#   so a page could hand the model controls with no readable text around
+#   them); slot handling is imperfect on purpose — shadow children and light
+#   children are both walked, which reads the plain overlay case correctly
+#   and may duplicate exotic slot arrangements rather than drop them;
+# - a FRAME's text is read when its document is reachable (same-origin), and
+#   NAMED AS UNREAD when it is not — a cross-origin frame is a fact about
+#   the page, and silently omitting it is the half-seen-page defect this
+#   exists to end. Nesting is bounded.
+#
+# The #363 law holds throughout: script/style/noscript/template contribute
+# nothing, and an element `checkVisibility` calls hidden contributes nothing
+# — the custom path only ever walks what the ordinary path would have
+# rendered.
+STRUCT_JS = r"""
+  const S_SKIP = {SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1};
+  const S_SPECIAL = 'table, [role=table], iframe, frame';
+  const S_ROWS = 'tr, [role=row]';
+  const S_CELLS = 'td, th, [role=cell], [role=gridcell], [role=columnheader],'
+                + ' [role=rowheader]';
+  // Phrasing content: a spine's inline children join a LINE, they do not
+  // each take one — "Total: <b>5</b>" is one sentence, not two lines. A
+  // structural tag set, the same instrument web.py's _BLOCK_TAGS is.
+  const S_INLINE = {A: 1, ABBR: 1, B: 1, BDI: 1, BDO: 1, CITE: 1, CODE: 1,
+                    DATA: 1, DFN: 1, EM: 1, I: 1, KBD: 1, MARK: 1, Q: 1,
+                    S: 1, SAMP: 1, SMALL: 1, SPAN: 1, STRONG: 1, SUB: 1,
+                    SUP: 1, TIME: 1, U: 1, VAR: 1, WBR: 1, LABEL: 1};
+  const S_FRAME_DEPTH = 3;
+  // A table whose rendered row would exceed this is not a data grid being
+  // read — it is a layout table (one huge cell holding a page region) or a
+  // cell holding an option flood, and the honest rendering for both is the
+  // native one: layout tables read as flowing text, and a flood block stays
+  // byte-identical for the stripper. Content-blind and self-limiting.
+  const S_ROW_MAX = 400;
+
+  // Parity with innerText, which is the contract: visibility:hidden content
+  // is excluded (bare checkVisibility() does NOT test the visibility
+  // property — the raw-text-node path would leak it), while opacity:0 text
+  // IS rendered and stays included, so checkOpacity stays off.
+  const sVisible = (el) => {
+    if (!el.checkVisibility) return true;
+    if (el.checkVisibility({checkVisibilityCSS: true})) return true;
+    // display:contents has no box of its own, and checkVisibility calls
+    // that hidden — but its CHILDREN render, and <slot> defaults to
+    // display:contents, so a spine holding either would silently drop its
+    // whole subtree (measured: the slot probe lost every slotted word).
+    try { return getComputedStyle(el).display === 'contents'; }
+    catch (e) { return false; }
+  };
+
+  const structuredTextIn = (rootEl, depth, tally) => {
+    // Which elements contain special content, precomputed once per root:
+    // walking up from each special node costs O(specials x depth) here and
+    // makes the per-node question O(1) — querying every spine element's
+    // whole subtree was superlinear on exactly the DOMs that hurt.
+    const holds = new Set();
+    const markUp = (el) => {
+      for (let n = el; n && n !== rootEl; n = n.parentElement) holds.add(n);
+      holds.add(rootEl);
+    };
+    if (rootEl.querySelectorAll) {
+      for (const el of rootEl.querySelectorAll(S_SPECIAL)) markUp(el);
+      for (const el of rootEl.querySelectorAll('*')) {
+        if (el.shadowRoot) { holds.add(el); markUp(el); }
+      }
+    }
+    if (rootEl.shadowRoot) holds.add(rootEl);
+
+    const frameText = (el) => {
+      if (depth >= S_FRAME_DEPTH) { tally.unread += 1; return ''; }
+      let doc = null;
+      try { doc = el.contentDocument; } catch (e) { doc = null; }
+      if (!doc) {
+        // Unreadable is COUNTED, never narrated: an in-page sentence about
+        // the frame would state an origin this code cannot know (the src
+        // attribute is page-authored and stale) in the one region where an
+        // aish-shaped line can be forged by the page itself.
+        tally.unread += 1;
+        return '';
+      }
+      if (!doc.body) return '';
+      return structuredTextIn(doc.body, depth + 1, tally);
+    };
+
+    const tableText = (el) => {
+      const lines = [];
+      const caption = el.querySelector && el.querySelector('caption');
+      if (caption) {
+        const said = render(caption).replace(/\s*\n\s*/g, ' ').trim();
+        if (said) lines.push(said);
+      }
+      for (const row of el.querySelectorAll(S_ROWS)) {
+        // A nested table's rows belong to that table, not to this one.
+        if (row.closest(S_SPECIAL) !== el) continue;
+        if (!sVisible(row)) continue;
+        const cells = [];
+        for (const cell of row.querySelectorAll(S_CELLS)) {
+          if (cell.closest(S_ROWS) !== row) continue;
+          // A hidden cell is dropped whole rather than holding an empty
+          // slot: the row may misalign against its header, but an empty
+          // " | " for content that is not on the page would be a claim.
+          if (!sVisible(cell)) continue;
+          cells.push(render(cell).replace(/\s*\n\s*/g, ' ').trim());
+        }
+        if (!cells.some((c) => c)) continue;
+        const line = cells.join(' | ');
+        if (line.length > S_ROW_MAX) return el.innerText || '';
+        lines.push(line);
+      }
+      return lines.join('\n');
+    };
+
+    const shadowText = (el) => {
+      // The shadow root's children ONLY — unslotted light children are not
+      // rendered by the browser and reading them would be the #363 leak in
+      // new clothes. Slotted light content arrives through its <slot>.
+      const parts = [];
+      for (const child of el.shadowRoot.children) {
+        const said = structuredTextIn(child, depth, tally);
+        if (said) parts.push(said);
+      }
+      return parts.join('\n');
+    };
+
+    const slotText = (el) => {
+      const parts = [];
+      let assigned = [];
+      try { assigned = el.assignedNodes ? el.assignedNodes() : []; }
+      catch (e) { assigned = []; }
+      if (!assigned.length) assigned = Array.from(el.childNodes);  // fallback content
+      for (const node of assigned) {
+        if (node.nodeType === 3) {
+          const said = (node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (said) parts.push(said);
+        } else if (node.nodeType === 1) {
+          const said = render(node);
+          if (said) parts.push(said);
+        }
+      }
+      return parts.join('\n');
+    };
+
+    const render = (el) => {
+      const tag = el.tagName || '';
+      if (S_SKIP[tag]) return '';
+      if (!sVisible(el)) return '';
+      if (tag === 'IFRAME' || tag === 'FRAME') return frameText(el);
+      if (tag === 'SLOT') return slotText(el);
+      let tableish = tag === 'TABLE';
+      try { tableish = tableish || (el.matches && el.matches('[role=table]')); }
+      catch (e) { /* not table-ish */ }
+      if (tableish) {
+        // The page's own statement that this table is layout, not data.
+        const role = (el.getAttribute && el.getAttribute('role')) || '';
+        if (role !== 'presentation' && role !== 'none') return tableText(el);
+      }
+      if (el.shadowRoot) return shadowText(el);
+      if (!holds.has(el)) return el.innerText || '';
+      // The mixed spine: inline runs share a line, block children take
+      // their own. A known, bounded divergence from innerText's CSS-aware
+      // spacing, confined to spines that HOLD special content — every
+      // special-free subtree above returned the native bytes.
+      const parts = [];
+      let run = [];
+      const flush = () => {
+        if (run.length) { parts.push(run.join(' ')); run = []; }
+      };
+      for (const node of el.childNodes) {
+        if (node.nodeType === 3) {
+          const said = (node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (said) run.push(said);
+          continue;
+        }
+        if (node.nodeType !== 1) continue;
+        const said = render(node);
+        if (!said) continue;
+        if (S_INLINE[node.tagName || '']) { run.push(said); continue; }
+        flush();
+        parts.push(said);
+      }
+      flush();
+      return parts.join('\n');
+    };
+
+    return render(rootEl);
+  };
+"""
+
+# The flat page through the structured reader — the one-shot read that
+# replaces what is handed over, never what is judged. Returns the text AND
+# the count of frames that could not be read: a count is an observation the
+# reader made; an in-text sentence naming an origin would be a claim it
+# cannot check, printed where the page could forge it.
+STRUCT_PAGE_JS = (
+    "() => {" + STRUCT_JS
+    + "  const tally = {unread: 0};\n"
+    + "  const text = document.body"
+    + " ? structuredTextIn(document.body, 0, tally) : '';\n"
+    + "  return {text: text, unread: tally.unread};\n}"
+)
+
+SECTIONS_JS = "(opts) => {" + DEEP_JS + STRUCT_JS + """
   const NAME_MAX = 60;
   const clean = (s) => (s || '').replace(/\\s+/g, ' ').replace(/[\\[\\]]/g, '')
     .trim().slice(0, NAME_MAX);
@@ -2933,7 +3155,10 @@ SECTIONS_JS = "(opts) => {" + DEEP_JS + """
     return false;
   };
   const push = (name, el) => {
-    const text = (el.innerText || '').trim();
+    // The structured reader, not bare innerText (#372 SEE): a tile's tables
+    // keep their rows, its shadow-rooted and framed text is read, and an
+    // ordinary tile is byte-identical to what innerText said — see STRUCT_JS.
+    const text = (structuredTextIn(el, 0, {unread: 0}) || '').trim();
     if (!text) return;
     // Empty when the walk runs before enumeration has tagged anything:
     // unmapped, not control-free.
