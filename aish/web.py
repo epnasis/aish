@@ -3274,8 +3274,18 @@ def _present_page(
     controls = BROWSE_CONTROLS_NOTE + "\n".join(lines) if lines else (
         "\n\n[no controls found on this page]"
     )
+    unread_note = ""
+    if getattr(snapshot, "frames_unread", 0):
+        # Above the banner, in aish's voice, count only: the body must not
+        # carry an aish-shaped sentence the page could forge, and the reader
+        # cannot know a cross-origin frame's real address anyway (#371).
+        unread_note = (
+            f"[aish: {snapshot.frames_unread} embedded frame(s) on this page "
+            "could not be read — their content is not in the text below]\n"
+        )
     return (
         _snapshot_notes(snapshot)
+        + unread_note
         + UNTRUSTED_NOTE
         + head
         + "\n"

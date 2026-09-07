@@ -5175,7 +5175,27 @@ async def _snapshot(
         timeout_ms=WATCH_MAX_MS if started_work else SETTLE_MAX_MS,
         inflight=lambda: session.inflight,
     )
-    text = await _without_option_floods(page, settled_text)
+    # The structured read replaces what is HANDED OVER, never what was
+    # judged: still-loading and thin-page ran on the native settled text
+    # above, and yesterday's flat text is the floor when the reader fails
+    # (#372 SEE, #371). One whole-DOM evaluate, once per snapshot — the
+    # settle POLLING stays on native innerText. The NATIVE text also stays
+    # the tiling-coverage denominator below: coverage exists to catch a
+    # reader-blind page, and a denominator produced by the same reader as
+    # the tiles would go blind with it (the correlated-failure objection
+    # from this design's review).
+    native = await _without_option_floods(page, settled_text)
+    frames_unread = 0
+    struct_text = ""
+    try:
+        got = await page.evaluate(browse_mod.STRUCT_PAGE_JS)
+        struct_text = str((got or {}).get("text") or "")
+        frames_unread = int((got or {}).get("unread") or 0)
+    except Exception:  # noqa: BLE001 — a page that will not answer keeps its text
+        struct_text = ""
+    text = (
+        await _without_option_floods(page, struct_text) if struct_text else native
+    )
     after_settle = clock()
     raw, raw_reveal, matched, unreached, matching, commit, dialog, reasons = await _enumerate(
         page, match
@@ -5187,7 +5207,7 @@ async def _snapshot(
     # AFTER enumeration, deliberately (#361 slice 4): the walk maps each
     # tile's controls by the data-aish-n tags enumeration just wrote, so a
     # section-addressed read can serve a section WITH its controls.
-    sections = await _sections(page, text)
+    sections = await _sections(page, native)
     if sections:
         text = browse_mod.sections_render(sections)
     after_enumerate = clock()
@@ -5240,6 +5260,7 @@ async def _snapshot(
         text=text,
         sections=sections,
         controls=controls,
+        frames_unread=frames_unread,
         revealable=revealable,
         hidden=hidden,
         narrowed=match or "",

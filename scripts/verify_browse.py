@@ -1022,6 +1022,72 @@ def check_revealable(url: str) -> None:
     print("JS-hidden refused →", (missing.problem or "")[:80])
 
 
+# The structured reader's acceptance page (#372 SEE, #371): a real table, a
+# shadow-rooted thread, a same-origin frame, a genuinely cross-origin frame
+# (localhost vs 127.0.0.1 — same server, different origins), and the #363
+# leak bait (a template and a hidden blob) that must stay unread.
+STRUCTURED = """<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><title>Struktura</title></head>
+<body>
+<main>
+  <h1>Rachunki</h1>
+  <table>
+    <tr><th>Konto</th><th>Saldo</th></tr>
+    <tr><td>Główne</td><td>1 200 PLN</td></tr>
+    <tr><td>Oszczędności</td><td>500 PLN</td></tr>
+  </table>
+  <div id="overlay"></div>
+  <iframe src="/framed.html" style="width:400px;height:80px"></iframe>
+  <iframe src="http://localhost:PORT/framed.html"
+          style="width:400px;height:80px"></iframe>
+  <template><div>szablon-sekret</div></template>
+  <div style="display:none">ukryty-blob-9000</div>
+</main>
+<footer><p>stopka strony, dużo drobnych linków i tekstu prawnego —
+lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod
+tempor incididunt ut labore et dolore magna aliqua</p></footer>
+<script>
+  const root = document.getElementById('overlay').attachShadow({mode: 'open'});
+  root.innerHTML = '<h2>Wątek Maciej</h2><p>Czesc, nie mam jeszcze schedulu</p>';
+</script>
+</body></html>
+"""
+
+FRAMED = """<!doctype html>
+<html><body><p>tekst z ramki wewnętrznej</p></body></html>
+"""
+
+
+def check_structured_text(url: str, port: int) -> None:
+    """Tables keep rows, shadow and framed text is read, a cross-origin
+    frame is COUNTED unread — never narrated in the body, where the page
+    could forge an aish-shaped line — and the leak bait stays unread
+    (#372 SEE, #371)."""
+    page = browser.browse_open(url + "structured.html")
+    text = page.text
+
+    assert "Główne | 1 200 PLN" in text, text[:800]
+    assert "Oszczędności | 500 PLN" in text, text[:800]
+    assert "Wątek Maciej" in text and "schedulu" in text, text[:800]
+    # Both frames serve the same document; only the same-origin one is
+    # readable, so its text appears exactly once and the other is counted.
+    assert text.count("tekst z ramki wewnętrznej") == 1, text[:1200]
+    assert page.frames_unread == 1, page.frames_unread
+    assert "was not read" not in text
+    assert "szablon-sekret" not in text and "ukryty-blob-9000" not in text
+
+    # And the SECTION carries the same reading: the shadow thread and the
+    # table live in the main tile, not only in the flat text.
+    main = next((s for s in page.sections if "Rachunki" in s.text), None)
+    assert main is not None, [s.label() for s in page.sections]
+    assert "Wątek Maciej" in main.text
+    assert "Główne | 1 200 PLN" in main.text
+    print("structured text → table rows, shadow thread, frames all present")
+    for line in text.splitlines():
+        if "|" in line or "frame" in line:
+            print("   |", line)
+
+
 def check_spinner(url: str) -> None:
     """A page that finishes after its DOM has gone quiet (#251)."""
     browser.browse_open(url + "hard.html")
@@ -1252,8 +1318,12 @@ def main() -> int:
     Path(root, "podsumowanie.html").write_text(KASA, encoding="utf-8")
     Path(root, "shadow.html").write_text(SHADOW, encoding="utf-8")
     Path(root, "messaging.html").write_text(MESSAGING, encoding="utf-8")
+    Path(root, "framed.html").write_text(FRAMED, encoding="utf-8")
     port = serve(root)
     url = f"http://127.0.0.1:{port}/"
+    Path(root, "structured.html").write_text(
+        STRUCTURED.replace("PORT", str(port)), encoding="utf-8"
+    )
 
     print(f"profile: {browser.profile_dir()}")
     check_portal(url)
@@ -1265,6 +1335,7 @@ def main() -> int:
     check_rows(url)
     check_focus_rows(url)
     check_revealable(url)
+    check_structured_text(url, port)
     check_spinner(url)
     check_submit_gating(url)
     check_grant_scope(url)
