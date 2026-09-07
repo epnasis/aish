@@ -4330,6 +4330,31 @@ function inspectDossier(t) {
   return t.dossierFetch;
 }
 
+// The step-screen, revealed at ONCE on a tap with a loading placeholder (#UX):
+// the record is a server fetch that takes a second or three, and until this
+// the box only appeared AFTER it resolved — so a tap sat with no feedback and
+// the reader could not tell it had registered. A cached (finished) turn skips
+// this and opens straight, so there is no flash on the common re-tap.
+function ssShowLoading() {
+  const box = $("step-screen");
+  if (!box) return;
+  box.hidden = false;
+  const title = $("ss-title");
+  if (title) title.textContent = "opening step…";
+  const facts = $("ss-facts");
+  if (facts) facts.textContent = "";
+  const content = $("ss-content");
+  if (content) {
+    content.textContent = "";
+    const wrap = document.createElement("div");
+    wrap.className = "ss-loading";
+    wrap.append(document.createElement("span"));
+    wrap.lastChild.className = "ss-spinner";
+    wrap.append(document.createTextNode(" opening the record…"));
+    content.appendChild(wrap);
+  }
+}
+
 function inspectStepClick(t, e) {
   const target = e && e.target;
   if (!target || !target.closest) return;
@@ -4343,14 +4368,18 @@ function inspectStepClick(t, e) {
   const rows = [...t.body.querySelectorAll(".step")];
   const id = inspectKeys(rows)[rows.indexOf(row)];
   if (!id) return;
+  // Instant feedback: reveal the inspector NOW, unless the record is already
+  // cached (a finished turn, tapped before) and will open with no wait.
+  const cached = t.finished && t.dossier;
+  if (!cached) ssShowLoading();
   inspectDossier(t).then(
     (doc) => {
       const resolved = inspectResolve(id, doc);
       const step = (doc.steps || []).find((x) => x.id === resolved);
       if (step) ssOpenDoc(doc, step.id, undefined, t.turnId);
-      else showToast("not in the record yet — this step is still running");
+      else { if (!cached) ssClose(); showToast("not in the record yet — this step is still running"); }
     },
-    (err) => showToast((err && err.message) || "the record could not be read"),
+    (err) => { if (!cached) ssClose(); showToast((err && err.message) || "the record could not be read"); },
   );
 }
 

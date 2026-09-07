@@ -2466,6 +2466,17 @@ body.dropping::after {
   border: 2px solid var(--blue); border-top-color: transparent;
   animation: spin 0.8s linear infinite; display: inline-block;
 }
+/* The step inspector's loading placeholder (instant feedback on a tap). */
+.ss-loading {
+  display: flex; align-items: center; gap: 10px;
+  padding: 28px 20px; color: var(--fg-dim, #888);
+  font-size: calc(15px * var(--fs));
+}
+.ss-spinner {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid var(--blue); border-top-color: transparent;
+  animation: spin 0.8s linear infinite; flex: none;
+}
 .trace {
   margin: 4px 0 12px;
   border-radius: var(--r-card);

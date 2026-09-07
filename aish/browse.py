@@ -3916,6 +3916,43 @@ def strip_controls(marked: str, controls: list[Control]) -> str:
     return _SENTINEL_RE.sub(_repl, marked)
 
 
+def resolve_ref_or_name(
+    controls: list[Control],
+    revealable: list[Control] | None,
+    target: Any,
+    nonce: str,
+) -> Resolution:
+    """Resolve a `browse_act` target that may be an inline REFERENCE or a name.
+
+    The one resolver the gate, the echo and the call all use (#364 safety
+    fix): a `press:cN·nonce` reference is validated and turned into its control
+    HERE, so a control pressed by reference is seen by the approval gate
+    exactly as one pressed by name — before this, the gate resolved the raw
+    `press:` string, matched nothing, saw no control, and skipped the commit
+    refusal and the card entirely, which made a page's `Zapłać` pressable by
+    reference unrefused and uncarded. A reference whose nonce is wrong or
+    absent — stale, or forged by the page into its own text — is refused, never
+    resolved."""
+    ref = parse_ref(str(target if target is not None else ""))
+    if ref is not None:
+        n, ref_nonce = ref
+        if not ref_nonce or not nonce or ref_nonce != nonce:
+            return Resolution(
+                problem=(
+                    "that control reference is not from the page in front of "
+                    "you (its code does not match). Read the page again and use "
+                    "a reference or label from what it shows now."
+                )
+            )
+        for control in list(controls) + list(revealable or []):
+            if control.n == n:
+                return Resolution(control=control)
+        return Resolution(
+            problem=f"there is no control {target!r} on this page any more"
+        )
+    return resolve_two_tier(controls, revealable or [], target)
+
+
 def _one_of(hits: list[Control]) -> Control | None:
     """The single control these hits are, or None if they are several.
 

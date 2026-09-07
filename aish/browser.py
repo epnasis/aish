@@ -787,6 +787,41 @@ def forget_login(host: str) -> bool:
 
 # ------------------------------------------------------- the owner thread
 
+def _prefer_pdf_download(profile: Path) -> None:
+    """Make Chrome DOWNLOAD a PDF instead of opening it in its own viewer (#3).
+
+    eon and a great many portals serve an invoice as an inline
+    `application/pdf`; Chrome then renders it in the PDF viewer and the file is
+    never saved, so the model has to notice the viewer and press its OWN
+    Download button — flaky, and frequently it just doesn't. A saved file is
+    the deliverable this feature is for: it lands in the downloads dir, reads
+    with `read_pdf`, and can be handed to the owner. `read_url`'s anonymous
+    opener already gets the file every time; this makes the DRIVEN browser
+    consistent with it. The pref is merged into the profile's Preferences —
+    never overwritten, the profile holds the owner's real settings — before
+    launch, which is when Chrome reads it. Verified: an inline PDF then fires a
+    download and the viewer never opens."""
+    prefs_path = profile / "Default" / "Preferences"
+    try:
+        prefs = json.loads(prefs_path.read_text()) if prefs_path.exists() else {}
+    except (ValueError, OSError):
+        prefs = {}
+    if not isinstance(prefs, dict):
+        prefs = {}
+    plugins = prefs.get("plugins")
+    if not isinstance(plugins, dict):
+        plugins = {}
+        prefs["plugins"] = plugins
+    if plugins.get("always_open_pdf_externally") is True:
+        return
+    plugins["always_open_pdf_externally"] = True
+    try:
+        prefs_path.parent.mkdir(parents=True, exist_ok=True)
+        prefs_path.write_text(json.dumps(prefs))
+    except OSError:  # a profile we cannot write keeps the viewer; not fatal
+        pass
+
+
 async def _launch(
     playwright: Any,
     *,
@@ -797,6 +832,7 @@ async def _launch(
 ) -> Any:
     profile = profile or profile_dir()
     profile.mkdir(parents=True, exist_ok=True)
+    _prefer_pdf_download(profile)
     launch_args = list(args)
     omit: list[str] = []
     if stealth():
