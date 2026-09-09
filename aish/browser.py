@@ -1848,11 +1848,10 @@ class _Session:
         self.inflight = 0
         self.adopt(page)
         self.epoch = 0
-        # This session's reference nonce (#364): minted here, never in any
-        # page's HTML, so a page cannot forge a valid inline control reference.
-        # Stable for the session, so a reference the model reads keeps working
-        # across its own reads and acts.
-        self.nonce = uuid.uuid4().hex[:8]
+        # The reference nonce is minted PER RENDER now (see the snapshot
+        # assembly), not once per session: a reference must name which render it
+        # came from, and the cross-render lifetime it used to carry lives in the
+        # per-chat ledger instead. Nothing stamps a session-wide nonce here.
         self.touched = time.monotonic()
 
     def adopt(self, page: Any) -> None:
@@ -5248,6 +5247,13 @@ async def _snapshot(
     # A SEPARATE addressing pass (#372): controls_from runs address_controls
     # per list, so a hidden twin can never rename a visible control's address.
     revealable = browse_mod.controls_from(raw_reveal)
+    # A FRESH nonce per render (#364 follow-up), not once per session: it is
+    # what lets `(nonce, n)` name one control in one render unambiguously, so a
+    # reference the model copied from an earlier render resolves through the
+    # per-chat ledger to the control it named THEN, not to whatever seat N now
+    # holds. Still minted here and never in any page's HTML, so a page still
+    # cannot forge a valid reference.
+    render_nonce = uuid.uuid4().hex[:8]
     # The structured read runs AFTER enumeration now (#364): it MARKS each
     # control's position with a sentinel, which needs the `data-aish-n` tags
     # enumeration just wrote. The sentinels become inline references in
@@ -5271,13 +5277,13 @@ async def _snapshot(
     if sections:
         for section in sections:
             section.text, got_ns = browse_mod.substitute_controls(
-                section.text, controls, session.nonce
+                section.text, controls, render_nonce
             )
             inlined |= got_ns
         text = browse_mod.sections_render(sections)
     elif struct_marked:
         flat = await _without_option_floods(page, struct_marked)
-        text, inlined = browse_mod.substitute_controls(flat, controls, session.nonce)
+        text, inlined = browse_mod.substitute_controls(flat, controls, render_nonce)
     else:
         text = native
     after_enumerate = clock()
@@ -5332,7 +5338,7 @@ async def _snapshot(
         controls=controls,
         frames_unread=frames_unread,
         inlined=inlined,
-        nonce=session.nonce,
+        nonce=render_nonce,
         revealable=revealable,
         hidden=hidden,
         narrowed=match or "",
@@ -6006,6 +6012,8 @@ def browse_act(
     href: str = "",
     mutating: bool = False,
     topic: str = "",
+    needle: str = "",
+    expect: dict | None = None,
     expect_download: bool = False,
     expect_epoch: int | None = None,
     key: str = "",
@@ -6025,6 +6033,19 @@ def browse_act(
     control disagrees — it needs approval now and did not then, it has become a
     password field, its destination has changed — the action does not run. The
     thing the owner approved has to be the thing that happens.
+
+    `needle` is what the act's enumeration narrows by when the caller already
+    resolved the target to a control: its NAME, so the cap buys the control
+    being pressed. It exists because `address` is not always a needle the page
+    can match — an inline reference arrives here as the control's address,
+    which may carry an ordinal or a row digest no element's text contains, and
+    a bare-number address must never narrow at all (`act_needle`).
+
+    `expect` is the identity aish recorded when it SHOWED the control (kind and
+    origin+path destination). The live control resolved by address must still
+    match it, or the page has put a different control at this address since the
+    card and the press does not run — the where-does-it-go half of the same
+    fence the mutating/password check is the escalating half of.
 
     Nothing in here raises for a page reason. Every ending is a snapshot with a
     line saying what happened — a bare error string used to leave the model
@@ -6101,7 +6122,12 @@ def browse_act(
         # the very one the narrowing existed to reach (#270). Falling back to
         # the address costs nothing: a name the matcher cannot see simply
         # leaves the selection in document order, which is what it was before.
-        raw, raw_reveal, *_ = await _enumerate(page, topic or address)
+        # Never a bare number, though: the needle REORDERS the numbering, so a
+        # digits needle would move the very control a numeric target names
+        # (`act_needle` — the Ananasowa mis-press).
+        raw, raw_reveal, *_ = await _enumerate(
+            page, topic or needle or browse_mod.act_needle(address)
+        )
         live = browse_mod.controls_from(raw)
         live_reveal = browse_mod.controls_from(raw_reveal)
         found = browse_mod.resolve_two_tier(live, live_reveal, address)
@@ -6126,6 +6152,26 @@ def browse_act(
                     "— the page changed under it and it now needs approval of "
                     "its own. Here is the page as it is now; ask again for what "
                     "you want."
+                ),
+            )
+        # And the LIVE control must still be the SAME control the reference
+        # named — an address can resolve to a row whose DOM node the page reused
+        # for a different link, and pressing it would be the right element and
+        # the wrong destination. `expect` is the identity aish recorded when it
+        # showed the control; a changed kind or a changed destination (compared
+        # at origin+path, so a rotating query token is not a change) is refused,
+        # never pressed. The password/mutating check above is the escalating
+        # half of the same fence; this is the where-does-it-go half.
+        if expect and not browse_mod.identity_matches(control, expect):
+            session.epoch += 1
+            return await shot(
+                owner,
+                session,
+                problem=(
+                    f"{control.address!r} is not the control that was approved "
+                    "— it is a different kind of control now, or it goes "
+                    "somewhere else. Here is the page as it is now; ask again "
+                    "for what you want."
                 ),
             )
         # The destination the gate checked has to still be this control's
@@ -6239,6 +6285,10 @@ def browse_act(
             started_work=True,
             covered=pressed.cover,
         )
+        # What was ACTUALLY pressed, off the live-resolved control — the fact
+        # the trace could not state (the Ananasowa mis-press logged as a clean
+        # `target=press:c17·…` success). Only here, on a real press.
+        snapshot.pressed = browse_mod.pressed_record(control)
         if expect_download and not snapshot.downloads:
             # Said HERE rather than at the gate, because it is only true here:
             # the press that works says nothing, and the press that produced no
@@ -6303,7 +6353,9 @@ def browse_fill(
             value = str(step.get("value", "") or step.get("text", "") or "")
             # Narrowed the same way the listing the model read was — see
             # browse_act, same reasoning, and each step names its own control.
-            raw, *_ = await _enumerate(page, topic or asked)
+            # Same digits guard too: a numeric step target may resolve by
+            # number but never reorder the list it resolves against.
+            raw, *_ = await _enumerate(page, topic or browse_mod.act_needle(asked))
             live = browse_mod.controls_from(raw)
             found = browse_mod.resolve(live, asked)
             control = found.control

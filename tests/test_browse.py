@@ -6891,6 +6891,115 @@ class TestScrollLoadsMoreAndReportsHonestly:
         assert "span > bestSpan" in browse.SCROLL_JS
 
 
+class TestActNeedleNeverReordersByNumber:
+    """The Ananasowa mis-press (session-20260908-141833). The act-time needle
+    decides which controls the cap buys AND the order they are numbered in.
+    A NAME hoists the very control being sought — safe. A bare NUMBER hoists
+    every invoice row, date and price that contains those digits, renumbering
+    the page, so asking for control 17 moved control 17 and the press landed
+    one control over. `act_needle` refuses to narrow by a number."""
+
+    def test_a_bare_number_narrows_by_nothing(self):
+        assert browse.act_needle("17") == ""
+        assert browse.act_needle("#17") == ""
+        assert browse.act_needle("  9 ") == ""
+
+    def test_a_name_narrows_by_itself(self):
+        assert browse.act_needle("Garaż Bluszczańska") == "Garaż Bluszczańska"
+        assert browse.act_needle("Pobierz e-fakturę") == "Pobierz e-fakturę"
+
+    def test_a_name_that_merely_contains_digits_is_kept(self):
+        # A row digest is part of an address, and it is the thing that tells two
+        # identical buttons apart — it must still narrow.
+        assert browse.act_needle("Pobierz — 220011346947") == (
+            "Pobierz — 220011346947"
+        )
+
+    def test_empty_and_none_are_empty(self):
+        assert browse.act_needle("") == ""
+        assert browse.act_needle(None) == ""
+
+
+class TestTheReferenceLedger:
+    """The per-chat ledger `BrowseView` keeps: every render's control
+    identities under that render's nonce, bounded to the last several renders,
+    written from EVERY remembered snapshot (deltas included), cleared only when
+    the page is forgotten."""
+
+    def _snap(self, nonce, names):
+        snap = snapshot(controls=[control(n=i, name=nm) for i, nm in enumerate(names)])
+        snap.nonce = nonce
+        return snap
+
+    def test_each_render_is_recorded_under_its_own_nonce(self):
+        view = web_module.BrowseView()
+        view.remember(self._snap("n1", ["A", "B"]))
+        view.remember(self._snap("n2", ["C"]))
+        assert set(view.refs) == {"n1", "n2"}
+        assert view.refs["n1"][0]["address"] == "A"
+        assert view.refs["n2"][0]["address"] == "C"
+
+    def test_the_ledger_is_bounded_and_drops_the_oldest(self):
+        view = web_module.BrowseView()
+        for i in range(web_module.REF_LEDGER_RENDERS + 3):
+            view.remember(self._snap(f"n{i}", ["A"]))
+        assert len(view.refs) == web_module.REF_LEDGER_RENDERS
+        assert "n0" not in view.refs, "the oldest render fell off"
+        assert f"n{web_module.REF_LEDGER_RENDERS + 2}" in view.refs
+
+    def test_forget_clears_it(self):
+        view = web_module.BrowseView()
+        view.remember(self._snap("n1", ["A"]))
+        view.forget()
+        assert len(view.refs) == 0
+
+    def test_a_snapshot_with_no_nonce_records_nothing(self):
+        view = web_module.BrowseView()
+        snap = snapshot(controls=[control(n=0, name="A")])  # no nonce set → ""
+        view.remember(snap)
+        assert len(view.refs) == 0
+
+
+class TestTheTracePressedRecord:
+    """The trace could not say which control a press became: a step recorded
+    `target=press:c17·…` and nothing about what c17 resolved to live, so the
+    Ananasowa mis-press logged as a clean success. `pressed_record` is that
+    fact, off the LIVE control, and `sealed` carries it onto the tool step."""
+
+    def test_pressed_record_names_the_control_not_the_number(self):
+        c = control(n=4, name="Garaż Bluszczańska",
+                    detail="https://eon.pl/set?ku=80500120852")
+        # A link: controls_from marks it navigating only via the href key.
+        c = browse.controls_from([{"n": 4, "kind": "link",
+                                   "name": "Garaż Bluszczańska",
+                                   "href": "https://eon.pl/set?ku=80500120852",
+                                   "detail": "https://eon.pl/set?ku=80500120852"}])[0]
+        rec = browse.pressed_record(c)
+        assert rec["label"] == "Garaż Bluszczańska"
+        assert rec["kind"] == "link"
+        assert rec["n"] == 4
+        assert rec["to"] == "eon.pl/set?ku=80500120852"
+
+    def test_a_non_navigating_control_has_no_destination(self):
+        c = control(n=2, kind=browse.BUTTON, name="Przełącz lokal/umowę")
+        rec = browse.pressed_record(c)
+        assert rec == {"n": 2, "kind": browse.BUTTON, "label": "Przełącz lokal/umowę"}
+
+    def test_sealed_carries_pressed_onto_the_tool_step(self):
+        out = web_module.sealed(
+            "the page", None,
+            pressed={"n": 4, "kind": "link", "label": "Garaż Bluszczańska"},
+        )
+        assert getattr(out, "meta", {}).get("pressed") == {
+            "n": 4, "kind": "link", "label": "Garaż Bluszczańska"
+        }
+
+    def test_no_pressed_no_key(self):
+        # A read presses nothing: absent means no press, never unknown.
+        out = web_module.sealed("the page", None, pressed={})
+        assert "pressed" not in getattr(out, "meta", {})
+
+
 class TestInlineControlReferences:
     """#364. Controls are shown IN PLACE in the reading, addressed by an
     aish-minted reference `[label](press:cN·nonce)` — a markdown link whose
@@ -6951,9 +7060,9 @@ class TestInlineControlReferences:
 
 class TestPressingByInlineReference:
     """#364. The model presses an inline `[label](press:cN·nonce)` by its
-    reference. The nonce is the session's, carried on the snapshot the chat
-    was shown; a reference with the wrong nonce — stale, or a page that
-    printed a control-shaped link into its own untrusted text — is refused
+    reference. The nonce is minted per render and carried in the per-chat
+    ledger; a reference with an unknown nonce — never shown, too old, or a page
+    that printed a control-shaped link into its own untrusted text — is refused
     BEFORE it resolves to anything."""
 
     def _view(self, nonce="abc123"):
@@ -6967,14 +7076,22 @@ class TestPressingByInlineReference:
     def _capture(self, monkeypatch, seen):
         def fake(address, action, **kw):
             seen["address"] = address
+            seen["needle"] = kw.get("needle")
             return snapshot(controls=[control(n=1)])
         monkeypatch.setattr(web_module.browser, "browse_act", fake)
 
-    def test_a_valid_reference_is_translated_to_its_control(self, monkeypatch):
+    def test_a_valid_reference_is_translated_to_its_controls_name(self, monkeypatch):
+        """The reference resolves to the control and the browser is handed its
+        durable ADDRESS, never its number. The number is a position that also
+        seeded the enumeration needle, which renumbered the page and pressed the
+        neighbour (session-20260908-141833); the address is matched exactly,
+        live, and the name is the needle so the cap keeps the control."""
         seen = {}
         self._capture(monkeypatch, seen)
         web_module.browse_act("press:c1·abc123", "click", view=self._view())
-        assert seen["address"] == "1", "a validated reference presses control 1"
+        assert seen["address"] == "Pobierz e-fakturę"
+        assert seen["address"] != "1", "a reference never presses by bare number"
+        assert seen["needle"] == "Pobierz e-fakturę", "the name narrows the act"
 
     def test_the_whole_markdown_link_also_works(self, monkeypatch):
         seen = {}
@@ -6982,7 +7099,7 @@ class TestPressingByInlineReference:
         web_module.browse_act(
             "[Pobierz e-fakturę](press:c1·abc123)", "click", view=self._view()
         )
-        assert seen["address"] == "1"
+        assert seen["address"] == "Pobierz e-fakturę"
 
     def test_a_wrong_nonce_is_refused_before_it_resolves(self, monkeypatch):
         called = {"n": 0}
@@ -6992,9 +7109,13 @@ class TestPressingByInlineReference:
             or snapshot(controls=[]),
         )
         out = web_module.browse_act(
-            "press:c1·WRONGNONCE", "click", view=self._view()
+            # A well-formed but unknown nonce — the ledger-miss branch, which is
+            # the one a page-forged reference actually hits (a page cannot know
+            # a real render nonce). Not a non-hex string, which parse_ref reads
+            # as no nonce at all and would test a different branch.
+            "press:c1·deadbeef", "click", view=self._view()
         )
-        assert "not from the page in front of you" in out
+        assert "not from a page aish has shown you" in out
         assert called["n"] == 0, "a forged reference never reaches the browser"
 
     def test_a_reference_with_no_nonce_is_refused(self, monkeypatch):
@@ -7005,7 +7126,7 @@ class TestPressingByInlineReference:
             or snapshot(controls=[]),
         )
         out = web_module.browse_act("press:c1", "click", view=self._view())
-        assert "not from the page" in out
+        assert "not from a page aish has shown you" in out
         assert called["n"] == 0
 
 
@@ -7052,6 +7173,15 @@ class TestAPickerConfirmIsNotACommit:
         assert not c.mutating
 
 
+def _ledger(controls, nonce, revealable=()):
+    """The per-chat ledger as `BrowseView._record_refs` builds it: one render's
+    control identities under its nonce."""
+    from collections import OrderedDict
+    return OrderedDict({nonce: {
+        c.n: browse.control_identity(c) for c in list(controls) + list(revealable)
+    }})
+
+
 class TestAReferenceIsGatedLikeItsName:
     """#364 safety fix. A control pressed by its inline reference must reach
     the SAME approval gate as one pressed by name — the gate resolves the
@@ -7067,8 +7197,9 @@ class TestAReferenceIsGatedLikeItsName:
 
     def test_the_gate_sees_the_control_behind_a_reference(self):
         ctrls = self._pay()
-        by_name = browse.resolve_ref_or_name(ctrls, None, "Zapłać", "abcd1234")
-        by_ref = browse.resolve_ref_or_name(ctrls, None, "press:c3·abcd1234", "abcd1234")
+        led = _ledger(ctrls, "abcd1234")
+        by_name = browse.resolve_ref_or_name(ctrls, None, "Zapłać", led)
+        by_ref = browse.resolve_ref_or_name(ctrls, None, "press:c3·abcd1234", led)
         assert by_name.control is by_ref.control, "same control both ways"
         assert by_ref.control.mutating and by_ref.control.worded
 
@@ -7083,18 +7214,140 @@ class TestAReferenceIsGatedLikeItsName:
              "detail": "https://x/d?id=243", "href": "https://x/d?id=243",
              "row": ["Prognoza numer 243750706864"]},
         ])
-        found = browse.resolve_ref_or_name(ctrls, None, "press:c0·f4a1b2c3", "f4a1b2c3")
+        led = _ledger(ctrls, "f4a1b2c3")
+        found = browse.resolve_ref_or_name(ctrls, None, "press:c0·f4a1b2c3", led)
         assert "222751249513" in found.control.address
 
-    def test_a_wrong_or_missing_nonce_is_refused_not_resolved(self):
+    def test_an_unknown_or_forged_nonce_is_refused_not_resolved(self):
         ctrls = self._pay()
-        assert browse.resolve_ref_or_name(ctrls, None, "press:c3·BADD", "abcd1234").control is None
-        assert browse.resolve_ref_or_name(ctrls, None, "press:c3", "abcd1234").control is None
-        # and a page-forged reference (no session nonce to match) never resolves
-        assert browse.resolve_ref_or_name(ctrls, None, "press:c3·abcd1234", "").control is None
+        led = _ledger(ctrls, "abcd1234")
+        # A nonce the ledger never saw — a stale render, or forged into the
+        # page's own text (a page cannot know a real render nonce). Both a
+        # well-formed hex miss and a non-hex token refuse.
+        assert browse.resolve_ref_or_name(ctrls, None, "press:c3·deadbeef", led).control is None
+        assert browse.resolve_ref_or_name(ctrls, None, "press:c3·BADD", led).control is None
+        # No nonce at all.
+        assert browse.resolve_ref_or_name(ctrls, None, "press:c3", led).control is None
+        # An empty ledger resolves nothing by reference.
+        assert browse.resolve_ref_or_name(ctrls, None, "press:c3·abcd1234", None).control is None
 
-    def test_a_name_still_resolves_and_a_gone_reference_says_so(self):
+    def test_a_name_still_resolves_and_an_unknown_reference_says_so(self):
         ctrls = self._pay()
-        assert browse.resolve_ref_or_name(ctrls, None, "Zapłać", "abcd1234").control is not None
-        gone = browse.resolve_ref_or_name(ctrls, None, "press:c9·abcd1234", "abcd1234")
-        assert gone.control is None and "any more" in gone.problem
+        led = _ledger(ctrls, "abcd1234")
+        assert browse.resolve_ref_or_name(ctrls, None, "Zapłać", led).control is not None
+        gone = browse.resolve_ref_or_name(ctrls, None, "press:c9·abcd1234", led)
+        assert gone.control is None and "too old" in gone.problem
+
+
+class TestAReferenceMeansTheControlItNamedNotTheSeat:
+    """The stickiness fix. Because a `browse_act` reply shows only what
+    CHANGED, a model holds references from OLDER renders. A reference must mean
+    the control aish showed under it, resolved on the page as it is now — never
+    seat N on whatever page is up. The nonce is per-render and the per-chat
+    ledger remembers the last several renders' identities."""
+
+    def _switcher(self, order):
+        """The account switcher, controls given in `order` — the same five
+        links a re-render may present in a different sequence."""
+        raw = [{"n": i, "kind": "link", "name": name,
+                "href": f"https://eon.pl/set?ku={ku}", "detail": f"https://eon.pl/set?ku={ku}"}
+               for i, (name, ku) in enumerate(order)]
+        return browse.controls_from(raw)
+
+    ACCOUNTS = [("Wyspowa", "8000"), ("Bluszczanska", "8001"),
+                ("Ananasowa", "8002"), ("Garaż Bluszczańska", "8500"),
+                ("Marii Cetysówny", "8501")]
+
+    def test_a_reference_from_an_older_render_follows_its_control(self):
+        # Render A: Garaż is c3. The model is shown this and remembers c3.
+        render_a = self._switcher(self.ACCOUNTS)
+        led = _ledger(render_a, "aaaa1111")
+        # Render B: the list re-rendered in a different order — Garaż is now c0,
+        # and c3 is a DIFFERENT account. The model still holds press:c3·aaaa1111.
+        render_b = self._switcher(list(reversed(self.ACCOUNTS)))
+        found = browse.resolve_ref_or_name(render_b, None, "press:c3·aaaa1111", led)
+        assert found.control is not None
+        assert found.control.address == "Garaż Bluszczańska", (
+            "the reference follows the control it named, not seat 3"
+        )
+        assert found.control.detail == "https://eon.pl/set?ku=8500"
+
+    def test_a_gone_control_is_refused_not_replaced(self):
+        render_a = self._switcher(self.ACCOUNTS)
+        led = _ledger(render_a, "aaaa1111")
+        # Render B no longer has Garaż at all; a different account sits where it
+        # was. The reference must refuse, not press the newcomer.
+        render_b = self._switcher([a for a in self.ACCOUNTS if a[0] != "Garaż Bluszczańska"])
+        found = browse.resolve_ref_or_name(render_b, None, "press:c3·aaaa1111", led)
+        assert found.control is None
+        assert "not on the page any more" in found.problem
+
+    def test_the_address_reused_for_a_different_destination_is_refused(self):
+        # A control keeps its label but the page repointed it — the reused-DOM
+        # -node case. Identity (origin+path) no longer matches → refused.
+        render_a = browse.controls_from([
+            {"n": 0, "kind": "link", "name": "Otwórz",
+             "href": "https://x/a", "detail": "https://x/a"}])
+        led = _ledger(render_a, "bbbb2222")
+        render_b = browse.controls_from([
+            {"n": 0, "kind": "link", "name": "Otwórz",
+             "href": "https://x/DIFFERENT", "detail": "https://x/DIFFERENT"}])
+        found = browse.resolve_ref_or_name(render_b, None, "press:c0·bbbb2222", led)
+        assert found.control is None
+        assert "not the one there now" in found.problem
+
+    def test_a_rotating_query_token_is_not_a_change(self):
+        # Same origin+path, different token in the query — NOT a repoint, so it
+        # resolves. This is the false-refusal the origin+path granularity avoids.
+        render_a = browse.controls_from([
+            {"n": 0, "kind": "link", "name": "Otwórz",
+             "href": "https://x/a?token=OLD", "detail": "https://x/a?token=OLD"}])
+        led = _ledger(render_a, "cccc3333")
+        render_b = browse.controls_from([
+            {"n": 0, "kind": "link", "name": "Otwórz",
+             "href": "https://x/a?token=NEW", "detail": "https://x/a?token=NEW"}])
+        found = browse.resolve_ref_or_name(render_b, None, "press:c0·cccc3333", led)
+        assert found.control is not None, "a query-token change is not a repoint"
+
+    def test_a_nameless_control_from_an_older_render_is_refused_not_seated(self):
+        # Two icon buttons in one row — edit and delete, no words, no href. Only
+        # their SEAT tells them apart, so a reference to one from an earlier
+        # render (where a banner has since shifted the seats) must refuse, never
+        # press the neighbour that now holds the seat. The Ananasowa bug for the
+        # unlabeled-icon case the delivery review found.
+        render_a = browse.controls_from([
+            {"n": 10, "kind": "button", "name": "", "row": ["Faktura 111"]},
+            {"n": 11, "kind": "button", "name": "", "row": ["Faktura 111"]}])
+        assert [c.address for c in render_a] == ["#10", "#11"]
+        # An OLDER render: its nonce is not the newest in the ledger.
+        led = _ledger(render_a, "aaaa0000")
+        led["bbbb1111"] = {0: {"address": "#0", "kind": "button", "to": ""}}
+        render_b = browse.controls_from([
+            {"n": 11, "kind": "button", "name": "", "row": ["Faktura 111"]}])
+        found = browse.resolve_ref_or_name(render_b, None, "press:c11·aaaa0000", led)
+        assert found.control is None
+        assert "no name of its own" in found.problem
+
+    def test_a_nameless_control_on_its_own_render_still_resolves(self):
+        # Same reference, but it IS the newest render — the seat is authoritative
+        # there, so pressing it is safe and must not refuse.
+        render = browse.controls_from([
+            {"n": 10, "kind": "button", "name": "", "row": ["Faktura 111"]},
+            {"n": 11, "kind": "button", "name": "", "row": ["Faktura 111"]}])
+        led = _ledger(render, "cccc0000")
+        found = browse.resolve_ref_or_name(render, None, "press:c11·cccc0000", led)
+        assert found.control is not None and found.control.n == 11
+
+    def test_an_ordinal_twin_from_an_older_render_is_refused(self):
+        # 'Wybierz #1'/'#2' differ only by a query the address does not carry
+        # (?ku=8000 vs 8500). Across a re-sort the ordinal points at the other
+        # account, so an older-render reference refuses rather than switch the
+        # wrong account.
+        render_a = self._switcher([("Wybierz", "8000"), ("Wybierz", "8500")])
+        assert [c.address for c in render_a] == ["Wybierz #1", "Wybierz #2"]
+        led = _ledger(render_a, "aaaa0000")
+        led["bbbb1111"] = {0: {"address": "#0", "kind": "button", "to": ""}}
+        render_b = self._switcher([("Wybierz", "8500"), ("Wybierz", "8000")])
+        found = browse.resolve_ref_or_name(render_b, None, "press:c0·aaaa0000", led)
+        assert found.control is None
+        assert "no name of its own" in found.problem

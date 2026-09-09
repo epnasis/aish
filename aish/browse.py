@@ -1363,6 +1363,17 @@ class Snapshot:
     # and because a press aish did not physically make must never be reported as
     # one it did.
     notice: str = ""
+    # WHAT WAS ACTUALLY PRESSED on the live page (the trace's `pressed`), set
+    # only on a real press and off the LIVE-resolved control — never the model's
+    # target string. It is the fact the trace could not state: a step recorded
+    # `target=press:c17·…` and nothing about which control that became, so the
+    # Ananasowa mis-press logged as a clean success and could only be found by
+    # reproducing it (session-20260908-141833). `{n, kind, label, to}` — the
+    # live tag, the kind, the durable name (`address`), and a link's elided
+    # destination. aish's own observation of its own act, so it rides above the
+    # untrusted banner like `covered`; the label is page-authored and scrubbed
+    # with the rest of the browse step's quoted names.
+    pressed: dict = field(default_factory=dict)
     # Files this action produced, as local paths. The whole point of driving a
     # signed-in portal is often the document at the end of it, and the anonymous
     # opener behind read_pdf could never have fetched one.
@@ -3749,6 +3760,66 @@ class Resolution:
     ambiguous: bool = False
 
 
+def _origin_path(url: str) -> str:
+    """A URL reduced to origin + path, query and fragment dropped.
+
+    The granularity a destination is COMPARED at across renders: a link that
+    now points at a different page or endpoint has moved somewhere the owner
+    did not approve, and that is worth refusing; a link whose only change is a
+    rotating token or tracking parameter in the query has NOT, and refusing it
+    would be the false-refusal Fable's review warned of. Origin+path is the
+    line between the two. Non-http detail (a field's "currently: …") passes
+    through verbatim, so two such controls still compare equal when unchanged."""
+    if not url.startswith(("http://", "https://")):
+        return url
+    return url.split("?", 1)[0].split("#", 1)[0]
+
+
+_POSITIONAL_ADDRESS = re.compile(r"(^#\d+$)|( #\d+$)")
+
+
+def _is_positional_address(address: str) -> bool:
+    """Is this address a SEAT rather than a name — `#12` (a control the page
+    gave no words to) or a `… #2` ordinal (identical labels the row could not
+    tell apart)? Those are assigned by position (`address_controls`), so they
+    are stable within one render and meaningless across renders. A
+    content-derived `label — rowkey` address is NOT positional: the row is what
+    distinguishes it, and that survives a re-render."""
+    return bool(_POSITIONAL_ADDRESS.search(address or ""))
+
+
+def control_identity(control: Control) -> dict:
+    """What a control WAS when it was shown, for recognising it on a later page.
+
+    Not a hash and not the seat number: the durable `address` the reference
+    resolves BY, plus the facts that say a live control at that address is the
+    SAME control and not a different one the page has since drawn in its place —
+    its kind, and where it goes (origin+path only, so a rotating query token is
+    not a change). The row is already inside the address for a duplicate, so it
+    is not repeated here."""
+    return {
+        "address": control.address,
+        "kind": control.kind,
+        "to": _origin_path(control.detail) if control.navigates else "",
+    }
+
+
+def identity_matches(control: Control, recorded: dict) -> bool:
+    """Is the live control the SAME one the reference was recorded against?
+
+    Address is already how it was found, so this asks only the two things a
+    re-render can change under a stable address: the KIND (a link became a
+    button, a button became a password field) and the DESTINATION at origin+path
+    (the row's DOM node reused for a different link). A change in either is the
+    page having moved a different control into this one's place — refused, never
+    pressed."""
+    if control.kind != recorded.get("kind"):
+        return False
+    return (_origin_path(control.detail) if control.navigates else "") == recorded.get(
+        "to", ""
+    )
+
+
 def resolve(controls: list[Control], target: Any) -> Resolution:
     """Find the control the model asked for by name.
 
@@ -3809,6 +3880,38 @@ def resolve(controls: list[Control], target: Any) -> Resolution:
         problem=f"no control on this page is called {asked!r}. This page has: "
         f"{_addresses(controls)}."
     )
+
+
+def pressed_record(control: Control) -> dict:
+    """What was pressed, as the trace's `pressed` — off the LIVE control the act
+    resolved, so the record states the fact the number never could: which
+    control the press became. The label is the durable `address`; a link's
+    destination is elided the way the control line elides it."""
+    record: dict = {"n": control.n, "kind": control.kind, "label": control.address}
+    if control.navigates and control.detail.startswith(("http://", "https://")):
+        record["to"] = re.sub(r"^https?://", "", short_detail(control.detail))
+    return record
+
+
+def act_needle(target: Any) -> str:
+    """What act-time enumeration may narrow by when the model named `target` —
+    the target itself, unless it is a bare number, which narrows by NOTHING.
+
+    The needle is a substring match over every control's name, href and row,
+    and it decides which controls the cap buys AND the order they are numbered
+    in (`wanted.concat(rest)` in `CONTROLS_JS`). A name-needle hoists the very
+    control being sought, so it is safe and useful. A NUMBER-needle hoists
+    every invoice row, date and price that happens to contain those digits,
+    renumbering the page — so asking for control 17 moved control 17, and the
+    press landed on its neighbour with nothing said (the Ananasowa mis-press,
+    session-20260908-141833: `press:c17` = "Garaż Bluszczańska" was pressed as
+    the account switch and the site switched to "Ananasowa", the control one
+    position earlier). A digits target still RESOLVES by the number rung in
+    `resolve`; it just may not reorder the list it is resolved against."""
+    asked = str(target if target is not None else "").strip()
+    if asked.lstrip("#").isdigit():
+        return ""
+    return asked
 
 
 def resolve_two_tier(
@@ -3935,37 +4038,91 @@ def resolve_ref_or_name(
     controls: list[Control],
     revealable: list[Control] | None,
     target: Any,
-    nonce: str,
+    ledger: dict[str, dict[int, dict]] | None,
 ) -> Resolution:
     """Resolve a `browse_act` target that may be an inline REFERENCE or a name.
 
     The one resolver the gate, the echo and the call all use (#364 safety
     fix): a `press:cN·nonce` reference is validated and turned into its control
     HERE, so a control pressed by reference is seen by the approval gate
-    exactly as one pressed by name — before this, the gate resolved the raw
-    `press:` string, matched nothing, saw no control, and skipped the commit
-    refusal and the card entirely, which made a page's `Zapłać` pressable by
-    reference unrefused and uncarded. A reference whose nonce is wrong or
-    absent — stale, or forged by the page into its own text — is refused, never
-    resolved."""
+    exactly as one pressed by name.
+
+    **A reference does not name a SEAT on the current page; it names a control
+    aish once SHOWED.** The number `cN` shifts every time the page is redrawn
+    (a menu opens, a banner loads), and because a `browse_act` reply shows only
+    what CHANGED, a model holding `press:c17` from an earlier render is never
+    told c17 now means a different control — so pressing c17 landed on its
+    neighbour, silently (session-20260908-141833: "Garaż" became "Ananasowa").
+    The `ledger` closes that: the per-render nonce identifies WHICH render the
+    reference came from, and `ledger[nonce][n]` is the identity aish wrote down
+    for that control THEN. Resolution looks that identity up, finds it on the
+    page as it is NOW by its durable address, and confirms the live control is
+    still that same control — pressing it, or refusing with a fresh page if it
+    is gone or a different control has taken its place. A reference whose nonce
+    is unknown — never shown, too old to still be in the ledger, or forged by
+    the page into its own untrusted text — resolves to nothing and is refused.
+
+    (The nonce remains the forgery defence it was: it never appears in any
+    page's HTML, so a page cannot print a valid reference. It is now minted per
+    RENDER rather than per session, which is what lets `(nonce, n)` name one
+    control in one render unambiguously; the cross-render lifetime that used to
+    live on the session nonce now lives in the ledger, which retains the last
+    several renders.)"""
     ref = parse_ref(str(target if target is not None else ""))
-    if ref is not None:
-        n, ref_nonce = ref
-        if not ref_nonce or not nonce or ref_nonce != nonce:
-            return Resolution(
-                problem=(
-                    "that control reference is not from the page in front of "
-                    "you (its code does not match). Read the page again and use "
-                    "a reference or label from what it shows now."
-                )
-            )
-        for control in list(controls) + list(revealable or []):
-            if control.n == n:
-                return Resolution(control=control)
+    if ref is None:
+        return resolve_two_tier(controls, revealable or [], target)
+    n, ref_nonce = ref
+    ledger = ledger or {}
+    recorded = ledger.get(ref_nonce, {}).get(n) if ref_nonce else None
+    if recorded is None:
         return Resolution(
-            problem=f"there is no control {target!r} on this page any more"
+            problem=(
+                "that control reference is not from a page aish has shown you "
+                "(its code is unknown or too old). Read the page again and use "
+                "a reference or label from what it shows now."
+            )
         )
-    return resolve_two_tier(controls, revealable or [], target)
+    address = recorded["address"]
+    # A reference to a control the page gave NO NAME of its own — its address is
+    # a seat (`#12`) or an ordinal (`Wybierz #2`) assigned by position — has no
+    # meaning on a LATER render: nothing the control says can tell it from the
+    # neighbour that now holds the seat, which is exactly the mis-press this fix
+    # exists to end (an edit icon and a delete icon in one row differ only by
+    # order). On the render it was SHOWN (its nonce is the newest in the ledger)
+    # the seat is authoritative and it resolves; from an older render it is
+    # refused, never resolved to whatever now sits there.
+    current_nonce = next(reversed(ledger), None)
+    if _is_positional_address(address) and ref_nonce != current_nonce:
+        return Resolution(
+            problem=(
+                "that control had no name of its own, so a reference to it from "
+                "an earlier view cannot be matched to the page as it is now. "
+                "Read the page again and press it from what it shows."
+            )
+        )
+    # Find the control the reference NAMED on the page as it is now, by the
+    # address recorded when it was shown — never by re-counting to seat N.
+    live = resolve_two_tier(controls, revealable or [], address)
+    if live.control is None:
+        # Ambiguous or gone: carry the two-tier refusal when it has one, else
+        # say plainly that the named control is no longer here.
+        if live.ambiguous:
+            return live
+        return Resolution(
+            problem=(
+                f"the control that reference named ({address!r}) is not on the "
+                "page any more. Read the page again and act on what it shows."
+            )
+        )
+    if not identity_matches(live.control, recorded):
+        return Resolution(
+            problem=(
+                f"the control that reference named ({address!r}) is not the one "
+                "there now — the page has changed under it. Read the page again "
+                "and act on what it shows."
+            )
+        )
+    return Resolution(control=live.control)
 
 
 def _one_of(hits: list[Control]) -> Control | None:
