@@ -4818,3 +4818,71 @@ class TestChromePrefersPdfDownload:
         import json
         prefs = json.loads((default / "Preferences").read_text())
         assert prefs["plugins"]["always_open_pdf_externally"] is True
+
+
+class TestTheBrowserSelfHealsADeadDriver:
+    """session-20260909-132410. A Playwright driver started once per browser
+    thread and cached on `self._playwright` was never restarted when it died
+    (killed under memory pressure, crashed) — so one death made every later
+    launch fail identically ("Connection closed while reading from the driver")
+    for the life of the service. `_open` now restarts the driver once, the same
+    shape as the stale-lock recovery beside it."""
+
+    def test_driver_is_dead_matches_a_closed_connection_only(self):
+        assert browser._driver_is_dead(
+            Exception("launch_persistent_context: Connection closed while "
+                      "reading from the driver"))
+        assert browser._driver_is_dead(
+            Exception("Target page, context or browser has been closed"))
+        # A missing executable is a different failure and must NOT be retried
+        # as a dead driver — it would retry pointlessly and mask the real cause.
+        assert not browser._driver_is_dead(Exception("Executable doesn't exist at /x"))
+
+    def test_a_dead_driver_is_restarted_and_the_launch_retried(
+        self, monkeypatch, tmp_path
+    ):
+        owner = browser._Owner()
+        owner._playwright = object()  # a driver already started — now a corpse
+        calls = {"launch": 0, "restart": 0}
+
+        class FakeCtx:
+            pages: list = []
+
+            def on(self, *a, **k):
+                pass
+
+        async def fake_launch(pw, **kw):
+            calls["launch"] += 1
+            if calls["launch"] == 1:
+                raise Exception("Connection closed while reading from the driver")
+            return FakeCtx()
+
+        async def fake_restart():
+            calls["restart"] += 1
+            owner._playwright = object()  # a fresh driver
+
+        monkeypatch.setattr(browser, "_launch", fake_launch)
+        monkeypatch.setattr(browser, "_prefer_pdf_download", lambda p: None)
+        owner._restart_driver = fake_restart  # type: ignore[method-assign]
+
+        ctx = asyncio.run(owner._open(tmp_path / "profile"))
+        assert isinstance(ctx, FakeCtx), "the retry after restart returns a context"
+        assert calls == {"launch": 2, "restart": 1}
+
+    def test_a_non_driver_launch_error_is_raised_not_retried(
+        self, monkeypatch, tmp_path
+    ):
+        owner = browser._Owner()
+        owner._playwright = object()
+        calls = {"launch": 0}
+
+        async def fake_launch(pw, **kw):
+            calls["launch"] += 1
+            raise Exception("Executable doesn't exist at /x")
+
+        monkeypatch.setattr(browser, "_launch", fake_launch)
+        monkeypatch.setattr(browser, "_prefer_pdf_download", lambda p: None)
+
+        with pytest.raises(Exception, match="Executable"):
+            asyncio.run(owner._open(tmp_path / "profile"))
+        assert calls["launch"] == 1, "a non-driver error is not retried"
