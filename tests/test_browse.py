@@ -6891,6 +6891,35 @@ class TestScrollLoadsMoreAndReportsHonestly:
         assert "span > bestSpan" in browse.SCROLL_JS
 
 
+class TestActNeedleNeverReordersByNumber:
+    """The Ananasowa mis-press (session-20260908-141833). The act-time needle
+    decides which controls the cap buys AND the order they are numbered in.
+    A NAME hoists the very control being sought — safe. A bare NUMBER hoists
+    every invoice row, date and price that contains those digits, renumbering
+    the page, so asking for control 17 moved control 17 and the press landed
+    one control over. `act_needle` refuses to narrow by a number."""
+
+    def test_a_bare_number_narrows_by_nothing(self):
+        assert browse.act_needle("17") == ""
+        assert browse.act_needle("#17") == ""
+        assert browse.act_needle("  9 ") == ""
+
+    def test_a_name_narrows_by_itself(self):
+        assert browse.act_needle("Garaż Bluszczańska") == "Garaż Bluszczańska"
+        assert browse.act_needle("Pobierz e-fakturę") == "Pobierz e-fakturę"
+
+    def test_a_name_that_merely_contains_digits_is_kept(self):
+        # A row digest is part of an address, and it is the thing that tells two
+        # identical buttons apart — it must still narrow.
+        assert browse.act_needle("Pobierz — 220011346947") == (
+            "Pobierz — 220011346947"
+        )
+
+    def test_empty_and_none_are_empty(self):
+        assert browse.act_needle("") == ""
+        assert browse.act_needle(None) == ""
+
+
 class TestInlineControlReferences:
     """#364. Controls are shown IN PLACE in the reading, addressed by an
     aish-minted reference `[label](press:cN·nonce)` — a markdown link whose
@@ -6967,14 +6996,22 @@ class TestPressingByInlineReference:
     def _capture(self, monkeypatch, seen):
         def fake(address, action, **kw):
             seen["address"] = address
+            seen["needle"] = kw.get("needle")
             return snapshot(controls=[control(n=1)])
         monkeypatch.setattr(web_module.browser, "browse_act", fake)
 
-    def test_a_valid_reference_is_translated_to_its_control(self, monkeypatch):
+    def test_a_valid_reference_is_translated_to_its_controls_name(self, monkeypatch):
+        """The reference resolves to the control and the browser is handed its
+        durable ADDRESS, never its number. The number is a position that also
+        seeded the enumeration needle, which renumbered the page and pressed the
+        neighbour (session-20260908-141833); the address is matched exactly,
+        live, and the name is the needle so the cap keeps the control."""
         seen = {}
         self._capture(monkeypatch, seen)
         web_module.browse_act("press:c1·abc123", "click", view=self._view())
-        assert seen["address"] == "1", "a validated reference presses control 1"
+        assert seen["address"] == "Pobierz e-fakturę"
+        assert seen["address"] != "1", "a reference never presses by bare number"
+        assert seen["needle"] == "Pobierz e-fakturę", "the name narrows the act"
 
     def test_the_whole_markdown_link_also_works(self, monkeypatch):
         seen = {}
@@ -6982,7 +7019,7 @@ class TestPressingByInlineReference:
         web_module.browse_act(
             "[Pobierz e-fakturę](press:c1·abc123)", "click", view=self._view()
         )
-        assert seen["address"] == "1"
+        assert seen["address"] == "Pobierz e-fakturę"
 
     def test_a_wrong_nonce_is_refused_before_it_resolves(self, monkeypatch):
         called = {"n": 0}

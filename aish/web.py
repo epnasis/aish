@@ -3528,8 +3528,14 @@ def _browse_act(
             if control is None:
                 return f"ERROR: {found.problem}"
             # The browser re-resolves the target on the LIVE page; a reference
-            # is not a name it knows, so hand it the resolved number.
-            target = str(control.n)
+            # is not a name it knows, so hand it the resolved ADDRESS — the
+            # control's durable name — never its number. The number is a
+            # position, and it doubled as the enumeration needle, which hoists
+            # digit-matching rows and renumbers the page: asking for c17 MOVED
+            # c17, and the press landed one control over, silently (the
+            # Ananasowa mis-press, session-20260908-141833). The address is
+            # what `resolve`'s first rung matches exactly, live.
+            target = control.address
     if control is not None:
         mutating = control.mutating
         # Read off the snapshot for the same reason as `href`: what the model
@@ -3559,6 +3565,11 @@ def _browse_act(
             str(target), "read" if action == "sections" else action,
             text=text, value=value, submit=submit,
             href=href, mutating=mutating, topic=topic or "",
+            # The resolved control's NAME is the needle its act narrows by —
+            # the address may carry an ordinal or a row digest the page's own
+            # text does not contain, and a needle that misses would let the
+            # cap drop the very control being pressed (#270).
+            needle=(control.name if control is not None else ""),
             expect_download=expect_download, expect_epoch=seen.epoch,
             key=_key(view),
         )

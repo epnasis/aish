@@ -6006,6 +6006,7 @@ def browse_act(
     href: str = "",
     mutating: bool = False,
     topic: str = "",
+    needle: str = "",
     expect_download: bool = False,
     expect_epoch: int | None = None,
     key: str = "",
@@ -6025,6 +6026,13 @@ def browse_act(
     control disagrees — it needs approval now and did not then, it has become a
     password field, its destination has changed — the action does not run. The
     thing the owner approved has to be the thing that happens.
+
+    `needle` is what the act's enumeration narrows by when the caller already
+    resolved the target to a control: its NAME, so the cap buys the control
+    being pressed. It exists because `address` is not always a needle the page
+    can match — an inline reference arrives here as the control's address,
+    which may carry an ordinal or a row digest no element's text contains, and
+    a bare-number address must never narrow at all (`act_needle`).
 
     Nothing in here raises for a page reason. Every ending is a snapshot with a
     line saying what happened — a bare error string used to leave the model
@@ -6101,7 +6109,12 @@ def browse_act(
         # the very one the narrowing existed to reach (#270). Falling back to
         # the address costs nothing: a name the matcher cannot see simply
         # leaves the selection in document order, which is what it was before.
-        raw, raw_reveal, *_ = await _enumerate(page, topic or address)
+        # Never a bare number, though: the needle REORDERS the numbering, so a
+        # digits needle would move the very control a numeric target names
+        # (`act_needle` — the Ananasowa mis-press).
+        raw, raw_reveal, *_ = await _enumerate(
+            page, topic or needle or browse_mod.act_needle(address)
+        )
         live = browse_mod.controls_from(raw)
         live_reveal = browse_mod.controls_from(raw_reveal)
         found = browse_mod.resolve_two_tier(live, live_reveal, address)
@@ -6303,7 +6316,9 @@ def browse_fill(
             value = str(step.get("value", "") or step.get("text", "") or "")
             # Narrowed the same way the listing the model read was — see
             # browse_act, same reasoning, and each step names its own control.
-            raw, *_ = await _enumerate(page, topic or asked)
+            # Same digits guard too: a numeric step target may resolve by
+            # number but never reorder the list it resolves against.
+            raw, *_ = await _enumerate(page, topic or browse_mod.act_needle(asked))
             live = browse_mod.controls_from(raw)
             found = browse_mod.resolve(live, asked)
             control = found.control

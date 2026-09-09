@@ -3811,6 +3811,27 @@ def resolve(controls: list[Control], target: Any) -> Resolution:
     )
 
 
+def act_needle(target: Any) -> str:
+    """What act-time enumeration may narrow by when the model named `target` —
+    the target itself, unless it is a bare number, which narrows by NOTHING.
+
+    The needle is a substring match over every control's name, href and row,
+    and it decides which controls the cap buys AND the order they are numbered
+    in (`wanted.concat(rest)` in `CONTROLS_JS`). A name-needle hoists the very
+    control being sought, so it is safe and useful. A NUMBER-needle hoists
+    every invoice row, date and price that happens to contain those digits,
+    renumbering the page — so asking for control 17 moved control 17, and the
+    press landed on its neighbour with nothing said (the Ananasowa mis-press,
+    session-20260908-141833: `press:c17` = "Garaż Bluszczańska" was pressed as
+    the account switch and the site switched to "Ananasowa", the control one
+    position earlier). A digits target still RESOLVES by the number rung in
+    `resolve`; it just may not reorder the list it is resolved against."""
+    asked = str(target if target is not None else "").strip()
+    if asked.lstrip("#").isdigit():
+        return ""
+    return asked
+
+
 def resolve_two_tier(
     controls: list[Control], revealable: list[Control], target: Any
 ) -> Resolution:

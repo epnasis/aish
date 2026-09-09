@@ -2333,6 +2333,115 @@ def _done(value):
     return ready()
 
 
+class TestTheNeedleDoesNotMoveTheControlItPresses:
+    """The Ananasowa mis-press, at the browser boundary (session-20260908).
+
+    Every other `_enumerate` fake in this file IGNORES its `match` argument, so
+    the one interaction that caused the bug — the needle reordering the page
+    that the target is then resolved against — was structurally unreachable in
+    the suite. This fake HONOURS it, exactly as `CONTROLS_JS` does: needle hits
+    go first (`wanted.concat(rest)`) and the page is renumbered in that order.
+    """
+
+    def _page(self):
+        # Reading order: the account switcher's five accounts. "Garaż" sits at
+        # 17; several rows carry the digits "17" in their account numbers, so a
+        # needle of "17" hoists them and shifts "Garaż" to a neighbour.
+        base = [
+            {"n": i, "kind": "button", "name": f"row-{i}", "row": [f"800017{i:02d}"]}
+            for i in range(16)
+        ]
+        base.append({"n": 16, "kind": "link", "name": "Ananasowa",
+                     "href": "https://eon.pl/set?ku=80001360847"})
+        base.append({"n": 17, "kind": "link", "name": "Garaż Bluszczańska",
+                     "href": "https://eon.pl/set?ku=80500120852"})
+        return base
+
+    def _drive(self, monkeypatch, address, needle):
+        from aish import browse as browse_mod
+
+        base = self._page()
+        pressed = []
+        captured = {}
+
+        def enumerate_honouring_needle(page, m=""):
+            fold = (m or "").lower()
+
+            def hit(c):
+                return bool(fold) and (
+                    fold in c["name"].lower()
+                    or fold in c.get("href", "").lower()
+                    or fold in " ".join(c.get("row", [])).lower()
+                )
+
+            ordered = ([c for c in base if hit(c)] + [c for c in base if not hit(c)]
+                       if fold else list(base))
+            live = [dict(c, n=i) for i, c in enumerate(ordered)]
+            # Keep the live numbering so `_find` can hand back the control that
+            # now sits at the resolved n — the identity is what the test asserts.
+            captured["live"] = live
+            return _done((live, [], len(live), 0, 0, "", "", {}))
+
+        class FakePage:
+            url = "https://eon.pl/mojeon/Faktury-i-platnosci"
+
+            def is_closed(self):
+                return False
+
+            @property
+            def context(self):
+                return type("C", (), {"pages": []})()
+
+            async def wait_for_load_state(self, *a, **k):
+                pass
+
+        page = FakePage()
+        owner = _owner_on(page)
+
+        async def snapshot(_o, _s, *, problem="", notice="", asked="", match="",
+                           started_work=False, covered=None):
+            return browse_mod.Snapshot(url=page.url, title="", text="",
+                                       problem=problem, notice=notice)
+
+        monkeypatch.setattr(browser, "_enumerate", enumerate_honouring_needle)
+        monkeypatch.setattr(browser, "_snapshot", snapshot)
+        # `_find` hands back the live control that now sits at the resolved n,
+        # so the press is asserted by IDENTITY (its href), not by a number — a
+        # number is meaningless once the page reorders, which is the whole bug.
+        monkeypatch.setattr(
+            browser, "_find", lambda page, n: _done((captured["live"][n], True))
+        )
+        monkeypatch.setattr(browser, "_reachable_now", lambda t: _done(""))
+        monkeypatch.setattr(browser, "_centre", lambda t: _done(None))
+        monkeypatch.setattr(browser, "_dismiss_consent", lambda p: _done(None))
+        monkeypatch.setattr(browser, "_adopt_new_tab", lambda o, k, p, b: _done(p))
+
+        async def press(_page, target, **_kw):
+            pressed.append(target["href"])
+            return browse_mod.Pressed()
+
+        monkeypatch.setattr(browser, "_press", press)
+        monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        browser.browse_act(address, "click", needle=needle)
+        return pressed
+
+    def test_pressing_the_garage_link_by_name_lands_on_the_garage(self, monkeypatch):
+        # web.py hands the resolved control's address + name as the needle.
+        pressed = self._drive(
+            monkeypatch, address="Garaż Bluszczańska", needle="Garaż Bluszczańska"
+        )
+        assert pressed == ["https://eon.pl/set?ku=80500120852"], (
+            "the named control is pressed, whatever number the render gives it"
+        )
+
+    def test_a_numeric_address_does_not_reorder_the_page(self, monkeypatch):
+        # act_needle("17") == "": document order is preserved, so the 17th
+        # control is still Garaż — the reorder that moved it never happens.
+        pressed = self._drive(monkeypatch, address="17", needle="")
+        assert pressed == ["https://eon.pl/set?ku=80500120852"]
+
+
 class TestFillingAFormAsOneAct:
     """#251. `fill` is the compound verb the batch exists for: on the form this
     was built for, a destination box is not a text field — typing opens a list
