@@ -192,6 +192,40 @@ _LOCK_MARKERS = vocab.declare(
     entries=("singletonlock", "processsingleton", "profile appears to be in use"),
 )
 
+# What a DEAD PLAYWRIGHT DRIVER looks like in a launch failure. The driver is a
+# node process started once per browser thread and cached on `self._playwright`;
+# if it is killed (memory pressure on this box has a nearly-full swap) or
+# crashes, the cached handle is a corpse and EVERY later launch on it fails the
+# same way — so one death wedged the browser for hours until the service was
+# restarted (session-20260909-132410: `browse` failed on every URL, google.com
+# included, with "Connection closed while reading from the driver"). Matching
+# these restarts the driver once instead (`_open`), the same shape as the lock
+# recovery beside it.
+_DRIVER_DEAD_MARKERS = vocab.declare(
+    "browser._DRIVER_DEAD_MARKERS",
+    demanded=True,  # consulted only after a launch already failed
+    languages="English — Playwright's own driver/transport error text",
+    on_miss=vocab.BREAKS,
+    note="A miss leaves the dead driver cached, so every later launch fails "
+    "until the whole service is restarted. Loud at the next launch.",
+    entries=(
+        "connection closed",
+        "reading from the driver",
+        "browser has been closed",
+        "target page, context or browser has been closed",
+        "target closed",
+    ),
+)
+
+
+def _driver_is_dead(exc: BaseException) -> bool:
+    """Does this launch failure mean the Playwright driver process is gone?
+
+    Consulted only inside `_open`'s launch except, where a failure already
+    happened — so it decides restart-the-driver vs raise, never fires on a
+    healthy path."""
+    return vocab.hit("browser._DRIVER_DEAD_MARKERS", _DRIVER_DEAD_MARKERS, str(exc).lower())
+
 
 def _clear_stale_lock(exc: BaseException) -> bool:
     """Remove a dead Chrome's profile lock. True when something was cleared.
@@ -2119,20 +2153,49 @@ class _Owner:
 
         try:
             context = await launch()
-        except Exception as exc:  # noqa: BLE001 — one specific, recoverable cause
-            # Chrome leaves a SingletonLock in the profile when it dies badly.
-            # Every later launch then fails, so every read AND every view fails
-            # until somebody kills Chrome by hand — on a headless server with
-            # nobody in front of it.
-            if not _clear_stale_lock(exc):
+        except Exception as exc:  # noqa: BLE001 — specific, recoverable causes
+            # Two recoverable ways a launch dies, each retried ONCE:
+            #
+            # 1. Chrome leaves a SingletonLock in the profile when it dies badly.
+            #    Every later launch then fails until somebody kills Chrome by
+            #    hand — on a headless server with nobody in front of it.
+            # 2. The Playwright DRIVER process is gone (killed under memory
+            #    pressure, crashed). `self._playwright` is then a corpse and
+            #    every later launch on it fails identically, so the browser
+            #    stays dead for the life of this thread — the whole service —
+            #    which is what one driver death did for hours
+            #    (session-20260909-132410). Restart the driver and try again.
+            if _clear_stale_lock(exc):
+                context = await launch()
+            elif _driver_is_dead(exc):
+                await self._restart_driver()
+                context = await launch()
+            else:
                 raise
-            context = await launch()
         # On the CONTEXT, so a tab aish never opened still reports what it
         # downloaded — see `_Owner.downloads`.
         context.on("page", self.watch_downloads)
         for page in list(context.pages):
             self.watch_downloads(page)
         return context
+
+    async def _restart_driver(self) -> None:
+        """Drop a dead Playwright driver and start a fresh one.
+
+        The cached handles that depended on the old driver are gone with it, so
+        they are cleared too — a `_context`/`_cold` pointing at a dead driver
+        would fail the same way the launch just did. The next `context()` /
+        `cold_context()` relaunches from scratch."""
+        old = self._playwright
+        self._playwright = None
+        self._context = None
+        self._cold = None
+        if old is not None:
+            with contextlib.suppress(Exception):
+                await old.stop()
+        from playwright.async_api import async_playwright
+
+        self._playwright = await async_playwright().start()
 
     async def context(
         self,
