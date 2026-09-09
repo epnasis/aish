@@ -22,6 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable
 from html.parser import HTMLParser
 from typing import Any, NamedTuple
@@ -963,6 +964,16 @@ LINK_NOTE_MAX_CHARS = 6000
 # reached only on a page too big to carry, which is where the link rescue was
 # always aimed — the 101-offer listing, not a product page.
 PAGE_MAX_CHARS = 12000
+
+# How many recent renders the reference ledger keeps identities for. A
+# reference older than this is refused as "too old" rather than pressed blind.
+# EVERY browse verb is one render — a read, each act, each fill step, each
+# section read — so a nine-field form filled step by step spends nine before
+# the model presses submit by a reference from the first read (measured in the
+# delivery review). The bound is generous because a ledger entry is a few small
+# dicts and a stale reference is refused, not pressed: 64 renders costs nothing
+# and keeps an ordinary multi-step interaction's references all live.
+REF_LEDGER_RENDERS = 64
 
 
 def link_note(dropped: str) -> str:
@@ -2590,6 +2601,19 @@ class BrowseView:
         # structure memory (names, not content) is slice 3's and lives
         # elsewhere.
         self.sections_seen: set[str] = set()
+        # The per-chat REFERENCE LEDGER: for each render's nonce, the identity
+        # aish wrote down for every control it showed — `{nonce: {n: identity}}`.
+        # It is what makes a `press:cN·nonce` reference mean the control aish
+        # SHOWED, not seat N on whatever page is up now: a reference from an
+        # earlier render (the model only sees what CHANGED, so it holds
+        # references the latest render never repeated) resolves through here to
+        # the control it named then. Bounded to the last several renders — a
+        # reference older than that is refused as too old rather than pressed
+        # blind. Written from EVERY snapshot (deltas included: the underlying
+        # snapshot still numbers its controls under that render's nonce), never
+        # cleared at the top of a call (its whole job is to survive across
+        # them), cleared only when the page is forgotten.
+        self.refs: OrderedDict[str, dict[int, dict]] = OrderedDict()
         # The document this chat's `shown` belongs to, as the browser counted
         # it. Compared before an act so a page another chat drove is refused
         # rather than acted on — see `browser.PAGE_TAKEN`.
@@ -2669,6 +2693,28 @@ class BrowseView:
         self.problem = str(getattr(snapshot, "problem", "") or "")
         self.phases = dict(getattr(snapshot, "phases", None) or {})
         self.pressed = dict(getattr(snapshot, "pressed", None) or {})
+        self._record_refs(snapshot)
+
+    def _record_refs(self, snapshot: Any) -> None:
+        """Write this render's control identities into the ledger, under its
+        nonce, and drop the oldest render once past the bound.
+
+        From EVERY snapshot, not only full renders: a delta shows the model no
+        references, but its underlying snapshot still carries the render's
+        controls numbered under that render's nonce, and a reference the model
+        copied from it must still resolve. Keyed by nonce, which is fresh per
+        render, so two renders never collide."""
+        nonce = str(getattr(snapshot, "nonce", "") or "")
+        if not nonce:
+            return
+        controls = list(getattr(snapshot, "controls", None) or [])
+        controls += list(getattr(snapshot, "revealable", None) or [])
+        self.refs[nonce] = {
+            c.n: browse_mod.control_identity(c) for c in controls
+        }
+        self.refs.move_to_end(nonce)
+        while len(self.refs) > REF_LEDGER_RENDERS:
+            self.refs.popitem(last=False)
 
     def commit_evidence(self) -> str:
         """What the page this chat was last shown says it COMMITS, if anything.
@@ -2684,6 +2730,7 @@ class BrowseView:
         self.shown = None
         self.epoch = None
         self.sections_seen.clear()
+        self.refs.clear()
         self.start_call()
 
 
@@ -3528,7 +3575,7 @@ def _browse_act(
             current.controls,
             getattr(current, "revealable", None),
             target,
-            getattr(current, "nonce", ""),
+            seen.refs,
         )
         control = found.control
         if is_ref:
@@ -3577,6 +3624,10 @@ def _browse_act(
             # text does not contain, and a needle that misses would let the
             # cap drop the very control being pressed (#270).
             needle=(control.name if control is not None else ""),
+            # The identity aish resolved from the snapshot the owner was shown,
+            # so the live press can refuse if the page has since put a different
+            # control at this address (a reused row's DOM node).
+            expect=(browse_mod.control_identity(control) if control is not None else None),
             expect_download=expect_download, expect_epoch=seen.epoch,
             key=_key(view),
         )

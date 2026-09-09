@@ -9005,7 +9005,7 @@ class Agent:
             current.controls,
             getattr(current, "revealable", None),
             args.get("target"),
-            getattr(current, "nonce", ""),
+            getattr(self._browse_view, "refs", None),
         ).control
 
     def _browse_approval(

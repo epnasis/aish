@@ -2219,7 +2219,7 @@ class TestTheThingApprovedIsTheThingPressed:
     element and the wrong flight."""
 
     def _drive(self, monkeypatch, live, target="Wybierz", mutating=False,
-               action="click"):
+               action="click", expect=None):
         from aish import browse as browse_mod
 
         pressed = []
@@ -2267,8 +2267,27 @@ class TestTheThingApprovedIsTheThingPressed:
         monkeypatch.setattr(browser, "_press", press)
         monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
         monkeypatch.setattr(browser, "_submit", run_job(owner))
-        browser.browse_act(target, action, mutating=mutating)
+        browser.browse_act(target, action, mutating=mutating, expect=expect)
         return pressed, snaps
+
+    def test_a_live_control_that_now_goes_elsewhere_is_not_pressed(self, monkeypatch):
+        """The reused-DOM-node case: the address still resolves, but the live
+        control points somewhere the owner did not approve. `expect` (the
+        identity recorded when shown) no longer matches → refused."""
+        live = [{"n": 3, "kind": "link", "name": "Otwórz",
+                 "href": "https://x/NOW", "detail": "https://x/NOW"}]
+        expect = {"address": "Otwórz", "kind": "link", "to": "https://x/THEN"}
+        pressed, snaps = self._drive(monkeypatch, live, target="Otwórz", expect=expect)
+        assert pressed == []
+        assert "not the control that was approved" in snaps[0]
+
+    def test_a_live_control_matching_its_recorded_identity_is_pressed(self, monkeypatch):
+        live = [{"n": 3, "kind": "link", "name": "Otwórz",
+                 "href": "https://x/SAME?t=2", "detail": "https://x/SAME?t=2"}]
+        # origin+path recorded; a query token differs but that is not a repoint.
+        expect = {"address": "Otwórz", "kind": "link", "to": "https://x/SAME"}
+        pressed, _ = self._drive(monkeypatch, live, target="Otwórz", expect=expect)
+        assert pressed and pressed[0][0] == "locator-3"
 
     def test_the_name_is_pressed_where_it_is_now_not_where_it_was(self, monkeypatch):
         """The page re-rendered and 'Wybierz' moved from [3] to [9]. The old
