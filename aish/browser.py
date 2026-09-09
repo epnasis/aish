@@ -6252,6 +6252,10 @@ def browse_act(
             started_work=True,
             covered=pressed.cover,
         )
+        # What was ACTUALLY pressed, off the live-resolved control — the fact
+        # the trace could not state (the Ananasowa mis-press logged as a clean
+        # `target=press:c17·…` success). Only here, on a real press.
+        snapshot.pressed = browse_mod.pressed_record(control)
         if expect_download and not snapshot.downloads:
             # Said HERE rather than at the gate, because it is only true here:
             # the press that works says nothing, and the press that produced no

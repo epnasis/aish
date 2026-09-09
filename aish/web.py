@@ -263,6 +263,7 @@ def sealed(
     problem: str = "",
     unchanged: bool = False,
     phases: "dict | None" = None,
+    pressed: "dict | None" = None,
 ) -> str:
     """The result, with the cut and the evidence frame recorded on it — or
     unchanged when there is neither.
@@ -345,6 +346,8 @@ def sealed(
         meta["unchanged"] = True
     if phases:
         meta["phases"] = dict(phases)
+    if pressed:
+        meta["pressed"] = dict(pressed)
     if signin is not None and (block := signin.record()):
         meta["signin"] = block
     if not meta:
@@ -2634,6 +2637,7 @@ class BrowseView:
         # for the same reason: a call that never reached a page must not report
         # the timings of the call before it.
         self.phases: dict = {}
+        self.pressed: dict = {}
 
     def start_call(self) -> None:
         """A new browse call begins: this chat has been shown nothing yet."""
@@ -2646,6 +2650,7 @@ class BrowseView:
         self.problem = ""
         self.unchanged = False
         self.phases = {}
+        self.pressed = {}
 
     def remember(self, snapshot: Any) -> None:
         was = str(getattr(self.shown, "url", "") or "")
@@ -2663,6 +2668,7 @@ class BrowseView:
         self.covered = cover.record() if cover is not None else {}
         self.problem = str(getattr(snapshot, "problem", "") or "")
         self.phases = dict(getattr(snapshot, "phases", None) or {})
+        self.pressed = dict(getattr(snapshot, "pressed", None) or {})
 
     def commit_evidence(self) -> str:
         """What the page this chat was last shown says it COMMITS, if anything.
@@ -3483,6 +3489,7 @@ def browse_act(
         problem=seen.problem,
         unchanged=seen.unchanged,
         phases=seen.phases,
+        pressed=seen.pressed,
     )
 
 

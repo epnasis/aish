@@ -1363,6 +1363,17 @@ class Snapshot:
     # and because a press aish did not physically make must never be reported as
     # one it did.
     notice: str = ""
+    # WHAT WAS ACTUALLY PRESSED on the live page (the trace's `pressed`), set
+    # only on a real press and off the LIVE-resolved control — never the model's
+    # target string. It is the fact the trace could not state: a step recorded
+    # `target=press:c17·…` and nothing about which control that became, so the
+    # Ananasowa mis-press logged as a clean success and could only be found by
+    # reproducing it (session-20260908-141833). `{n, kind, label, to}` — the
+    # live tag, the kind, the durable name (`address`), and a link's elided
+    # destination. aish's own observation of its own act, so it rides above the
+    # untrusted banner like `covered`; the label is page-authored and scrubbed
+    # with the rest of the browse step's quoted names.
+    pressed: dict = field(default_factory=dict)
     # Files this action produced, as local paths. The whole point of driving a
     # signed-in portal is often the document at the end of it, and the anonymous
     # opener behind read_pdf could never have fetched one.
@@ -3809,6 +3820,17 @@ def resolve(controls: list[Control], target: Any) -> Resolution:
         problem=f"no control on this page is called {asked!r}. This page has: "
         f"{_addresses(controls)}."
     )
+
+
+def pressed_record(control: Control) -> dict:
+    """What was pressed, as the trace's `pressed` — off the LIVE control the act
+    resolved, so the record states the fact the number never could: which
+    control the press became. The label is the durable `address`; a link's
+    destination is elided the way the control line elides it."""
+    record: dict = {"n": control.n, "kind": control.kind, "label": control.address}
+    if control.navigates and control.detail.startswith(("http://", "https://")):
+        record["to"] = re.sub(r"^https?://", "", short_detail(control.detail))
+    return record
 
 
 def act_needle(target: Any) -> str:

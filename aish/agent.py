@@ -2046,6 +2046,11 @@ def _scrub_page_console(step: dict) -> None:
         step["covered"] = {**covered, "by": secrets.scrub(str(covered["by"]))}
     if step.get("problem"):
         step["problem"] = secrets.scrub(str(step["problem"]))
+    pressed = step.get("pressed")
+    if isinstance(pressed, dict) and pressed.get("label"):
+        # `label` is the control's page-authored name, same class as the names
+        # quoted in `problem`: a login control could carry a stored value.
+        step["pressed"] = {**pressed, "label": secrets.scrub(str(pressed["label"]))}
     signin = step.get("signin")
     if isinstance(signin, dict):
         block = dict(signin)

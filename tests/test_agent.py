@@ -9357,6 +9357,38 @@ class TestReadPdf:
         ]
 
 
+class TestThePressedLabelIsScrubbed:
+    """`pressed.label` is a control's page-authored name, the same class as the
+    names quoted in `problem` — a login control could carry a stored value. It
+    is scrubbed where the browse step's other quoted names are (#352 `pressed`).
+    """
+
+    TOKEN = "awov6ybawmor59a9d7u926vk1yfdsm"
+
+    @pytest.fixture
+    def stored(self, monkeypatch, tmp_path):
+        index = tmp_path / "names.txt"
+        index.write_text("SECRET\n", encoding="utf-8")
+        monkeypatch.setattr(secrets_module, "names_index", lambda i=index: i)
+        monkeypatch.setattr(secrets_module, "get",
+                            lambda name: {"SECRET": self.TOKEN}.get(name))
+        secrets_module._invalidate()
+        yield
+        secrets_module._invalidate()
+
+    def test_a_stored_value_in_the_label_does_not_survive(self, stored):
+        step = {"kind": "tool", "name": "browse_act",
+                "pressed": {"n": 3, "kind": "button", "label": self.TOKEN}}
+        agent_module._scrub_page_console(step)
+        assert self.TOKEN not in json.dumps(step)
+        assert step["pressed"]["n"] == 3  # the rest of the record is untouched
+
+    def test_a_step_with_no_pressed_is_left_alone(self):
+        step = {"kind": "tool", "name": "browse_act"}
+        agent_module._scrub_page_console(step)
+        assert "pressed" not in step
+
+
 class TestSecretScrub:
     """A stored secret must not survive a tool's OUTPUT.
 

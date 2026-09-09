@@ -2423,23 +2423,27 @@ class TestTheNeedleDoesNotMoveTheControlItPresses:
         monkeypatch.setattr(browser, "_press", press)
         monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
         monkeypatch.setattr(browser, "_submit", run_job(owner))
-        browser.browse_act(address, "click", needle=needle)
-        return pressed
+        snap = browser.browse_act(address, "click", needle=needle)
+        return pressed, snap
 
     def test_pressing_the_garage_link_by_name_lands_on_the_garage(self, monkeypatch):
         # web.py hands the resolved control's address + name as the needle.
-        pressed = self._drive(
+        pressed, snap = self._drive(
             monkeypatch, address="Garaż Bluszczańska", needle="Garaż Bluszczańska"
         )
         assert pressed == ["https://eon.pl/set?ku=80500120852"], (
             "the named control is pressed, whatever number the render gives it"
         )
+        # The trace records what was ACTUALLY pressed, off the live control.
+        assert snap.pressed["label"] == "Garaż Bluszczańska"
+        assert snap.pressed["kind"] == "link"
 
     def test_a_numeric_address_does_not_reorder_the_page(self, monkeypatch):
         # act_needle("17") == "": document order is preserved, so the 17th
         # control is still Garaż — the reorder that moved it never happens.
-        pressed = self._drive(monkeypatch, address="17", needle="")
+        pressed, snap = self._drive(monkeypatch, address="17", needle="")
         assert pressed == ["https://eon.pl/set?ku=80500120852"]
+        assert snap.pressed["label"] == "Garaż Bluszczańska"
 
 
 class TestFillingAFormAsOneAct:

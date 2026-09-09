@@ -6920,6 +6920,46 @@ class TestActNeedleNeverReordersByNumber:
         assert browse.act_needle(None) == ""
 
 
+class TestTheTracePressedRecord:
+    """The trace could not say which control a press became: a step recorded
+    `target=press:c17·…` and nothing about what c17 resolved to live, so the
+    Ananasowa mis-press logged as a clean success. `pressed_record` is that
+    fact, off the LIVE control, and `sealed` carries it onto the tool step."""
+
+    def test_pressed_record_names_the_control_not_the_number(self):
+        c = control(n=4, name="Garaż Bluszczańska",
+                    detail="https://eon.pl/set?ku=80500120852")
+        # A link: controls_from marks it navigating only via the href key.
+        c = browse.controls_from([{"n": 4, "kind": "link",
+                                   "name": "Garaż Bluszczańska",
+                                   "href": "https://eon.pl/set?ku=80500120852",
+                                   "detail": "https://eon.pl/set?ku=80500120852"}])[0]
+        rec = browse.pressed_record(c)
+        assert rec["label"] == "Garaż Bluszczańska"
+        assert rec["kind"] == "link"
+        assert rec["n"] == 4
+        assert rec["to"] == "eon.pl/set?ku=80500120852"
+
+    def test_a_non_navigating_control_has_no_destination(self):
+        c = control(n=2, kind=browse.BUTTON, name="Przełącz lokal/umowę")
+        rec = browse.pressed_record(c)
+        assert rec == {"n": 2, "kind": browse.BUTTON, "label": "Przełącz lokal/umowę"}
+
+    def test_sealed_carries_pressed_onto_the_tool_step(self):
+        out = web_module.sealed(
+            "the page", None,
+            pressed={"n": 4, "kind": "link", "label": "Garaż Bluszczańska"},
+        )
+        assert getattr(out, "meta", {}).get("pressed") == {
+            "n": 4, "kind": "link", "label": "Garaż Bluszczańska"
+        }
+
+    def test_no_pressed_no_key(self):
+        # A read presses nothing: absent means no press, never unknown.
+        out = web_module.sealed("the page", None, pressed={})
+        assert "pressed" not in getattr(out, "meta", {})
+
+
 class TestInlineControlReferences:
     """#364. Controls are shown IN PLACE in the reading, addressed by an
     aish-minted reference `[label](press:cN·nonce)` — a markdown link whose
