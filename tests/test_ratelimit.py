@@ -869,6 +869,33 @@ class TestLimitsAreABeliefNotALaw:
         governor.observe("g:m", ratelimit.classify(informative_429("q")))
         assert governor.limits("g:m").rpm < loose
 
+    def test_a_long_quiet_stretch_forgets_the_belief_entirely(self):
+        """Decay has a terminal state: past RELAX_FORGET_FACTOR the ceiling
+        cannot bind any real call, so the honest answer is the default — no
+        ceiling. Left unbounded, the exponential overflowed float to inf after
+        ~22 quiet days and int(inf) failed every task (2026-09-12)."""
+        wall = [1000.0]
+        governor = self.learned(wall)
+        wall[0] += 22 * 86400.0  # the quiet stretch that crashed in the field
+        forgotten = governor.limits("g:m")
+        assert forgotten.rpm is None
+        assert forgotten.tpm is None
+        assert forgotten.source == "none"
+
+    def test_forgetting_never_overflows_however_long_the_quiet(self):
+        wall = [1000.0]
+        governor = self.learned(wall)
+        wall[0] += 10 * 365 * 86400.0  # a decade
+        assert governor.limits("g:m").tpm is None
+
+    def test_the_forgotten_belief_relearns_from_the_next_refusal(self):
+        wall = [1000.0]
+        governor = self.learned(wall)
+        wall[0] += 22 * 86400.0
+        assert governor.limits("g:m").tpm is None
+        governor.observe("g:m", ratelimit.classify(informative_429("q")))
+        assert governor.limits("g:m").source == "observed"
+
     def test_a_stated_tier_never_drifts(self, monkeypatch):
         """Relaxation is aish correcting its own guess. An owner who stated
         their tier said something aish has no business loosening."""
