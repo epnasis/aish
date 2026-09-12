@@ -41,6 +41,7 @@ handled as a stop-worthy limit even when nothing named a day.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -474,6 +475,13 @@ def estimate_tokens(messages: list | None) -> int:
 # recorded and legible, rather than the invisible slam it used to be.
 RELAX_AFTER_S = 600.0
 RELAX_FACTOR = 1.25
+# Decay's terminal state: a belief loosened this far above what was observed
+# cannot bind any real call, so it says nothing — forget it and return to the
+# honest default of no ceiling. Also what keeps the exponential finite: left
+# unbounded, `tpm * RELAX_FACTOR**steps` overflows float to inf after ~22
+# quiet days and `int(inf)` then failed every task (2026-09-12).
+RELAX_FORGET_FACTOR = 1e6
+_RELAX_FORGET_STEPS = math.ceil(math.log(RELAX_FORGET_FACTOR, RELAX_FACTOR))
 
 
 @dataclass
@@ -523,6 +531,8 @@ class Limits:
         steps = int(quiet // RELAX_AFTER_S)
         if steps <= 0:
             return self
+        if steps >= _RELAX_FORGET_STEPS:
+            return Limits()  # fully decayed — nothing learned any more
         factor = RELAX_FACTOR**steps
         return Limits(
             rpm=None if self.rpm is None else max(1, int(self.rpm * factor)),

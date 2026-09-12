@@ -3390,6 +3390,10 @@ class WebServer:
             session.bridge.emit({"type": "error", "text": failure})
         except Exception as exc:  # noqa: BLE001 — a task bug must not kill the server
             failure = f"task failed: {exc!r}"
+            # The card shows only repr(exc); without the traceback in the log
+            # a crash inside a dependency is undiagnosable (the 2026-09-12
+            # OverflowError took a live repro to locate).
+            log.exception("task failed")
             session.bridge.emit({"type": "error", "text": failure})
         finally:
             # HOW it ended, not just that it did (#203). The failure text was
