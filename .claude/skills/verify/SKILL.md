@@ -86,9 +86,10 @@ The pytest suite makes the same cut in `tests/conftest.py`
    background; wait for
    `curl http://127.0.0.1:8899/` → 200.
 3. Drive with the Chrome tools: type into the "Ask aish" box and either click
-   the send arrow or press Cmd/Ctrl+Enter. A bare Enter does NOT submit — it
-   inserts a newline, by design (`[ENTER]`, `docs/web-frontend.md`). Each
-   queued task pops the next scripted response.
+   the send arrow or press Cmd/Ctrl+Enter. Bare Enter sends only while the
+   draft is single-line; in a multi-line draft it inserts a newline, by design
+   (`[ENTER]`, `docs/web-frontend.md`). Each queued task pops the next
+   scripted response.
 4. Observability: print tool-role messages inside `ScriptedChat.__call__` —
    that is exactly what the model receives (approval notes, denial guidance).
    Check side effects (files, allowlist) in the temp workdir.

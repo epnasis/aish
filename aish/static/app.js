@@ -8815,12 +8815,10 @@ $("composer").addEventListener("submit", (e) => {
 // the fresh #input node terminal mode swaps in (attachInputListeners, #156).
 // [ENTER-START]
 function onInputKeydown(e) {
-  // Cmd/Ctrl+Enter SENDS, in either mode. Bare Enter deliberately does not in
-  // prose (#170) because autocorrect, IME and dictation all emit lone Returns
-  // that fired half-written messages — none of them can produce a modifier
-  // chord, so this gives the desktop a keyboard send path without reopening
-  // that. It runs ahead of the suggestion popup: holding a modifier means "send
-  // what I typed", not "complete it".
+  // Cmd/Ctrl+Enter SENDS, in either mode and whatever the draft holds — a
+  // multi-line prose draft has no bare-Enter send path (below), so the chord
+  // is the desktop keyboard's way to fire one. It runs ahead of the suggestion
+  // popup: holding a modifier means "send what I typed", not "complete it".
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.altKey) {
     e.preventDefault();
     submitInput();
@@ -8837,8 +8835,8 @@ function onInputKeydown(e) {
     if (e.key === "Tab" || e.key === "Enter") {
       const chosen = suggest.items[suggest.index];
       // Re-completing an already-exact command would be a no-op, so Enter falls
-      // through instead: to the terminal-mode run below, or — in prose — to
-      // nothing but closing the popup (#170: only the send button submits).
+      // through instead: to the terminal-mode run below, or — in prose — to the
+      // single-line send below (an exactly-typed slash is one line by nature).
       const exact = (suggest.kind === "slash" || suggest.kind === "cmd")
         && chosen[0] === input.value.trim();
       if (e.key === "Tab" || !exact) {
@@ -8846,7 +8844,7 @@ function onInputKeydown(e) {
         acceptSuggestion(chosen);
         return;
       }
-      if (!cmdMode) { e.preventDefault(); hideSuggest(); return; }
+      if (!cmdMode) hideSuggest();
     }
     if (e.key === "Escape") {
       // First Esc only closes the suggestion popup; a second one leaves the
@@ -8860,12 +8858,21 @@ function onInputKeydown(e) {
     e.preventDefault();
     return;
   }
-  // Enter submits ONLY in terminal mode — that mode is a shell prompt and
-  // running the command is the whole point of it (#100). Prose messages are
-  // sent by the send button alone (#170): a newline is the common intent, and
-  // autocorrect/IME/dictation all produce Returns that used to fire a
-  // half-written message. Don't "fix" this asymmetry back into symmetry.
+  // Enter submits in terminal mode — that mode is a shell prompt and running
+  // the command is the whole point of it (#100).
   if (e.key === "Enter" && !e.shiftKey && cmdMode) {
+    e.preventDefault();
+    submitInput();
+    return;
+  }
+  // In prose, bare Enter sends only while the draft is SINGLE-LINE (owner
+  // call, 2026-09-13, revising #170's button-only rule): Shift+Enter inserts
+  // a newline, and once the field holds one every further Enter is a newline
+  // too — a deliberately multi-line draft can never be fired by a stray
+  // Return. The isComposing guard keeps an IME's commit-Return from sending;
+  // Alt+Enter stays a newline (a send must not be reachable by a near-miss).
+  if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.isComposing
+      && !input.value.includes("\n")) {
     e.preventDefault();
     submitInput();
   }
@@ -8875,7 +8882,10 @@ function onInputKeydown(e) {
 // return key arrives as a beforeinput/insertLineBreak. In terminal mode that
 // key must RUN the command like a real shell, not drop a newline. Desktop is
 // handled by the keydown above (which cancels this default), so no double-run.
-// Prose is untouched here for the same reason as above — the newline stands.
+// Prose deliberately keeps the newline here even for a single-line draft: the
+// soft-keyboard Return is indistinguishable from the ones dictation and
+// autocorrect emit (the #170 scar), so on touch the send button stays the
+// only send path.
 function onInputBeforeInput(e) {
   if (cmdMode && e.inputType === "insertLineBreak") {
     e.preventDefault();
@@ -15813,13 +15823,14 @@ document.addEventListener("keydown", (e) => {
 // content on every reconnect.
 const FINE_POINTER = matchMedia("(pointer: fine)").matches;
 
-// The send chord is otherwise invisible — the button is the only send path a
-// reader can see, so it says so, on the pointer that has a modifier key. The
-// tooltip is the only place the platform's own glyph appears; the handler
-// accepts either modifier regardless of what is printed here.
+// The keyboard send paths are otherwise invisible — the button is the only
+// one a reader can see, so it names them, on the pointer that has a keyboard:
+// bare Enter for a single-line draft, the chord for any draft. The tooltip is
+// the only place the platform's own glyph appears; the handler accepts either
+// modifier regardless of what is printed here.
 if (FINE_POINTER) {
   const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
-  $("send").title = mac ? "send (⌘↩)" : "send (Ctrl+Enter)";
+  $("send").title = mac ? "send (↩ · multi-line: ⌘↩)" : "send (Enter · multi-line: Ctrl+Enter)";
 }
 
 // Grabber: drag down to dismiss (pointer events cover touch and mouse).
