@@ -586,7 +586,9 @@ async function offlineFetchSession(name, local) {
     payload.base > 0 ? previous.slice(0, payload.base).concat(payload.events) : payload.events;
   const meta = await offlineSave(name, {
     ...payload,
-    pinned: local?.pinned,
+    // The ledger's answer, so a chat pinned on another device gets its flag
+    // the moment this one mirrors it — and eviction respects it ([PIN-SYNC]).
+    pinned: pinnedFor(name, local?.pinned),
     openedAt: local?.openedAt,
   }, events);
   meta.etag = response.headers.get("etag") || "";
@@ -936,15 +938,23 @@ async function offlineFirstPaint() {
 
 // ---- offline: pinning ("Available offline") -----------------------------
 // [OFFLINE-PIN-STATE-START]
-// The pin lives in IndexedDB, and that is the ONLY place anything may read it
-// from. Reading it off the in-memory `offlineMeta` mirror instead was the "my
-// pin got reset" bug: that map is empty for a moment after every reload (it is
-// filled by an async refresh), so a pinned chat's menu showed "Off" — and
-// tapping the item to "pin" it read the real state and flipped it, silently
-// UNPINNING the chat the user was trying to protect. A label that can lie about
-// a toggle's state is worse than a slow one, so this is always a real read.
+// ONE authority answers "is this chat pinned", for the label AND the tap.
+// Two sources that can disagree was the "my pin got reset" bug: the menu
+// label read the in-memory `offlineMeta` mirror — empty for a moment after
+// every reload — while the toggle read IndexedDB, so a pinned chat's menu
+// showed "Off" and tapping it to "pin" read the REAL state and flipped it,
+// silently UNPINNING the chat the user was trying to protect. A label that
+// can lie about a toggle's state is worse than a slow one.
+//
+// The authority is now the synced pin ledger ([PIN-SYNC]) — it loads
+// synchronously at boot, so it has no empty-after-reload window at all. The
+// IndexedDB meta is the FALLBACK, for a chat the ledger has never heard of
+// (a pre-sync pin not yet seeded), and it is still a real store read, never
+// the in-memory mirror. The `typeof` guard keeps this region extractable on
+// its own (tests/js/test_offline_pin_state.js runs it in isolation).
 async function offlineIsPinned(name) {
   if (!name) return false;
+  if (typeof pinAt !== "undefined" && pinAt[name]) return Boolean(pinAt[name].p);
   const meta = await offlineSafe(idbGet("meta", name));
   return Boolean(meta && meta.pinned);
 }
@@ -975,24 +985,22 @@ async function refreshOfflinePinUi() {
 
 async function toggleOfflinePin() {
   if (!currentSession) { showToast("no chat to pin yet"); return; }
-  const meta = (await offlineSafe(idbGet("meta", currentSession))) || null;
-  if (!meta) {
+  const name = currentSession;
+  // Flip from the same authority the label reads ([OFFLINE-PIN-STATE]) — the
+  // tap must do what the label says it will.
+  const pinned = !(await offlineIsPinned(name));
+  if (pinned && !(await offlineSafe(idbGet("meta", name)))) {
     // Not mirrored yet (a brand-new chat, or a sync that hasn't reached it):
     // fetch it now so "available offline" is true the moment it is promised.
+    // A failure doesn't block the pin — it still floats the chat and reaches
+    // the other devices, and the ordinary sync mirrors it when it can.
     try {
-      await offlineFetchSession(currentSession, null);
-    } catch {
-      showToast("can't save this chat offline right now");
-      return;
-    }
+      await offlineFetchSession(name, null);
+    } catch { /* the next sync pass picks it up */ }
   }
-  const current = (await offlineSafe(idbGet("meta", currentSession))) || null;
-  if (!current) { showToast("offline storage unavailable"); return; }
-  current.pinned = !current.pinned;
-  await idbPut("meta", current);
-  offlineMeta.set(currentSession, current);
-  refreshOfflinePinUi(); // reflect the new state on the toggle immediately
-  showToast(current.pinned ? "pinned — kept at the top and offline" : "unpinned");
+  if (name !== currentSession) return; // switched chats mid-fetch
+  setPin(name, pinned);
+  showToast(pinned ? "pinned — kept at the top and offline, on every device" : "unpinned");
 }
 
 // There is deliberately no "clear offline copies" action. The mirror manages
@@ -1607,6 +1615,8 @@ function handle(event) {
     // The owner read a chat — here, or on the other device (#232).
     case "seen_marked": applySeenMarks(event.seen, event.floor); break;
     case "seen_ledger": onSeenLedger(event); break;
+    case "pin_marked": applyPinMarks(event.pins); break;
+    case "pin_ledger": onPinLedger(event); break;
     case "peek": onPeek(event); break;
     case "session_renamed": onSessionRenamed(event); break;
     case "role": onRole(event); break;
@@ -2206,6 +2216,7 @@ function onHello(event) {
   // on the other one. A hello arrives on every switch too and this is not
   // per-chat, but it is cheap and idempotent — the outbox is normally empty.
   syncSeen(event.now);
+  syncPins(); // same choreography for the pin ledger — offers out, snapshot back
   if (railIsOpen()) requestSessions($("sessions-search").value || ""); // docked: stay current
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
   uploadsDir = event.uploads_dir || uploadsDir; // resolves `![[cat.png]]` (#231)
@@ -16145,6 +16156,7 @@ async function forgetSession(name) {
   prefetched.delete(name);
   viewCache.delete(name);
   forgetAttention(name);
+  forgetPin(name); // gone is gone, pin included — entry AND any pending offer
   await offlineForget(name);
 }
 // [FORGET-SESSION-END]
@@ -16593,6 +16605,193 @@ function sessionUnread(info, state) {
 }
 // [SEEN-END]
 
+// [PIN-SYNC-START]
+// The pin belongs to the OWNER, not to a screen — [SEEN]'s finding applied to
+// a toggle (the pin lived only in each device's IndexedDB mirror, so a chat
+// pinned on the laptop sat in the date buckets on the phone). Same shape:
+// this map is a CACHE of the server's ledger plus an OUTBOX of unconfirmed
+// toggles, applied locally on the tap (L7) and reconciled on every connect.
+//
+// Unlike [SEEN], NO time crosses the wire — not even skew-corrected. A toggle
+// merges last-writer-wins, and under LWW a client clock has no safe direction
+// to be wrong in: clamping a fast one would promote a stale toggle to the
+// freshest action, honouring a slow one would silently discard the owner's
+// newest. So the server stamps every accepted toggle as it lands, and the
+// semantics are last-RECONNECT-wins — for one owner, conflicting offline
+// toggles of the same chat on two devices are a near-nonexistent event, and
+// "the device I just reconnected shows what I last set on it" is the
+// defensible outcome even then.
+//
+// A pending offer is retired the moment the server states the same answer
+// (however stamped), and a migration SEED retires on any verdict at all — a
+// seed may introduce a pre-sync pin but never overturn a recorded action, and
+// one that lost must not re-offer forever.
+//
+// This map is the ONE read authority for the pin, everywhere a pin is read —
+// the toggle, the menu label, the rail ([OFFLINE-PIN-STATE] holds the read
+// side). The IndexedDB meta's `pinned` flag stays as its WRITE-THROUGH: the
+// eviction planner reads metas, so the ledger's answer is copied onto the
+// store, and rows fall back to `meta.pinned` only for a chat the ledger has
+// never heard of (a pre-sync pin not yet seeded).
+const PINS_KEY = "aish-pins";
+let pinAt = {};       // name → { p: pinned, at: ms } — the owner's ledger, cached
+let pendingPins = {}; // name → { p, seed? } — toggles the server has not confirmed
+let pinsSeeded = false; // pre-sync local pins offered once per boot
+
+function savePins() {
+  try {
+    localStorage.setItem(PINS_KEY, JSON.stringify({ at: pinAt, pending: pendingPins }));
+  } catch { /* private mode: pins degrade to in-memory + server */ }
+}
+
+(function loadPins() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PINS_KEY));
+    if (raw && raw.at) {
+      pinAt = raw.at;
+      pendingPins = raw.pending || {};
+    }
+  } catch { /* corrupt/absent — the ledger refills on the next connect */ }
+})();
+
+// The one read. Loads synchronously at boot, so unlike the in-memory meta
+// mirror it is never transiently empty-and-wrong after a reload.
+function pinnedFor(name, fallback) {
+  const held = pinAt[name];
+  return held ? Boolean(held.p) : Boolean(fallback);
+}
+
+// THE writer of the owner's toggle: cache + outbox, write-through to the
+// store, then tell the server. Everything is local-first — the tap never
+// waits on a round trip (L7). `at: 0` claims nothing about when; the
+// server's echo fills it in.
+function setPin(name, pinned) {
+  if (!name) return;
+  pinAt[name] = { p: pinned, at: 0 };
+  pendingPins[name] = { p: pinned };
+  savePins();
+  pinWriteThrough(name, pinned);
+  flushPins();
+  refreshOfflinePinUi();
+  if (railIsOpen()) renderSessionsFromCache();
+}
+
+// The eviction planner and the mirror's own rows read `meta.pinned`, so the
+// ledger's answer is copied onto the store. A chat not mirrored yet gets its
+// flag when the ordinary sync fetches it (offlineFetchSession consults the
+// ledger); nothing is lost by the meta being absent here.
+async function pinWriteThrough(name, pinned) {
+  const meta = await offlineSafe(idbGet("meta", name));
+  if (!meta || Boolean(meta.pinned) === pinned) return;
+  meta.pinned = pinned;
+  await offlineSafe(idbPut("meta", meta));
+  offlineMeta.set(name, meta);
+}
+
+// Fold server marks in — a broadcast or the full ledger, same rule. A pending
+// toggle survives only a verdict stating a DIFFERENT answer while this
+// device's own offer is still in flight (the flush carrying it wins on
+// arrival — last reconnect wins). Agreement retires it, and a seed retires on
+// any verdict at all, so the outbox always drains.
+function applyPinMarks(pins) {
+  let moved = false;
+  for (const [name, mark] of Object.entries(pins || {})) {
+    if (!mark || typeof mark !== "object") continue;
+    const p = Boolean(mark.pinned);
+    const ms = Number(mark.at) * 1000; // the ledger is in epoch SECONDS
+    const pending = pendingPins[name];
+    if (pending && (pending.seed || pending.p === p)) delete pendingPins[name];
+    if (pendingPins[name]) continue; // this device's own later toggle is in flight
+    const held = pinAt[name];
+    if (!held || held.p !== p || held.at !== ms) {
+      pinAt[name] = { p, at: ms };
+      moved = true;
+      pinWriteThrough(name, p);
+    }
+  }
+  savePins();
+  if (moved) {
+    refreshOfflinePinUi();
+    if (railIsOpen()) renderSessionsFromCache();
+  }
+}
+
+// The full answer also prunes: an entry the authority no longer holds — a
+// chat deleted while this device was away, a trimmed tombstone — is dropped,
+// pending offers excepted. The meta flag is left alone: [MIRROR-FORGET]
+// removes a deleted chat's copy itself, and for anything else the flag is the
+// fallback that lets a pin re-seed rather than vanish.
+function onPinLedger(event) {
+  const held = event.pins || {};
+  let pruned = false;
+  for (const name of Object.keys(pinAt)) {
+    if (!(name in held) && !(name in pendingPins)) {
+      delete pinAt[name];
+      pruned = true;
+    }
+  }
+  applyPinMarks(held); // saves; repaints when something moved
+  if (pruned) {
+    savePins();
+    refreshOfflinePinUi();
+    if (railIsOpen()) renderSessionsFromCache();
+  }
+}
+
+// Hand over what the server has not confirmed; on a connect ask for the whole
+// ledger back. Same choreography as flushSeen, for the same reason: the
+// repair for a lost broadcast is the next connect, and re-offering is free.
+function flushPins(full) {
+  const marks = {};
+  for (const [name, offer] of Object.entries(pendingPins)) {
+    marks[name] = { pinned: offer.p };
+    if (offer.seed) marks[name].seed = true;
+  }
+  if (!full && !Object.keys(marks).length) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "pin", marks, full: Boolean(full) }));
+}
+
+// A hello: reconcile, and once per boot offer this device's pre-sync local
+// pins as SEEDS — pins set before the ledger existed, known only to this
+// device's metas. Idempotent with no flag to forget: a name the ledger (or
+// the outbox) already knows is never re-offered, and the server takes a seed
+// only for a name it has never heard of, so a device offline across the
+// upgrade cannot resurrect a pin the owner has since removed elsewhere. The
+// seed flag persists in the outbox — a seed re-offered after a failed
+// connect must still be a seed, or it would count as a fresh action.
+function syncPins() {
+  flushPins(true);
+  if (pinsSeeded) return;
+  pinsSeeded = true;
+  offlineSafe(idbAll("meta"), []).then((metas) => {
+    let added = false;
+    for (const meta of metas || []) {
+      if (meta && meta.pinned && !(meta.name in pinAt) && !(meta.name in pendingPins)) {
+        pendingPins[meta.name] = { p: true, seed: true };
+        added = true;
+      }
+    }
+    if (added) {
+      savePins();
+      flushPins();
+    }
+  });
+}
+
+// The chat no longer exists ([FORGET-SESSION]): its entry and any offer go
+// with it. Unlike the seen stamp, which survives so the leftover row cannot
+// turn alarming, a pin entry protects nothing once the chat is gone — and a
+// surviving offer would re-assert the pin on every connect (the server drops
+// offers for missing chats too; this is the client honouring the same rule).
+function forgetPin(name) {
+  if (!(name in pinAt) && !(name in pendingPins)) return;
+  delete pinAt[name];
+  delete pendingPins[name];
+  savePins();
+}
+// [PIN-SYNC-END]
+
 // SESSIONS_PARTITION_START
 // One list, four bands, in the order you act on them:
 //
@@ -16842,7 +17041,7 @@ async function renderOfflineSessions(query) {
     state: "", // liveness is a server fact; a mirror can only lie about it
     cwd: "",
     origin: meta.origin,
-    pinned: meta.pinned,
+    pinned: pinnedFor(meta.name, meta.pinned),
   }));
   // Not `metas.length`: a device that has connected but never finished a sync
   // still has rows worth painting, and they are the ones the count names.
@@ -17378,12 +17577,13 @@ function railSection(label, sessions, current, unreadState) {
 
 function renderSessions(event) {
   lastSessionEvent = event;
-  // Carry the mirror's own facts onto server-supplied rows: the pin lives on
-  // this device, so the authoritative list only learns it from here.
+  // Carry the pin onto server-supplied rows: the ledger answers first
+  // ([PIN-SYNC]), the mirror's meta stands in for a pre-sync pin — so a chat
+  // pinned on another device shows in the Pinned band even before this one
+  // has mirrored it.
   if (!event.fromCache) {
     for (const info of event.sessions) {
-      const meta = offlineMeta.get(info.name);
-      if (meta) info.pinned = meta.pinned;
+      info.pinned = pinnedFor(info.name, offlineMeta.get(info.name)?.pinned);
     }
   }
   const list = $("sessions-list");

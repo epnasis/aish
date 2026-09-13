@@ -85,6 +85,26 @@ function makeSandbox(store) {
     assert.strictEqual(await sandbox.offlineIsPinned("a.jsonl"), true);
   });
 
+  await check("the synced ledger answers first, in both directions", async () => {
+    // The pin is the owner's, shared by every device ([PIN-SYNC]). When the
+    // ledger holds an answer it outranks the store's flag — a chat pinned on
+    // another device must read as pinned here before the write-through lands,
+    // and one unpinned there must not read as pinned off a stale flag.
+    const { sandbox, reads } = makeSandbox({ "a.jsonl": { name: "a.jsonl", pinned: false } });
+    sandbox.pinAt = { "a.jsonl": { p: true, at: 5 } };
+    assert.strictEqual(await sandbox.offlineIsPinned("a.jsonl"), true);
+    assert.deepStrictEqual(reads, [], "the ledger's answer needs no store read");
+    sandbox.pinAt = { "a.jsonl": { p: false, at: 5 } };
+    assert.strictEqual(await sandbox.offlineIsPinned("a.jsonl"), false);
+  });
+
+  await check("a chat the ledger never heard of falls back to the store", async () => {
+    // A pre-sync pin not yet seeded: the store's flag is still the truth.
+    const { sandbox } = makeSandbox({ "a.jsonl": { name: "a.jsonl", pinned: true } });
+    sandbox.pinAt = {};
+    assert.strictEqual(await sandbox.offlineIsPinned("a.jsonl"), true);
+  });
+
   await check("the toggle's appearance is not wired to the in-memory mirror", async () => {
     // Structural guard: whatever paints the toggle must not read offlineMeta.
     // This is the wiring that regressed, and a unit test on offlineIsPinned

@@ -3387,6 +3387,94 @@ class TestSeenLedger:
             assert "at" not in event["row"]
 
 
+class TestPinLedger:
+    """Pins belong to the OWNER, not to a screen — the seen ledger's finding
+    applied to a toggle. The unit properties (one clock — the server's, seeds
+    only introduce, tombstones drop first) are in `tests/test_pins.py`; what
+    is pinned here is the wire — that a pin toggled on one socket reaches the
+    other one, that a connect gets the whole ledger back, and that an offer
+    naming a chat that does not exist is dropped before the merge.
+    """
+
+    def test_pinning_here_reaches_the_other_device(self, app_env):
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (a, hello, _):
+            name = hello["session"]
+            with client.websocket_connect("/ws") as b:
+                recv_until(b, "hello")
+                a.send_json({"type": "pin", "marks": {name: {"pinned": True}}})
+                event = recv_until(b, "pin_marked")
+                assert event["pins"][name]["pinned"] is True
+                assert event["pins"][name]["at"] > 0
+
+    def test_a_connect_gets_the_whole_ledger_back(self, app_env):
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "pin", "marks": {name: {"pinned": True}}})
+            recv_until(ws, "pin_marked")
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "pin", "marks": {}, "full": True})
+            ledger = recv_until(ws, "pin_ledger")
+            assert ledger["pins"][name]["pinned"] is True
+            assert ledger["now"] > 0
+
+    def test_re_offering_what_is_held_publishes_nothing(self, app_env):
+        # What makes re-offering unconfirmed toggles on every connect free.
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "pin", "marks": {name: {"pinned": True}}})
+            recv_until(ws, "pin_marked")
+            ws.send_json({"type": "pin", "marks": {name: {"pinned": True}}, "full": True})
+            # The ledger answer arrives; a second pin_marked never does.
+            assert recv_until(ws, "pin_ledger")["pins"][name]["pinned"] is True
+
+    def test_a_pin_for_a_chat_that_does_not_exist_is_dropped(self, app_env):
+        # The outbox of a device that missed a delete re-offers the pin on
+        # every connect; taking it would recreate an entry nothing can ever
+        # remove — pins are exactly what the trim never drops.
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "pin", "marks": {"ghost.jsonl": {"pinned": True}}})
+            ws.send_json({"type": "pin", "marks": {}, "full": True})
+            assert "ghost.jsonl" not in recv_until(ws, "pin_ledger")["pins"]
+
+    def test_it_survives_a_restart(self, app_env):
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "pin", "marks": {name: {"pinned": True}}})
+            recv_until(ws, "pin_marked")
+        again, _ = make_client(app_env, [model_says("hi")])
+        with again, connected(again) as (ws, _, _):
+            ws.send_json({"type": "pin", "marks": {}, "full": True})
+            assert recv_until(ws, "pin_ledger")["pins"][name]["pinned"] is True
+
+    def test_a_garbled_pin_message_is_ignored_not_fatal(self, app_env):
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "pin"})
+            ws.send_json({"type": "pin", "marks": "nonsense"})
+            ws.send_json({"type": "pin", "marks": {}, "full": True})
+            assert recv_until(ws, "pin_ledger")["pins"] == {}
+
+    def test_deleting_a_chat_drops_its_pin(self, app_env):
+        # Gone is gone, pin included ([MIRROR-FORGET]); the seen stamp
+        # deliberately survives the same delete, so this is its own check.
+        client, app = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "pin", "marks": {name: {"pinned": True}}})
+            recv_until(ws, "pin_marked")
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "delete_session", "name": name})
+            recv_until(ws, "session_deleted")
+            ws.send_json({"type": "pin", "marks": {}, "full": True})
+            assert name not in recv_until(ws, "pin_ledger")["pins"]
+
+
 class TestPeek:
     """`peek` is the swipe-neighbor prefetch: a VIEW message answering another
     session's transcript snapshot WITHOUT switching to it, so a committed

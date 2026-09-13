@@ -116,6 +116,7 @@ from .cli import (
 from .documents import DocumentError, page_count, page_png
 from .embeddings import SemanticIndex
 from .paths import config_home
+from .pins import PinLedger
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
 from .seen import SeenLedger
@@ -1683,10 +1684,12 @@ error.
 - The web UI WORKS OFFLINE for READING. Past conversations are mirrored to the \
 device automatically (newest first, including chats started on the user's other \
 devices), so with no connection the app still opens, past chats still open, and \
-SEARCH still works over their contents. The download icon in the header (⤓, \
-beside the terminal and new-chat icons) is a ONE-TAP toggle that pins the chat \
-being read so it is never dropped from that local copy however old it gets — \
-filled means kept. There is nothing else to manage and no cache to clear by \
+SEARCH still works over their contents. The Pin row in the chat menu (the ⋯ \
+beside the chat title) is a ONE-TAP toggle that pins the chat being read: it \
+floats under "Pinned" in the chat list and is never dropped from the local \
+copy however old it gets. The pin is the USER's, not the device's — pinning \
+on one browser or phone pins the chat on all of them. There is nothing else \
+to manage and no cache to clear by \
 hand: the mirror caps its own size and drops the least useful copies first. \
 SENDING is paused while \
 offline — by design, not by accident: a prompt queued for later would run \
@@ -1977,6 +1980,10 @@ class WebServer:
         # State, not config: `~/.config/aish` is auto-pushed to GitHub, and a
         # record of when the owner read what has no business there.
         self.seen = SeenLedger(state_dir / "seen.json")
+        # Which chats the owner has PINNED — the same finding, for a toggle:
+        # a pin is the owner's promise about a chat, not about one device's
+        # copy of it, so it is held where every device can agree with it.
+        self.pins = PinLedger(state_dir / "pins.json")
         self._default: Session | None = None  # bare-connection landing session
         # The single GLOBAL interactive console (issue #148 follow-up), shared by
         # every connection. Held here, NEVER on a Session — the model has no
@@ -2639,6 +2646,9 @@ class WebServer:
         elif kind == "seen":
             # VIEW message: reading a chat claims nothing.
             await self._mark_seen(client, message)
+        elif kind == "pin":
+            # VIEW message too: a pin is the owner's own list preference.
+            await self._mark_pin(client, message)
         elif kind == "sessions":
             await self._send_sessions(client, str(message.get("query", "")))
         elif kind == "resume":
@@ -3838,6 +3848,47 @@ class WebServer:
                 }
             )
 
+    # ---- the pin ledger ---------------------------------------------------
+    # Which chats the owner has PINNED, shared by every device — the seen
+    # ledger's finding applied to a toggle. It rides the same plane for the
+    # same reason (a fact belonging to no one conversation, needed by every
+    # client), and the same connect choreography repairs a lost broadcast: the
+    # client re-offers what the server never confirmed and asks for the whole
+    # ledger back. The merge is last-writer-wins in the SERVER's clock rather
+    # than a max, because a toggle is not monotonic — `aish/pins.py` holds the
+    # properties that make that safe.
+    async def _mark_pin(self, client: Client, message: dict) -> None:
+        """Fold in this device's toggles, tell the others, answer with the
+        ledger if it asked for it.
+
+        Offers naming a chat that no longer exists are dropped BEFORE the
+        merge: a device offline across a delete still holds the pin in its
+        outbox and re-offers it on every connect, and a pinned entry for a
+        chat nothing can ever delete again would be a permanent ledger leak —
+        pins are exactly what the trim never drops.
+        """
+        marks = message.get("marks")
+        if isinstance(marks, dict):
+            marks = {
+                name: mark
+                for name, mark in marks.items()
+                if isinstance(name, str) and self._session_exists(name)
+            }
+        changed = self.pins.merge(marks) if isinstance(marks, dict) else {}
+        if changed:
+            # To EVERY client, the sender included — same reasoning as the
+            # seen ledger: the merge is idempotent, so hearing your own toggle
+            # back cannot hurt, and it is what retires the pending offer.
+            self._broadcast({"type": "pin_marked", "pins": changed})
+        if message.get("full"):
+            await client.ws.send_json(
+                {
+                    "type": "pin_ledger",
+                    "pins": self.pins.snapshot(),
+                    "now": time.time(),
+                }
+            )
+
     def _broadcast(self, event: dict) -> None:
         """Send to every connected client, viewer or not. Fire-and-forget on
         the loop thread: a roster fact is never worth blocking a caller, and a
@@ -3988,6 +4039,13 @@ class WebServer:
         # publishes normally.
         self.add_session(session, default=False, publish=False)
         return session
+
+    def _session_exists(self, name: str) -> bool:
+        """Whether a chat is real: open in memory, or its log on disk."""
+        if name in self.sessions:
+            return True
+        path = safe_session_path(self.state_dir, name)
+        return path is not None and path.is_file()
 
     @staticmethod
     def _gone_error(name: str) -> dict:
@@ -4243,6 +4301,10 @@ class WebServer:
         # on the laptop used to stay on the phone's list until it happened to
         # refresh, and tapping it opened a chat that no longer existed.
         self._roster.pop(name, None)
+        # Gone is gone, pin included ([MIRROR-FORGET]) — and unlike the seen
+        # stamp, which survives so the leftover row cannot turn alarming, a
+        # pin entry protects nothing once the chat it names is gone.
+        self.pins.forget(name)
         self._roster_seq += 1
         self._broadcast({"type": "session_deleted", "name": name, "seq": self._roster_seq})
         await self._send_sessions(client, "")
