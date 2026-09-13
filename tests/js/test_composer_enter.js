@@ -1,16 +1,17 @@
-// Node-only, dependency-free regression check for issue #170 (the composer's
-// send button is the ONLY thing that submits a prose message; Enter inserts a
-// newline). Pulls the real onInputKeydown/onInputBeforeInput out of app.js by
-// marker and runs them in an isolated vm against fake dependencies — so this
-// exercises the shipped branching, not a copy.
+// Node-only, dependency-free regression check for the composer's Enter
+// contract (docs/web-frontend.md [ENTER]). Pulls the real
+// onInputKeydown/onInputBeforeInput out of app.js by marker and runs them in
+// an isolated vm against fake dependencies — so this exercises the shipped
+// branching, not a copy.
 //
-// The deliberate asymmetry under test: terminal (`!`) mode is a shell prompt,
-// where Enter RUNNING the command is the point (#100/#156), on both the desktop
-// keydown path and iOS's beforeinput/insertLineBreak path.
-//
-// Also under test: Cmd/Ctrl+Enter sends from the prose composer. It does not
-// weaken #170 — a modifier chord is unreachable by autocorrect, IME and
-// dictation, which are what made bare Enter unsafe there.
+// The contract under test (owner call 2026-09-13, revising #170):
+// - Desktop prose: bare Enter SENDS while the draft holds no newline;
+//   Shift+Enter inserts one, and once the field is multi-line every bare
+//   Enter is a newline — only the button or the Cmd/Ctrl+Enter chord sends.
+// - iOS insertLineBreak in prose stays a newline even single-line: a
+//   soft-keyboard Return is indistinguishable from the ones dictation and
+//   autocorrect emit (#170), so on touch the button remains the send path.
+// - Terminal (`!`) mode: Enter RUNS the command on both paths (#100/#156).
 //
 // Run manually: node tests/js/test_composer_enter.js
 "use strict";
@@ -87,15 +88,23 @@ function check(name, fn) {
   }
 }
 
-check("prose: Enter does NOT submit and lets the newline through", () => {
+check("prose: Enter SENDS a single-line draft", () => {
   reset({ value: "hello" });
   const e = keyEvent("Enter");
   sandbox.onInputKeydown(e);
-  assert.deepStrictEqual(calls, [], "nothing may be submitted");
+  assert.deepStrictEqual(calls, ["submitInput"]);
+  assert.strictEqual(e.prevented, true, "no stray newline alongside the send");
+});
+
+check("prose: Enter on a MULTI-LINE draft inserts a newline, never sends", () => {
+  reset({ value: "hello\nworld" });
+  const e = keyEvent("Enter");
+  sandbox.onInputKeydown(e);
+  assert.deepStrictEqual(calls, [], "a deliberate multi-line draft must not fire");
   assert.strictEqual(e.prevented, false, "the newline must not be cancelled");
 });
 
-check("prose: Shift+Enter still just inserts a newline", () => {
+check("prose: Shift+Enter inserts a newline even on a single-line draft", () => {
   reset({ value: "hello" });
   const e = keyEvent("Enter", { shiftKey: true });
   sandbox.onInputKeydown(e);
@@ -103,7 +112,15 @@ check("prose: Shift+Enter still just inserts a newline", () => {
   assert.strictEqual(e.prevented, false);
 });
 
-check("prose: iOS insertLineBreak does NOT submit", () => {
+check("prose: an IME commit-Return (isComposing) never sends", () => {
+  reset({ value: "hello" });
+  const e = keyEvent("Enter", { isComposing: true });
+  sandbox.onInputKeydown(e);
+  assert.deepStrictEqual(calls, []);
+  assert.strictEqual(e.prevented, false);
+});
+
+check("prose: iOS insertLineBreak stays a newline even single-line (#170)", () => {
   reset({ value: "hello" });
   const e = beforeInputEvent("insertLineBreak");
   sandbox.onInputBeforeInput(e);
@@ -127,12 +144,12 @@ check("terminal mode: iOS insertLineBreak RUNS the command", () => {
   assert.strictEqual(e.prevented, true);
 });
 
-check("prose: Enter on an exactly-typed slash closes the popup, never submits", () => {
+check("prose: Enter on an exactly-typed slash closes the popup and SENDS it", () => {
   reset({ value: "/help", popup: { items: [["/help", "about aish web"]], index: 0, kind: "slash" } });
   const e = keyEvent("Enter");
   sandbox.onInputKeydown(e);
-  assert.deepStrictEqual(calls, ["hideSuggest"], "close it, don't send it");
-  assert.strictEqual(e.prevented, true, "the text is left exactly as typed");
+  assert.deepStrictEqual(calls, ["hideSuggest", "submitInput"], "close it, then send it");
+  assert.strictEqual(e.prevented, true, "no stray newline alongside the send");
 });
 
 check("prose: Enter on a partial slash still accepts the suggestion", () => {
