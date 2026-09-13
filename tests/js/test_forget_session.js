@@ -48,8 +48,10 @@ function makeWorld({ pinned = false } = {}) {
     viewCache: new Map([["gone.jsonl", {}], ["keep.jsonl", {}]]),
     seenAt: { "gone.jsonl": 1000, "keep.jsonl": 2000 },
     forgotAttention: [],
+    forgotPins: [],
   };
   sandbox.forgetAttention = (name) => sandbox.forgotAttention.push(name);
+  sandbox.forgetPin = (name) => sandbox.forgotPins.push(name);
   vm.createContext(sandbox);
   vm.runInContext(extract("// [MIRROR-FORGET-START]", "// [MIRROR-FORGET-END]"), sandbox);
   vm.runInContext(extract("// [FORGET-SESSION-START]", "// [FORGET-SESSION-END]"), sandbox);
@@ -78,6 +80,9 @@ function check(name, fn) {
     const w = makeWorld({ pinned: true });
     await w.forgetSession("gone.jsonl");
     assert(!w.stores.meta.has("gone.jsonl"), "a pinned ghost is one no sync can ever prune");
+    // …pin LEDGER entry included ([PIN-SYNC]): a surviving outbox offer would
+    // re-assert the pin to the server on every connect.
+    assert.deepStrictEqual(w.forgotPins, ["gone.jsonl"], "the pin ledger still names it");
   });
 
   await check("the seen stamp SURVIVES — a delete must not make a chat unread", async () => {

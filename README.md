@@ -556,7 +556,8 @@ this UI. Highlights:
   task queue up together. Automation is a glyph on the row, not a separate tab.
   Rows show state, not decoration: a spinner while it works, an alert when it
   needs approving, a glyph when a schedule or an email started it. Pin a chat to
-  keep it above the fold and permanently on the device.
+  keep it above the fold and permanently available offline — the pin is yours,
+  not the device's, so it applies on every browser and phone you use.
 - **Global interactive console.** The real TTY shell described above, openable
   from any chat (`⌘/Ctrl+\`), `tmux`-backed for restart survival. URLs in its
   output are tappable — including the ones an auth CLI wraps across several

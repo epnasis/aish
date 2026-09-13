@@ -498,6 +498,7 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       // a world that wants a skewed device loads the real block and sets it.
       serverNow: () => Date.now(),
       syncSeen: spy("syncSeen"),
+      syncPins: spy("syncPins"),
       offlineLoad: spy("offlineLoad", () => Promise.resolve(null)),
       offlineList: spy("offlineList", () => Promise.resolve([])),
       freshPrefetch: spy("freshPrefetch", () => null),

@@ -60,6 +60,22 @@ const OWNED = {
       + " mark silently, and the dot the owner already answered comes back on every"
       + " other screen they own",
   },
+  pinAt: {
+    owners: ["PIN-SYNC"],
+    instead: "call setPin(name, pinned), or let applyPinMarks()/onPinLedger() fold the server in",
+    why: "the pin map is the ONE read authority for whether a chat is pinned — the toggle,"
+      + " the menu label and the rail all answer from it; a stray writer makes the label"
+      + " lie about what the tap will do, which is exactly how pinned chats were getting"
+      + " silently unpinned before [OFFLINE-PIN-STATE] unified the read",
+  },
+  pendingPins: {
+    owners: ["PIN-SYNC"],
+    instead: "call setPin() to add one, and let applyPinMarks() retire it",
+    why: "it is the outbox that carries a pin toggled OFFLINE to the other devices; a writer"
+      + " that clears it before the server has stated a verdict loses the toggle silently,"
+      + " and one that strips the seed flag turns a migration seed into a fresh action that"
+      + " can resurrect a pin the owner deliberately removed",
+  },
   seenFloor: {
     owners: ["SEEN"],
     instead: "let trimSeen() or applySeenMarks(seen, floor) raise it — it only ever rises",
