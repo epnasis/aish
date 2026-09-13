@@ -106,10 +106,14 @@ Rules:
    else. Answer what they asked;
    when unsure whether something was solved before, call recall. And capture
    learnings as you go: when the user corrects you, when a skill's
-   instructions proved wrong (update THAT skill — append the gotcha with
-   edit_file, never create a duplicate), or when a hard-won multi-step
-   procedure worked, save it — recall first to find an existing entry, then
-   write or update the skill file (the user approves the diff). One-line
+   instructions proved wrong (update THAT skill — fold the gotcha in, never
+   create a duplicate), or when a hard-won multi-step procedure worked, save
+   it — recall first to find an existing entry, then call create_skill; the
+   SAME name updates that skill in place (e.g. create_skill(name=
+   'existing-skill', content='<the whole revised playbook>')). create_skill
+   locates and composes the skill file itself and the user approves the
+   diff — you MUST NOT hunt for skill files (find/ls) or write them with
+   write_file/edit_file. One-line
    facts, preferences, and corrected commands → remember(). When a memory is
    stale, wrong, or superseded, you MUST prune it: call forget_memory(<slug>)
    to delete it. To consolidate duplicates, remember() the one canonical fact,
@@ -138,8 +142,8 @@ Rules:
    PREFER an existing plugin tool over re-composing the raw command it wraps.
    Use create_tool to capture an operation as a tool ONLY when ALL THREE hold:
    it is invoked FREQUENTLY, its arguments are FREE-TEXT/shell-fragile, AND
-   reliability matters (mutating or user-facing output); otherwise write a
-   skill. create_tool validates the manifest and shows both files (manifest
+   reliability matters (mutating or user-facing output); otherwise save a
+   skill with create_skill. create_tool validates the manifest and shows both files (manifest
    first, then wrapper) for your user to approve. Every tool MUST declare
    `returns` — what a successful result contains — and its wrapper MUST exit
    non-zero when it did not do that; aish CHECKS the declared contract on
@@ -1168,13 +1172,13 @@ def task_reminder(index: str, preload_text: str = "", rules_text: str = "") -> s
 LEARN_PROMPT = (
     "Review this conversation for durable learnings{hint}. For each one: "
     "call recall first to check for an existing skill or memory entry — if "
-    "one exists, UPDATE it (edit_file: append the gotcha or correct it) "
-    "instead of creating a duplicate. If recall surfaces stale or duplicate "
-    "memory, consolidate it: remember() the one canonical fact, then "
-    "forget_memory() each redundant slug. Save multi-step procedures as skills — "
-    "a markdown file in ~/.config/aish/skills/ (project-scope ./.aish/skills/ "
-    "is disabled and would not be read) "
-    "with a trigger-phrased description ('Use when the "
+    "one exists, UPDATE it (create_skill with the same name, or remember "
+    "with the same slug) instead of creating a duplicate. If recall surfaces "
+    "stale or duplicate memory, consolidate it: remember() the one canonical "
+    "fact, then forget_memory() each redundant slug. Save multi-step "
+    "procedures as skills with create_skill — it locates and writes the "
+    "skill file itself, so never hunt for skill files or write them by hand "
+    "— with a trigger-phrased description ('Use when the "
     "user asks to …'); save one-line facts and preferences with remember(). "
     "Entries are retrieved by matching their name/description/keywords "
     "against future tasks: phrase every description like the tasks it must "
@@ -5458,6 +5462,8 @@ class Agent:
             return str(a.get("path", ""))
         if name in ("remember", "forget_memory"):
             return str(a.get("name") or "memory")
+        if name == "create_skill":
+            return str(a.get("name") or "skill")
         if "command" in a:
             return str(a["command"])  # read_docs, run_command
         # A PLUGIN tool: its args are its own, and this used to fall through to
@@ -9395,13 +9401,15 @@ class Agent:
         )
         return note + web.UNTRUSTED_NOTE + served
 
-    def _record_admission(self, record: dict) -> None:
+    def _record_admission(self, record: dict, target: str = "memory") -> None:
         """The `admission` record (contract §3.7) for the near-duplicate gate.
         Renderless. #194 will add the fact-vs-behaviour classification to the
         same kind; this phase contributes the half that already exists and was
         deciding silently — including the SCORE and the FLOOR, without which
-        DEDUP_MIN_SIM stays "provisional until measured" forever."""
-        self._emit_record(kind="admission", target="memory", **record)
+        DEDUP_MIN_SIM stays "provisional until measured" forever. `target`
+        distinguishes the memory gate from the skill gate (#380) in the same
+        kind, as §3.7 always anticipated."""
+        self._emit_record(kind="admission", target=target, **record)
 
     # ------------------------------------------------------------ rules (#191)
 
@@ -10600,6 +10608,9 @@ class Agent:
         if name in ("write_file", "edit_file"):
             return self._dispatch_write(name, args)
 
+        if name == "create_skill":
+            return self._create_skill(args)
+
         if name == "create_tool":
             return self._create_tool(args)
 
@@ -10844,6 +10855,63 @@ class Agent:
         "sh": ("run.sh", "#!/bin/sh"),
         "python": ("run.py", "#!/usr/bin/env python3"),
     }
+
+    def _create_skill(self, args: dict) -> str:
+        """Save or update a skill (#380). skills.plan_skill composes the file
+        and resolves its path without touching disk; the write then goes
+        through the same diff-approval gate as write_file — so this holds
+        exactly the approval surface skill writes always had, minus the shell
+        hunt for the file that used to precede them. The near-duplicate gate
+        covers skills here for the first time; its verdicts land as
+        `admission` records with target "skill" (contract §3.7)."""
+        name = str(args.get("name", "")).strip()
+        disabled = args.get("disabled")
+        path, text, refusal = skills.plan_skill(
+            name,
+            str(args.get("description", "") or ""),
+            str(args.get("content", "") or ""),
+            keywords=str(args.get("keywords", "") or ""),
+            cwd=self.cwd,
+            semantic=self.semantic.scores if self.semantic is not None else None,
+            force=bool(args.get("force", False)),
+            expires=str(args.get("expires", "") or "") or None,
+            disabled=None if disabled is None else bool(disabled),
+            on_admission=partial(self._record_admission, target="skill"),
+        )
+        if refusal:
+            self._note(f"→ {refusal}")
+            if refusal.startswith("NOT saved"):
+                return _gate_outcome(refusal, decision="rejected")
+            return refusal
+        assert path is not None
+        if self.approve_write is None:
+            return "ERROR: no write approver available; cannot save a skill."
+        verb = "updating" if path.exists() else "creating"
+        self._note(f"→ {verb} skill {name} at {_display_path(path)}")
+        commit_res = self._commit_tool_file(path, text, executable=False)
+        if commit_res is not None:
+            return commit_res
+        self._note(f"→ saved skill {name}")
+        # The claim below is read off the ARTIFACT, not assumed: an update to
+        # a retired or expired skill preserves that state, and "indexed from
+        # the next task" would then be a sentence the code guarantees false.
+        entry = skills._parse(path, "skill")
+        if not skills.entry_active(entry):
+            reason = (
+                "status: disabled"
+                if entry.status == "disabled"
+                else f"expired {entry.expires}"
+            )
+            return (
+                f"Saved skill {name!r} at {path} — but it is retired "
+                f"({reason}), so it will NOT be indexed, preloaded or "
+                "recalled until re-enabled (create_skill with "
+                "disabled=false)."
+            )
+        return (
+            f"Saved skill {name!r} at {path}. It is indexed from the next "
+            "task and preloaded when a task matches its description/keywords."
+        )
 
     def _create_tool(self, args: dict) -> str:
         """Author a plugin tool (issue #141). Three guardrails the model cannot

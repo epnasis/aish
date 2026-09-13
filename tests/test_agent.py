@@ -14584,3 +14584,151 @@ class TestTheToolDownloadsStore:
         served = tool_messages(agent.messages)[-1]["content"]
         assert str(agent.tool_downloads_dir) in served
         assert agent.tool_downloads_dir.is_dir()
+
+
+class TestCreateSkill:
+    """#380: create_skill resolves the skill file itself and routes the write
+    through the same diff-approval gate as write_file — the shell hunt for
+    "where does a skill live" has no reason to exist, and the near-duplicate
+    gate covers skills for the first time."""
+
+    @staticmethod
+    def _cs_call(**arguments):
+        # Built directly: tool_call()'s first parameter IS `name`, so a skill
+        # slug named "name" cannot go through it (same as remember's tests).
+        return SimpleNamespace(
+            function=SimpleNamespace(name="create_skill", arguments=arguments)
+        )
+
+    def _agent(self, tmp_path, calls, **kwargs):
+        return make_agent(
+            [model_says(tool_calls=calls), model_says("done")],
+            cwd=str(tmp_path),
+            **kwargs,
+        )
+
+    def test_saves_a_new_skill_through_the_diff_gate(self, tmp_path):
+        plans = []
+        agent, _ = self._agent(
+            tmp_path,
+            [self._cs_call(name="qr-payment", description="Use when paying by QR",
+                           content="1. qrencode", keywords="qr, przelew")],
+            approve_write=lambda plan: plans.append(plan) or True,
+        )
+        agent.run_task("save it")
+        path = skills_module.GLOBAL_SKILLS_DIR / "qr-payment.md"
+        assert path.is_file()
+        text = path.read_text()
+        assert "description: Use when paying by QR" in text
+        assert text.endswith("1. qrencode\n")
+        # the user saw the real file at its real path, as a write plan
+        assert plans and str(plans[0].target) == str(path)
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "Saved skill 'qr-payment'" in result
+
+    def test_updates_an_existing_skill_in_place(self, tmp_path):
+        existing = skills_module.GLOBAL_SKILLS_DIR / "qr-payment.md"
+        existing.write_text(
+            "---\nname: qr-payment\ndescription: old trigger\n---\nold body\n"
+        )
+        agent, _ = self._agent(
+            tmp_path,
+            [self._cs_call(name="qr-payment", content="new body")],
+            approve_write=lambda plan: True,
+        )
+        agent.run_task("update it")
+        text = existing.read_text()
+        assert "description: old trigger" in text  # omitted → preserved
+        assert text.endswith("new body\n")
+        assert "old body" not in text
+
+    def test_denied_write_writes_nothing(self, tmp_path):
+        agent, _ = self._agent(
+            tmp_path,
+            [self._cs_call(name="qr-payment", description="d", content="body")],
+            approve_write=lambda plan: False,
+        )
+        agent.run_task("save it")
+        assert not (skills_module.GLOBAL_SKILLS_DIR / "qr-payment.md").exists()
+
+    def test_duplicate_refused_before_any_approval(self, tmp_path):
+        (skills_module.GLOBAL_SKILLS_DIR / "qr-payment-generator.md").write_text(
+            "---\nname: qr-payment-generator\n"
+            "description: generate a polish bank qr payment code\n---\nsteps\n"
+        )
+        prompted = []
+        steps: list[dict] = []
+        agent, _ = self._agent(
+            tmp_path,
+            [self._cs_call(name="qr-payment-maker",
+                           description="generate a polish bank qr payment codes",
+                           content="steps")],
+            approve_write=lambda plan: prompted.append(1) or True,
+            step_log=steps.append,
+        )
+        agent.run_task("save it")
+        assert not prompted
+        assert not (skills_module.GLOBAL_SKILLS_DIR / "qr-payment-maker.md").exists()
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "NOT saved" in result and "qr-payment-generator" in result
+        admissions = [s for s in steps if s.get("kind") == "admission"]
+        assert admissions and admissions[0]["target"] == "skill"
+        assert admissions[0]["verdict"] == "refused_duplicate"
+        assert admissions[0]["evidence"]["against"] == "qr-payment-generator"
+
+    def test_invalid_args_refused_without_prompting(self, tmp_path):
+        prompted = []
+        agent, _ = self._agent(
+            tmp_path,
+            [self._cs_call(name="no-body", description="d", content="")],
+            approve_write=lambda plan: prompted.append(1) or True,
+        )
+        agent.run_task("save it")
+        assert not prompted
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "content is required" in result
+
+    def test_the_prompts_route_skill_writes_here(self):
+        """The instruction is imperative on every surface that used to send
+        the model at the filesystem: the system prompt's LEARNING section and
+        the /learn prompt both name create_skill, and neither tells the model
+        to reach a skill file with edit_file or a path any more."""
+        from aish.agent import LEARN_PROMPT, SYSTEM_PROMPT_TEMPLATE
+
+        for surface in (SYSTEM_PROMPT_TEMPLATE, LEARN_PROMPT):
+            assert "create_skill" in surface
+        assert "write or update the skill file" not in SYSTEM_PROMPT_TEMPLATE
+        assert "~/.config/aish/skills/" not in LEARN_PROMPT
+
+    def test_the_result_line_says_what_the_artifact_means(self, tmp_path):
+        """A retired skill stays retired through an update, and the code
+        guarantees it reaches no index, preflight or recall — so the success
+        line must say so instead of promising 'indexed from the next task'
+        (the review finding on df19f0c; the confirmation and the artifact are
+        one claim, #209)."""
+        retired = skills_module.GLOBAL_SKILLS_DIR / "retired.md"
+        retired.write_text(
+            "---\nname: retired\ndescription: d\nstatus: disabled\n---\nold\n"
+        )
+        agent, _ = self._agent(
+            tmp_path,
+            [self._cs_call(name="retired", content="new")],
+            approve_write=lambda plan: True,
+        )
+        agent.run_task("update it")
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "retired" in result and "NOT be indexed" in result
+        assert "indexed from the next task" not in result
+
+    def test_disabled_arg_retires_a_skill_through_the_tool(self, tmp_path):
+        live = skills_module.GLOBAL_SKILLS_DIR / "live.md"
+        live.write_text("---\nname: live\ndescription: d\n---\nsteps\n")
+        agent, _ = self._agent(
+            tmp_path,
+            [self._cs_call(name="live", content="steps", disabled=True)],
+            approve_write=lambda plan: True,
+        )
+        agent.run_task("retire it")
+        assert "status: disabled" in live.read_text()
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "retired" in result

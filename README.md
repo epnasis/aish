@@ -151,6 +151,7 @@ unless you explicitly *Share* a selection.
 | `read_docs` | man page → `--help` fallback, full-text topic search | auto |
 | `remember` / `forget_memory` | save or prune one fact in structured memory | auto (echoed) |
 | `read_skill` / `recall` | load a playbook; ranked search across skills, memory & past sessions | auto (echoed) |
+| `create_skill` | save or update a **skill** playbook — aish locates and composes the file itself, and a new name too similar to an existing skill is refused with that skill's name | **diff + y/N** |
 | `create_tool` | author a reusable **plugin tool** (validated `TOOL.md` + wrapper) | **diff + y/N**; refuses to write an invalid manifest |
 | `import_skill` | install a skill from a git repo or local path | **one consolidated review** of the whole skill + risk flags |
 | `read_tool_output` | read the next page of a **truncated** tool result, from cache | auto (never re-runs the tool) |
@@ -379,7 +380,11 @@ thousands of entries without bloating the context.
   model answers one bounded repair/pin/disable/skip verdict per entry (plus a
   merge-or-distinct question on embedding-detected duplicate pairs) — so it
   works with small local models and nothing private ever leaves the machine.
-  All changes are frontmatter-only and reversible; deletion has no code path. **Import skills from the ecosystem** with `import_skill`
+  All changes are frontmatter-only and reversible; deletion has no code path.
+  The model saves and updates skills itself with `create_skill`: it resolves
+  the file's location (an existing name updates that skill in place), refuses
+  a new name too similar to an existing skill, and every change is shown as a
+  diff for approval before anything is written. **Import skills from the ecosystem** with `import_skill`
   (e.g. `anthropics/skills`): a read-only clone, then one consolidated review of
   every file plus deterministic risk flags before anything installs.
 - **Plugin tools** — where a skill *teaches*, a tool *does*. A droppable

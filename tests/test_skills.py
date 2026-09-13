@@ -1546,3 +1546,284 @@ def test_suite_never_reaches_the_real_knowledge_store():
     save_memory("a probe from the test suite", skills_module.GLOBAL_MEMORY_DIR, name="pin-probe")
     assert (skills_module.GLOBAL_MEMORY_DIR / "pin-probe.md").exists()
     assert not (DEFAULT_CONFIG_HOME / "memory" / "pin-probe.md").exists()
+
+
+class TestPlanSkill:
+    """#380: plan_skill composes the file and resolves its path without
+    touching disk — the files.py plan/commit shape — so saving a skill never
+    again begins with a shell hunt over the config tree. The near-duplicate
+    gate (#178 P1-8) covers skills here for the first time."""
+
+    def _global(self, tmp_path, monkeypatch):
+        directory = tmp_path / "skills"
+        directory.mkdir()
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", directory)
+        return directory
+
+    def test_new_skill_resolves_to_the_global_dir(self, tmp_path, monkeypatch):
+        directory = self._global(tmp_path, monkeypatch)
+        path, text, refusal = skills_module.plan_skill(
+            "qr-payment", "Use when the user asks to pay by QR", "1. run qrencode",
+            keywords="qr, payment", cwd=str(tmp_path),
+        )
+        assert refusal == ""
+        assert path == directory / "qr-payment.md"
+        assert not path.exists(), "plan must not touch disk"
+        assert "name: qr-payment" in text
+        assert "description: Use when the user asks to pay by QR" in text
+        assert "keywords: qr, payment" in text
+        assert text.endswith("1. run qrencode\n")
+
+    def test_invalid_name_refused(self, tmp_path, monkeypatch):
+        self._global(tmp_path, monkeypatch)
+        path, _, refusal = skills_module.plan_skill(
+            "../escape", "d", "body", cwd=str(tmp_path)
+        )
+        assert path is None and refusal.startswith("ERROR: invalid skill name")
+
+    def test_empty_content_redirects_to_remember(self, tmp_path, monkeypatch):
+        self._global(tmp_path, monkeypatch)
+        path, _, refusal = skills_module.plan_skill(
+            "fact-only", "d", "   ", cwd=str(tmp_path)
+        )
+        assert path is None and "remember()" in refusal
+
+    def test_new_skill_requires_a_description(self, tmp_path, monkeypatch):
+        self._global(tmp_path, monkeypatch)
+        path, _, refusal = skills_module.plan_skill(
+            "no-desc", "", "body", cwd=str(tmp_path)
+        )
+        assert path is None and "description is required" in refusal
+
+    def test_update_resolves_the_existing_flat_file(self, tmp_path, monkeypatch):
+        directory = self._global(tmp_path, monkeypatch)
+        write_skill(directory, "qr-payment.md", (
+            "---\nname: qr-payment\ndescription: old trigger\n"
+            "keywords: qr, przelew\n---\nold body\n"
+        ))
+        path, text, refusal = skills_module.plan_skill(
+            "qr-payment", "", "new body", cwd=str(tmp_path)
+        )
+        assert refusal == ""
+        assert path == directory / "qr-payment.md"
+        # omitted description/keywords survive; the body is replaced
+        assert "description: old trigger" in text
+        assert "keywords: qr, przelew" in text
+        assert text.endswith("new body\n")
+        assert "old body" not in text
+
+    def test_update_resolves_a_folder_skill(self, tmp_path, monkeypatch):
+        directory = self._global(tmp_path, monkeypatch)
+        write_skill(directory / "bundled", "SKILL.md", (
+            "---\nname: bundled\ndescription: folder skill\n---\nold\n"
+        ))
+        path, text, refusal = skills_module.plan_skill(
+            "bundled", "", "new", cwd=str(tmp_path)
+        )
+        assert refusal == ""
+        assert path == directory / "bundled" / "SKILL.md"
+        assert text.endswith("new\n")
+
+    def test_update_preserves_lifecycle_frontmatter(self, tmp_path, monkeypatch):
+        directory = self._global(tmp_path, monkeypatch)
+        write_skill(directory, "retired.md", (
+            "---\nname: retired\ndescription: d\nstatus: disabled\n"
+            "expires: 2099-01-02\n---\nold\n"
+        ))
+        _, text, refusal = skills_module.plan_skill(
+            "retired", "", "new", cwd=str(tmp_path)
+        )
+        assert refusal == ""
+        assert "status: disabled" in text
+        assert "expires: 2099-01-02" in text
+
+    def test_keywords_deduped_and_capped(self, tmp_path, monkeypatch):
+        self._global(tmp_path, monkeypatch)
+        many = ",".join(f"kw{i}" for i in range(skills_module.KEYWORDS_MAX + 5))
+        _, text, _ = skills_module.plan_skill(
+            "kw-probe", "d", "body", keywords=f"QR, qr, {many}", cwd=str(tmp_path)
+        )
+        line = next(ln for ln in text.splitlines() if ln.startswith("keywords:"))
+        words = [w.strip() for w in line.partition(":")[2].split(",")]
+        assert len(words) == skills_module.KEYWORDS_MAX
+        assert words.count("QR") == 1 and "qr" not in words
+
+
+class TestPlanSkillNearDuplicate:
+    """The memory gate's exact contract, on skills: a NEW name too similar to
+    an existing skill is refused with that skill's name; the same name is the
+    update path and never gated; force overrides; both verdicts reach
+    on_admission with their inputs."""
+
+    def _seed(self, tmp_path, monkeypatch):
+        directory = tmp_path / "skills"
+        directory.mkdir()
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", directory)
+        write_skill(directory, "qr-payment-generator.md", (
+            "---\nname: qr-payment-generator\n"
+            "description: generate a polish bank qr payment code\n---\nsteps\n"
+        ))
+        return directory
+
+    def test_similar_new_name_refused_with_the_existing_name(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        recorded = []
+        path, _, refusal = skills_module.plan_skill(
+            "qr-payment-maker", "generate a polish bank qr payment codes", "steps",
+            cwd=str(tmp_path), on_admission=recorded.append,
+        )
+        assert path is None
+        assert refusal.startswith("NOT saved")
+        assert "qr-payment-generator" in refusal and "force" in refusal
+        assert recorded[0]["verdict"] == "refused_duplicate"
+        assert recorded[0]["evidence"]["against"] == "qr-payment-generator"
+        assert recorded[0]["evidence"]["mode"] == "lexical"
+        assert recorded[0]["evidence"]["sim"] >= recorded[0]["evidence"]["floor"]
+
+    def test_same_name_is_the_update_path_and_never_gated(self, tmp_path, monkeypatch):
+        directory = self._seed(tmp_path, monkeypatch)
+        recorded = []
+        path, _, refusal = skills_module.plan_skill(
+            "qr-payment-generator", "generate a polish bank qr payment code",
+            "revised steps", cwd=str(tmp_path), on_admission=recorded.append,
+        )
+        assert refusal == ""
+        assert path == directory / "qr-payment-generator.md"
+        assert recorded == []
+
+    def test_force_overrides_the_gate(self, tmp_path, monkeypatch):
+        directory = self._seed(tmp_path, monkeypatch)
+        path, _, refusal = skills_module.plan_skill(
+            "qr-payment-maker", "generate a polish bank qr payment codes", "steps",
+            cwd=str(tmp_path), force=True,
+        )
+        assert refusal == ""
+        assert path == directory / "qr-payment-maker.md"
+
+    def test_a_distinct_skill_is_admitted_on_the_record(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        recorded = []
+        _, _, refusal = skills_module.plan_skill(
+            "flight-status", "Use when the user asks about a flight", "steps",
+            cwd=str(tmp_path), on_admission=recorded.append,
+        )
+        assert refusal == ""
+        assert recorded[0]["verdict"] == "admitted"
+
+
+class TestPlanSkillRoundTrip:
+    """#209's day-one rule for a new writer: render a model-authored value,
+    parse it back, assert it means the identical thing. Description and
+    keywords are header lines and must flatten; content is the body and must
+    survive verbatim without reaching the header."""
+
+    def _write(self, tmp_path, monkeypatch, **kwargs):
+        directory = tmp_path / "skills"
+        directory.mkdir(exist_ok=True)
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", directory)
+        kwargs.setdefault("description", "a harmless trigger")
+        kwargs.setdefault("content", "a harmless body")
+        path, text, refusal = skills_module.plan_skill(
+            "probe", kwargs["description"], kwargs["content"],
+            keywords=kwargs.get("keywords", ""), cwd=str(tmp_path),
+        )
+        assert refusal == ""
+        path.write_text(text, encoding="utf-8")
+        return _parse(path, "skill")
+
+    @pytest.mark.parametrize("smuggled", SMUGGLED)
+    def test_a_description_cannot_smuggle_a_second_key(self, tmp_path, monkeypatch, smuggled):
+        entry = self._write(tmp_path, monkeypatch, description=smuggled)
+        assert entry.name == "probe"
+        assert entry.status == "" and entry.expires is None and not entry.pinned
+        assert entry.description == skills_module.frontmatter_value(smuggled)
+
+    @pytest.mark.parametrize("smuggled", SMUGGLED)
+    def test_a_keyword_cannot_smuggle_a_second_key(self, tmp_path, monkeypatch, smuggled):
+        entry = self._write(tmp_path, monkeypatch, keywords=f"alpha,{smuggled},beta")
+        assert entry.name == "probe"
+        assert entry.status == "" and entry.expires is None and not entry.pinned
+        assert len(entry.keywords) == 3, entry.keywords
+
+    @pytest.mark.parametrize("smuggled", SMUGGLED)
+    def test_the_body_stays_prose_and_the_header_stays_the_header(
+        self, tmp_path, monkeypatch, smuggled
+    ):
+        entry = self._write(tmp_path, monkeypatch, content=smuggled)
+        assert entry.name == "probe"
+        assert entry.status == "" and entry.expires is None and not entry.pinned
+        assert entry.description == "a harmless trigger"
+        # read_text's universal newlines fold \r\n to \n on the way back in;
+        # the prose is otherwise verbatim.
+        assert entry.body == str(smuggled).strip().replace("\r\n", "\n")
+
+
+class TestPlanSkillLifecycle:
+    """The review findings on df19f0c: a regenerated header must not strip
+    `pinned:` (curate's disable-refusal keys on it), and retire/revive must be
+    expressible through the tool now that the prompts forbid hand-editing
+    skill files (L4 — save_memory's exact disabled/expires semantics)."""
+
+    def _seed(self, tmp_path, monkeypatch, front_extra=""):
+        directory = tmp_path / "skills"
+        directory.mkdir(exist_ok=True)
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", directory)
+        write_skill(directory, "probe.md", (
+            f"---\nname: probe\ndescription: d\n{front_extra}---\nold\n"
+        ))
+        return directory
+
+    def test_update_preserves_pinned(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch, "pinned: yes\n")
+        _, text, refusal = skills_module.plan_skill(
+            "probe", "", "new", cwd=str(tmp_path)
+        )
+        assert refusal == ""
+        assert "pinned: yes" in text
+
+    def test_update_preserves_kind_policy_as_pinned(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch, "kind: policy\n")
+        path, text, _ = skills_module.plan_skill(
+            "probe", "", "new", cwd=str(tmp_path)
+        )
+        path.write_text(text, encoding="utf-8")
+        assert _parse(path, "skill").pinned is True
+
+    def test_disabled_true_retires_and_false_revives(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        path, text, _ = skills_module.plan_skill(
+            "probe", "", "new", cwd=str(tmp_path), disabled=True
+        )
+        assert "status: disabled" in text
+        path.write_text(text, encoding="utf-8")
+        _, revived, _ = skills_module.plan_skill(
+            "probe", "", "newer", cwd=str(tmp_path), disabled=False
+        )
+        assert "status: disabled" not in revived
+
+    def test_expires_is_strict_on_write(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        path, _, refusal = skills_module.plan_skill(
+            "probe", "", "new", cwd=str(tmp_path), expires="soonish"
+        )
+        assert path is None and "invalid expires date" in refusal
+        _, text, refusal = skills_module.plan_skill(
+            "probe", "", "new", cwd=str(tmp_path), expires="2099-03-04"
+        )
+        assert refusal == "" and "expires: 2099-03-04" in text
+
+    def test_missing_description_errors_before_the_admission_record(
+        self, tmp_path, monkeypatch
+    ):
+        """An identity line with no description scores nothing meaningful; a
+        call that errors must not leave a verdict about an entry that never
+        existed."""
+        directory = tmp_path / "skills"
+        directory.mkdir()
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", directory)
+        recorded = []
+        path, _, refusal = skills_module.plan_skill(
+            "brand-new", "", "body", cwd=str(tmp_path), on_admission=recorded.append
+        )
+        assert path is None and "description is required" in refusal
+        assert recorded == []
