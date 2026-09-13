@@ -392,7 +392,7 @@ The recording seam is `web.PageCut` — one per tool call, never module state, b
 
 ### 3.7 · `admission` — memory admission control (#194) and the near-duplicate gate
 
-One kind covers both, because both are "a write to the knowledge corpus was classified and possibly redirected".
+One kind covers both, because both are "a write to the knowledge corpus was classified and possibly redirected". `target` names which corpus: `"memory"` (`save_memory`), or `"skill"` since the gate reached `create_skill`/`plan_skill` (#380).
 
 ```json
 {"kind": "admission", "turn": 9, "target": "memory",

@@ -1214,3 +1214,96 @@ def forget_memory(name: str, cwd: str = "") -> str:
         except OSError as exc:
             return f"ERROR: could not forget memory: {exc}"
     return f"(no memory named {slug!r} to forget)"
+
+
+def plan_skill(name: str, description: str, content: str, keywords: str = "",
+               cwd: str = "", semantic=None, force: bool = False,
+               on_admission=None) -> tuple[Path | None, str, str]:
+    """Compose one skill file WITHOUT touching disk — the files.py plan/commit
+    shape, because unlike `save_memory` the write must go through the caller's
+    diff-approval gate (a skill instructs every future session, so it is never
+    auto-approved).
+
+    Returns (path, rendered_text, "") ready for a diff-approved write, or
+    (None, "", refusal): a refusal starting "NOT saved" is the near-duplicate
+    gate (the memory gate of #178 P1-8, extended to skills), anything else a
+    correctable ERROR.
+
+    Resolving the target path here is the point (#380): nothing model-facing
+    answered "where does a skill live", so every save or update began with a
+    shell hunt over the config tree — `find ~/.config/aish -name "*.md"`,
+    twice in one day, once held by the owner. An existing name resolves to
+    its own file (flat `<name>.md` or a folder skill's SKILL.md) and is
+    updated in place, preserving status/expires and any description/keywords
+    the caller omitted; a new name lands in the global skills dir.
+    """
+    slug = name.strip()
+    if not NAME_RE.match(slug or ""):
+        return None, "", f"ERROR: invalid skill name {slug!r}"
+    body = str(content or "").strip()
+    if not body:
+        return None, "", (
+            "ERROR: content is required — a skill is a multi-step playbook. "
+            "Save a one-line fact with remember() instead."
+        )
+    desc = frontmatter_value(description or "")
+    # Keyword hygiene, identical to save_memory (#183, #209): each keyword is
+    # model-authored and occupies part of ONE frontmatter line.
+    seen_kw: set[str] = set()
+    keyword_list = []
+    for word in (frontmatter_value(w) for w in (keywords or "").split(",")):
+        if word and word.casefold() not in seen_kw:
+            seen_kw.add(word.casefold())
+            keyword_list.append(word)
+    keyword_list = keyword_list[:KEYWORDS_MAX]
+    # _merged rather than load_entries: an update must find a RETIRED skill's
+    # file too, or a disabled entry silently forks into a duplicate.
+    all_skills = [e for e in _merged(skill_dirs(cwd), "skill") if e.path is not None]
+    prior = next((e for e in all_skills if e.name == slug), None)
+    if prior is None and not force:
+        identity = f"{slug}: {desc}"
+        if keyword_list:
+            identity += f" (keywords: {', '.join(keyword_list)})"
+        similar, score, floor, mode = _near_duplicate(
+            identity, [e for e in all_skills if entry_active(e)], semantic
+        )
+        if on_admission is not None:
+            on_admission(
+                {
+                    "name": slug,
+                    "verdict": "refused_duplicate" if similar else "admitted",
+                    "tier": 1,
+                    "evidence": {
+                        "mode": mode,
+                        "sim": round(score, 4),
+                        "floor": floor,
+                        "against": similar.name if similar else None,
+                    },
+                }
+            )
+        if similar is not None:
+            return None, "", (
+                f"NOT saved — a similar skill already exists — {similar.name}: "
+                f"\"{similar.description}\". UPDATE it instead (create_skill "
+                f"with name=\"{similar.name}\"); only if this is genuinely a "
+                "different playbook, retry with force=true."
+            )
+    if not desc:
+        if prior is None:
+            return None, "", (
+                "ERROR: description is required for a new skill — trigger-"
+                "phrased, e.g. 'Use when the user asks to …'."
+            )
+        desc = frontmatter_value(prior.description)
+    if not keyword_list and prior is not None:
+        keyword_list = [frontmatter_value(w) for w in prior.keywords]
+    front = [f"name: {slug}", f"description: {desc}"]
+    if keyword_list:
+        front.append(f"keywords: {', '.join(keyword_list)}")
+    if prior is not None and prior.status == "disabled":
+        front.append("status: disabled")
+    if prior is not None and prior.expires is not None:
+        front.append(f"expires: {prior.expires.isoformat()}")
+    text = "---\n" + "\n".join(front) + "\n---\n" + body + "\n"
+    path = prior.path if prior is not None else skill_dirs(cwd)[-1] / f"{slug}.md"
+    return path, text, ""

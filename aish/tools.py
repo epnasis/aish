@@ -710,6 +710,65 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "create_skill",
+            "description": (
+                "Save or UPDATE a skill — a reusable multi-step playbook retrieved "
+                "for future tasks. Use it when a hard-won procedure worked or the "
+                "user corrects a saved workflow; one-line facts go to remember() "
+                "instead. You MUST use create_skill for every skill save or "
+                "update: aish resolves the file location itself — NEVER search "
+                "for skill files (find/ls) and NEVER write them with "
+                "write_file/edit_file. Call recall first to find the existing "
+                "entry; passing its exact name UPDATES that skill in place, "
+                "keeping any description/keywords you omit. The composed file is "
+                "shown to the user as a diff for approval before anything is "
+                "written. A NEW name too similar to an existing skill is refused "
+                "with that skill's name — update it instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill slug, [A-Za-z0-9_-]. Reusing an "
+                        "existing name UPDATES that skill instead of duplicating it.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Trigger-phrased one-liner — 'Use when the "
+                        "user asks to …' — matched against future tasks; it is what "
+                        "makes the skill fire. Required for a new skill; omit on "
+                        "update to keep the existing one.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The full markdown playbook body (steps, "
+                        "commands, gotchas). No frontmatter — aish writes the "
+                        "header. REPLACES the existing body on update, so include "
+                        "the WHOLE revised playbook, never just the change.",
+                    },
+                    "keywords": {
+                        "type": "string",
+                        "description": "Comma-separated retrieval keywords: topical "
+                        "nouns and synonyms in every language the user types (e.g. "
+                        "'qr code, payment, przelew'). Omit on update to keep the "
+                        "existing ones.",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Only when a save was refused as similar to "
+                        "an existing skill AND you verified the playbooks are "
+                        "genuinely different: retry with force=true. Otherwise "
+                        "UPDATE the named skill.",
+                    },
+                },
+                "required": ["name", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": (
                 "Read a text file with line numbers, optionally a specific line range. "

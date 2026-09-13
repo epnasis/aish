@@ -4096,6 +4096,7 @@ const TOOL_STATUS = {
   read_skill: (r) => "Reading skill: " + (r.summary || "…"),
   recall: (r) => "Recalling: " + (r.summary || "…"),
   remember: (r) => "Saving to memory: " + (r.summary || "…"),
+  create_skill: (r) => "Saving skill: " + (r.summary || "…"),
   create_tool: () => "Creating a tool",
   import_skill: (r) => "Importing skill: " + (r.summary || "…"),
 };
