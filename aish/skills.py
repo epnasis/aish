@@ -1218,6 +1218,7 @@ def forget_memory(name: str, cwd: str = "") -> str:
 
 def plan_skill(name: str, description: str, content: str, keywords: str = "",
                cwd: str = "", semantic=None, force: bool = False,
+               expires: str | None = None, disabled: bool | None = None,
                on_admission=None) -> tuple[Path | None, str, str]:
     """Compose one skill file WITHOUT touching disk — the files.py plan/commit
     shape, because unlike `save_memory` the write must go through the caller's
@@ -1234,8 +1235,16 @@ def plan_skill(name: str, description: str, content: str, keywords: str = "",
     shell hunt over the config tree — `find ~/.config/aish -name "*.md"`,
     twice in one day, once held by the owner. An existing name resolves to
     its own file (flat `<name>.md` or a folder skill's SKILL.md) and is
-    updated in place, preserving status/expires and any description/keywords
-    the caller omitted; a new name lands in the global skills dir.
+    updated in place, preserving any description/keywords the caller omitted;
+    a new name lands in the global skills dir.
+
+    `expires`/`disabled` carry `save_memory`'s exact semantics (L4): None
+    preserves the file's value, `disabled` retires or revives via `status:
+    disabled`, and a malformed date is a strict write-side error. `pinned` is
+    preserved but never set here — pinning a skill is curate's verb — because
+    the header is regenerated, and a regenerated header that dropped
+    `pinned:` would hand the next curate pass a `disable` the envelope
+    refuses on pinned entries.
     """
     slug = name.strip()
     if not NAME_RE.match(slug or ""):
@@ -1246,6 +1255,12 @@ def plan_skill(name: str, description: str, content: str, keywords: str = "",
             "ERROR: content is required — a skill is a multi-step playbook. "
             "Save a one-line fact with remember() instead."
         )
+    expiry: date | None = None
+    if expires is not None and expires.strip():
+        try:
+            expiry = date.fromisoformat(expires.strip())
+        except ValueError:
+            return None, "", f"ERROR: invalid expires date {expires!r} — use YYYY-MM-DD"
     desc = frontmatter_value(description or "")
     # Keyword hygiene, identical to save_memory (#183, #209): each keyword is
     # model-authored and occupies part of ONE frontmatter line.
@@ -1260,6 +1275,14 @@ def plan_skill(name: str, description: str, content: str, keywords: str = "",
     # file too, or a disabled entry silently forks into a duplicate.
     all_skills = [e for e in _merged(skill_dirs(cwd), "skill") if e.path is not None]
     prior = next((e for e in all_skills if e.name == slug), None)
+    if prior is None and not desc:
+        # Before the dedup gate: an identity line with no description scores
+        # nothing meaningful, and recording an admission for a call that then
+        # errors would be a verdict about an entry that never existed.
+        return None, "", (
+            "ERROR: description is required for a new skill — trigger-"
+            "phrased, e.g. 'Use when the user asks to …'."
+        )
     if prior is None and not force:
         identity = f"{slug}: {desc}"
         if keyword_list:
@@ -1288,22 +1311,23 @@ def plan_skill(name: str, description: str, content: str, keywords: str = "",
                 f"with name=\"{similar.name}\"); only if this is genuinely a "
                 "different playbook, retry with force=true."
             )
-    if not desc:
-        if prior is None:
-            return None, "", (
-                "ERROR: description is required for a new skill — trigger-"
-                "phrased, e.g. 'Use when the user asks to …'."
-            )
+    if not desc and prior is not None:
         desc = frontmatter_value(prior.description)
     if not keyword_list and prior is not None:
         keyword_list = [frontmatter_value(w) for w in prior.keywords]
+    if disabled is None:
+        disabled = prior is not None and prior.status == "disabled"
+    if expiry is None and prior is not None:
+        expiry = prior.expires
     front = [f"name: {slug}", f"description: {desc}"]
     if keyword_list:
         front.append(f"keywords: {', '.join(keyword_list)}")
-    if prior is not None and prior.status == "disabled":
+    if prior is not None and prior.pinned:
+        front.append("pinned: yes")
+    if disabled:
         front.append("status: disabled")
-    if prior is not None and prior.expires is not None:
-        front.append(f"expires: {prior.expires.isoformat()}")
+    if expiry is not None:
+        front.append(f"expires: {expiry.isoformat()}")
     text = "---\n" + "\n".join(front) + "\n---\n" + body + "\n"
     path = prior.path if prior is not None else skill_dirs(cwd)[-1] / f"{slug}.md"
     return path, text, ""

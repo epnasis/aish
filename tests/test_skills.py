@@ -1756,3 +1756,74 @@ class TestPlanSkillRoundTrip:
         # read_text's universal newlines fold \r\n to \n on the way back in;
         # the prose is otherwise verbatim.
         assert entry.body == str(smuggled).strip().replace("\r\n", "\n")
+
+
+class TestPlanSkillLifecycle:
+    """The review findings on df19f0c: a regenerated header must not strip
+    `pinned:` (curate's disable-refusal keys on it), and retire/revive must be
+    expressible through the tool now that the prompts forbid hand-editing
+    skill files (L4 — save_memory's exact disabled/expires semantics)."""
+
+    def _seed(self, tmp_path, monkeypatch, front_extra=""):
+        directory = tmp_path / "skills"
+        directory.mkdir(exist_ok=True)
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", directory)
+        write_skill(directory, "probe.md", (
+            f"---\nname: probe\ndescription: d\n{front_extra}---\nold\n"
+        ))
+        return directory
+
+    def test_update_preserves_pinned(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch, "pinned: yes\n")
+        _, text, refusal = skills_module.plan_skill(
+            "probe", "", "new", cwd=str(tmp_path)
+        )
+        assert refusal == ""
+        assert "pinned: yes" in text
+
+    def test_update_preserves_kind_policy_as_pinned(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch, "kind: policy\n")
+        path, text, _ = skills_module.plan_skill(
+            "probe", "", "new", cwd=str(tmp_path)
+        )
+        path.write_text(text, encoding="utf-8")
+        assert _parse(path, "skill").pinned is True
+
+    def test_disabled_true_retires_and_false_revives(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        path, text, _ = skills_module.plan_skill(
+            "probe", "", "new", cwd=str(tmp_path), disabled=True
+        )
+        assert "status: disabled" in text
+        path.write_text(text, encoding="utf-8")
+        _, revived, _ = skills_module.plan_skill(
+            "probe", "", "newer", cwd=str(tmp_path), disabled=False
+        )
+        assert "status: disabled" not in revived
+
+    def test_expires_is_strict_on_write(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        path, _, refusal = skills_module.plan_skill(
+            "probe", "", "new", cwd=str(tmp_path), expires="soonish"
+        )
+        assert path is None and "invalid expires date" in refusal
+        _, text, refusal = skills_module.plan_skill(
+            "probe", "", "new", cwd=str(tmp_path), expires="2099-03-04"
+        )
+        assert refusal == "" and "expires: 2099-03-04" in text
+
+    def test_missing_description_errors_before_the_admission_record(
+        self, tmp_path, monkeypatch
+    ):
+        """An identity line with no description scores nothing meaningful; a
+        call that errors must not leave a verdict about an entry that never
+        existed."""
+        directory = tmp_path / "skills"
+        directory.mkdir()
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", directory)
+        recorded = []
+        path, _, refusal = skills_module.plan_skill(
+            "brand-new", "", "body", cwd=str(tmp_path), on_admission=recorded.append
+        )
+        assert path is None and "description is required" in refusal
+        assert recorded == []

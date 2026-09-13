@@ -10865,6 +10865,7 @@ class Agent:
         covers skills here for the first time; its verdicts land as
         `admission` records with target "skill" (contract §3.7)."""
         name = str(args.get("name", "")).strip()
+        disabled = args.get("disabled")
         path, text, refusal = skills.plan_skill(
             name,
             str(args.get("description", "") or ""),
@@ -10873,6 +10874,8 @@ class Agent:
             cwd=self.cwd,
             semantic=self.semantic.scores if self.semantic is not None else None,
             force=bool(args.get("force", False)),
+            expires=str(args.get("expires", "") or "") or None,
+            disabled=None if disabled is None else bool(disabled),
             on_admission=partial(self._record_admission, target="skill"),
         )
         if refusal:
@@ -10889,6 +10892,22 @@ class Agent:
         if commit_res is not None:
             return commit_res
         self._note(f"→ saved skill {name}")
+        # The claim below is read off the ARTIFACT, not assumed: an update to
+        # a retired or expired skill preserves that state, and "indexed from
+        # the next task" would then be a sentence the code guarantees false.
+        entry = skills._parse(path, "skill")
+        if not skills.entry_active(entry):
+            reason = (
+                "status: disabled"
+                if entry.status == "disabled"
+                else f"expired {entry.expires}"
+            )
+            return (
+                f"Saved skill {name!r} at {path} — but it is retired "
+                f"({reason}), so it will NOT be indexed, preloaded or "
+                "recalled until re-enabled (create_skill with "
+                "disabled=false)."
+            )
         return (
             f"Saved skill {name!r} at {path}. It is indexed from the next "
             "task and preloaded when a task matches its description/keywords."

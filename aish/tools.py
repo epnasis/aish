@@ -754,6 +754,20 @@ TOOL_SCHEMAS = [
                         "'qr code, payment, przelew'). Omit on update to keep the "
                         "existing ones.",
                     },
+                    "disabled": {
+                        "type": "boolean",
+                        "description": "Set true to RETIRE an existing skill "
+                        "without deleting it (reversible — false re-enables): "
+                        "pass its name and current content. A retired skill "
+                        "leaves the index, preflight and recall but keeps its "
+                        "file. Omit for normal saves.",
+                    },
+                    "expires": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD date after which the skill "
+                        "stops applying and drops out of the index and recall "
+                        "automatically. Omit for durable playbooks.",
+                    },
                     "force": {
                         "type": "boolean",
                         "description": "Only when a save was refused as similar to "

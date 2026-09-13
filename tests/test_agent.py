@@ -14699,3 +14699,36 @@ class TestCreateSkill:
             assert "create_skill" in surface
         assert "write or update the skill file" not in SYSTEM_PROMPT_TEMPLATE
         assert "~/.config/aish/skills/" not in LEARN_PROMPT
+
+    def test_the_result_line_says_what_the_artifact_means(self, tmp_path):
+        """A retired skill stays retired through an update, and the code
+        guarantees it reaches no index, preflight or recall — so the success
+        line must say so instead of promising 'indexed from the next task'
+        (the review finding on df19f0c; the confirmation and the artifact are
+        one claim, #209)."""
+        retired = skills_module.GLOBAL_SKILLS_DIR / "retired.md"
+        retired.write_text(
+            "---\nname: retired\ndescription: d\nstatus: disabled\n---\nold\n"
+        )
+        agent, _ = self._agent(
+            tmp_path,
+            [self._cs_call(name="retired", content="new")],
+            approve_write=lambda plan: True,
+        )
+        agent.run_task("update it")
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "retired" in result and "NOT be indexed" in result
+        assert "indexed from the next task" not in result
+
+    def test_disabled_arg_retires_a_skill_through_the_tool(self, tmp_path):
+        live = skills_module.GLOBAL_SKILLS_DIR / "live.md"
+        live.write_text("---\nname: live\ndescription: d\n---\nsteps\n")
+        agent, _ = self._agent(
+            tmp_path,
+            [self._cs_call(name="live", content="steps", disabled=True)],
+            approve_write=lambda plan: True,
+        )
+        agent.run_task("retire it")
+        assert "status: disabled" in live.read_text()
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "retired" in result
