@@ -25,6 +25,7 @@ from tests.test_recipients import _cli_cards, _FakeLog, _web_cards
 TAGGED_INLINE = "---\ntags: [aish, pay]\n---\n# Note\n\nbody\n"
 TAGGED_BLOCK = "---\ntitle: x\ntags:\n  - pay\n  - aish\n---\n# Note\n"
 TAGGED_HASH = '---\ntags: "#aish"\n---\n# Note\n'
+TAGGED_PAID = "---\ntags: [aish]\npaid: false\ndue: 2026\n---\n# Note\n"
 UNTAGGED = "---\ntags: [pay]\n---\n# Note\n"
 BODY_ONLY_HASH = "# Note\n\nsome text #aish here\n"
 
@@ -63,6 +64,7 @@ def _seed(vault: Path) -> None:
     _note(vault, "Payments/Twin.md", TAGGED_INLINE)
     _note(vault, "Archive/Twin.md", TAGGED_INLINE)
     _note(vault, "Payments/Eon.md", TAGGED_INLINE)
+    _note(vault, "Paid.md", TAGGED_PAID)
 
 
 # Each row is (label, args) for obsidian_write, with the answer BOTH surfaces owe.
@@ -110,8 +112,19 @@ _WRITES = [
      {"action": "append", "note": "Missing", "content": "more"}, True),
     ("append with attachments",
      {"action": "append", "note": "Tagged", "attachments": "/etc/hosts"}, True),
-    ("set_frontmatter paid=true on a tagged note",
+    ("set_frontmatter paid=true on a tagged note without paid",
      {"action": "set_frontmatter", "note": "Tagged", "frontmatter": "paid=true"}, False),
+    ("set_frontmatter paid=true on a note that already has paid",
+     {"action": "set_frontmatter", "note": "Paid", "frontmatter": "paid=true"}, True),
+    ("set_frontmatter Paid=true, case-folded against the existing key",
+     {"action": "set_frontmatter", "note": "Paid", "frontmatter": "Paid=true"}, True),
+    ("set_frontmatter a new key beside an existing one",
+     {"action": "set_frontmatter", "note": "Paid", "frontmatter": "amount=12"}, False),
+    ("set_frontmatter one new key and one existing key",
+     {"action": "set_frontmatter", "note": "Paid", "frontmatter": "amount=12, due=2027"},
+     True),
+    ("set_frontmatter overwriting via JSON form",
+     {"action": "set_frontmatter", "note": "Paid", "frontmatter": '{"due": "2027"}'}, True),
     ("set_frontmatter two keys, kv form",
      {"action": "set_frontmatter", "note": "Tagged", "frontmatter": "paid=true, due=2026"},
      False),
@@ -335,19 +348,33 @@ class TestSetFrontmatterStaysOnItsOwnLine:
     newline inside a value wrote a second `tags:` line, cardless, and the
     note fell out of its own opt-in on both sides."""
 
-    plain = staticmethod(vault_writes._frontmatter_is_plain)
+    plain = staticmethod(vault_writes._plain_frontmatter_keys)
 
-    def test_plain_forms_are_licensed(self):
-        for raw in (
-            "paid=true",
-            "paid=true, due=2026",
-            "paid=",
-            '{"paid": true, "due": "2026"}',
-            '{"paid": ["a", "b"], "n": 3}',
-            {"paid": True},
-            ' {"paid": "x"}',
+    def test_plain_forms_are_read(self):
+        for raw, keys in (
+            ("paid=true", {"paid"}),
+            ("paid=true, due=2026", {"paid", "due"}),
+            ("paid=", {"paid"}),
+            ('{"paid": true, "due": "2026"}', {"paid", "due"}),
+            ('{"paid": ["a", "b"], "n": 3}', {"paid", "n"}),
+            ({"Paid": True}, {"paid"}),
+            (' {"paid": "x"}', {"paid"}),
         ):
-            assert self.plain(raw), raw
+            assert self.plain(raw) == keys, raw
+
+    def test_the_notes_own_keys_are_read_liberally(self, tmp_path):
+        """Anything at column 0 with a colon counts as a key the note holds,
+        so a spelling this misses can only card an addition, never free an
+        overwrite."""
+        path = tmp_path / "n.md"
+        path.write_text(
+            "---\ntags: [aish]\nPaid: false\nurl: http://x\nodd:value\n"
+            "- item\n  nested: 1\n# comment: no\n---\nbody: not a key\n",
+            encoding="utf-8",
+        )
+        assert vault_writes._frontmatter_keys(path) == {"tags", "paid", "url", "odd"}
+        (tmp_path / "bare.md").write_text("no frontmatter\n", encoding="utf-8")
+        assert vault_writes._frontmatter_keys(tmp_path / "bare.md") == frozenset()
 
     def test_every_route_to_a_second_line_or_to_tags_cards(self):
         for raw in (
@@ -378,7 +405,7 @@ class TestSetFrontmatterStaysOnItsOwnLine:
             "key with space=1",
             "a:b=1",
         ):
-            assert not self.plain(raw), raw
+            assert self.plain(raw) is None, raw
 
 
 class TestTheLicenceNeverLeansOnTheWrapper:

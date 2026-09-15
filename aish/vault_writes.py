@@ -23,13 +23,12 @@ consequence, never per tool):
 - `append` to a note whose FRONTMATTER `tags` carry `aish` — the owner's
   per-note opt-in, made in Obsidian's Properties. Append destroys nothing.
 - `set_frontmatter` on such a note, ONLY when every key is a plain word other
-  than `tags`, and every value is a single-line scalar (or a list of them) —
-  no `null`, which removes a key. Touching `tags` could edit the note out of
-  its own opt-in, and a newline in a value writes a second YAML line that can
-  do the same thing by another route. What this still licenses is OVERWRITING
-  an existing scalar (`paid: false` → `paid: true`), whose undo is the
-  wrapper's trash copy; stated as the one accepted residual rather than
-  implied away.
+  than `tags`, ABSENT from the note's existing frontmatter, and every value
+  is a single-line scalar (or a list of them) — no `null`, which removes a
+  key. Adding a key destroys nothing. Overwriting one, removing one, or
+  touching `tags` each has no undo aish can see (the trash copy is the
+  wrapper's), and a newline in a value writes a second YAML line that can
+  rewrite `tags` by another route — so all of those card.
 
 What is deliberately NOT licensed, and why:
 
@@ -103,9 +102,12 @@ def owner_opted_write(
         elif action == "append":
             licensed = _opted_in_note(vault, args.get("note")) is not None
         elif action == "set_frontmatter":
+            # ONLY keys the note does not already hold: adding one destroys
+            # nothing, overwriting one has no undo aish can see.
+            keys = _plain_frontmatter_keys(args.get("frontmatter"))
+            note = _opted_in_note(vault, args.get("note"))
             licensed = (
-                _frontmatter_is_plain(args.get("frontmatter"))
-                and _opted_in_note(vault, args.get("note")) is not None
+                keys is not None and note is not None and not keys & _frontmatter_keys(note)
             )
         else:
             licensed = False
@@ -307,25 +309,53 @@ _TAGS_KEY = re.compile(r"^tags:[ \t]*(.*?)[ \t]*$")
 _LIST_ITEM = re.compile(r"^[ \t]*-[ \t]*(.*?)[ \t]*$")
 
 
+def _frontmatter_block(path: Path) -> list[str] | None:
+    """The lines between a note's leading `---` fences, or None when there is
+    no closed block at the top. ONE reading of where the header ends, shared
+    by the tags reader and the key reader below."""
+    with path.open("rb") as fh:
+        head = fh.read(_HEAD_BYTES)
+    lines = head.decode("utf-8").splitlines()
+    if not lines or lines[0].rstrip() != "---":
+        return None
+    block: list[str] = []
+    for line in lines[1:]:
+        if line.rstrip() in ("---", "..."):
+            return block
+        block.append(line)
+    return None
+
+
+def _frontmatter_keys(path: Path) -> frozenset[str]:
+    """Every top-level key the note's frontmatter already holds, lower-cased.
+    A line at column 0 with a colon in it is a key; list items and indented
+    continuations are not. Read so that `set_frontmatter` can be licensed
+    ONLY for keys that are ABSENT: adding one destroys nothing, while
+    overwriting one has no undo but the wrapper's trash copy."""
+    block = _frontmatter_block(path)
+    if block is None:
+        return frozenset()
+    keys = set()
+    for line in block:
+        match = _TOP_LEVEL_KEY.match(line)
+        if match:
+            keys.add(match.group(1).strip().strip("\"'").lower())
+    return frozenset(keys)
+
+
+# Liberal on purpose: any column-0 line with a colon is taken as a key, so a
+# spelling this misses can only card an addition, never free an overwrite.
+_TOP_LEVEL_KEY = re.compile(r"^([^\s\-#][^:]*):")
+
+
 def _frontmatter_tags(path: Path) -> frozenset[str]:
     """The tags a note's frontmatter declares, lower-cased and `#`-stripped —
     inline `[a, b]`, a block list, or a scalar. Only the leading `---` block
     counts; an inline `#aish` in the body is pasted content and licenses
     nothing. A `tags:` key stated twice is refused (#326): nothing here picks
     one of two readings."""
-    with path.open("rb") as fh:
-        head = fh.read(_HEAD_BYTES)
-    lines = head.decode("utf-8").splitlines()
-    if not lines or lines[0].rstrip() != "---":
-        return frozenset()
-    block: list[str] = []
-    closed = False
-    for line in lines[1:]:
-        if line.rstrip() in ("---", "..."):
-            closed = True
-            break
-        block.append(line)
-    if not closed:
+    block = _frontmatter_block(path)
+    if block is None:
         return frozenset()
     found = [i for i, line in enumerate(block) if _TAGS_KEY.match(line)]
     if len(found) != 1:
@@ -354,10 +384,10 @@ _PLAIN_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 _OPT_IN_KEYS = frozenset({"tags", "tag"})
 
 
-def _frontmatter_is_plain(raw: object) -> bool:
-    """Whether a `set_frontmatter` argument — a mapping, a JSON object string,
-    or `k=v, k2=v2` — sets ONLY plain keys to ONLY single-line values, and
-    never `tags`. Anything else is False (card).
+def _plain_frontmatter_keys(raw: object) -> frozenset[str] | None:
+    """The lower-cased keys a `set_frontmatter` argument — a mapping, a JSON
+    object string, or `k=v, k2=v2` — would set, when it sets ONLY plain keys
+    to ONLY single-line values and never `tags`. Anything else is None (card).
 
     The reason this reads VALUES and not only key names: the wrapper writes a
     value as a line of YAML, so a value carrying a newline becomes a second
@@ -367,19 +397,21 @@ def _frontmatter_is_plain(raw: object) -> bool:
     so removals card exactly as `replace` does."""
     pairs = _frontmatter_pairs(raw)
     if not pairs:
-        return False
+        return None
+    keys = set()
     for key, value in pairs:
         if not _PLAIN_KEY.match(key) or key.lower() in _OPT_IN_KEYS:
-            return False
+            return None
         items = value if isinstance(value, list) else [value]
         for item in items:
             if isinstance(item, bool | int | float):
                 continue
             if not isinstance(item, str) or len(item.splitlines()) > 1:
-                return False  # None (a removal), a nested object, a newline
+                return None  # None (a removal), a nested object, a newline
             if item.strip().lower() in ("null", "none"):
-                return False  # the kv form's own spelling of a removal
-    return True
+                return None  # the kv form's own spelling of a removal
+        keys.add(key.lower())
+    return frozenset(keys)
 
 
 def _frontmatter_pairs(raw: object) -> list[tuple[str, object]] | None:
