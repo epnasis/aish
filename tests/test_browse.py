@@ -5051,8 +5051,16 @@ class TestWhatRealPickersActuallyLookLike:
     def test_the_picker_clears_its_own_stale_tags(self):
         """Every month hop re-stamps from 1, so without this one number matched
         a cell from the month aish had just left — "two elements, one number,
-        silently", the defect CONTROLS_JS already records for data-aish-n."""
+        silently", the defect CONTROLS_JS already records for data-aish-n.
+
+        And the clear reaches as far as the stamp (#376): the grid is found
+        through shadow roots, so a document-scoped sweep left the arrows of a
+        shadow-rooted picker tagged, and the nav pass then skipped them as day
+        cells on every hop after the first. `scripts/verify_browse.py`'s
+        `check_shadow` is the instrument that measured it; this pins the reach."""
         assert "removeAttribute('data-aish-cell')" in browse.CALENDAR_JS
+        assert "deepAll('[data-aish-cell]')" in browse.CALENDAR_JS
+        assert "document.querySelectorAll('[data-aish-cell]')" not in browse.CALENDAR_JS
 
 
 def page_snippets():
@@ -5244,12 +5252,19 @@ class TestATagsWriterAndItsReadersHaveTheSameReach:
             },
         },
         # The picker's own numbering, written and cleared entirely inside
-        # `CALENDAR_JS`. LIGHT on both sides, and consistent with itself: the
-        # cells come from `grid.querySelectorAll`, so a tag can only ever be
-        # stamped where the document-wide clear can reach it.
+        # `CALENDAR_JS`. DEEP on both sides: the stamps go on
+        # `grid.querySelectorAll(...)`, and `grid` itself is found through
+        # shadow roots (`deepById` on aria-controls, `deepAll` on the fallback
+        # scan), so a tag lands wherever the picker lives. This row said LIGHT
+        # for a month on the claim that the clear could reach everything the
+        # stamp could — and it could not (#376): on a shadow-rooted picker the
+        # document-wide sweep left last pass's tag on the month arrow, and the
+        # "a day cell is not an arrow" guard then dropped the arrow as a cell.
+        # The write side of this table is the human's, which is exactly how a
+        # false claim survived the guard.
         "data-aish-cell": {
-            "writes": {"CALENDAR_JS": LIGHT},
-            "reads": {"CALENDAR_JS": LIGHT},
+            "writes": {"CALENDAR_JS": DEEP},
+            "reads": {"CALENDAR_JS": DEEP},
         },
         # The login form's fields, re-read immediately before the press because
         # the tag survives a same-document change — and once more before the
@@ -5378,14 +5393,21 @@ class TestATagsWriterAndItsReadersHaveTheSameReach:
         assert self._misdeclared(doctored, page_snippets())
         # …and the same lie told the other way round: a claim of DEEP over a
         # document-scoped lookup. Both patterns have to bite, or half the check
-        # is decoration.
+        # is decoration. Planted in a doctored snippet, not borrowed from a
+        # live one: this used to lean on `CALENDAR_JS`'s sweep being
+        # document-scoped, which was the #376 defect itself.
         overclaimed = {
             "data-aish-cell": {
                 "writes": {"CALENDAR_JS": DEEP},
                 "reads": {"CALENDAR_JS": DEEP},
             }
         }
-        assert self._misdeclared(overclaimed, page_snippets())
+        light_sweep = {
+            "CALENDAR_JS": "for (const s of document.querySelectorAll('[data-aish-cell]')) {}"
+        }
+        assert self._misdeclared(overclaimed, light_sweep)
+        # The shipped snippet, under the shipped table: no lie either way.
+        assert not self._misdeclared(overclaimed, page_snippets())
 
     def test_the_guard_catches_an_unlisted_snippet(self, monkeypatch):
         monkeypatch.setattr(

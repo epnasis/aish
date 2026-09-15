@@ -2817,7 +2817,16 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
   // `.first` took the stale one. Measured on wizzair.com: the walk from August
   // to December worked, the picker was showing the right day, and the press
   // came back Stuck because it was aimed at a cell no longer on the page.
-  for (const stale of document.querySelectorAll('[data-aish-cell]')) {
+  //
+  // The sweep has the STAMP's reach. `grid` is found through shadow roots
+  // (deepById / deepAll above), so the stamps land wherever the picker lives
+  // — and a `document.querySelectorAll` here cannot see into a shadow root at
+  // all. Measured (#376): on a shadow-rooted picker the first pass listed both
+  // arrows, the second listed none, because the arrow still carried last
+  // pass's tag and the "a day cell is not an arrow" guard below took the
+  // stale tag as proof it was a cell. The refusal then read "nothing that
+  // could move it" — a fact about the page that was a fact about this line.
+  for (const stale of deepAll('[data-aish-cell]')) {
     stale.removeAttribute('data-aish-cell');
   }
   const cells = [];
