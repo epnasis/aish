@@ -269,7 +269,7 @@ def test_the_wire_still_says_session() -> None:
     # `aish explain` and the web trace card read back out of logs written years
     # apart. Only the line the user reads was reworded (#260).
     assert '"approved+session" if saved else "approved"' in CLI
-    assert 'chat-allowed: {typed or suggestion}' in CLI
+    assert 'chat-allowed: {_plain(typed or suggestion)}' in CLI  # sanitised, #327
 
 
 def test_the_old_spelling_of_a_command_still_works() -> None:

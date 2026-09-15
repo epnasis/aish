@@ -400,13 +400,13 @@ def allow_segments_flow(command: str, allow_path: Path) -> bool:
     saved = False
     for suggestion in suggestions:
         answer = input(
-            f"{YELLOW}always allow prefix{RESET} [{BOLD}{suggestion}{RESET}] "
+            f"{YELLOW}always allow prefix{RESET} [{BOLD}{_plain(suggestion)}{RESET}] "
             f"(enter=yes, s=skip, or type a different prefix): "
         ).strip()
         if answer.lower() == "s":
             continue
         save_prefix(allow_path, answer or suggestion)
-        print(f"{DIM}  saved: {answer or suggestion} → {allow_path}{RESET}")
+        print(f"{DIM}  saved: {_plain(answer or suggestion)} → {allow_path}{RESET}")
         saved = True
     return saved
 
@@ -422,7 +422,9 @@ def print_intent(said: str) -> None:
     """
     if not said:
         return
-    lines = said.strip().splitlines()
+    lines = _plain(said).strip().splitlines()
+    if not lines:
+        return
     print(f"\n{DIM}  \u25b8 aish says: {lines[0]}{RESET}")
     for line in lines[1:]:
         print(f"{DIM}    {line}{RESET}")
@@ -476,8 +478,8 @@ def make_approver(
         # the allowlist can never bypass this.
         reason = check_denied(command, load_prefixes(deny_path))
         if reason:
-            print(f"\n{RED}✗ blocked ({reason}):{RESET}\n  {BOLD}{command}{RESET}")
-            print(f"{DIM}  run it yourself with !{command}  if you truly mean it{RESET}")
+            print(f"\n{RED}✗ blocked ({reason}):{RESET}\n  {BOLD}{_plain(command)}{RESET}")
+            print(f"{DIM}  run it yourself with !{_plain(command)}  if you truly mean it{RESET}")
             record(command, f"blocked: {reason}")
             return Blocked(reason)
 
@@ -485,16 +487,19 @@ def make_approver(
         if not ask_all and is_auto_approvable(
             command, known_prefixes(), cwd=cwd, roots=roots
         ):
-            print(f"\n{GREEN}✓ auto-approved:{RESET} {BOLD}{command}{RESET}")
+            print(f"\n{GREEN}✓ auto-approved:{RESET} {BOLD}{_plain(command)}{RESET}")
             record(command, "auto")
             return command
 
         print_intent(intent())
         warning = f" {RED}⚠ destructive{RESET}" if looks_destructive(command) else ""
-        print(f"\n{YELLOW}{BOLD}▶ run command?{RESET}{warning}\n  {BOLD}{command}{RESET}")
+        # The thing being approved is the thing being printed, one line above
+        # [y/N]: it must not be able to repaint itself (#327). The RECORD keeps
+        # the raw string; only the screen is sanitised.
+        print(f"\n{YELLOW}{BOLD}▶ run command?{RESET}{warning}\n  {BOLD}{_plain(command)}{RESET}")
         escapes = escaping_dirs(command, cwd, roots) if trust_dir and cwd and roots else []
         if escapes:
-            print(f"{YELLOW}  ⚠ outside this chat's roots:{RESET} {', '.join(escapes)}")
+            print(f"{YELLOW}  ⚠ outside this chat's roots:{RESET} {_plain(', '.join(escapes))}")
         options = (
             "[y/N/a(lways)/c(hat)/t(rust dir)/e(dit)]"
             if escapes
@@ -511,7 +516,7 @@ def make_approver(
             return command
         if answer == "t" and escapes:
             for directory in escapes:
-                print(f"{DIM}  {trust_dir(directory)}{RESET}")
+                print(f"{DIM}  {_plain(trust_dir(directory))}{RESET}")
             record(command, f"approved+trusted:{','.join(escapes)}")
             return command
         if answer == "a":
@@ -529,13 +534,13 @@ def make_approver(
             for suggestion in suggestions:
                 typed = input(
                     f"{YELLOW}allow prefix for THIS CHAT{RESET} "
-                    f"[{BOLD}{suggestion}{RESET}] "
+                    f"[{BOLD}{_plain(suggestion)}{RESET}] "
                     f"(enter=yes, s=skip, or type a different prefix): "
                 ).strip()
                 if typed.lower() == "s":
                     continue
                 session_prefixes().add(typed or suggestion)
-                print(f"{DIM}  chat-allowed: {typed or suggestion}{RESET}")
+                print(f"{DIM}  chat-allowed: {_plain(typed or suggestion)}{RESET}")
                 saved = True
             # The verdict is PERSISTED and read back — by `aish explain` and by
             # every trace card replaying a log written before #260. Only the
@@ -549,8 +554,9 @@ def make_approver(
                 # `ls` could be edited into `rm -rf /` and run unchecked.
                 reason = check_denied(edited, load_prefixes(deny_path))
                 if reason:
-                    print(f"\n{RED}✗ blocked ({reason}):{RESET}\n  {BOLD}{edited}{RESET}")
-                    print(f"{DIM}  run it yourself with !{edited}  if you truly mean it{RESET}")
+                    shown = _plain(edited)
+                    print(f"\n{RED}✗ blocked ({reason}):{RESET}\n  {BOLD}{shown}{RESET}")
+                    print(f"{DIM}  run it yourself with !{shown}  if you truly mean it{RESET}")
                     record(f"{command} => {edited}", f"blocked: {reason}")
                     return Blocked(reason)
                 record(f"{command} => {edited}", "edited")
@@ -564,8 +570,10 @@ def make_approver(
 
 
 def colorize_diff(diff: str) -> str:
+    # The body is page/file content and sits in the same card whose note is
+    # sanitised — per line, BEFORE the SGR wrapping, so the wrapping survives.
     out = []
-    for line in diff.splitlines():
+    for line in _plain(diff).splitlines():
         if line.startswith("+++") or line.startswith("---"):
             out.append(f"{BOLD}{line}{RESET}")
         elif line.startswith("+"):
@@ -579,16 +587,78 @@ def colorize_diff(diff: str) -> str:
     return "\n".join(out)
 
 
+# What a terminal reads as an instruction rather than as text (#327). Two
+# sanitisers share these pieces and differ in exactly one thing: whether SGR
+# (colour) survives. Alternation order matters — the escape-led sequences are
+# tried before the lone-control class, so `ESC [ 2 A` is consumed as ONE
+# cursor-up and not as an ESC marker followed by the visible text "[2A".
+_CSI_SEQ = r"\x1b\[[0-?]*[ -/]*[@-~]"
+# SGR proper: numeric params with `;` (and `:` for 38:2::r:g:b). The
+# private-parameter forms ending in `m` are NOT colour — ESC[>4;2m re-encodes
+# what the owner types at the next [y/N], ESC[?4m makes the terminal REPLY
+# into stdin — so `[0-?]` would have let state changes ride in as colour.
+_SGR_SEQ = r"\x1b\[[0-9;:]*m"
+# OSC / DCS / SOS / PM / APC run to a terminator (BEL, ESC \, or 8-bit ST) and
+# are consumed whole — a terminal shows none of an OSC 8 hyperlink's target.
+# An UNTERMINATED one is deliberately not matched here: it falls through to
+# `_ESC_OTHER`, which removes the introducer and leaves the payload as inert,
+# visible text. A real terminal would swallow everything after it; hiding the
+# rest of a card is the opposite of what a sanitiser is for.
+_STRING_SEQ = r"\x1b[\]PX^_][^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
+# Every other ESC-led form (ESC 7, ESC M reverse-index, ESC ( B charset …).
+_ESC_OTHER = r"\x1b[ -/]*[0-~]"
 # C1 too (0x80–0x9f): 0x9b IS a CSI on a terminal reading 8-bit controls, so
 # stripping only C0 leaves the single-byte form of the escape it removes.
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+_C0_C1_EXCEPT_TAB_LF = r"[\x00-\x08\x0b-\x1f\x7f-\x9f]"
+_C0_C1_EXCEPT_TAB_LF_CR = r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
+# Unicode format controls that reorder or re-nest rendered text (LRM/RLM, the
+# embedding/override/pop set, the isolate set): the same attack on a card as a
+# cursor move, in a character class no terminal escapes.
+_BIDI_CONTROLS = r"[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+# `str.splitlines()` breaks on these two, so an unmarked one turns a single
+# diff line into two — `+foo\u2028-bar` painted as an add AND a delete.
+_LINE_SEPARATORS = r"[\u2028\u2029]"
+
+_CARD_UNSAFE = re.compile(
+    "|".join((_CSI_SEQ, _STRING_SEQ, _ESC_OTHER, _C0_C1_EXCEPT_TAB_LF, _BIDI_CONTROLS,
+              _LINE_SEPARATORS))
+)
+_LIVE_UNSAFE = re.compile(
+    "|".join((f"(?P<sgr>{_SGR_SEQ})", _CSI_SEQ, _STRING_SEQ, _ESC_OTHER,
+              _C0_C1_EXCEPT_TAB_LF_CR))
+)
+_REMOVED_MARK = "\N{REPLACEMENT CHARACTER}"
 
 
 def _plain(text: str) -> str:
-    """Text that cannot repaint the terminal it is printed into. Newlines and
-    tabs survive; every other control character, escape sequences included,
-    becomes a visible marker rather than an instruction to the terminal."""
-    return _CONTROL_CHARS.sub("\ufffd", text)
+    """Card mode: text that cannot repaint the terminal it is printed into.
+
+    For approval-card bodies and model-authored prose — nothing there
+    legitimately moves a cursor, so EVERY control goes: C0 except tab and
+    newline, C1, escape sequences with their string terminators, the bidi
+    controls, and the Unicode line separators `splitlines()` would break on.
+    Each becomes a visible marker rather than an instruction
+    to the terminal, so a card that had something stripped from it says so.
+    CRLF collapses to LF first (a diff of a CRLF file is not an attack); a lone
+    CR is one — `rm -rf /\\rls` paints as `ls` — and is marked.
+    """
+    return _CARD_UNSAFE.sub(_REMOVED_MARK, text.replace("\r\n", "\n"))
+
+
+def _plain_live(text: str) -> str:
+    """Live mode: a command's own output, where colour is expected to survive.
+
+    `ls`, `git`, `rg --color` send SGR on purpose, so `ESC [ … m` is kept
+    intact. Everything else a terminal would act on is marked: CSI with any
+    other final byte (cursor moves, erases, scroll regions), the OSC/DCS/APC/PM
+    /SOS strings (an OSC 8 hyperlink's target goes with it), the remaining
+    ESC-led forms, and the lone C0/C1 controls apart from tab, newline and CR.
+    CR stays: a line arrives here already split on LF, so CR can only overwrite
+    within that one line (progress bars), never reach the lines above it. The
+    bidi controls are left alone too — `cat` of a file with real RTL text needs
+    them, and live output is not a decision surface.
+    """
+    return _LIVE_UNSAFE.sub(lambda m: m.group("sgr") or _REMOVED_MARK, text)
 
 
 def make_write_approver(log, get_intent=None):
@@ -600,9 +670,9 @@ def make_write_approver(log, get_intent=None):
             # A rule is not a file, to the person approving it.
             head = {"Created": "new rule", "Updated": "rule change",
                     "Retired": "retire rule"}.get(plan.rule_verb, "rule")
-            print(f"\n{YELLOW}{BOLD}▶ {head}?{RESET} {BOLD}{plan.rule}{RESET}")
+            print(f"\n{YELLOW}{BOLD}▶ {head}?{RESET} {BOLD}{_plain(str(plan.rule))}{RESET}")
         else:
-            print(f"\n{YELLOW}{BOLD}▶ {verb} file?{RESET} {BOLD}{plan.target}{RESET} "
+            print(f"\n{YELLOW}{BOLD}▶ {verb} file?{RESET} {BOLD}{_plain(str(plan.target))}{RESET} "
                   f"{DIM}(+{plan.added} -{plan.removed}){RESET}")
         if plan.note:
             # Above the diff, because for a rule the diff is YAML the owner did
@@ -640,19 +710,21 @@ def make_import_approver(log, get_intent=None):
     def approve_import(name, description, files, skipped, flags, dest) -> bool:
         said = (get_intent() if get_intent else "") or ""
         print_intent(said)
-        print(f"\n{YELLOW}{BOLD}▶ import skill?{RESET} {BOLD}{name}{RESET}")
-        print(f"{DIM}  {description}{RESET}")
-        print(f"{DIM}  → {dest}  ({len(files)} files){RESET}")
+        # Attacker-authored by construction — that is what this review reads.
+        # Every field is sanitised, not just the file bodies (#327).
+        print(f"\n{YELLOW}{BOLD}▶ import skill?{RESET} {BOLD}{_plain(str(name))}{RESET}")
+        print(f"{DIM}  {_plain(str(description))}{RESET}")
+        print(f"{DIM}  → {_plain(str(dest))}  ({len(files)} files){RESET}")
         if flags:
             print(f"{RED}  ⚠ review closely:{RESET}")
             for flag in flags:
-                print(f"{RED}    • {flag}{RESET}")
+                print(f"{RED}    • {_plain(str(flag))}{RESET}")
         if skipped:
-            print(f"{DIM}  (binary assets skipped: {', '.join(skipped)}){RESET}")
+            print(f"{DIM}  (binary assets skipped: {_plain(', '.join(skipped))}){RESET}")
         for f in files:
-            print(f"\n{CYAN}{BOLD}── {f['path']}{RESET}"
+            print(f"\n{CYAN}{BOLD}── {_plain(str(f['path']))}{RESET}"
                   f"{DIM}{'  (executable)' if f.get('executable') else ''}{RESET}")
-            print(f["content"].rstrip("\n"))
+            print(_plain(f["content"]).rstrip("\n"))
         try:
             answer = input(f"\n{YELLOW}install this skill? [y/N]{RESET} ").strip().lower()
         except EOFError:
@@ -690,7 +762,7 @@ def make_tool_approver(log, get_intent=None, get_gate=None):
         said = (get_intent() if get_intent else "") or ""
         if recipients.owner_scoped_send(name, args):
             print(f"\n{DIM}✓ auto-approved ({recipients.OWNER_ONLY}): "
-                  f"{name}({shown}){RESET}")
+                  f"{_plain(name)}({_plain(shown)}){RESET}")
             if log:
                 log.command(
                     f"tool {name}({shown})", f"auto ({recipients.OWNER_ONLY})", said,
@@ -698,9 +770,10 @@ def make_tool_approver(log, get_intent=None, get_gate=None):
                 )
             return True
         print_intent(said)
-        print(f"\n{YELLOW}{BOLD}▶ run tool?{RESET} {BOLD}{name}{RESET}({shown})")
+        print(f"\n{YELLOW}{BOLD}▶ run tool?{RESET} {BOLD}{_plain(name)}{RESET}({_plain(shown)})")
         if preview:
-            print(f"{DIM}  {preview}{RESET}")
+            # A plugin wrapper's raw preview stdout, on a mutating tool's card.
+            print(f"{DIM}  {_plain(preview)}{RESET}")
         try:
             answer = input(f"{YELLOW}[y/N]{RESET} ").strip().lower()
         except EOFError:
@@ -729,9 +802,9 @@ def make_read_approver(log, trust_dir=None, get_intent=None):
         offer_trust = reason == "outside" and trust_dir is not None
         if reason == "outside":
             print(f"\n{YELLOW}{BOLD}▶ read file outside the project?{RESET} "
-                  f"{BOLD}{path}{RESET} {DIM}(/cd or /add-dir widens the scope){RESET}")
+                  f"{BOLD}{_plain(path)}{RESET} {DIM}(/cd or /add-dir widens the scope){RESET}")
         else:
-            print(f"\n{YELLOW}{BOLD}▶ read sensitive file?{RESET} {BOLD}{path}{RESET} "
+            print(f"\n{YELLOW}{BOLD}▶ read sensitive file?{RESET} {BOLD}{_plain(path)}{RESET} "
                   f"{RED}⚠ may contain secrets{RESET}")
         options = "[y/N/t(rust dir)]" if offer_trust else "[y/N]"
         try:
@@ -740,7 +813,7 @@ def make_read_approver(log, trust_dir=None, get_intent=None):
             answer = ""
         if answer == "t" and offer_trust:
             directory = os.path.dirname(os.path.expanduser(path)) or "."
-            print(f"{DIM}  {trust_dir(directory)}{RESET}")
+            print(f"{DIM}  {_plain(trust_dir(directory))}{RESET}")
             if log:
                 log.command(
                     f"read {path}", f"approved+trusted:{directory}", said,
@@ -764,7 +837,10 @@ _timer = None
 
 
 def echo(text: str) -> None:
-    lines = text.splitlines()
+    # Chokepoint for progress notes and tool results (#327): card mode, since
+    # nothing routed here is a command's live output — that goes through
+    # stream_line, which keeps colour.
+    lines = _plain(text).splitlines()
     shown = lines[:ECHO_PREVIEW_LINES]
     out = DIM + "\n".join(f"  {line}" for line in shown) + RESET
     if len(lines) > ECHO_PREVIEW_LINES:
@@ -776,7 +852,14 @@ def echo(text: str) -> None:
 
 
 def stream_line(line: str) -> None:
-    print(f"{DIM}  {line}{RESET}")
+    print(f"{DIM}  {_plain_live(line)}{RESET}")
+
+
+def print_answer_piece(text: str) -> None:
+    """One piece of the streamed final answer, after the chip filter. Card
+    mode, per piece: a sequence split across two tokens leaves a lone ESC in
+    the first, which is marked, and inert text in the second."""
+    print(f"{GREEN}{_plain(text)}{RESET}", end="", flush=True)
 
 
 class LiveTimer:
@@ -872,7 +955,7 @@ def print_sources(agent) -> None:
     for source in sources:
         title = source.get("title")
         line = f"{title} — {source['url']}" if title else source["url"]
-        print(f"{DIM}  ↳ {line}{RESET}")
+        print(f"{DIM}  ↳ {_plain(line)}{RESET}")
 
 
 def resolve_chip_selection(task: str, chips: list[tuple[str, str]]) -> str:
@@ -891,7 +974,7 @@ def print_chip_menu(chips: list[tuple[str, str]]) -> None:
         return
     print(f"{DIM}Quick replies (type a number to send):{RESET}")
     for i, (label, _reply) in enumerate(chips, 1):
-        print(f"{DIM}  {i}.{RESET} {label}")
+        print(f"{DIM}  {i}.{RESET} {_plain(label)}")
 
 
 def print_answer_images(agent, answer: str) -> None:
@@ -925,17 +1008,17 @@ def replay_history(messages: list[dict]) -> list[tuple[str, str]]:
             # FOR THE MODEL. Resuming a web session in the terminal printed those
             # back as if the user had typed them, absolute uploads path and all —
             # so show what was typed, and name the files as files.
-            typed = strip_attachment_notes(content)
-            files = attachment_names(content)
+            typed = _plain(strip_attachment_notes(content))
+            files = [_plain(name) for name in attachment_names(content)]
             if files:
                 typed = f"{typed} {DIM}[{', '.join(files)}]{RESET}" if typed \
                     else f"{DIM}[{', '.join(files)}]{RESET}"
             print(f"\n{BOLD}❯{RESET} {typed}")
         elif role == "assistant":
             content, pending = parse_reply_chips(content)
-            print(f"{GREEN}{content}{RESET}")
+            print(f"{GREEN}{_plain(content)}{RESET}")
         else:
-            lines = content.splitlines()
+            lines = _plain(content).splitlines()
             print(DIM + "\n".join(f"  {line}" for line in lines[:REPLAY_TOOL_LINES]) + RESET)
             if len(lines) > REPLAY_TOOL_LINES:
                 print(f"{DIM}  … ({len(lines) - REPLAY_TOOL_LINES} more lines){RESET}")
@@ -1962,7 +2045,7 @@ def _skill_cli(args: list[str]) -> int:
         if flags:
             print(f"{RED}  ⚠ review closely:{RESET}")
             for flag in flags:
-                print(f"{RED}    • {flag}{RESET}")
+                print(f"{RED}    • {_plain(str(flag))}{RESET}")
         print(f"\nreview the files, then install with:  {BOLD}aish skill approve {name}{RESET}")
         print(f"or drop it with:                      aish skill discard {name}")
         return 0
@@ -2015,10 +2098,12 @@ def _explain_cli(args: list[str]) -> int:
         for path in matches[-20:]:
             print(f"  {path.name}")
         return 2
+    # Live mode (#327): the dossier quotes a page's own console output, and it
+    # colours its own headings — so keep SGR and neutralise the cursor moves.
     print(
-        explain_mod.explain(
+        _plain_live(explain_mod.explain(
             matches[0], turn, show_tools=show_tools, show_context=show_context
-        )
+        ))
     )
     return 0
 
@@ -2283,9 +2368,7 @@ def main() -> int:
 
     # Strip quick-reply chip syntax out of the streamed body (#167): the chips
     # are surfaced as a numbered menu after the answer, not as raw markdown.
-    chip_stream = ChipStream(
-        lambda text: print(f"{GREEN}{text}{RESET}", end="", flush=True)
-    ) if stream_answers else None
+    chip_stream = ChipStream(print_answer_piece) if stream_answers else None
 
     def print_token(token: str) -> None:
         assert chip_stream is not None
@@ -2438,7 +2521,7 @@ def main() -> int:
             chip_stream.close()
         clean, _chips = parse_reply_chips(result)
         if not stream_answers:
-            print(f"{GREEN}{clean}{RESET}")
+            print(f"{GREEN}{_plain(clean)}{RESET}")
         print_answer_images(agent, result)
         print_sources(agent)
         return 0
@@ -2460,7 +2543,7 @@ def main() -> int:
         # normal message. Chips are one-shot — consumed by whatever comes next.
         selected = resolve_chip_selection(task, pending_chips)
         if selected != task:
-            print(f"{BOLD}❯{RESET} {selected}")
+            print(f"{BOLD}❯{RESET} {_plain(selected)}")
         task = selected
         pending_chips = []
         if task in ("exit", "quit"):
@@ -2499,7 +2582,7 @@ def main() -> int:
                 chip_stream.close()
             clean, pending_chips = parse_reply_chips(result)
             if not stream_answers:
-                print(f"\n{GREEN}{clean}{RESET}")
+                print(f"\n{GREEN}{_plain(clean)}{RESET}")
             print_answer_images(agent, result)
             print_sources(agent)
             print_chip_menu(pending_chips)
