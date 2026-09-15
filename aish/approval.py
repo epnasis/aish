@@ -150,6 +150,21 @@ EXEC_WRAPPERS = frozenset(
 FORBIDDEN_CHARS = frozenset(";<>`$(){}\n")
 FORBIDDEN_IN_DOUBLE_QUOTES = frozenset("`$")
 
+# Bytes a terminal reads as an instruction rather than as text, judged on the
+# RAW string before any parsing (#382): C0 controls other than tab and newline
+# (a bare newline is already in FORBIDDEN_CHARS; a quoted one is inert text the
+# card shows as-is), DEL and the C1 range (0x9b is the one-byte CSI), the bidi
+# controls, and the two Unicode line separators. The same set the approval
+# card marks with a replacement character (#327, `cli._CARD_UNSAFE`) — an
+# auto-approved command prints no card, so this is the only place the marker
+# can be "seen". The only reasons such a byte exists in a command are a model
+# quoting page text verbatim or an attempt to make the printed card differ
+# from the recorded command; the classifier must not find out which, so it
+# prompts on any of them without looking further.
+_CONTROL_BYTES = re.compile(
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]"
+)
+
 # How the shell will treat one character.
 _BARE, _ESCAPED, _SINGLE, _DOUBLE = "bare", "escaped", "single", "double"
 
@@ -541,6 +556,8 @@ def is_auto_approvable(
     user-persisted prefix. One unvetted segment means the whole command prompts.
     When cwd/roots are given, path arguments escaping the roots also force a
     prompt — and the user allowlist never bypasses that check."""
+    if _CONTROL_BYTES.search(command):
+        return False
     segments = split_chain(command)
     if segments is None:
         return False
@@ -862,7 +879,7 @@ def prefix_suggestions(command: str, prefixes: Collection[str]) -> list[str]:
     and saved a rule named `keys'` (#265). Both callers show the buttons only
     when this returns something.
     """
-    if split_chain(command) is None:
+    if _CONTROL_BYTES.search(command) or split_chain(command) is None:
         return []
     return [suggest_prefix(segment) for segment in unvetted_segments(command, prefixes)]
 

@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import pytest
 
+from aish import approval as approval_module
 from aish.approval import (
     check_denied,
     escaping_dirs,
@@ -799,6 +802,91 @@ class TestQuoteAwareParsing:
         assert not is_auto_approvable("awk '{print $1}' f", ["awk"])
         assert not is_read_only("jq '.a' f")  # jq is not a SAFE_COMMAND by itself
         assert not is_auto_approvable("jq '.a' f | rm x", ["jq"])
+
+
+class TestControlBytesNeverAutoApprove:
+    """#382. `ls \\x1b[2A\\x1b[2K` classified as read-only and ran with no card:
+    the escape sequence rode as an ordinary argument through the classifier.
+    #327 marks such bytes on every PRINTED card, but an auto-approved command
+    prints none, so the classifier is the only place they can be refused."""
+
+    CONTROL = [
+        pytest.param("ls \x1b[2A", id="ESC (7-bit CSI)"),
+        pytest.param("ls \x9b2A", id="C1 (8-bit CSI)"),
+        pytest.param("ls \x7f", id="DEL"),
+        pytest.param("ls \u202e", id="bidi override"),
+        pytest.param("ls \u2029 pwd", id="paragraph separator"),
+        pytest.param("ls\x00", id="NUL"),
+        pytest.param("ls\r", id="lone CR"),
+        pytest.param("ls 'a\x1bb'", id="ESC inside single quotes"),
+    ]
+
+    @pytest.mark.parametrize("command", CONTROL)
+    def test_a_control_byte_anywhere_forces_a_prompt(self, command):
+        assert not is_auto_approvable(command, [])
+
+    @pytest.mark.parametrize("command", CONTROL)
+    def test_the_user_allowlist_does_not_lift_it(self, command):
+        """The check runs before the allowlist is consulted, so a saved `ls`
+        prefix cannot wave the bytes through either."""
+        assert not is_auto_approvable(command, ["ls"])
+
+    @pytest.mark.parametrize("command", CONTROL)
+    def test_no_rule_is_offered_that_the_gate_would_not_honour(self, command):
+        """The #265 promise: 'Always' is shown only when saving it would work."""
+        assert prefix_suggestions(command, []) == []
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("ls -la", id="plain"),
+            pytest.param("ls 'zażółć gęślą'", id="non-ASCII text is not a control"),
+            pytest.param("ls\t-la", id="tab stays accepted"),
+            pytest.param("grep 'a\nb' f", id="quoted newline stays inert text"),
+        ],
+    )
+    def test_readable_text_keeps_its_verdict(self, command):
+        assert is_auto_approvable(command, [])
+
+    def test_a_bare_newline_still_fails_closed_as_before(self):
+        assert not is_auto_approvable("ls\npwd", [])
+
+    def test_the_expanded_alias_is_what_the_gate_sees(self):
+        """Aliases expand BEFORE the gate (aliases.py), so bytes hidden behind an
+        opaque alias name are judged on the command that will actually run."""
+        from aish import aliases
+
+        expanded = aliases.expand("ll", {"ll": "ls \x1b[2A\x1b[2K"})
+        assert "\x1b" in expanded
+        assert not is_auto_approvable(expanded, ["ll", "ls"])
+
+    # Built with chr() rather than written as \u escapes, because an editing
+    # tool that "helpfully" decodes escapes is exactly how the literals got
+    # into the source the first time — the guard must not be convertible.
+    INVISIBLE = "".join(
+        chr(cp)
+        for cp in (0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A),
+                   0x2028, 0x2029)
+    )
+
+    @pytest.mark.parametrize(
+        "source_file",
+        [
+            pytest.param(Path(approval_module.__file__), id="aish/approval.py"),
+            pytest.param(Path(approval_module.__file__).with_name("cli.py"), id="aish/cli.py"),
+            pytest.param(Path(__file__), id="tests/test_approval.py"),
+        ],
+    )
+    def test_the_source_spells_every_invisible_code_point_as_an_escape(self, source_file):
+        """The first commit of this fix shipped the regex with nine LITERAL
+        bidi/format characters in it — an editing tool decoded the `\\u`
+        escapes — which is hidden-bidi Unicode in repo source, the very thing
+        the regex guards commands against, and what GitHub flags. Scanned as
+        one string, not per line: `splitlines()` breaks on U+2028/9 and a
+        per-line scan hid exactly those two."""
+        text = source_file.read_text(encoding="utf-8")
+        found = sorted({f"U+{ord(ch):04X}" for ch in text if ch in self.INVISIBLE})
+        assert not found, f"{source_file.name} holds literal invisible code points: {found}"
 
 
 class TestPrefixSuggestions:

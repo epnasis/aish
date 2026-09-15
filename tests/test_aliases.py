@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from aish import aliases
 from aish.agent import Agent
-from aish.approval import Blocked, check_denied, is_read_only
+from aish.approval import Blocked, check_denied, is_auto_approvable, is_read_only
 
 # --- pure expansion -------------------------------------------------------
 
@@ -194,6 +194,27 @@ class TestGateSeesExpanded:
         # The expanded form is what the read-only classifier judges.
         assert is_read_only(aliases.expand("ll", {"ll": "ls -l"}))
         assert not is_read_only(aliases.expand("nuke", {"nuke": "rm -rf /tmp/x"}))
+
+    def test_alias_hiding_a_control_byte_is_judged_on_its_expansion(self):
+        """#382: the alias NAME is clean, the command it expands to carries an
+        escape sequence. The gate is handed the expansion, and the classifier
+        refuses it — a saved prefix for either spelling does not lift that."""
+        seen: list[str] = []
+        chat = _scripted(
+            [
+                _model_says(tool_calls=[_tool_call("run_command", command="ll")]),
+                _model_says("done"),
+            ]
+        )
+        agent = Agent(
+            model="fake",
+            approve=_gate_approver(seen),
+            client_chat=chat,
+            aliases={"ll": "ls \x1b[2A\x1b[2K"},
+        )
+        agent.run_task("list")
+        assert seen == ["ls \x1b[2A\x1b[2K"]
+        assert not is_auto_approvable(seen[0], ["ll", "ls"])
 
 
 class TestUserCommandPath:
