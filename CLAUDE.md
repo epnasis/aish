@@ -124,7 +124,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`seen.py`** — the seen ledger: when the OWNER last read each chat, shared by every device. Monotonic and server-clocked, which is what makes sharing it safe. → `docs/web-server.md`
 - **`pins.py`** — the pin ledger: which chats the OWNER has pinned, shared by every device. A toggle, so not monotonic — no client time is trusted at all (last-reconnect-wins in the server's clock), which is what makes sharing it safe. → `docs/web-server.md`
 - **`pty_session.py`** — the PTY behind the one global interactive console. The model has NO write path to it, by construction. → `docs/web-server.md`
-- **`email_poll.py`** — the Gmail→`/trigger` poller; both effectful edges are parameter seams, so it tests with no subprocess and no network. → `docs/web-server.md`
+- **`email_poll.py`** — the Gmail→`/trigger` poller; every effectful edge (gws, HTTP, notifier, clock) is a parameter seam, so it tests with no subprocess, no network and no sleeps. → `docs/web-server.md`
 - **`skills.py`** — the knowledge store (skills + memory): progressive disclosure, pre-flight injection, lifecycle. → `docs/knowledge-layer.md`
 - **`embeddings.py`** — the semantic layer over retrieval. Lexical word-matching is the guaranteed floor; embeddings are an upgrade, never a dependency. → `docs/knowledge-layer.md`
 - **`curate.py`** — the retrieval self-curation loop; the orchestration lives in the script, not in a model session. → `docs/knowledge-layer.md`

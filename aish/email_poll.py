@@ -22,9 +22,10 @@ Config (env):
   AISH_WEB_TOKEN  required — the /trigger gate
   AISH_POLL_MAX   default 10 — max messages handled per run
 
-Testability: the two effectful edges — the `gws` subprocess runner and the
-HTTP POST — are parameter seams (`run_poll(gws=…, post=…)`), so tests fake
-both and never spawn a process or touch the network.
+Testability: the effectful edges — the `gws` subprocess runner, the HTTP POST,
+the escalation notifier and the clock — are parameter seams
+(`run_poll(gws=…, post=…, notify=…, now=…)`), so tests fake them all and never
+spawn a process or touch the network.
 """
 
 from __future__ import annotations
@@ -35,9 +36,14 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import Any
+
+from .notify import pushover
 
 ALLOWED_SENDERS = ("pawel@wenda.eu", "pawel@wenda.email")
 PROCESSED_LABEL = "aish-processed"
@@ -53,6 +59,18 @@ QUERY = (
 # (status, headers, body) from an HTTP POST; the injectable seam's shape.
 PostResult = tuple[int, Mapping[str, str], bytes]
 Gws = Callable[..., "dict | list | None"]
+Notify = Callable[[str, str], bool]
+
+# Escalation when failure becomes persistent (#362): from 2026-08-16 to
+# 2026-09-05 every 180s poll failed (gws auth error) and the only evidence was
+# this process's own log — email triggering was dead for 20 days. So a streak
+# of consecutive polls that could not LIST the mailbox is counted on disk
+# (this process is one-shot under launchd), and at the threshold the owner is
+# pushed once via notify.pushover, then at most daily while the streak lasts.
+# A clean listing resets both. No auto-remediation — the push states what was
+# observed, never a cause the code did not check.
+FAILURE_STREAK_NOTIFY_AT = 10  # ≈30 min at the 180s launchd interval
+FAILURE_RENOTIFY_SECONDS = 24 * 60 * 60
 
 
 def log(msg: str) -> None:
@@ -90,6 +108,73 @@ def default_gws(args: list[str], timeout: int = 30) -> dict | list | None:
         return json.loads(p.stdout)
     except json.JSONDecodeError:
         return None
+
+
+def _health_path() -> Path:
+    """Streak/notify state, beside the rest of aish's state. Resolved from the
+    environment at call time like every other AISH_STATE_DIR consumer (the
+    suite redirects the variable; production launchd inherits the default)."""
+    root = os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
+    return Path(root) / "email_poll_health.json"
+
+
+def _load_health(path: Path) -> tuple[int, float | None]:
+    """(consecutive failures, when the owner was last notified). Anything
+    unreadable or ill-typed counts as a fresh ledger — an unreadable ledger
+    must cost a late escalation, never a poll."""
+    try:
+        data = json.loads(path.read_text())
+        failures = int(data.get("failures") or 0)
+        notified_at = data.get("notified_at")
+        return failures, None if notified_at is None else float(notified_at)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0, None
+
+
+def _save_health(path: Path, state: dict[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state))
+    except OSError as exc:
+        # A broken state write must not break polling; worst case the streak
+        # restarts from zero and the escalation fires late.
+        log(f"could not persist poll health ({path}): {exc}")
+
+
+def record_poll_health(listing_ok: bool, *, notify: Notify, now: Callable[[], float]) -> None:
+    """Count consecutive failed polls and escalate a persistent streak (#362).
+
+    A poll FAILED when the mailbox listing itself did not come back — the
+    shape of the 20-day launchd credential outage, and the state in which no
+    trigger can fire. Nothing raised out of here may reach the poll loop."""
+    path = _health_path()
+    failures, notified_at = _load_health(path)
+    if listing_ok:
+        if failures or notified_at is not None:
+            _save_health(path, {"failures": 0, "notified_at": None})
+        return
+    failures += 1
+    due = failures >= FAILURE_STREAK_NOTIFY_AT and (
+        notified_at is None or now() - notified_at >= FAILURE_RENOTIFY_SECONDS
+    )
+    if due:
+        log(f"failure streak at {failures} consecutive polls — notifying owner")
+        try:
+            notify(
+                "aish email poller failing",
+                f"The mailbox poll has failed {failures} times in a row, so email "
+                "triggers cannot fire. Errors are in ~/Library/Logs/aish-email-poll.log.",
+            )
+        except Exception as exc:
+            # notify.pushover never raises, but an injected notifier might; the
+            # poll loop outranks any notification.
+            log(f"escalation notify failed: {exc}")
+        # Stamped on the ATTEMPT, not on confirmed delivery: pushover() is a
+        # silent no-op returning False when unconfigured, and stamping only
+        # deliveries would turn "unconfigured" into a credential probe on
+        # every failing poll instead of one per day.
+        notified_at = now()
+    _save_health(path, {"failures": failures, "notified_at": notified_at})
 
 
 def http_post(url: str, body: bytes, timeout: int = 30) -> PostResult:
@@ -215,9 +300,12 @@ def run_poll(
     post: Callable[..., PostResult] = http_post,
     env: Mapping[str, str] | None = None,
     token: str | None = None,
+    notify: Notify = pushover,
+    now: Callable[[], float] = time.time,
 ) -> int:
-    """One poll pass. `gws` and `post` are the effectful seams (tests fake
-    both); `token` overrides the Keychain/env lookup for tests."""
+    """One poll pass. `gws`, `post`, `notify` and `now` are the effectful
+    seams (tests fake all four); `token` overrides the Keychain/env lookup
+    for tests."""
     env = os.environ if env is None else env
     if token is None:
         token = read_token()
@@ -232,6 +320,10 @@ def run_poll(
 
     listing = gws(["gmail", "users", "messages", "list", "--params",
                    json.dumps({"userId": "me", "q": query, "maxResults": max_n})])
+    # A non-dict listing means the mailbox could not even be asked (the gws
+    # failure default_gws already logged) — the streak the escalation counts.
+    # An empty-but-successful listing is a quiet mailbox and resets it.
+    record_poll_health(isinstance(listing, dict), notify=notify, now=now)
     ids = [m["id"] for m in listing.get("messages", [])] if isinstance(listing, dict) else []
     if not ids:
         return 0
