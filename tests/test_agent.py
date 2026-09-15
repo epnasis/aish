@@ -5422,6 +5422,77 @@ class TestReadMedia:
         )
         assert "needs every=" in self._result(agent)
 
+    def test_every_without_count_is_refused_rather_than_silently_one_frame(
+        self, tmp_path, monkeypatch
+    ):
+        """The mirror case (#216): a model asking for a frame every N seconds
+        did not ask for ONE frame, and answering with one — the step it wrote
+        ignored, no sentence saying so — is a request honoured in name only."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", at="0:05", every="5s")
+            ])],
+        )
+        result = self._result(agent)
+        assert "needs count=" in result
+        assert agent.asked == []
+        assert not self._delivered(agent)
+
+    def test_every_without_count_is_refused_for_a_chapter_too(self, tmp_path, monkeypatch):
+        """A chapter sampled at a step nobody counted is the same silence in a
+        different branch: the step was taken once and called a sampling."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", chapter=1, every="5s")
+            ])],
+        )
+        assert "needs count=" in self._result(agent)
+        assert agent.asked == []
+
+    def test_a_frame_series_with_no_anchor_is_refused_rather_than_the_opening_frame(
+        self, tmp_path, monkeypatch
+    ):
+        """count= and every= with neither at= nor chapter= used to fall into
+        the opening-frame branch, which forced one frame and dropped BOTH —
+        the third silent drop of the same shape (#216)."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", count=3, every="5s")
+            ])],
+        )
+        result = self._result(agent)
+        assert "at= or chapter=" in result
+        assert agent.asked == []
+        assert not self._delivered(agent)
+
+    def test_search_with_a_frame_series_is_refused_rather_than_ignored(
+        self, tmp_path, monkeypatch
+    ):
+        """search= returns moments, never frames, so a count=/every= beside it
+        was silently dropped — the model asked for a stepped look at what it
+        found and got a list of times with no sentence saying so."""
+        import aish.agent as agent_module
+
+        transcript_calls: list[str] = []
+        monkeypatch.setattr(
+            agent_module.Agent, "_search_media",
+            lambda self, recording, query, language="": (
+                transcript_calls.append(query), "searched"
+            )[1],
+        )
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", search="phone", every="5s")
+            ])],
+        )
+        result = self._result(agent)
+        assert result.startswith("ERROR:") and "search=" in result and "every=" in result
+        assert transcript_calls == []
+
     def test_at_and_chapter_together_are_refused(self, tmp_path, monkeypatch):
         """They name different places; honouring one silently returns frames
         from somewhere nobody asked about, cited as if they were asked for."""

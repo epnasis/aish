@@ -930,15 +930,17 @@ TOOL_SCHEMAS = [
                     "count": {
                         "type": "integer",
                         "description": (
-                            "How many frames to return, starting at 'at'. "
-                            "Default 1."
+                            "How many frames to return, stepping from 'at' or "
+                            "across 'chapter'. Default 1; above 1 needs every= "
+                            "and one of at= or chapter=."
                         ),
                     },
                     "every": {
                         "type": "string",
                         "description": (
                             "Gap between frames when count is above 1, e.g. "
-                            "\"5s\", \"30s\", \"2m\". Required with count."
+                            "\"5s\", \"30s\", \"2m\". Give count and every "
+                            "together or neither."
                         ),
                     },
                     "chapter": {
