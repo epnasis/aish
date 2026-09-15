@@ -386,13 +386,13 @@ def allow_segments_flow(command: str, allow_path: Path) -> bool:
     saved = False
     for suggestion in suggestions:
         answer = input(
-            f"{YELLOW}always allow prefix{RESET} [{BOLD}{suggestion}{RESET}] "
+            f"{YELLOW}always allow prefix{RESET} [{BOLD}{_plain(suggestion)}{RESET}] "
             f"(enter=yes, s=skip, or type a different prefix): "
         ).strip()
         if answer.lower() == "s":
             continue
         save_prefix(allow_path, answer or suggestion)
-        print(f"{DIM}  saved: {answer or suggestion} → {allow_path}{RESET}")
+        print(f"{DIM}  saved: {_plain(answer or suggestion)} → {allow_path}{RESET}")
         saved = True
     return saved
 
@@ -409,6 +409,8 @@ def print_intent(said: str) -> None:
     if not said:
         return
     lines = _plain(said).strip().splitlines()
+    if not lines:
+        return
     print(f"\n{DIM}  \u25b8 aish says: {lines[0]}{RESET}")
     for line in lines[1:]:
         print(f"{DIM}    {line}{RESET}")
@@ -500,7 +502,7 @@ def make_approver(
             return command
         if answer == "t" and escapes:
             for directory in escapes:
-                print(f"{DIM}  {trust_dir(directory)}{RESET}")
+                print(f"{DIM}  {_plain(trust_dir(directory))}{RESET}")
             record(command, f"approved+trusted:{','.join(escapes)}")
             return command
         if answer == "a":
@@ -524,7 +526,7 @@ def make_approver(
                 if typed.lower() == "s":
                     continue
                 session_prefixes().add(typed or suggestion)
-                print(f"{DIM}  chat-allowed: {typed or suggestion}{RESET}")
+                print(f"{DIM}  chat-allowed: {_plain(typed or suggestion)}{RESET}")
                 saved = True
             # The verdict is PERSISTED and read back — by `aish explain` and by
             # every trace card replaying a log written before #260. Only the
@@ -577,7 +579,11 @@ def colorize_diff(diff: str) -> str:
 # tried before the lone-control class, so `ESC [ 2 A` is consumed as ONE
 # cursor-up and not as an ESC marker followed by the visible text "[2A".
 _CSI_SEQ = r"\x1b\[[0-?]*[ -/]*[@-~]"
-_SGR_SEQ = r"\x1b\[[0-?]*m"
+# SGR proper: numeric params with `;` (and `:` for 38:2::r:g:b). The
+# private-parameter forms ending in `m` are NOT colour — ESC[>4;2m re-encodes
+# what the owner types at the next [y/N], ESC[?4m makes the terminal REPLY
+# into stdin — so `[0-?]` would have let state changes ride in as colour.
+_SGR_SEQ = r"\x1b\[[0-9;:]*m"
 # OSC / DCS / SOS / PM / APC run to a terminator (BEL, ESC \, or 8-bit ST) and
 # are consumed whole — a terminal shows none of an OSC 8 hyperlink's target.
 # An UNTERMINATED one is deliberately not matched here: it falls through to
@@ -594,10 +600,14 @@ _C0_C1_EXCEPT_TAB_LF_CR = r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
 # Unicode format controls that reorder or re-nest rendered text (LRM/RLM, the
 # embedding/override/pop set, the isolate set): the same attack on a card as a
 # cursor move, in a character class no terminal escapes.
-_BIDI_CONTROLS = r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+_BIDI_CONTROLS = r"[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+# `str.splitlines()` breaks on these two, so an unmarked one turns a single
+# diff line into two — `+foo\u2028-bar` painted as an add AND a delete.
+_LINE_SEPARATORS = r"[\u2028\u2029]"
 
 _CARD_UNSAFE = re.compile(
-    "|".join((_CSI_SEQ, _STRING_SEQ, _ESC_OTHER, _C0_C1_EXCEPT_TAB_LF, _BIDI_CONTROLS))
+    "|".join((_CSI_SEQ, _STRING_SEQ, _ESC_OTHER, _C0_C1_EXCEPT_TAB_LF, _BIDI_CONTROLS,
+              _LINE_SEPARATORS))
 )
 _LIVE_UNSAFE = re.compile(
     "|".join((f"(?P<sgr>{_SGR_SEQ})", _CSI_SEQ, _STRING_SEQ, _ESC_OTHER,
@@ -611,8 +621,9 @@ def _plain(text: str) -> str:
 
     For approval-card bodies and model-authored prose — nothing there
     legitimately moves a cursor, so EVERY control goes: C0 except tab and
-    newline, C1, escape sequences with their string terminators, and the bidi
-    format controls. Each becomes a visible marker rather than an instruction
+    newline, C1, escape sequences with their string terminators, the bidi
+    controls, and the Unicode line separators `splitlines()` would break on.
+    Each becomes a visible marker rather than an instruction
     to the terminal, so a card that had something stripped from it says so.
     CRLF collapses to LF first (a diff of a CRLF file is not an attack); a lone
     CR is one — `rm -rf /\\rls` paints as `ls` — and is marked.
@@ -788,7 +799,7 @@ def make_read_approver(log, trust_dir=None, get_intent=None):
             answer = ""
         if answer == "t" and offer_trust:
             directory = os.path.dirname(os.path.expanduser(path)) or "."
-            print(f"{DIM}  {trust_dir(directory)}{RESET}")
+            print(f"{DIM}  {_plain(trust_dir(directory))}{RESET}")
             if log:
                 log.command(
                     f"read {path}", f"approved+trusted:{directory}", said,
@@ -983,12 +994,12 @@ def replay_history(messages: list[dict]) -> list[tuple[str, str]]:
             # FOR THE MODEL. Resuming a web session in the terminal printed those
             # back as if the user had typed them, absolute uploads path and all —
             # so show what was typed, and name the files as files.
-            typed = strip_attachment_notes(content)
-            files = attachment_names(content)
+            typed = _plain(strip_attachment_notes(content))
+            files = [_plain(name) for name in attachment_names(content)]
             if files:
                 typed = f"{typed} {DIM}[{', '.join(files)}]{RESET}" if typed \
                     else f"{DIM}[{', '.join(files)}]{RESET}"
-            print(f"\n{BOLD}❯{RESET} {_plain(typed)}")
+            print(f"\n{BOLD}❯{RESET} {typed}")
         elif role == "assistant":
             content, pending = parse_reply_chips(content)
             print(f"{GREEN}{_plain(content)}{RESET}")

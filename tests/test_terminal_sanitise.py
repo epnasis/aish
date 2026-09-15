@@ -16,6 +16,7 @@ import pytest
 from aish.cli import (
     _plain,
     _plain_live,
+    colorize_diff,
     echo,
     make_approver,
     make_import_approver,
@@ -80,7 +81,7 @@ class TestCardSanitiser:
         assert _plain("a\x1bMb\x1b7c\x1b(Bd") == f"a{MARK}b{MARK}c{MARK}d"
 
     @pytest.mark.parametrize(
-        "control", ["‮", "‪", "‬", "‎", "‏", "⁦", "⁩"]
+        "control", ["\u202e", "\u202a", "\u202c", "\u200e", "\u200f", "\u2066", "\u2069"]
     )
     def test_bidi_controls_are_removed(self, control):
         assert _plain(f"rm{control}ls") == f"rm{MARK}ls"
@@ -94,6 +95,17 @@ class TestCardSanitiser:
         text = "col\tumn\nnext — ünïcödé 日本語 ✓"
         assert _plain(text) == text
 
+    def test_arabic_letter_mark_is_a_bidi_control_too(self):
+        assert _plain("rm\u061cls") == f"rm{MARK}ls"
+
+    @pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
+    def test_unicode_line_separators_cannot_split_a_line(self, separator):
+        # `str.splitlines()` breaks on these: unmarked, `+foo<LS>-bar` would be
+        # coloured as an add AND a delete from one added line.
+        assert _plain(f"+foo{separator}-bar") == f"+foo{MARK}-bar"
+        assert colorize_diff(f"+foo{separator}-bar").count("\n") == 0
+        assert "\x1b[31m" not in colorize_diff(f"+foo{separator}-bar")
+
     def test_a_split_sequence_is_inert_in_both_halves(self):
         # Streaming hands the sanitiser one token at a time.
         assert _plain("\x1b") == MARK
@@ -104,6 +116,16 @@ class TestLiveSanitiser:
     def test_sgr_survives(self):
         text = "\x1b[1;32mM\x1b[0m file.py"
         assert _plain_live(text) == text
+
+    @pytest.mark.parametrize("sgr", ["\x1b[38:2::1:2:3m", "\x1b[38;5;1m", "\x1b[m"])
+    def test_real_sgr_forms_survive(self, sgr):
+        assert _plain_live(f"{sgr}x\x1b[0m") == f"{sgr}x\x1b[0m"
+
+    @pytest.mark.parametrize("seq", ["\x1b[>4;2m", "\x1b[?4m", "\x1b[=5m", "\x1b[<1m"])
+    def test_private_parameter_m_sequences_are_not_colour(self, seq):
+        # XTMODKEYS re-encodes what the owner types at the next [y/N];
+        # XTQMODKEYS makes the terminal reply INTO stdin. Neither is SGR.
+        assert _plain_live(f"a{seq}b") == f"a{MARK}b"
 
     def test_cursor_up_and_erase_do_not(self):
         out = _plain_live("a" + CURSOR_UP + ERASE_LINE + "b\x1b[0m")
@@ -120,7 +142,7 @@ class TestLiveSanitiser:
     def test_bidi_is_left_alone_in_live_output(self):
         # `cat` of a file with real RTL text needs its marks; live output is
         # not a decision surface.
-        assert _plain_live("‏שלום") == "‏שלום"
+        assert _plain_live("\u200fשלום") == "\u200fשלום"
 
 
 class TestCardSites:
@@ -207,6 +229,43 @@ class TestCardSites:
         print_intent(f"line one{ATTACK}\nline two{ATTACK}")
         assert_inert(capsys.readouterr().out, "line two")
 
+    def test_print_intent_whitespace_only_prints_nothing(self, capsys):
+        print_intent(" ")
+        print_intent("\n\t\n")
+        assert capsys.readouterr().out == ""
+
+    def test_always_allow_flow_prompts_and_saves_inert(self, tmp_path, monkeypatch, capsys):
+        # 'a' at the gate asks per segment, with the suggested prefix INSIDE the
+        # input() prompt, and Enter writes it to allow.txt permanently. The
+        # suggestion is carved out of the model's command, so it carries the
+        # payload — and the prompt, the 'saved:' line and the 'chat-allowed:'
+        # line must all show it inert.
+        prompts: list[str] = []
+        answers = iter(["a", "", "c", ""])
+
+        def capture(prompt=""):
+            prompts.append(prompt)
+            return next(answers)
+
+        monkeypatch.setattr(builtins, "input", capture)
+        # Two allow files: the first 'a' would otherwise auto-approve the second
+        # call and the 'c' flow would never run.
+        make_approver(False, tmp_path / "allow-a.txt", None)(f"git{ATTACK} push origin")
+        make_approver(False, tmp_path / "allow-c.txt", None)(f"git{ATTACK} push origin")
+        printed = capsys.readouterr().out
+        assert prompts, "the 'always' flow never asked"
+        for prompt in prompts:
+            assert CURSOR_UP not in prompt and ERASE_LINE not in prompt
+        assert any(MARK in prompt for prompt in prompts)
+        assert "saved:" in printed and "chat-allowed:" in printed
+        assert_inert(printed, "saved:")
+
+    def test_trust_dir_note_is_inert(self, tmp_path, monkeypatch, capsys):
+        scripted_input(monkeypatch, ["t"])
+        approve_read = make_read_approver(None, trust_dir=lambda d: f"trusted {d}{ATTACK}")
+        approve_read(f"{tmp_path}/x.txt", "outside")
+        assert_inert(capsys.readouterr().out, "trusted")
+
     def test_plugin_tool_card_preview(self, monkeypatch, capsys):
         scripted_input(monkeypatch, ["n"])
         make_tool_approver(None)(
@@ -239,6 +298,16 @@ class TestCardSites:
             {"role": "tool", "content": f"tool{ATTACK} output"},
         ])
         assert_inert(capsys.readouterr().out, "answered")
+
+    def test_replay_of_a_turn_with_attachments_shows_no_marker(self, capsys):
+        # The file list is wrapped in DIM/RESET by replay_history itself; that
+        # wrapping must not be what the sanitiser marks.
+        content = "fix it\n\n[attached file: /up/a.py]\n[attached file: /up/b.py]"
+        replay_history([{"role": "user", "content": content}])
+        printed = capsys.readouterr().out
+        assert MARK not in printed
+        assert "fix it" in printed
+        assert "a.py" in printed and "b.py" in printed
 
 
 class TestLiveOutputSite:
