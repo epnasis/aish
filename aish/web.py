@@ -2868,6 +2868,36 @@ def _present_snapshot(
 # genuinely ambiguous and `REACH_JS` says so itself.
 _UNSCROLLABLE = ("behind-a-dialog",)
 
+# Four reasons are geometry: the control IS drawn, and the predicate measured
+# that no scroll position puts it on screen — a `position: fixed` ancestor that
+# is off-screen (`off-canvas`), an offset before or past its scroller's range
+# (`outside-scroll-range`), a non-scrollable clip box it lies outside
+# (`clipped`), or a spot outside the document's own range (`off-document`).
+#
+# #370 (367b) filed the opposite reading — that `outside-scroll-range` marks a
+# control scrolling WOULD reach and the sentence should say "scroll to it".
+# The predicate says otherwise, and real Chrome agreed (2026-09-15, headless,
+# the real `REACHABLE_JS`): a row below a scroll pane's fold, an element at
+# `top:5000px` inside the scroller, and a button below the document fold all
+# came back reachable and listed; only an element at `top:-300px` — before the
+# scroller's range, where no scrollTop reaches — was `outside-scroll-range`.
+# Anything a scroll position of the page AS MEASURED would show is never
+# counted at all; that is the predicate's definition ("could the owner put
+# this on screen using nothing but scrolling"). So a "scroll to it" sentence
+# would name a repair the code checked to be futile for the page it saw. What
+# IS earned is that measurement, and now that a `scroll` action exists it is
+# worth saying, so the model does not spend calls scrolling for a control the
+# page has parked. Which thing to press stays unchecked, so the sentence keeps
+# offering that as the possibility it is.
+#
+# Known limits of the predicate itself, unmeasured and NOT covered by the
+# sentence's bound (an adversarial review, 2026-09-15): an RTL scroller's
+# negative `scrollLeft`, and an absolutely positioned element whose containing
+# block is outside the DOM ancestor the walk treats as its clipper. Both would
+# mislabel a reachable control — a listing defect, in which the sentence only
+# translates the reason recorded.
+_PARKED = ("outside-scroll-range", "off-document", "off-canvas", "clipped")
+
 # The page said so AND the reason agrees: the only sentence that gives an order.
 BEHIND_NAMED = (
     "are on this page but BEHIND {named}, which the page has open on top of "
@@ -2885,6 +2915,18 @@ SCROLL_LOCKED = (
 NOT_DRAWN_YET = (
     "are on this page but closed away — in a collapsed menu, an off-screen "
     "panel, or behind a dialog. Press whatever opens them first."
+)
+# Drawn, and measured out of every scroll position's reach AS THE PAGE STANDS.
+# That bound is load-bearing: the predicate measured one instant's geometry
+# against the current ranges, not what the page's own scroll handler would
+# draw — a headroom header parked at `translateY(-100%)` is `off-canvas` and a
+# scroll EVENT is exactly what brings it back. So the sentence states the
+# observation and never the prediction "scrolling will not work"; the rest
+# names the possibilities, not a cause.
+PARKED_OUT_OF_REACH = (
+    "are on this page but drawn where no scroll position reaches them as the "
+    "page stands — in an off-screen panel, a clipped container or a collapsed "
+    "section. Press whatever opens them first."
 )
 MIXED = (
     "are on this page but out of reach — some not drawn yet, some off-screen "
@@ -2907,12 +2949,17 @@ def _out_of_reach(snapshot) -> str:
     # that names both possibilities, so an unknown degrades to the honest
     # sentence and never to a confident wrong one.
     other = sum(n for why, n in reasons.items() if why not in _UNSCROLLABLE)
+    parked = sum(n for why, n in reasons.items() if why in _PARKED)
     if not reasons:
         return NOT_DRAWN_YET
     if locked and other:
         return MIXED
     if not locked:
-        return NOT_DRAWN_YET
+        # Only when EVERY reason is geometry are all the counted controls
+        # drawn-and-parked; a mix with a not-drawn reason (`invisible`,
+        # `aria-hidden`, …) keeps the wording that names both, rather than a
+        # description measured for some of them stated as if of all.
+        return PARKED_OUT_OF_REACH if parked == other else NOT_DRAWN_YET
     named = str(getattr(snapshot, "dialog", "") or "").strip()
     if named:
         # Two independent signals agree — the page DECLARED something modal and
