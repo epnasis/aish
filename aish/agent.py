@@ -6682,11 +6682,11 @@ class Agent:
         # Words and pictures are different questions and answering both when
         # only one was asked doubles the cost of every call. They also conflict
         # explicitly rather than resolving to a winner.
-        if query and (at or chapter or duration):
+        if query and (at or chapter or duration or every or count):
             return (
-                "ERROR: search= finds WHERE something is said; at=, chapter= and "
-                "duration= read a place you already know. Search first, then look "
-                "at what it returns."
+                "ERROR: search= finds WHERE something is said; at=, chapter=, "
+                "duration=, count= and every= read a place you already know. "
+                "Search first, then look at what it returns."
             )
         if query:
             return self._search_media(recording, query, language)
@@ -6839,6 +6839,13 @@ class Agent:
         elif at:
             base = recordings.parse_time(at)
         else:
+            # A series has nowhere to start from. This branch used to force
+            # one frame and drop count= AND every= without a word (#216).
+            if step or how_many > 1:
+                raise recordings.RecordingError(
+                    "count= and every= step from somewhere — give at= or chapter= "
+                    "as well. Example: at=\"1:00\", count=4, every=\"30s\"."
+                )
             # The opening frame. Not second zero: a video's first moment is
             # routinely black, a title card, or a logo, and a blank picture
             # reads as "nothing to see" rather than "you looked too early".

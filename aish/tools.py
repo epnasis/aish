@@ -930,8 +930,9 @@ TOOL_SCHEMAS = [
                     "count": {
                         "type": "integer",
                         "description": (
-                            "How many frames to return, starting at 'at'. "
-                            "Default 1."
+                            "How many frames to return, stepping from 'at' or "
+                            "across 'chapter'. Default 1; above 1 needs every= "
+                            "and one of at= or chapter=."
                         ),
                     },
                     "every": {
