@@ -34,14 +34,35 @@ function slice(startMarker, endMarker) {
 // structural selectors ensureTrace builds via innerHTML, memoizes a stand-in.
 // ".step-sub" is deliberately NOT memoized — the live finalize branch probes it
 // to avoid double-adding, and a memoized fake would always claim one exists.
+//
+// Parentage is real: `remove` and `replaceWith` detach, and a node appended
+// elsewhere leaves its old parent — retireThinkingRow (#374) lifts nested rows
+// out of a row it is about to drop, and a fake whose `remove` was a no-op
+// would pass whether or not the rows survived.
 function makeElement(tag) {
   const found = new Map();
+  const adopt = (node) => {
+    if (node && node.parentNode) node.parentNode.detach(node);
+    if (node && typeof node === "object") node.parentNode = el;
+  };
   const el = {
     tagName: tag, className: "", textContent: "", innerHTML: "",
-    children: [], style: {}, dataset: {},
-    append(...nodes) { el.children.push(...nodes); },
-    appendChild(node) { el.children.push(node); return node; },
-    remove() {},
+    children: [], style: {}, dataset: {}, parentNode: null,
+    append(...nodes) { nodes.forEach(adopt); el.children.push(...nodes); },
+    appendChild(node) { adopt(node); el.children.push(node); return node; },
+    detach(node) {
+      const i = el.children.indexOf(node);
+      if (i >= 0) el.children.splice(i, 1);
+      node.parentNode = null;
+    },
+    remove() { if (el.parentNode) el.parentNode.detach(el); },
+    replaceWith(...nodes) {
+      const parent = el.parentNode;
+      if (!parent) return;
+      nodes.forEach((n) => { if (n.parentNode) n.parentNode.detach(n); n.parentNode = parent; });
+      parent.children.splice(parent.children.indexOf(el), 1, ...nodes);
+      el.parentNode = null;
+    },
     addEventListener() {},
     classList: {
       _set: new Set(),
@@ -91,6 +112,7 @@ function makeSandbox() {
     updateScrollHints() {},
     refreshStatusline() {},
     measurePinnedTrace() {}, // needs offsetHeight + ResizeObserver
+    releasePinnedTrace() {},
     scrollToEnd() {},
     removeQueueChip() {},
     finalizeAnswerRow() {},
@@ -101,7 +123,12 @@ function makeSandbox() {
   vm.createContext(sandbox);
   vm.runInContext(slice("// [TRACE-OPEN-START]", "// [TRACE-OPEN-END]"), sandbox);
   vm.runInContext(slice("function pinTrace(t) {", "const WRAP_SVG"), sandbox);
+  // The card's END as well (#374): finalizeAnswerRow and finishTrace are the
+  // two places a live thinking row is dropped or finalized, and what happens to
+  // the rows drawn under it is decided there. The real ones replace the stub.
+  vm.runInContext(slice("function finalizeAnswerRow(t, ref, secs) {", "// [TRACE-CLOSE-END]"), sandbox);
   assert(typeof sandbox.traceStep === "function", "traceStep not extracted");
+  assert(typeof sandbox.finishTrace === "function", "finishTrace not extracted");
   return sandbox;
 }
 
@@ -219,6 +246,216 @@ check("an unrecognised failure still draws a legible row", () => {
   const row = errorRow(s, { kind: "model_error", attempt: 1, attempts: 3, action: "give_up" });
   assert(titleOf(row).includes("error"), titleOf(row));
   assert(subOf(row).length > 0, "no subtitle");
+});
+
+// ---- where the row goes (#374) ------------------------------------------
+// A retry is the SAME model call still being made, so its failed attempts
+// belong under the live "Thinking…" step. Drawn beside it, the highlighted
+// live box covered the timeline rail and the failure read as a detached event
+// under a broken line (the owner's screenshot). Two invariants: an attempt that
+// arrives while a call is open draws under that call's row, and no attempt is
+// ever lost when that row is later finalized or dropped.
+
+// The timeline's shape, as data: every .step in order, with what is under it.
+// Classes come from both the string set at creation and the classList.
+function classesOf(node) {
+  const set = new Set((node.className || "").split(/\s+/).filter(Boolean));
+  for (const c of node.classList ? node.classList._set : []) set.add(c);
+  return [...set].sort();
+}
+
+function shapeOf(container) {
+  return (container.children || [])
+    .filter((n) => classesOf(n).includes("step"))
+    .map((row) => {
+      const under = (row.children || []).find((n) => classesOf(n).includes("step-under"));
+      return {
+        classes: classesOf(row),
+        title: titleOf(row),
+        sub: subOf(row),
+        under: under ? shapeOf(under) : [],
+      };
+    });
+}
+
+function underOf(row) {
+  return (row.children || []).find((n) => classesOf(n).includes("step-under"));
+}
+
+const RATE_LIMITED = {
+  kind: "model_error", class: "rate_limit", status: 429, attempt: 1,
+  attempts: 8, action: "retry", waited_s: 5, scope: "short",
+};
+const RATE_LIMITED_AGAIN = { ...RATE_LIMITED, attempt: 2, waited_s: 10 };
+const GAVE_UP = {
+  kind: "model_error", class: "rate_limit", status: 429, attempt: 3,
+  attempts: 8, action: "give_up", retryable: true, bound: "wait_budget",
+  waited_total_s: 35, wait_budget_s: 30,
+};
+
+check("an attempt that fails while the call is open draws under its Thinking… row", () => {
+  const s = makeSandbox();
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep(RATE_LIMITED);
+  const top = rows(s);
+  assert.strictEqual(top.length, 1, `expected one timeline row, got ${top.length}`);
+  const think = top[0];
+  assert(classesOf(think).includes("running") && classesOf(think).includes("active-step"),
+    "the live row lost its highlight");
+  assert(classesOf(think).includes("step-with-under"), classesOf(think).join(" "));
+  const under = underOf(think);
+  assert(under, "no under-slot on the thinking row");
+  assert.strictEqual(under.children.length, 1);
+  const err = under.children[0];
+  assert(classesOf(err).includes("step-model-error"), classesOf(err).join(" "));
+  assert(titleOf(err).startsWith("Model call failed — rate limit (429)"), titleOf(err));
+  assert(subOf(err).includes("attempt 1 — retrying in 5s"), subOf(err));
+  // The slot is a SIBLING of the row's own main, never inside it: what reads
+  // the main (the gist probe, the interrupted note) must not find a nested row.
+  const main = findByClass(think, ".step-main");
+  assert(!(main.children || []).some((n) => classesOf(n).includes("step-under")),
+    "the under-slot was put inside .step-main");
+  // The thinking row's own title is still the first one found.
+  assert(titleOf(think).startsWith("Thinking…"), titleOf(think));
+});
+
+check("with no call open the row stays on the timeline itself", () => {
+  // The final give-up lands after the row closed on some paths, and a log
+  // written before thinking_start existed never opens one: the row must not
+  // vanish for want of a parent.
+  const s = makeSandbox();
+  s.traceStep(GAVE_UP);
+  const top = rows(s);
+  assert.strictEqual(top.length, 1);
+  assert(classesOf(top[0]).includes("step-model-error"));
+  assert(!underOf(top[0]), "a root-level error row grew an under-slot");
+});
+
+check("the attempts stay under the call once it finalizes to Thought for…", () => {
+  const s = makeSandbox();
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep(RATE_LIMITED);
+  s.traceStep(RATE_LIMITED_AGAIN);
+  s.traceStep({ kind: "thinking", secs: 7.5, gist: "Initiating Email Search", tokens: [10, 2] });
+  const top = rows(s);
+  assert.strictEqual(top.length, 1);
+  const think = top[0];
+  assert(classesOf(think).includes("step-think"));
+  assert(!classesOf(think).includes("running"), "finalized row still running");
+  assert(titleOf(think).startsWith("Thought for 7.5s"), titleOf(think));
+  // The gist still lands: the finalize branch probes the main for an existing
+  // sub-line, and a nested row's sub must not satisfy that probe.
+  assert.strictEqual(subOf(think), "Initiating Email Search");
+  const under = underOf(think);
+  assert.strictEqual(under.children.length, 2);
+  assert(subOf(under.children[1]).includes("attempt 2 — retrying in 10s"));
+});
+
+check("a Thinking… row dropped by a plain answer leaves its attempts on the timeline", () => {
+  // thinking_cancel removes a row the turn turned out not to need. What was
+  // drawn under it is evidence (#261) and steps out into the row's place.
+  const s = makeSandbox();
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep(RATE_LIMITED);
+  s.traceStep(RATE_LIMITED_AGAIN);
+  s.traceStep({ kind: "thinking_cancel", secs: 12, tokens: [10, 2] });
+  const top = rows(s);
+  assert.strictEqual(top.length, 2, shapeOf(s.currentTrace.inner).map((r) => r.title).join(" | "));
+  assert(top.every((r) => classesOf(r).includes("step-model-error")));
+  assert(top.every((r) => r.parentNode === s.currentTrace.inner), "lifted rows not re-parented");
+  assert(subOf(top[0]).includes("attempt 1") && subOf(top[1]).includes("attempt 2"), "order lost");
+  assert.strictEqual(s.currentTrace.thinkingRow, null);
+});
+
+check("a Thinking… row that became the answer keeps its attempts under Answered in…", () => {
+  // Live, the tokens stream into the thinking row before thinking_cancel
+  // lands ([ANSWER-OPEN] relabels it and marks isAnswer); the row is then
+  // finalized in place, and the attempts stay where the owner watched them.
+  const s = makeSandbox();
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep(RATE_LIMITED);
+  s.currentTrace.thinkingRow.titleEl.textContent = "Answering…";
+  s.currentTrace.thinkingRow.isAnswer = true;
+  s.traceStep({ kind: "thinking_cancel", secs: 23, tokens: [10, 2] });
+  const top = rows(s);
+  assert.strictEqual(top.length, 1);
+  assert(classesOf(top[0]).includes("step-answer"), classesOf(top[0]).join(" "));
+  assert(titleOf(top[0]).startsWith("Answered in 23s"), titleOf(top[0]));
+  assert.strictEqual(underOf(top[0]).children.length, 1);
+});
+
+check("a turn that gave up keeps the failure when the card is closed on it", () => {
+  // The give-up path writes no thinking_cancel: the loop raises out of the
+  // model call and the turn's `error` closes the card with the row still
+  // open. finishTrace drops the row; the attempts must not go with it.
+  const s = makeSandbox();
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep(RATE_LIMITED);
+  s.traceStep(GAVE_UP);
+  const t = s.currentTrace;
+  s.finishTrace(true);
+  const top = shapeOf(t.inner);
+  assert.strictEqual(top.length, 2, JSON.stringify(top));
+  assert(top.every((r) => r.classes.includes("step-model-error")));
+  assert(top[1].sub.includes("waited 35s"), top[1].sub);
+  assert.strictEqual(s.currentTrace, null);
+});
+
+// Hot and cold render identically (L2). Replay walks thinking_start in file
+// order exactly as the live path received it — verified against the owner's
+// own logs: thinking_start → model_error × N → thinking | thinking_cancel —
+// so the same event list through the same code must give the same shape. The
+// only thing that differs between the paths is the `replaying` flag.
+function shapeAfter(events, replaying) {
+  const s = makeSandbox();
+  s.replaying = replaying;
+  const cards = [];
+  for (const ev of events) {
+    if (ev === "ERROR" || ev === "DONE") {
+      // The card AFTER it closed: finishTrace is where an open row is dropped.
+      const t = s.currentTrace;
+      s.finishTrace(ev === "ERROR");
+      cards.push(shapeOf(t.inner));
+      continue;
+    }
+    s.traceStep(ev);
+  }
+  return cards;
+}
+
+check("hot and cold agree: a retried call that went on to call tools", () => {
+  const events = [
+    { kind: "thinking_start" }, RATE_LIMITED, RATE_LIMITED_AGAIN,
+    { kind: "thinking", secs: 7.5, gist: "Initiating Email Search", tokens: [10, 2] },
+    "DONE",
+  ];
+  const hot = shapeAfter(events, false);
+  const cold = shapeAfter(events, true);
+  assert.deepStrictEqual(cold, hot);
+  assert.strictEqual(hot[0][0].under.length, 2, JSON.stringify(hot));
+});
+
+check("hot and cold agree: thinking → failure → give up → you retried → answer", () => {
+  // Two cards: the attempt that gave up (closed by its `error`), then the
+  // rerun the Retry press opened — the press is the first row of the second
+  // card on both paths (reconstruct_events holds it until the turn it opens).
+  const events = [
+    { kind: "thinking_start" }, RATE_LIMITED, GAVE_UP, "ERROR",
+    { kind: "retry", by: "owner", attempt: 2, previous: { ended: "failed", failure: "rate_limit" } },
+    { kind: "thinking_start" }, RATE_LIMITED,
+    { kind: "thinking_cancel", secs: 9, tokens: [10, 2] },
+    "DONE",
+  ];
+  const hot = shapeAfter(events, false);
+  const cold = shapeAfter(events, true);
+  assert.deepStrictEqual(cold, hot);
+  assert.strictEqual(hot.length, 2);
+  // Card 1: both attempts on the timeline, the row that held them gone.
+  assert.deepStrictEqual(hot[0].map((r) => r.classes.includes("step-model-error")), [true, true]);
+  // Card 2: the press first, then the lifted attempt; no Thinking… row left.
+  assert(hot[1][0].classes.includes("step-retry"), JSON.stringify(hot[1]));
+  assert(hot[1][1].classes.includes("step-model-error"), JSON.stringify(hot[1]));
+  assert(!hot[1].some((r) => r.title === "Thinking…"));
 });
 
 // ---- the retry row (#339) -----------------------------------------------

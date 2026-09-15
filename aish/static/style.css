@@ -2603,6 +2603,27 @@ body.awaiting-approval .trace.live {
 }
 .step-badge svg { display: block; }
 .step.running .step-badge { background: var(--blue-glow); }
+/* Steps UNDER a row (#374): a model call's failed attempts, drawn inside the
+   call's own row instead of beside it. The slot is a full-width flex line
+   below badge + main, and it carries its own rail segment down from the
+   parent's badge column — so the timeline reads as continuing THROUGH the
+   highlighted live box rather than stopping at it and resuming underneath.
+   12px + 2px + 22px = the badge (25px) plus the row gap (11px), so a nested
+   badge sits exactly one column in, with a short tick joining it to the rail. */
+.step.step-with-under { flex-wrap: wrap; row-gap: 0; }
+.step-under {
+  flex: 1 0 calc(100% - 12px); /* its own line; the basis leaves room for the margin */
+  margin-left: 12px; border-left: 2px solid var(--rail); padding-left: 22px; min-width: 0;
+}
+.step-under .step { padding: 6px 0 0; }
+.step-under .step::before {
+  content: ""; position: absolute; left: -22px; top: 18px; width: 18px; height: 2px;
+  background: var(--rail);
+}
+/* The highlight is the parent's: only its own title goes blue and only its own
+   badge glows, never a failed attempt drawn under it. */
+.step.active-step .step-under .step-title { color: var(--fg); }
+.step.running .step-under .step-badge { background: var(--bg-elev2); }
 .step-main { flex: 1; min-width: 0; padding-top: 1px; display: flex; flex-direction: column; }
 .step-title { font-size: 15.5px; font-weight: 600; color: var(--fg); line-height: 1.3; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 /* Two-line clamp, not one-line ellipsis: subs carry text worth reading (a
