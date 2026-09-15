@@ -87,7 +87,7 @@ An unarmed teaser also stops saying **REQUIRED**. A model told a read is require
 The thresholds, all calibrated on the #183 audit (`TestPreflightPrecision`):
 
 - **`PREFLIGHT_MIN_SIM` = 0.35** for unsolicited injection — relevant median 0.458 versus irrelevant 0.290.
-- **`SEMANTIC_MIN_SIM` = 0.24** remains the floor for deliberate `recall` *and* for keyword-rail confirmation. A keyword hit is a strong PRIOR that lowers the bar, **never a bypass**: keywords are model-authored, and one generic word used to guarantee injection on a third of all tasks.
+- **`SEMANTIC_MIN_SIM` = 0.24** remains the floor for keyword-rail confirmation. A keyword hit is a strong PRIOR that lowers the bar, **never a bypass**: keywords are model-authored, and one generic word used to guarantee injection on a third of all tasks. It is no longer `recall`'s floor — the 0.24 bar sat below recall-shaped noise too (`RECALL_MIN_SIM` below).
 - **A NAME hit is unconditional** — naming an entry is unambiguous, and short names embed poorly.
 - **Pinned rules never compete for preflight slots.** They are already in every task's index; re-injecting them stole slots from actual skills.
 
@@ -102,6 +102,20 @@ In lexical fallback the keyword rail is a full guarantee again — there is no s
 ## Deliberate recall
 
 `rank_entries` + `recall_text`: deterministic difflib tiers, two-phase, hard caps, mtime-cached parsing (`TestRankEntries`, `TestRecallText`, `TestRecallTool`). Both take `semantic` and `Agent._recall` passes it, so embeddings reach the deliberate-search path and not only preflight (#178 P1-9). Fusion keeps strong lexical hits — exact name, whole query inside the identity line — as the deterministic rail on top, and similarity orders the rest; a `None` from `scores()` degrades byte-identically to pure lexical. `TestSemanticRecall`.
+
+**Recall must be able to say nothing matches (#369, L3 applied to search).** A ranker always has a "best", so without a floor an empty match rendered identically to a real one — in aish's own voice: `recall("Maciej LinkedIn")` returned *"Saved knowledge matching 'Maciej LinkedIn' (best first):"* followed by the owner's home-address memory and an Apple Reminders skill, zero relevance, and a small local model may act on that noise. The lexical path always had the natural floor — zero shared words means `score_entries` never ranks the entry — but in semantic fusion a word-free neighbour rode in on cosine alone at `SEMANTIC_MIN_SIM` (0.24). A pure-semantic hit now needs **`RECALL_MIN_SIM` = 0.30**; below it, `recall` says plainly that nothing saved matches. Lexical hits never consult the floor (L2) — a populated corpus with zero shared words already answered "nothing matches" before this change, and `test_a_populated_corpus_with_no_shared_word_is_no_match` now pins it — and past-session mentions still list separately: "sessions that mention it" is honest language about text search, not a relevance claim.
+
+The number is **provisional** — not a judged audit like the one behind `PREFLIGHT_MIN_SIM`, but hand-labelled probes replayed against the live corpus (embeddinggemma, 2026-09-15): twenty genuine queries (mostly Polish, against English entries, no shared words) and ten queries with nothing in the corpus:
+
+| | scores observed |
+|---|---|
+| genuine, target ranked **first** (16/20) | 0.313 · 0.348 · 0.364 · 0.367 · 0.370 · 0.382 · 0.395 · 0.416 · 0.426 · 0.430 · 0.486 · 0.501 · 0.508 · 0.511 · 0.511 · 0.612 |
+| genuine, target ranked 4th–6th behind noise (4/20) | 0.209 · 0.234 · 0.267 · 0.283 (the two `trippy_search` hotel queries, google-maps for "jak dojechać", a vague "what car parts") |
+| no match, top neighbour (10/10) | 0.164 · 0.217 · 0.236 · **0.259 (the incident)** · 0.262 · 0.267 · 0.268 · **0.282 ("Anna's phone number" → `user-home-address`)** · 0.286 · 0.313 ("kubernetes ingress config" → `do-not-expose-secrets-inline`) |
+
+The distributions overlap in the 0.28–0.32 band, so no floor separates them; the choice is which error to prefer. 0.30 is the highest floor that keeps every first-ranked genuine match and the lowest that stops the incident's shape recurring: an earlier draft's 0.28 still listed the owner's home address for a stranger's phone number — a personal-data memory surfacing on an unrelated person lookup is exactly #369. What 0.30 drops already ranked behind three to five noise entries, so listing it under "best first" bought nothing (that `trippy_search` loses to an apartment-balances memory on a hotel query is a retrieval-quality problem the floor cannot fix). It is deliberately NOT `PREFLIGHT_MIN_SIM` (0.35): that bar loses the 0.313 first-ranked match, and recall's listing is read critically by the model where preflight injects unsolicited. One no-match query (0.313) still lists an entry; the margin on both sides is one probe wide.
+
+**Recall records no scores** — the `knowledge` record covers preflight only — so recalibration means replaying labelled probes (`skills.score_entries` + `SemanticIndex.scores` over `load_entries`, with a temp `state_dir`), never adjusting by taste. `TestSemanticRecall` pins the incident shape, the 0.282 phone-number shape, the 0.313 survivor, and the lexical exemption, and asserts the constant sits between the evidence.
 
 `recall` also searches past sessions, except in an unattended session, where that half is dropped (see the origin gates in `docs/agent-core.md`).
 

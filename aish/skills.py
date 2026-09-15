@@ -76,11 +76,31 @@ PREFLIGHT_HEAD_CHARS = 600  # teaser length for an oversized skill
 # embeddinggemma with retrieval prefixes against real tasks: true matches
 # score 0.27-0.41 (incl. Polish task vs English entries), unrelated tasks
 # peak near 0.21. Short identity lines compress the scale — do not expect
-# textbook 0.6+ values here. This is the floor for DELIBERATE search
-# (recall's ranked listing, which the model reads critically) and for
-# keyword-rail confirmation; unsolicited injection uses the stricter
-# PREFLIGHT_MIN_SIM below.
+# textbook 0.6+ values here. This is the floor for keyword-rail
+# confirmation in preflight; deliberate recall uses RECALL_MIN_SIM below,
+# and unsolicited injection the stricter PREFLIGHT_MIN_SIM.
 SEMANTIC_MIN_SIM = 0.24
+# Deliberate recall's floor for a PURE-semantic hit — an entry sharing no
+# word with the query, ranked on cosine alone (#369). A ranker always has a
+# "best", so without a floor an empty match rendered exactly like a real
+# one: recall("Maciej LinkedIn") listed the owner's home address and an
+# Apple Reminders skill under "Saved knowledge matching … (best first)".
+# Replayed on the live corpus (embeddinggemma, 2026-09-15, 20 labelled
+# genuine queries + 10 no-match queries; the table is in
+# docs/knowledge-layer.md): the incident peaks at 0.259, and every genuine
+# match that ranks FIRST scores >= 0.313, while no-match queries peak at
+# 0.259-0.286 with one outlier at 0.313. The distributions overlap, so no
+# number separates them; 0.30 is the highest floor that keeps every
+# first-ranked genuine match, and the lowest that stops the incident's
+# shape recurring — "Anna's phone number" surfaces the home address at
+# 0.282, which the earlier draft's 0.28 would still have listed. What 0.30
+# drops (0.209-0.283) already ranked 4th-6th behind noise, so listing it
+# under "best first" bought nothing. PROVISIONAL — hand-labelled probes,
+# not a judged audit like PREFLIGHT_MIN_SIM's; recall records no scores,
+# so recalibration means replaying labelled probes. Deliberately NOT 0.35:
+# that bar loses the 0.313 first-ranked cross-language match. Lexical hits
+# never consult it — shared words remain the guaranteed floor (L2).
+RECALL_MIN_SIM = 0.30
 # Unsolicited injection needs a higher bar than search (#183): preflight
 # puts bodies straight into context, so a marginal match is pure noise
 # there, and "inject nothing" must be a normal outcome — the old single
@@ -707,7 +727,13 @@ def rank_entries(entries: list[Entry], query: str, semantic=None) -> list[Entry]
     (exact name / whole query in name+description+keywords) stay a
     deterministic guarantee rail on top, similarity orders everything else,
     weaker lexical tiers break similarity ties. Without `semantic` — or when
-    it fails (returns None) — output is byte-identical to pure lexical."""
+    it fails (returns None) — output is byte-identical to pure lexical.
+
+    An entry with NO lexical hit rides on similarity alone, so it must clear
+    RECALL_MIN_SIM (#369): nearest neighbours below that floor are noise, and
+    listing them dressed a non-match as a match in aish's own voice. Zero
+    shared words plus sub-floor similarity = not a result; an empty list here
+    is what lets recall_text say plainly that nothing matches."""
     scored = score_entries(entries, query)
     sims = semantic(query, entries) if semantic is not None else None
     if sims is None:
@@ -717,7 +743,7 @@ def rank_entries(entries: list[Entry], query: str, semantic=None) -> list[Entry]
     for entry in entries:  # corpus order keeps ties stable
         lex = lexical.get(id(entry), 0)
         sim = sims.get(id(entry), 0.0)
-        if lex == 0 and sim < SEMANTIC_MIN_SIM:
+        if lex == 0 and sim < RECALL_MIN_SIM:
             continue
         rail = lex if lex >= 4 else 0
         fused.append((rail, sim, lex, entry))
