@@ -156,6 +156,9 @@ async def main() -> int:
         check("reasons", found.get("reasons"), {"inert": 3})
         check("gets the OPEN-something repair",
               "Press whatever opens them first" in _sentence(found), True)
+        # `inert` is not geometry: the parked wording (#370) is not earned here.
+        check("and not the parked description",
+              "no scroll position reaches them" not in _sentence(found), True)
 
         print("an inert [role=dialog] on a scrolling page claims NOTHING:")
         found = await enumerate_page(page, "dialog-inert")

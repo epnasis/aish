@@ -1384,7 +1384,7 @@ A modern feed keeps only what is on screen in the DOM: a message thread's older 
 
 **Which region** (`SCROLL_JS`): the biggest thing that can scroll and is on screen, chosen by total scrollable span (`scrollHeight − clientHeight`) — not by room in the requested direction, because a pane already at its top is still the pane, and choosing it is what lets the answer say *"already at the top"* rather than the false *"nothing scrolls"*. An explicit anchor (`target`) picks the scrollable ancestor of the named text instead — "older messages in the Maciej thread" moves the thread, not the sidebar — and the document scroller is the floor when nothing else qualifies. The step is ~80% of the region's height in the chosen direction.
 
-**It reports what it observed, never a hope** (`scroll_note`, `TestScrollLoadsMoreAndReportsHonestly`): the pixels it actually moved, and whether the region was already at that end. Three distinct facts the model must keep apart or it scrolls a wall forever — `moved > 0` (something loaded, see the change report), `moved == 0` with `atEnd` (*"already at the top — nothing further this way"*), and `moved == 0` without it (*"did not move — do not scroll it again expecting a different result"*), plus *"nothing on this page scrolls that way"* when no region qualifies at all. The direction words are a small counted closed set (`_SCROLL_UP`, `docs/vocabularies.md`); anything not in it scrolls down. Verified end-to-end in real Chrome against a pane that prepends older messages on scroll-up (the lazy-feed fixture in `scripts/verify_browse.py`).
+**It reports what it observed, never a hope** (`scroll_note`, `TestScrollLoadsMoreAndReportsHonestly`): the pixels it actually moved, and whether the region was already at that end. Three distinct facts the model must keep apart or it scrolls a wall forever — `moved > 0` (something loaded, see the change report), `moved == 0` with `atEnd` (*"already at the top — nothing further this way"*), and `moved == 0` without it (*"did not move — do not scroll it again expecting a different result"*), plus *"nothing on this page scrolls that way"* when no region qualifies at all. The direction words are a small counted closed set (`_SCROLL_UP`, `docs/vocabularies.md`); anything not in it scrolls down. Verified end-to-end in real Chrome against a pane that prepends older messages on scroll-up (the lazy-feed fixture in `scripts/verify_browse.py`). **Scrolling is for content that is not in the DOM yet, not for a counted out-of-reach control**: a control some scroll position of the page as measured would show is already listed, and the geometric reasons say so in their sentence, bounded to the page as it stands (see `outside-scroll-range` under the #350 follow-ups).
 
 ## A dropdown is not the page
 
@@ -1881,8 +1881,8 @@ first"* with the picker open.
 
 The right signal was already there and being thrown away. `unreachable(el)`
 returns a REASON — `aria-hidden` | `hidden` | `inert` | `invisible` |
-`zero-size` | `closed-details` | `off-document` | `outside-scroll-range` |
-`clipped` | `behind-a-dialog` — and `CONTROLS_JS` discarded it into a bare
+`zero-size` | `closed-details` | `off-canvas` | `off-document` |
+`outside-scroll-range` | `clipped` | `behind-a-dialog` — and `CONTROLS_JS` discarded it into a bare
 count. So the sentence now states the reason the predicate recorded, which
 cannot be a false positive the way a probe can: it is not an inference about the
 page, it is the test result.
@@ -1917,6 +1917,34 @@ contents are clipped too — `REACH_JS` says exactly this in its own comment. An
 ambiguous reason keeps the wording that names both possibilities, a genuine mix
 of reasons says it is a mix, and an unrecognised reason from a future
 `REACH_JS` degrades to the old wording rather than to a confident wrong one.
+
+**`outside-scroll-range` does not mean "scroll to it" — it means the opposite,
+and #370 (367b) had it backwards.** The issue asked for a *scroll to it* ending
+for the four geometric reasons (`outside-scroll-range`, `off-document`,
+`off-canvas`, `clipped`) once a `scroll` action existed. But the predicate's
+whole definition is "could the owner put this on screen using nothing but
+scrolling": a control that some scroll position of the page AS MEASURED would
+show returns `''` and is LISTED, never counted. `outside-scroll-range` fires
+only for an offset before or past its scroller's range, where no scrollTop
+reaches. Measured in real Chrome (2026-09-15, the real `REACHABLE_JS`): rows
+below a scroll pane's fold, an element at `top:5000px` inside the scroller and
+a button below the document fold were all reachable; only an element at
+`top:-300px` was `outside-scroll-range`. So the earned ending is that
+measurement — *drawn where no scroll position reaches them as the page stands*
+— stated only when EVERY reason is geometry (`_PARKED`,
+`PARKED_OUT_OF_REACH`), so the model does not spend the new action on a
+control the page has parked; what to press stays offered, never ordered, and a
+mix with a not-drawn reason keeps the old wording. **The bound "as the page
+stands" is load-bearing and the first draft lacked it**: the predicate measured
+one instant's geometry, not what a scroll handler would draw — a headroom
+header parked at `translateY(-100%)` is `off-canvas` and a scroll EVENT is
+exactly what brings it back, so "scrolling will not bring them into view" was
+a prediction, not an observation, and was cut in review. Two predicate limits
+the review named and nothing has measured: an RTL scroller's negative
+`scrollLeft`, and an absolutely positioned element whose containing block lies
+outside the DOM ancestor the walk treats as its clipper — both would mislabel
+a reachable control, a listing defect the sentence merely translates.
+`test_outside_scroll_range_means_scrolling_CANNOT_reach_it`.
 
 **The settle is 69% of all browser time (#351)** — 153s of 221s — and every wait
 is `last_arrival_ms + 5000`. Of the 15 calls held to the 5s bar, **12 saw the page move at

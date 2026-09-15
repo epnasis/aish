@@ -740,8 +740,10 @@ class TestWhatTheModelIsToldItCannotSee:
         out = web_module._present_snapshot(
             snapshot(unreachable=3, reasons={"inert": 3})
         )
+        assert "closed away" in out
         assert "Press whatever opens them first" in out
         assert "CLOSE" not in out
+        assert "no scroll position reaches them" not in out
 
     def test_a_genuine_MIX_says_so_rather_than_picking_one(self):
         """Naming one repair when both were observed is the same guess this
@@ -752,21 +754,66 @@ class TestWhatTheModelIsToldItCannotSee:
         assert "some not drawn yet, some off-screen behind a locked scroll" in out
 
     def test_a_control_the_page_has_not_drawn_still_says_open_something(self):
+        """`invisible` is not geometry — nothing was measured about WHERE the
+        control is, so the parked description is not earned for it."""
         out = web_module._present_snapshot(
             snapshot(unreachable=4, reasons={"invisible": 4})
         )
         assert "Press whatever opens them first" in out
+        assert "no scroll position reaches them" not in out
 
     def test_an_AMBIGUOUS_reason_keeps_the_wording_that_names_both(self):
         """`clipped` looks like it means "behind something" and does not: a
         collapsed accordion is `height: 0; overflow: hidden`, so its contents
         are clipped too — REACH_JS says so in its own comment. A reason that
-        does not choose must not make the sentence choose."""
+        does not choose must not make the sentence choose: the only clause
+        stated as fact is the one the predicate measured (no scroll position
+        reaches it), and what to press stays offered, never ordered."""
         out = web_module._present_snapshot(
             snapshot(unreachable=5, reasons={"clipped": 5})
         )
+        assert "no scroll position reaches them as the page stands" in out
+        assert "a collapsed section" in out
         assert "Press whatever opens them first" in out
         assert "CLOSE what is open" not in out
+
+    def test_outside_scroll_range_means_scrolling_CANNOT_reach_it(self):
+        """#370 (367b) filed the opposite: that this reason marks a control
+        scrolling would reach, so the sentence should say "scroll to it".
+        `REACH_JS` fires it only when the offset is BEFORE or PAST the
+        scroller's range — the one place no scrollTop reaches — and a row
+        merely below the pane's fold returns '' and is listed. Measured in real
+        Chrome on 2026-09-15 (the fixture is described on `_PARKED`). So the
+        earned sentence is that measurement — bounded to the page AS IT STANDS,
+        because a scroll event may redraw (a headroom header is `off-canvas`
+        until one does) — and a "scroll to it" here would be the very L8
+        defect 367b was filed against."""
+        out = web_module._present_snapshot(
+            snapshot(unreachable=2, reasons={"outside-scroll-range": 2})
+        )
+        assert "no scroll position reaches them as the page stands" in out
+        assert "Press whatever opens them first" in out
+        assert "scroll to" not in out.lower()
+        # The observation, never the prediction.
+        assert "will not" not in out
+        # The line the sentence rests on: the range test, not a fold test.
+        assert ("if (near + span < -1 || near > range + 1) "
+                "return 'outside-scroll-range';") in browse.REACH_JS
+
+    def test_the_parked_sentence_needs_every_reason_to_be_geometry(self):
+        """A mix with a not-drawn reason falls back to the wording that names
+        both — the parked description was measured for some of the controls
+        and must not be stated as if of all. `behind-a-dialog` is untouched."""
+        mixed = web_module._present_snapshot(
+            snapshot(unreachable=6, reasons={"off-canvas": 3, "invisible": 3})
+        )
+        assert "Press whatever opens them first" in mixed
+        assert "no scroll position reaches them" not in mixed
+        locked = web_module._present_snapshot(
+            snapshot(unreachable=2, reasons={"behind-a-dialog": 2})
+        )
+        assert "scrolling LOCKED and they are off-screen" in locked
+        assert "no scroll position reaches them" not in locked
 
     def test_an_unrecognised_reason_degrades_to_the_old_wording(self):
         """A future REACH_JS reason nobody has classified yet must land on the
@@ -774,13 +821,17 @@ class TestWhatTheModelIsToldItCannotSee:
         out = web_module._present_snapshot(
             snapshot(unreachable=3, reasons={"some-new-reason": 3})
         )
+        assert "closed away" in out
         assert "Press whatever opens them first" in out
+        assert "no scroll position reaches them" not in out
 
     def test_a_log_with_no_reasons_keeps_the_old_wording(self):
         """A snapshot from before #350 records no reasons, and absence must not
         be read as a finding (contract corollary 2)."""
         out = web_module._present_snapshot(snapshot(unreachable=4))
+        assert "closed away" in out
         assert "Press whatever opens them first" in out
+        assert "no scroll position reaches them" not in out
 
 
 class TestHowItWasPressedIsNotWhetherItWorked:
