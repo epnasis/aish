@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import pytest
 
+from aish import approval as approval_module
 from aish.approval import (
     check_denied,
     escaping_dirs,
@@ -811,8 +814,8 @@ class TestControlBytesNeverAutoApprove:
         pytest.param("ls \x1b[2A", id="ESC (7-bit CSI)"),
         pytest.param("ls \x9b2A", id="C1 (8-bit CSI)"),
         pytest.param("ls \x7f", id="DEL"),
-        pytest.param("ls ‮", id="bidi override"),
-        pytest.param("ls   pwd", id="paragraph separator"),
+        pytest.param("ls \u202e", id="bidi override"),
+        pytest.param("ls \u2029 pwd", id="paragraph separator"),
         pytest.param("ls\x00", id="NUL"),
         pytest.param("ls\r", id="lone CR"),
         pytest.param("ls 'a\x1bb'", id="ESC inside single quotes"),
@@ -856,6 +859,33 @@ class TestControlBytesNeverAutoApprove:
         expanded = aliases.expand("ll", {"ll": "ls \x1b[2A\x1b[2K"})
         assert "\x1b" in expanded
         assert not is_auto_approvable(expanded, ["ll", "ls"])
+
+    # Built with chr() rather than written as \u escapes, because an editing
+    # tool that "helpfully" decodes escapes is exactly how the literals got
+    # into the source the first time — the guard must not be convertible.
+    INVISIBLE = "".join(
+        chr(cp)
+        for cp in (0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A),
+                   0x2028, 0x2029)
+    )
+
+    @pytest.mark.parametrize(
+        "source_file",
+        [
+            pytest.param(Path(approval_module.__file__), id="aish/approval.py"),
+            pytest.param(Path(__file__), id="tests/test_approval.py"),
+        ],
+    )
+    def test_the_source_spells_every_invisible_code_point_as_an_escape(self, source_file):
+        """The first commit of this fix shipped the regex with nine LITERAL
+        bidi/format characters in it — an editing tool decoded the `\\u`
+        escapes — which is hidden-bidi Unicode in repo source, the very thing
+        the regex guards commands against, and what GitHub flags. Scanned as
+        one string, not per line: `splitlines()` breaks on U+2028/9 and a
+        per-line scan hid exactly those two."""
+        text = source_file.read_text(encoding="utf-8")
+        found = sorted({f"U+{ord(ch):04X}" for ch in text if ch in self.INVISIBLE})
+        assert not found, f"{source_file.name} holds literal invisible code points: {found}"
 
 
 class TestPrefixSuggestions:

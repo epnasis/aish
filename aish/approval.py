@@ -162,7 +162,7 @@ FORBIDDEN_IN_DOUBLE_QUOTES = frozenset("`$")
 # from the recorded command; the classifier must not find out which, so it
 # prompts on any of them without looking further.
 _CONTROL_BYTES = re.compile(
-    r"[\x00-\x08\x0b-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩  ]"
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]"
 )
 
 # How the shell will treat one character.
