@@ -2955,7 +2955,10 @@ function clearStepTimer(t, ref) {
   t.activeStartedAt = null;
 }
 
-function traceRow(t, iconHtml, title, sub) {
+// `into` is where the row lands: the timeline itself by default, or the
+// under-slot of a row it belongs to (stepUnder) — a failed attempt of the model
+// call that is still running draws UNDER that call's row, not beside it (#374).
+function traceRow(t, iconHtml, title, sub, into) {
   const row = document.createElement("div");
   row.className = "step";
   const badge = document.createElement("span");
@@ -2974,10 +2977,35 @@ function traceRow(t, iconHtml, title, sub) {
     main.appendChild(subEl);
   }
   row.append(badge, main);
-  t.inner.appendChild(row);
+  (into || t.inner).appendChild(row);
   scrollToEnd();
   pinTrace(t);
   return { row, badge, main, titleEl };
+}
+
+// The slot UNDER a row for steps that belong to it (#374): a sibling of the
+// row's `.step-main`, never inside it, so everything that reads the main —
+// the gist probe on finalize, the "interrupted" note — keeps finding the
+// row's own sub-lines and not a nested row's. Created on first use, so a row
+// with nothing under it is byte-identical to one drawn before this existed.
+function stepUnder(ref) {
+  if (!ref.under) {
+    ref.under = document.createElement("div");
+    ref.under.className = "step-under";
+    ref.row.classList.add("step-with-under");
+    ref.row.appendChild(ref.under);
+  }
+  return ref.under;
+}
+
+// Drop a live "Thinking…" row the turn turned out not to need — but never
+// what was drawn under it. A failed attempt is EVIDENCE (#261: absence is the
+// one thing the record must never be), so the nested rows step out into the
+// row's own place on the timeline, in order, and only then does the row go.
+function retireThinkingRow(t, ref) {
+  const nested = ref.under ? [...ref.under.children] : [];
+  if (nested.length) ref.row.replaceWith(...nested);
+  else ref.row.remove();
 }
 
 // One step's duration, booked against the turn's two clocks: `secs` is the work
@@ -3050,7 +3078,7 @@ function traceStep(step) {
     if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
     if (t.thinkingRow) {
       if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow, step.secs);
-      else { t.thinkingRow.row.remove(); t.started -= 1; }
+      else { retireThinkingRow(t, t.thinkingRow); t.started -= 1; }
       t.thinkingRow = null;
     }
     updateTraceHead(t);
@@ -3167,6 +3195,15 @@ function traceStep(step) {
     // retried-then-recovered call left the trace showing an unexplained gap,
     // and a cold reload erased even the bubble. Absence as evidence, which is
     // the one thing docs/trace-contract.md §0 exists to prevent.
+    //
+    // It draws UNDER the model call it failed (#374): a retry is the same
+    // call still being made, so the row belongs to the live "Thinking…" step
+    // — beside it, the highlighted box covered the rail and the failure read
+    // as a detached event under a broken line. With no call open (the final
+    // give-up after the row closed, a log that never wrote thinking_start)
+    // it stays on the timeline itself; retireThinkingRow keeps it there when
+    // the call's row is later dropped. Same code on both paths: replay walks
+    // thinking_start in file order too, so hot and cold nest alike (L2).
     t.started += 1;
     const what = String(step.class || "error").replace(/_/g, " ");
     const status = step.status ? ` (${step.status})` : "";
@@ -3190,7 +3227,8 @@ function traceStep(step) {
     } else {
       tail = `gave up after ${step.attempt} of ${step.attempts} attempts`;
     }
-    traceRow(t, traceSvg("denied", "var(--red)"), `Model call failed — ${what}${status}`, tail)
+    const into = t.thinkingRow ? stepUnder(t.thinkingRow) : null;
+    traceRow(t, traceSvg("denied", "var(--red)"), `Model call failed — ${what}${status}`, tail, into)
       .row.classList.add("step-model-error");
     updateTraceHead(t);
     return;
@@ -4195,7 +4233,7 @@ function finishTrace(errored) {
   releasePinnedTrace(t); // stops pinning, and gives the arrow its base offset back
   if (t.thinkingRow) {
     if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow);
-    else t.thinkingRow.row.remove();
+    else retireThinkingRow(t, t.thinkingRow); // its failed attempts stay (#374)
     t.thinkingRow = null;
   }
   t.pending = null;
