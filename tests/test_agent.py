@@ -130,8 +130,9 @@ class TestApprovalGate:
 class TestApprovalComment:
     """#81: approve vs deny with a comment mean OPPOSITE things. Deny+comment =
     STOP (address the concern in plain text, then halt). Approve+comment =
-    CONTINUE but ADJUST (the original never runs — the model adjusts and
-    re-proposes, approved again before it runs)."""
+    CONTINUE (the original never runs — the model re-proposes, reworked if the
+    comment asks a change, identical if it asks none (#368), approved again
+    before it runs)."""
 
     def _stop_note(self, text: str) -> bool:
         return "STOP" in text and "NO tool call" in text
@@ -171,6 +172,46 @@ class TestApprovalComment:
         assert result.startswith("NOT RUN")
         assert "run it verbosely instead" in result
         assert "ADJUSTED" in result
+
+    def test_approve_with_no_change_comment_still_holds_and_permits_identical(self, tmp_path):
+        """#368: a comment that asks for NO change ("No reason to ask - it's
+        read only") still HOLDS the original — the fresh approval card is the
+        gate — but the follow-up instruction must permit re-proposing the SAME
+        command unchanged, instead of demanding an invented variation."""
+        from aish.approval import Approved
+
+        marker = tmp_path / "nochange368"
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("acknowledged"),
+            ],
+            approve=lambda _cmd: Approved("No reason to ask - it's read only"),
+        )
+        agent.run_task("do it")
+        assert not marker.exists()  # still HELD — approve+comment never runs the original
+        result = tool_messages(agent.messages)[0]["content"]
+        assert result.startswith("NOT RUN")
+        assert "re-propose the SAME command EXACTLY" in result
+        assert "do NOT invent a variation" in result
+        assert "shown for approval again" in result  # the card stays the gate
+
+    def test_every_held_instruction_names_both_branches(self):
+        """#368: each held-for-adjustment text must instruct BOTH branches —
+        rework when the comment asks a change, identical re-proposal when it
+        asks none — so a no-change comment never forces an invented variation,
+        and every branch ends at a fresh approval card."""
+        from aish.agent import (
+            HELD_FOR_ADJUSTMENT,
+            TOOL_HELD_FOR_ADJUSTMENT,
+            WRITE_HELD_FOR_ADJUSTMENT,
+        )
+
+        for text in (HELD_FOR_ADJUSTMENT, WRITE_HELD_FOR_ADJUSTMENT, TOOL_HELD_FOR_ADJUSTMENT):
+            assert "asks for a change" in text
+            assert "NO change" in text
+            assert "do NOT invent a variation" in text
+            assert "approval again" in text  # the re-proposal draws its own card
 
     def test_no_comment_leaves_result_clean(self, tmp_path):
         """A bare approval (no comment) runs the command as-is with no note."""
@@ -304,6 +345,34 @@ class TestStopGate:
         assert agent.run_task("go") == "done"
         assert not original.exists()  # HELD — original never ran
         assert adjusted.exists()  # adjusted re-proposal ran without a stop
+
+    def test_identical_reproposal_after_no_change_comment_draws_its_own_card(self, tmp_path):
+        """#368: a no-change comment holds the original, the model re-proposes
+        the IDENTICAL command, and that re-proposal reaches the approver as its
+        own fresh card before it runs — the hold is what keeps approve+comment
+        safe, and an unchanged re-proposal must not slip past it."""
+        from aish.approval import Approved
+
+        marker = tmp_path / "identical368"
+        command = f"touch {marker}"
+        seen: list[str] = []
+
+        def approve(cmd):
+            seen.append(cmd)
+            # First card: approve with a no-change comment. Second card: plain approve.
+            return Approved("No reason to ask - it's read only") if len(seen) == 1 else True
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=command)]),
+                model_says(tool_calls=[tool_call("run_command", command=command)]),
+                model_says("done"),
+            ],
+            approve=approve,
+        )
+        assert agent.run_task("go") == "done"
+        assert seen == [command, command]  # the identical re-proposal got its own card
+        assert marker.exists()  # and ran only once that card was approved
 
     def test_bare_denial_does_not_gate(self, tmp_path):
         """No comment → no gate: a plain deny must not block the next command."""

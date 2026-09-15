@@ -177,9 +177,11 @@ Rules:
    may edit a command before approving; the edited form is what ran. A COMMENT
    the user attaches to a decision changes what you do next, and approve vs
    deny mean opposite things:
-   - APPROVE + comment = CONTINUE, but adjust. The original command is NOT run
-     as-is; adjust it to what the user asked and propose the ADJUSTED command
-     (it is approved again before it runs). Never re-run the original unchanged.
+   - APPROVE + comment = CONTINUE. The original command was NOT run; the
+     comment decides what to propose next. Comment asks for a change →
+     propose the ADJUSTED command; comment asks for no change → re-propose
+     the SAME command unchanged, never a variation the user did not ask for.
+     Either way it is approved again before it runs.
    - DENY + comment = STOP. Your next reply MUST be plain text with NO tool
      call: address the user's concern and wait for them. Do not retry a variant
      or run anything else first. That reply is written with no way left to
@@ -674,30 +676,44 @@ FEEDBACK_NOTE = (
     'what I would do instead…" and stop.' + UNVERIFIED_CLAIM_CLAUSE + "]"
 )
 
-# Approve + comment = CONTINUE, but adjust. The original action was HELD (not
-# run); the model must adjust it to what the user asked and re-propose, and the
-# adjusted action is approved again before it runs — the task keeps going.
+# Approve + comment = CONTINUE. The original action was HELD (not run); the
+# COMMENT decides what comes back (#368): a comment asking for a change gets an
+# adjusted re-proposal, a comment asking for none gets the identical action
+# re-proposed. Safety is the same either way — the re-proposal draws its own
+# approval card. The old blanket "never unchanged" left a no-change comment
+# with nothing to rework, so the model invented a cosmetic unreviewed variation.
 HELD_FOR_ADJUSTMENT = (
     'NOT RUN — the user APPROVED this command but attached a COMMENT: "{comment}"\n'
     "Approval means CONTINUE, so proceed — but the original command was NOT run. "
-    "Adjust it to what the user asked and propose the ADJUSTED command; it will "
-    "be shown for approval again before it runs. Do NOT re-run the original "
-    "unchanged."
+    "If the comment asks for a change, you MUST propose the ADJUSTED command; "
+    "if it asks for NO change to the command, you MUST re-propose the SAME "
+    "command EXACTLY as before — do NOT invent a variation the user did not ask "
+    "for. Either way it is shown for approval again before it runs. Example: "
+    'comment "add -v" → propose the command with -v; comment "no need to ask, '
+    "it's read-only\" → propose the identical command again."
 )
 
 WRITE_HELD_FOR_ADJUSTMENT = (
     'NOT WRITTEN — the user APPROVED this change but attached a COMMENT: "{comment}"\n'
-    "Approval means CONTINUE, so proceed — but nothing was written. Adjust the "
-    "change to what the user asked and propose the ADJUSTED write; it will be "
-    "shown for approval again before it lands. Do NOT re-apply the original "
-    "unchanged."
+    "Approval means CONTINUE, so proceed — but nothing was written. If the "
+    "comment asks for a change, you MUST propose the ADJUSTED write; if it asks "
+    "for NO change to the write, you MUST re-propose the SAME write EXACTLY as "
+    "before — do NOT invent a variation the user did not ask for. Either way it "
+    "is shown for approval again before it lands. Example: comment \"keep it "
+    'under docs/" → propose the write under docs/; comment "fine, go ahead" → '
+    "propose the identical write again."
 )
 
 TOOL_HELD_FOR_ADJUSTMENT = (
     'NOT RUN — the user APPROVED calling {name} but attached a COMMENT: "{comment}"\n'
-    "Approval means CONTINUE, so proceed — but the tool was NOT run. Rework the "
-    "arguments to what the user asked and call {name} again; it will be shown "
-    "for approval again before it runs. Do NOT re-run the original args unchanged."
+    "Approval means CONTINUE, so proceed — but the tool was NOT run. If the "
+    "comment asks for a change, you MUST call {name} with the REWORKED "
+    "arguments; if it asks for NO change to the call, you MUST call {name} "
+    "again with the IDENTICAL arguments — do NOT invent a variation the user "
+    "did not ask for. Either way it is shown for approval again before it runs. "
+    'Example: comment "use the smaller size" → call {name} with the smaller '
+    "size; comment \"no need to ask, it's read-only\" → call {name} with the "
+    "same arguments unchanged."
 )
 
 
@@ -7797,8 +7813,8 @@ class Agent:
         #
         # Only HERE, and deliberately not on the `Approved(comment)` branch
         # above: that one is a HOLD — the call never ran — so writing a vouch
-        # there would record a permission for an action the owner asked to have
-        # reworked.
+        # there would record a permission for an action that did not happen;
+        # the re-proposal's own card is where a lasting yes can be given.
         # The PLACEHOLDER is not a host and must never enter a store that is
         # machine-wide and permanent (#343 F4). Filtered here, at the one call
         # site that writes it, and pinned by a test.
@@ -10688,10 +10704,11 @@ class Agent:
                 self._arm_stop_gate(decision.comment)
                 return _with_feedback(DENIED_RESULT, decision.comment)
             if isinstance(decision, Approved):
-                # Approve + comment = CONTINUE, but adjust: the original command
-                # is NOT run as-is. Hold it — the model adjusts to what the user
-                # asked and re-proposes, and that adjusted command is approved
-                # again before it runs (issue #81). Approval never stops the task.
+                # Approve + comment = CONTINUE: the original command is NOT run
+                # as-is. Hold it — the model re-proposes (adjusted if the comment
+                # asks a change, identical if it asks none — #368), and that
+                # re-proposal is approved again before it runs (issue #81).
+                # Approval never stops the task.
                 self._run_meta = {
                     "command": command, "decision": "held", "output": "",
                     "comment": decision.comment,
@@ -10831,8 +10848,9 @@ class Agent:
                     comment=decision.comment,
                 )
             if isinstance(decision, Approved):
-                # Approve + comment = CONTINUE but adjust: the original args are
-                # HELD, the model reworks them and re-proposes (re-approved).
+                # Approve + comment = CONTINUE: the original args are HELD, the
+                # model re-proposes (reworked if the comment asks a change,
+                # identical if it asks none — #368) and is re-approved.
                 return _gate_outcome(
                     TOOL_HELD_FOR_ADJUSTMENT.format(
                         name=tool.name, comment=decision.comment
@@ -11551,9 +11569,10 @@ class Agent:
             self._arm_stop_gate(decision.comment)
             return _with_feedback(WRITE_DENIED, decision.comment)
         if isinstance(decision, Approved):
-            # Approve + comment = CONTINUE, but adjust: hold the write (nothing
-            # is committed), the model adjusts to what the user asked and
-            # re-proposes, and that change is approved again before it lands.
+            # Approve + comment = CONTINUE: hold the write (nothing is
+            # committed), the model re-proposes (adjusted if the comment asks a
+            # change, identical if it asks none — #368), and the re-proposal is
+            # approved again before it lands.
             self._run_meta = {
                 "decision": "held", "ok": False, "output": "",
                 "comment": decision.comment, **diff_meta,
