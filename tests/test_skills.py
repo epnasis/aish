@@ -11,6 +11,7 @@ from aish.skills import (
     INDEX_SKILLS_MAX,
     PREFLIGHT_ENTRY_CHARS,
     PREFLIGHT_TOP,
+    RECALL_MIN_SIM,
     RECALL_TOP,
     _parse,
     forget_memory,
@@ -1043,6 +1044,98 @@ class TestSemanticRecall:
             semantic=self._sims({"hotels-use-trippy": 0.1, "charts": 0.1}),
         )
         assert ranked == []
+
+    # Scores below are the ones observed on the live corpus with embeddinggemma
+    # (2026-09-15; the table is in docs/knowledge-layer.md). They are the
+    # evidence the floor rests on, so the floor must stay between them.
+    INCIDENT_NOISE = (0.259, 0.249)  # "Maciej LinkedIn" → home address, reminders
+    PHONE_NUMBER_NOISE = 0.282  # "Anna's phone number" → home address
+    WEAKEST_FIRST_RANKED_GENUINE = 0.313  # "opłaty za mieszkanie" → e-kartoteka
+
+    def test_the_floor_sits_between_the_evidence(self):
+        assert max(self.INCIDENT_NOISE) < RECALL_MIN_SIM
+        assert self.PHONE_NUMBER_NOISE < RECALL_MIN_SIM
+        assert RECALL_MIN_SIM < self.WEAKEST_FIRST_RANKED_GENUINE
+
+    def test_noise_above_the_old_floor_is_not_a_match(self, tmp_path):
+        # #369 incident in miniature: recall("Maciej LinkedIn") listed the
+        # owner's home address (0.259) and a reminders skill (0.249) as
+        # matches — nearest neighbours above the old 0.24 floor, zero
+        # relevance. Below RECALL_MIN_SIM a pure-semantic hit is not a result.
+        entries = self._entries(tmp_path)
+        home, reminders = self.INCIDENT_NOISE
+        ranked = rank_entries(
+            entries,
+            "Maciej LinkedIn",
+            semantic=self._sims({"hotels-use-trippy": home, "charts": reminders}),
+        )
+        assert ranked == []
+
+    def test_a_personal_fact_is_not_a_match_for_a_strangers_lookup(self, tmp_path):
+        # The incident's shape at its highest observed score: a query about a
+        # person the corpus does not know surfaces the owner's home address at
+        # 0.282. An earlier draft's 0.28 floor would still have listed it.
+        entries = self._entries(tmp_path)
+        ranked = rank_entries(
+            entries,
+            "Anna's phone number",
+            semantic=self._sims({"hotels-use-trippy": self.PHONE_NUMBER_NOISE}),
+        )
+        assert ranked == []
+
+    def test_the_weakest_observed_genuine_match_still_surfaces(self, tmp_path):
+        # The floor must sit BELOW real matches: the weakest genuine match that
+        # ranked first live (Polish query vs English entry) scored 0.313, and
+        # cross-language retrieval is the semantic layer's reason to exist.
+        entries = self._entries(tmp_path)
+        ranked = rank_entries(
+            entries,
+            "znajdź nocleg w Krakowie",
+            semantic=self._sims(
+                {"hotels-use-trippy": self.WEAKEST_FIRST_RANKED_GENUINE, "charts": 0.05}
+            ),
+        )
+        assert [e.name for e in ranked] == ["hotels-use-trippy"]
+
+    def test_a_populated_corpus_with_no_shared_word_is_no_match_lexically(self, tmp_path):
+        # L2: with no semantic layer at all, zero shared words is the floor —
+        # the incident query against a populated corpus says nothing matches
+        # rather than listing the nearest entries (#369 lexical half).
+        self._entries(tmp_path)
+        out = recall_text(str(tmp_path), None, "Maciej LinkedIn")
+        assert "Nothing saved matches 'Maciej LinkedIn'" in out
+        assert "Saved knowledge matching" not in out
+        assert "hotels-use-trippy" not in out and "charts" not in out
+
+    def test_a_lexical_hit_never_consults_the_semantic_floor(self, tmp_path):
+        # Shared words are the guaranteed floor (L2): a weak lexical tier
+        # keeps an entry ranked even when its similarity is far below
+        # RECALL_MIN_SIM — the floor binds only word-free neighbours.
+        entries = self._entries(tmp_path)
+        ranked = rank_entries(
+            entries,
+            "villa trippy",  # all words in the entry head: lexical tier 2
+            semantic=self._sims({"hotels-use-trippy": 0.1, "charts": 0.0}),
+        )
+        assert [e.name for e in ranked] == ["hotels-use-trippy"]
+
+    def test_recall_text_says_nothing_matches_below_the_floor(self, tmp_path):
+        # The sayable unknown (#369): sub-floor neighbours render as "Nothing
+        # saved matches", never as a "best first" list — while past-session
+        # mentions still list separately ("sessions that mention it" is
+        # honest language about text search, not a relevance claim).
+        self._entries(tmp_path)
+        out = recall_text(
+            str(tmp_path),
+            None,
+            "Maciej LinkedIn",
+            semantic=self._sims({"hotels-use-trippy": 0.26, "charts": 0.25}),
+            sessions_search=lambda q: "- session-x · today · Maciej onboarding",
+        )
+        assert "Nothing saved matches" in out
+        assert "Saved knowledge matching" not in out
+        assert "hotels-use-trippy" not in out and "charts" not in out
+        assert "Past sessions that mention it:" in out and "session-x" in out
 
     def test_recall_text_threads_semantic(self, tmp_path):
         self._entries(tmp_path)
