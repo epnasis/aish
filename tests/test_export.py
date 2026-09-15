@@ -187,6 +187,23 @@ def test_derive_title_falls_back_on_empty_content():
     assert export.derive_title("```\nonly code\n```", "aish answer") == "aish answer"
 
 
+def test_strip_web_only_drops_a_chip_whose_label_has_a_nested_bracket():
+    # #373: the chip the web renders as a button must be the chip the PDF drops —
+    # the old label class stopped at the inner ']' and the raw markup reached
+    # the page.
+    out = export._strip_web_only(
+        "Które konto?\n\n"
+        "[Pokaż transakcje z konta OPERACYJNE [a4]](aish-reply://pokaż a4)\n"
+        "[Wszystkie](aish-reply://all)\n"
+    )
+    assert out == "Które konto?"
+
+
+def test_strip_web_only_keeps_a_plain_link_with_a_nested_bracket():
+    text = "See [Docs [v2]](https://example.com/docs) for details."
+    assert export._strip_web_only(text) == text
+
+
 def test_clean_title_unwraps_what_models_pad_a_title_with():
     assert export.clean_title('  "Bali eSIM data plans"  ') == "Bali eSIM data plans"
     assert export.clean_title("Title: **Quarterly report**") == "Quarterly report"

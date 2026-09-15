@@ -50,6 +50,71 @@ def test_answer_with_plain_markdown_link_is_untouched():
     assert clean == answer
 
 
+# --- a label with its own bracketed run (#373) ------------------------------
+
+NESTED_CHIP = "[Pokaż transakcje z konta OPERACYJNE [a4]](aish-reply://pokaż transakcje z konta a4)"
+
+
+def test_parse_chips_reads_a_label_with_one_nested_bracket():
+    clean, chips = parse_reply_chips("Które konto?\n\n" + NESTED_CHIP)
+    assert chips == [("Pokaż transakcje z konta OPERACYJNE [a4]", "pokaż transakcje z konta a4")]
+    assert clean == "Które konto?"
+
+
+def test_parse_chips_nested_bracket_followed_by_text_keeps_the_whole_label():
+    _clean, chips = parse_reply_chips("[Show [a4] transactions now](aish-reply://show a4)")
+    assert chips == [("Show [a4] transactions now", "show a4")]
+
+
+def test_parse_chips_several_nested_labels_on_one_line():
+    _clean, chips = parse_reply_chips(
+        "[Konto [a4]](aish-reply://a4) [Konto [b7]](aish-reply://b7) [Wszystkie](aish-reply://all)"
+    )
+    assert chips == [("Konto [a4]", "a4"), ("Konto [b7]", "b7"), ("Wszystkie", "all")]
+
+
+def test_parse_chips_leaves_a_plain_link_with_a_nested_bracket_alone():
+    answer = "See [Docs [v2]](https://example.com/docs) for details."
+    clean, chips = parse_reply_chips(answer)
+    assert chips == []
+    assert clean == answer
+
+
+def test_parse_chips_does_not_read_a_doubly_nested_label():
+    # Bounded on purpose: one inner pair, mirroring app.js's INLINE_RE. The
+    # line is kept literally rather than half-consumed.
+    answer = "[A [B [C]]](aish-reply://deep)"
+    clean, chips = parse_reply_chips(answer)
+    assert chips == []
+    assert clean == answer
+
+
+def test_chip_stream_holds_and_strips_a_nested_label_fed_one_char_at_a_time():
+    # Before #373 the hold-back check took the FIRST ']' as the label's end, so
+    # "[…OPERACYJNE [a4]]" was released as plain text one character before the
+    # chip could complete — the raw markup then flashed in the terminal.
+    text = "Które konto?\n\n" + NESTED_CHIP + "\n[Wszystkie](aish-reply://all)"
+    out: list[str] = []
+    stream = ChipStream(out.append)
+    for ch in text:
+        stream.feed(ch)
+    stream.close()
+    printed = "".join(out)
+    assert "aish-reply://" not in printed
+    assert "[a4]" not in printed
+    assert "Które konto?" in printed
+
+
+def test_chip_stream_releases_a_nested_bracket_that_never_becomes_a_chip():
+    text = "Matrix [row [1]] is fine."
+    out: list[str] = []
+    stream = ChipStream(out.append)
+    for ch in text:
+        stream.feed(ch)
+    stream.close()
+    assert "".join(out) == text
+
+
 def test_number_selects_matching_chip():
     chips = [("Yes", "yes please"), ("No", "no thanks")]
     assert resolve_chip_selection("1", chips) == "yes please"
