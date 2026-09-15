@@ -2065,10 +2065,12 @@ class WebServer:
 
     async def _resume_interrupted(self) -> None:
         """Pick up where a killed process left off (#164) — see RESUME_WINDOW.
-        Applies to user chats and automated (triggered) sessions alike: neither
-        has anything else that would ever restart the task. A resumed session is
-        opened in the background exactly like a triggered one; its owner sees it
-        in the drawer, and a triggered one still pushes its finish notification.
+        Applies to user chats and one-shot triggered sessions (email/webhook)
+        alike: none of those has anything else that would ever restart the task.
+        Schedule-origin sessions are the exception — see the check below (#187).
+        A resumed session is opened in the background exactly like a triggered
+        one; its owner sees it in the drawer, and a triggered one still pushes
+        its finish notification.
 
         Nothing here may propagate: a state dir that can't be read is a reason to
         start without recovery, never a reason not to start."""
@@ -2086,6 +2088,19 @@ class WebServer:
             if info["attempts"] >= RESUME_MAX_ATTEMPTS:
                 print(f"[resume] {path.name}: left alone after {info['attempts']} "
                       "interrupted attempts", file=sys.stderr)
+                continue
+            if info.get("origin") == "schedule":
+                # Never resume a scheduled job (#187): a resume restores the
+                # session's RECORDED model, so a run whose model OOM-crashed
+                # the host is re-run with the exact model that killed it — up
+                # to RESUME_MAX_ATTEMPTS crashes in a row, unattended. And it
+                # buys nothing: a periodic job re-fires on its own cadence, and
+                # cross-restart idempotency is the SOURCE's job (the in-process
+                # dedup above is not durable — see TRIGGER_DEDUP_TTL). Left
+                # alone exactly like a task past RESUME_MAX_ATTEMPTS — nothing
+                # is appended, and cold replay renders the interrupted turn.
+                print(f"[resume] {path.name}: schedule-origin task left to its "
+                      "own cadence (never resumed, #187)", file=sys.stderr)
                 continue
             try:
                 # The same cold open a user's session-switch performs, so the

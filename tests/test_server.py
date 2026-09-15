@@ -8000,6 +8000,42 @@ class TestRestartResume:
             assert path.name not in client.app.state.server.sessions
         assert chat.calls == []
 
+    def test_schedule_origin_interrupted_task_is_never_resumed(self, app_env):
+        # #187: a resume restores the session's recorded model, so a scheduled
+        # run whose model OOM-crashed the host would be re-run with the exact
+        # model that killed it. A periodic job re-fires on its own cadence and
+        # its dedup key makes the re-fire idempotent, so resuming buys nothing.
+        state_dir = Path(app_env["state_dir"])
+        log = SessionLog(state_dir / "session-20260101-120000-000000.jsonl")
+        log.model("fake")
+        log.origin("schedule")
+        log.task_start("weekly curation")
+        log.message({"role": "user", "content": "weekly curation"})
+        log.step({"kind": "tool_start", "name": "run_command", "command": "curate"})
+        log.close()  # killed mid-curation
+        path = log.path
+        client, chat = make_client(app_env, [])
+        with client:
+            time.sleep(0.3)
+            assert path.name not in client.app.state.server.sessions
+        assert chat.calls == []  # no model was loaded, let alone the recorded one
+        # Same clean state as an abandoned task: nothing appended, and cold
+        # replay renders the interrupted turn honestly instead of breaking.
+        events = SessionLog.reconstruct_events(path)
+        assert {"type": "error", "text": session_module.INTERRUPTED_TASK} in events
+
+    def test_user_origin_interrupted_task_still_resumes(self, app_env):
+        # The schedule exception must not widen: a user chat has nothing else
+        # that would ever restart its task, so it resumes exactly as before.
+        path = self._interrupted_log(app_env, origin="user")
+        client, chat = make_client(app_env, [model_says("picked it back up")])
+        with client:
+            server = client.app.state.server
+            assert self._wait(lambda: path.name in server.sessions), "never resumed"
+            assert self._wait(lambda: not server.sessions[path.name].busy)
+        assert "[automatic resume]" in self._resumed_prompt(chat)
+        assert SessionLog.pending_task(path) is None
+
     def test_stale_interrupted_task_is_not_resumed(self, app_env):
         path = self._interrupted_log(app_env)
         old = time.time() - server_module.RESUME_WINDOW - 60

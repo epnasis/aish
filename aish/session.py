@@ -1431,9 +1431,14 @@ class SessionLog:
         a `tool_start` trace record with no matching `tool`. That is the one
         genuinely dangerous gap in a resume: a completed step logged its result,
         but an in-flight one may or may not have taken effect (a send, a write),
-        and only the model re-checking reality can tell."""
+        and only the model re-checking reality can tell.
+
+        `origin` rides along (from the `kind:"origin"` record, "user" when none
+        was written) so the resume path can decide by provenance — a scheduled
+        job must never be resumed (#187)."""
         pending: dict | None = None
         attempts = 0
+        origin = "user"
         started: list[dict] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
@@ -1453,6 +1458,8 @@ class SessionLog:
                 }
             elif kind == "task_end":
                 pending, attempts, started = None, 0, []
+            elif kind == "origin":
+                origin = record.get("origin") or origin
             elif kind == "trace" and pending is not None:
                 step = record.get("step") or {}
                 if step.get("kind") == "tool_start":
@@ -1467,6 +1474,7 @@ class SessionLog:
         if pending is not None:
             pending["attempts"] = attempts
             pending["in_flight"] = [SessionLog._describe_step(s) for s in started]
+            pending["origin"] = origin
         return pending
 
     @staticmethod
