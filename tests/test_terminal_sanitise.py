@@ -161,10 +161,19 @@ class TestCardSites:
         approve(f"rm -rf /{ATTACK}")
         assert_inert(capsys.readouterr().out, "rm -rf /")
 
-    def test_run_command_card_body_when_auto_approved(self, tmp_path, monkeypatch, capsys):
+    def test_run_command_with_a_control_byte_is_never_auto_approved(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The command the issue was found with. It USED to auto-approve — the
+        sanitiser then had a line to mark, but the bytes still reached the
+        shell unseen. #382 refuses it before parsing, so it reaches a card,
+        and the card is inert."""
         approve = make_approver(False, tmp_path / "allow.txt", None)
-        approve(f"ls {ATTACK}")
-        assert_inert(capsys.readouterr().out, "auto-approved")
+        scripted_input(monkeypatch, ["n"])
+        assert approve(f"ls {ATTACK}") is None
+        printed = capsys.readouterr().out
+        assert "auto-approved" not in printed
+        assert_inert(printed, "run command?")
 
     def test_file_edit_card_diff(self, tmp_path, monkeypatch, capsys):
         plan = SimpleNamespace(
@@ -234,31 +243,32 @@ class TestCardSites:
         print_intent("\n\t\n")
         assert capsys.readouterr().out == ""
 
-    def test_always_allow_flow_prompts_and_saves_inert(self, tmp_path, monkeypatch, capsys):
-        # 'a' at the gate asks per segment, with the suggested prefix INSIDE the
-        # input() prompt, and Enter writes it to allow.txt permanently. The
-        # suggestion is carved out of the model's command, so it carries the
-        # payload — and the prompt, the 'saved:' line and the 'chat-allowed:'
-        # line must all show it inert.
+    def test_always_allow_flow_offers_no_rule_for_a_payload(self, tmp_path, monkeypatch, capsys):
+        # 'a' and 'c' at the gate used to carve the suggested prefix out of the
+        # model's command — payload included — show it in the input() prompt
+        # and write it to allow.txt permanently. Since #382 a command carrying
+        # a control byte is refused BEFORE the allowlist is read, so no saved
+        # prefix could ever silence it, and the #265 promise applies: nothing
+        # is offered, nothing is written, the command is approved just once.
         prompts: list[str] = []
-        answers = iter(["a", "", "c", ""])
+        answers = iter(["a", "c"])
 
         def capture(prompt=""):
             prompts.append(prompt)
             return next(answers)
 
         monkeypatch.setattr(builtins, "input", capture)
-        # Two allow files: the first 'a' would otherwise auto-approve the second
-        # call and the 'c' flow would never run.
-        make_approver(False, tmp_path / "allow-a.txt", None)(f"git{ATTACK} push origin")
-        make_approver(False, tmp_path / "allow-c.txt", None)(f"git{ATTACK} push origin")
+        command = f"git{ATTACK} push origin"
+        assert make_approver(False, tmp_path / "allow-a.txt", None)(command) == command
+        assert make_approver(False, tmp_path / "allow-c.txt", None)(command) == command
         printed = capsys.readouterr().out
-        assert prompts, "the 'always' flow never asked"
+        assert len(prompts) == 2, "only the [y/N/...] question was asked, no prefix prompt"
         for prompt in prompts:
             assert CURSOR_UP not in prompt and ERASE_LINE not in prompt
-        assert any(MARK in prompt for prompt in prompts)
-        assert "saved:" in printed and "chat-allowed:" in printed
-        assert_inert(printed, "saved:")
+        assert printed.count("no saved prefix can silence this one") == 2
+        assert "saved:" not in printed and "chat-allowed:" not in printed
+        assert not (tmp_path / "allow-a.txt").exists()
+        assert_inert(printed, "run command?")
 
     def test_trust_dir_note_is_inert(self, tmp_path, monkeypatch, capsys):
         scripted_input(monkeypatch, ["t"])
