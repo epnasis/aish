@@ -1154,6 +1154,21 @@ def test_pending_task_counts_attempts_since_last_end(tmp_path):
     log.close()
 
 
+def test_pending_task_carries_the_session_origin(tmp_path):
+    # #187: the resume path decides by provenance, so the origin record rides
+    # the pending dict — "user" when the log never wrote one.
+    log = SessionLog.new(tmp_path)
+    log.origin("schedule")
+    log.task_start("weekly curation")
+    log.close()
+    assert SessionLog.pending_task(log.path)["origin"] == "schedule"
+
+    plain = SessionLog.new(tmp_path)
+    plain.task_start("do the thing")
+    plain.close()
+    assert SessionLog.pending_task(plain.path)["origin"] == "user"
+
+
 def test_pending_task_ignores_logs_without_markers(tmp_path):
     # A CLI session (which never writes task markers) is never resumable.
     log = SessionLog.new(tmp_path)
