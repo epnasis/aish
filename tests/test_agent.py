@@ -5422,6 +5422,35 @@ class TestReadMedia:
         )
         assert "needs every=" in self._result(agent)
 
+    def test_every_without_count_is_refused_rather_than_silently_one_frame(
+        self, tmp_path, monkeypatch
+    ):
+        """The mirror case (#216): a model asking for a frame every N seconds
+        did not ask for ONE frame, and answering with one — the step it wrote
+        ignored, no sentence saying so — is a request honoured in name only."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", at="0:05", every="5s")
+            ])],
+        )
+        result = self._result(agent)
+        assert "needs count=" in result
+        assert agent.asked == []
+        assert not self._delivered(agent)
+
+    def test_every_without_count_is_refused_for_a_chapter_too(self, tmp_path, monkeypatch):
+        """A chapter sampled at a step nobody counted is the same silence in a
+        different branch: the step was taken once and called a sampling."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", chapter=1, every="5s")
+            ])],
+        )
+        assert "needs count=" in self._result(agent)
+        assert agent.asked == []
+
     def test_at_and_chapter_together_are_refused(self, tmp_path, monkeypatch):
         """They name different places; honouring one silently returns frames
         from somewhere nobody asked about, cited as if they were asked for."""

@@ -6807,6 +6807,13 @@ class Agent:
                 "count= needs every= as well, or every frame would come from the "
                 "same moment. Example: count=4, every=\"30s\"."
             )
+        # The mirror rule (#216): every= alone used to yield ONE frame with the
+        # step silently dropped — a request honoured in name only.
+        if step and not count:
+            raise recordings.RecordingError(
+                "every= needs count= as well, or there is no second frame for the "
+                "step to reach. Example: count=4, every=\"30s\"."
+            )
 
         if chapter:
             index = int(chapter)

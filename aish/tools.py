@@ -938,7 +938,8 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": (
                             "Gap between frames when count is above 1, e.g. "
-                            "\"5s\", \"30s\", \"2m\". Required with count."
+                            "\"5s\", \"30s\", \"2m\". Give count and every "
+                            "together or neither."
                         ),
                     },
                     "chapter": {
