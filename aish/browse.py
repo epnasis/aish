@@ -2817,7 +2817,16 @@ CALENDAR_JS = "(opts) => {" + REACH_JS + NAME_JS + r"""
   // `.first` took the stale one. Measured on wizzair.com: the walk from August
   // to December worked, the picker was showing the right day, and the press
   // came back Stuck because it was aimed at a cell no longer on the page.
-  for (const stale of document.querySelectorAll('[data-aish-cell]')) {
+  //
+  // The sweep has the STAMP's reach. `grid` is found through shadow roots
+  // (deepById / deepAll above), so the stamps land wherever the picker lives
+  // — and a `document.querySelectorAll` here cannot see into a shadow root at
+  // all. Measured (#376): on a shadow-rooted picker the first pass listed both
+  // arrows, the second listed none, because the arrow still carried last
+  // pass's tag and the "a day cell is not an arrow" guard below took the
+  // stale tag as proof it was a cell. The refusal then read "nothing that
+  // could move it" — a fact about the page that was a fact about this line.
+  for (const stale of deepAll('[data-aish-cell]')) {
     stale.removeAttribute('data-aish-cell');
   }
   const cells = [];
@@ -5124,6 +5133,10 @@ def _control_state(control: Control) -> tuple:
     return (control.kind, control.detail, control.disabled, control.mutating)
 
 
+# The after-side start of a unified-diff hunk: `@@ -a,b +c,d @@` → c.
+_HUNK_START_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
 def _text_delta(before: str, after: str) -> tuple[list[str], int, int]:
     """Lines of page text that APPEARED, with context; how many more appeared
     than the cap let through; and how many lines went away.
@@ -5134,7 +5147,19 @@ def _text_delta(before: str, after: str) -> tuple[list[str], int, int]:
     around an absence. A line that CHANGED surfaces as its new state, because
     the unified diff writes it as a removal plus an addition and only the
     addition is kept — with its context, which is what makes "+ 63,19 zł"
-    readable as the price of something."""
+    readable as the price of something.
+
+    Lines are compared by CONTENT, with their control references reduced to
+    labels — the same rule `section_key` follows (#364): a per-render nonce
+    must never reach a content identity. It reached this one. The nonce was
+    per session when this diff was written, so the raw text compared equal
+    line for line; once it was minted per render (87f92e9) every line that
+    carried a control differed from its own previous rendering, and the delta
+    that exists so the page is "never sent again" (#361) sent the whole page
+    on every act — measured on the harness portal: a 448-character report of
+    a 358-character page after typing one word. What is EMITTED is the live
+    line from the current render, so the reference the model goes on to
+    press is the one this render minted, not the one the diff matched on."""
     lines: list[str] = []
     spent = 0
     dropped = 0
@@ -5154,9 +5179,14 @@ def _text_delta(before: str, after: str) -> tuple[list[str], int, int]:
             spent += len(line) + 1
             lines.append(line)
 
+    after_lines = (after or "").splitlines()
+    # Where the next context or added line sits in `after_lines`. Set from
+    # each hunk header — `@@ -a,b +c,d @@`, `c` 1-based — and advanced by every
+    # line that is not a removal; a hunk that adds nothing never reads it.
+    at = 0
     for line in difflib.unified_diff(
-        (before or "").splitlines(),
-        (after or "").splitlines(),
+        [_plain_of(one) for one in (before or "").splitlines()],
+        [_plain_of(one) for one in after_lines],
         n=DELTA_CONTEXT_LINES,
         lineterm="",
     ):
@@ -5165,10 +5195,15 @@ def _text_delta(before: str, after: str) -> tuple[list[str], int, int]:
         if line.startswith("@@"):
             flush()
             hunk = []
+            header = _HUNK_START_RE.match(line)
+            at = int(header.group(1)) - 1 if header else 0
             continue
         if line.startswith("-"):
             vanished += 1
-        hunk.append(line)
+            hunk.append(line)
+            continue
+        hunk.append(line[0] + after_lines[at])
+        at += 1
     flush()
     while lines and lines[-1] == "…":
         lines.pop()
