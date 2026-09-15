@@ -1385,6 +1385,39 @@ class TestTheReportIsAdditive:
         assert lines == []
         assert vanished == 3
 
+    def test_a_fresh_reference_nonce_is_not_a_change(self):
+        """The nonce is minted per RENDER (87f92e9), so every control-bearing
+        line differs from its own previous rendering by nonce alone — and the
+        delta that exists so the page is never sent again sent the whole page
+        on every act. `scripts/verify_browse.py`'s `check_portal` measured a
+        448-character report of a 358-character page after typing one word.
+        Lines are compared by content, references reduced to labels, exactly
+        as `section_key` already does (#364)."""
+        def page(nonce, value):
+            return "\n".join([
+                f"[Pulpit](press:c0·{nonce}) [Faktury](press:c1·{nonce}) → eon.pl/f",
+                f"Bluszczanska [Przełącz lokal](press:c2·{nonce})",
+                f"[Szukaj faktury](press:c4·{nonce}) ({value})",
+                f"[Filtruj](press:c5·{nonce})",
+                "Faktura 09/2026 — 118,40 zl",
+            ])
+
+        before = page("1b8e1751", "field")
+        after = page("b7a7e3df", "currently: wrzesień")
+        lines, more, vanished = browse._text_delta(before, after)
+        assert vanished == 1, lines
+        assert [line for line in lines if line.startswith("+")] == [
+            "+[Szukaj faktury](press:c4·b7a7e3df) (currently: wrzesień)"
+        ], lines
+        # Context and the changed line carry the CURRENT render's references:
+        # the one the model goes on to press must be the one this render
+        # minted, never the one the diff happened to match on.
+        assert not any("1b8e1751" in line for line in lines), lines
+        assert len("\n".join(lines)) < len(after)
+
+        same = browse._text_delta(page("aaaa", "field"), page("bbbb", "field"))
+        assert same == ([], 0, 0), same
+
     def test_control_additions_are_capped_with_an_honest_count(self):
         """The uncapped control block is what used to blow every report past
         the cap and re-send the page — a date picker opening adds ~90 cells."""
