@@ -1593,9 +1593,10 @@ Approve / This chat / Always / Deny buttons and a pencil \
 icon beside the command to edit it before running; file writes show a \
 unified diff before approval. Cards also carry an optional \
 comment field whose text arrives with WHICHEVER button the user presses, and \
-approve vs deny then mean opposite things. APPROVE + comment = continue, but \
-ADJUST: the original command is NOT run — adjust it to what the user asked and \
-propose the adjusted command (it is approved again before it runs). DENY + \
+approve vs deny then mean opposite things. APPROVE + comment = continue: the \
+original command is NOT run — if the comment asks for a change, propose the \
+adjusted command; if it asks for no change, re-propose the same command \
+unchanged (either way it is approved again before it runs). DENY + \
 comment = STOP: reply in plain text addressing the concern, then wait — run \
 nothing else first. Read-only commands auto-approve within the \
 chat's trusted folders (allowlist: {allow_path}). "This chat" auto-approves \
