@@ -70,6 +70,7 @@ from . import (
     recipients,
     tools,
     turns,
+    vault_writes,
 )
 from .agent import (
     ASKED_BY_IMPORT,
@@ -1180,13 +1181,18 @@ def _auto_safe(name: str, args: dict, origin: str) -> str | None:
     worth blocking an overnight session on; in the owner's own session he still
     sees the card, because there he is the one who can cheaply say no.
 
-    CONSEQUENCE-SCOPED (`recipients.owner_scoped_send`): safe because of what
-    the action can REACH, which does not change with who started the session.
+    CONSEQUENCE-SCOPED (`recipients.owner_scoped_send`,
+    `vault_writes.owner_opted_write`): safe because of what the action can
+    REACH or DESTROY, which does not change with who started the session.
+    Each is computed from facts aish reads itself — never from the tool's
+    manifest, which is the fence in `docs/tools-layer.md`.
 
-    The returned string is the AUDIT REASON, so the log says which of the two
+    The returned string is the AUDIT REASON, so the log says which policy
     licensed the run rather than restating the origin (#377)."""
     if recipients.owner_scoped_send(name, args):
         return recipients.OWNER_ONLY
+    if policy := vault_writes.owner_opted_write(name, args):
+        return policy
     if origin != "user" and name in TRIGGERED_SAFE_TOOLS:
         return f"unattended: {origin}"
     return None
