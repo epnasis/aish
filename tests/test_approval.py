@@ -873,6 +873,7 @@ class TestControlBytesNeverAutoApprove:
         "source_file",
         [
             pytest.param(Path(approval_module.__file__), id="aish/approval.py"),
+            pytest.param(Path(approval_module.__file__).with_name("cli.py"), id="aish/cli.py"),
             pytest.param(Path(__file__), id="tests/test_approval.py"),
         ],
     )
