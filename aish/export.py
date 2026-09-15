@@ -206,8 +206,11 @@ def assemble_session_markdown(messages: list[dict], title: str) -> str:
     return "\n\n---\n\n".join(answers)
 
 
-# Web-only interactive bits that make no sense in a printed PDF.
-_AISH_REPLY_RE = re.compile(r"\[[^\]]*\]\(\s*aish-reply://[^)]*\)")
+# Web-only interactive bits that make no sense in a printed PDF. The label may
+# hold one closed bracketed run ("… [a4]", #373), the same shape app.js's
+# INLINE_RE and cli.py's _CHIP_RE read — a chip the web renders as a button
+# must be the chip the PDF drops.
+_AISH_REPLY_RE = re.compile(r"\[(?:[^\[\]]|\[[^\[\]]*\])*\]\(\s*aish-reply://[^)]*\)")
 _NO_CHIPS_RE = re.compile(r"\[no-chips\]", re.IGNORECASE)
 
 

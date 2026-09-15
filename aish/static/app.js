@@ -5651,13 +5651,24 @@ function mdTable(lines, start) {
 // exclusion an unmatched "[" earlier in that blob could greedily consume
 // across a line break into a LATER line's real chip syntax instead of
 // leaving it to match on its own.
+//
+// A quick-reply label may carry ONE bracketed run of its own — "[Pokaż
+// transakcje z konta OPERACYJNE [a4]](aish-reply://…)" (#373), where the
+// model quotes an account's tag exactly as the page shows it. The label group
+// is (?:plain | \[plain\])+ : a "[" is accepted only as the start of a closed
+// inner pair, so each character has exactly one way to match and the regex
+// stays linear. Letting the plain branch also eat "[" would make every inner
+// "[x]" two-way ambiguous, which backtracks exponentially on a line that turns
+// out not to be a chip — text the model (or a quoted page) can produce at
+// will. Deeper nesting is not read; the same shape is mirrored by cli.py's
+// _CHIP_RE and export.py's _AISH_REPLY_RE, and all three must move together.
 const INLINE_RE = new RegExp(
   "(`[^`]+`)" +
   "|(\\*\\*[^*]+\\*\\*|__[^_]+__)" +
   "|(\\*[^*\\s][^*]*\\*)" +
   "|(~~[^~]+~~)" +
   "|\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)" +
-  "|\\[([^\\]\\n]+)\\]\\(aish-reply:\\/\\/([^)\\n]*)\\)" +
+  "|\\[((?:[^\\[\\]\\n]|\\[[^\\[\\]\\n]*\\])+)\\]\\(aish-reply:\\/\\/([^)\\n]*)\\)" +
   "|!\\[([^\\]\\n]*)\\]\\(([^)\\s]+)\\)" +
   // A link to a file on THIS machine — last, so http, aish-reply and images
   // are all read as themselves first, and appended rather than inserted so no

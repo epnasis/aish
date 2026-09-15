@@ -63,10 +63,13 @@ REPLAY_TOOL_LINES = 4
 # Quick-reply chips (#167): the model ends a question with markdown links of
 # the form [Label](aish-reply://answer text) — the web UI renders each as a tap
 # button; the CLI surfaces them as a numbered menu the user picks by number.
-# The pattern mirrors app.js's INLINE_RE exactly: label is [^\]\n]+, the
-# url-encoded payload is [^)\n]*, both single-line.
-_CHIP_RE = re.compile(r"\[([^\]\n]+)\]\(aish-reply://([^)\n]*)\)")
+# The pattern mirrors app.js's INLINE_RE exactly: the label is plain text that
+# may hold ONE closed bracketed run ("… OPERACYJNE [a4]", #373) and never a
+# bare "[" — that keeps the match unambiguous, hence linear; the url-encoded
+# payload is [^)\n]*; both are single-line. Deeper nesting is not read.
+_CHIP_RE = re.compile(r"\[((?:[^\[\]\n]|\[[^\[\]\n]*\])+)\]\(aish-reply://([^)\n]*)\)")
 _CHIP_MID = "(aish-reply://"  # the fixed run after the label's closing ']'
+_CHIP_LABEL_MAX_DEPTH = 2  # the label's own "[" plus one inner pair, as _CHIP_RE reads it
 
 
 def _decode_reply(payload: str, label: str) -> str:
@@ -114,20 +117,31 @@ def _chip_hold_index(buf: str) -> int:
 
 def _is_chip_prefix(s: str) -> bool:
     """True when `s` (which starts with '[') could still grow into a full chip.
-    Structure: '[' label ']' '(aish-reply://' payload ')'."""
+    Structure: '[' label ']' '(aish-reply://' payload ')'. The label's closing
+    ']' is the first one at bracket depth 0 — not the first ']' at all, which
+    an inner "[a4]" would supply one character early and release the chip as
+    plain text before it could complete (#373)."""
     if "\n" in s:  # chips are single-line
         return False
-    if "]" not in s:  # still typing the label
-        return True
-    idx = s.index("]")
-    if idx == 1:  # empty label — [^\]\n]+ needs at least one char
-        return False
-    rest = s[idx + 1:]  # should become '(aish-reply://' + payload
-    if len(rest) <= len(_CHIP_MID):
-        return _CHIP_MID.startswith(rest)
-    if not rest.startswith(_CHIP_MID):
-        return False
-    return ")" not in rest[len(_CHIP_MID):]  # a ')' would have closed the chip
+    depth = 0
+    for idx, ch in enumerate(s):
+        if ch == "[":
+            depth += 1
+            if depth > _CHIP_LABEL_MAX_DEPTH:  # _CHIP_RE could never match this
+                return False
+        elif ch == "]":
+            depth -= 1
+            if depth > 0:
+                continue
+            if idx == 1:  # empty label — the label group needs at least one char
+                return False
+            rest = s[idx + 1:]  # should become '(aish-reply://' + payload
+            if len(rest) <= len(_CHIP_MID):
+                return _CHIP_MID.startswith(rest)
+            if not rest.startswith(_CHIP_MID):
+                return False
+            return ")" not in rest[len(_CHIP_MID):]  # a ')' would have closed the chip
+    return True  # still typing the label
 
 
 class ChipStream:
