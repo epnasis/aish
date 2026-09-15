@@ -14,7 +14,7 @@ import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import aliases, backends, browser, recipients, term_image, tools, turns
+from . import aliases, backends, browser, recipients, term_image, tools, turns, vault_writes
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
@@ -751,21 +751,28 @@ def make_tool_approver(log, get_intent=None, get_gate=None):
     asks the agent who is holding the card (#295 M3), late-bound exactly as
     `get_intent` is.
 
-    The one auto-approval is a mail that can reach nobody but the owner (#377),
-    the same answer `server.py` gives — an identical action must not need an
-    approval here and none there, or the terminal simply inherits the asymmetry
-    the web one just shed. The CLI has no unattended origin, so the
-    origin-scoped half of that policy has nothing to say here."""
+    The auto-approvals are the consequence-scoped licences — a mail that can
+    reach nobody but the owner (#377), an Obsidian write that can destroy
+    nothing he did not opt in (#379) — the same answers `server.py` gives: an
+    identical action must not need an approval here and none there, or the
+    terminal simply inherits the asymmetry the web one shed. The CLI has no
+    unattended origin, so the origin-scoped half of that policy has nothing
+    to say here."""
 
     def approve_tool(name: str, args: dict, preview: "str | None" = None) -> bool:
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         said = (get_intent() if get_intent else "") or ""
-        if recipients.owner_scoped_send(name, args):
-            print(f"\n{DIM}✓ auto-approved ({recipients.OWNER_ONLY}): "
+        policy = (
+            recipients.OWNER_ONLY
+            if recipients.owner_scoped_send(name, args)
+            else vault_writes.owner_opted_write(name, args)
+        )
+        if policy:
+            print(f"\n{DIM}✓ auto-approved ({policy}): "
                   f"{_plain(name)}({_plain(shown)}){RESET}")
             if log:
                 log.command(
-                    f"tool {name}({shown})", f"auto ({recipients.OWNER_ONLY})", said,
+                    f"tool {name}({shown})", f"auto ({policy})", said,
                     asked_by=(get_gate() if get_gate else "") or "",
                 )
             return True
