@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from aish import skills as skills_module
 from aish.approval import load_prefixes
 from aish.cli import (
     make_approver,
@@ -314,6 +315,19 @@ class TestUsageContext:
 
         text = usage_context("m", True, tmp_path, tmp_path, tmp_path)
         assert "currently true" in text
+
+    def test_names_the_skills_dir_in_effect_now(self, tmp_path):
+        """`from .skills import GLOBAL_SKILLS_DIR` copied the path at IMPORT, so
+        this line kept naming the owner's real ~/.config/aish/skills however the
+        constant was later moved — an isolated suite told the model where the
+        owner's corpus was, and the verify harness (#254) was told wrong too
+        (#381). Reading the module attribute is what makes a rebind take."""
+        from aish.cli import usage_context
+        from aish.paths import DEFAULT_CONFIG_HOME
+
+        text = usage_context("m", False, tmp_path, tmp_path, tmp_path)
+        assert str(skills_module.GLOBAL_SKILLS_DIR) in text
+        assert str(DEFAULT_CONFIG_HOME / "skills") not in text
 
     def test_grounds_identity_as_local_ollama(self, tmp_path):
         from aish.cli import usage_context
