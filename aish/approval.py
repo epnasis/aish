@@ -25,9 +25,24 @@ from pathlib import Path
 
 from . import vocab
 from .files import contains, is_sensitive_path, resolved, within_roots
+from .paths import config_home
 
-DEFAULT_ALLOWLIST = Path.home() / ".config" / "aish" / "allow.txt"
-DEFAULT_DENYLIST = Path.home() / ".config" / "aish" / "deny.txt"
+
+def default_allowlist() -> Path:
+    """Where `a` (always allow) appends, when nothing named a path.
+
+    Resolved at CALL time and through the one config-home knob, not bound at
+    import (#390). `save_prefix` mkdir's and appends, and an append is the one
+    write the suite's corpus guard cannot see — so an import-bound
+    `Path.home()` made the owner's real `allow.txt` reachable from a test that
+    merely drove the approval flow without naming a path.
+    """
+    return config_home() / "allow.txt"
+
+
+def default_denylist() -> Path:
+    return config_home() / "deny.txt"
+
 
 # Admin-owned system bin directories. A binary invoked by absolute path from
 # one of these is trusted to be the tool its bare name denotes, so it may be

@@ -225,6 +225,21 @@ class TestBackgroundJobs:
         tools.JOBS[-1]["proc"].wait(timeout=10)
         assert tmp_path.name in Path(tools.JOBS[-1]["log"]).read_text()
 
+    def test_unnamed_log_dir_follows_the_state_dir_in_effect_now(self, tmp_path, monkeypatch):
+        """Every real caller passes `state_dir / "jobs"` with `state_dir`
+        honouring AISH_STATE_DIR; the fallback for a caller that named nothing
+        read `Path.home()` instead (#390), so an Agent built without
+        `job_log_dir` under an isolated state dir still mkdir'd and wrote in
+        the owner's real one — the one directory the corpus guard cannot
+        watch. The two must agree."""
+        monkeypatch.setattr(tools, "JOBS", [])
+        state = tmp_path / "state"
+        monkeypatch.setenv("AISH_STATE_DIR", str(state))
+        assert tools._default_job_log_dir() == state / "jobs"
+        tools.start_background("echo unnamed")
+        tools.JOBS[-1]["proc"].wait(timeout=10)
+        assert Path(tools.JOBS[-1]["log"]).parent == state / "jobs"
+
 
 class TestDetach:
     def test_detach_registers_job_and_drains_to_log(self, tmp_path, monkeypatch):

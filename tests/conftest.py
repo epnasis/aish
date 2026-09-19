@@ -17,14 +17,22 @@ from aish import secrets as secrets_module
 from aish import signin as signin_module
 from aish import skills as skills_module
 from aish import tool_plugins as tool_plugins_module
-from aish.paths import config_home
+from aish.paths import DEFAULT_CONFIG_HOME, config_home
 
 # Resolved HERE, at conftest import, and not inside the guard below: this is the
 # last moment that is definitively before any fixture has moved AISH_CONFIG_HOME,
 # so it is the only reading that is certain to name the owner's real corpus.
-REAL_CORPUS_DIRS = (
-    config_home(),  # the root too: allow.txt, config.toml, and any dir a test invents
-    *(config_home() / name for name in ("memory", "skills", "rules", "tools")),
+# DEFAULT_CONFIG_HOME is watched as well: `no_inherited_aish_env` strips a
+# developer's exported AISH_CONFIG_HOME from every test, so the tree a leak
+# would reach is the real ~/.config/aish even when the shell said otherwise.
+_CORPUS_ROOTS = dict.fromkeys((config_home(), DEFAULT_CONFIG_HOME))  # ordered, deduped
+REAL_CORPUS_DIRS = tuple(
+    directory
+    for root in _CORPUS_ROOTS
+    for directory in (
+        root,  # the root too: allow.txt, config.toml, and any dir a test invents
+        *(root / name for name in ("memory", "skills", "rules", "tools")),
+    )
 )
 
 
@@ -91,7 +99,30 @@ def no_writes_to_the_real_corpus():
 
 
 @pytest.fixture(autouse=True)
-def isolated_global_dirs(tmp_path_factory, monkeypatch):
+def no_inherited_aish_env(monkeypatch):
+    """Nothing the developer exported reaches a test (#390).
+
+    Every `AISH_*` variable is a knob the code reads at call time — where the
+    allowlist, the config file, the state dir and the model live, which
+    browser to use, whether to push. The fixtures below set the handful that
+    need a value; the rest were inherited from the shell, so a developer with
+    `AISH_ALLOWLIST` or `AISH_CONFIG` exported ran a suite that read (and,
+    through the always-allow flow, appended to) their real files while every
+    tmp-home fixture reported success. The whole prefix goes, with no
+    exemption list to keep current: a test that wants a value sets it itself,
+    inside the test, where monkeypatch restores it afterwards.
+
+    Ordered before the setters by dependency, not by position in this file.
+    `AISH_LIVE_WEB` is unaffected in practice — its one reader is a `skipif`
+    evaluated at collection, before any fixture runs.
+    """
+    for name in list(os.environ):
+        if name.startswith("AISH_"):
+            monkeypatch.delenv(name)
+
+
+@pytest.fixture(autouse=True)
+def isolated_global_dirs(tmp_path_factory, monkeypatch, no_inherited_aish_env):
     home = tmp_path_factory.mktemp("config-home")
     # The knob itself (#254), for whatever resolves the config home LATER —
     # config.toml, or a subprocess that imports aish. The four constants below
@@ -127,7 +158,7 @@ def project_scope(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_real_notifications(monkeypatch):
+def no_real_notifications(monkeypatch, no_inherited_aish_env):
     """Never push to the developer's real phone.
 
     `notify.configured()` reads the live macOS Keychain, so any test that runs
@@ -197,7 +228,7 @@ def no_real_secrets(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_real_browser(tmp_path_factory, monkeypatch):
+def no_real_browser(tmp_path_factory, monkeypatch, no_inherited_aish_env):
     """Never launch a real Chrome, and never touch the owner's real profile.
 
     Same reasoning as the notifier guard: `browser` reaches a live, persistent
@@ -306,7 +337,7 @@ def no_real_backoff_sleep(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolated_rate_governor(monkeypatch):
+def isolated_rate_governor(monkeypatch, no_inherited_aish_env):
     """A fresh governor per test.
 
     It is process-global by design (one API key, many session threads), so

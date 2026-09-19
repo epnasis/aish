@@ -163,6 +163,8 @@ Consequences, all of them load-bearing: `close()` collects ONLY the ephemeral fa
 
 **Prefix lifetimes.** `a` / "Always allow" is durable and file-backed, shared by CLI and web. `s` / "Allow this session" lands in `Agent.session_prefixes` and dies with the session.
 
+**Where the lists live is resolved at CALL time, through the one config-home knob (#390).** `approval.default_allowlist()` / `default_denylist()` and `cli.default_lessons()` return `config_home() / …`; `AISH_ALLOWLIST` / `AISH_DENYLIST` / `AISH_LESSONS` still override each one. They were `Path.home()` constants bound at import — so they ignored `AISH_CONFIG_HOME` (the knob `paths.py` promises moves the whole tree), `cli` and `server` imported them BY VALUE (a copy no monkeypatch reaches, the same shape as `GLOBAL_SKILLS_DIR` in #381), and `make_approver` / `usage_context` carried them as DEFINITION-time default arguments, which nothing at all can move. The `a` answer `mkdir`s and appends, and an append is the one write the suite's corpus guard (`no_writes_to_the_real_corpus`) documents as invisible to it — so any test that reached the flow without naming a path would have written the owner's real `allow.txt` and nothing would have said so. The suite also strips every inherited `AISH_*` variable before its own setters run (`no_inherited_aish_env`), because the CLI reads those overrides straight from the environment and a developer's exported value outranked every tmp-home fixture. `test_unnamed_lists_live_in_the_config_home_in_effect_now` drives the real `cli.main()` with no list named; `test_suite_never_inherits_aish_env` pins the exact set a test may see.
+
 ---
 
 ## Session scope (L4)

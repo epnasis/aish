@@ -329,6 +329,21 @@ class TestUsageContext:
         assert str(skills_module.GLOBAL_SKILLS_DIR) in text
         assert str(DEFAULT_CONFIG_HOME / "skills") not in text
 
+    def test_names_the_deny_and_lessons_paths_in_effect_now(self, tmp_path):
+        """Same shape as the skills dir, one parameter over (#390): the
+        defaults for `deny_path` and `lessons_path` were module constants
+        bound at DEFINITION, so a caller that left them out told the model
+        where the owner's real files were, whatever config home was in
+        effect. Resolved at call time they follow the tmp home instead."""
+        from aish.cli import usage_context
+        from aish.paths import DEFAULT_CONFIG_HOME, config_home
+
+        text = usage_context("m", False, tmp_path, tmp_path, tmp_path)
+        assert str(config_home() / "deny.txt") in text
+        assert str(config_home() / "lessons.md") in text
+        assert str(DEFAULT_CONFIG_HOME / "deny.txt") not in text
+        assert str(DEFAULT_CONFIG_HOME / "lessons.md") not in text
+
     def test_grounds_identity_as_local_ollama(self, tmp_path):
         from aish.cli import usage_context
 
@@ -1574,7 +1589,7 @@ class TestLaunchResume:
     implemented but unverified (#176). No model and no network: the backend is
     a stub and run_task never reaches one."""
 
-    def launch(self, monkeypatch, tmp_path, argv):
+    def launch(self, monkeypatch, tmp_path, argv, name_the_lists=True):
         import io
         import sys
 
@@ -1588,9 +1603,10 @@ class TestLaunchResume:
         monkeypatch.chdir(workdir)
         monkeypatch.setenv("AISH_STATE_DIR", str(state))
         monkeypatch.setenv("AISH_CONFIG", str(tmp_path / "absent.toml"))
-        monkeypatch.setenv("AISH_ALLOWLIST", str(tmp_path / "allow.txt"))
-        monkeypatch.setenv("AISH_DENYLIST", str(tmp_path / "deny.txt"))
-        monkeypatch.setenv("AISH_LESSONS", str(tmp_path / "lessons.md"))
+        if name_the_lists:
+            monkeypatch.setenv("AISH_ALLOWLIST", str(tmp_path / "allow.txt"))
+            monkeypatch.setenv("AISH_DENYLIST", str(tmp_path / "deny.txt"))
+            monkeypatch.setenv("AISH_LESSONS", str(tmp_path / "lessons.md"))
         monkeypatch.delenv("AISH_MODEL", raising=False)
         monkeypatch.setattr(cli, "_box", None)  # no interactive picker…
         monkeypatch.setattr(sys, "stdin", io.StringIO())  # …piped: resume the latest
@@ -1642,6 +1658,52 @@ class TestLaunchResume:
         reaches the banner and then exits the REPL on end-of-input."""
         self.launch(monkeypatch, tmp_path, [])
         assert "model qwen3.6:35b-a3b" in capsys.readouterr().out
+
+    def test_unnamed_lists_live_in_the_config_home_in_effect_now(self, tmp_path, monkeypatch):
+        """A launch that names no list — every launch outside this harness —
+        used to resolve `allow.txt` from a `Path.home()` bound at approval's
+        IMPORT, which no tmp config home and no monkeypatch could move (#390).
+        The `a` answer appends there, and an append is the one write the
+        corpus guard cannot see. So the paths must follow the config home in
+        effect NOW: conftest points AISH_CONFIG_HOME at a tmp dir, and that
+        is where all three must resolve."""
+        from aish import cli
+        from aish.paths import DEFAULT_CONFIG_HOME, config_home
+
+        seen: dict = {}
+        real_usage_context = cli.usage_context
+
+        def record(model, vi, allow_path, state_dir, config_path, deny_path, lessons_path, **kw):
+            seen.update(allow=allow_path, deny=deny_path, lessons=lessons_path)
+            return real_usage_context(
+                model, vi, allow_path, state_dir, config_path, deny_path, lessons_path, **kw
+            )
+
+        monkeypatch.setattr(cli, "usage_context", record)
+        self.launch(monkeypatch, tmp_path, [], name_the_lists=False)
+
+        home = config_home()
+        assert home != DEFAULT_CONFIG_HOME  # the suite is isolated, or nothing below means anything
+        assert seen == {
+            "allow": home / "allow.txt",
+            "deny": home / "deny.txt",
+            "lessons": home / "lessons.md",
+        }
+
+
+def test_suite_never_inherits_aish_env():
+    """Exactly the AISH_* variables conftest sets on purpose are visible to a
+    test, and nothing the developer's shell exported (#390). `main()` reads
+    AISH_ALLOWLIST / AISH_DENYLIST / AISH_LESSONS / AISH_CONFIG / AISH_MODEL
+    straight from the environment, so an exported value used to outrank every
+    tmp-home fixture — and the allowlist is a file the `a` answer appends to.
+    Pinned as an exact set: a new deliberate setter must be added here, and an
+    inherited one fails here rather than in whichever test it silently steered.
+    """
+    import os
+
+    visible = {name for name in os.environ if name.startswith("AISH_")}
+    assert visible == {"AISH_CONFIG_HOME", "AISH_STATE_DIR", "AISH_NOTIFY"}
 
 
 # --- The gate says why (#252) ---------------------------------------------

@@ -150,6 +150,23 @@ class TestUserAllowlist:
     def test_missing_file_loads_empty(self, tmp_path):
         assert load_prefixes(tmp_path / "nope.txt") == []
 
+    def test_default_lists_follow_the_config_home_in_effect_now(self, tmp_path, monkeypatch):
+        """The defaults were `Path.home()` paths bound at IMPORT (#390): they
+        ignored AISH_CONFIG_HOME — the one knob `paths.py` promises moves the
+        whole config tree — and no monkeypatch could reach the copies
+        `cli`/`server` had imported by value. Through the knob, at call time,
+        a relocated home is where an unnamed `a` answer lands."""
+        from aish.paths import DEFAULT_CONFIG_HOME
+
+        home = tmp_path / "relocated"
+        monkeypatch.setenv("AISH_CONFIG_HOME", str(home))
+        assert approval_module.default_allowlist() == home / "allow.txt"
+        assert approval_module.default_denylist() == home / "deny.txt"
+
+        save_prefix(approval_module.default_allowlist(), "git status")
+        assert load_prefixes(home / "allow.txt") == ["git status"]
+        assert approval_module.default_allowlist().parent != DEFAULT_CONFIG_HOME
+
     def test_prefix_does_not_re_enable_unsafe_flags(self):
         # allow-listing a benign `find` must NOT auto-approve destructive variants
         assert is_auto_approvable("find . -name foo", ["find"])

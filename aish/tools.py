@@ -319,13 +319,25 @@ def _flush_buf(buf: bytes, lines: list[str], on_line) -> None:
 _DRAIN_SCRIPT = "import shutil,sys; shutil.copyfileobj(sys.stdin.buffer, sys.stdout.buffer)"
 
 
+def _default_job_log_dir() -> Path:
+    """Where a job log lands when the caller named no directory (#390).
+
+    Every real entry point passes `state_dir / "jobs"`, and `state_dir` honours
+    `AISH_STATE_DIR` — so a fallback that read `Path.home()` disagreed with
+    them: an Agent built without `job_log_dir` inside an isolated state dir
+    still mkdir'd and wrote into the owner's real one.
+    """
+    root = os.environ.get("AISH_STATE_DIR") or Path.home() / ".local" / "state" / "aish"
+    return Path(root) / "jobs"
+
+
 def _detach_running(proc, command, collected, log_dir, on_line) -> str:
     """Hand a running foreground command to the background-job table. Its
     still-open output pipe is drained by an INDEPENDENT process in its own
     session, so output keeps flowing to the log — and the child never blocks on
     a full pipe — even after aish exits. (A daemon thread would die with aish,
     stalling the child once its 64 KB pipe buffer filled.)"""
-    directory = Path(log_dir) if log_dir else Path.home() / ".local" / "state" / "aish" / "jobs"
+    directory = Path(log_dir) if log_dir else _default_job_log_dir()
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = directory / f"job-{stamp}-{len(JOBS) + 1}.log"
@@ -384,7 +396,7 @@ JOBS: list[dict] = []
 def start_background(command: str, cwd: str | None = None, log_dir=None) -> str:
     """Start a detached long-running command; output goes to a log file the
     model (or user) can tail. The process survives aish exiting."""
-    directory = Path(log_dir) if log_dir else Path.home() / ".local" / "state" / "aish" / "jobs"
+    directory = Path(log_dir) if log_dir else _default_job_log_dir()
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = directory / f"job-{stamp}-{len(JOBS) + 1}.log"
