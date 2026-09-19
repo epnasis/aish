@@ -1665,7 +1665,7 @@ the delete DOES destroy at once, and restoring does not bring back: the \
 chat's throwaway working files and the stored copies of the requests its \
 steps sent. The copy mirrored to their devices also goes at once and comes \
 back by syncing again after a restore. Permanently deleting from Recently \
-Deleted is the one step that cannot be undone. Every \
+deleted is the one step that cannot be undone. Every \
 finished answer has a row of chips beneath it — copy, export that one answer \
 to PDF, and (where available) read-aloud. Each of the user's OWN prompts has a \
 row too — the time it was sent, a trash chip, a pencil that puts the prompt \
