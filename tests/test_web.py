@@ -19,6 +19,10 @@ from ddgs.exceptions import DDGSException
 
 from aish import browser, web
 
+# Captured before any test can touch it, so "what a fresh process starts with"
+# stays answerable however the suite is ordered.
+NEVER_WALLED = web._search_walled_at
+
 
 @pytest.fixture
 def no_browser(monkeypatch):
@@ -115,7 +119,7 @@ class TestWebSearch:
         self.monkeypatch = monkeypatch
         # Module state: a wall recorded by one test must not stand the next
         # test's browser down.
-        monkeypatch.setattr(web, "_search_walled_at", 0.0)
+        monkeypatch.setattr(web, "_search_walled_at", NEVER_WALLED)
 
     @pytest.fixture
     def second_index(self, monkeypatch):
@@ -1370,7 +1374,7 @@ class TestWhereTheSearchLanded:
             status=200,
             links=[("Konto Google", "https://myaccount.google.com/")],
         )
-        monkeypatch.setattr(web, "_search_walled_at", 0.0)
+        monkeypatch.setattr(web, "_search_walled_at", NEVER_WALLED)
         monkeypatch.setattr(web.browser, "read_cold", lambda url, **kw: elsewhere)
         rows, why = web.search_page("anything")
         assert rows == []
@@ -1389,11 +1393,26 @@ class TestWhereTheSearchLanded:
                 url="https://consent.google.com/m", status=200,
             )
 
-        monkeypatch.setattr(web, "_search_walled_at", 0.0)
+        monkeypatch.setattr(web, "_search_walled_at", NEVER_WALLED)
         monkeypatch.setattr(web.browser, "read_cold", elsewhere)
         web.search_page("one")
         web.search_page("two")
         assert len(reads) == 1
+
+    def test_a_wall_is_only_reported_after_one_was_met(self, monkeypatch):
+        """However young the machine is. `time.monotonic()` counts from boot,
+        so a "never walled" sentinel spelled as a clock reading IS a recent
+        moment for the first `SEARCH_WALL_COOLDOWN` of a machine's life: CI
+        runners are minutes old, and there every search was answered
+        "google.com walled aish's browser a moment ago" about a wall nothing
+        had met (#385)."""
+        assert NEVER_WALLED is None, "never-walled must not be a clock reading"
+        monkeypatch.setattr(web, "_search_walled_at", NEVER_WALLED)
+        monkeypatch.setattr(web.time, "monotonic", lambda: 1.0)
+        monkeypatch.setattr(web.browser, "read_cold", lambda url, **kw: serp_page()[1])
+        rows, why = web.search_page("anything")
+        assert why == ""
+        assert rows
 
 
 AISH = pathlib.Path(__file__).resolve().parent.parent / "aish"
