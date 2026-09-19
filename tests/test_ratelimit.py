@@ -17,7 +17,7 @@ import time
 import pytest
 
 from aish import agent as agent_module
-from aish import ratelimit
+from aish import backends, ratelimit
 
 _REAL_WAIT = ratelimit.wait
 
@@ -98,10 +98,18 @@ class TestClassify:
         assert failure.matched == "prompt is too long"
 
     @pytest.mark.parametrize("message", [
-        # Every one of these is a real 400 body captured from a provider and
-        # quoted in `docs/rate-limits.md`, not a shape invented here. aish has
-        # never recorded one itself — there is no `bad_request` model_error in
-        # any session log it has written — so the fixtures ARE the evidence.
+        # Each of these is a provider wording quoted in `docs/rate-limits.md`
+        # §7, which says per entry what established it — they are NOT equally
+        # well evidenced, and the table is where that is stated rather than
+        # here. aish has never recorded one itself, so these fixtures are as
+        # close to a corpus as this list has.
+        #
+        # The one with LOCAL evidence: the only over-window text any log on
+        # this machine has produced, 135 times in ~/.ollama/logs/server-3.log
+        # — and every one of those was answered HTTP 200, so this wording has
+        # never been seen on a 4xx. The 400 here is the test's assumption, not
+        # an observation.
+        "llm embedding error: the input length exceeds the context length",
         "Error code: 400 - {'error': {'message': \"This model's maximum context "
         "length is 4096 tokens. However, your messages resulted in 4239 tokens. "
         "Please reduce the length of the messages.\", 'type': 'invalid_request_error', "
@@ -124,9 +132,12 @@ class TestClassify:
         ).kind == ratelimit.CONTEXT_OVERFLOW
 
     def test_a_string_that_is_merely_too_long_is_not_a_context_overflow(self):
-        """The look-alike an independent implementation of this matcher
-        (LiteLLM) excludes by name: OpenAI's `user` field is capped at 64
-        characters and complains in words that read like an overflow."""
+        """The look-alike, and the one place this list deliberately DIVERGES
+        from an independent implementation: OpenAI's `user` field is capped at
+        64 characters and complains in words that read like an overflow.
+        LiteLLM's matcher calls that a context-window error; it is a MALFORMED
+        request no trim can fix, so here it stays `bad_request`
+        (docs/rate-limits.md §7)."""
         failure = ratelimit.classify(FakeAPIError(
             "Invalid value for 'user': string too long. Expected a string with "
             "maximum length 64", status=400,
@@ -678,6 +689,81 @@ class TestContextOverflowTrimsAndRetriesOnce:
         assert [s for s in steps if s.get("kind") == "trim"] == []
         assert errors[-1]["class"] == ratelimit.BAD_REQUEST
         assert errors[-1]["bound"] == "not_retryable"
+
+
+class TestContextOverflowSettlesItsReservation:
+    """The DEBIT, not the retry (#388).
+
+    Every model call is admitted on an estimate and debited from a
+    process-global window before it is sent, and the way out owes a correction.
+    A new failure class is a new way out, so the question it has to answer is
+    which of the three `Reservation` outcomes it takes — and a class that took
+    none would leave a debit nothing ever closes, throttling every other
+    session in the process for a full window.
+
+    It takes the same one every non-429 failure takes, and it cannot take a
+    different one by construction: the settle happens in `backends.governed`,
+    INSIDE the call the agent's retry loop wraps. The loop's trim-and-`continue`
+    is reached only after the exception has already passed through there, so it
+    cannot skip it, and the next attempt reserves afresh on the SMALLER history.
+    """
+
+    def failed_call(self, exc, monkeypatch):
+        """One governed call that raises, and the ticket it left behind."""
+        tickets = []
+        real = ratelimit.reserve_for_call
+
+        def capture(key, messages):
+            ticket = real(key, messages)
+            tickets.append(ticket)
+            return ticket
+
+        monkeypatch.setattr(ratelimit, "reserve_for_call", capture)
+
+        def chat(**_kwargs):
+            raise exc
+
+        with pytest.raises(type(exc)):
+            backends.governed(chat, "claude")(
+                model="m", messages=[{"role": "user", "content": "x" * 300}]
+            )
+        # The tokens only: the wall time an entry also carries differs between
+        # two runs of the same call and says nothing about how it settled.
+        entries = ratelimit.governor()._window("claude:m").entries
+        return tickets[-1], [tokens for _when, tokens in entries]
+
+    def test_the_reservation_is_closed_and_the_estimate_stands(self, monkeypatch):
+        """`settle(None)`: the request was sent and the provider may well have
+        read it, so the tokens are NOT refunded — the same direction every
+        non-quota failure errs in."""
+        ticket, entries = self.failed_call(OVERFLOW_400, monkeypatch)
+        assert ticket._closed is True
+        assert entries == [100.0]
+
+    def test_it_settles_exactly_as_a_plain_bad_request_does(self, monkeypatch):
+        """The differential that matters: splitting `BAD_REQUEST` in two must
+        not have given one half a different debit from the other."""
+        malformed = FakeAPIError("Invalid value for 'tools[0].name'", status=400)
+        overflow_ticket, overflow_entries = self.failed_call(OVERFLOW_400, monkeypatch)
+        ratelimit.reset_governor()
+        bad_ticket, bad_entries = self.failed_call(malformed, monkeypatch)
+        assert overflow_ticket._closed == bad_ticket._closed
+        assert overflow_entries == bad_entries
+
+    def test_it_is_not_treated_as_a_quota_refusal(self, monkeypatch):
+        """A 429 keeps the REQUEST debit and drops the tokens, and spells a
+        cooldown. An overflow is neither: the provider did not refuse a rate,
+        so nothing about the pacing may be learned from it."""
+        _ticket, overflow_entries = self.failed_call(OVERFLOW_400, monkeypatch)
+        assert ratelimit.governor()._cooldown_until == {}
+
+        ratelimit.reset_governor()
+        _ticket, quota_entries = self.failed_call(
+            FakeAPIError("slow down", status=429), monkeypatch
+        )
+        assert quota_entries == [0.0]
+        assert overflow_entries != quota_entries
+        assert ratelimit.governor()._cooldown_until != {}
 
 
 class TestEstimate:

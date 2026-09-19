@@ -110,7 +110,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `approval.SAFE_COMMANDS` | program names | friction | yes | root scoping + `UNSAFE_FLAGS` — being on it is necessary, never sufficient | 34 |
 | `approval._DESTRUCTIVE_COMMANDS` | program names | breaks | yes | none needed — the GATE is `check_denied` and the card, neither of which reads this | 12 |
 | `agent.REFUSAL_OPENINGS` | EN (aish's own words) | permits | yes | `_gate_outcome` / `ToolOutcome.meta`, checked FIRST | 6 |
-| `ratelimit._OVERFLOW_PHRASES` | EN (provider error text) | friction | yes | the 4xx status that already bounds it — these words only ever split `BAD_REQUEST`, never create a failure | 9 |
+| `ratelimit._OVERFLOW_PHRASES` | EN (provider error text) | friction | yes | the 4xx status that already bounds it — these words only ever split `BAD_REQUEST`, never create a failure | 10 |
 | `signin._SECOND_LEVEL` | public suffixes | friction | **no** | — | 10 |
 | `web._NOT_BUYABLE` | schema.org enum | breaks | **no** | subset of `web._AVAILABILITY`, tested at the same call site | 3 |
 

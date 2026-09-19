@@ -147,12 +147,19 @@ _OVERFLOW_PHRASES = vocab.declare(
         # supports up to 32768`. Which surface emits which is NOT established;
         # carrying both costs nothing and matching only one would miss.
         "model only supports up to",
-        # Ollama, from its own source: when truncation is on and context shift
-        # is off it returns 400 `the prompt is longer than the context length
-        # currently available to the model; shorten the prompt, …`
-        # (`llm/llama_server.go`). Its DEFAULT chat path truncates silently
-        # instead — see docs/rate-limits.md — so this catches the one branch
-        # that speaks.
+        # Ollama, and the ONLY entry with local evidence — the only over-window
+        # text any log on this machine has produced: `llm embedding error: the
+        # input length exceeds the context length`, 135 times in
+        # `~/.ollama/logs/server-3.log`. Every one of those was answered HTTP
+        # 200, so this wording has never been seen ON a 4xx and this entry
+        # claims nothing beyond the words themselves.
+        "exceeds the context length",
+        # Ollama's other wording, reported from its source as a 400 `the prompt
+        # is longer than the context length currently available to the model;
+        # shorten the prompt, …`. UNVERIFIED: no copy of that source is on this
+        # machine and no log here carries it. Kept because a miss costs a turn
+        # and a false positive costs one bounded retry, but it rests on nothing
+        # stronger than a reading nobody here could check (docs/rate-limits.md).
         "longer than the context length",
         # The deliberately broad entry, from Claude Code's own broad matcher
         # (`includes("context window")`); it also covers OpenAI's Responses
