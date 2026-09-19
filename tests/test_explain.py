@@ -1226,6 +1226,46 @@ class TestTheFlow:
         assert not [e for r in doc["flow"]["rounds"] for e in r["before"]]
         assert "eager_stub" in explain_mod.explain(path, root=tmp_path)
 
+    def test_an_overflow_trim_is_filed_after_the_failure_it_answers(self, tmp_path):
+        """The record the REAL overflow path writes (#388), not a hand-made
+        one: the provider refuses the first call for its size, aish trims and
+        retries. That trim fired between two calls, so it is a mid-turn event —
+        filing it in `given` would put it above the failure it answers and read
+        as what the turn started from."""
+        from aish.agent import Agent
+
+        log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+        calls = []
+
+        class Overflow(Exception):
+            status_code = 400
+
+        def chat(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise Overflow("prompt is too long: 234567 tokens > 200000 maximum")
+            return model_says("recovered")
+
+        agent = Agent(model="fake", approve=lambda _c: True, client_chat=chat,
+                      on_message=log.message, step_log=log.step, state_dir=tmp_path)
+        agent.messages.append({"role": "tool", "tool_name": "run_command", "content": "y" * 9000})
+        assert agent.run_task("go") == "recovered"
+
+        (trim,) = steps(log.path, "trim")
+        assert trim["policy"] == "overflow_oldest_first"
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        assert doc["given"]["trims"] == [], "an overflow trim is not what the turn started from"
+        flow = doc["flow"]
+        placed = [e for r in flow["rounds"] for e in r["before"]] + flow["loose"]
+        assert any(e.get("kind") == "trim" for e in placed), "the trim disappeared from the flow"
+        out = explain_mod.explain(log.path, root=tmp_path)
+        # The failed attempt is on the page as a call that did not return and
+        # was retried; the stubbing is reported as what happened BEFORE the
+        # call that recovered, never as the turn's starting state.
+        assert "call 1 did not return" in out and "(retry)" in out
+        assert "before this call" in out and "were stubbed for the model" in out
+
 
 class TestTheStepList:
     """The turn as a ledger of steps (#352 slice 1) — what the web step screen

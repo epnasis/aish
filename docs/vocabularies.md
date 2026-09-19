@@ -209,9 +209,11 @@ on the old behaviour — `bad_request`, no retry, the turn ends as before. That 
 `friction` in the column above, paid in a lost turn.
 **Nothing in this repository could have written it.** aish has never recorded a 400 of
 any kind — 166 `model_error` records across every session log, not one `bad_request` —
-and no SDK carries provider error text, so every entry is sourced from a captured
-response, a provider's own client, or Ollama's source, each named in
-`docs/rate-limits.md`. **The counter is therefore the only instrument that will ever
+and the provider SDKs aish imports carry none of the words (the provider's text lives in
+the response, not the client). Every entry is therefore sourced from a provider's own
+server or client source, from an independent client's provider-annotated matcher, or —
+for one entry — from this machine's Ollama log, each named with file and line in
+`docs/rate-limits.md` §7, and that table says which entries rest on which kind. **The counter is therefore the only instrument that will ever
 report this list going stale**, since the event it fires on has never been seen here.
 `quiet` will not help: on a corpus of zero it can say nothing, which is `browse._FORWARD`'s
 lesson one layer earlier.

@@ -106,24 +106,31 @@ _TRANSPORT_WORDS = re.compile(
 # WHERE EACH ENTRY COMES FROM, because none of it is derivable from this
 # repository: there is no recorded over-window rejection in any session log
 # aish has ever written (166 `model_error` records, not one of them
-# `bad_request`), and no SDK carries the provider's error text.
+# `bad_request`). The evidence for each entry — the provider's own source or
+# client where there is one, an independent client's annotated matcher where
+# there is not, and the file:line of each — is the table in
+# docs/rate-limits.md §7. The comments here say only which KIND of source it
+# was, so a reader can tell a verified entry from a merely plausible one
+# without leaving the file.
 _OVERFLOW_PHRASES = vocab.declare(
     "ratelimit._OVERFLOW_PHRASES",
     (
-        # Anthropic, from a real 400 body pasted in an issue:
-        # `prompt is too long: 233153 tokens > 200000 maximum`. The shipped
-        # Claude Code binary (2.1.278) matches the same two strings against
-        # `err.message.toLowerCase()`, which is also where the second comes
-        # from — it is NOT in Anthropic's published error docs.
+        # Anthropic: `prompt is too long: N tokens > 200000 maximum`. Two
+        # independent clients match it under an `anthropic` label (LiteLLM,
+        # openclaw), and the shipped Claude Code binary (2.1.278) matches it
+        # and the next entry against `e.toLowerCase()` in one function.
+        # Anthropic's own errors page does not document it.
         "prompt is too long",
+        # Anthropic models via BEDROCK, not the direct API — openclaw labels it
+        # `Amazon Bedrock` and LiteLLM's bedrock branch matches the shorter
+        # `Input is too long`. aish has no Bedrock backend; it is carried
+        # because a false positive costs one bounded retry and a miss a turn.
         "input is too long for requested model",
-        # Anthropic's other one: `input length and max_tokens exceed context
-        # limit: 154690 + 64000 > 200000, decrease input length or max_tokens
-        # and try again`. Cut short of `max_tokens` on purpose — the captured
-        # body has it plain and the Claude Code matcher has it backticked, and
-        # a list that pins punctuation is a list that misses by one character
-        # (#321). A substring of a verified phrase cannot miss where the whole
-        # phrase would match.
+        # Anthropic direct API: `input length and max_tokens exceed context
+        # limit: N + N > N, …`. Cut short of `max_tokens` on purpose: the
+        # Claude Code binary matches it WITH backticks around that word and
+        # openclaw makes them optional, and a list that pins punctuation
+        # misses by one character (#321).
         "exceed context limit",
         # OpenAI's machine-readable code, and the strongest entry here: it is
         # in openai-python's generated types ("The request exceeds the model's
@@ -131,42 +138,39 @@ _OVERFLOW_PHRASES = vocab.declare(
         # (`error.code == "context_length_exceeded"`). It travels in the body,
         # which `classify` already folds into the haystack.
         "context_length_exceeded",
-        # The prose beside that code, from a pasted 400: `This model's maximum
-        # context length is 4096 tokens. However, your messages resulted in
-        # 4239 tokens. Please reduce the length of the messages.` vLLM opens
-        # with the same clause and finishes differently, which is exactly why
-        # the entry stops at the clause.
+        # OpenAI chat-completions prose: `This model's maximum context length
+        # is N tokens. However, your messages resulted in N tokens …`. LiteLLM
+        # matches the opening clause; the entry stops there because other
+        # servers open the same way and finish differently.
         "maximum context length",
-        # Gemini, from pasted 400/INVALID_ARGUMENT bodies: `The input token
-        # count (185586) exceeds the maximum number of tokens allowed
-        # (131072).` Neither this nor the code above appears in the providers'
-        # own error documentation; both are pasted real responses.
+        # Gemini: `The input token count (N) exceeds the maximum number of
+        # tokens allowed (N).` LiteLLM main annotates it `# Gemini`; QwenPaw
+        # pairs it with `input token count`. No capture of the body here.
         "exceeds the maximum number of tokens allowed",
-        # A second Gemini wording reported on a newer surface: `Unable to
-        # submit request because the input token count is N but model only
-        # supports up to 32768`. Which surface emits which is NOT established;
-        # carrying both costs nothing and matching only one would miss.
+        # Gemini via VERTEX: `… input token count is N but model only supports
+        # up to N`. Two independent clients (redpanda's Go SDK, QwenPaw); the
+        # Go one comments it `Legacy Vertex wording`. Nothing from Google.
         "model only supports up to",
-        # Ollama, and the ONLY entry with local evidence — the only over-window
-        # text any log on this machine has produced: `llm embedding error: the
-        # input length exceeds the context length`, 135 times in
-        # `~/.ollama/logs/server-3.log`. Every one of those was answered HTTP
-        # 200, so this wording has never been seen ON a 4xx and this entry
-        # claims nothing beyond the words themselves.
+        # Ollama, and the ONLY entry with local evidence: `llm embedding error:
+        # the input length exceeds the context length`, 135 times in
+        # `~/.ollama/logs/server-3.log`, every one answered HTTP 200 because
+        # embedding truncates by default. Ollama's `server/routes.go` and
+        # `llm/llama_server.go` return the same words as a 400 when `truncate`
+        # is explicitly false — so the 4xx form exists, and has not been seen.
         "exceeds the context length",
-        # Ollama's other wording, reported from its source as a 400 `the prompt
-        # is longer than the context length currently available to the model;
-        # shorten the prompt, …`. UNVERIFIED: no copy of that source is on this
-        # machine and no log here carries it. Kept because a miss costs a turn
-        # and a false positive costs one bounded retry, but it rests on nothing
-        # stronger than a reading nobody here could check (docs/rate-limits.md).
+        # Ollama's chat-path refusal, `llm/llama_server.go`: 400 `the prompt is
+        # longer than the context length currently available to the model;
+        # shorten the prompt, …`, taken only when context shift is off. The
+        # DEFAULT chat path (`server/prompt.go`) truncates silently at Debug
+        # level instead, so this catches the one branch that speaks.
         "longer than the context length",
-        # The deliberately broad entry, from Claude Code's own broad matcher
-        # (`includes("context window")`); it also covers OpenAI's Responses
-        # wording, `Your input exceeds the context window of this model.` It
-        # is what a provider nobody here has recorded falls into, and being
-        # broad is the cheap mistake: a false positive costs one trim and one
-        # retry, both bounded and both recorded, while a miss costs a turn.
+        # The deliberately broad entry — the Claude Code binary's own broad
+        # matcher is `e.toLowerCase().includes("context window")`. It covers
+        # OpenAI's Responses wording, `Your input exceeds the context window of
+        # this model.` (a fixture in codex's own tests), and is what a provider
+        # nobody here has recorded falls into. Being broad is the cheap
+        # mistake: a false positive costs one trim and one retry, both bounded
+        # and both recorded, while a miss costs a turn.
         "context window",
     ),
     languages="EN (provider error text)",

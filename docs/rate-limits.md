@@ -423,28 +423,33 @@ ends as it did before the list existed. `friction`, in that document's column.
 **Where the entries come from, because none of it is derivable here — and the
 first fact is that aish has never seen one.** Across every session log on this
 machine: 166 `model_error` records, 125 `rate_limit`, 39 `server`, 2 `unknown`,
-and **not one `bad_request`** — no 400 of any kind has ever been recorded. No SDK
-carries the text either; the provider's words live in the response, never in the
-client. So every entry is sourced from outside this repository, and each one says
-which kind of source it is, because they are not equally good:
+and **not one `bad_request`** — no 400 of any kind has ever been recorded. So
+every entry is sourced from outside this repository. Each row below names what
+established it and what KIND of source that is, because they are not equally
+good: a provider's own client or server source is the strongest; an independent
+client's matcher that annotates the provider is corroboration of the words, not
+of the response they came from; and "reported" means nothing better than that.
+Every reference was read on 2026-09-19, at the file and line given; `upstream` means the
+project's `main` on GitHub that day, everything else a copy on this machine.
 
 | entry | what established it |
 |---|---|
-| `prompt is too long` | A real 400 body pasted in an issue: `prompt is too long: 233153 tokens > 200000 maximum`. Also one of the matchers inside the shipped Claude Code binary (2.1.278), against `err.message.toLowerCase()`. |
-| `input is too long for requested model` | That binary's second matcher. No captured body was found for this one. |
-| `exceed context limit` | A captured 400: `input length and max_tokens exceed context limit: 154690 + 64000 > 200000, decrease input length or max_tokens and try again`. |
-| `context_length_exceeded` | OpenAI's machine-readable code — in openai-python's generated types ("The request exceeds the model's context window") and matched by OpenAI's own codex client. The strongest entry here: a code, not prose. |
-| `maximum context length` | The prose beside it, captured: `This model's maximum context length is 4096 tokens. However, your messages resulted in 4239 tokens. Please reduce the length of the messages.` |
-| `exceeds the maximum number of tokens allowed` | Gemini, captured several times: `The input token count (185586) exceeds the maximum number of tokens allowed (131072).`, 400 / `INVALID_ARGUMENT`. |
-| `model only supports up to` | A second Gemini wording reported on a newer surface. Which surface emits which is **not** established; carrying both costs nothing. |
-| `longer than the context length` | Ollama's own source: 400 `the prompt is longer than the context length currently available to the model; shorten the prompt, …`. |
-| `context window` | The deliberately broad one, from the same binary's broad matcher; it also covers OpenAI's Responses wording, `Your input exceeds the context window of this model.` |
+| `prompt is too long` | Anthropic. LiteLLM's *anthropic* branch (`exception_mapping_utils.py:552`, the anthropic exception-mapping branch, in the 1.75.0 copy in this machine's uv cache) and openclaw's `packages/ai/src/utils/overflow.ts:41`, whose comment quotes the body `prompt is too long: 213462 tokens > 200000 maximum`. Also a matcher in the shipped Claude Code binary (`~/.local/share/claude/versions/2.1.278`, read with a byte search): `n=e.toLowerCase();return n.includes("prompt is too long")\|\|n.includes("input is too long for requested model")`. |
+| `input is too long for requested model` | **Bedrock's** wording for Anthropic models, not the direct API's: openclaw `overflow.ts:44` annotates it `Amazon Bedrock`; LiteLLM's *bedrock* branch matches the shorter `Input is too long`. The Claude Code binary matches it in the same function as `prompt is too long` (above) — Claude Code speaks Bedrock too, so that is consistent with the attribution, not against it. An earlier draft of this table called it Anthropic's second wording; no source attributes it to the direct API. aish has no Bedrock backend. Kept because it costs one bounded retry if wrong and a turn if a `claude`-family error ever arrives through Bedrock. |
+| `exceed context limit` | Anthropic direct API. openclaw `overflow.ts:43` matches ``input length and `?max_tokens`? exceed context limit: N + N > N`` — the *optional* backticks around `max_tokens` are why aish's entry stops short of that word (#321); the Claude Code binary has them, `input length and \`max_tokens\` exceed context limit`, and a 400-only regex `… exceed context limit: (\d+) \+ (\d+) > (\d+)`; LiteLLM's generic list carries `exceed context limit` verbatim. |
+| `context_length_exceeded` | OpenAI's machine-readable code, from OpenAI's own sources: `openai-python` `src/openai/types/beta/session_turn_error.py:14,34` (“The request exceeds the model's context window”), and the codex client matches `error.code == Some("context_length_exceeded")` at `codex-rs/codex-api/src/sse/responses.rs:721-723`. Both read from upstream `main`; the openai-python 2.46.0 in aish's own venv and the codex 0.153.4 installed here contain the string nowhere, so this is a code OpenAI's newer sources carry, not one any client on this machine has seen. The strongest entry here all the same: a code, not prose. |
+| `maximum context length` | OpenAI chat-completions prose. LiteLLM's generic list matches `this model's maximum context length is`; the full body in `TestClassify` (`… 4096 tokens. However, your messages resulted in 4239 tokens …`) is the shape that phrase is taken from, and no copy of that body was captured here. |
+| `exceeds the maximum number of tokens allowed` | Gemini. LiteLLM main annotates it `# Gemini` (`exception_mapping_utils.py:96` upstream; not yet in the cached 1.75.0); QwenPaw `react_agent.py:672` pairs it with `input token count`. The full body in `TestClassify` is the test's rendering of that pairing, not a capture. |
+| `model only supports up to` | Gemini via **Vertex**: redpanda `ai-sdk-go/providers/google/errors.go:86-88` matches it under the comment `Legacy Vertex wording`; QwenPaw `react_agent.py:676`. Two independent clients agree on the surface; nothing from Google does. |
+| `exceeds the context length` | Ollama — the one entry with LOCAL evidence (below), and in Ollama's own source: `server/routes.go` (embed, `req.Truncate` explicitly false) and `llm/llama_server.go:2462-2463` both return 400 `the input length exceeds the context length`. |
+| `longer than the context length` | Ollama's own source, `llm/llama_server.go:296-300`: 400 `the prompt is longer than the context length currently available to the model; shorten the prompt, …` when context shift is off. |
+| `context window` | The deliberately broad one. OpenAI's Responses body is `Your input exceeds the context window of this model. Please adjust your input and try again.` — a fixture in codex's own tests (`responses.rs:1178`); openclaw matches `/exceeds the context window/i` for OpenAI; the Claude Code binary's own broad matcher is `e.toLowerCase().includes("context window")`. Broad on purpose: a false positive costs one trim and one retry, both bounded and recorded; a miss costs the turn. |
 
-**Two things that surprised the survey and are worth keeping.** *Not one of these
-strings is in the providers' own error documentation* — OpenAI's error-codes page
-does not mention `context_length_exceeded` at all, Google's does not carry the
-token-count wording, and Anthropic's documents neither of its two. They are
-known only from captured responses.
+**Two things worth keeping from the survey.** *Not one of these strings is in the
+providers' own error documentation*, checked 2026-09-19: Anthropic's errors page
+(`platform.claude.com/docs/en/api/errors`) lists many 400 messages verbatim and
+none for the context window, and OpenAI's error-codes page carries neither the
+code nor the prose. They are known from clients and captured responses only.
 
 And **on Ollama an over-length request is not always refused**, which is the
 locally-checked half of this section. `~/.ollama/logs/server-3.log` on this
@@ -452,20 +457,24 @@ machine logs `llm embedding error: the input length exceeds the context length`
 at `INFO` **135 times**, and in all 135 the next access line for that request is
 `POST "/api/embed" 200`. An over-length request answered 200 never reaches
 `classify` at all, so on that path there is nothing for this class to fire on.
-Two caveats the log itself forces, and neither is tidy:
+Ollama's source says why, and says when it WOULD refuse:
 
-- That is the **embedding** path, not chat. What Ollama's chat path does when a
-  prompt does not fit is not established here — the entry `longer than the
-  context length` came from a reading of Ollama's source that no copy on this
-  machine can confirm, and it is flagged as such in the table.
-- The wording this machine actually recorded, `exceeds the context length`, is
-  **not** an entry in `_OVERFLOW_PHRASES`, so it is carried as one on that
-  evidence: it is the only over-window text any log here has ever produced. It
-  has never been seen on a 4xx, and the entry claims nothing more than the words.
+- **Chat truncates silently by default.** `server/prompt.go:23-77`
+  (`chatPrompt(…, truncate bool)`) removes messages from the front until the
+  prompt fits and logs it at `slog.Debug` — no error, no field in the response.
+  The 400 `longer than the context length` is the adjacent branch in
+  `llm/llama_server.go:296-300`, taken only when context shift is off.
+- **Embedding refuses only when asked to.** `server/routes.go` returns the 400
+  `the input length exceeds the context length` when `req.Truncate` is
+  explicitly false; with the default it truncates and answers 200, which is
+  exactly what the 135 local lines show. That wording is carried as an entry on
+  that evidence — it is the only over-window text any log here has ever
+  produced — and it has never been seen ON a 4xx here.
 
-The same log holds four `400`s on `/api/chat` (2026-07-19) with **no accompanying
-message**, so what they were is unknown; they are recorded here because a later
-reader will find them and should not have to re-derive that they explain nothing.
+So on Ollama this class will usually never fire, because there is usually
+nothing to fire on. The same log holds four `400`s on `/api/chat` (2026-07-19)
+with **no accompanying message**, so what they were is unknown; they are
+recorded so a later reader does not have to re-derive that they explain nothing.
 
 `claude_max.py` never enters this loop at all — the SDK owns its own, and its own
 compaction.
