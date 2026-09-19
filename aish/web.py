@@ -1268,7 +1268,12 @@ _SERP_CHROME_PATHS = ("/search", "/preferences", "/advanced_search", "/setprefs"
 # of Chrome to be refused again. Cleared by time only — nothing else knows when
 # Google has changed its mind.
 SEARCH_WALL_COOLDOWN = 1800.0
-_search_walled_at = 0.0
+# `None` and never 0.0: "never walled" is not a moment, and spelling it as one
+# makes it a moment INSIDE the cooldown for the first half hour of a machine's
+# life, because `time.monotonic()` counts from boot. On a CI runner a minute
+# old, every search was refused with "google.com walled aish's browser a moment
+# ago" — aish's own words about a wall nothing had ever met (#385).
+_search_walled_at: float | None = None
 
 
 def _is_serp_chrome(href: str, engine_host: str) -> bool:
@@ -1334,7 +1339,10 @@ def search_page(query: str) -> tuple[list[tuple[str, str, str]], str]:
     us" call for different things from the model, and a bare empty list says
     neither."""
     global _search_walled_at
-    if time.monotonic() - _search_walled_at < SEARCH_WALL_COOLDOWN:
+    if (
+        _search_walled_at is not None
+        and time.monotonic() - _search_walled_at < SEARCH_WALL_COOLDOWN
+    ):
         return [], f"{SEARCH_ENGINE} walled aish's browser a moment ago"
     url = SEARCH_ENGINE_URL.format(q=urllib.parse.quote_plus(query))
     try:

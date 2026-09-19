@@ -14,7 +14,17 @@ import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import aliases, backends, browser, recipients, term_image, tools, turns, vault_writes
+from . import (
+    aliases,
+    backends,
+    browser,
+    recipients,
+    skills,
+    term_image,
+    tools,
+    turns,
+    vault_writes,
+)
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
@@ -42,7 +52,6 @@ from .approval import (
 from .embeddings import SemanticIndex
 from .paths import config_home
 from .session import SessionInfo, SessionLog, attachment_names, strip_attachment_notes
-from .skills import GLOBAL_SKILLS_DIR
 
 if TYPE_CHECKING:
     from .claude_max import ClaudeMaxAgent
@@ -1799,7 +1808,7 @@ override config; $AISH_MODEL overrides the model key.
 - Durable context: an AISH.md file in the working directory or \
 ~/.config/aish/AISH.md is loaded into your system prompt — the right place \
 for host facts and user preferences.
-- Skills: markdown playbooks in {GLOBAL_SKILLS_DIR} (global; project-scope \
+- Skills: markdown playbooks in {skills.GLOBAL_SKILLS_DIR} (global; project-scope \
 ./.aish/skills/ discovery is disabled pending a per-directory trust \
 mechanism), indexed in your context and \
 read via the read_skill tool. To create one when the user asks — or when \
@@ -2030,7 +2039,7 @@ def _skill_cli(args: list[str]) -> int:
     path for skill imports (#139). `import` STAGES to a quarantine dir (nothing
     installed); you review the files with your own tools, then `approve` installs.
     For in-session import with an inline review card, just ask aish to import."""
-    from . import skill_import, skills
+    from . import skill_import
 
     usage = "usage: aish skill <import REPO [PATH] | approve NAME | list | discard NAME>"
     if not args:
