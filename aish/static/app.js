@@ -17704,7 +17704,7 @@ function trashRow(entry) {
 }
 
 // Appended by renderSessions after every other band. Renders NOTHING when the
-// trash is empty — a permanent "Recently Deleted (0)" row is a control that
+// trash is empty — a permanent "Recently deleted (0)" row is a control that
 // never does anything, sitting under the list you actually navigate by.
 function renderTrashSection(list, rows) {
   if (!rows.length) return;
@@ -17723,7 +17723,7 @@ function renderTrashSection(list, rows) {
   if (trashKeepDays) {
     const note = document.createElement("div");
     note.className = "trash-note";
-    note.textContent = `Deleted chats are removed after ${trashKeepDays} days.`;
+    note.textContent = `Chats here are deleted for good after ${trashKeepDays} days.`;
     list.appendChild(note);
   }
 }

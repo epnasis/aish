@@ -906,7 +906,7 @@ def test_delete_moves_the_chat_to_the_trash_and_says_how_to_get_it_back(
 ):
     """Both surfaces call the same helper (#177), so the terminal's delete is
     the web's delete — and it has to SAY so, since the terminal has no
-    Recently Deleted list to notice the chat in."""
+    Recently deleted list to notice the chat in."""
     from aish.cli import handle_slash
     from aish.session import list_trash
 

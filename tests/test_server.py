@@ -3343,13 +3343,34 @@ class TestRecentlyDeleted:
             for kind in ("restore_session", "purge_session"):
                 for entry in ("../../session-x.jsonl", "1700-session-20200101-000000-000000.jsonl"):
                     ws.send_json({"type": kind, "entry": entry})
-                    assert "Recently Deleted" in recv_until(ws, "error")["text"]
+                    assert "Recently deleted" in recv_until(ws, "error")["text"]
 
     def test_the_trash_can_be_read_without_changing_anything(self, app_env):
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "trash"})
             assert recv_until(ws, "trash_list")["entries"] == []
+
+    def test_the_offline_index_drops_a_trashed_chat_and_lists_it_again_on_restore(
+        self, app_env
+    ):
+        """The deliberate call on the issue's "interaction that will bite"
+        ([MIRROR-FORGET], docs/web-frontend.md): a trashed chat is ABSENT from
+        the offline catalogue, so every device evicts its copy, and a restore
+        puts it back in the catalogue for the next sync to refetch. Pinned so
+        the absence stays a decision and never becomes an accident."""
+        client, _ = make_client(app_env, [model_says("noted")], token="s3cret")
+        with client, connected(client, "/ws?token=s3cret") as (ws, hello, _):
+            name = self._deleted_chat(ws, hello)
+            entry = recv_until(ws, "trash_list")["entries"][0]["entry"]
+            recv_until(ws, "session_list")
+            listed = [s["name"] for s in client.get("/offline/index?token=s3cret").json()["sessions"]]
+            assert name not in listed
+
+            ws.send_json({"type": "restore_session", "entry": entry})
+            recv_until(ws, "session_restored")
+            listed = [s["name"] for s in client.get("/offline/index?token=s3cret").json()["sessions"]]
+            assert name in listed
 
     def test_startup_purges_what_the_trash_has_held_too_long(self, app_env):
         state_dir = app_env["state_dir"]

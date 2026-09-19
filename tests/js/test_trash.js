@@ -150,7 +150,7 @@ const entry = (over = {}) => ({
   const rows = opened.kids.filter((k) => k.className.includes("trash-row"));
   ok("…and every deleted chat is a row", rows.length === 2);
   ok("the policy is stated once, from the server's number",
-    opened.kids.some((k) => /removed after 30 days/.test(k.textContent)));
+    opened.kids.some((k) => /deleted for good after 30 days/.test(k.textContent)));
 }
 
 // ---- 4. A deleted chat is NOT a chat row ---------------------------------

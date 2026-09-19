@@ -1658,7 +1658,7 @@ is never rewritten. The centered chat title opens a menu (new chat, rename this 
 switch model, change directory, line wrap, export the chat to PDF, keep this \
 chat, delete \
 this chat, workspace & jobs); the compose pencil (top right) starts a new \
-chat. Deleting a chat is NOT final: it moves to a "Recently Deleted" section \
+chat. Deleting a chat is NOT final: it moves to a "Recently deleted" section \
 at the bottom of the chat list, where it can be restored for 30 days before \
 aish purges it. Tell them that when they ask about a chat they deleted. What \
 the delete DOES destroy at once, and restoring does not bring back: the \
@@ -2721,7 +2721,7 @@ class WebServer:
         elif kind == "delete_session":
             await self._delete_session(client, str(message.get("name", "")))
         elif kind == "trash":
-            # VIEW message (#177): reading what is in Recently Deleted changes
+            # VIEW message (#177): reading what is in Recently deleted changes
             # nothing and claims nothing.
             await self._send_trash(client)
         elif kind == "restore_session":
@@ -4379,11 +4379,11 @@ class WebServer:
         await self._broadcast_trash()
         await self._send_sessions(client, "")
 
-    # ---- Recently Deleted (#177) -----------------------------------------
+    # ---- Recently deleted (#177) -----------------------------------------
     #
     # One authority for what is in the trash, published to EVERY client on
     # every change, for the reason the roster plane exists: a chat restored on
-    # the laptop must not sit in the phone's Recently Deleted list waiting to
+    # the laptop must not sit in the phone's Recently deleted list waiting to
     # be restored a second time. The list is a READ (a client asks for it when
     # it paints the section); the two things that change it are ACTS.
 
@@ -4422,7 +4422,7 @@ class WebServer:
         than at the top as if it had just been used."""
         restored = await asyncio.to_thread(restore_session, self.state_dir, entry_name)
         if restored is None:
-            await self._refuse(client, "that chat is no longer in Recently Deleted")
+            await self._refuse(client, "that chat is no longer in Recently deleted")
             return
         # Every client, like a delete: this one changes what is IN the list on
         # each of them, and a device that kept no copy needs to know there is
@@ -4439,7 +4439,7 @@ class WebServer:
         #177, and the only one behind a card that still says so."""
         match = [e for e in list_trash(self.state_dir) if e.path.name == entry_name]
         if not match:
-            await self._refuse(client, "that chat is no longer in Recently Deleted")
+            await self._refuse(client, "that chat is no longer in Recently deleted")
             return
         def remove() -> None:
             try:

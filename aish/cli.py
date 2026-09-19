@@ -2125,7 +2125,7 @@ def _trash_cli(args: list[str]) -> int:
     """`aish trash <list|restore NAME|delete NAME>` — the terminal's way back
     from a delete (#177).
 
-    The web has a Recently Deleted section; a web-less user needs something,
+    The web has a Recently deleted section; a web-less user needs something,
     or the trash is just a slower delete. `restore` and `delete` take either
     the chat's own name or the trash entry's, because the name a person has in
     front of them is whichever one they were last shown.

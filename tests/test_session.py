@@ -3208,8 +3208,26 @@ class TestTrash:
         return log
 
     def test_trashing_hides_a_chat_from_every_listing(self, tmp_path):
+        """Every reader of the state dir, by name, so that a listing added
+        later with its own walk cannot inherit this guarantee unasserted."""
         kept = self._chat(tmp_path, "kept chat")
-        doomed = self._chat(tmp_path, "doomed chat")
+        doomed = SessionLog.new(tmp_path)
+        doomed.message({"role": "user", "content": "doomed chat"})
+        # Give the doomed chat something for the two readers that look past
+        # the title: a clean user-direct command (the terminal palette) and an
+        # unfinished task (restart recovery).
+        doomed.command("ls doomed", "user-direct")
+        doomed.command_event(
+            {"kind": "cmd_start", "cwd": "/x", "command": "ls doomed", "user": True}
+        )
+        doomed.command_event({"kind": "cmd_end", "status": "exit", "exit_code": 0})
+        doomed.task_start("left unfinished")
+        doomed.close()
+        assert SessionLog.user_command_history(tmp_path) == ["ls doomed"]
+        assert [p.name for p, _ in SessionLog.interrupted_sessions(tmp_path, 3600)] == [
+            doomed.path.name
+        ]
+
         assert session_module.trash_session(tmp_path, doomed.path) is not None
 
         assert {p.name for p in SessionLog._by_recency(tmp_path)} == {kept.path.name}
@@ -3220,6 +3238,12 @@ class TestTrash:
         # …and the search reading those same entries cannot find it either.
         entries = SessionLog.load_entries(tmp_path)
         assert [i.path.name for i in SessionLog.rank(entries, "doomed")] == []
+        assert SessionLog.search_sessions(tmp_path, "doomed") == []
+        assert SessionLog.search_excerpts(tmp_path, "doomed").startswith("No past session")
+        # The terminal palette and restart recovery walk the same dir with
+        # their own filters; neither sees a trashed chat.
+        assert SessionLog.user_command_history(tmp_path) == []
+        assert SessionLog.interrupted_sessions(tmp_path, 3600) == []
 
     def test_the_trash_is_one_level_down_and_no_longer_named_like_a_session(self, tmp_path):
         """Both halves of the invisibility, named separately: a future reader
