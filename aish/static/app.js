@@ -4344,8 +4344,12 @@ function inspectKeys(rows) {
     if (cl.contains("step-answer")) { ids[i] = "m:last"; pendingThink = -1; return; }
     if (cl.contains("step-trim")) {
       // A seed trim is not a step of its own; it shaped what the first model
-      // call started from, which is where the dossier files it.
-      ids[i] = d.policy === "mid_task_budget" ? `t${next("t")}` : "m1";
+      // call started from, which is where the dossier files it. A trim that
+      // fired BETWEEN calls is its own step — the same split explain.py makes
+      // with MID_TURN_TRIM, and the list has to agree with that one.
+      ids[i] = ["mid_task_budget", "overflow_oldest_first"].includes(d.policy)
+        ? `t${next("t")}`
+        : "m1";
       return;
     }
     if (cl.contains("step-steer")) { ids[i] = `s${next("s")}`; return; }

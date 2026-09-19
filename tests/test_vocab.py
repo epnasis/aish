@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from aish import agent as agent_module
-from aish import approval, browse, browser, provenance, usage, vocab, web
+from aish import approval, browse, browser, provenance, ratelimit, usage, vocab, web
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -237,6 +237,14 @@ class TestEveryCountersZeroIsReachable:
         approval.is_read_only("tar -xzf thing.tgz")
         counted = vocab.drain()["approval.SAFE_COMMANDS"]
         assert counted["matched"] == 0 and counted["asked"] >= 1
+
+    def test_the_overflow_phrases_record_a_400_that_is_merely_malformed(self):
+        """The common case, and the one that proves the zero is reachable: most
+        400s really are malformed requests, and each one is a consultation."""
+        exc = RuntimeError("Invalid value for 'tools[0].name'")
+        exc.status_code = 400  # type: ignore[attr-defined]
+        assert ratelimit.classify(exc).kind == ratelimit.BAD_REQUEST
+        assert vocab.drain()["ratelimit._OVERFLOW_PHRASES"] == {"asked": 1, "matched": 0}
 
     def test_the_destructive_list_records_a_command_it_did_not_flag(self):
         assert approval.looks_destructive("ls -la") is False

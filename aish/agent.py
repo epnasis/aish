@@ -2409,6 +2409,25 @@ CHARS_PER_TOKEN_BUDGET = 3
 # local path is unchanged by construction.
 HISTORY_TOKEN_CEILING = 300_000
 
+# How much of what aish is holding it gives back when the provider rejects a
+# request as too large for the model's context window (#388).
+#
+# A fraction of the MEASURED size, not a number derived from the provider's
+# complaint, and the reason is that aish does not know the shortfall. By the
+# time a call goes out, `_enforce_budget` has already fitted the history to the
+# budget aish believes in, so an over-window rejection says that belief is
+# wrong — and nothing in it says by how much. The message sometimes names two
+# token counts, but those count the system prompt, the tool schemas and the
+# images too, none of which a history trim can reach, and comparing them
+# against aish's own char measure would dress a ratio in the provider's unit
+# (#262). So the request is made decisively smaller by a stated constant and
+# the record says that is what governed it.
+#
+# Half, because the retry happens exactly once: a timid cut spends the one
+# attempt without fitting, and an over-large cut costs little — every stub
+# carries the continuation key that pages the text back (`TRIMMED_RECOVERABLE`).
+OVERFLOW_TRIM_FRACTION = 0.5
+
 # How many model calls a minute the history budget is sized to allow, when a
 # provider rate limit is actually known.
 #
@@ -2621,7 +2640,13 @@ def _model_error_line(
     was and what happens next, because "model call failed" answered neither."""
     what = failure.kind.replace("_", " ")
     if not final:
+        if failure.kind == ratelimit.CONTEXT_OVERFLOW:
+            # No wait to report: what changes before the next attempt is the
+            # request, not the clock (#388).
+            return f"✕ {what} (attempt {attempt}) — shortening the conversation and retrying"
         return f"✕ {what} (attempt {attempt}) — retrying in {delay:.0f}s"
+    if bound == "trim_exhausted":
+        return f"✕ {what} — aish could not make the request any smaller, not retrying"
     if failure.exhausted:
         # "Spent" only where the provider NAMED a long-window quota; a bare
         # long retry hint proves the wait, not whose budget is empty.
@@ -2659,6 +2684,13 @@ def _unavailable_text(failure: ratelimit.CallFailure | None, attempts: int = 1) 
         return (
             f"{failure.kind.replace('_', ' ')}: {spent} — retrying will not "
             f"help until it resets. {failure.text}"
+        )
+    if failure.kind == ratelimit.CONTEXT_OVERFLOW:
+        # Not "(not retryable)": this one WAS retried if there was anything to
+        # give back. What the reader can act on is that it is still too big.
+        return (
+            "context overflow: the provider says this request is larger than the "
+            f"model's context window, and aish could not make it small enough. {failure.text}"
         )
     if not failure.retryable:
         return f"{failure.kind.replace('_', ' ')} (not retryable): {failure.text}"
@@ -4260,6 +4292,9 @@ class Agent:
         budget = self._retry_wait_budget()
         waited = 0.0
         attempt = 0
+        # Whether this call has already spent its one shrink-and-retry (#388).
+        # Per call, not per task: each model call is rejected on its own size.
+        shrunk = False
         # What the adapter reports it is about to send, per attempt (#352).
         # Cleared before each try so a retry can only ever record the request
         # the model actually received on the attempt that succeeded.
@@ -4287,6 +4322,32 @@ class Agent:
                 raise TaskCancelled from exc
             except Exception as exc:  # noqa: BLE001 — surface, don't crash the REPL
                 last = ratelimit.classify(exc)
+                overflow = last.kind == ratelimit.CONTEXT_OVERFLOW
+                if overflow and not shrunk and self._can_trim_history():
+                    # The one 4xx aish can answer: the request was refused for
+                    # its SIZE, so the next move is a SMALLER request, not a
+                    # later one. No wait is taken — nothing about the provider
+                    # changes in the meantime, and what goes out next is a
+                    # different request rather than the same one again.
+                    #
+                    # The failure is recorded BEFORE the trim so the log reads
+                    # in the order the two happened, and the retry is promised
+                    # only because `_can_trim_history` already said the next
+                    # request will be smaller.
+                    #
+                    # Once per call. A second overflow ends the turn (`bound:
+                    # trim_exhausted`) rather than eating the conversation a
+                    # fraction at a time against a window nothing here knows.
+                    shrunk = True
+                    self._record_model_error(
+                        last, attempt, 0.0, False, waited=waited, budget=budget
+                    )
+                    self._trim_history_to_budget(
+                        int(self._total_chars() * OVERFLOW_TRIM_FRACTION),
+                        policy="overflow_oldest_first",
+                        cap_source=f"constant:OVERFLOW_TRIM_FRACTION:{OVERFLOW_TRIM_FRACTION}",
+                    )
+                    continue
                 # The next wait is priced BEFORE the decision, because the
                 # decision is about affording it. Which bound ended the retry is
                 # recorded rather than left to be re-derived: "gave up after 5
@@ -4296,7 +4357,13 @@ class Agent:
                 # applies to the three bounds on a page.
                 delay = ratelimit.backoff_delay(last, attempt) if last.retryable else 0.0
                 bound = ""
-                if not last.retryable:
+                if overflow:
+                    # Recognised, and out of room: either nothing was left to
+                    # trim, or the one shrink this call allows itself was
+                    # already spent. `not_retryable` would be true of the
+                    # class and say nothing about what actually ended it.
+                    bound = "trim_exhausted"
+                elif not last.retryable:
                     bound = "not_retryable"
                 elif waited + delay > budget:
                     bound = "wait_budget"
@@ -4715,11 +4782,9 @@ class Agent:
         This matters most exactly where the trim hurts most: a small local model
         can never hold a long history, so being able to fetch a page back on
         demand is the difference between a bounded context and a lossy one."""
-        if message.get("role") != "tool":
+        if not self._trimmable(message):
             return None
         content = message["content"]
-        if len(content) <= TRIM_KEEP_CHARS + len(TRIMMED_NOTE):
-            return None
         # Cache BEFORE overwriting. An unwritable store returns "" and the stub
         # degrades to the old dead end, which must never be an exception in the
         # middle of preparing a turn.
@@ -4788,9 +4853,41 @@ class Agent:
             dropped.append(self._stub_ref(i))
         self._record_trim("delivered_images", before, budget=None, stubbed=dropped)
 
-    def _trim_history_to_budget(self) -> None:
+    def _trimmable(self, message: dict) -> bool:
+        """Would `_trim_tool_message` shorten this one?
+
+        Split out so the overflow path can ask BEFORE it trims (#388). It has
+        to: the `model_error` record saying a retry is coming is written first,
+        so the failure does not land in the log underneath the trim it caused,
+        and the only honest way to say "retrying" ahead of time is to know the
+        next request will actually be smaller. Asking the trimmer's own
+        condition rather than restating it is what keeps the two in step.
+        """
+        return (
+            message.get("role") == "tool"
+            and len(message.get("content") or "") > TRIM_KEEP_CHARS + len(TRIMMED_NOTE)
+        )
+
+    def _can_trim_history(self) -> bool:
+        """Is there anything left for a trim to shorten? Over the same slice
+        `_trim_history_to_budget` walks — never the system message at 0."""
+        return any(self._trimmable(message) for message in self.messages[1:])
+
+    def _trim_history_to_budget(
+        self,
+        budget: int | None = None,
+        *,
+        policy: str = "budget_oldest_first",
+        cap_source: str = "",
+    ) -> None:
         """Shrink old tool outputs oldest-first, only as far as the budget
         actually demands — the ONE history policy, at every task boundary.
+
+        `budget` overrides the standing one for the single caller that must cut
+        BELOW it: a provider that rejected the request as over-window has just
+        said the standing budget is wrong, so trimming to it again would free
+        nothing (#388). The target and its provenance are then the caller's, and
+        the record carries them rather than the history budget's.
 
         There used to be two. This one ran on a resume (#164), where trimming
         to a stub would gut exactly the unfinished work the resume exists to
@@ -4809,7 +4906,8 @@ class Agent:
         purpose (`backends.py`, `cache_control`), so trimming rarely is a cost
         SAVING, not a cost risk.
         """
-        budget, _ = self._history_budget()
+        if budget is None:
+            budget, _ = self._history_budget()
         before = self._total_chars()
         stubbed: list[dict] = []
         for i in range(1, len(self.messages)):
@@ -4818,7 +4916,7 @@ class Agent:
             key = self._trim_tool_message(self.messages[i])
             if key is not None:
                 stubbed.append(self._stub_ref(i, key))
-        self._record_trim("budget_oldest_first", before, budget=budget, stubbed=stubbed)
+        self._record_trim(policy, before, budget=budget, stubbed=stubbed, cap_source=cap_source)
 
     def _stub_ref(self, index: int, key: str = "") -> dict:
         """Which message was stubbed, in terms a reader can act on: its position
@@ -4838,7 +4936,12 @@ class Agent:
         return ref
 
     def _record_trim(
-        self, policy: str, before: int, budget: int | None, stubbed: list[dict]
+        self,
+        policy: str,
+        before: int,
+        budget: int | None,
+        stubbed: list[dict],
+        cap_source: str = "",
     ) -> None:
         """The `trim` record (contract §3.5). Renderless — it edits history
         rather than describing a call, so it cannot ride the `tool` step.
@@ -4849,8 +4952,10 @@ class Agent:
         # The provenance of the number that ACTUALLY governed this trim. It
         # used to report the backend window while the budget had been computed
         # from num_ctx — a record claiming the backend window governed a trim
-        # the backend window never touched.
-        _, cap_source = self._history_budget()
+        # the backend window never touched. A caller that trimmed to its own
+        # target states its own, for the same reason.
+        if not cap_source:
+            _, cap_source = self._history_budget()
         # RENDERED, not log-only (#243). Every other governance record describes
         # a decision the owner can look up on demand; this one contradicts what
         # is in front of him — the transcript still shows the full page while
@@ -4867,7 +4972,10 @@ class Agent:
             keep_chars=TRIM_KEEP_CHARS,
             budget=budget,
             cap_source=("constant:TRIM_KEEP_CHARS" if budget is None else cap_source),
-            oldest_first=policy == "budget_oldest_first",
+            # Both oldest-first policies run the SAME loop over the whole
+            # history, so the flag follows the name rather than a second list
+            # that could drift from it.
+            oldest_first=policy.endswith("oldest_first"),
         )
 
     def _total_chars(self) -> int:

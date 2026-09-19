@@ -277,6 +277,14 @@ def _refused(gate: dict) -> bool:
 #
 # States are machine values, distinct from the display strings above. A field is
 # never merely absent.
+#: Trim policies that fire INSIDE a turn, between two model calls, rather than
+#: preparing the one the turn starts from. A mid-turn trim is an EVENT in the
+#: flow and is rendered between rounds; a seed trim shaped what the first call
+#: was handed and belongs to the turn's starting state. `overflow_oldest_first`
+#: joined it with #388 — it runs when a call has already been refused, which is
+#: as mid-turn as a trim gets.
+MID_TURN_TRIM = frozenset({"mid_task_budget", "overflow_oldest_first"})
+
 RECORDED = "recorded"
 MISSING = "not_recorded"
 EMPTY = "empty"
@@ -651,10 +659,10 @@ def _given(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
     ]
     given["rules"] = _rules_data(turn, log)
     # Trims that fired at task SEED, not mid-task. They shaped what the model
-    # started from, so they belong here; `mid_task_budget` is an event in the
+    # started from, so they belong here; a MID_TURN_TRIM is an event in the
     # flow and is rendered between rounds instead.
     given["trims"] = [
-        dict(r) for r in turn.of_kind("trim") if r.get("policy") != "mid_task_budget"
+        dict(r) for r in turn.of_kind("trim") if r.get("policy") not in MID_TURN_TRIM
     ]
     return given
 
@@ -1720,7 +1728,7 @@ def _rounds(turn: Turn, doc: dict) -> dict:
     after: dict[int, list[dict]] = {}
     for index, step in enumerate(turn.steps):
         kind = step.get("kind")
-        if kind == "trim" and step.get("policy") == "mid_task_budget":
+        if kind == "trim" and step.get("policy") in MID_TURN_TRIM:
             after.setdefault(at.get(index, 0), []).append({"kind": "trim", "record": dict(step)})
         elif kind == "injected":
             after.setdefault(at.get(index, 0), []).append(
@@ -2134,7 +2142,7 @@ def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
                     STEP_BRIEF_CHANGED, {"model_call": number}, facts, id=event_id("b"),
                     title="what the model was handed changed", before=number,
                 ))
-        elif kind == "trim" and step.get("policy") == "mid_task_budget":
+        elif kind == "trim" and step.get("policy") in MID_TURN_TRIM:
             stubbed = step.get("stubbed")
             facts = [{"k": "results stubbed", "v": _fmt_n(step.get("affected"))},
                      {"k": "which",

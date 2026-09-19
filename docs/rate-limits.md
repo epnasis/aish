@@ -395,6 +395,125 @@ So a key that never hits a *named* quota behaves exactly as it did, and the budg
 ever tightens — a generous quota is never read as permission to
 exceed the model's actual window. `TestSpendBudget`.
 
+## 7 · The one 4xx with an answer (#388)
+
+Every non-408/409/429 4xx is `BAD_REQUEST`: *a request the provider will reject
+identically forever*, so retrying it spends a request to relearn a permanent
+answer. That is right for a malformed body and wrong for exactly one case — a
+rejection that says the request was too **big**. The identical request is indeed
+refused forever; a **smaller** one is not, and only the agent can make it smaller.
+
+So `classify()` gains one class, `CONTEXT_OVERFLOW`, and it is still
+`retryable=False`. That field means *re-issuing THIS request could help*, which
+remains false; what the class adds is that the caller has an action. The split is
+a class rather than a flag on `BAD_REQUEST` because the two route to opposite
+behaviour, and a reader of `aish explain` has to be able to tell "this will never
+work" from "this size will never work". `TestClassify`.
+
+### Recognising it, and what a miss costs
+
+There is **no structural test for this.** The status says a 4xx; nothing in it
+says whether the complaint was about the shape of the request or its size. So
+`_OVERFLOW_PHRASES` is a word list under `docs/vocabularies.md`'s rules, and its
+structural half is the status class it can only ever **split**: the words never
+create a failure, they choose which of two unretryable verdicts one gets. A miss
+therefore lands on today's behaviour exactly — `BAD_REQUEST`, no retry, the turn
+ends as it did before the list existed. `friction`, in that document's column.
+
+**Where the entries come from, because none of it is derivable here — and the
+first fact is that aish has never seen one.** Across every session log on this
+machine: 166 `model_error` records, 125 `rate_limit`, 39 `server`, 2 `unknown`,
+and **not one `bad_request`** — no 400 of any kind has ever been recorded. No SDK
+carries the text either; the provider's words live in the response, never in the
+client. So every entry is sourced from outside this repository, and each one says
+which kind of source it is, because they are not equally good:
+
+| entry | what established it |
+|---|---|
+| `prompt is too long` | A real 400 body pasted in an issue: `prompt is too long: 233153 tokens > 200000 maximum`. Also one of the matchers inside the shipped Claude Code binary (2.1.278), against `err.message.toLowerCase()`. |
+| `input is too long for requested model` | That binary's second matcher. No captured body was found for this one. |
+| `exceed context limit` | A captured 400: `input length and max_tokens exceed context limit: 154690 + 64000 > 200000, decrease input length or max_tokens and try again`. |
+| `context_length_exceeded` | OpenAI's machine-readable code — in openai-python's generated types ("The request exceeds the model's context window") and matched by OpenAI's own codex client. The strongest entry here: a code, not prose. |
+| `maximum context length` | The prose beside it, captured: `This model's maximum context length is 4096 tokens. However, your messages resulted in 4239 tokens. Please reduce the length of the messages.` |
+| `exceeds the maximum number of tokens allowed` | Gemini, captured several times: `The input token count (185586) exceeds the maximum number of tokens allowed (131072).`, 400 / `INVALID_ARGUMENT`. |
+| `model only supports up to` | A second Gemini wording reported on a newer surface. Which surface emits which is **not** established; carrying both costs nothing. |
+| `longer than the context length` | Ollama's own source: 400 `the prompt is longer than the context length currently available to the model; shorten the prompt, …`. |
+| `context window` | The deliberately broad one, from the same binary's broad matcher; it also covers OpenAI's Responses wording, `Your input exceeds the context window of this model.` |
+
+**Two things that surprised the survey and are worth keeping.** *Not one of these
+strings is in the providers' own error documentation* — OpenAI's error-codes page
+does not mention `context_length_exceeded` at all, Google's does not carry the
+token-count wording, and Anthropic's documents neither of its two. They are
+known only from captured responses. And **Ollama's default chat path does not
+refuse at all**: `server/prompt.go` drops messages from the front until the
+prompt fits and logs it at `Debug`, with no error and no field in the response
+(its own issue tracker calls this out). The 400 above exists on the adjacent
+branch where context shift is off. Locally that matches what this machine's logs
+show for the embedding path — an over-length request logged at `INFO` and
+answered **HTTP 200**, 135 times in `~/.ollama/logs/server-3.log`. So on Ollama
+this class will usually never fire, because there is usually nothing to fire on.
+
+`claude_max.py` never enters this loop at all — the SDK owns its own, and its own
+compaction.
+
+**An independent implementation agrees on the shape.** LiteLLM's
+`is_error_str_context_window_exceeded` carries a substring list of the same kind
+(`exceed context limit`, `this model's maximum context length is`, `exceeds the
+maximum number of tokens allowed`, …) and two explicit **exclusions**: OpenAI's
+`user` field is capped at 64 characters and complains in words that read like an
+overflow. That look-alike is pinned here as a `bad_request` (`TestClassify`).
+
+### The trim, and why it cannot use the standing budget
+
+By the time a call goes out, `_enforce_budget` has already fitted the history to
+the budget aish believes in. An over-window rejection therefore says **that
+belief is wrong**, and re-trimming to the same number would free nothing — the
+retry would re-send the identical request, which is the thing this whole file
+argues against. The target has to be below what is being held.
+
+**How far below is aish's own guess, and it is labelled as one.** The provider's
+message sometimes names two token counts, but those count the system prompt, the
+tool schemas and the images, none of which a history trim can reach — and
+comparing them against aish's char measure would dress a ratio in the provider's
+unit (§4, #262). So `OVERFLOW_TRIM_FRACTION` gives back **half of what is
+measurably held**, the trim runs through the **existing** oldest-first machinery
+(`_trim_history_to_budget`, one extra parameter, not a second trimmer), and the
+record carries `policy: overflow_oldest_first` with
+`cap_source: constant:OVERFLOW_TRIM_FRACTION` — the provenance of the number that
+actually governed it, never the history budget it deliberately ignored. Half,
+because the retry happens once: a timid cut spends the attempt without fitting,
+and an over-large one costs little, since every stub carries the continuation key
+that pages the text back.
+
+The trim is a **mid-turn** event, so it joins `mid_task_budget` in
+`explain.MID_TURN_TRIM` and in `app.js`'s inspector keys. A trim that fires after
+a call has been refused is not part of what that call started from, and filing it
+there would put it in the dossier's *given* section, above the failure it answers.
+
+### Once, and the order of the two records
+
+`model_error` is written **before** the trim, so the log reads in the order the
+two happened; a trim above the failure would read as preparation rather than a
+response. Promising a retry before doing the work is only honest because
+`_can_trim_history` has already established the next request will be smaller —
+with nothing left to give back, no retry is promised and none is made.
+
+The retry is spent **once per model call**. A second overflow ends the turn with
+`bound: trim_exhausted`, the fourth value of that closed field: *aish could not
+make the request any smaller* — either nothing was trimmable or the one shrink
+was already spent. `not_retryable` would have been true of the class and said
+nothing about what actually ended it. No wait is taken on either attempt: nothing
+about the provider changes in the meantime, and the next request is a different
+one rather than the same one again. `TestContextOverflowTrimsAndRetriesOnce`
+covers the recovered path, the trim record, the record order, the second
+overflow, the nothing-to-trim case, and the fence that a 400 which is **not** an
+overflow is still never retried.
+
+**What it cannot fix.** A request over the window because of **images** is
+char-invisible, so a char trim may free nothing that matters and the retry is
+spent for nothing (one call, then the turn ends). `_expire_delivered_images` only
+reaches pictures delivered in EARLIER tasks, and nothing here widens that.
+
 ## What this does not fix
 
 Throttling is symptom management; ~120k tokens per call is the disease. At free-tier TPM
@@ -405,9 +524,9 @@ and §6 is the one that changes the arithmetic.
 
 Still open, tracked on #261:
 
-- **A context-window-exceeded 400 should trim and retry**, not fail. It is classified
-  `BAD_REQUEST` and correctly not retried, but the useful action is to shorten and try
-  again — the same path an unsatisfiable reservation should take.
+- ~~**A context-window-exceeded 400 should trim and retry**~~ — built in §7 (#388). The
+  unsatisfiable reservation still takes the other path: `RateLimited` tells the caller to
+  shorten the conversation and nothing shortens it for them.
 - **Whether Gemini's implicit cached tokens count against TPM quota**, as opposed to
   merely costing less. `cached_tokens` IS reported through the compat layer and now
   reaches the log (`aish usage` shows it), so the first half of the question is answered:

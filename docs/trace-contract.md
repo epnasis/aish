@@ -367,7 +367,7 @@ The recording seam is `web.PageCut` — one per tool call, never module state, b
  "oldest_first": false}
 ```
 
-`policy` is `eager_stub` \| `budget_oldest_first` (the `keep_history=True` resume path). `budget` is the char budget when one applied, `null` when the trim was unconditional — which is exactly the fact #192 says is wrong and which no current record states.
+`policy` is `eager_stub` \| `budget_oldest_first` (the `keep_history=True` resume path) \| `mid_task_budget` \| `delivered_images` \| `overflow_oldest_first` (#388 — the same oldest-first loop trimming to a target the provider's over-window rejection forced, below the standing budget; its `cap_source` is that target's own constant, never the history budget it deliberately ignored). The last three postdate this section and are recorded here so the enumeration does not lag the code. `budget` is the char budget when one applied, `null` when the trim was unconditional — which is exactly the fact #192 says is wrong and which no current record states.
 
 ### 3.6 · `tool_check` — birth check (#193)
 
