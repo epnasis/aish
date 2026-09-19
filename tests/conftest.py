@@ -4,6 +4,7 @@ so tests must never see the developer's real ~/.config/aish — nor reach the
 developer's real phone."""
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,77 @@ from aish import secrets as secrets_module
 from aish import signin as signin_module
 from aish import skills as skills_module
 from aish import tool_plugins as tool_plugins_module
+from aish.paths import config_home
+
+# Resolved HERE, at conftest import, and not inside the guard below: this is the
+# last moment that is definitively before any fixture has moved AISH_CONFIG_HOME,
+# so it is the only reading that is certain to name the owner's real corpus.
+REAL_CORPUS_DIRS = (
+    config_home(),  # the root too: allow.txt, config.toml, and any dir a test invents
+    *(config_home() / name for name in ("memory", "skills", "rules", "tools")),
+)
+
+
+def _corpus_listing(directory: Path) -> set[str]:
+    """Names in `directory`, or nothing at all if it is not there.
+
+    Never creates it: a guard that mkdir'd the thing it is watching would be
+    the first writer into the real config tree."""
+    try:
+        return {entry.name for entry in directory.iterdir()}
+    except OSError:  # missing, or unreadable — both are "no files to compare"
+        return set()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def no_writes_to_the_real_corpus():
+    """The suite must leave the owner's real ~/.config/aish untouched (#381).
+
+    `isolated_global_dirs` below points every knowledge directory at a tmp dir,
+    but it does so by rebinding constants that each module bound at IMPORT — so
+    any path that captured one earlier, or resolved the config home without the
+    fixture in effect, writes to the real corpus and nothing says so. On
+    2026-08-24 that happened: 49 fixture files (`f000`-`f019`, `rule-000`-
+    `rule-021`, …) landed in `~/.config/aish/memory`, the WatchPaths autocommit
+    pushed them to the backup within seconds, and they were live entries in the
+    owner's knowledge store for three weeks before a retrieval probe surfaced
+    one. A per-test patch cannot cover a path that escaped before the patch;
+    only a session-wide before/after comparison can, which is the same argument
+    that put `no_real_notifications` here.
+
+    Deletions are compared too, and are the worse half: `forget_memory` on an
+    unpatched dir would remove the owner's own memories, and nothing in a test
+    run would report it.
+
+    What it does NOT see, stated rather than implied: it compares entry NAMES,
+    so a test that OVERWRITES a file already in the corpus — or appends to
+    `allow.txt` — passes this guard untouched. Closing that needs content
+    hashes, and hashes of the owner's live corpus would then disagree whenever
+    he edits a memory while the suite runs. Names are the part that can be
+    compared without a false alarm.
+
+    The STATE dir (`~/.local/state/aish`) is deliberately NOT guarded. The
+    owner's aish-web server runs on this machine and appends to session logs
+    continuously, so any snapshot of it disagrees with itself by the end of a
+    suite run — the guard would fail for the owner using his own agent, which
+    trains people to ignore it. The config tree has no such background writer:
+    it changes only when someone deliberately saves knowledge, so a difference
+    there is a real event worth stopping for, whichever side produced it.
+    """
+    before = {directory: _corpus_listing(directory) for directory in REAL_CORPUS_DIRS}
+    yield
+    changed = []
+    for directory, names in before.items():
+        now = _corpus_listing(directory)
+        for name in sorted(now - names):
+            changed.append(f"{directory / name} (added)")
+        for name in sorted(names - now):
+            changed.append(f"{directory / name} (deleted)")
+    assert not changed, (
+        "the test suite changed the owner's real knowledge corpus — a test "
+        "escaped `isolated_global_dirs` and wrote outside the tmp config home:\n  "
+        + "\n  ".join(changed)
+    )
 
 
 @pytest.fixture(autouse=True)
