@@ -86,12 +86,12 @@ from .agent import (
     remove_chat_scratch,
 )
 from .approval import (
-    DEFAULT_ALLOWLIST,
-    DEFAULT_DENYLIST,
     Approved,
     Blocked,
     Denied,
     check_denied,
+    default_allowlist,
+    default_denylist,
     escaping_dirs,
     is_auto_approvable,
     load_prefixes,
@@ -100,10 +100,10 @@ from .approval import (
     save_prefix,
 )
 from .cli import (
-    DEFAULT_LESSONS,
     LogRef,
     _backend_hint,
     available_models,
+    default_lessons,
     default_workspace,
     identity_context,
     load_config,
@@ -6111,9 +6111,9 @@ def create_app(
     # Base URL for notification deep-links (#163): a push tap must open the
     # session in the real UI, so this is the public origin, not the LAN bind.
     public_url = (public_url or os.environ.get("AISH_PUBLIC_URL", "")).rstrip("/")
-    allow_path = Path(allow_path or os.environ.get("AISH_ALLOWLIST", str(DEFAULT_ALLOWLIST)))
-    deny_path = Path(deny_path or os.environ.get("AISH_DENYLIST", str(DEFAULT_DENYLIST)))
-    lessons_path = Path(lessons_path or os.environ.get("AISH_LESSONS", str(DEFAULT_LESSONS)))
+    allow_path = Path(allow_path or os.environ.get("AISH_ALLOWLIST") or default_allowlist())
+    deny_path = Path(deny_path or os.environ.get("AISH_DENYLIST") or default_denylist())
+    lessons_path = Path(lessons_path or os.environ.get("AISH_LESSONS") or default_lessons())
     uploads_dir = state_dir / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
 

@@ -38,10 +38,10 @@ from .agent import (
     learn_prompt,
 )
 from .approval import (
-    DEFAULT_ALLOWLIST,
-    DEFAULT_DENYLIST,
     Blocked,
     check_denied,
+    default_allowlist,
+    default_denylist,
     escaping_dirs,
     is_auto_approvable,
     load_prefixes,
@@ -443,7 +443,7 @@ def make_approver(
     ask_all: bool,
     allow_path: Path,
     log,
-    deny_path: Path = DEFAULT_DENYLIST,
+    deny_path: Path | None = None,
     get_scope=None,
     get_session_prefixes=None,
     trust_dir=None,
@@ -464,6 +464,7 @@ def make_approver(
     it was doing on the step that proposed this command (#252), printed above
     the prompt and recorded with the decision — the terminal gate shows the same
     reason the web card does, because the two gate identically."""
+    deny_path = deny_path if deny_path is not None else default_denylist()
     own_prefixes: set[str] = set()
 
     def session_prefixes() -> set[str]:
@@ -1602,7 +1603,10 @@ def handle_slash(
     return "handled"
 
 
-DEFAULT_LESSONS = Path.home() / ".config" / "aish" / "lessons.md"
+def default_lessons() -> Path:
+    """Call-time, through the one config-home knob — same reason as
+    `approval.default_allowlist` (#390)."""
+    return config_home() / "lessons.md"
 
 
 def default_workspace(cwd: str) -> str:
@@ -1664,12 +1668,14 @@ def usage_context(
     allow_path: Path,
     state_dir: Path,
     config_path: Path,
-    deny_path: Path = DEFAULT_DENYLIST,
-    lessons_path: Path = DEFAULT_LESSONS,
+    deny_path: Path | None = None,
+    lessons_path: Path | None = None,
     provider: str = "ollama",
 ) -> str:
     """Self-knowledge for the system prompt: aish should be able to explain
     and (via approved commands) reconfigure itself."""
+    deny_path = deny_path if deny_path is not None else default_denylist()
+    lessons_path = lessons_path if lessons_path is not None else default_lessons()
     return f"""\
 About aish (you) — use this to answer questions about your own usage:
 {identity_context(model, provider)}
@@ -2320,9 +2326,9 @@ def main() -> int:
     state_dir = Path(
         os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
     )
-    allow_path = Path(os.environ.get("AISH_ALLOWLIST", str(DEFAULT_ALLOWLIST)))
-    deny_path = Path(os.environ.get("AISH_DENYLIST", str(DEFAULT_DENYLIST)))
-    lessons_path = Path(os.environ.get("AISH_LESSONS", str(DEFAULT_LESSONS)))
+    allow_path = Path(os.environ.get("AISH_ALLOWLIST") or default_allowlist())
+    deny_path = Path(os.environ.get("AISH_DENYLIST") or default_denylist())
+    lessons_path = Path(os.environ.get("AISH_LESSONS") or default_lessons())
 
     global _box
     if sys.stdin.isatty():

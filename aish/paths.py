@@ -11,9 +11,13 @@ kept `remember` / `create_skill` pointed at the owner's real store. Four env
 vars is four chances to isolate three of them and share the fourth, and the
 fourth is the one that writes.
 
-Resolved at import, like `AISH_STATE_DIR` at its call sites: set the variable
-before importing aish (the verify harness runs a launcher script, so it does),
-or monkeypatch the derived constants (the pytest suite does).
+The four directory constants are resolved at import: set the variable before
+importing aish (the verify harness runs a launcher script, so it does), or
+monkeypatch the derived constants (the pytest suite does). The three FILES
+beside them — `allow.txt`, `deny.txt`, `lessons.md` — resolve through
+`config_home()` at CALL time instead (#390): an import-bound `Path.home()`
+there was reachable by any test that drove the approval flow without naming a
+path, and an append is the one write the suite's corpus guard cannot see.
 """
 
 import os
