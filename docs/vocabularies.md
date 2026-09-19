@@ -219,6 +219,11 @@ lesson one layer earlier.
 distinguishes a malformed body from an oversized one. The closest thing to a structural
 signal is OpenAI's `context_length_exceeded` **code** — machine-readable, and in the list
 for that reason — but it is one provider's, and the others send prose only.
+**It is consulted TWICE per failed call**, which matters for reading its number: the same
+exception is classified once at the backend seam for the governor
+(`backends._settle_failure`) and once in the retry loop for the decision. `asked` counts
+consultations, exactly as this document says everywhere else — not rejections, and not
+turns.
 
 **`agent.REFUSAL_OPENINGS` — the odd one out.** It matches aish's OWN sentences, not a
 page's, so it goes stale by an aish refactor rather than by a site. It is only reached when
