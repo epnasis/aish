@@ -866,6 +866,154 @@ def _turn_opens_at(records: list[dict], user_index: int) -> int:
     return user_index
 
 
+# ---- trash: a delete you can take back for 30 days (#177) -----------------
+#
+# Deleting a chat was one `unlink()`, and nothing anywhere could bring it back —
+# not the server, not the CLI, and not the offline mirror, which drops a
+# server-deleted chat on its next sync. It now MOVES the log into
+# `<state_dir>/trash/`, and `purge_trash` removes what has been there longer
+# than TRASH_MAX_AGE_S.
+#
+# Three properties carry it, and each is why a more obvious design was rejected:
+#
+# 1. `trash/` is a SUBDIRECTORY. Every listing in this module walks the state
+#    dir through one non-recursive `state_dir.glob("session-*.jsonl")`
+#    (`_by_recency`), and every other module that walks it does the same — so a
+#    trashed chat leaves the drawer, the CLI picker, the offline index, search
+#    and recovery with NO change to any of them. Both halves are load-bearing:
+#    the entry is one level down AND its name no longer starts with `session-`.
+# 2. The deletion time is in the FILENAME, never in the log. Appending a
+#    `kind:"trashed"` record — the idiom `title`/`origin`/`cwd` use — would have
+#    rewritten the file's mtime, which is the last-interaction stamp every
+#    ordering here depends on, for a chat that has had no new activity.
+# 3. A restore is the rename run backwards, so the bytes and the mtime are the
+#    ones that went in. There is nothing to re-derive and nothing to get wrong.
+#
+# What trash does NOT hold, said plainly so the promise does not outrun the
+# code: a chat's throwaway scratch workspace and its evidence blobs are deleted
+# when the chat is (`agent.remove_chat_scratch`, `turns.delete_chat`). This
+# holds the conversation and its command audit trail — the part a delete
+# destroys that nothing else has a copy of.
+TRASH_DIR_NAME = "trash"
+TRASH_MAX_AGE_S = 30 * 24 * 3600
+# A ceiling on the directory, so a bulk delete cannot grow it without limit
+# before the age purge catches up. Far above anything one person deletes in a
+# month, because reaching it destroys the OLDEST-deleted entries EARLY — the
+# one way this mechanism can lose something it promised to hold for 30 days.
+TRASH_MAX_ENTRIES = 200
+
+# `<deleted-at epoch>-<original name>`. The original half is the same shape
+# `_SESSION_NAME_RE` accepts, so a name this parses can only ever be restored to
+# something the rest of the tree already calls a session.
+_TRASH_ENTRY_RE = re.compile(r"^(\d{1,20})-(session-[0-9-]+\.jsonl)$")
+
+
+class TrashEntry(NamedTuple):
+    """One deleted chat: where it sits now, the name it goes back to, and when
+    it was deleted (read off the filename, never off the log)."""
+
+    path: Path
+    name: str
+    deleted_at: float
+
+
+def trash_dir(state_dir: Path) -> Path:
+    return Path(state_dir) / TRASH_DIR_NAME
+
+
+def trash_session(state_dir: Path, path: Path, now: float | None = None) -> Path | None:
+    """Move one session log into the trash; answer where it landed, or None if
+    it would not move — the caller decides whether that is a refusal.
+
+    A rename within the same state dir: atomic, and it leaves mtime alone.
+    """
+    source = Path(path)
+    target_dir = trash_dir(state_dir)
+    entry = target_dir / f"{int(time.time() if now is None else now)}-{source.name}"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        # `rename` REPLACES silently on POSIX, so a name already taken would be
+        # a delete destroying the copy it promised to keep — the one outcome
+        # this whole mechanism exists to prevent. Refusing is visible; the
+        # caller says so and nothing has happened yet.
+        if entry.exists():
+            return None
+        source.rename(entry)
+    except OSError:
+        return None
+    return entry
+
+
+def list_trash(state_dir: Path) -> list[TrashEntry]:
+    """What is in the trash, most recently deleted first.
+
+    A file whose name this cannot parse is not one of ours: never listed, and
+    never purged. Deleting something we cannot identify is the wrong direction
+    for a mechanism that exists to stop destroying things.
+    """
+    try:
+        found = list(trash_dir(state_dir).iterdir())
+    except OSError:  # no trash yet, or an unreadable one — both are "empty"
+        return []
+    entries = []
+    for path in found:
+        match = _TRASH_ENTRY_RE.match(path.name)
+        if match is not None:
+            entries.append(TrashEntry(path, match.group(2), float(match.group(1))))
+    entries.sort(key=lambda entry: (-entry.deleted_at, entry.name))
+    return entries
+
+
+def restore_session(state_dir: Path, entry_name: str) -> Path | None:
+    """Put a trashed chat back under its own name — the rename that trashed it,
+    run backwards, so the log is byte-identical and its mtime never moved.
+
+    None when the name is not a trash entry, when the file is not there, or
+    when a live log already holds that name: recovering one chat must never
+    overwrite another.
+    """
+    match = _TRASH_ENTRY_RE.match(entry_name)
+    if match is None or Path(entry_name).name != entry_name:
+        return None
+    target = Path(state_dir) / match.group(2)
+    if target.exists():
+        return None
+    try:
+        (trash_dir(state_dir) / entry_name).rename(target)
+    except OSError:
+        return None
+    return target
+
+
+def purge_trash(
+    state_dir: Path,
+    max_age: float = TRASH_MAX_AGE_S,
+    max_entries: int = TRASH_MAX_ENTRIES,
+    now: float | None = None,
+) -> list[str]:
+    """Delete what the trash has held too long, then anything over the entry
+    ceiling, oldest-deleted first. Answers the ORIGINAL names removed.
+
+    Never raises, and one entry that will not unlink does not stop the rest:
+    this runs from a server start and a CLI launch, where a trash that cannot
+    be swept is a line in a log and never a reason not to come up.
+    """
+    entries = list_trash(state_dir)
+    cutoff = (time.time() if now is None else now) - max_age
+    # Held for the WHOLE window it promises: an entry expires once it is older
+    # than the limit, not once it has reached it.
+    expired = [entry for entry in entries if entry.deleted_at < cutoff]
+    kept = [entry for entry in entries if entry.deleted_at >= cutoff]
+    removed = []
+    for entry in expired + kept[max_entries:]:
+        try:
+            entry.path.unlink()
+        except OSError:
+            continue
+        removed.append(entry.name)
+    return removed
+
+
 class SessionLog:
     def __init__(self, path: Path):
         self.path = path

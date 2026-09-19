@@ -124,15 +124,20 @@ from .seen import SeenLedger
 from .session import (
     RATINGS,
     RESUME_MARKER,
+    TRASH_MAX_AGE_S,
     SessionLog,
     attachment_guidance,
     attachment_names,
     files_named,
+    list_trash,
+    purge_trash,
     real_attachments,
+    restore_session,
     strip_attachment_notes,
     synthetic_kind,
     title_drifted,
     to_record_form,
+    trash_session,
 )
 
 if TYPE_CHECKING:
@@ -1653,7 +1658,14 @@ is never rewritten. The centered chat title opens a menu (new chat, rename this 
 switch model, change directory, line wrap, export the chat to PDF, keep this \
 chat, delete \
 this chat, workspace & jobs); the compose pencil (top right) starts a new \
-chat. Every \
+chat. Deleting a chat is NOT final: it moves to a "Recently Deleted" section \
+at the bottom of the chat list, where it can be restored for 30 days before \
+aish purges it. Tell them that when they ask about a chat they deleted. What \
+the delete DOES destroy at once, and restoring does not bring back: the \
+chat's throwaway working files and the stored copies of the requests its \
+steps sent. The copy mirrored to their devices also goes at once and comes \
+back by syncing again after a restore. Permanently deleting from Recently \
+Deleted is the one step that cannot be undone. Every \
 finished answer has a row of chips beneath it — copy, export that one answer \
 to PDF, and (where available) read-aloud. Each of the user's OWN prompts has a \
 row too — the time it was sent, a trash chip, a pencil that puts the prompt \
@@ -2052,6 +2064,10 @@ class WebServer:
         # every turn, never inside a tool call. Background for the same reason
         # as the resumer — it walks the state dir.
         self.sweeper = asyncio.ensure_future(asyncio.to_thread(self._sweep_turns))
+        # And the trash's age purge (#177), for the same reason and in the same
+        # shape: one listdir and a filename parse, off the startup path, and a
+        # failure that can never keep the server from coming up.
+        self.purger = asyncio.ensure_future(asyncio.to_thread(self._purge_trash))
 
     def _sweep_turns(self) -> None:
         """Evict whole chats' evidence, oldest first, when the store exceeds
@@ -2411,6 +2427,13 @@ class WebServer:
             # is the normal case, not the exception — so the `shared` broadcast
             # alone would only ever reach a tab that happened to be open.
             "shares": self.shares_snapshot(),
+            # How long a deleted chat can be restored for (#177). The number,
+            # not the list: the client needs it to say what a delete costs, and
+            # there must be exactly ONE statement of the policy — a copy in
+            # app.js would go on saying 30 the day this stopped meaning it. The
+            # list is asked for separately, because building it peeks a title
+            # out of every trashed log and that has no place on an attach.
+            "trash_keep_days": TRASH_MAX_AGE_S // 86400,
         }
 
     @staticmethod
@@ -2697,6 +2720,14 @@ class WebServer:
             )
         elif kind == "delete_session":
             await self._delete_session(client, str(message.get("name", "")))
+        elif kind == "trash":
+            # VIEW message (#177): reading what is in Recently Deleted changes
+            # nothing and claims nothing.
+            await self._send_trash(client)
+        elif kind == "restore_session":
+            await self._restore_session(client, str(message.get("entry", "")))
+        elif kind == "purge_session":
+            await self._purge_session(client, str(message.get("entry", "")))
         elif kind == "rename_session":
             self._claim(client)
             await self._rename_session(
@@ -4281,9 +4312,14 @@ class WebServer:
         await self._show(client, session)
 
     async def _delete_session(self, client: Client, name: str) -> None:
-        """Delete a session permanently: its conversation AND its command
-        audit trail — explicit and confirmed client-side, never bulk. Replies
-        with a refreshed session_list so the drawer re-renders."""
+        """Delete a chat — explicit and confirmed client-side, never bulk.
+        Replies with a refreshed session_list so the drawer re-renders.
+
+        Since #177 the log is MOVED to the trash rather than unlinked, so the
+        conversation and its command audit trail can be put back for 30 days.
+        Everything else about a delete is unchanged, including what it destroys
+        outright (the scratch workspace, the evidence blobs, the pin) — see the
+        trash section in session.py for why those are not held."""
         session = self.sessions.get(name)
         path = safe_session_path(self.state_dir, name)
         if path is None or (session is None and not path.is_file()):
@@ -4307,10 +4343,21 @@ class WebServer:
                 await self._new_session(viewer)
             session.close()
             self.sessions.pop(name, None)
-        # POSIX unlink only detaches the name: a terminal aish holding this
-        # file open via --resume keeps appending to the unlinked inode until
-        # it exits — harmless, the data just vanishes with the last handle.
-        await asyncio.to_thread(lambda: path.unlink(missing_ok=True))
+        # A rename only detaches the name from this directory: a terminal aish
+        # holding this file open via --resume keeps appending to the same inode,
+        # now under its trash name — harmless, and a restore brings those lines
+        # back with the rest.
+        # A chat that has never written a line has no file, and nothing to
+        # recover — closing it IS the delete. Everything else moves.
+        if path.is_file():
+            entry = await asyncio.to_thread(trash_session, self.state_dir, path)
+            if entry is None:
+                # Nothing has happened yet, so say so rather than carrying on
+                # and broadcasting a deletion that did not take place.
+                await self._refuse(
+                    client, "could not delete that chat — its log file would not move", name=name
+                )
+                return
         # The chat's scratch workspace goes with it (#258). Deleting the chat
         # is the ONLY thing that collects it — closing the session no longer
         # does, because the workspace has to survive eviction and restart.
@@ -4329,7 +4376,95 @@ class WebServer:
         self.pins.forget(name)
         self._roster_seq += 1
         self._broadcast({"type": "session_deleted", "name": name, "seq": self._roster_seq})
+        await self._broadcast_trash()
         await self._send_sessions(client, "")
+
+    # ---- Recently Deleted (#177) -----------------------------------------
+    #
+    # One authority for what is in the trash, published to EVERY client on
+    # every change, for the reason the roster plane exists: a chat restored on
+    # the laptop must not sit in the phone's Recently Deleted list waiting to
+    # be restored a second time. The list is a READ (a client asks for it when
+    # it paints the section); the two things that change it are ACTS.
+
+    async def _trash_rows(self) -> list[dict]:
+        """The trash as rows a client can render: the entry to act on, the
+        chat's own name, its title, and when it was deleted.
+
+        The title is peeked from the log, so this walks files — off the loop,
+        and never on the hello path, which is why the client asks for it
+        instead of it riding every attach."""
+        def read() -> list[dict]:
+            rows = []
+            for entry in list_trash(self.state_dir):
+                title = SessionLog._peek_title(entry.path)
+                rows.append({
+                    "entry": entry.path.name,
+                    "name": entry.name,
+                    # An untitled chat is one nobody ever typed into; it still
+                    # has to be nameable in the list, so say what it is.
+                    "title": title or "empty chat",
+                    "deleted_at": entry.deleted_at,
+                })
+            return rows
+
+        return await asyncio.to_thread(read)
+
+    async def _send_trash(self, client: Client) -> None:
+        await client.ws.send_json({"type": "trash_list", "entries": await self._trash_rows()})
+
+    async def _broadcast_trash(self) -> None:
+        self._broadcast({"type": "trash_list", "entries": await self._trash_rows()})
+
+    async def _restore_session(self, client: Client, entry_name: str) -> None:
+        """Put a deleted chat back. It returns byte-identical and with its own
+        mtime, so it lands exactly where it was in the recency order rather
+        than at the top as if it had just been used."""
+        restored = await asyncio.to_thread(restore_session, self.state_dir, entry_name)
+        if restored is None:
+            await self._refuse(client, "that chat is no longer in Recently Deleted")
+            return
+        # Every client, like a delete: this one changes what is IN the list on
+        # each of them, and a device that kept no copy needs to know there is
+        # something to fetch again.
+        self._roster_seq += 1
+        self._broadcast({
+            "type": "session_restored", "name": restored.name, "seq": self._roster_seq
+        })
+        await self._broadcast_trash()
+        await self._send_sessions(client, "")
+
+    async def _purge_session(self, client: Client, entry_name: str) -> None:
+        """Delete one trashed chat for good — the only irreversible half of
+        #177, and the only one behind a card that still says so."""
+        match = [e for e in list_trash(self.state_dir) if e.path.name == entry_name]
+        if not match:
+            await self._refuse(client, "that chat is no longer in Recently Deleted")
+            return
+        def remove() -> None:
+            try:
+                match[0].path.unlink()
+            except OSError:
+                pass
+
+        await asyncio.to_thread(remove)
+        await self._broadcast_trash()
+
+    def _purge_trash(self) -> None:
+        """Drop what the trash has held past its window, and whatever a bulk
+        delete pushed over the entry ceiling. Never raises: a trash that cannot
+        be swept is a line in the daemon log, not a failed start."""
+        try:
+            purged = purge_trash(self.state_dir)
+        except OSError as exc:
+            print(f"[trash] could not purge {self.state_dir}: {exc}", file=sys.stderr)
+            return
+        if purged:
+            print(
+                f"[trash] purged {len(purged)} chat(s) deleted more than "
+                f"{TRASH_MAX_AGE_S // 86400} days ago: {', '.join(purged)}",
+                file=sys.stderr,
+            )
 
     async def _rename_session(self, client: Client, name: str, title: str) -> None:
         """Give a chat a custom title. Persisted as an append-only

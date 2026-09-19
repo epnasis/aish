@@ -2306,6 +2306,45 @@ body.dropping::after {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Recently deleted (#177). The section header is a DISCLOSURE, so it is a
+   button rather than the plain label every other band uses — same type, same
+   dim, and the whole width is the target because it is the one control in the
+   rail a thumb reaches for by aiming at a word rather than a row. */
+.trash-head {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.trash-head:active { color: var(--fg); }
+/* A deleted chat is NOT a chat row: no status icon, no unread, no pin, nothing
+   that says it has a state — it has one fact (when it went) and one gesture
+   (tap for what to do with it). The dim title is what keeps the section from
+   reading as more chats. */
+.trash-row { display: flex; align-items: flex-start; gap: 12px; }
+.trash-row .title {
+  font-weight: 500;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trash-row .snippet {
+  display: block;
+  margin-top: 3px;
+  color: var(--dim);
+  font-size: 14.5px;
+}
+.trash-note {
+  color: var(--dim);
+  font-size: 13.8px;
+  padding: 8px 6px 2px;
+  margin: 0;
+}
+.sheet-list .row.danger { color: var(--red); }
+.sheet-list .row.danger .meta { color: var(--dim); }
 /* The word you searched for, inside the row that answers the search. Colour and
    weight rather than a highlighter block: the row is already a dim one-line
    quote, and a filled background at this size reads as a defect. */

@@ -887,6 +887,68 @@ def test_delete_picker_confirms_and_unlinks(tmp_path, capsys, monkeypatch):
     assert (tmp_path / "session-20260201-000000-000000.jsonl").exists()
 
 
+def test_delete_moves_the_chat_to_the_trash_and_says_how_to_get_it_back(
+    tmp_path, capsys, monkeypatch
+):
+    """Both surfaces call the same helper (#177), so the terminal's delete is
+    the web's delete — and it has to SAY so, since the terminal has no
+    Recently Deleted list to notice the chat in."""
+    from aish.cli import handle_slash
+    from aish.session import list_trash
+
+    agent, logref = two_session_setup(tmp_path)
+    doomed = tmp_path / "session-20260101-000000-000000.jsonl"
+    body = doomed.read_bytes()
+    scripted_input(monkeypatch, ["2", "y"])
+    handle_slash("/delete", agent, logref, tmp_path)
+
+    out = capsys.readouterr().out
+    assert "aish trash restore session-20260101-000000-000000.jsonl" in out
+    [entry] = list_trash(tmp_path)
+    assert entry.name == doomed.name
+    assert entry.path.read_bytes() == body
+
+
+def test_trash_cli_lists_restores_and_deletes_for_good(tmp_path, capsys, monkeypatch):
+    """The terminal's whole way back. Without it a web-less user's delete is
+    still one-way, whatever the trash holds."""
+    from aish.cli import _trash_cli, handle_slash
+    from aish.session import list_trash
+
+    monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+    agent, logref = two_session_setup(tmp_path)
+    doomed = tmp_path / "session-20260101-000000-000000.jsonl"
+    body = doomed.read_bytes()
+    scripted_input(monkeypatch, ["2", "y"])
+    handle_slash("/delete", agent, logref, tmp_path)
+    capsys.readouterr()
+
+    assert _trash_cli(["list"]) == 0
+    assert doomed.name in capsys.readouterr().out
+
+    assert _trash_cli(["restore", doomed.name]) == 0
+    assert "restored" in capsys.readouterr().out
+    assert doomed.read_bytes() == body
+    assert list_trash(tmp_path) == []
+
+    scripted_input(monkeypatch, ["2", "y"])
+    handle_slash("/delete", agent, logref, tmp_path)
+    capsys.readouterr()
+    assert _trash_cli(["delete", doomed.name]) == 0
+    assert "for good" in capsys.readouterr().out
+    assert list_trash(tmp_path) == []
+    assert not doomed.exists()
+
+
+def test_trash_cli_reports_a_name_it_does_not_hold(tmp_path, capsys, monkeypatch):
+    from aish.cli import _trash_cli
+
+    monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+    assert _trash_cli(["restore", "session-20200101-000000-000000.jsonl"]) == 1
+    assert "not in the trash" in capsys.readouterr().out
+    assert _trash_cli(["wat"]) == 2
+
+
 def test_delete_default_answer_keeps_file(tmp_path, capsys, monkeypatch):
     from aish.cli import handle_slash
 

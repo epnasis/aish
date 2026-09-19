@@ -111,9 +111,18 @@ The two triggers and their gating are in `docs/web-server.md` — both are web-o
 
 ---
 
+## Deleting a chat, and the way back (#177)
+
+`/delete` no longer unlinks: it calls the same `session.trash_session` the web calls, so the terminal's delete and the browser's delete are one act rather than two that happen to share a word (L1's argument, applied to a destruction instead of a gate). The chat can be restored for 30 days.
+
+The terminal has no Recently Deleted list to notice a chat sitting in, so two things carry it instead. The `/delete` confirmation **names the command that undoes it** — `aish trash restore <name>` — because a way back nobody is told about is not one. And `aish trash <list|restore NAME|delete NAME>` is the surface itself, a CLI-only entry point like `aish secret`; it takes either the chat's own name or the trash entry's, since the name someone has in front of them is whichever one they were last shown.
+
+`_purge_trash_at_launch` runs the age purge on a daemon thread at startup — the mirror of the server's background `_purge_trash`. Without it a terminal-only user's trash would never expire and the 30 days would be a promise nothing keeps; on a thread because the prompt must not wait on a directory, and silent about failure for the same reason the evidence sweep is. `TestTrash` (`tests/test_session.py`) holds the mechanism; the CLI's half is in `tests/test_cli.py`.
+
 ## CLI-only entry points
 
 - `aish secret <set|get|list|rm>` — the Keychain store (`docs/tools-layer.md`).
 - `aish skill <import|approve|list|discard>` — staged import with review in your own editor (`docs/knowledge-layer.md`).
+- `aish trash <list|restore NAME|delete NAME>` — Recently Deleted for the terminal (above).
 
-Both are intercepted before the main argument parser.
+All three are intercepted before the main argument parser.

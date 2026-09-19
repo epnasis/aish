@@ -1062,6 +1062,9 @@ function retireSocket(sock) {
 //                     growing one carve-out at a time is what said the roster
 //                     needed its own channel rather than more exemptions
 //   session_deleted — same, and dropping it strands a chat that is gone
+//   session_restored — same again (#177): a chat coming back belongs to no
+//                     conversation on screen, and dropping it leaves this
+//                     device's Recently deleted list claiming it is still gone
 //   session_state   — the roster plane's predecessor, kept for an old server
 // session_renamed is exempt too: its handler is by-name and idempotent, and
 // dropping it in the switch window would just desync a drawer/pager label.
@@ -1070,7 +1073,8 @@ function retireSocket(sock) {
 // delivery, keeping the recorded transcript byte-identical to a cold
 // reconstruct_events replay.
 const SESSION_CROSS_EVENTS = new Set([
-  "hello", "session_changed", "session_deleted", "session_state", "session_renamed",
+  "hello", "session_changed", "session_deleted", "session_restored", "session_state",
+  "session_renamed",
 ]);
 
 function foreignSessionEvent(event, current) {
@@ -1611,6 +1615,10 @@ function handle(event) {
     case "file_list": onFileList(event); break;
     case "session_state": onSessionState(event); break;
     case "session_deleted": onSessionDeleted(event); break;
+    // Recently deleted (#177): the trash is one directory on one machine, so
+    // the server states what is in it and every device paints that ([TRASH]).
+    case "trash_list": onTrashList(event); break;
+    case "session_restored": onSessionRestored(event); break;
     case "session_changed": onSessionChanged(event); break;
     // The owner read a chat — here, or on the other device (#232).
     case "seen_marked": applySeenMarks(event.seen, event.floor); break;
@@ -1848,7 +1856,8 @@ let viewDirty = true; // events arrived since that replay → a stash would be s
 // the view dirty — over-dirtying only costs a rebuild, never a stale screen.
 const VIEW_SAFE_EVENTS = new Set([
   "hello", "replay", "session_list", "model_list", "role", "ack",
-  "session_renamed", "session_deleted", "cmd_history", "jobs", "files", "dirs",
+  "session_renamed", "session_deleted", "session_restored", "trash_list",
+  "cmd_history", "jobs", "files", "dirs",
   "console_started", "console_out", "console_exit", "console_error",
   "console_shared", "peek",
 ]);
@@ -2232,6 +2241,13 @@ function onHello(event) {
   // A share almost always arrives with nothing connected, so hello — not the
   // broadcast — is how it is normally first seen (#213).
   renderShares(event.shares || []);
+  // How long the trash holds a chat is the SERVER's number and rides the
+  // hello, so the delete confirmation can state it without this file keeping a
+  // second copy of the policy ([TRASH]). The list itself is asked for, not
+  // carried: reading it means peeking a title out of every trashed log, which
+  // has no business on the attach path.
+  trashKeepDays = event.trash_keep_days || trashKeepDays;
+  send({ type: "trash" });
   hideBootLoader(); // connected and about to replay — drop the first-paint spinner
   schedulePeeks(); // warm the swipe neighbors once this view settles
 }
@@ -16330,8 +16346,13 @@ $("confirm-modal").onclick = (e) => {
   if (e.target === $("confirm-modal")) closeConfirm();
 };
 
-// Deleting a chat is IRREVERSIBLE: the log file is unlinked, and the offline
-// mirror drops server-deleted sessions on its next sync, so no copy survives.
+// Deleting a chat is no longer irreversible (#177), so this no longer says it
+// is: the log MOVES to Recently deleted and can be restored for 30 days. The
+// sentence is still a consequences sentence, because the parts that ARE lost
+// now are the ones a "you can undo this" framing would hide — the copy on your
+// devices goes at once, and the chat's working files with it. Overstating the
+// damage would be the same defect as understating it: the modal is read once,
+// and what it says has to be what happens.
 // The name is captured when the question is ASKED, so an answer can never land
 // on a chat the view moved to in between.
 function askDeleteChat() {
@@ -16340,9 +16361,10 @@ function askDeleteChat() {
   askConfirm({
     title: "Delete this chat?",
     body:
-      "Deletes the whole conversation — every message in it, and its log file " +
-      "on the server. The copy on your devices is deleted at the next sync. " +
-      "This cannot be undone.",
+      "Takes the whole conversation off the chat list and puts it in Recently " +
+      `deleted, where you can restore it for ${trashKeepDays} days. The copy ` +
+      "on your devices and the chat's working files go now, and do not come " +
+      "back with it.",
     verb: "Delete",
     // Answering "Delete" is not the same as the chat being deleted — the
     // request still has to arrive and be handled ([ACK-LEDGER]). Nothing to
@@ -17614,6 +17636,151 @@ function refreshRailCurrent() {
   }
 }
 
+// [TRASH-START]
+// RECENTLY DELETED — the way back from a delete (#177).
+//
+// Deleting a chat was one unlink and there was no way back from it. The server
+// now moves the log to a trash it purges after 30 days; this is the surface
+// that makes that reachable, without which the trash is only a slower delete.
+//
+// Four things about this section are deliberate and each one is a trap avoided:
+//
+// 1. IT IS NOT A BAND. `Needs you` / `Active now` / `Pinned` / the date buckets
+//    are one list of chats you can open, ordered by attention; these are chats
+//    that DO NOT EXIST any more. So it sits under all of them, collapsed,
+//    behind its own count — the iOS Photos/Notes placement — and its rows are
+//    not `sessionRow`s. A deleted chat rendered as an ordinary row would be
+//    tappable straight into `resumeSession`, which is the "no such chat" error
+//    [FORGET-SESSION] exists to stop.
+// 2. THE LIST IS THE SERVER'S. There is no local copy and no optimistic edit
+//    (the one place in the rail where L7 does not apply): the trash is one
+//    directory on one machine, every device must agree about what is in it,
+//    and a restore on the laptop has to take the row off the phone. So the
+//    server publishes `trash_list` to EVERY client on every change, this asks
+//    for it once per connection, and nothing here paints a row the server has
+//    not stated.
+// 3. RESTORE AND PERMANENT DELETE ARE ACTS ([ACK-LEDGER]). Neither claims
+//    anything on screen before the server answers — the list only moves when
+//    the next `trash_list` lands — so neither needs a `lost` repair, and the
+//    UI can never be left saying a chat came back when it did not.
+// 4. ONLY THE SECOND ONE IS IRREVERSIBLE, and it is the only one behind
+//    [CONFIRM]. Putting a modal in front of the restore too would make the two
+//    read as equally serious, which is precisely the reading that made the
+//    original delete's modal worth writing.
+let trashRows = [];        // what the server last said is in the trash
+// How long the trash holds a chat, stated by the server on every hello. It is
+// the server's policy, so this file keeps no copy of the number — a duplicated
+// 30 here would go on saying 30 the day the server stopped meaning it.
+let trashKeepDays = 0;
+let trashExpanded = false; // collapsed until asked for: these are chats you deleted
+
+// How long ago a chat was deleted. Deliberately NOT `sessionStamp`, which
+// answers "when did this chat last do something" in clock time — on this row
+// that reads as activity, and the only question here is how much of the window
+// is left.
+function trashStamp(deletedAt, now = Date.now()) {
+  const days = Math.floor((now - deletedAt * 1000) / DAY_MS);
+  if (days <= 0) return "Deleted today";
+  if (days === 1) return "Deleted yesterday";
+  return `Deleted ${days} days ago`;
+}
+
+function trashRow(entry) {
+  const row = document.createElement("button");
+  row.className = "row trash-row";
+  row.dataset.entry = entry.entry;
+  const body = document.createElement("span");
+  body.className = "session-body";
+  const title = document.createElement("span");
+  title.className = "title";
+  title.textContent = entry.title;
+  const when = document.createElement("span");
+  when.className = "snippet";
+  when.textContent = trashStamp(entry.deleted_at);
+  body.append(title, when);
+  row.append(body);
+  row.onclick = () => openTrashSheet(entry);
+  return row;
+}
+
+// Appended by renderSessions after every other band. Renders NOTHING when the
+// trash is empty — a permanent "Recently Deleted (0)" row is a control that
+// never does anything, sitting under the list you actually navigate by.
+function renderTrashSection(list, rows) {
+  if (!rows.length) return;
+  const head = document.createElement("button");
+  head.className = "section-label trash-head";
+  head.id = "trash-head";
+  head.setAttribute("aria-expanded", String(trashExpanded));
+  head.textContent = `${trashExpanded ? "▾" : "▸"} Recently deleted (${rows.length})`;
+  head.onclick = () => {
+    trashExpanded = !trashExpanded;
+    renderSessionsFromCache();
+  };
+  list.appendChild(head);
+  if (!trashExpanded) return;
+  for (const entry of rows) list.appendChild(trashRow(entry));
+  if (trashKeepDays) {
+    const note = document.createElement("div");
+    note.className = "trash-note";
+    note.textContent = `Deleted chats are removed after ${trashKeepDays} days.`;
+    list.appendChild(note);
+  }
+}
+
+function openTrashSheet(entry) {
+  openSheet("trash-sheet");
+  $("trash-sheet-title").textContent = entry.title;
+  $("trash-sheet-when").textContent = trashStamp(entry.deleted_at);
+  // Captured when the sheet is OPENED, never read back when a button is
+  // pressed: the list under it is repainted by every `trash_list` the server
+  // sends, and an action must land on the chat that was asked about.
+  $("trash-restore").onclick = () => {
+    closeSheets();
+    act({ type: "restore_session", entry: entry.entry }, { label: "restoring that chat" });
+  };
+  $("trash-purge").onclick = () => {
+    closeSheets();
+    askPurgeChat(entry);
+  };
+}
+
+// The one irreversible step in #177, so it keeps the wording the plain delete
+// gave up: there is genuinely nothing after this.
+function askPurgeChat(entry) {
+  askConfirm({
+    title: "Delete this chat permanently?",
+    body:
+      `Deletes "${entry.title}" and its log file on the server for good. ` +
+      "It will not be in Recently deleted afterwards, and nothing can bring " +
+      "it back. This cannot be undone.",
+    verb: "Delete",
+    action: () =>
+      act({ type: "purge_session", entry: entry.entry }, { label: "deleting that chat" }),
+  });
+}
+
+function onTrashList(event) {
+  trashRows = event.entries || [];
+  // Nothing left to expand: a section that vanishes while open would otherwise
+  // come back expanded at the next delete, which nobody asked for.
+  if (!trashRows.length) trashExpanded = false;
+  if (railIsOpen()) renderSessionsFromCache();
+}
+
+// The mirror dropped this device's copy when the chat was deleted
+// ([MIRROR-FORGET]) — deliberately, and the server is holding the bytes, so
+// the repair is to sync rather than to have kept a ghost. Ask for the list so
+// the row is back where it belongs, and let the mirror refetch on its own
+// schedule.
+function onSessionRestored(event) {
+  rosterBaseline(event.seq);
+  showToast("chat restored");
+  requestSessions($("sessions-search").value || "");
+  offlineSyncSoon();
+}
+// [TRASH-END]
+
 // ---- rendering the list --------------------------------------------------
 function railSection(label, sessions, current, unreadState) {
   if (!sessions.length) return;
@@ -17675,6 +17842,7 @@ function renderSessions(event) {
     empty.className = "section-label";
     empty.textContent = "No chats yet";
     list.appendChild(empty);
+    renderTrashSection(list, trashRows); // deleting your last chat is how you get here
     return;
   }
   const { bands } = partitionSessions(event.sessions, unreadState);
@@ -17690,6 +17858,8 @@ function renderSessions(event) {
     }
     list.appendChild(sessionRow(info, current, { unread: false }));
   }
+  // Under everything, because these are not chats you can go to ([TRASH]).
+  renderTrashSection(list, trashRows);
 }
 
 // models

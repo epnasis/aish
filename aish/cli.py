@@ -41,7 +41,17 @@ from .approval import (
 )
 from .embeddings import SemanticIndex
 from .paths import config_home
-from .session import SessionInfo, SessionLog, attachment_names, strip_attachment_notes
+from .session import (
+    TRASH_MAX_AGE_S,
+    SessionInfo,
+    SessionLog,
+    attachment_names,
+    list_trash,
+    purge_trash,
+    restore_session,
+    strip_attachment_notes,
+    trash_session,
+)
 from .skills import GLOBAL_SKILLS_DIR
 
 if TYPE_CHECKING:
@@ -191,10 +201,11 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  untouched and can be resumed back
   {CYAN}/resume <n>{RESET}    switch to the n-th newest chat directly
   {CYAN}/resume <text>{RESET} open the picker with the filter pre-filled
-  {CYAN}/delete [n|text]{RESET} delete an earlier chat permanently (same picker and
-                 argument forms as /resume, then a y/N confirm; removes the
-                 conversation AND its command audit log — the current
-                 chat cannot be deleted)
+  {CYAN}/delete [n|text]{RESET} delete an earlier chat (same picker and argument forms
+                 as /resume, then a y/N confirm). The conversation and its
+                 command audit log move to the trash and can be put back with
+                 'aish trash restore' for 30 days; the current chat cannot be
+                 deleted
   {CYAN}/rename <title>{RESET} give this chat a custom title (overrides the one derived
                  from the first message; shown in /resume and the web drawer)
   {CYAN}/new, /clear{RESET}   fresh conversation in a new chat (clears the screen;
@@ -1471,22 +1482,27 @@ def handle_slash(
         try:
             answer = input(
                 f"{YELLOW}delete '{selected.title}' ({selected.count} msgs)?{RESET} "
-                f"removes its history and audit log [y/N] "
+                f"its history and audit log move to the trash for "
+                f"{TRASH_MAX_AGE_S // 86400} days [y/N] "
             ).strip().lower()
         except EOFError:
             answer = "n"
         if answer not in ("y", "yes"):
             print(f"{DIM}cancelled{RESET}")
             return "handled"
-        try:
-            selected.path.unlink()
-        except OSError as exc:
-            print(f"{RED}cannot delete {selected.path.name}: {exc}{RESET}")
+        # The same move the web makes, from the same helper (#177) — one
+        # implementation, or the two surfaces mean different things by delete.
+        if trash_session(state_dir, selected.path) is None:
+            print(f"{RED}cannot delete {selected.path.name}: its log file would not move{RESET}")
             return "handled"
         # The chat's evidence goes with it (#352): the chat is the only owner
-        # of its directory in the per-chat store.
+        # of its directory in the per-chat store, and the trash holds the
+        # conversation, not the whole footprint (see session.py).
         turns.delete_chat(state_dir, selected.path)
-        print(f"{DIM}deleted {selected.path.name}{RESET}")
+        print(
+            f"{DIM}deleted {selected.path.name} — put it back with "
+            f"'aish trash restore {selected.path.name}'{RESET}"
+        )
         return "handled"
     if command == "/rename":
         parts = task.split(maxsplit=1)
@@ -1740,9 +1756,15 @@ Resuming SWITCHES this REPL to the chosen chat — its conversation, its \
 log file, the model it last used and the directory it was working in all \
 become the current ones, and the chat being left is untouched (resume it \
 back the same way). It never merges two conversations. Their log \
-files are append-only; /delete opens the same picker to permanently remove \
-an earlier chat (conversation and audit log, y/N confirm — the current \
-chat cannot be deleted). /new or /clear (or plain 'clear') starts a \
+files are append-only; /delete opens the same picker to delete an earlier \
+chat (conversation and audit log, y/N confirm — the current chat cannot be \
+deleted). A delete is NOT final: the chat moves to the trash and can be put \
+back for 30 days — 'aish trash' lists what is there, 'aish trash restore \
+<name>' brings one back, 'aish trash delete <name>' destroys one for good. \
+Tell them that when they ask about a chat they deleted. What the delete does \
+destroy at once, and a restore does not bring back, is the chat's throwaway \
+working files and the stored copies of the requests its steps sent. \
+/new or /clear (or plain 'clear') starts a \
 fresh conversation and clears the screen; /model <name> switches the model \
 for this chat and /model alone opens the same type-to-filter picker over \
 installed Ollama models and the cloud providers (typing provider:model inside \
@@ -1831,6 +1853,24 @@ def load_context_files(cwd: str) -> list[str]:
         except OSError:
             continue
     return parts
+
+
+def _purge_trash_at_launch(state_dir) -> None:
+    """The trash's age purge (#177), on a background thread at launch.
+
+    The web server purges at startup; without this a terminal-only user's
+    trash would never expire, so the 30 days would be a promise nothing keeps.
+    Off the launch path — a daemon thread, so it cannot delay the prompt and
+    cannot outlive the process — and silent about a failure for the same reason
+    the evidence sweep is: neither is a reason not to come up.
+    """
+    def run() -> None:
+        try:
+            purge_trash(state_dir)
+        except OSError:
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def _sweep_turns(state_dir) -> None:
@@ -2072,6 +2112,59 @@ def _skill_cli(args: list[str]) -> int:
     return 2
 
 
+def _trash_cli(args: list[str]) -> int:
+    """`aish trash <list|restore NAME|delete NAME>` — the terminal's way back
+    from a delete (#177).
+
+    The web has a Recently Deleted section; a web-less user needs something,
+    or the trash is just a slower delete. `restore` and `delete` take either
+    the chat's own name or the trash entry's, because the name a person has in
+    front of them is whichever one they were last shown.
+    """
+    from . import explain as explain_mod
+
+    state_dir = explain_mod.state_dir()
+    usage = "usage: aish trash <list | restore NAME | delete NAME>"
+    cmd = args[0] if args else "list"
+    rest = args[1:]
+    entries = list_trash(state_dir)
+    if cmd == "list":
+        if not entries:
+            print("(no deleted chats)")
+            return 0
+        for entry in entries:
+            when = datetime.datetime.fromtimestamp(entry.deleted_at).strftime("%Y-%m-%d %H:%M")
+            title = SessionLog._peek_title(entry.path) or "empty chat"
+            print(f"{when}  {entry.name}  {title}")
+        print(
+            f"\n{DIM}purged {TRASH_MAX_AGE_S // 86400} days after deletion; "
+            f"restore with 'aish trash restore <name>'{RESET}"
+        )
+        return 0
+    if cmd in ("restore", "delete") and rest:
+        wanted = rest[0]
+        found = [e for e in entries if wanted in (e.name, e.path.name)]
+        if not found:
+            print(f"{wanted}: not in the trash")
+            return 1
+        if cmd == "restore":
+            restored = restore_session(state_dir, found[0].path.name)
+            if restored is None:
+                print(f"cannot restore {found[0].name}: a chat already holds that name")
+                return 1
+            print(f"restored {restored.name}")
+            return 0
+        try:
+            found[0].path.unlink()
+        except OSError as exc:
+            print(f"cannot delete {found[0].name}: {exc}")
+            return 1
+        print(f"deleted {found[0].name} for good")
+        return 0
+    print(usage)
+    return 2
+
+
 def _explain_cli(args: list[str]) -> int:
     """`aish explain <chat> [turn] [--tools] [--context]` — what governed a turn (#214).
 
@@ -2229,6 +2322,8 @@ def main() -> int:
         return _personal_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "skill":
         return _skill_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "trash":
+        return _trash_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "explain":
         return _explain_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "usage":
@@ -2314,6 +2409,7 @@ def main() -> int:
     allow_path = Path(os.environ.get("AISH_ALLOWLIST", str(DEFAULT_ALLOWLIST)))
     deny_path = Path(os.environ.get("AISH_DENYLIST", str(DEFAULT_DENYLIST)))
     lessons_path = Path(os.environ.get("AISH_LESSONS", str(DEFAULT_LESSONS)))
+    _purge_trash_at_launch(state_dir)
 
     global _box
     if sys.stdin.isatty():

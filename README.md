@@ -502,7 +502,8 @@ thousands of entries without bloating the context.
 3. **A private scratch workspace.** A per-chat directory the model may
    freely create, edit, delete **and read** throwaway files in without prompting
    — it belongs to the chat, survives reconnects and restarts, and is deleted
-   when you delete the chat. The same applies to aish's other own
+   when you delete the chat (it is throwaway by definition, so unlike the
+   conversation it does not go to Recently deleted). The same applies to aish's other own
    directories (the media store, the converted-document store, the tool-output
    cache): reading back what the process already writes unprompted grants
    nothing new. Your files are unaffected — anywhere else still prompts, and a
@@ -792,6 +793,9 @@ detaches it into a background job that survives aish exiting (`/jobs` lists them
 `/cd`, `/add-dir`, `/aliases`, `/jobs`, `/chat` (this chat's log file — the
 older `/session` still works), `/help`, `/quit`.
 
+**Other commands**: `aish trash <list|restore NAME|delete NAME>` (see below),
+`aish secret`, `aish skill`, `aish explain`, `aish usage`, `aish personal`.
+
 **Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
 `vi_mode`, and an `[aliases]` table (aish-level aliases, since commands run
 through a non-interactive shell that never sources your `~/.zshrc`). CLI flags
@@ -826,6 +830,17 @@ deletion itself is on the record. For a message sent to the wrong chat, a
 half-typed one an autocorrect Return sent, or a secret pasted into the composer
 — previously the only options were deleting the whole chat or editing JSONL by
 hand. Deleting a chat asks the same way.
+
+**Deleting a whole chat is not final.** It goes to **Recently deleted**, a
+collapsed section at the bottom of the chat list, and you can restore it there
+for **30 days** — the conversation and its command audit log come back exactly
+as they were, in the same place in the list. After that aish purges it. What
+the delete does destroy at once, and a restore does not bring back: the chat's
+throwaway scratch workspace, its stored copies of the requests its steps sent,
+and the copy mirrored to your devices (which re-syncs after a restore). In the
+terminal, `aish trash` lists what is there, `aish trash restore <name>` brings
+one back, and `aish trash delete <name>` destroys one for good — that last one
+is the only step here that cannot be undone, and it asks first.
 
 **Resuming always switches, never merges.** `aish --resume`, `/resume` in the
 terminal and the web chat list all mean the same thing: the chosen chat

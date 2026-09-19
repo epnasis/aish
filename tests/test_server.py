@@ -3257,6 +3257,131 @@ class TestSessions:
                 assert "no such chat" in error["text"]
 
 
+class TestRecentlyDeleted:
+    """Deleting a chat moves it to the trash, and a restore brings it back
+    (#177).
+
+    The unit properties — the filename, the age boundary, the entry ceiling —
+    are in `tests/test_session.py::TestTrash`. What is pinned here is the wire
+    and the server's own obligations: that the chat leaves every listing, that
+    what comes back is the conversation that went in, that every device learns
+    about both, and that a purge failure cannot keep the server from starting.
+    """
+
+    def _deleted_chat(self, ws, hello):
+        """Say something in the default chat, leave it, delete it."""
+        name = hello["session"]
+        ws.send_json({"type": "task", "text": "remember the zebra"})
+        recv_until(ws, "done")
+        ws.send_json({"type": "new"})
+        recv_until(ws, "hello")
+        ws.send_json({"type": "delete_session", "name": name})
+        recv_until(ws, "session_deleted")
+        return name
+
+    def test_a_deleted_chat_is_in_the_trash_and_in_no_listing(self, app_env):
+        client, _ = make_client(app_env, [model_says("noted")])
+        with client, connected(client) as (ws, hello, _):
+            name = self._deleted_chat(ws, hello)
+            trash = recv_until(ws, "trash_list")
+            listing = recv_until(ws, "session_list")
+
+            assert name not in [s["name"] for s in listing["sessions"]]
+            assert [e["name"] for e in trash["entries"]] == [name]
+            assert trash["entries"][0]["title"]
+            assert trash["entries"][0]["deleted_at"] > 0
+            assert not (app_env["state_dir"] / name).exists()
+            assert (app_env["state_dir"] / "trash" / trash["entries"][0]["entry"]).is_file()
+
+    def test_restoring_brings_the_conversation_back(self, app_env):
+        client, _ = make_client(app_env, [model_says("noted")])
+        with client, connected(client) as (ws, hello, _):
+            name = self._deleted_chat(ws, hello)
+            entry = recv_until(ws, "trash_list")["entries"][0]
+            recv_until(ws, "session_list")
+
+            ws.send_json({"type": "restore_session", "entry": entry["entry"]})
+            restored = recv_until(ws, "session_restored")
+            assert restored["name"] == name
+            assert recv_until(ws, "trash_list")["entries"] == []
+            listing = recv_until(ws, "session_list")
+            assert name in [s["name"] for s in listing["sessions"]]
+
+            # And it is the chat that went in: resuming it replays the turn.
+            ws.send_json({"type": "resume", "path": name})
+            assert "zebra" in json.dumps(recv_until(ws, "replay")["events"])
+
+    def test_the_restore_reaches_the_other_device(self, app_env):
+        """A chat restored on the laptop must not sit in the phone's Recently
+        Deleted list waiting to be restored a second time."""
+        client, _ = make_client(app_env, [model_says("noted")])
+        with client, connected(client) as (a, hello_a, _):
+            name = self._deleted_chat(a, hello_a)
+            entry = recv_until(a, "trash_list")["entries"][0]["entry"]
+            recv_until(a, "session_list")
+            with connected(client) as (b, _, _):
+                a.send_json({"type": "restore_session", "entry": entry})
+                assert recv_until(a, "session_restored")["name"] == name
+                assert recv_until(b, "session_restored")["name"] == name
+                assert recv_until(b, "trash_list")["entries"] == []
+
+    def test_a_chat_can_be_deleted_for_good_from_the_trash(self, app_env):
+        """The one irreversible half, and the only card that still says so."""
+        client, _ = make_client(app_env, [model_says("noted")])
+        with client, connected(client) as (ws, hello, _):
+            self._deleted_chat(ws, hello)
+            entry = recv_until(ws, "trash_list")["entries"][0]["entry"]
+            recv_until(ws, "session_list")
+
+            ws.send_json({"type": "purge_session", "entry": entry})
+            assert recv_until(ws, "trash_list")["entries"] == []
+            assert not (app_env["state_dir"] / "trash" / entry).exists()
+
+    def test_restore_and_purge_refuse_an_entry_that_is_not_there(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            for kind in ("restore_session", "purge_session"):
+                for entry in ("../../session-x.jsonl", "1700-session-20200101-000000-000000.jsonl"):
+                    ws.send_json({"type": kind, "entry": entry})
+                    assert "Recently Deleted" in recv_until(ws, "error")["text"]
+
+    def test_the_trash_can_be_read_without_changing_anything(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "trash"})
+            assert recv_until(ws, "trash_list")["entries"] == []
+
+    def test_startup_purges_what_the_trash_has_held_too_long(self, app_env):
+        state_dir = app_env["state_dir"]
+        trash = state_dir / "trash"
+        trash.mkdir(parents=True)
+        old = trash / "1000-session-20200101-000000-000000.jsonl"
+        old.write_text('{"kind": "message", "role": "user", "content": "long gone"}\n')
+        fresh = trash / f"{int(time.time())}-session-20200102-000000-000000.jsonl"
+        fresh.write_text('{"kind": "message", "role": "user", "content": "just deleted"}\n')
+
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "trash"})
+            names = [e["entry"] for e in recv_until(ws, "trash_list")["entries"]]
+            assert names == [fresh.name]
+            assert not old.exists()
+
+    def test_a_trash_that_cannot_be_purged_never_stops_the_server(self, app_env):
+        """It runs beside restart recovery and the evidence sweep, and for the
+        same reason: a state dir it cannot read is a reason to start without
+        the purge, never a reason not to start."""
+        state_dir = app_env["state_dir"]
+        state_dir.mkdir(parents=True)
+        (state_dir / "trash").write_text("a file where the trash should be")
+
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            assert hello["type"] == "hello"
+            ws.send_json({"type": "trash"})
+            assert recv_until(ws, "trash_list")["entries"] == []
+
+
 class TestSeenLedger:
     """Unread belongs to the OWNER, not to a screen (#232).
 
