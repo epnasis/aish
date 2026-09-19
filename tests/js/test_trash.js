@@ -79,6 +79,7 @@ function world(entries = [], { keepDays = 30 } = {}) {
     askConfirm: (spec) => { asked.push(spec); },
     openSheet: (id) => { opened.push(id); },
     closeSheets: () => { opened.push("closed"); },
+    closeSessionRail: () => { opened.push("rail-closed"); },
     railIsOpen: () => true,
     renderSessionsFromCache: () => {},
     requestSessions: () => {},
@@ -173,6 +174,18 @@ const entry = (over = {}) => ({
   // block reaches the resume machinery. Comments are stripped first, or this
   // check is answered by the paragraph explaining why it exists.
   ok("nothing here resumes a chat", !/resumeSession|railRow/.test(code()));
+}
+
+// ---- 4b. The sheet is reachable: the rail stands down before it opens -----
+// The slide-over rail sits above every sheet and does not stack with one, so a
+// sheet raised from a rail row opens BEHIND the rail — a headless-Chrome run at
+// phone width found "Restore chat" visible but unreachable, every tap landing on
+// the rail. The row does what picking a chat does: closes the rail first.
+{
+  const w = world([entry()]);
+  w.sandbox.openTrashSheet(entry());
+  ok("tapping a deleted row stands the rail down, THEN opens the sheet",
+    w.opened.join(",") === "rail-closed,trash-sheet");
 }
 
 // ---- 5. An action names the chat the question was about ------------------

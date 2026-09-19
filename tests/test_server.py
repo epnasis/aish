@@ -3364,13 +3364,15 @@ class TestRecentlyDeleted:
             name = self._deleted_chat(ws, hello)
             entry = recv_until(ws, "trash_list")["entries"][0]["entry"]
             recv_until(ws, "session_list")
-            listed = [s["name"] for s in client.get("/offline/index?token=s3cret").json()["sessions"]]
-            assert name not in listed
+            def catalogue():
+                index = client.get("/offline/index?token=s3cret").json()
+                return [s["name"] for s in index["sessions"]]
+
+            assert name not in catalogue()
 
             ws.send_json({"type": "restore_session", "entry": entry})
             recv_until(ws, "session_restored")
-            listed = [s["name"] for s in client.get("/offline/index?token=s3cret").json()["sessions"]]
-            assert name in listed
+            assert name in catalogue()
 
     def test_startup_purges_what_the_trash_has_held_too_long(self, app_env):
         state_dir = app_env["state_dir"]

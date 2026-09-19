@@ -17729,6 +17729,14 @@ function renderTrashSection(list, rows) {
 }
 
 function openTrashSheet(entry) {
+  // The slide-over rail sits ABOVE every sheet (z-index 30 over 20) and does
+  // not stack with one — `openSessionRail` hides them all. A sheet raised from
+  // inside it therefore opens BEHIND it, and on a phone the tap looks like it
+  // did nothing: a headless-Chrome run at 414px found "Restore chat" visible
+  // but unreachable, the rail intercepting every click. So the row does what
+  // picking a chat does (`railRow`): stands the rail down first. Docked, this
+  // is a no-op and the sheet is inset beside the rail by CSS.
+  closeSessionRail();
   openSheet("trash-sheet");
   $("trash-sheet-title").textContent = entry.title;
   $("trash-sheet-when").textContent = trashStamp(entry.deleted_at);
