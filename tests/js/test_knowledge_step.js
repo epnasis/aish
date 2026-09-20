@@ -228,7 +228,7 @@ function docFor(reminder) {
   };
 }
 
-const RECORDED = { state: "recorded", located: "brief_position", at: 6, chars: REMINDER.length, digest: "d", text: REMINDER, candidates: 1 };
+const RECORDED = { state: "recorded", why: null, located: "brief_position", at: 6, chars: REMINDER.length, digest: "d", text: REMINDER, candidates: 1, system_role: "all_system" };
 
 function nodesOf(w) { return w.el("ss-content").children; }
 function metaText(w) { return nodesOf(w).filter((n) => (n.className || "").includes("ss-meta")).map((n) => n.textContent).join("\n"); }
@@ -317,7 +317,8 @@ check("the pane lists every item with its kind and numbers, and shows the inject
   const meta = metaText(w);
   assert(meta.includes("aish-gender-masculine-polish (memory) · sim 0.36 · rail 3"), meta);
   assert(meta.includes("gh_issue (skill) · sim 0.402 · rail 0"), meta);
-  assert(meta.includes("located by position on this turn's brief: system message at 6"), meta);
+  assert(meta.includes("located by position on this turn's brief: aish's message at 6"), meta);
+  assert(meta.includes("the per-task system message that carried it"), "on ollama it IS a system message");
   assert(meta.includes("recalled: 2 (1 skill · 1 memory)"), "the facts strip rides at the top");
   // The text the model was handed is PAYLOAD, whole, and its own node.
   const payload = payloadText(w);
@@ -327,19 +328,40 @@ check("the pane lists every item with its kind and numbers, and shows the inject
   assert(w.sandbox.ssView.text.includes(REMINDER));
 });
 
+check("the role on the wire is said as the brief recorded it — never 'system message' where the model saw a user message", () => {
+  const cases = [
+    ["first_only", "sent as a USER message on this provider"],
+    ["hoisted", "hoisted into the request's system parameter"],
+    ["all_system", "the per-task system message that carried it"],
+    [null, "its role on the wire was not recorded"],
+  ];
+  for (const [role, words] of cases) {
+    const w = world();
+    const d = docFor({ ...RECORDED, system_role: role });
+    assert(w.sandbox.ssOpen(d, "k1", ""));
+    const meta = metaText(w);
+    assert(meta.includes(words), `${role}: ${meta}`);
+    if (role !== "all_system") assert(!meta.includes("the per-task system message that carried it"), `${role}: called a system message`);
+    assert.equal(payloadText(w), REMINDER, `${role}: the bytes are still shown`);
+  }
+});
+
 check("where the record cannot answer, the pane says which state — and shows NO text", () => {
-  for (const [state, words] of [
-    ["not_recorded", "not recorded"],
-    ["purged", "recorded, then deleted"],
-    ["not_located", "cannot tell which system part carried it"],
+  for (const [state, words, why] of [
+    ["not_recorded", "no brief was written at this turn's first model call", "no_brief"],
+    ["not_recorded", "a brief was written at this turn's first model call, but the aish that wrote this log did not keep its system text", "system_not_kept"],
+    ["not_recorded", "not recorded — the aish that wrote this log did not keep it", null],
+    ["purged", "recorded, then deleted", null],
+    ["not_located", "cannot tell which system part carried it", null],
   ]) {
     const w = world();
-    const reminder = { state, located: state === "not_located" ? null : null, at: null, chars: null, digest: null, text: null, candidates: state === "not_located" ? 2 : 0 };
+    const reminder = { state, why, located: null, at: null, chars: null, digest: null, text: null, candidates: state === "not_located" ? 2 : 0, system_role: null };
     const d = docFor(reminder);
     assert(w.sandbox.ssOpen(d, "k1", ""));
     const meta = metaText(w);
-    assert(meta.includes(`THE TEXT INJECTED — ${words}`) || meta.includes(words), `${state}: ${meta}`);
+    assert(meta.includes(`THE TEXT INJECTED — ${words}`) || meta.includes(words), `${state}/${why}: ${meta}`);
     assert.equal(payloadText(w), "", `${state}: nothing may be shown as the injected text`);
+    if (state !== "not_located") assert(!meta.includes("on record"), `${state}/${why}: nothing here is on record`);
     // The items are still listed: they ARE on record.
     assert(meta.includes("gh_issue (skill)"), `${state}: items still listed`);
   }

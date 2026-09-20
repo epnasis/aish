@@ -12697,9 +12697,25 @@ const SS_STATE_WORDS = {
 };
 // What a knowledge step can say about the text it was injected as (#386,
 // explain._reminder). `recorded` needs no words; `purged` is in SS_STATE_WORDS.
+// `not_recorded` is two different logs, told apart by `why`: no brief at all,
+// or a brief whose system half was not kept — neither has anything on record.
+// `not_located` is reserved for a brief that HAS a system half of the wrong
+// shape.
 const SS_REMINDER_WORDS = {
-  not_recorded: "not recorded — no brief was written at this turn's first model call",
+  not_recorded: "not recorded — the aish that wrote this log did not keep it",
+  no_brief: "not recorded — no brief was written at this turn's first model call",
+  system_not_kept: "not recorded — a brief was written at this turn's first model call, but the aish that wrote this log did not keep its system text",
   not_located: "on record, but this reader cannot tell which system part carried it — the brief does not have the shape the reminder is written in",
+};
+// How the provider carried the per-task reminder on the wire (#74,
+// backends.SYSTEM_ROLE_POLICY, recorded on the brief as `options.system_role`).
+// Only `all_system` is a system message as the model saw it; a `first_only`
+// provider relabels it as a USER message, and saying "system message" there
+// would describe an authority the model was never given.
+const SS_REMINDER_ROLE_WORDS = {
+  all_system: "the per-task system message that carried it",
+  hoisted: "the per-task reminder that carried it — hoisted into the request's system parameter on this provider",
+  first_only: "the per-task reminder that carried it — sent as a USER message on this provider, which keeps only the first system message (#74)",
 };
 // How the round grouping was arrived at. `recorded` needs no words; the other
 // two do.
@@ -13397,15 +13413,18 @@ function ssKnowledgeSegs(step, b) {
   b.meta(...rows);
   const reminder = step.reminder || { state: "not_recorded" };
   if (reminder.state === "recorded") {
+    const role = SS_REMINDER_ROLE_WORDS[reminder.system_role]
+      || "the per-task reminder that carried it — its role on the wire was not recorded";
     b.meta(
-      "THE TEXT INJECTED — the per-task system message that carried it, whole: the time note and the rules in force ride in the same message",
-      `located by position on this turn's brief: system message at ${reminder.at} · ${ssN(reminder.chars)} chars`,
+      `THE TEXT INJECTED — ${role}; whole: the time note and the rules in force ride in the same message`,
+      `located by position on this turn's brief: aish's message at ${reminder.at} · ${ssN(reminder.chars)} chars`,
     );
     if (reminder.text) b.text(reminder.text, "markdown");
     else b.meta("recorded, and it was empty");
   } else {
-    b.meta("THE TEXT INJECTED — "
-      + (SS_REMINDER_WORDS[reminder.state] || SS_STATE_WORDS[reminder.state] || reminder.state));
+    const words = (reminder.state === "not_recorded" && SS_REMINDER_WORDS[reminder.why])
+      || SS_REMINDER_WORDS[reminder.state] || SS_STATE_WORDS[reminder.state] || reminder.state;
+    b.meta("THE TEXT INJECTED — " + words);
   }
   b.meta("THE RECORD");
   b.rec(step.record || {});
