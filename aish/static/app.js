@@ -3174,10 +3174,13 @@ function traceStep(step) {
     const parts = [];
     if (nSkill) parts.push(`${nSkill} skill${nSkill === 1 ? "" : "s"}`);
     if (nMem) parts.push(`${nMem} ${nMem === 1 ? "memory" : "memories"}`);
-    const { main } = traceRow(
+    const { main, row } = traceRow(
       t, traceSvg("knowledge", "var(--yellow)"), "Recalled knowledge",
       `${parts.join(" · ") || items.length} from past work`
     );
+    // A step of the record (#386): the dossier's `knowledge` step, counted per
+    // kind in card order like the other between-round rows (inspectKeys).
+    row.classList.add("step-knowledge");
     if (items.length) {
       const chips = document.createElement("div");
       chips.className = "know-chips";
@@ -4375,6 +4378,7 @@ function inspectKeys(rows) {
     if (cl.contains("step-steer")) { ids[i] = `s${next("s")}`; return; }
     if (cl.contains("step-model-error")) { ids[i] = `e${next("e")}`; return; }
     if (cl.contains("step-retry")) { ids[i] = `retry${next("retry")}`; return; }
+    if (cl.contains("step-knowledge")) { ids[i] = `k${next("k")}`; return; }
   });
   return ids;
 }
@@ -12691,6 +12695,12 @@ const SS_STATE_WORDS = {
   unreadable: "recorded, but the stored bytes are unreadable",
   fragments: "only a fragment was kept — this log predates the full record",
 };
+// What a knowledge step can say about the text it was injected as (#386,
+// explain._reminder). `recorded` needs no words; `purged` is in SS_STATE_WORDS.
+const SS_REMINDER_WORDS = {
+  not_recorded: "not recorded — no brief was written at this turn's first model call",
+  not_located: "on record, but this reader cannot tell which system part carried it — the brief does not have the shape the reminder is written in",
+};
 // How the round grouping was arrived at. `recorded` needs no words; the other
 // two do.
 const SS_GROUPING_WORDS = {
@@ -12766,6 +12776,7 @@ function ssStepIcon(doc, step) {
   }
   if (step.kind === "steering") return traceSvg("chat", "var(--blue)");
   if (step.kind === "model_error") return traceSvg("denied", "var(--red)");
+  if (step.kind === "knowledge") return traceSvg("knowledge", "var(--yellow)");
   return traceSvg("dot", "var(--dim)"); // trim, retry, brief_changed
 }
 
@@ -13358,8 +13369,46 @@ function ssEventSegs(doc, step) {
     b.rec(step.record || {});
   } else if (step.kind === "brief_changed") {
     b.meta("the brief this call was handed is in that model call's whole context");
+  } else if (step.kind === "knowledge") {
+    ssKnowledgeSegs(step, b);
   }
   return b.segs;
+}
+
+// The pre-flight recall as a pane (#386): each item with the retrieval numbers
+// the record kept for it (#183), then the text it was injected AS. That text is
+// the per-task system message — the step says how it was located (by position
+// on this turn's brief, the one system part beside the standing prompt) — and
+// it carried the time note and the rules in force in the same message, so it
+// is shown WHOLE and labelled as the message, never cut down to "the knowledge"
+// (fidelity: payload is shown exactly as the model received it). Where the
+// record cannot answer, the pane says which of the states it is in.
+function ssKnowledgeSegs(step, b) {
+  const items = step.items || [];
+  const rows = ["RECALLED — each item as the record scored it"];
+  for (const it of items) {
+    const nums = [];
+    if (it.sim !== undefined && it.sim !== null) nums.push(`sim ${it.sim}`);
+    if (it.rail !== undefined && it.rail !== null) nums.push(`rail ${it.rail}`);
+    if (it.score !== undefined && it.score !== null) nums.push(`score ${it.score}`);
+    rows.push(`· ${it.label || "?"} (${it.kind || "?"})` + (nums.length ? ` · ${nums.join(" · ")}` : ""));
+  }
+  if (!items.length) rows.push("the record lists no items");
+  b.meta(...rows);
+  const reminder = step.reminder || { state: "not_recorded" };
+  if (reminder.state === "recorded") {
+    b.meta(
+      "THE TEXT INJECTED — the per-task system message that carried it, whole: the time note and the rules in force ride in the same message",
+      `located by position on this turn's brief: system message at ${reminder.at} · ${ssN(reminder.chars)} chars`,
+    );
+    if (reminder.text) b.text(reminder.text, "markdown");
+    else b.meta("recorded, and it was empty");
+  } else {
+    b.meta("THE TEXT INJECTED — "
+      + (SS_REMINDER_WORDS[reminder.state] || SS_STATE_WORDS[reminder.state] || reminder.state));
+  }
+  b.meta("THE RECORD");
+  b.rec(step.record || {});
 }
 
 // Every pane of a step, as a SEGMENT LIST. `before` is a node drawn ABOVE the
