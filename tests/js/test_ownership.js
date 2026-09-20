@@ -144,6 +144,24 @@ const OWNED = {
     why: "a live trace left un-closed by a session switch kept receiving the NEXT chat's"
       + " steps, and its interval timer ran forever",
   },
+  freshHonoured: {
+    owners: ["SHARES"],
+    instead: "let honourFreshShares() ledger an id in the step that ACTS on it — after the"
+      + " landing chat's transcript has answered, never inside the hello that carried it",
+    why: "it is the ledger of `chat=new` intents already acted on; a writer that marks one"
+      + " before the transcript it is judged against has landed spends the intent against an"
+      + " empty DOM, the old chat paints over the top, and no later repaint recovers it —"
+      + " which is how sharing to a closed app never opened a chat (#393)",
+    set: true,
+  },
+  freshParked: {
+    owners: ["SHARES"],
+    instead: "let openChatForFreshShares() park and settleFreshShares() release — the two"
+      + " halves of one hand-off",
+    why: "it is the other half of freshHonoured's invariant: a stray overwrite here LOSES a"
+      + " `chat=new` intent as surely as a stray add there SPENDS one (#393)",
+    array: true,
+  },
   ssView: {
     owners: ["STEP-SCREEN"],
     instead: "call ssOpen(doc, stepId, pane) / ssShow(index, pane) / ssGo(delta) / ssClose()",

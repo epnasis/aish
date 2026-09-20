@@ -1457,7 +1457,11 @@ function resetLiveTurn(landing) {
 function handle(event) {
   switch (event.type) {
     case "hello": onHello(event); break;
-    case "replay": serverPainted = true; onReplay(event); break;
+    case "replay":
+      serverPainted = true;
+      onReplay(event);
+      settleFreshShares(); // a `chat=new` share parked by the hello now has its answer (#393)
+      break;
     case "user":
       closeAnswer();
       finishTrace(); // close any trace from a prior turn before the new one
@@ -11138,19 +11142,62 @@ function composerAppend(text) {
 // also makes this failure-tolerant — if the new chat never arrives, the file is
 // still attached to the chat you are in, which is the old behaviour and not a
 // loss.
+//
+// The decision is taken against the chat the app is LANDING on, and that chat
+// is not known until its transcript has landed (#393). The share sheet's normal
+// case is a share arriving while nothing is connected; the app then opens, and
+// the server sends `hello` (which carries the inbox) and, as a separate later
+// message, the `replay` that paints the transcript. Asking the DOM inside the
+// hello answered about a transcript that had not arrived: "empty, nothing to
+// leave behind", the old chat painted over the top, and the item was already
+// ledgered as honoured, so nothing later recovered it — spent, not delayed.
+//
+// So a fresh item is PARKED until the view holds a server paint of the current
+// chat. `viewFp` is that fact and already has an owner ([REPLAY-LANDING], L4):
+// it is the claim that the DOM equals a server replay of `currentSession`, a
+// hello for another chat resets it, and a mirror or boot paint never stamps it.
+// The socket's replay then settles what was parked. The ledger is written only
+// in the step that acts on the intent, so a decision that cannot be taken yet
+// degrades to "late" — the next hello and its replay honour it — never to lost.
+//
+// Deliberately NOT retried when the `new` request goes unreceipted: the ack
+// ledger's rule is that unreceipted means UNCONFIRMED, the chat may well have
+// opened, and a second one is the spare empty row this whole rule exists to
+// avoid. The ledger says so on screen and ＋ is one tap.
 const freshHonoured = new Set(); // ids already acted on — a hello repeats them
+let freshParked = []; // ids seen before the landing chat's transcript had arrived
 
 function openChatForFreshShares(items) {
-  const fresh = items.filter((item) => item.fresh && !freshHonoured.has(item.id));
-  if (!fresh.length) return;
-  // ALL of them are marked, and at most ONE chat is opened: sharing three
-  // photos then opening aish means one new chat holding three, not three chats
-  // holding one each and two of them empty.
-  for (const item of fresh) freshHonoured.add(item.id);
+  const fresh = items
+    .filter((item) => item.fresh && !freshHonoured.has(item.id))
+    .map((item) => item.id);
+  // The server's latest list REPLACES what was parked: an item claimed on the
+  // other device while the replay was in flight must not open a chat for nobody.
+  if (!viewFp) { freshParked = fresh; return; }
+  freshParked = [];
+  honourFreshShares(fresh);
+}
+
+// The socket's replay has landed ([REPLAY-LANDING] stamped the claim), so the
+// transcript on screen is the chat these shares are landing on. Called from
+// the socket dispatch, beside `serverPainted` — the same fact, and the ONE path
+// every hello's replay takes (server.py `_show` sends the pair, in that order).
+function settleFreshShares() {
+  if (!freshParked.length || !viewFp) return;
+  const ids = freshParked;
+  freshParked = [];
+  honourFreshShares(ids);
+}
+
+function honourFreshShares(ids) {
+  if (!ids.length) return;
   // Nothing to leave behind: opening a new chat from an unused one just leaves
-  // an empty row in the rail and looks like the button misfired.
-  if (transcriptIsEmpty()) return;
-  requestNewChat();
+  // an empty row in the rail and looks like the button misfired — the share is
+  // already in a chat of its own. Otherwise ALL of them ride into ONE chat:
+  // sharing three photos then opening aish means one new chat holding three,
+  // not three chats holding one each and two of them empty.
+  if (!transcriptIsEmpty()) requestNewChat();
+  for (const id of ids) freshHonoured.add(id);
 }
 
 // The server owns the inbox, so removal is a request, not a local splice. The

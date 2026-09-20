@@ -4879,6 +4879,31 @@ class TestShareInbox:
             # Still inert: recording the intent must not start anything.
             assert chat.calls == []
 
+    def test_the_fresh_flag_is_logged_on_arrival_and_on_claim(self, app_env, capsys):
+        """#393: the item is deleted the moment it is claimed and nothing else
+        logs POST /share, so after the fact a Shortcut that never sent
+        `chat=new` and a client that dropped it looked identical. Both lines
+        record what was RECEIVED — never a cause — and the text of a shared
+        link stays out of the server log."""
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _hello, _):
+            asked = client.post("/share?name=a.png&chat=new", content=b"\x89PNG").json()["id"]
+            plain = client.post(
+                "/share?source=Safari", content=b"https://example.com/secret-link"
+            ).json()["id"]
+            ws.send_json({"type": "share_drop", "id": asked})
+            recv_until(ws, "shared")
+            ws.send_json({"type": "share_drop", "id": "never-existed"})
+            ws.send_json({"type": "share_drop", "id": plain})
+            recv_until(ws, "shared")
+        err = capsys.readouterr().err
+        assert f"[share] {asked} received: file, source='share sheet', chat=new=yes" in err
+        assert f"[share] {plain} received: text, source='Safari', chat=new=no" in err
+        assert f"[share] {asked} left the inbox, chat=new=yes" in err
+        assert f"[share] {plain} left the inbox, chat=new=no" in err
+        assert "never-existed" not in err  # a no-op drop records nothing
+        assert "secret-link" not in err  # what was shared is the owner's, not the log's
+
     def test_a_body_with_no_name_is_text(self, app_env):
         """Safari shares a URL, and percent-encoding one into a query string
         inside Shortcuts works right up until the link contains an `&`. So the

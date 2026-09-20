@@ -467,8 +467,11 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       setRolePill: spy("setRolePill"),
       updateEmptyHint: spy("updateEmptyHint"),
       // The share inbox rides in on hello ([SHARES]); test_shares.js drives the
-      // real one.
+      // real one. A `chat=new` share parked by a hello is settled by the
+      // socket's replay (#393), so any world that dispatches a replay through
+      // handle() reaches this — test_choreo_share_landing.js drives the real one.
       renderShares: spy("renderShares"),
+      settleFreshShares: spy("settleFreshShares"),
       // How long the trash holds a deleted chat ([TRASH]) — the server states
       // it on every hello and `onHello` adopts it, so it must be DEFINED here
       // or that assignment throws mid-hello. test_trash.js owns the real one.
