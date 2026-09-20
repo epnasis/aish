@@ -1806,8 +1806,20 @@ EVENT_STEPS = frozenset(
 # "the record has it and this reader cannot point at it" is a different answer
 # from "not recorded" and from "purged".
 KNOWLEDGE_NOT_LOCATED = "not_located"
-# How the reminder was found: by its POSITION on the turn's own brief. Said on
-# the step so a renderer can label the join, the way `placement` is.
+# The `knowledge` record names the message it was injected as (its digest,
+# #396) and the brief written at the turn's first model call has no system
+# part with that digest. The writer said which; the brief does not have it.
+# Not folded into `not_located` — that one means the reader could not tell,
+# this one means the two records disagree — and never a fallback to position,
+# which would be a guess wearing the stamp's authority.
+KNOWLEDGE_NOT_ON_BRIEF = "not_on_brief"
+# How the reminder was found. By DIGEST: the `knowledge` record's stamp
+# matched one system part of the turn's own brief (#396) — an exact join. By
+# POSITION: the record carries no stamp (a log older than #396), so the part
+# not at position 0 is taken on the writer's word that it keeps exactly one
+# per-task system message beside the standing prompt. Said on the step so a
+# renderer can label the join, the way `placement` is.
+REMINDER_BY_DIGEST = "brief_digest"
 REMINDER_BY_POSITION = "brief_position"
 # WHY a knowledge step's injected text is `not_recorded` — two different logs:
 # no brief was written for the turn's first model call (a log predating #239,
@@ -2084,7 +2096,7 @@ def _event_step(kind: str, record: dict, facts: list[dict], **extra) -> dict:
     return {"kind": kind, "panes": [PANE_EVENT], "facts": facts, "record": record, **extra}
 
 
-def _reminder(doc: dict) -> dict:
+def _reminder(doc: dict, record: dict) -> dict:
     """The per-task system message that carried the recalled knowledge into
     the turn (#386) — located on this turn's own brief, never rebuilt.
 
@@ -2092,22 +2104,34 @@ def _reminder(doc: dict) -> dict:
     actually handed is the per-task reminder (`agent.task_reminder`: the time
     note, the rules in force, the preloaded knowledge), and that text is on
     record only as one of the brief's system parts (#239) — by position and
-    digest, unlabelled. The join is positional: the loop keeps exactly two
-    system-role messages in front of a turn's first model call, the standing
-    prompt at position 0 and the reminder appended at seed (every earlier
-    reminder is stripped first), so the reminder is the one system part of the
-    brief written at model call 1 that is not at position 0. That is a fact
-    about the writer, not about the record, so the step says how it was found
-    and refuses when the brief does not have that shape: a brief with no part
-    beside the standing prompt, or with two, is `not_located` — the reader
-    cannot tell which, and a wrong text shown as "what the model was handed"
-    is the lie this whole reader exists to prevent. `not_located` is reserved
-    for a brief that HAS a system half of the wrong shape; a brief that kept
-    no system half at all is `not_recorded`, with `why` saying which of the
-    two not-recorded logs this is.
+    digest, unlabelled. Two joins, in this order:
+
+    BY DIGEST (#396). The `knowledge` record carries `reminder`, the digest of
+    the message the writer built, under the same content address the brief
+    gives its parts — so the part whose digest equals the stamp IS the text,
+    whatever position it sits at. The stamp is the writer's own word about
+    which message it made, so a stamp that matches NO part is not a cue to
+    fall back on position: it is `not_on_brief`, the two records disagreeing,
+    and the reader says so rather than showing a part the writer did not name.
+
+    BY POSITION, only for a record with no stamp — a log older than #396. The
+    loop keeps exactly two system-role messages in front of a turn's first
+    model call, the standing prompt at position 0 and the reminder appended
+    at seed (every earlier reminder is stripped first), so the reminder is the
+    one system part not at position 0. That is a fact about the writer, not
+    about the record, so the step says how it was found and refuses when the
+    brief does not have that shape: a brief with no part beside the standing
+    prompt, or with two, is `not_located` — the reader cannot tell which, and
+    a wrong text shown as "what the model was handed" is the lie this whole
+    reader exists to prevent. `not_located` is reserved for a brief that HAS
+    a system half of the wrong shape; a brief that kept no system half at all
+    is `not_recorded`, with `why` saying which of the two not-recorded logs
+    this is.
     """
+    stamp = str(record.get("reminder") or "") or None
     absent = {"state": MISSING, "why": None, "located": None, "at": None, "chars": None,
-              "digest": None, "text": None, "candidates": 0, "system_role": None}
+              "digest": None, "text": None, "candidates": 0, "system_role": None,
+              "stamp": stamp}
     briefs = [b for b in doc["given"]["briefs"]
               if b["written_here"] and b.get("model_call") == 1]
     if not briefs:
@@ -2128,7 +2152,16 @@ def _reminder(doc: dict) -> dict:
         # before the system text was recorded). Different from "no brief", and
         # from "on record but unlocatable" — nothing here is on record.
         return {**absent, "why": REMINDER_SYSTEM_NOT_KEPT, "system_role": system_role}
-    parts = [p for p in system.get("parts") or [] if p.get("at") != 0]
+    all_parts = list(system.get("parts") or [])
+    if stamp is not None:
+        parts = [p for p in all_parts if p.get("digest") == stamp]
+        located = REMINDER_BY_DIGEST
+        if not parts:
+            return {**absent, "state": KNOWLEDGE_NOT_ON_BRIEF, "candidates": len(all_parts),
+                    "system_role": system_role}
+    else:
+        parts = [p for p in all_parts if p.get("at") != 0]
+        located = REMINDER_BY_POSITION
     if len(parts) != 1:
         return {**absent, "state": KNOWLEDGE_NOT_LOCATED, "candidates": len(parts),
                 "system_role": system_role}
@@ -2136,13 +2169,14 @@ def _reminder(doc: dict) -> dict:
     return {
         "state": part["state"],
         "why": None,
-        "located": REMINDER_BY_POSITION,
+        "located": located,
         "at": part["at"],
         "chars": part["chars"],
         "digest": part["digest"],
         "text": part["text"],
         "candidates": 1,
         "system_role": system_role,
+        "stamp": stamp,
     }
 
 
@@ -2159,11 +2193,14 @@ def _knowledge_step(step: dict, doc: dict, sid: str, before: int | None) -> dict
             f"{memories} memor{'y' if memories == 1 else 'ies'}" if memories else "",
         ) if s
     )
-    reminder = _reminder(doc)
+    reminder = _reminder(doc, step)
     injected = {
         RECORDED: f"recorded · {_fmt_n(reminder['chars'])} chars",
         PURGED: "recorded, then deleted",
         KNOWLEDGE_NOT_LOCATED: "on record, but this reader cannot tell which system part it is",
+        KNOWLEDGE_NOT_ON_BRIEF: (
+            "the record names the message; the brief has no part with that digest"
+        ),
     }.get(reminder["state"], "not recorded")
     facts = [{"k": "recalled", "v": f"{len(items)}" + (f" ({counts})" if counts else "")},
              {"k": "mode", "v": str(step.get("mode") or "not recorded")},

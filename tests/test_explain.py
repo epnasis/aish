@@ -1652,7 +1652,8 @@ class TestTheKnowledgeStep:
     """Pre-flight recall is a step of the ledger (#386): the "Recalled
     knowledge" row has somewhere to land. The step carries what was recalled
     with the per-item retrieval diagnostics (#183) and the text it was injected
-    as — read off the turn's own brief by position (#239), and refused in words
+    as — read off the turn's own brief by the digest the record stamped (#396),
+    by position on a log older than the stamp (#239), and refused in words
     wherever the brief cannot answer."""
 
     @pytest.fixture(autouse=True)
@@ -1696,7 +1697,12 @@ class TestTheKnowledgeStep:
         reminder = step["reminder"]
         assert reminder["state"] == explain_mod.RECORDED
         assert reminder["why"] is None
-        assert reminder["located"] == explain_mod.REMINDER_BY_POSITION
+        # Joined by the digest the writer stamped on the record (#396), not by
+        # position: the stamp is the digest of the message it built, and the
+        # brief's part with that digest is the one shown.
+        assert reminder["located"] == explain_mod.REMINDER_BY_DIGEST
+        (record,) = steps(log.path, "knowledge")
+        assert record["reminder"] == reminder["stamp"] == reminder["digest"]
         # The role on the wire, as the brief declared it: the fake backend is
         # the ollama shape, where a system message IS a system message.
         assert reminder["system_role"] == "all_system"
@@ -1705,6 +1711,7 @@ class TestTheKnowledgeStep:
         sent = chat.calls[0]["messages"][reminder["at"]]
         assert sent["role"] == "system"
         assert reminder["text"] == sent["content"]
+        assert record["reminder"] == evidence.digest_of(sent["content"])
         assert "Pull the zzfrob lever twice." in reminder["text"]
         assert reminder["chars"] == len(sent["content"])
         assert {"k": "recalled", "v": "1 (1 skill)"} in step["facts"]
@@ -1835,11 +1842,110 @@ class TestTheKnowledgeStep:
         assert step["reminder"]["text"] is None
         assert {"k": "injected text", "v": "recorded, then deleted"} in step["facts"]
 
+    def test_a_log_older_than_the_stamp_resolves_by_position_and_says_so(self, tmp_path):
+        """A `knowledge` record with no `reminder` stamp (#386's stratum, before
+        #396): the positional join still serves it, and the step says that is
+        how it was found."""
+        path = tmp_path / "session-386.jsonl"
+        tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
+        prompt = evidence.put("the standing prompt", tmp_path)
+        reminder = evidence.put("the reminder", tmp_path)
+        self._write(path, [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            tr({"kind": "knowledge", "mode": "semantic",
+                "items": [{"label": "s", "kind": "skill", "sim": 0.5, "rail": 1}]}),
+            {"ts": "t", "kind": "message", "role": "user", "content": "go", "model_call": 0},
+            tr({"kind": "brief", "model_call": 1,
+                "system": [{"at": 0, "chars": 19, "digest": prompt},
+                           {"at": 4, "chars": 12, "digest": reminder}],
+                "tools": {"count": 0},
+                "options": {"model": "m", "provider": "ollama", "system_role": "all_system"}}),
+            tr({"kind": "reasoning", "model_call": 1, "text": "first", "tokens": [10, 2]}),
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ])
+        lg = explain_mod.load(path)
+        step = explain_mod.dossier(lg.turns[0], lg, tmp_path)["steps"][0]
+        assert step["reminder"]["state"] == explain_mod.RECORDED
+        assert step["reminder"]["located"] == explain_mod.REMINDER_BY_POSITION
+        assert step["reminder"]["stamp"] is None
+        assert step["reminder"]["at"] == 4
+        assert step["reminder"]["text"] == "the reminder"
+
+    def test_a_stamp_matching_no_part_is_not_on_brief_never_a_positional_guess(self, tmp_path):
+        """The record names the message by digest and the brief has no part
+        with it. The brief HAS the positional shape — one part beside the
+        standing prompt — so falling back to position would find a text; it
+        would also be a guess wearing the writer's authority. The reader says
+        the two records disagree, shows nothing, and names no cause."""
+        path = tmp_path / "session-disagree.jsonl"
+        tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
+        prompt = evidence.put("the standing prompt", tmp_path)
+        on_brief = evidence.put("a reminder the brief has", tmp_path)
+        stamped = evidence.digest_of("a reminder the record names")
+        assert stamped != on_brief
+        self._write(path, [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            tr({"kind": "knowledge", "mode": "semantic", "reminder": stamped,
+                "items": [{"label": "s", "kind": "skill", "sim": 0.5, "rail": 1}]}),
+            {"ts": "t", "kind": "message", "role": "user", "content": "go", "model_call": 0},
+            tr({"kind": "brief", "model_call": 1,
+                "system": [{"at": 0, "chars": 19, "digest": prompt},
+                           {"at": 1, "chars": 24, "digest": on_brief}],
+                "tools": {"count": 0},
+                "options": {"model": "m", "provider": "ollama", "system_role": "all_system"}}),
+            tr({"kind": "reasoning", "model_call": 1, "text": "first", "tokens": [10, 2]}),
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ])
+        lg = explain_mod.load(path)
+        step = explain_mod.dossier(lg.turns[0], lg, tmp_path)["steps"][0]
+        reminder = step["reminder"]
+        assert reminder["state"] == explain_mod.KNOWLEDGE_NOT_ON_BRIEF
+        assert reminder["located"] is None and reminder["text"] is None
+        assert reminder["stamp"] == stamped and reminder["digest"] is None
+        assert reminder["candidates"] == 2  # every part was a candidate for the digest
+        assert reminder["system_role"] == "all_system"
+        (fact,) = [f["v"] for f in step["facts"] if f["k"] == "injected text"]
+        assert "no part with that digest" in fact
+        assert "not recorded" not in fact and "on record" not in fact
+
+    def test_two_extra_parts_resolve_by_digest_where_position_could_not(self, tmp_path):
+        """The case #396 exists for: a writer that keeps a second per-task
+        system message beside the reminder. Position has two candidates and
+        must refuse (the test below); the stamp picks the one the writer
+        named, at whatever position it sits."""
+        path = tmp_path / "session-two-parts.jsonl"
+        tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
+        prompt = evidence.put("the standing prompt", tmp_path)
+        other = evidence.put("some other per-task system text", tmp_path)
+        reminder = evidence.put("the reminder", tmp_path)
+        self._write(path, [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            tr({"kind": "knowledge", "mode": "semantic", "reminder": reminder,
+                "items": [{"label": "s", "kind": "skill", "sim": 0.5, "rail": 1}]}),
+            {"ts": "t", "kind": "message", "role": "user", "content": "go", "model_call": 0},
+            tr({"kind": "brief", "model_call": 1,
+                "system": [{"at": 0, "chars": 19, "digest": prompt},
+                           {"at": 1, "chars": 31, "digest": other},
+                           {"at": 2, "chars": 12, "digest": reminder}],
+                "tools": {"count": 0},
+                "options": {"model": "m", "provider": "ollama", "system_role": "all_system"}}),
+            tr({"kind": "reasoning", "model_call": 1, "text": "first", "tokens": [10, 2]}),
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ])
+        lg = explain_mod.load(path)
+        step = explain_mod.dossier(lg.turns[0], lg, tmp_path)["steps"][0]
+        assert step["reminder"]["state"] == explain_mod.RECORDED
+        assert step["reminder"]["located"] == explain_mod.REMINDER_BY_DIGEST
+        assert step["reminder"]["at"] == 2
+        assert step["reminder"]["digest"] == step["reminder"]["stamp"] == reminder
+        assert step["reminder"]["text"] == "the reminder"
+        assert step["reminder"]["candidates"] == 1
+
     def test_a_brief_of_another_shape_is_refused_not_guessed(self, tmp_path):
-        """The join is positional — the one system part beside the standing
-        prompt — and it is a fact about the writer. A brief with two such
-        parts is a writer this reader does not know; it says so rather than
-        picking one."""
+        """With no stamp the join is positional — the one system part beside
+        the standing prompt — and it is a fact about the writer. A brief with
+        two such parts is a writer this reader does not know; it says so
+        rather than picking one."""
         path = tmp_path / "session-odd.jsonl"
         tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
         a = evidence.put("first extra system text", tmp_path)

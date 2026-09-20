@@ -14,6 +14,7 @@
 **#355 (2026-09-04) added `received` as §3.13** — the COMPLETE response of every successful model call, stored whole in the per-chat store beside the request, so what came back is captured as completely as what went out (the point is completeness and forward-compatibility, not a curated summary: `raw_blocks` carries provider content types verbatim, so a new one is kept whole rather than reduced to its name). Renderless, symmetric with `sent`; the reader states it and the step screen shows it beside the curated reasoning/said view.
 **#352 slice 1 (2026-09-03) stamped `model_call` on the rendered `tool_start` and `tool` steps** — the second amendment to §2's fork 1(b), beside the `brief` one (`docs/diagnostics.md`). Additive; omitted rather than zeroed where no recorded model call issued the call (claude-max), matching the renderless `call` record it mirrors. The browser is built from rendered steps alone, so without it the trace card could fold its timeline into rounds only by counting rows. `thinking` is still untouched.
 **#339 (2026-08-30) added `retry` as §3.11, and with it the `superseded` KEY** — the first record in this document about the log being rewritten rather than about a decision inside a turn. It exists because Retry deleted what it discarded, so a §0-corollary-2 absence could be created *after the fact*, which no record shape here anticipated. Rendered, and the one record whose PLACEMENT is a reader rule.
+**#396 (2026-09-20) added `reminder` to §3.8** — the digest of the per-task system message the recalled items were injected AS, under the same content address the `brief` gives its system parts, so a reader joins the two records exactly instead of by position. Additive key on the existing `knowledge` step; absent on every log written before it, and a reader serves those by the positional join #386 shipped with. A stamp the brief has no part for is its own reader state (`not_on_brief`) and never a fallback to position: the writer named the message, and a part it did not name shown as "what the model was handed" is the confident-false-conclusion class §0 exists to prevent.
 **Scope:** what #191, #192, #193, #194 and #196 must write to the session log so that #197 can answer *"what governed this turn, what fired, what didn't, and why?"* from the log alone.
 **Gate:** phase 1 of #190's build order. A binding that ships without logging its evidence, or a gate that ships without logging which tier decided, makes that question unanswerable forever for everything built before someone notices. Retrofitting it is how #183's calibration problem ended up costing a 481-call audit.
 
@@ -461,6 +462,26 @@ The preflight record is the template #197's abstention requirement generalises f
 | `truncated` | Considered rows dropped by the cap. |
 
 `items[]` keeps its current shape exactly (`label`, `kind`, `sim`/`rail` or `score`) — `curate.scan_ledger` reads it and must not break.
+
+**`reminder` (#396, shipped 2026-09-20)** — the content address of the message the items were injected AS.
+
+```json
+{"kind": "knowledge", "turn": 3, "mode": "semantic",
+ "items": [{"label": "trippy-hotel-search", "kind": "skill", "sim": 0.512, "rail": 3}],
+ "reminder": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}
+```
+
+| field | why a reader needs it |
+|---|---|
+| `reminder` | The full sha256 hex (`evidence.digest_of`) of the per-task system message `run_task` appended at seed — `task_reminder`'s output: the time note, the rules in force and the preloaded knowledge in one string — computed on the SAME string the message carries, at the line that appends it. The `brief` written at the turn's first model call records that message as one of its system parts (the `brief` record is specified in `docs/diagnostics.md`, not here) under the same digest (`_system_evidence` calls `evidence.put`, which returns `digest_of` of the same bytes), so `reminder == brief.system[i].digest` is an exact join and needs no fact about where the loop puts its messages. Written by the writer that built the message, never re-derived from the brief; a bare digest, no bytes, so §3.10's names-only rule is untouched — the text still lives once in the evidence store and `purge` still reaches it. Absent only on a log written before the key (corollary 2: the step is emitted only when something was preloaded, so absent-key and absent-step are different facts). |
+
+**How a reader joins, in this order** (`explain._reminder`, `located` on the step says which):
+
+1. **By digest** (`located: "brief_digest"`) when the record carries `reminder`: the one brief part whose `digest` equals the stamp, at whatever `at` it sits. Two parts with the same digest — identical bytes at two positions — are `not_located` (the reader cannot say which `at`), not a pick.
+2. **By position** (`located: "brief_position"`) only when the record has NO stamp — a log older than this key: the one system part not at position 0, on the writer's word that it keeps exactly one per-task system message beside the standing prompt (#386). A brief of another shape is `not_located`.
+3. **A stamp that matches no part is `not_on_brief`**, a state of its own — the writer said which message it made and the brief has no part with that digest. It is NOT `not_located` (that one means *the reader cannot tell*; this one means *the two records disagree*), and it is never a fallback to rule 2: the brief may well have the positional shape, so position would FIND a text, and showing it would be a guess wearing the stamp's authority. The renderer says the two records disagree and names no cause — *why* they disagree is not on record, and "aish does not know why" is the sayable ending (`docs/agent-core.md` L8).
+
+The three refusal states #386 shipped (`not_recorded` with its two `why`s, `purged`, `not_located`) are unchanged in meaning; `not_on_brief` is a fifth beside them. `TestTheKnowledgeStep` (`tests/test_explain.py`) drives the real seed path and pins `reminder == digest_of(<the system message the fake backend received>)` and `located == "brief_digest"`, an unstamped fixture resolving positionally, the disagreeing fixture refusing, and a three-part brief resolving by digest where position could not; `tests/js/test_knowledge_step.js` pins the wording of each join and the causeless wording of `not_on_brief`.
 
 ### 3.9 · `incident` — the #197 unit itself
 

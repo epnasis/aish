@@ -12700,12 +12700,22 @@ const SS_STATE_WORDS = {
 // `not_recorded` is two different logs, told apart by `why`: no brief at all,
 // or a brief whose system half was not kept — neither has anything on record.
 // `not_located` is reserved for a brief that HAS a system half of the wrong
-// shape.
+// shape. `not_on_brief` (#396) is the two records disagreeing: the knowledge
+// record names the message by digest and the brief has no part with it — a
+// fact, with no cause named, and never a fallback to position.
 const SS_REMINDER_WORDS = {
   not_recorded: "not recorded — the aish that wrote this log did not keep it",
   no_brief: "not recorded — no brief was written at this turn's first model call",
   system_not_kept: "not recorded — a brief was written at this turn's first model call, but the aish that wrote this log did not keep its system text",
   not_located: "on record, but this reader cannot tell which system part carried it — the brief does not have the shape the reminder is written in",
+  not_on_brief: "the record names the message it was injected as, but the brief written at this turn's first model call has no system part with that digest — aish does not know why",
+};
+// How the reminder was joined to the brief (explain.REMINDER_BY_*): by the
+// digest the knowledge record stamped (#396), or — on a log older than the
+// stamp — by its position as the one part beside the standing prompt.
+const SS_REMINDER_JOIN_WORDS = {
+  brief_digest: "located by digest on this turn's brief — the record named the message",
+  brief_position: "located by position on this turn's brief",
 };
 // How the provider carried the per-task reminder on the wire (#74,
 // backends.SYSTEM_ROLE_POLICY, recorded on the brief as `options.system_role`).
@@ -13393,8 +13403,8 @@ function ssEventSegs(doc, step) {
 
 // The pre-flight recall as a pane (#386): each item with the retrieval numbers
 // the record kept for it (#183), then the text it was injected AS. That text is
-// the per-task system message — the step says how it was located (by position
-// on this turn's brief, the one system part beside the standing prompt) — and
+// the per-task system message — the step says how it was located (by the digest
+// the record stamped, #396, or by position on an older log) — and
 // it carried the time note and the rules in force in the same message, so it
 // is shown WHOLE and labelled as the message, never cut down to "the knowledge"
 // (fidelity: payload is shown exactly as the model received it). Where the
@@ -13415,9 +13425,11 @@ function ssKnowledgeSegs(step, b) {
   if (reminder.state === "recorded") {
     const role = SS_REMINDER_ROLE_WORDS[reminder.system_role]
       || "the per-task reminder that carried it — its role on the wire was not recorded";
+    const join = SS_REMINDER_JOIN_WORDS[reminder.located]
+      || "located on this turn's brief — how was not recorded";
     b.meta(
       `THE TEXT INJECTED — ${role}; whole: the time note and the rules in force ride in the same message`,
-      `located by position on this turn's brief: aish's message at ${reminder.at} · ${ssN(reminder.chars)} chars`,
+      `${join}: aish's message at ${reminder.at} · ${ssN(reminder.chars)} chars`,
     );
     if (reminder.text) b.text(reminder.text, "markdown");
     else b.meta("recorded, and it was empty");
