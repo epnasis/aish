@@ -7458,6 +7458,13 @@ function speakableText(el) {
     if (node.nodeType === Node.TEXT_NODE) { parts.push(node.nodeValue); return; }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     if (node.tagName === "PRE" || node.classList.contains("msg-tools")) return;
+    // A rendered equation ([MATH]) is two DOM branches of the same thing — a
+    // MathML mirror carrying the TeX source, and the visual HTML — and this
+    // walk has no aria-hidden check, so it would read both, garbled. Speech is
+    // linear and no maths library hands out a linearizer; until one exists the
+    // honest spoken form is the word "formula". A span that fell back to its
+    // source (.math-source) is plain text and is read as before.
+    if (node.classList.contains("math")) { parts.push("formula"); return; }
     for (const child of node.childNodes) walk(child);
     if (/^(P|LI|H[1-6]|TR|BLOCKQUOTE)$/.test(node.tagName)) parts.push("\n");
   };

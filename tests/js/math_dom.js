@@ -35,8 +35,13 @@ function makeElement(tag) {
     _attrs: {},
     _text: "",
     _className: "",
-    appendChild(child) { this.childNodes.push(child); return child; },
-    append(...kids) { for (const k of kids) this.childNodes.push(k); },
+    // Appending a fragment moves its children, as in a browser.
+    appendChild(child) {
+      if (child.nodeType === 11) { this.childNodes.push(...child.childNodes); child.childNodes = []; }
+      else this.childNodes.push(child);
+      return child;
+    },
+    append(...kids) { for (const k of kids) this.appendChild(k); },
     setAttribute(k, v) { this._attrs[k] = String(v); if (k === "class") this.className = String(v); },
     getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; },
     querySelectorAll() { return []; },
