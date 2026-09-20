@@ -16358,13 +16358,16 @@ $("confirm-modal").onclick = (e) => {
 function askDeleteChat() {
   const name = currentSession;
   if (!name) return;
+  // The window is the server's number ([TRASH]); a hello from a server that
+  // does not state it leaves 0, and "for 0 days" would be a false promise.
+  const keptFor = trashKeepDays ? ` for ${trashKeepDays} days` : "";
   askConfirm({
     title: "Delete this chat?",
     body:
       "Takes the whole conversation off the chat list and puts it in Recently " +
-      `deleted, where you can restore it for ${trashKeepDays} days. The copy ` +
-      "on your devices and the chat's working files go now, and do not come " +
-      "back with it.",
+      `deleted, where you can restore it${keptFor}. The chat's working files ` +
+      "go now and do not come back with it; the copy on your devices goes now " +
+      "and syncs back after a restore.",
     verb: "Delete",
     // Answering "Delete" is not the same as the chat being deleted — the
     // request still has to arrive and be handled ([ACK-LEDGER]). Nothing to

@@ -140,6 +140,14 @@ for (const [name, dismiss] of [
     !/cannot be undone/.test(body()));
   ok("…while still naming what the delete really does destroy",
     /devices/.test(body()) && /working files/.test(body()));
+  // The device copy is dropped by the mirror and re-synced after a restore
+  // ([MIRROR-FORGET], onSessionRestored → offlineSyncSoon); the README, the
+  // model's own text and the docs all say so. The first cut of this modal said
+  // the opposite — that it "does not come back" — and was the one surface
+  // contradicting every other.
+  ok("…and says the device copy syncs back, not that it is lost for good",
+    /devices goes now and syncs back/.test(body()) &&
+    !/devices[^.]*do not come back/.test(body()));
   w.sandbox.currentSession = "session-somewhere-else.jsonl";
   w.el("confirm-ok").onclick();
   ok("confirming deletes", w.sent.length === 1 && w.sent[0].type === "delete_session");
@@ -149,6 +157,19 @@ for (const [name, dismiss] of [
   // receipts it ([ACK-LEDGER]), under a label the user would recognise.
   ok("…and it goes out as an ACT, held open until the server answers",
     w.awaited.length === 1 && /delet/i.test(w.awaited[0]));
+}
+
+// 5b. The number of days is the SERVER's ([TRASH]); a hello from a server that
+//     states none leaves 0, and "restore it for 0 days" is a promise of
+//     nothing. The sentence drops the number rather than say that.
+{
+  const w = world();
+  w.sandbox.trashKeepDays = 0;
+  w.sandbox.askDeleteChat();
+  const body = w.el("confirm-body").textContent;
+  ok("with no window stated, the question still says it can be restored",
+    /Recently deleted, where you can restore it\./.test(body));
+  ok("…and never quotes a zero-day window", !/0 days/.test(body));
 }
 
 // 6. Escape answers the question rather than dismissing whatever is behind it —
