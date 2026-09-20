@@ -45,6 +45,8 @@ import hashlib
 import os
 from pathlib import Path
 
+from . import atomic_write
+
 STORE_DIRNAME = "evidence"
 
 
@@ -76,13 +78,13 @@ def put(text: str, state_dir: os.PathLike | str | None) -> str:
     path = _blob_path(state_dir, digest)
     if path.exists():
         return digest
-    path.parent.mkdir(parents=True, exist_ok=True)
     # Written through a temp file: a reader that finds a half-written blob
     # cannot tell it from a complete one by looking, and the whole point of the
-    # store is that what it hands back is what was recorded.
-    tmp = path.with_name(f".{digest}.tmp{os.getpid()}")
-    tmp.write_text(text)
-    tmp.replace(path)
+    # store is that what it hands back is what was recorded. `keep_existing`
+    # because two sessions on aish-web's thread pool can record the same bytes
+    # in the same instant (#395): whichever lands second finds the blob there,
+    # identical by construction, and has nothing left to do.
+    atomic_write.publish(path, text, keep_existing=True)
     return digest
 
 

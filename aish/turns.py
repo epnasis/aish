@@ -38,6 +38,8 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
+from . import atomic_write
+
 STORE_DIRNAME = "turns"
 TOMBSTONE = ".evicted"
 
@@ -108,12 +110,10 @@ def put(text: str, state_dir: os.PathLike | str | None, session: os.PathLike | s
     if path.exists():
         return digest
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         # Through a temp file, as `evidence.put` does: a reader that finds a
-        # half-written blob cannot tell it from a complete one by looking.
-        tmp = path.with_name(f".{digest}.tmp{os.getpid()}")
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
+        # half-written blob cannot tell it from a complete one by looking. And
+        # yielding to a concurrent writer of the same digest, as it does (#395).
+        atomic_write.publish(path, text, encoding="utf-8", keep_existing=True)
     except OSError:
         # A full disk or an unwritable state dir is not a reason for a model
         # call to fail. The record still carries the digest, and the reader

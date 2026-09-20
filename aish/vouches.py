@@ -43,6 +43,7 @@ import json
 import os
 from pathlib import Path
 
+from . import atomic_write
 from .session import SessionLog
 
 STORE_NAME = "egress-vouches.json"
@@ -111,22 +112,16 @@ def _current() -> dict | None:
 def _write(data: dict) -> None:
     """Write the store so a reader never sees half of one.
 
-    The scratch name carries the PID because `aish-web` and a terminal session
-    write the same file: with one shared scratch name, two writers racing would
-    interleave inside it and `replace` would then publish a file that is neither
-    of theirs. A losing racer costs one host and one later card; a torn file
-    costs the whole record, and `_current` would refuse to repair it — correctly
-    — for the rest of the machine's life."""
-    path = store()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    scratch = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        scratch.write_text(
-            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
-        scratch.replace(path)
-    finally:
-        scratch.unlink(missing_ok=True)
+    The scratch name is unique per CALL (`atomic_write`) because `aish-web`
+    and a terminal session write the same file, and two web sessions in one
+    process do too (#395): with one shared scratch name, two writers racing
+    would interleave inside it and `replace` would then publish a file that is
+    neither of theirs. A losing racer costs one host and one later card; a torn
+    file costs the whole record, and `_current` would refuse to repair it —
+    correctly — for the rest of the machine's life."""
+    atomic_write.publish(
+        store(), json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
 
 
 def hosts() -> list[str]:

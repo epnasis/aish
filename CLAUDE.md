@@ -161,6 +161,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
   scan over the logs, under the same reader law as `explain`; it reports what was RECORDED
   and says plainly what it cannot know. → `docs/token-accounting.md`
 - **`export.py`** — local Markdown → PDF for the web UI; the text never leaves the machine. → `docs/export-pdf.md`
+- **`atomic_write.py`** — the ONE write-through-temp helper: scratch name unique per CALL, removed on every failure path, yields to a concurrent winner for content-addressed stores. A PID-named scratch is unique per process only, and aish-web is one process (#395). → `docs/diagnostics.md`
 - **`dir_ignore.py`** — the configurable gitignore-style ignore list shared by the web folder browser and @-file completion. Name-level `fnmatch` on basenames only — it must never add a per-subfolder stat. → `docs/cli.md`
 
 Startup safety: launching either entry point from `$HOME` re-anchors the session to `~/aish` (`cli.default_workspace`, also used by `create_app`) so the home tree never becomes the auto-approval root; explicit `cwd` overrides are respected.
