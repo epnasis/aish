@@ -56,6 +56,9 @@ function world() {
     act: (message, opts) => { sent.push(message); awaited.push(opts && opts.label); return true; },
     showToast() {},
     offlineMode: false,
+    // The trash window the delete question quotes — the SERVER's number,
+    // carried on every hello ([TRASH]), never a copy kept in app.js.
+    trashKeepDays: 30,
   };
   vm.createContext(sandbox);
   vm.runInContext(
@@ -125,9 +128,26 @@ for (const [name, dismiss] of [
   const w = world();
   w.sandbox.askDeleteChat();
   ok("asking sends nothing", w.sent.length === 0);
-  ok("the question says what is lost",
-    /log file/.test(w.el("confirm-body").textContent)
-    && /cannot be undone/.test(w.el("confirm-body").textContent));
+  // The consequences of a delete CHANGED with #177 and the question had to
+  // change with them: it can no longer say "cannot be undone", because for 30
+  // days it can. Overstating the damage is the same defect as understating it
+  // — the modal is read once, and what it says has to be what happens. So it
+  // states both halves: what comes back, and what does not.
+  const body = () => w.el("confirm-body").textContent;
+  ok("the question says the chat can be restored, and for how long",
+    /Recently deleted/i.test(body()) && /30 days/.test(body()));
+  ok("…and it no longer claims a delete is final",
+    !/cannot be undone/.test(body()));
+  ok("…while still naming what the delete really does destroy",
+    /devices/.test(body()) && /working files/.test(body()));
+  // The device copy is dropped by the mirror and re-synced after a restore
+  // ([MIRROR-FORGET], onSessionRestored → offlineSyncSoon); the README, the
+  // model's own text and the docs all say so. The first cut of this modal said
+  // the opposite — that it "does not come back" — and was the one surface
+  // contradicting every other.
+  ok("…and says the device copy syncs back, not that it is lost for good",
+    /devices goes now and syncs back/.test(body()) &&
+    !/devices[^.]*do not come back/.test(body()));
   w.sandbox.currentSession = "session-somewhere-else.jsonl";
   w.el("confirm-ok").onclick();
   ok("confirming deletes", w.sent.length === 1 && w.sent[0].type === "delete_session");
@@ -137,6 +157,19 @@ for (const [name, dismiss] of [
   // receipts it ([ACK-LEDGER]), under a label the user would recognise.
   ok("…and it goes out as an ACT, held open until the server answers",
     w.awaited.length === 1 && /delet/i.test(w.awaited[0]));
+}
+
+// 5b. The number of days is the SERVER's ([TRASH]); a hello from a server that
+//     states none leaves 0, and "restore it for 0 days" is a promise of
+//     nothing. The sentence drops the number rather than say that.
+{
+  const w = world();
+  w.sandbox.trashKeepDays = 0;
+  w.sandbox.askDeleteChat();
+  const body = w.el("confirm-body").textContent;
+  ok("with no window stated, the question still says it can be restored",
+    /Recently deleted, where you can restore it\./.test(body));
+  ok("…and never quotes a zero-day window", !/0 days/.test(body));
 }
 
 // 6. Escape answers the question rather than dismissing whatever is behind it —
@@ -162,6 +195,22 @@ for (const [name, dismiss] of [
   ok("…and it is an ACT, not a bare send",
     !/send\(\{ type: "delete_session"/.test(src));
   ok("the old two-tap guard is gone", !/armDeleteChat|DELARM/.test(src));
+  // #177 added a SECOND destructive action — deleting a chat out of Recently
+  // deleted for good — and it is the one that genuinely cannot be undone. It
+  // must reach the same modal, or the app ends up with two dialogs disagreeing
+  // about how serious the same word is.
+  const trash = extract("// [TRASH-START]", "// [TRASH-END]");
+  ok("permanently deleting a chat goes through the shared modal too",
+    trash.includes("askConfirm({"));
+  ok("…and it is the one that still says so",
+    /cannot be undone/.test(trash));
+  const purgers = src.match(/(?:send|act)\(\{ type: "purge_session"/g) || [];
+  ok("…with exactly one code path behind it", purgers.length === 1);
+  ok("…which is an ACT as well", !/send\(\{ type: "purge_session"/.test(src));
+  // Restoring is not destructive and deliberately has NO modal: a question in
+  // front of it would make the two read as equally serious, which is the exact
+  // reading the delete's own modal exists to create.
+  ok("restoring asks nothing", !/askConfirm[\s\S]{0,400}restore_session/.test(trash));
 }
 
 console.log(`${checks} ok — all checks passed`);

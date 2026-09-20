@@ -866,10 +866,198 @@ def _turn_opens_at(records: list[dict], user_index: int) -> int:
     return user_index
 
 
+# ---- trash: a delete you can take back for 30 days (#177) -----------------
+#
+# Deleting a chat was one `unlink()`, and nothing anywhere could bring it back —
+# not the server, not the CLI, and not the offline mirror, which drops a
+# server-deleted chat on its next sync. It now MOVES the log into
+# `<state_dir>/trash/`, and `purge_trash` removes what has been there longer
+# than TRASH_MAX_AGE_S.
+#
+# Three properties carry it, and each is why a more obvious design was rejected:
+#
+# 1. `trash/` is a SUBDIRECTORY. Every listing in this module walks the state
+#    dir through one non-recursive `state_dir.glob("session-*.jsonl")`
+#    (`_by_recency`), and every other module that walks it does the same — so a
+#    trashed chat leaves the drawer, the CLI picker, the offline index, search
+#    and recovery with NO change to any of them. Both halves are load-bearing:
+#    the entry is one level down AND its name no longer starts with `session-`.
+# 2. The deletion time is in the FILENAME, never in the log. Appending a
+#    `kind:"trashed"` record — the idiom `title`/`origin`/`cwd` use — would have
+#    rewritten the file's mtime, which is the last-interaction stamp every
+#    ordering here depends on, for a chat that has had no new activity.
+# 3. A restore is the rename run backwards, so the bytes and the mtime are the
+#    ones that went in. There is nothing to re-derive and nothing to get wrong.
+#
+# What trash does NOT hold, said plainly so the promise does not outrun the
+# code: a chat's throwaway scratch workspace and its evidence blobs are deleted
+# when the chat is (`agent.remove_chat_scratch`, `turns.delete_chat`). This
+# holds the conversation and its command audit trail — the part a delete
+# destroys that nothing else has a copy of.
+TRASH_DIR_NAME = "trash"
+TRASH_MAX_AGE_S = 30 * 24 * 3600
+# A ceiling on the directory, so a bulk delete cannot grow it without limit
+# before the age purge catches up. Far above anything one person deletes in a
+# month, because reaching it destroys the OLDEST-deleted entries EARLY — the
+# one way this mechanism can lose something it promised to hold for 30 days.
+TRASH_MAX_ENTRIES = 200
+
+# `<deleted-at epoch>-<original name>`. The original half is the same shape
+# `_SESSION_NAME_RE` accepts, so a name this parses can only ever be restored to
+# something the rest of the tree already calls a session.
+_TRASH_ENTRY_RE = re.compile(r"^(\d{1,20})-(session-[0-9-]+\.jsonl)$")
+
+
+class TrashEntry(NamedTuple):
+    """One deleted chat: where it sits now, the name it goes back to, and when
+    it was deleted (read off the filename, never off the log)."""
+
+    path: Path
+    name: str
+    deleted_at: float
+
+
+def trash_dir(state_dir: Path) -> Path:
+    return Path(state_dir) / TRASH_DIR_NAME
+
+
+def trash_session(state_dir: Path, path: Path, now: float | None = None) -> Path | None:
+    """Move one session log into the trash; answer where it landed, or None if
+    it would not move — the caller decides whether that is a refusal.
+
+    A rename within the same state dir: atomic, and it leaves mtime alone.
+    """
+    source = Path(path)
+    target_dir = trash_dir(state_dir)
+    entry = target_dir / f"{int(time.time() if now is None else now)}-{source.name}"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        # `rename` REPLACES silently on POSIX, so a name already taken would be
+        # a delete destroying the copy it promised to keep — the one outcome
+        # this whole mechanism exists to prevent. Refusing is visible; the
+        # caller says so and nothing has happened yet.
+        if entry.exists():
+            return None
+        source.rename(entry)
+    except OSError:
+        return None
+    return entry
+
+
+def list_trash(state_dir: Path) -> list[TrashEntry]:
+    """What is in the trash, most recently deleted first.
+
+    A file whose name this cannot parse is not one of ours: never listed, and
+    never purged. Deleting something we cannot identify is the wrong direction
+    for a mechanism that exists to stop destroying things.
+    """
+    try:
+        found = list(trash_dir(state_dir).iterdir())
+    except OSError:  # no trash yet, or an unreadable one — both are "empty"
+        return []
+    entries = []
+    for path in found:
+        match = _TRASH_ENTRY_RE.match(path.name)
+        if match is not None:
+            entries.append(TrashEntry(path, match.group(2), float(match.group(1))))
+    entries.sort(key=lambda entry: (-entry.deleted_at, entry.name))
+    return entries
+
+
+class RestoreRefused(Exception):
+    """`restore_session` did not move the chat, and its message is the ONE
+    condition that was observed — never a summary of several. Each surface
+    shows it as-is: a refusal that names a cause a line did not check is the
+    defect L8 in `docs/agent-core.md` exists to stop, and "that chat is no
+    longer in Recently deleted" was being said for a chat that still was."""
+
+
+def restore_session(state_dir: Path, entry_name: str) -> Path:
+    """Put a trashed chat back under its own name — the rename that trashed it,
+    run backwards, so the log is byte-identical and its mtime never moved.
+
+    Raises `RestoreRefused` — saying which — when the name is not a trash
+    entry's, when the entry is no longer there, when a live log already holds
+    that name (recovering one chat must never overwrite another), or when the
+    rename itself failed.
+    """
+    match = _TRASH_ENTRY_RE.match(entry_name)
+    if match is None or Path(entry_name).name != entry_name:
+        raise RestoreRefused("that is not the name of a deleted chat")
+    source = trash_dir(state_dir) / entry_name
+    if not source.is_file():
+        raise RestoreRefused("that chat is no longer in Recently deleted")
+    target = Path(state_dir) / match.group(2)
+    if target.exists():
+        raise RestoreRefused(
+            "a chat already holds that name, so this one cannot be put back — "
+            "it is still in Recently deleted"
+        )
+    try:
+        source.rename(target)
+    except OSError as exc:
+        raise RestoreRefused(f"its log file would not move: {exc}") from exc
+    return target
+
+
+def purge_trash(
+    state_dir: Path,
+    max_age: float = TRASH_MAX_AGE_S,
+    max_entries: int = TRASH_MAX_ENTRIES,
+    now: float | None = None,
+) -> list[str]:
+    """Delete what the trash has held too long, then anything over the entry
+    ceiling, oldest-deleted first. Answers the ORIGINAL names removed.
+
+    Never raises, and one entry that will not unlink does not stop the rest:
+    this runs from a server start and a CLI launch, where a trash that cannot
+    be swept is a line in a log and never a reason not to come up.
+    """
+    entries = list_trash(state_dir)
+    cutoff = (time.time() if now is None else now) - max_age
+    # Held for the WHOLE window it promises: an entry expires once it is older
+    # than the limit, not once it has reached it.
+    expired = [entry for entry in entries if entry.deleted_at < cutoff]
+    kept = [entry for entry in entries if entry.deleted_at >= cutoff]
+    removed = []
+    for entry in expired + kept[max_entries:]:
+        try:
+            entry.path.unlink()
+        except OSError:
+            continue
+        removed.append(entry.name)
+    return removed
+
+
+class SessionLogMoved(Exception):
+    """A write was refused because the log this session was opened ON is no
+    longer at its path (#177). The message states only what was observed and
+    where a deleted chat would be — never who moved it, which nothing here
+    can see."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        super().__init__(
+            f"nothing was written: this chat's log file has gone from {path} since "
+            "the chat was opened. If it was deleted from another aish client it is "
+            "in Recently deleted — 'aish trash' lists what is there."
+        )
+
+
 class SessionLog:
     def __init__(self, path: Path):
         self.path = path
         self._fh: TextIO | None = None
+        # Whether a log was THERE when this session was opened on it (#177).
+        # The append handle is opened lazily (see `_write_line`), so a resumed
+        # chat that has not spoken yet holds no handle — and if another client
+        # trashes the log in the meantime, the lazy `open("a")` would recreate
+        # a fresh file under the live name holding only the new records. That
+        # stub then blocks the restore (`restore_session` refuses a name a live
+        # log holds) until the purge destroys the only full copy. So a session
+        # that found a file refuses to invent one; a NEW session still creates
+        # its file on the first record, as before.
+        self._had_file = path.exists()
         self._pending_model: str | None = None
         # When this chat last put something in the CONVERSATION, epoch seconds
         # (#203 / #275). Held in memory so a LIVE session can be asked "when did
@@ -2337,11 +2525,15 @@ class SessionLog:
         paths = [path for _, path in stamped]
         # Deleted sessions leave the parse caches with the same sweep that
         # notices them gone. Keys from OTHER state dirs (tests use several)
-        # are not this dir's to prune.
+        # are not this dir's to prune. A peek at a TRASHED log (the Recently
+        # deleted list, #177) caches under `trash/` too; those are never live
+        # here, so this sweep drops them every time — a restore changes the
+        # path anyway, and holding them would only grow the cache.
         live = {str(path) for path in paths}
+        ours = (state_dir, trash_dir(state_dir))
         for cache in (_PARSE_CACHE, _ENTRY_CACHE):
             for spath in [
-                s for s in cache if s not in live and Path(s).parent == state_dir
+                s for s in cache if s not in live and Path(s).parent in ours
             ]:
                 cache.pop(spath, None)
         return paths
@@ -2799,8 +2991,10 @@ class SessionLog:
     def _record(self, kind: str, **fields) -> None:
         with self._write_lock:
             if self._pending_model is not None and kind != "model":
-                pending, self._pending_model = self._pending_model, None
-                self._write_line("model", model=pending)
+                # Cleared only once written: a refused write (`SessionLogMoved`)
+                # must not silently drop which model this chat runs.
+                self._write_line("model", model=self._pending_model)
+                self._pending_model = None
             self._write_line(kind, **fields)
 
     def _write_line(self, kind: str, **fields) -> None:
@@ -2813,6 +3007,12 @@ class SessionLog:
         if SessionLog._is_output(record):
             self.output_at = record_epoch(record) or self.output_at
         if self._fh is None:
+            # A log that was there at open and is not now has been moved (or
+            # deleted) by something else since; refuse rather than recreate it
+            # (#177, see `_had_file`). Checked only on the lazy open — a handle
+            # already held follows the inode, trash name and all.
+            if self._had_file and not self.path.exists():
+                raise SessionLogMoved(self.path)
             # Created on first record, not in __init__: a chat that never
             # gets a message must leave no file — empty session files crowd
             # every recency-ordered list and pile up across restarts.

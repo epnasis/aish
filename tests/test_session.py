@@ -5,6 +5,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from aish import session as session_module
 from aish.session import (
     CLOSEST_MAX,
@@ -3190,3 +3192,252 @@ class TestRedactionUnlinksEvidence:
         assert turns.get(shared, tmp_path, log.path) == "shared history"
         assert turns.get(only_second, tmp_path, log.path) == "later text"
         assert turns.get(menu, tmp_path, log.path) == "the tool menu"
+
+
+class TestTrash:
+    """A delete you can take back for 30 days (#177).
+
+    The whole design rests on one claim about this module — that `trash/` is
+    invisible to every listing because they all walk the state dir through one
+    NON-RECURSIVE glob — so that claim is checked here against the real
+    listings rather than taken from reading the code.
+    """
+
+    def _chat(self, state_dir, text="hello"):
+        log = SessionLog.new(state_dir)
+        log.message({"role": "user", "content": text})
+        log.close()
+        return log
+
+    def test_trashing_hides_a_chat_from_every_listing(self, tmp_path):
+        """Every reader of the state dir, by name, so that a listing added
+        later with its own walk cannot inherit this guarantee unasserted."""
+        kept = self._chat(tmp_path, "kept chat")
+        doomed = SessionLog.new(tmp_path)
+        doomed.message({"role": "user", "content": "doomed chat"})
+        # Give the doomed chat something for the two readers that look past
+        # the title: a clean user-direct command (the terminal palette) and an
+        # unfinished task (restart recovery).
+        doomed.command("ls doomed", "user-direct")
+        doomed.command_event(
+            {"kind": "cmd_start", "cwd": "/x", "command": "ls doomed", "user": True}
+        )
+        doomed.command_event({"kind": "cmd_end", "status": "exit", "exit_code": 0})
+        doomed.task_start("left unfinished")
+        doomed.close()
+        assert SessionLog.user_command_history(tmp_path) == ["ls doomed"]
+        assert [p.name for p, _ in SessionLog.interrupted_sessions(tmp_path, 3600)] == [
+            doomed.path.name
+        ]
+
+        assert session_module.trash_session(tmp_path, doomed.path) is not None
+
+        assert {p.name for p in SessionLog._by_recency(tmp_path)} == {kept.path.name}
+        assert [i.path.name for i in SessionLog.list_sessions(tmp_path)] == [kept.path.name]
+        assert [e.info.path.name for e in SessionLog.load_entries(tmp_path)] == [kept.path.name]
+        assert [p[0] for p in SessionLog.pager_titles(tmp_path)] == [kept.path.name]
+        assert SessionLog.latest(tmp_path) == kept.path
+        # …and the search reading those same entries cannot find it either.
+        entries = SessionLog.load_entries(tmp_path)
+        assert [i.path.name for i in SessionLog.rank(entries, "doomed")] == []
+        assert SessionLog.search_sessions(tmp_path, "doomed") == []
+        assert SessionLog.search_excerpts(tmp_path, "doomed").startswith("No past session")
+        # The terminal palette and restart recovery walk the same dir with
+        # their own filters; neither sees a trashed chat.
+        assert SessionLog.user_command_history(tmp_path) == []
+        assert SessionLog.interrupted_sessions(tmp_path, 3600) == []
+
+    def test_the_trash_is_one_level_down_and_no_longer_named_like_a_session(self, tmp_path):
+        """Both halves of the invisibility, named separately: a future reader
+        moving the entry back up, or keeping the original name as the prefix,
+        would each defeat it on their own."""
+        log = self._chat(tmp_path)
+        entry = session_module.trash_session(tmp_path, log.path)
+        assert entry.parent == tmp_path / "trash"
+        assert not entry.name.startswith("session-")
+        assert list(tmp_path.glob("session-*.jsonl")) == []
+
+    def test_a_restored_chat_is_byte_identical_and_keeps_its_mtime(self, tmp_path):
+        """mtime is the recency stamp every ordering depends on, so a restore
+        that moved it would put an untouched chat at the top of the list."""
+        log = self._chat(tmp_path, "the exact bytes")
+        body = log.path.read_bytes()
+        mtime = log.path.stat().st_mtime_ns
+        entry = session_module.trash_session(tmp_path, log.path)
+        restored = session_module.restore_session(tmp_path, entry.name)
+        assert restored == log.path
+        assert restored.read_bytes() == body
+        assert restored.stat().st_mtime_ns == mtime
+        assert [i.path.name for i in SessionLog.list_sessions(tmp_path)] == [log.path.name]
+
+    def test_trashing_does_not_touch_the_log(self, tmp_path):
+        """The deletion time rides the FILENAME. A `kind:"trashed"` record —
+        the idiom title/origin/cwd use — was the alternative, and it would have
+        rewritten the recency stamp of a chat with no new activity."""
+        log = self._chat(tmp_path)
+        before = log.path.read_text()
+        entry = session_module.trash_session(tmp_path, log.path)
+        assert entry.read_text() == before
+
+    def test_the_entry_carries_when_it_was_deleted(self, tmp_path):
+        log = self._chat(tmp_path)
+        session_module.trash_session(tmp_path, log.path, now=1_700_000_000)
+        [entry] = session_module.list_trash(tmp_path)
+        assert entry.deleted_at == 1_700_000_000
+        assert entry.name == log.path.name
+
+    def test_list_trash_is_newest_deleted_first(self, tmp_path):
+        first = self._chat(tmp_path, "one")
+        second = self._chat(tmp_path, "two")
+        session_module.trash_session(tmp_path, first.path, now=1000)
+        session_module.trash_session(tmp_path, second.path, now=2000)
+        assert [e.name for e in session_module.list_trash(tmp_path)] == [
+            second.path.name,
+            first.path.name,
+        ]
+
+    def test_purge_holds_an_entry_for_the_whole_window_it_promises(self, tmp_path):
+        """The boundary, both sides: an entry expires once it is OLDER than the
+        limit, never once it has merely reached it."""
+        on_the_line = self._chat(tmp_path, "exactly thirty days")
+        a_second_over = self._chat(tmp_path, "thirty days and a second")
+        age = session_module.TRASH_MAX_AGE_S
+        now = 10 * age
+        session_module.trash_session(tmp_path, on_the_line.path, now=now - age)
+        session_module.trash_session(tmp_path, a_second_over.path, now=now - age - 1)
+        assert session_module.purge_trash(tmp_path, now=now) == [a_second_over.path.name]
+        assert [e.name for e in session_module.list_trash(tmp_path)] == [on_the_line.path.name]
+
+    def test_purge_bounds_the_directory_oldest_deleted_first(self, tmp_path):
+        logs = [self._chat(tmp_path, f"chat {n}") for n in range(4)]
+        for n, log in enumerate(logs):
+            session_module.trash_session(tmp_path, log.path, now=1000 + n)
+        purged = session_module.purge_trash(tmp_path, max_entries=2, now=1000)
+        assert purged == [logs[1].path.name, logs[0].path.name]
+        assert [e.name for e in session_module.list_trash(tmp_path)] == [
+            logs[3].path.name,
+            logs[2].path.name,
+        ]
+
+    def test_purge_never_raises_on_a_trash_it_cannot_read(self, tmp_path):
+        """It runs from a server start and a CLI launch: a trash that cannot be
+        swept is a line in a log, never a reason not to come up."""
+        assert session_module.purge_trash(tmp_path) == []
+        (tmp_path / "trash").write_text("not a directory")
+        assert session_module.purge_trash(tmp_path) == []
+
+    def test_a_file_the_trash_cannot_identify_is_left_alone(self, tmp_path):
+        """Never listed and never purged. Destroying something we cannot name
+        is the wrong direction for a mechanism that exists to stop destroying
+        things."""
+        (tmp_path / "trash").mkdir()
+        stray = tmp_path / "trash" / "notes.txt"
+        stray.write_text("someone's file")
+        assert session_module.list_trash(tmp_path) == []
+        assert session_module.purge_trash(tmp_path, max_age=0, max_entries=0) == []
+        assert stray.exists()
+
+    def test_restore_refuses_a_name_that_is_not_a_trash_entry(self, tmp_path):
+        log = self._chat(tmp_path)
+        session_module.trash_session(tmp_path, log.path)
+        for bad in ("", "../session-1.jsonl", "trash/x", log.path.name, "1700-notes.txt"):
+            with pytest.raises(session_module.RestoreRefused, match="not the name"):
+                session_module.restore_session(tmp_path, bad)
+        assert len(session_module.list_trash(tmp_path)) == 1
+
+    def test_restore_says_the_entry_is_gone_only_when_it_is(self, tmp_path):
+        with pytest.raises(session_module.RestoreRefused, match="no longer in Recently deleted"):
+            session_module.restore_session(tmp_path, "1700-session-20200101-000000-000000.jsonl")
+
+    def test_restore_never_overwrites_a_live_chat(self, tmp_path):
+        """Recovering one chat must not destroy another — and the refusal
+        names THAT, not the trash entry being gone: it is still there, and a
+        sentence saying otherwise would send the owner looking in the wrong
+        place (L8)."""
+        log = self._chat(tmp_path, "original")
+        entry = session_module.trash_session(tmp_path, log.path)
+        log.path.write_text('{"kind": "message", "role": "user", "content": "newer"}\n')
+        with pytest.raises(session_module.RestoreRefused) as refused:
+            session_module.restore_session(tmp_path, entry.name)
+        assert "already holds that name" in str(refused.value)
+        assert "no longer" not in str(refused.value)
+        assert "newer" in log.path.read_text()
+        assert len(session_module.list_trash(tmp_path)) == 1
+
+    def test_a_resumed_session_never_recreates_a_log_the_trash_took(self, tmp_path):
+        """The exact sequence: a terminal resumes a chat (constructs on the
+        existing log, writes nothing — the handle is lazy), another client
+        trashes it, the terminal user types. `open("a")` would recreate a stub
+        under the live name; that stub blocks the restore, and the purge then
+        destroys the only full copy. The write is refused instead, no file
+        appears, and the restore goes through."""
+        original = self._chat(tmp_path, "the whole conversation")
+        body = original.path.read_bytes()
+        resumed = SessionLog(original.path)  # --resume: opened, not written
+        entry = session_module.trash_session(tmp_path, original.path)
+        assert entry is not None
+
+        with pytest.raises(session_module.SessionLogMoved) as refused:
+            resumed.message({"role": "user", "content": "typed after the delete"})
+        assert not original.path.exists(), "no stub was created under the live name"
+        assert "nothing was written" in str(refused.value)
+        assert entry.read_bytes() == body, "the trash copy is untouched"
+
+        restored = session_module.restore_session(tmp_path, entry.name)
+        assert restored == original.path
+        assert restored.read_bytes() == body
+        assert session_module.list_trash(tmp_path) == []
+        # And the refusal was about the file's ABSENCE, not the session: with
+        # the log back where it was, the same session writes to it again.
+        resumed.message({"role": "user", "content": "typed after the restore"})
+        resumed.close()
+        assert b"typed after the restore" in original.path.read_bytes()
+        assert b"typed after the delete" not in original.path.read_bytes()
+
+    def test_a_new_session_still_creates_its_file_on_the_first_record(self, tmp_path):
+        """The guard is for a log that WAS there; a fresh chat had none and
+        keeps creating one lazily, so an unused chat still leaves no file."""
+        fresh = SessionLog.new(tmp_path)
+        assert not fresh.path.exists()
+        fresh.message({"role": "user", "content": "first"})
+        fresh.close()
+        assert fresh.path.is_file()
+
+    def test_a_handle_already_open_follows_the_log_into_the_trash(self, tmp_path):
+        """The other half of the same sequence: a terminal that has already
+        written holds the inode, and its later lines land in the trash copy —
+        a restore brings them back with the rest."""
+        live = SessionLog.new(tmp_path)
+        live.message({"role": "user", "content": "before"})
+        entry = session_module.trash_session(tmp_path, live.path)
+        live.message({"role": "user", "content": "after"})
+        live.close()
+        assert not live.path.exists()
+        assert b"after" in entry.read_bytes()
+
+    def test_a_peek_at_a_trashed_log_does_not_stay_in_the_parse_cache(self, tmp_path):
+        """The Recently deleted list peeks each entry's title, which caches
+        under `trash/`; the listing sweep drops those keys with the rest of
+        this dir's dead ones rather than letting them accumulate."""
+        log = self._chat(tmp_path, "peeked")
+        entry = session_module.trash_session(tmp_path, log.path)
+        assert SessionLog._peek_title(entry) == "peeked"
+        assert str(entry) in session_module._PARSE_CACHE
+        SessionLog._by_recency(tmp_path)
+        assert str(entry) not in session_module._PARSE_CACHE
+
+    def test_a_delete_never_overwrites_a_copy_already_in_the_trash(self, tmp_path):
+        """`rename` replaces silently on POSIX, so the one thing this mechanism
+        exists to prevent — a delete destroying a copy it promised to keep — is
+        exactly what a taken name would cause. It refuses instead, and the
+        chat is still where it was."""
+        log = self._chat(tmp_path, "first")
+        planted = tmp_path / "trash" / f"5000-{log.path.name}"
+        planted.parent.mkdir()
+        planted.write_text("an earlier copy of this chat\n")
+        assert session_module.trash_session(tmp_path, log.path, now=5000) is None
+        assert planted.read_text() == "an earlier copy of this chat\n"
+        assert log.path.is_file()
+
+    def test_trashing_a_log_that_will_not_move_answers_none(self, tmp_path):
+        assert session_module.trash_session(tmp_path, tmp_path / "session-nope.jsonl") is None

@@ -532,6 +532,29 @@
   <div id="model-list" class="sheet-list"></div>
 </div>
 
+<!-- What a tap on a Recently deleted row offers (#177). A sheet, like every
+     other rarely-touched per-chat action: a deleted chat cannot be opened, so
+     its row has nowhere else to put these, and the chat menu these would
+     otherwise live in hangs off a title this chat no longer has. -->
+<div id="trash-sheet" class="sheet" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <strong id="trash-sheet-title" class="grow"></strong>
+    <button class="close" aria-label="close" data-close="trash-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
+  </div>
+  <p id="trash-sheet-when" class="trash-note"></p>
+  <div class="sheet-list">
+    <button type="button" id="trash-restore" class="row">
+      Restore chat
+      <span class="meta">Puts it back in the chat list where it was, unpinned</span>
+    </button>
+    <button type="button" id="trash-purge" class="row danger">
+      Delete permanently
+      <span class="meta">Asks first — this one cannot be undone</span>
+    </button>
+  </div>
+</div>
+
 <!-- workspace panel -->
 <div id="workspace-sheet" class="sheet" hidden>
   <div class="grabber"></div>

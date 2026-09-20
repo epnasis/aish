@@ -188,6 +188,11 @@ function ledgerWorld({ socket = "open" } = {}) {
     // needs (`sessions` and `files` fire on every keystroke).
     sessions: "read", files: "read", models: "read", jobs: "read",
     peek: "read", client_debug: "read",
+    // Also a read (#177): asking what is in Recently deleted paints a section
+    // and claims nothing. The two things that CHANGE the trash — restore and
+    // permanent delete — go through act(), and the server republishes the list
+    // to every device after each, so a lost query repairs itself.
+    trash: "read",
     // ALREADY GUARDED, more strictly than a receipt: the message is on screen
     // pending until the server's own version lands, and the text goes back to
     // the composer if it never does.
