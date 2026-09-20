@@ -25,6 +25,14 @@
 //   - ✕ on an attachment tells the server, or the next repaint puts it back;
 //   - `chat=new` opens one chat for the batch, once, never from an empty one.
 //
+// These are decision pins for a transcript that is already PAINTED — the
+// world below states that claim (`viewFp`) and puts real nodes in the fake
+// transcript for the real transcriptIsEmpty to read. The ordering that broke
+// this feature (#393: the decision taken inside a hello, before its replay had
+// painted anything) is test_choreo_share_landing.js's subject, driven through
+// the real socket dispatch; it cannot be seen from here, and a harness that
+// hands the code its answer cannot fail on it.
+//
 // Run manually: node tests/js/test_shares.js
 "use strict";
 
@@ -36,10 +44,16 @@ const { ok, report } = checks();
 
 function world({ emptyChat = false, draft = "", cmdMode = false } = {}) {
   const newChats = [];
-  const empty = { value: emptyChat };
   const acts = [];
   const sent = [];
   const toasts = [];
+  // The transcript on screen, as the real transcriptIsEmpty reads it.
+  const messagesEl = fakeElement("div");
+  if (!emptyChat) {
+    const bubble = fakeElement("div");
+    bubble.className = "msg user";
+    messagesEl.appendChild(bubble);
+  }
   const sandbox = {
     $: () => fakeElement("div"),
     document: { createElement: (tag) => fakeElement(tag) },
@@ -48,7 +62,11 @@ function world({ emptyChat = false, draft = "", cmdMode = false } = {}) {
     showToast: (text) => toasts.push(text),
     renderAttachments: () => {},
     requestNewChat: () => newChats.push(1),
-    transcriptIsEmpty: () => empty.value,
+    messagesEl,
+    // The view holds a server paint of this chat ([REPLAY-LANDING]'s claim) —
+    // the already-open case. Without it every fresh item is parked for a
+    // replay that this world never sends.
+    viewFp: "2:0:",
     cmdMode,
     // The real composer is a <textarea>; the input event is what saves the
     // draft and re-measures it, so the code only needs value + dispatchEvent.
@@ -58,10 +76,12 @@ function world({ emptyChat = false, draft = "", cmdMode = false } = {}) {
     Set,
   };
   vm.createContext(sandbox);
+  const src = appSource();
   vm.runInContext(
-    surface(extract(appSource(), "// [SHARES-START]", "// [SHARES-END]")),
+    surface(extract(src, "function transcriptIsEmpty() {", "\n// Empty-state welcome hero")),
     sandbox,
   );
+  vm.runInContext(surface(extract(src, "// [SHARES-START]", "// [SHARES-END]")), sandbox);
   return {
     s: sandbox,
     acts,
