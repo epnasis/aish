@@ -154,6 +154,14 @@ const OWNED = {
       + " which is how sharing to a closed app never opened a chat (#393)",
     set: true,
   },
+  freshParked: {
+    owners: ["SHARES"],
+    instead: "let openChatForFreshShares() park and settleFreshShares() release — the two"
+      + " halves of one hand-off",
+    why: "it is the other half of freshHonoured's invariant: a stray overwrite here LOSES a"
+      + " `chat=new` intent as surely as a stray add there SPENDS one (#393)",
+    array: true,
+  },
   ssView: {
     owners: ["STEP-SCREEN"],
     instead: "call ssOpen(doc, stepId, pane) / ssShow(index, pane) / ssGo(delta) / ssClose()",
