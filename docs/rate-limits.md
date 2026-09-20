@@ -169,8 +169,9 @@ crosses a minute. **Unattended (`UNATTENDED_WAIT_CEILING_S`, 20s) it lands back 
 attempts, and that is not a compromise**: an unattended session holds a thread from the
 server's bounded worker pool, which is the entire reason its ceiling is low.
 
-`bound` on the record names which limit ended the retry — `wait_budget`, `attempt_cap` or
-`not_retryable` — alongside `wait_budget_s` and `waited_total_s`. Without it a reader sees
+`bound` on the record names which limit ended the retry — `wait_budget`, `attempt_cap`,
+`not_retryable` or, since #388, `trim_exhausted` (§7) — alongside `wait_budget_s` and
+`waited_total_s`. Without it a reader sees
 *"gave up on attempt 5 of 8"* and cannot tell a spent budget from a bug that stopped early;
 the same provenance discipline §6 applies to the three bounds on a page. `attempts` still
 carries the cap, and is now rarely what bound. `TestModelErrorRecord`.

@@ -177,8 +177,9 @@ _OVERFLOW_PHRASES = vocab.declare(
     on_miss=vocab.FRICTION,
     structural="the 4xx status that already bounds it — these words only ever "
     "split BAD_REQUEST, never create a failure",
-    # Asked of every 4xx that is not a quota, so matching nothing is usually
-    # the correct answer: most of them really are malformed requests.
+    # Asked only of the 4xx that reach the bad-request branch (a quota, an auth
+    # refusal and a timeout have already left `classify`), so matching nothing
+    # is usually the correct answer: most of those really are malformed.
     demanded=False,
     note="No aish session log has ever recorded one of these, so the counter is "
     "the only thing that would report the list had stopped matching.",

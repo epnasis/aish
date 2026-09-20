@@ -91,8 +91,10 @@ _EXTERNAL_SYMBOLS: set[str] = {
     # as `hook_callback` control requests. Naming them is the finding.
     # LiteLLM's own context-window matcher — docs/rate-limits.md §7 names it
     # as the INDEPENDENT implementation aish's `_OVERFLOW_PHRASES` was checked
-    # against, including the two look-alikes it excludes by name. Naming it is
-    # the evidence that the shape was corroborated and not invented (#388).
+    # against — and the one place aish deliberately DIVERGES from it (the
+    # `string too long…` look-alike LiteLLM counts as an overflow and aish keeps
+    # as bad_request). Naming it is the evidence that the shape was
+    # corroborated and not invented (#388).
     "is_error_str_context_window_exceeded",
     "HookEvent",
     "PostToolUse",

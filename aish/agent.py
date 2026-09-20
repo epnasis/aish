@@ -4972,9 +4972,10 @@ class Agent:
             keep_chars=TRIM_KEEP_CHARS,
             budget=budget,
             cap_source=("constant:TRIM_KEEP_CHARS" if budget is None else cap_source),
-            # Both oldest-first policies run the SAME loop over the whole
+            # The two `*_oldest_first` policies run the SAME loop over the whole
             # history, so the flag follows the name rather than a second list
-            # that could drift from it.
+            # that could drift from it. (`mid_task_budget` also walks oldest-
+            # first and records false here — pre-existing, and its own loop.)
             oldest_first=policy.endswith("oldest_first"),
         )
 
