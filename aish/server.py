@@ -5440,6 +5440,16 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         self.shares.append(item)
         self._prune_shares()
         self._save_shares()
+        # The one durable record of what the Shortcut SENT (#393). The item is
+        # deleted the moment it is claimed and nothing else logs this endpoint,
+        # so without this line a Shortcut that never carried `chat=new` and a
+        # client that dropped it are indistinguishable afterwards. What was
+        # received, not what was made of it: the client's half is its own.
+        print(
+            f"[share] {item['id']} received: {'file' if path else 'text'}, "
+            f"source={item['source']!r}, chat=new={'yes' if item['fresh'] else 'no'}",
+            file=sys.stderr,
+        )
         # Every open tab, not just one: which device the owner picks up next is
         # not knowable here.
         self._broadcast({"type": "shared", "items": self.shares_snapshot()})
@@ -5450,10 +5460,18 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         hears the same list. The uploaded FILE stays where it is: a claimed
         share is now an attachment the composer is holding by path, and a
         dismissed one is no different from any other file in uploads."""
-        before = len(self.shares)
-        self.shares = [s for s in self.shares if s.get("id") != share_id]
-        if len(self.shares) == before:
+        claimed = [s for s in self.shares if s.get("id") == share_id]
+        if not claimed:
             return
+        self.shares = [s for s in self.shares if s.get("id") != share_id]
+        # The flag rides out with the item (#393): a claim is the last moment
+        # the server holds it, and the pair of lines is what lets "asked for a
+        # chat and got none" be told from "never asked".
+        print(
+            f"[share] {share_id} left the inbox, "
+            f"chat=new={'yes' if claimed[0].get('fresh') else 'no'}",
+            file=sys.stderr,
+        )
         self._save_shares()
         self._broadcast({"type": "shared", "items": self.shares_snapshot()})
 
