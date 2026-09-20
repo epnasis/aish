@@ -3864,9 +3864,8 @@ class Agent:
         # bindings, at the same position `knowledge` is emitted from — before
         # the user message, so nothing this turn dispatches can outrun the gate.
         rules_text = self.seed_rules(task, images, documents)
-        self.messages.append(
-            {"role": "system", "content": task_reminder(index, preload.text, rules_text)}
-        )
+        reminder = task_reminder(index, preload.text, rules_text)
+        self.messages.append({"role": "system", "content": reminder})
         if rules_text:
             self.mark_rules_seeded()  # the prose reached context — record it
         if rules.has_verify(self._bindings):
@@ -3900,10 +3899,14 @@ class Agent:
             # sim/rail/score diagnostics persist to the session log via the
             # trace sink, so retrieval precision stays auditable from logs
             # alone (#183); the frontend chips read only label/kind.
+            # `reminder` is the digest of the message the items were injected
+            # AS (#396) — the same content address the brief gives its system
+            # parts, so a reader joins the two exactly instead of by position.
             self._emit_step(
                 kind="knowledge",
                 mode=preload.mode,
                 items=[{"label": it.pop("name"), **it} for it in preload.items],
+                reminder=evidence.digest_of(reminder),
             )
         # `task` is the guidance form — the sentences telling this backend what
         # it may do with each attached file. The LOG gets the record form (#231),

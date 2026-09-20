@@ -27,6 +27,12 @@ Stamped on `tool_start`/`tool`/`knowledge` plus every renderless kind. `thinking
 
 This replaces positional correlation — pairing a record with the NEXT user record, which the curation ledger's own docstring apologises for. `TestTurnAndCallIdentity`.
 
+## A join between two records is by content address, never by position (#396)
+
+The `knowledge` step names what was recalled; the `brief` written at the turn's first model call holds the bytes it was injected as, but only as one unlabelled system part among the parts. #386 joined them by POSITION — the one part not at 0 — on the writer's word that the loop keeps exactly one per-task system message beside the standing prompt. That is a fact about the writer, not the record: the day the loop keeps a second such message, the reader must refuse (`not_located`), and it can never tell the two apart.
+
+So the writer that BUILT the message stamps its digest on the step (`reminder`, contract §3.8) at the line it appends the message — the same `evidence.digest_of` the brief gives its parts — and the reader joins on that (`located: brief_digest`), falling back to position only for a record with no stamp. The rule is the same one §2 states for `turn`: a fact the writer holds at emit time is written, not re-derived by a reader from the order things happened to land in. And a stamp the brief has no part for is a state of its own (`not_on_brief`), never a fallback: falling back would silently replace the writer's word with a guess, in exactly the case where the guess is most likely wrong. `TestTheKnowledgeStep`.
+
 ---
 
 ## A refused action is never a green step

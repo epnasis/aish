@@ -12,9 +12,10 @@
 //      the step screen ON that step. No silent dead tap (L7).
 //   3. The pane shows each item's name, kind and retrieval numbers as META,
 //      and the injected text as PAYLOAD (the model received it), labelled
-//      with how it was located. Where the record cannot answer it says which
-//      state it is in — not recorded / purged / not located — and shows no
-//      text at all: nothing is rebuilt from the item labels.
+//      with how it was located (by digest, #396, or by position on a log
+//      older than the stamp). Where the record cannot answer it says which
+//      state it is in — not recorded / purged / not located / not on brief —
+//      and shows no text at all: nothing is rebuilt from the item labels.
 //   4. The step is on the tape: a swipe forward from it reaches the first
 //      model call, a swipe back from that model call lands on it.
 //
@@ -228,7 +229,7 @@ function docFor(reminder) {
   };
 }
 
-const RECORDED = { state: "recorded", why: null, located: "brief_position", at: 6, chars: REMINDER.length, digest: "d", text: REMINDER, candidates: 1, system_role: "all_system" };
+const RECORDED = { state: "recorded", why: null, located: "brief_digest", at: 6, chars: REMINDER.length, digest: "d", text: REMINDER, candidates: 1, system_role: "all_system", stamp: "d" };
 
 function nodesOf(w) { return w.el("ss-content").children; }
 function metaText(w) { return nodesOf(w).filter((n) => (n.className || "").includes("ss-meta")).map((n) => n.textContent).join("\n"); }
@@ -317,7 +318,8 @@ check("the pane lists every item with its kind and numbers, and shows the inject
   const meta = metaText(w);
   assert(meta.includes("aish-gender-masculine-polish (memory) · sim 0.36 · rail 3"), meta);
   assert(meta.includes("gh_issue (skill) · sim 0.402 · rail 0"), meta);
-  assert(meta.includes("located by position on this turn's brief: aish's message at 6"), meta);
+  assert(meta.includes("located by digest on this turn's brief — the record named the message: aish's message at 6"), meta);
+  assert(!meta.includes("by position"), "a digest join is never called positional");
   assert(meta.includes("the per-task system message that carried it"), "on ollama it IS a system message");
   assert(meta.includes("recalled: 2 (1 skill · 1 memory)"), "the facts strip rides at the top");
   // The text the model was handed is PAYLOAD, whole, and its own node.
@@ -326,6 +328,24 @@ check("the pane lists every item with its kind and numbers, and shows the inject
   assert(!meta.includes(REMINDER), "the payload never sits in a meta node");
   // Copy carries what is on screen.
   assert(w.sandbox.ssView.text.includes(REMINDER));
+});
+
+check("the join is said as the reader made it: by digest (#396), by position on a log older than the stamp, and neither is assumed", () => {
+  const cases = [
+    ["brief_digest", "located by digest on this turn's brief — the record named the message"],
+    ["brief_position", "located by position on this turn's brief"],
+    [null, "located on this turn's brief — how, this reader cannot say"],
+  ];
+  for (const [located, words] of cases) {
+    const w = world();
+    const d = docFor({ ...RECORDED, located, stamp: located === "brief_digest" ? "d" : null });
+    assert(w.sandbox.ssOpen(d, "k1", ""));
+    const meta = metaText(w);
+    assert(meta.includes(`${words}: aish's message at 6`), `${located}: ${meta}`);
+    if (located !== "brief_digest") assert(!meta.includes("by digest"), `${located}: called a digest join`);
+    if (located !== "brief_position") assert(!meta.includes("by position"), `${located}: called a positional join`);
+    assert.equal(payloadText(w), REMINDER, `${located}: the bytes are shown whichever way they were found`);
+  }
 });
 
 check("the role on the wire is said as the brief recorded it — never 'system message' where the model saw a user message", () => {
@@ -353,15 +373,23 @@ check("where the record cannot answer, the pane says which state — and shows N
     ["not_recorded", "not recorded — the aish that wrote this log did not keep it", null],
     ["purged", "recorded, then deleted", null],
     ["not_located", "cannot tell which system part carried it", null],
+    ["not_on_brief", "the record names the message it was injected as, but the brief written at this turn's first model call has no system part with that digest", null],
   ]) {
     const w = world();
-    const reminder = { state, why, located: null, at: null, chars: null, digest: null, text: null, candidates: state === "not_located" ? 2 : 0, system_role: null };
+    const reminder = { state, why, located: null, at: null, chars: null, digest: null, text: null, candidates: state === "not_located" ? 2 : 0, system_role: null, stamp: state === "not_on_brief" ? "d" : null };
     const d = docFor(reminder);
     assert(w.sandbox.ssOpen(d, "k1", ""));
     const meta = metaText(w);
     assert(meta.includes(`THE TEXT INJECTED — ${words}`) || meta.includes(words), `${state}/${why}: ${meta}`);
     assert.equal(payloadText(w), "", `${state}: nothing may be shown as the injected text`);
     if (state !== "not_located") assert(!meta.includes("on record"), `${state}/${why}: nothing here is on record`);
+    if (state === "not_on_brief") {
+      // The two records disagree; the pane says that and names no cause.
+      for (const cause of ["because", "purged", "rewritten", "bug", "mismatch"]) {
+        assert(!meta.toLowerCase().includes(cause), `${state}: a cause was named: ${cause}`);
+      }
+      assert(!meta.includes("by position"), `${state}: never falls back to position`);
+    }
     // The items are still listed: they ARE on record.
     assert(meta.includes("gh_issue (skill)"), `${state}: items still listed`);
   }
