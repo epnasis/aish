@@ -1941,6 +1941,36 @@ class TestTheKnowledgeStep:
         assert step["reminder"]["text"] == "the reminder"
         assert step["reminder"]["candidates"] == 1
 
+    def test_the_same_digest_at_two_positions_is_refused_not_picked(self, tmp_path):
+        """Contract §3.8 rule 1: identical bytes at two positions under a
+        stamp is `not_located`, not a pick — the one refusal the digest
+        branch owns beyond `not_on_brief`, pinned so a later "simplification"
+        to a first-match cannot turn a duplicate into a guess."""
+        path = tmp_path / "session-dup.jsonl"
+        tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
+        prompt = evidence.put("the standing prompt", tmp_path)
+        reminder = evidence.put("the reminder", tmp_path)
+        self._write(path, [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            tr({"kind": "knowledge", "mode": "semantic", "reminder": reminder,
+                "items": [{"label": "s", "kind": "skill", "sim": 0.5, "rail": 1}]}),
+            {"ts": "t", "kind": "message", "role": "user", "content": "go", "model_call": 0},
+            tr({"kind": "brief", "model_call": 1,
+                "system": [{"at": 0, "chars": 19, "digest": prompt},
+                           {"at": 1, "chars": 12, "digest": reminder},
+                           {"at": 2, "chars": 12, "digest": reminder}],
+                "tools": {"count": 0},
+                "options": {"model": "m", "provider": "ollama", "system_role": "all_system"}}),
+            tr({"kind": "reasoning", "model_call": 1, "text": "first", "tokens": [10, 2]}),
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ])
+        lg = explain_mod.load(path)
+        step = explain_mod.dossier(lg.turns[0], lg, tmp_path)["steps"][0]
+        assert step["reminder"]["state"] == explain_mod.KNOWLEDGE_NOT_LOCATED
+        assert step["reminder"]["candidates"] == 2
+        assert step["reminder"]["text"] is None
+        assert step["reminder"]["stamp"] == reminder
+
     def test_a_brief_of_another_shape_is_refused_not_guessed(self, tmp_path):
         """With no stamp the join is positional — the one system part beside
         the standing prompt — and it is a fact about the writer. A brief with

@@ -13426,7 +13426,7 @@ function ssKnowledgeSegs(step, b) {
     const role = SS_REMINDER_ROLE_WORDS[reminder.system_role]
       || "the per-task reminder that carried it — its role on the wire was not recorded";
     const join = SS_REMINDER_JOIN_WORDS[reminder.located]
-      || "located on this turn's brief — how was not recorded";
+      || "located on this turn's brief — how, this reader cannot say";
     b.meta(
       `THE TEXT INJECTED — ${role}; whole: the time note and the rules in force ride in the same message`,
       `${join}: aish's message at ${reminder.at} · ${ssN(reminder.chars)} chars`,

@@ -334,7 +334,7 @@ check("the join is said as the reader made it: by digest (#396), by position on 
   const cases = [
     ["brief_digest", "located by digest on this turn's brief — the record named the message"],
     ["brief_position", "located by position on this turn's brief"],
-    [null, "located on this turn's brief — how was not recorded"],
+    [null, "located on this turn's brief — how, this reader cannot say"],
   ];
   for (const [located, words] of cases) {
     const w = world();
