@@ -155,7 +155,7 @@ threw all of it away. An attempt count cannot express "long enough to outlast a 
 because a quota window is measured in seconds and an attempt count is not. Whatever number
 it is set to, the arithmetic that matters is invisible in it.
 
-So `MODEL_CALL_ATTEMPT_CAP` is now a **backstop** (eight, far above any real retry, there
+So `MODEL_CALL_ATTEMPT_CAP` is now a **backstop** (120, far above any real retry, there
 only for a provider answering `Retry-After: 0` forever) and the bound is
 `Agent._retry_wait_budget()` — the seconds of waiting one call may spend. It is the same
 number as `_wait_ceiling`, deliberately: both answer *"how long may this session sit
@@ -164,10 +164,44 @@ They are separate methods because they bound different phases — queueing for h
 BEFORE a call versus backing off BETWEEN calls — so sizing them apart later needs no
 excavation.
 
-Attended (`DEFAULT_WAIT_CEILING_S`, 120s) that buys 5+10+20+40 across five attempts, which
-crosses a minute. **Unattended (`UNATTENDED_WAIT_CEILING_S`, 20s) it lands back on three
-attempts, and that is not a compromise**: an unattended session holds a thread from the
-server's bounded worker pool, which is the entire reason its ceiling is low.
+**For a quota the number is an hour (`QUOTA_WAIT_BUDGET_S`, 3600s), by the owner's
+decision (#387, 2026-09-20): *"finish the turn even when quota; wait if needed."*** It was
+120s — 5+10+20+40 across five attempts, which crosses a minute and no more — and the turn
+that outlasted its minute still died at the two-minute mark with its work done, leaving the
+owner to notice it was a quota and press Retry. Now the backoff runs 5→10→20→40 and then
+60s steady (`MAX_WAIT_S`), so a busy per-minute window is outlasted in the first minute and
+a longer one inside the same attempt: no `task_end: failed`, no second turn, no button. The
+hour is a backstop against a provider that answers 429 without ever naming a window; a
+*spent* quota never waits it out, because `classify` marks it not retryable (`scope: long`)
+and the turn says so at once, and Stop cuts the wait wherever it is (`ratelimit.wait` polls
+the cancel Event). If aish-web restarts mid-wait, the unmatched `task_start` is exactly what
+restart recovery resumes (`docs/web-server.md`).
+
+**The hour is for quotas only.** A retryable failure of any other class — a 5xx, a
+connection reset, an error nothing classified — keeps the old two minutes
+(`TRANSIENT_WAIT_BUDGET_S`): the hour is for a provider that will take the call once its
+window clears, and a backend that is down does not clear. `_retry_wait_budget(failure)` is
+re-sized per classified failure, and the record's `wait_budget_s` says which figure bound.
+**Waiting is accounted per class**, each against its own budget: Gemini interleaves 429
+with 503 under exactly the load the hour is for, and one accumulator against a budget that
+swaps with the class would let a single stray 5xx after ten minutes of quota waiting end
+the turn — or one 429 amid a dead backend's resets re-arm the hour. So a record's
+`waited_total_s` is its own class's spend, and `waited_total_s <= wait_budget_s` holds on
+every record. `test_a_stray_5xx_amid_a_busy_quota_does_not_end_the_hour`.
+The wait's caption names what is being waited out (`wait_caption`) — "Rate-limited" was
+hardcoded, which was true when every wait was seconds and is a false sentence about two
+minutes on a dead backend. `test_a_transient_failure_retries_until_the_wait_budget_is_spent`,
+`test_the_wait_caption_names_the_failure`.
+
+**There is one ceiling for every origin.** An unattended session had 20s on the argument
+that it holds a thread from the server's bounded worker pool. The pool is sized for
+precisely that — `WORKER_POOL_SIZE` (32) is several times `MAX_OPEN_SESSIONS` +
+`MAX_CONCURRENT_TRIGGERED` (3) + restart-resumes — so every triggered session parked on a
+quota at once leaves it mostly idle, and the ingress cap, not the wait, bounds how many
+can park. What the short ceiling actually bought was an email trigger that died whenever
+its minute was busy, with nobody there to press Retry.
+`test_a_busy_quota_is_waited_out_for_up_to_an_hour`,
+`test_an_unattended_session_waits_out_a_busy_quota_like_a_user`, `test_one_ceiling_for_every_origin`.
 
 `bound` on the record names which limit ended the retry — `wait_budget`, `attempt_cap` or
 `not_retryable` — alongside `wait_budget_s` and `waited_total_s`. Without it a reader sees
@@ -205,8 +239,13 @@ it is wrapped. Cancel and status wiring therefore cannot ride on the arguments �
 added for the governor's benefit would break the one invariant that keeps the backends
 interchangeable — so it rides on a **thread-local** (`ratelimit.hooks`). A thread is the
 right scope by construction: the agent's worker thread is exactly the span of one
-session's calls, and a caller that sets nothing (the retitler, a test) gets bounded
-default behaviour rather than blocking forever.
+session's calls, and a caller that sets nothing (the retitler, a test) gets
+`DEFAULT_WAIT_CEILING_S` — two minutes — rather than blocking forever. That default is
+deliberately NOT the hour a turn may wait on a quota (§4): the retitler runs on the
+default executor, uncancellable, with its result abandoned after `TITLE_TIMEOUT`, and an
+hour parked there is the starvation `docs/web-server.md` L3 exists to prevent. The hour
+rides in through `hooks` from the agent, on a thread Stop can reach.
+`test_a_caller_with_no_hooks_never_queues_for_the_hour`.
 
 **Keys are `provider:model`.** Quotas are per model on the tiers this matters for, and one
 process genuinely mixes models on one key.
@@ -354,11 +393,9 @@ and a wait longer than the caller's ceiling. All three raise `RateLimited`, whic
 `sent=False`: *"the provider refused"* and *"aish declined to ask"* look identical in a
 bare error string and mean opposite things about whose budget just moved.
 
-An **unattended** session queues far less than a user's own
-(`UNATTENDED_WAIT_CEILING_S`), and not out of politeness: it holds a thread from the
-server's bounded worker pool, which exists so a session parked on an approval cannot
-starve short user actions. A session parked on headroom would re-create that hazard inside
-the pool.
+An **unattended** session queues exactly as long as a user's own (§4 says why the
+short ceiling it used to have went): the pool is sized for every triggered session to
+park at once, and a triggered turn that gives up early has nobody to press Retry for it.
 
 The governor is process-global, so `tests/conftest.py` resets it per test
 (`isolated_rate_governor`). Without that, the ceiling one test INFERS from a 429 outlives
