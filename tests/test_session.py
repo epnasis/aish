@@ -566,6 +566,44 @@ def test_untouched_session_leaves_no_file(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+class TestWriteAfterClose:
+    """#397. A write that reaches a closed log — a titling answered after the
+    chat was evicted — takes the lazy-open path like the rewrite paths do,
+    not `ValueError: I/O operation on closed file`: reopened while the file
+    is still there, refused with the #177 signal once it has been trashed."""
+
+    def test_a_closed_log_whose_file_remains_reopens_and_appends(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hi"})
+        log.close()
+        log.set_title("late name", auto=True)
+        kinds = [json.loads(line)["kind"] for line in log.path.read_text().splitlines()]
+        assert kinds[-1] == "title"
+        log.close()
+
+    def test_a_closed_log_whose_file_was_trashed_refuses(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hi"})
+        log.close()
+        log.path.unlink()
+        with pytest.raises(session_module.SessionLogMoved):
+            log.set_title("late name", auto=True)
+        assert not log.path.exists()  # and did not recreate it
+
+    def test_set_title_if_writes_only_while_wanted(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hi"})
+        assert log.set_title_if("kept", True, lambda: False) is False
+        assert log.set_title_if("kept", True, lambda: True) is True
+        titles = [
+            json.loads(line)["title"]
+            for line in log.path.read_text().splitlines()
+            if json.loads(line)["kind"] == "title"
+        ]
+        assert titles == ["kept"]
+        log.close()
+
+
 def test_pager_cap_applies_after_skipping_blank_sessions(tmp_path):
     old = make_session(tmp_path, "session-20260101-000000-000000.jsonl", ("user", "real chat"))
     os.utime(old, (1, 1))

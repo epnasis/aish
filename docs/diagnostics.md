@@ -100,6 +100,8 @@ Everything else joins by id: trace records carry an int `turn`, and a `call` num
 
 **But `task_start` comes from the CLI and the server, not from the agent.** A log written by any other path, or one predating the bracket, has none — and bracketing on it alone reported those as sessions with no turns at all. The fallback is the user's own messages, with aish's `[aish: …]` notes excluded via `synthetic_kind` (they never reached the transcript live, and one landing mid-turn would split it). **The choice is made per FILE, never per record**: mixing both boundaries in one log would double-count every web turn.
 
+`title` records are position-independent, and a bracket says nothing about them. The chat's name is latest-wins wherever it is read (`_parse`, `_peek`, this reader's `title`), and since #397 the auto-titler answers OFF the turn that asked it, so its record may sit inside a LATER turn's `task_start`/`task_end` bracket. A `title` listed among a turn's records is not a fact about that turn — only about when the name landed.
+
 Note the name collision the log itself warns about (`docs/session-log.md`): `message` records carry a top-level `turn` that is a client-minted **string** event id, unrelated to the int counter on trace steps. `Turn.ordinal` (position in the file) and `Turn.counter` (the agent's int id) are both reported, because reopening a chat restarts the counter and they genuinely differ.
 
 ---

@@ -45,7 +45,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import quote, urlsplit
 
 import uvicorn
@@ -1825,6 +1825,17 @@ copy and paste, so if they quote a message back at you with `![[…]]` in it, \
 that is an attached file and the notes above are how it reached you."""
 
 
+class TitleRequest(NamedTuple):
+    """A titling asked for at the end of a turn and answered off it (#397):
+    the name the chat had, the exchanges to name it from, and the generation
+    of the name it was asked under — the stamp that decides, when the answer
+    comes back, whether anything the owner did meanwhile outranks it."""
+
+    current: str
+    body: str
+    generation: int
+
+
 class Client:
     """One WebSocket connection. Per-connection state that used to live on
     WebServer (the socket, its sender task, and which session it shows) lives
@@ -1885,6 +1896,15 @@ class Session:
         # log otherwise carries the PARENT's title forever.
         self.title_auto = False
         self.retitle_forced = False
+        # The generation of the chat's NAME (#397). The auto-titler answers off
+        # the turn, so by the time its answer lands the owner may have moved
+        # on: renamed the chat, redacted the turn it was naming, retried the
+        # answer, or a newer titling may have been asked. Each of those bumps
+        # this; a titling carries the generation it was asked under and is
+        # dropped if the two differ when it comes to write. Loop-owned (L2);
+        # the under-lock check in `SessionLog.set_title_if` reads it from a
+        # thread, which for an int is one atomic load.
+        self.title_gen = 0
         # last-actor-drives (#102): whoever last performed a session-affecting
         # action. Observers viewing this session see a "another tab is active"
         # hint; acting claims control. Never persisted — replay re-derives it.
@@ -3095,6 +3115,9 @@ class WebServer:
         prompt = session.agent.rewind_last_task() or client_text
         if not prompt:
             return
+        # The answer a titling in flight was asked to name is the one being
+        # discarded (#397): it must not become the chat's name after the rerun.
+        session.title_gen += 1
         # Every path here is the owner pressing Retry in his own UI: this call
         # and the deferred one in _finish_turn, both from a `retry` message on a
         # viewer's socket. Nothing else in the server calls it.
@@ -3199,6 +3222,12 @@ class WebServer:
                 )
             return
         path = session.logref.log.path
+        # Before the rewrite, not after: a titling asked before this point may
+        # be summarising the very text about to go, and its answer must find
+        # the generation already moved when it comes to write (#397). Bumped
+        # whether or not a title record turns out to exist — the SOURCE the
+        # titler was handed is what may quote the removed turn.
+        session.title_gen += 1
         removed = await asyncio.to_thread(session.logref.redact_turn, turn)
         if removed is None:
             # The id named nothing: already removed (from another tab), or a
@@ -3436,7 +3465,7 @@ class WebServer:
         failure = ""  # set by either except arm; recorded on the way out
         # What the post-answer work needs, taken while the turn still owns the
         # session (#397); None until the answer has landed.
-        finished: tuple[str, tuple[str, str] | None] | None = None
+        finished: tuple[str, TitleRequest | None] | None = None
         try:
             if resume and isinstance(session.agent, Agent):
                 # Keep the interrupted task's own tool output verbatim (#164):
@@ -3512,22 +3541,23 @@ class WebServer:
             self._after_turn(session, *finished)
 
     def _after_turn(
-        self, session: Session, result: str, titling: tuple[str, str] | None
+        self, session: Session, result: str, titling: TitleRequest | None
     ) -> None:
         """Spawn the post-answer work — the completion push, then the titling
         call — as its own task, once the turn has ended (#397).
 
-        Neither touches anything the next turn owns: the push reads only its
-        own arguments and the session's viewers, the titler was handed its
-        source before busy cleared and writes a `title` record under the
-        log's own lock. Held in `_epilogues` because `session.runner` is the
-        NEXT turn by now, and asyncio keeps no strong reference of its own."""
+        The push reads only its own arguments and the session's viewers. The
+        titler was handed its source before busy cleared, and everything it
+        would write is guarded by the name's generation (see `_retitle`), so
+        the owner acting meanwhile always outranks it. Held in `_epilogues`
+        because `session.runner` is the NEXT turn by now, and asyncio keeps no
+        strong reference of its own."""
 
         async def run() -> None:
             try:
                 await self._notify_done(session, result)
                 if titling is not None:
-                    await self._retitle(session, *titling)
+                    await self._retitle(session, titling)
             except Exception:  # noqa: BLE001 — a push or a name is never worth a crash
                 log.exception("post-turn work failed")
 
@@ -4559,6 +4589,11 @@ class WebServer:
             await client.ws.send_json(self._gone_error(name))
             return
         if session is not None:
+            # The owner's name outranks any titling still in flight (#397):
+            # bumped before the write, so a titler that reaches the lock after
+            # this point drops its answer, and one that wrote just before it
+            # is outranked by the record appended here (latest wins).
+            session.title_gen += 1
             # Append through the session's own open handle so a single writer
             # touches the file; mirror the name into memory for the hot path.
             await asyncio.to_thread(session.logref.log.set_title, title)
@@ -5949,41 +5984,67 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return True  # the title is still the raw prompt — always worth replacing
         return title_drifted(WebServer._title(session), recent)
 
-    def _title_request(self, session: Session) -> tuple[str, str] | None:
-        """(current title, source to name from) if the turn that just finished
-        earns a titling call, else None. Synchronous on purpose (#397): it is
-        the only reader of `agent.messages` in the titler, and it runs while
-        the turn still owns them — the call itself happens off the turn, from
-        this copy, so the next turn can append whatever it likes meanwhile."""
+    def _title_request(self, session: Session) -> TitleRequest | None:
+        """The titling this finished turn earns, or None. Synchronous on
+        purpose (#397): it is the only reader of `agent.messages` in the
+        titler, and it runs while the turn still owns them — the call itself
+        happens off the turn, from this copy, so the next turn can append
+        whatever it likes meanwhile. Issuing a request bumps the name's
+        generation: an older titling still in flight is superseded by this
+        one, whichever of the two the model answers first."""
         turns = sum(
             1 for m in getattr(session.agent, "messages", [])[1:] if m.get("role") == "user"
         )
         current, body, recent = self._title_source(session)
         if not body or not self._retitle_due(session, turns, recent):
             return None
-        return current, body
+        session.title_gen += 1
+        return TitleRequest(current, body, session.title_gen)
 
-    async def _retitle(self, session: Session, current: str, body: str) -> None:
+    async def _retitle(self, session: Session, request: TitleRequest) -> None:
         """Name the chat after what it is about, from a source already read.
-        Runs after the turn has ended, so everything checked before the model
-        call is re-checked after it: the owner may have renamed the chat
-        meanwhile (his name stands, permanently), or closed it."""
+
+        Runs after the turn has ended, so the owner may act on the chat while
+        the model is thinking, and everything he does outranks the answer: a
+        rename, a redaction of the turn being named, a retry of its answer, a
+        newer titling — each bumps `title_gen`. The stamp is checked three
+        times, and each check has its own job: after the model call (cheap,
+        drops most stale answers before touching the log); INSIDE the write,
+        under the log's lock, so that no other writer of the file can land
+        between the check and the append; and once more back on the loop
+        before the in-memory name is set, for a bump that landed after the
+        append — that act's own record follows ours in the file, so the file
+        and memory agree on it, not on us. The same locked check confirms the
+        session is still open: a chat evicted or deleted meanwhile gets no
+        write. A stale answer is dropped silently — it is the owner's newer
+        intent that stands, and nothing was lost that he wanted."""
         try:
             title = await asyncio.wait_for(
-                asyncio.to_thread(self._model_session_title, session, current, body),
+                asyncio.to_thread(
+                    self._model_session_title, session, request.current, request.body
+                ),
                 TITLE_TIMEOUT,
             )
         except Exception:  # noqa: BLE001 — timeout or backend blow-up: keep the old name
             return
-        session.retitle_forced = False  # attempted; don't re-force on the next turn
-        if not title or title == current:
+        if session.title_gen != request.generation:
             return
-        if session.custom_title and not session.title_auto:
-            return  # hand-typed while the model was thinking: the owner's call
-        if self.sessions.get(session.name) is not session:
-            return  # evicted or deleted meanwhile: its log is closed, or gone
+        session.retitle_forced = False  # attempted; don't re-force on the next turn
+        if not title or title == request.current:
+            return
         title = title[:RENAME_MAX]
-        await asyncio.to_thread(session.logref.log.set_title, title, True)
+
+        def still_wanted() -> bool:
+            return (
+                session.title_gen == request.generation
+                and self.sessions.get(session.name) is session
+            )
+
+        written = await asyncio.to_thread(
+            session.logref.log.set_title_if, title, True, still_wanted
+        )
+        if not written or session.title_gen != request.generation:
+            return
         session.custom_title = title
         session.title_auto = True
         # record=False: a rename is UI state, not part of the transcript — cold
