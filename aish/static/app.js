@@ -15940,8 +15940,8 @@ function activeApprovalCard() {
 // composer. `CHORD_HINTS` is the same fact for the tooltips.
 const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
 const CHORD_HINTS = IS_MAC
-  ? { new: "⌘⇧O", search: "⌘K" }
-  : { new: "Ctrl+Shift+O", search: "Ctrl+K" };
+  ? { new: "⌘⇧O", search: "⌘K", rail: "⌘O" }
+  : { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+O" };
 
 function primaryChord(e) {
   if (e.altKey) return false;
@@ -17466,12 +17466,17 @@ function syncRailToggle() {
   const docked = railDocked();
   const showing = railIsOpen();
   const label = !docked ? "Chats" : showing ? "Hide chats" : "Show chats";
-  // The tooltip names the chord that does the same (#384) — on a pointer that
-  // has a keyboard, the console button's convention. Guarded by typeof: this
-  // block is loaded on its own by tests/js/test_session_rail.js, where neither
-  // identifier exists; in the app both are initialised before the first call.
-  const hint = typeof CHORD_HINTS === "object" && typeof FINE_POINTER !== "undefined" && FINE_POINTER
-    ? ` (${CHORD_HINTS.search})` : "";
+  // The tooltip names the chord that does what the tap does (#384) — on a
+  // pointer that has a keyboard, the console button's convention. Which chord
+  // depends on the state: showing the list is the search chord (⌘K opens it
+  // and focuses the field); HIDING a docked list is the toggle chord (⌘O —
+  // ⌘K on an open list only focuses the field, so naming it here would name
+  // a chord that does not hide). Guarded by typeof: this block is loaded on
+  // its own by tests/js/test_session_rail.js, where neither identifier
+  // exists; in the app both are initialised before the first call.
+  const hints = typeof CHORD_HINTS === "object" && typeof FINE_POINTER !== "undefined" && FINE_POINTER
+    ? CHORD_HINTS : null;
+  const hint = !hints ? "" : ` (${docked && showing ? hints.rail : hints.search})`;
   chip.title = label + hint;
   chip.setAttribute("aria-label", label);
   // aria-pressed only where the control IS a switch. On a phone it opens an

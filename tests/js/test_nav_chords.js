@@ -67,7 +67,7 @@ check("macOS: ⌘⇧O is new chat, ⌘K and ⌘⇧K are search; Ctrl is not acce
   // A plain key is nothing.
   assert.equal(s.navChord(key("k")), null);
   assert.equal(s.navChord(key("k", { shiftKey: true })), null);
-  assert.deepEqual(s.CHORD_HINTS, { new: "⌘⇧O", search: "⌘K" });
+  assert.deepEqual(s.CHORD_HINTS, { new: "⌘⇧O", search: "⌘K", rail: "⌘O" });
 });
 
 check("Windows/Linux: Ctrl+Shift+O is new chat, Ctrl+K and Ctrl+Shift+K are search; ⌘ (Win key) is not accepted", () => {
@@ -81,7 +81,7 @@ check("Windows/Linux: Ctrl+Shift+O is new chat, Ctrl+K and Ctrl+Shift+K are sear
     assert.equal(s.navChord(key("o", { metaKey: true, shiftKey: true })), null, platform);
     // Ctrl+Alt is AltGr on many layouts: never a chord.
     assert.equal(s.navChord(key("k", { ctrlKey: true, altKey: true })), null, platform);
-    assert.deepEqual(s.CHORD_HINTS, { new: "Ctrl+Shift+O", search: "Ctrl+K" }, platform);
+    assert.deepEqual(s.CHORD_HINTS, { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+O" }, platform);
   }
 });
 
@@ -175,9 +175,40 @@ check("the buttons' tooltips name the chord in the platform's glyph, the console
   const block = extract(src, "if (FINE_POINTER) {", "// Grabber: drag down to dismiss");
   assert(block.includes('$("new-chip").title = `new chat (${CHORD_HINTS.new})`'), block);
   assert(block.includes('$("sessions-new").title = `new chat (${CHORD_HINTS.new})`'), block);
-  // The chats button's title is syncRailToggle's (one writer), and it carries the search chord.
-  const rail = extract(src, "function syncRailToggle() {", "function clearRailDragStyles");
-  assert(rail.includes("CHORD_HINTS.search"), rail);
+});
+
+check("the chats button names the chord that does what its tap does, per state", () => {
+  // The REAL syncRailToggle, with the hints present (as in the app) and absent
+  // (as test_session_rail.js loads it).
+  const run = (docked, showing, hints, fine) => {
+    const chip = { title: "", attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; } };
+    const sandbox = { $: (id) => (id === "back-chip" ? chip : null), railDocked: () => docked, railIsOpen: () => showing };
+    if (hints) { sandbox.CHORD_HINTS = hints; sandbox.FINE_POINTER = fine; }
+    vm.createContext(sandbox);
+    vm.runInContext(surface(extract(src, "function syncRailToggle() {", "function clearRailDragStyles")), sandbox);
+    sandbox.syncRailToggle();
+    return chip;
+  };
+  const mac = chords("MacIntel").CHORD_HINTS;
+  // Slide-over: the tap opens the list, and so does ⌘K.
+  assert.equal(run(false, false, mac, true).title, "Chats (⌘K)");
+  assert.equal(run(false, true, mac, true).title, "Chats (⌘K)");
+  // Docked and put away: the tap shows it, and so does ⌘K.
+  assert.equal(run(true, false, mac, true).title, "Show chats (⌘K)");
+  // Docked and showing: the tap HIDES it. ⌘K would only focus the search
+  // field, so the chord named is the toggle, ⌘O, which does hide.
+  assert.equal(run(true, true, mac, true).title, "Hide chats (⌘O)");
+  const win = chords("Win32").CHORD_HINTS;
+  assert.equal(run(true, true, win, true).title, "Hide chats (Ctrl+O)");
+  assert.equal(run(false, false, win, true).title, "Chats (Ctrl+K)");
+  // aria-label never carries the chord; a coarse pointer gets no hint; the
+  // block loaded alone (no hints) keeps the bare titles the rail test pins.
+  assert.equal(run(true, true, mac, true).attrs["aria-label"], "Hide chats");
+  assert.equal(run(true, true, mac, false).title, "Hide chats");
+  assert.equal(run(true, true, null).title, "Hide chats");
+  // And ⌘O really is the chord that hides a docked, showing rail.
+  const s = chords("MacIntel");
+  assert.equal(s.navChord(key("o", { metaKey: true })), "rail");
 });
 
 if (failures) { console.error(`nav chords: ${failures} check(s) failed`); process.exit(1); }
