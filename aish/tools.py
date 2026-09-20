@@ -22,6 +22,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from .paths import state_home
+
 try:
     import termios
     import tty
@@ -327,8 +329,7 @@ def _default_job_log_dir() -> Path:
     them: an Agent built without `job_log_dir` inside an isolated state dir
     still mkdir'd and wrote into the owner's real one.
     """
-    root = os.environ.get("AISH_STATE_DIR") or Path.home() / ".local" / "state" / "aish"
-    return Path(root) / "jobs"
+    return state_home() / "jobs"
 
 
 def _detach_running(proc, command, collected, log_dir, on_line) -> str:

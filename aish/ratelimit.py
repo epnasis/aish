@@ -52,6 +52,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from . import vocab
+from .paths import state_home
 
 # What went wrong, in the only vocabulary the retry policy needs. Closed set:
 # a value outside it is a bug, not a new case to handle downstream.
@@ -1037,11 +1038,19 @@ class Governor:
 
     # -- what survives a restart ------------------------------------------
 
-    def _path(self) -> Path | None:
+    def _path(self) -> Path:
+        """Where the learned ceilings live: the state tree, always (#389).
+
+        This used to return `None` unless `AISH_STATE_DIR` was set, and the
+        production launchd plist sets it for nothing — so the server, the one
+        process whose restarts this persistence exists for, was the one
+        process that never persisted. The state tree has a default and every
+        other consumer of it already used one; `paths.state_home` is what
+        keeps this site from opting out again by omission.
+        """
         if self._store is not None:
             return self._store
-        root = os.environ.get("AISH_STATE_DIR")
-        return Path(root) / "rate-limits.json" if root else None
+        return state_home() / "rate-limits.json"
 
     def _load(self) -> None:
         """Learned ceilings and the spent-quota latch, from the last run.
@@ -1057,7 +1066,7 @@ class Governor:
             return
         self._loaded = True
         path = self._path()
-        if path is None or not path.is_file():
+        if not path.is_file():
             return
         try:
             stored = json.loads(path.read_text())
@@ -1076,8 +1085,6 @@ class Governor:
 
     def _save(self) -> None:
         path = self._path()
-        if path is None:
-            return
         payload = {
             # The BELIEF, never the relaxed view: writing a number that moves
             # with the clock would make the file disagree with itself the moment

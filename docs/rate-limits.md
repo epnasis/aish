@@ -309,9 +309,23 @@ moves with the clock.
 A ceiling costs a 429 to learn, so learning it once per **restart** rather than once is
 paying repeatedly for the same information — and `make ship` restarts the server often. The
 learned ceilings, the **age of the evidence** behind them, and the spent-quota latch are
-persisted to `rate-limits.json` in the state dir. The age matters as much as the number:
-without it a restart would look like a fresh refusal and re-freeze a ceiling that had spent
-an hour earning its way back up.
+persisted to `rate-limits.json` in the state dir — `~/.local/state/aish/` unless
+`AISH_STATE_DIR` moves it, the same tree the sessions and `aish explain` already live in.
+The age matters as much as the number: without it a restart would look like a fresh refusal
+and re-freeze a ceiling that had spent an hour earning its way back up.
+
+**The location is structural, not configured (#389).** For one release `_path()` returned
+`None` unless `AISH_STATE_DIR` was set, and the production launchd plist sets it for
+nothing — so the server, the one process whose restarts this section exists for, was the
+one process that never persisted anything: `rate-limits.json` was written by CLI runs and
+never read by `aish-web`, and the latch below did not survive a restart either, while this
+section said it did. The default now comes from `paths.state_home()`, the single place the
+state tree's default is spelled (the same shape as `config_home()`, #254), so no site can
+opt out of persistence again by omitting a default. `test_the_store_defaults_to_the_state_tree_when_nothing_names_it`,
+`test_a_governor_given_no_store_persists_into_the_state_dir`, and in `tests/test_paths.py`
+`TestStateHome` (the knob itself: unset, empty, and call-time resolution) and
+`TestEveryConsumerAnswersTheSame`, which pins every consumer of the state dir to the knob
+rather than to a string it happens to share with it.
 
 The latch persisting closes the gap this doc previously listed as open. Restart recovery
 re-runs interrupted triggered sessions, so an in-memory latch meant a spent daily quota was
@@ -585,7 +599,7 @@ incident's 156-call task into a multi-hour one that **still** spends 12.7M token
 requests and exhausts the daily quota anyway. §5 and §6 are the two halves of that answer,
 and §6 is the one that changes the arithmetic.
 
-Still open, tracked on #261:
+Still open, tracked on #389 (split out of #261):
 
 - ~~**A context-window-exceeded 400 should trim and retry**~~ — built in §7 (#388). The
   unsatisfiable reservation still takes the other path: `RateLimited` tells the caller to
@@ -600,11 +614,8 @@ Still open, tracked on #261:
   RESOURCE_EXHAUSTED.
 - **`curate` runs in a separate process** on the same key, so no in-process governor
   reaches it.
-- **Nothing is persisted in production.** `_path()` returns `None` unless `AISH_STATE_DIR`
-  is set, and `com.aish.web.plist` does not set it — so `rate-limits.json` in the state dir
-  is written by CLI runs and never read by the server, which re-learns from scratch on every
-  restart. The spent-quota latch does not survive a restart either, which is the exact gap
-  §5's "What survives a restart" claims to have closed. Fixing it is a launchd change on the
-  live host, not a code change, so it is listed rather than done here.
+- ~~**Nothing is persisted in production.**~~ — closed by #389: `_path()` falls back to the
+  state tree through `paths.state_home()`, so the server persists with no plist change
+  (§5, "What survives a restart").
 
 Token accounting and reporting is #262 — `docs/token-accounting.md`.

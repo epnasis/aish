@@ -32,12 +32,13 @@ live attacker already running as the user. That is out of scope by design.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import time
 import unicodedata
 from pathlib import Path
+
+from .paths import state_home
 
 SERVICE = "aish"
 # Site sign-ins live in their OWN Keychain service, and the separation is a
@@ -70,10 +71,9 @@ def state_dir() -> Path:
     owner's real name index — which is exactly how a probe run against #343
     wrote into his live state directory believing it was isolated. `server.py`'s
     own comment already claimed `secrets` resolved it at call time; now it
-    does."""
-    return Path(
-        os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
-    )
+    does — through `paths.state_home`, the one place the default is spelled
+    (#389)."""
+    return state_home()
 
 
 def names_index() -> Path:
