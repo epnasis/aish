@@ -437,7 +437,10 @@ class TestModelErrorRecord:
 
     def test_a_transient_failure_retries_until_the_wait_budget_is_spent(self):
         """The bound is TIME, not a count (#337), so the attempts are however
-        many fit — and the last record says which bound ended it."""
+        many fit — and the last record says which bound ended it. A transient
+        failure that is NOT a quota keeps the two-minute budget: the hour is
+        for a provider whose window will clear, and a dead backend's does not
+        (#387)."""
         from aish.agent import MODEL_CALL_ATTEMPT_CAP, ModelUnavailable
 
         RAISE_TIMES["n"] = 99
@@ -448,10 +451,63 @@ class TestModelErrorRecord:
         assert [e["attempt"] for e in errors] == list(range(1, len(errors) + 1))
         assert errors[-1]["action"] == "give_up"
         assert errors[-1]["bound"] == "wait_budget"
+        assert errors[-1]["wait_budget_s"] == ratelimit.TRANSIENT_WAIT_BUDGET_S == 120.0
         # The cap is a backstop, not the bound: it must not be what stopped this.
         assert len(errors) < MODEL_CALL_ATTEMPT_CAP
         # Every retry's wait, and nothing beyond the budget.
         assert errors[-1]["waited_total_s"] <= errors[-1]["wait_budget_s"]
+
+    def test_a_stray_5xx_amid_a_busy_quota_does_not_end_the_hour(self):
+        """Gemini interleaves 429 with 503 under exactly the load the hour is
+        for. Waiting is accounted PER CLASS: ten minutes spent on the quota
+        must not be charged against the 503's two-minute budget, and the one
+        503 must not re-arm anything either. Each record's `waited_total_s`
+        is its own class's spend and stays within its own budget."""
+        from tests.test_agent import Agent, model_says
+
+        steps: list[dict] = []
+        # Enough 429s to pass ten minutes at 60s steady, then one 503, then
+        # 429s again, then success.
+        script = [FakeAPIError("quota", status=429)] * 14
+        script += [FakeAPIError("overloaded", status=503)]
+        script += [FakeAPIError("quota", status=429)] * 3
+        calls = {"n": 0}
+
+        def chat(**kwargs):
+            if calls["n"] < len(script):
+                exc = script[calls["n"]]
+                calls["n"] += 1
+                raise exc
+            return model_says("recovered")
+
+        agent = Agent(model="fake", approve=lambda _c: True, client_chat=chat,
+                      step_log=steps.append)
+        agent.provider = "gemini"
+        assert agent.run_task("hi") == "recovered"
+        errors = [s for s in steps if s.get("kind") == "model_error"]
+        assert all(e["action"] == "retry" for e in errors)
+        quota_waited = sum(e.get("waited_s", 0) for e in errors if e["class"] == "rate_limit")
+        assert quota_waited > 10 * 60
+        server = next(e for e in errors if e["class"] == "server")
+        assert server["wait_budget_s"] == ratelimit.TRANSIENT_WAIT_BUDGET_S
+        assert server["waited_total_s"] == 0.0  # nothing of the quota's spend is charged to it
+        assert all(e["waited_total_s"] <= e["wait_budget_s"] for e in errors)
+
+    def test_the_wait_caption_names_the_failure(self):
+        """`wait` used to say "Rate-limited" whatever it was waiting out."""
+        caption = lambda exc: ratelimit.wait_caption(ratelimit.classify(exc))  # noqa: E731
+        assert caption(ConnectionError("connection refused")) == "Backend unreachable"
+        assert caption(OSError("reset")) == "Model call failed"  # unclassified stays honest
+        assert caption(FakeAPIError("q", status=429)) == "Rate-limited"
+        assert caption(FakeAPIError("q", status=503)) == "Provider error"
+
+    def test_a_caller_with_no_hooks_never_queues_for_the_hour(self):
+        """The retitler runs on the default executor, uncancellable, with its
+        result abandoned after `TITLE_TIMEOUT`; an hour parked there is the
+        starvation `docs/web-server.md` L3 exists to prevent. The hour rides
+        in through `hooks` from a turn; the hook-less default stays short."""
+        assert ratelimit.current_hooks().ceiling is None
+        assert ratelimit.DEFAULT_WAIT_CEILING_S == 120.0 < ratelimit.QUOTA_WAIT_BUDGET_S
 
     def test_a_quota_is_retried_long_enough_to_outlast_a_per_minute_window(self):
         """The defect #337 names: three attempts spaced 5s and 10s spend fifteen
@@ -468,19 +524,43 @@ class TestModelErrorRecord:
         assert sum(e.get("waited_s", 0) for e in errors) > 60.0
         assert errors[-1]["bound"] == "wait_budget"
 
-    def test_an_unattended_session_still_gives_up_early(self):
-        """Not politeness: it holds a thread from the server's bounded worker
-        pool, which exists so a parked session cannot starve short user actions.
-        Its low ceiling is the reason, and it must survive the wider budget."""
+    def test_a_busy_quota_is_waited_out_for_up_to_an_hour(self):
+        """The owner's decision (#387): finish the turn even when quota — wait
+        if needed. A busy window that lasts minutes is outlasted INSIDE the
+        attempt, at the 60s steady backoff, and the turn never dies with its
+        work done and a Retry button as the only way on. The attempt cap must
+        stay a backstop: it is sized for the hour and must not be what ends
+        this."""
+        from aish.agent import MODEL_CALL_ATTEMPT_CAP, ModelUnavailable
+
+        RAISE_TIMES["n"] = 999
+        agent, steps = self.agent_with(FakeAPIError("quota", status=429))
+        with pytest.raises(ModelUnavailable):
+            agent.run_task("hi")
+        errors = [s for s in steps if s.get("kind") == "model_error"]
+        waited = sum(e.get("waited_s", 0) for e in errors)
+        assert waited > 30 * 60, "a half-hour busy window must be outlasted"
+        assert waited <= ratelimit.QUOTA_WAIT_BUDGET_S == 3600.0
+        assert errors[-1]["bound"] == "wait_budget"
+        assert len(errors) < MODEL_CALL_ATTEMPT_CAP
+        # Backoff, not a flat poll: the steady state is the 60s cap.
+        assert max(e.get("waited_s", 0) for e in errors) == ratelimit.MAX_WAIT_S
+
+    def test_an_unattended_session_waits_out_a_busy_quota_like_a_user(self):
+        """It used to give up at 20s because it holds a pool thread. The pool is
+        sized for every triggered session to park at once, and what the short
+        ceiling bought was an email trigger that died whenever its minute was
+        busy — with nobody there to press Retry (#387)."""
         from aish.agent import ModelUnavailable
 
-        RAISE_TIMES["n"] = 99
+        RAISE_TIMES["n"] = 999
         agent, steps = self.agent_with(FakeAPIError("quota", status=429))
         agent.origin = "trigger"
         with pytest.raises(ModelUnavailable):
             agent.run_task("hi")
         errors = [s for s in steps if s.get("kind") == "model_error"]
-        assert sum(e.get("waited_s", 0) for e in errors) <= ratelimit.UNATTENDED_WAIT_CEILING_S
+        assert sum(e.get("waited_s", 0) for e in errors) > 30 * 60
+        assert agent._wait_ceiling() == ratelimit.QUOTA_WAIT_BUDGET_S
 
     def test_the_ending_names_the_bound_it_hit(self):
         """"Gave up on attempt 5 of 8" cannot be read: a spent budget and a bug
@@ -544,7 +624,7 @@ class TestModelErrorRecord:
         agent, _ = self.agent_with(FakeAPIError("quota", status=429))
         ratelimit_wait_calls = {"n": 0}
 
-        def stop_during_wait(delay, stop, note=None):
+        def stop_during_wait(delay, stop, note=None, what=""):
             ratelimit_wait_calls["n"] += 1
             agent.cancel()
             return True
@@ -1004,10 +1084,18 @@ class TestGovernorIsShared:
         governor.reserve("g:flash", 1).settle(1)
         governor.reserve("g:pro", 1, ceiling=0).settle(1)  # a different budget
 
-    def test_an_unattended_session_queues_far_less_than_a_user(self):
-        """It holds a thread from the bounded worker pool, which exists so a
-        parked session cannot starve short user actions."""
-        assert ratelimit.UNATTENDED_WAIT_CEILING_S < ratelimit.DEFAULT_WAIT_CEILING_S
+    def test_one_ceiling_for_every_origin(self):
+        """The unattended short ceiling is gone (#387): the pool is sized for
+        every triggered session to park at once, and a triggered turn that dies
+        on a busy minute has nobody to press Retry for it."""
+        from aish.agent import Agent
+
+        assert not hasattr(ratelimit, "UNATTENDED_WAIT_CEILING_S")
+        attended = Agent.__new__(Agent)
+        attended.origin = "user"
+        unattended = Agent.__new__(Agent)
+        unattended.origin = "trigger"
+        assert attended._wait_ceiling() == unattended._wait_ceiling() == 3600.0
 
     def test_hooks_do_not_leak_past_their_block(self):
         with ratelimit.hooks(ceiling=3):
