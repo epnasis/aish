@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NamedTuple, TextIO
@@ -1079,10 +1080,20 @@ class SessionLog:
 
     def close(self) -> None:
         """Release the append handle; a session that never recorded anything
-        has no handle and leaves no file."""
+        has no handle and leaves no file.
+
+        The handle is dropped, not merely closed, for the same reason the
+        rewrite paths drop theirs: a write that arrives after close then takes
+        the lazy-open path — reopened if the file is still there, refused with
+        `SessionLogMoved` if it was trashed meanwhile (#177) — instead of
+        raising on a closed file (#397). A handle means the file existed, so
+        closing one also marks it seen: a chat created live and trashed after
+        close must refuse like a resumed one, not recreate a stub."""
         with self._write_lock:
             if self._fh is not None:
                 self._fh.close()
+                self._fh = None
+                self._had_file = True
 
     @classmethod
     def new(cls, state_dir: Path) -> "SessionLog":
@@ -2990,12 +3001,16 @@ class SessionLog:
 
     def _record(self, kind: str, **fields) -> None:
         with self._write_lock:
-            if self._pending_model is not None and kind != "model":
-                # Cleared only once written: a refused write (`SessionLogMoved`)
-                # must not silently drop which model this chat runs.
-                self._write_line("model", model=self._pending_model)
-                self._pending_model = None
-            self._write_line(kind, **fields)
+            self._record_locked(kind, **fields)
+
+    def _record_locked(self, kind: str, **fields) -> None:
+        """`_record`'s body. Caller must hold _write_lock."""
+        if self._pending_model is not None and kind != "model":
+            # Cleared only once written: a refused write (`SessionLogMoved`)
+            # must not silently drop which model this chat runs.
+            self._write_line("model", model=self._pending_model)
+            self._pending_model = None
+        self._write_line(kind, **fields)
 
     def _write_line(self, kind: str, **fields) -> None:
         """Append one record. Caller must hold _write_lock."""
@@ -3147,6 +3162,19 @@ class SessionLog:
         typed rename be permanent: the auto-titler stands down for good once
         the winning record is a manual one."""
         self._record("title", title=title.strip(), auto=auto)
+
+    def set_title_if(self, title: str, auto: bool, still_wanted: Callable[[], bool]) -> bool:
+        """`set_title`, but only if `still_wanted()` holds UNDER the write lock
+        (#397). A title decided off the turn — the auto-titler's, computed by a
+        model call the chat did not wait for — may have been overtaken by the
+        time it lands: a rename, a redaction, a newer titling. Those all write
+        this file under the same lock, so a check taken here cannot be
+        separated from the append by any of them. Returns whether it wrote."""
+        with self._write_lock:
+            if not still_wanted():
+                return False
+            self._record_locked("title", title=title.strip(), auto=auto)
+            return True
 
     def origin(self, origin: str) -> None:
         """Record who started this session (schedule | email | webhook — never

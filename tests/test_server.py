@@ -4100,6 +4100,342 @@ class TestAutoTitle:
         assert SessionLog._parse(app_env["state_dir"] / name).title is None
 
 
+class HeldTitler(FakeChat):
+    """A FakeChat whose titling calls each block until the test releases
+    them — the titler on a slow model, held open for as long as the test
+    needs the post-answer window to stay open (#397). Each call is held on
+    its own gate so two titlings can be released in either order; `titles`
+    is what the n-th call answers."""
+
+    HOLDS = 8
+
+    def __init__(self, responses, titles=("Named by the titler",)):
+        super().__init__(responses, title=None)
+        self.titles = list(titles)
+        self.held: list[dict] = []  # each titling's kwargs, recorded when ASKED
+        self._lock = threading.Lock()
+        self.asked = [threading.Event() for _ in range(self.HOLDS)]  # in flight
+        self.release = [threading.Event() for _ in range(self.HOLDS)]  # may answer
+        self.answered = [threading.Event() for _ in range(self.HOLDS)]  # has
+
+    def release_all(self) -> None:
+        for gate in self.release:
+            gate.set()
+
+    def __call__(self, **kwargs):
+        if not _is_title_call(kwargs):
+            return super().__call__(**kwargs)
+        with self._lock:  # two titlings may be in flight at once
+            n = len(self.held)
+            self.held.append(kwargs)
+        self.asked[n].set()
+        self.release[n].wait(timeout=10)
+        try:
+            self.title_calls.append(kwargs)
+            return model_says(self.titles[min(n, len(self.titles) - 1)])
+        finally:
+            self.answered[n].set()
+
+
+def wait_until(predicate, timeout: float = 5.0) -> bool:
+    """Poll a fact the loop thread owns from the test thread — the loop keeps
+    running under TestClient, so the fact settles on its own."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def drained(client) -> bool:
+    """Every post-turn task has finished — the point after which a NEGATIVE
+    claim about what the titler did is a claim about a completed fact, not
+    about a task that may simply not have run yet."""
+    return wait_until(lambda: not client.app.state.server._epilogues)
+
+
+def title_records(app_env, name) -> list[dict]:
+    lines = (app_env["state_dir"] / name).read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in lines if line.strip()]
+    return [r for r in records if r.get("kind") == "title"]
+
+
+class TestTurnEndsAtDone:
+    """#397 — a turn is over for the owner when it is over for the client.
+
+    `done` used to go out BEFORE the post-answer work (the completion push and
+    the titling model call), and `busy` cleared only after it — so for as long
+    as the titler took, the owner's next message was refused as "this chat is
+    busy" (create_issue) or parked in the queue (task). CI on a slow runner is
+    where it showed. Each test holds the titler open and acts in that window.
+    """
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _window(app_env, chat):
+        """(client, ws, hello) with the titler RELEASED before the socket
+        closes, whichever way the block exits — a held titler outlives a
+        failed assertion otherwise, and the client's shutdown waits on it."""
+        app = create_app("fake", client_chat=chat, **app_env, token=TEST_TOKEN)
+        client = TokenClient(app, auto_token=TEST_TOKEN)
+        with client, connected(client) as (ws, hello, _):
+            try:
+                yield client, ws, hello
+            finally:
+                chat.release_all()
+
+    @staticmethod
+    def _events_until(ws, wanted: str) -> tuple[dict, list[str]]:
+        """The next `wanted` event and the types seen on the way to it."""
+        seen: list[str] = []
+        for _ in range(200):
+            event = ws.receive_json()
+            seen.append(event["type"])
+            if event["type"] == wanted:
+                return event, seen
+            if event["type"] == "error":
+                raise AssertionError(f"error while waiting for {wanted!r}: {event['text']}")
+        raise AssertionError(f"no {wanted!r} within 200 events: {seen}")
+
+    def test_create_issue_is_taken_while_the_titler_is_still_running(
+        self, app_env, monkeypatch
+    ):
+        captured: list[str] = []
+        monkeypatch.setattr(
+            "aish.tools.run_command", TestIssueCreation._fake_run_command(captured)
+        )
+        chat = HeldTitler([model_says(ISSUE_BLOCK)])
+        with self._window(app_env, chat) as (_, ws, _):
+            ws.send_json({"type": "task", "text": "/feedback dark mode is broken"})
+            recv_until(ws, "done")  # the answer has landed …
+            assert chat.asked[0].wait(5)  # … and the titler is still on the model
+            ws.send_json({"type": "create_issue"})
+            # Refused as busy before the fix — the error event fails this.
+            start = recv_until(ws, "command_start")
+            assert start.get("user") is True
+            recv_until(ws, "done")
+        assert len(captured) == 1
+
+    def test_the_next_task_starts_while_the_titler_is_still_running(self, app_env):
+        chat = HeldTitler([model_says("first answer"), model_says("second answer")])
+        with self._window(app_env, chat) as (_, ws, _):
+            ws.send_json({"type": "task", "text": "first question"})
+            recv_until(ws, "done")
+            assert chat.asked[0].wait(5)
+            ws.send_json({"type": "task", "text": "second question"})
+            # Queued behind the titler before the fix: a `queued` event arrived
+            # where the next turn's answer should.
+            done, seen = self._events_until(ws, "done")
+            assert "queued" not in seen, "parked behind the titling call"
+            assert done["result"] == "second answer"
+
+    def test_the_title_still_lands_and_names_the_turn_it_was_asked_about(self, app_env):
+        """Off the turn, the titler must read NOTHING the next turn can touch:
+        its source is snapshotted before `busy` is released, so a turn that
+        starts meanwhile cannot leak into the name — and the name still lands
+        in the log as the same `title` record it always was."""
+        chat = HeldTitler([model_says("first answer"), model_says("second answer")])
+        with self._window(app_env, chat) as (_, ws, hello):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "first question"})
+            recv_until(ws, "done")
+            assert chat.asked[0].wait(5)
+            ws.send_json({"type": "task", "text": "second question"})
+            # Up to the second answer nothing may have been parked or named:
+            # the titler is still held, and the next turn did not wait on it.
+            done, seen = self._events_until(ws, "done")
+            assert "queued" not in seen and "session_renamed" not in seen, seen
+            assert done["result"] == "second answer"
+            chat.release[0].set()
+            renamed = recv_until(ws, "session_renamed")
+            assert renamed["title"] == "Named by the titler"
+            prompt = chat.title_calls[-1]["messages"][0]["content"]
+            assert "first question" in prompt and "first answer" in prompt
+            assert "second" not in prompt  # snapshotted before the next turn
+        parsed = SessionLog._parse(app_env["state_dir"] / name)
+        assert parsed.title == "Named by the titler"
+        assert parsed.title_auto is True
+
+    def test_a_rename_typed_while_the_titler_runs_is_not_overwritten(self, app_env):
+        """The hand-typed name wins even when the titler was already asked: the
+        answer that comes back late is dropped, and the titler stands down."""
+        chat = HeldTitler([model_says("an answer")])
+        with self._window(app_env, chat) as (client, ws, hello):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "a question"})
+            recv_until(ws, "done")
+            assert chat.asked[0].wait(5)
+            ws.send_json({"type": "rename_session", "name": name, "title": "My own name"})
+            renamed = recv_until(ws, "session_renamed")
+            assert renamed["title"] == "My own name"
+            chat.release[0].set()
+            assert chat.answered[0].wait(5) and drained(client)  # the late answer ran
+            session = client.app.state.server.sessions[name]
+            assert session.custom_title == "My own name"
+            assert session.title_auto is False
+            self._assert_nothing_more_named(ws, name)
+        records = title_records(app_env, name)
+        assert [r["title"] for r in records] == ["My own name"]
+        assert SessionLog._parse(app_env["state_dir"] / name).title_auto is False
+
+    @staticmethod
+    def _assert_nothing_more_named(ws, name) -> None:
+        """No `session_renamed` is waiting on the socket. Asked AFTER the
+        epilogues drained, so an absent event is an event that never was, not
+        one still on its way; the sessions list is the fence a reply must be
+        behind."""
+        ws.send_json({"type": "sessions"})
+        _, seen = TestTurnEndsAtDone._events_until(ws, "session_list")
+        assert "session_renamed" not in seen, seen
+
+    def test_a_redaction_during_the_titler_keeps_the_removed_text_out_of_the_name(
+        self, app_env
+    ):
+        """BLOCKER from review (#397). Redaction deletes every auto title so a
+        model-written name cannot quote the removed text — but a titler asked
+        BEFORE the redaction, from a source that still held the text, would
+        land its answer after the scrub and hand the redacted content back as
+        the chat's name on every device. Its answer must be dropped, and the
+        forced retitle the redaction armed must survive to the next turn.
+
+        Turn 1 is named normally so an auto title exists for the redaction to
+        scrub (that is what arms the forced retitle); turn 3 is a backoff slot
+        the chat has drifted to, and ITS titler is the one held."""
+        chat = HeldTitler(
+            [model_says("Airalo."), model_says("ok"), model_says("hunter2 it is")],
+            titles=("Bali eSIM data plans", "The hunter2 chat"),
+        )
+        with self._window(app_env, chat) as (client, ws, hello):
+            name = hello["session"]
+            chat.release[0].set()  # turn 1's titler answers at once
+            ws.send_json({"type": "task", "text": "which eSIM for Bali?"})
+            recv_until(ws, "done")
+            assert recv_until(ws, "session_renamed")["title"] == "Bali eSIM data plans"
+            ws.send_json({"type": "task", "text": "thanks"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "unrelated: the SECRET is hunter2"})
+            live = recv_until(ws, "user")
+            recv_until(ws, "done")
+            assert chat.asked[1].wait(5)  # turn 3's titler, held
+            assert "hunter2" in chat.held[1]["messages"][0]["content"]
+            ws.send_json({"type": "redact", "turn": live["turn"]})
+            recv_until(ws, "replay")
+            rederived = recv_until(ws, "session_renamed")  # the scrub's own rename
+            assert "hunter2" not in rederived["title"]
+            session = client.app.state.server.sessions[name]
+            assert session.retitle_forced is True  # the scrub armed it
+            chat.release[1].set()
+            assert chat.answered[1].wait(5) and drained(client)
+            assert session.retitle_forced is True  # still owed a real name
+            assert session.custom_title != "The hunter2 chat"
+            self._assert_nothing_more_named(ws, name)
+        assert not any("hunter2" in r["title"] for r in title_records(app_env, name))
+        assert "hunter2" not in (app_env["state_dir"] / name).read_text(encoding="utf-8")
+
+    def test_a_retried_answer_cannot_name_the_chat_after_its_replacement(self, app_env):
+        """Two titlings for one chat, the older one answering LAST: Retry
+        discards the answer titler A was naming, the rerun asks titler B, B
+        lands — and A, arriving late, must not overwrite it."""
+        chat = HeldTitler(
+            [model_says("first wrong answer"), model_says("second clean answer")],
+            titles=("Title from the wrong answer", "Title from the clean answer"),
+        )
+        with self._window(app_env, chat) as (client, ws, hello):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "what is 2+2?"})
+            recv_until(ws, "done")
+            assert chat.asked[0].wait(5)  # A, held
+            ws.send_json({"type": "retry", "text": "what is 2+2?"})
+            recv_until(ws, "replay")
+            done, seen = self._events_until(ws, "done")
+            assert done["result"] == "second clean answer"
+            assert "queued" not in seen
+            assert chat.asked[1].wait(5)  # B, held
+            chat.release[1].set()
+            renamed = recv_until(ws, "session_renamed")
+            assert renamed["title"] == "Title from the clean answer"
+            chat.release[0].set()  # A answers last
+            assert chat.answered[0].wait(5) and drained(client)
+            session = client.app.state.server.sessions[name]
+            assert session.custom_title == "Title from the clean answer"
+            self._assert_nothing_more_named(ws, name)
+        assert [r["title"] for r in title_records(app_env, name)] == [
+            "Title from the clean answer"
+        ]
+
+    @pytest.mark.parametrize("hop", ["before the append", "after the append"])
+    def test_a_rename_landing_inside_the_write_still_stands(self, app_env, hop):
+        """The two hops a late answer crosses on its way into the file and into
+        memory, each with a rename dropped into it. Before the append: the
+        under-lock check sees the owner's generation and writes nothing. After
+        it: the auto record is in the file but the owner's follows it, and the
+        loop-side check keeps the auto name out of memory — file and memory
+        agree on his."""
+        chat = HeldTitler([model_says("an answer")])
+        with self._window(app_env, chat) as (client, ws, hello):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "a question"})
+            recv_until(ws, "done")
+            assert chat.asked[0].wait(5)
+            session = client.app.state.server.sessions[name]
+            log = session.logref.log
+            in_the_write = threading.Event()
+            let_it_through = threading.Event()
+            real = log.set_title_if
+
+            def held_write(title, auto, still_wanted):
+                if hop == "before the append":
+                    in_the_write.set()
+                    let_it_through.wait(timeout=10)
+                    return real(title, auto, still_wanted)
+                written = real(title, auto, still_wanted)
+                in_the_write.set()
+                let_it_through.wait(timeout=10)
+                return written
+
+            log.set_title_if = held_write
+            chat.release[0].set()
+            assert in_the_write.wait(5)
+            ws.send_json({"type": "rename_session", "name": name, "title": "My own name"})
+            renamed = recv_until(ws, "session_renamed")
+            assert renamed["title"] == "My own name"
+            let_it_through.set()
+            assert chat.answered[0].wait(5) and drained(client)
+            assert session.custom_title == "My own name"
+            assert session.title_auto is False
+            self._assert_nothing_more_named(ws, name)
+        records = title_records(app_env, name)
+        assert records[-1]["title"] == "My own name" and not records[-1]["auto"]
+        if hop == "before the append":
+            assert [r["title"] for r in records] == ["My own name"]
+        parsed = SessionLog._parse(app_env["state_dir"] / name)
+        assert parsed.title == "My own name" and parsed.title_auto is False
+
+    def test_a_triggered_session_still_pushes_when_it_finishes(self, app_env, monkeypatch):
+        """The completion push runs off the turn now; it must still fire."""
+        monkeypatch.setattr(server_module.notify, "configured", lambda: True)
+        calls: list = []
+        monkeypatch.setattr(
+            server_module.notify, "pushover", lambda *a, **k: calls.append((a, k)) or True
+        )
+        chat = FakeChat([model_says("sent the reply")])
+        app = create_app("fake", client_chat=chat, **app_env, token="secret")
+        client = TokenClient(app, auto_token="secret")
+        with client:
+            r = client.post(
+                "/trigger?token=secret",
+                json={"prompt": "go", "origin": "email", "title": "Email: hi"},
+            )
+            server = client.app.state.server
+            session = server.sessions[r.json()["session"]]
+            assert wait_until(lambda: not session.busy)
+            assert wait_until(lambda: len(calls) == 1)
+        (title, body), _ = calls[0]
+        assert "finished" in title.lower() and "Email: hi" in title
+        assert body == "sent the reply"
+
+
 class TestFork:
     def test_fork_seeds_new_session_and_leaves_source_untouched(self, app_env):
         # /fork copies the whole conversation into a NEW session, switches
