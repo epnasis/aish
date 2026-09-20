@@ -301,6 +301,17 @@ check("a thinking row takes its number from the tool rows under it, and counts o
   const t2 = w2.sandbox.currentTrace;
   w2.sandbox.finishTrace();
   assert.deepEqual(idsOf(t2), ["m1", "m1", "c1"]);
+  // A trim that fired BETWEEN calls is its own step, whichever mid-turn policy
+  // wrote it — the same split explain.py makes with MID_TURN_TRIM. An overflow
+  // trim filed under model call 1 would put it above the failure it answers.
+  const w3 = world();
+  w3.sandbox.currentTurnId = "t";
+  w3.sandbox.traceStep({ kind: "thinking", secs: 1 });
+  w3.sandbox.traceStep({ kind: "model_error", model_call: 1, class: "context_overflow", action: "retry", attempt: 1, attempts: 8 });
+  w3.sandbox.traceStep({ kind: "trim", policy: "overflow_oldest_first", affected: 1, stubbed: [{ at: 1, tool: "run_command" }] });
+  const t3 = w3.sandbox.currentTrace;
+  w3.sandbox.finishTrace();
+  assert.deepEqual(idsOf(t3), ["m1", "e1", "t1"]);
 });
 
 // ---- 2 & 3. the tap, the summary, the strip -----------------------------------------

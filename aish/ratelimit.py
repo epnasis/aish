@@ -51,11 +51,19 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+from . import vocab
+
 # What went wrong, in the only vocabulary the retry policy needs. Closed set:
 # a value outside it is a bug, not a new case to handle downstream.
 RATE_LIMIT = "rate_limit"
 AUTH = "auth"
 BAD_REQUEST = "bad_request"
+#: A 4xx that says the REQUEST WAS TOO BIG rather than malformed — the one
+#: rejection in that class aish can answer, by giving context back and asking
+#: again (#388). Split out of BAD_REQUEST rather than flagged inside it: the
+#: two route to opposite actions, and a reader of `aish explain` must be able
+#: to tell "the provider will refuse this forever" from "it refused this size".
+CONTEXT_OVERFLOW = "context_overflow"
 SERVER = "server"
 TRANSPORT = "transport"
 CANCELLED = "cancelled"
@@ -84,6 +92,97 @@ _TRANSPORT_WORDS = re.compile(
     r"timed?[\s_-]*out|timeout|connection|econnreset|broken pipe|temporarily unavailable"
     r"|remote end closed|ssl",
     re.I,
+)
+
+# How a provider says "this request is bigger than the model's context window",
+# folded to lowercase (#388). `docs/vocabularies.md` governs this list.
+#
+# It only ever SPLITS a rejection already classified 4xx by its status; it can
+# never create one. That is the structural half — the words decide which of two
+# unretryable verdicts a refusal gets, never whether there was a refusal — and
+# it is why a miss costs exactly today's behaviour: the turn ends on
+# BAD_REQUEST, as it did before this list existed.
+#
+# WHERE EACH ENTRY COMES FROM, because none of it is derivable from this
+# repository: there is no recorded over-window rejection in any session log
+# aish has ever written (166 `model_error` records, not one of them
+# `bad_request`). The evidence for each entry — the provider's own source or
+# client where there is one, an independent client's annotated matcher where
+# there is not, and the file:line of each — is the table in
+# docs/rate-limits.md §7. The comments here say only which KIND of source it
+# was, so a reader can tell a verified entry from a merely plausible one
+# without leaving the file.
+_OVERFLOW_PHRASES = vocab.declare(
+    "ratelimit._OVERFLOW_PHRASES",
+    (
+        # Anthropic: `prompt is too long: N tokens > 200000 maximum`. Two
+        # independent clients match it under an `anthropic` label (LiteLLM,
+        # openclaw), and the shipped Claude Code binary (2.1.278) matches it
+        # and the next entry against `e.toLowerCase()` in one function.
+        # Anthropic's own errors page does not document it.
+        "prompt is too long",
+        # Anthropic models via BEDROCK, not the direct API — openclaw labels it
+        # `Amazon Bedrock` and LiteLLM's bedrock branch matches the shorter
+        # `Input is too long`. aish has no Bedrock backend; it is carried
+        # because a false positive costs one bounded retry and a miss a turn.
+        "input is too long for requested model",
+        # Anthropic direct API: `input length and max_tokens exceed context
+        # limit: N + N > N, …`. Cut short of `max_tokens` on purpose: the
+        # Claude Code binary matches it WITH backticks around that word and
+        # openclaw makes them optional, and a list that pins punctuation
+        # misses by one character (#321).
+        "exceed context limit",
+        # OpenAI's machine-readable code, and the strongest entry here: it is
+        # in openai-python's generated types ("The request exceeds the model's
+        # context window") and is what OpenAI's own codex client matches on
+        # (`error.code == "context_length_exceeded"`). It travels in the body,
+        # which `classify` already folds into the haystack.
+        "context_length_exceeded",
+        # OpenAI chat-completions prose: `This model's maximum context length
+        # is N tokens. However, your messages resulted in N tokens …`. LiteLLM
+        # matches the opening clause; the entry stops there because other
+        # servers open the same way and finish differently.
+        "maximum context length",
+        # Gemini: `The input token count (N) exceeds the maximum number of
+        # tokens allowed (N).` LiteLLM main annotates it `# Gemini`; QwenPaw
+        # pairs it with `input token count`. No capture of the body here.
+        "exceeds the maximum number of tokens allowed",
+        # Gemini via VERTEX: `… input token count is N but model only supports
+        # up to N`. Two independent clients (redpanda's Go SDK, QwenPaw); the
+        # Go one comments it `Legacy Vertex wording`. Nothing from Google.
+        "model only supports up to",
+        # Ollama, and the ONLY entry with local evidence: `llm embedding error:
+        # the input length exceeds the context length`, 135 times in
+        # `~/.ollama/logs/server-3.log`, every one answered HTTP 200 because
+        # embedding truncates by default. Ollama's `server/routes.go` and
+        # `llm/llama_server.go` return the same words as a 400 when `truncate`
+        # is explicitly false — so the 4xx form exists, and has not been seen.
+        "exceeds the context length",
+        # Ollama's chat-path refusal, `llm/llama_server.go`: 400 `the prompt is
+        # longer than the context length currently available to the model;
+        # shorten the prompt, …`, taken only when context shift is off. The
+        # DEFAULT chat path (`server/prompt.go`) truncates silently at Debug
+        # level instead, so this catches the one branch that speaks.
+        "longer than the context length",
+        # The deliberately broad entry — the Claude Code binary's own broad
+        # matcher is `e.toLowerCase().includes("context window")`. It covers
+        # OpenAI's Responses wording, `Your input exceeds the context window of
+        # this model.` (a fixture in codex's own tests), and is what a provider
+        # nobody here has recorded falls into. Being broad is the cheap
+        # mistake: a false positive costs one trim and one retry, both bounded
+        # and both recorded, while a miss costs a turn.
+        "context window",
+    ),
+    languages="EN (provider error text)",
+    on_miss=vocab.FRICTION,
+    structural="the 4xx status that already bounds it — these words only ever "
+    "split BAD_REQUEST, never create a failure",
+    # Asked only of the 4xx that reach the bad-request branch (a quota, an auth
+    # refusal and a timeout have already left `classify`), so matching nothing
+    # is usually the correct answer: most of those really are malformed.
+    demanded=False,
+    note="No aish session log has ever recorded one of these, so the counter is "
+    "the only thing that would report the list had stopped matching.",
 )
 
 
@@ -296,6 +395,14 @@ def classify(exc: BaseException, now: float | None = None) -> CallFailure:
             text=text,
         )
     if status is not None and 400 <= status < 500 and status not in (408, 409, 429):
+        if phrase := _overflow_phrase(haystack):
+            # Still not retryable: the IDENTICAL request is refused identically
+            # forever, exactly as any other 4xx. What the class adds is that a
+            # SMALLER one might not be, and only the agent can make it smaller
+            # — so the trim-and-retry lives there (`Agent._chat_turn`) and this
+            # side only ever reports what the provider said.
+            return CallFailure(kind=CONTEXT_OVERFLOW, retryable=False, status=status,
+                               matched=phrase, text=text)
         # A request the provider will reject identically forever. Retrying it
         # spends a request against the quota to learn nothing.
         return CallFailure(kind=BAD_REQUEST, retryable=False, status=status,
@@ -311,6 +418,20 @@ def classify(exc: BaseException, now: float | None = None) -> CallFailure:
     # everything once, and a classifier that silently stopped retrying a case it
     # failed to recognise would be a regression disguised as a refinement.
     return CallFailure(kind=UNKNOWN, retryable=True, status=status, text=text)
+
+
+def _overflow_phrase(haystack: str) -> str:
+    """The phrase that identified an over-window rejection, or "".
+
+    The phrase itself and not a boolean, because it lands in `matched`: a
+    reader has to be able to see which words earned the verdict, on the same
+    terms as a prose rate-limit match. `vocab.note` rather than `vocab.hit`
+    for exactly that reason — the call site needs the hit, not the answer.
+    """
+    folded = haystack.lower()
+    found = next((phrase for phrase in _OVERFLOW_PHRASES if phrase in folded), "")
+    vocab.note("ratelimit._OVERFLOW_PHRASES", matched=bool(found))
+    return found
 
 
 def _match_text(pattern: re.Pattern, haystack: str) -> str:

@@ -110,6 +110,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `approval.SAFE_COMMANDS` | program names | friction | yes | root scoping + `UNSAFE_FLAGS` — being on it is necessary, never sufficient | 34 |
 | `approval._DESTRUCTIVE_COMMANDS` | program names | breaks | yes | none needed — the GATE is `check_denied` and the card, neither of which reads this | 12 |
 | `agent.REFUSAL_OPENINGS` | EN (aish's own words) | permits | yes | `_gate_outcome` / `ToolOutcome.meta`, checked FIRST | 6 |
+| `ratelimit._OVERFLOW_PHRASES` | EN (provider error text) | friction | yes | the 4xx status that already bounds it — these words only ever split `BAD_REQUEST`, never create a failure | 10 |
 | `signin._SECOND_LEVEL` | public suffixes | friction | **no** | — | 10 |
 | `web._NOT_BUYABLE` | schema.org enum | breaks | **no** | subset of `web._AVAILABILITY`, tested at the same call site | 3 |
 
@@ -198,6 +199,33 @@ dead list as a working one (`_destructive_verdict`).
 a miss can only ever put a card in front of the owner. It is also the highest-volume list in
 the tree. Its counter is a **use-rate, not a health check**, and reading a falling match rate
 as breakage would be wrong: it moves with what the model happens to run.
+
+**`ratelimit._OVERFLOW_PHRASES` (#388) — the first list added after this document
+existed, and the one whose corpus is empty.** It decides whether a 4xx rejection was
+about the request's SIZE, which is the one 400 aish can answer (trim, retry once). Its
+structural half is the status class it can only ever **split**: the words never create a
+failure, they choose which of two unretryable verdicts one gets, so a miss lands exactly
+on the old behaviour — `bad_request`, no retry, the turn ends as before. That is
+`friction` in the column above, paid in a lost turn.
+**Nothing in this repository could have written it.** aish has never recorded a 400 of
+any kind — 166 `model_error` records across every session log, not one `bad_request` —
+and the provider SDKs aish imports carry none of the words (the provider's text lives in
+the response, not the client). Every entry is therefore sourced from a provider's own
+server or client source, from an independent client's provider-annotated matcher, or —
+for one entry — from this machine's Ollama log, each named with file and line in
+`docs/rate-limits.md` §7, and that table says which entries rest on which kind. **The counter is therefore the only instrument that will ever
+report this list going stale**, since the event it fires on has never been seen here.
+`quiet` will not help: on a corpus of zero it can say nothing, which is `browse._FORWARD`'s
+lesson one layer earlier.
+**Could a structural check replace it?** No. The status says a 4xx; nothing in it
+distinguishes a malformed body from an oversized one. The closest thing to a structural
+signal is OpenAI's `context_length_exceeded` **code** — machine-readable, and in the list
+for that reason — but it is one provider's, and the others send prose only.
+**It is consulted TWICE per failed call**, which matters for reading its number: the same
+exception is classified once at the backend seam for the governor
+(`backends._settle_failure`) and once in the retry loop for the decision. `asked` counts
+consultations, exactly as this document says everywhere else — not rejections, and not
+turns.
 
 **`agent.REFUSAL_OPENINGS` — the odd one out.** It matches aish's OWN sentences, not a
 page's, so it goes stale by an aish refactor rather than by a site. It is only reached when

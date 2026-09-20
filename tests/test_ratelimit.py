@@ -16,7 +16,8 @@ import time
 
 import pytest
 
-from aish import ratelimit
+from aish import agent as agent_module
+from aish import backends, ratelimit
 
 _REAL_WAIT = ratelimit.wait
 
@@ -81,6 +82,82 @@ class TestClassify:
         failure = ratelimit.classify(FakeAPIError("malformed", status=400))
         assert failure.kind == ratelimit.BAD_REQUEST
         assert not failure.retryable
+
+    def test_a_400_that_says_the_request_was_too_big_is_its_own_class(self):
+        """The one 4xx with a useful answer (#388). Still not retryable — the
+        identical request is refused identically forever — but a SMALLER one
+        may not be, and the class is what tells the two apart downstream."""
+        failure = ratelimit.classify(
+            FakeAPIError("prompt is too long: 234567 tokens > 200000 maximum", status=400)
+        )
+        assert failure.kind == ratelimit.CONTEXT_OVERFLOW
+        assert not failure.retryable
+        assert failure.status == 400
+        # The words that earned the verdict, not a status — a reader must be
+        # able to see this one was a prose match.
+        assert failure.matched == "prompt is too long"
+
+    @pytest.mark.parametrize("message", [
+        # Each of these is a provider wording quoted in `docs/rate-limits.md`
+        # §7, which says per entry what established it — they are NOT equally
+        # well evidenced, and the table is where that is stated rather than
+        # here. aish has never recorded one itself, so these fixtures are as
+        # close to a corpus as this list has.
+        #
+        # The one with LOCAL evidence: the only over-window text any log on
+        # this machine has produced, 135 times in ~/.ollama/logs/server-3.log
+        # — and every one of those was answered HTTP 200, so this wording has
+        # never been seen on a 4xx. The 400 here is the test's assumption, not
+        # an observation.
+        "llm embedding error: the input length exceeds the context length",
+        "Error code: 400 - {'error': {'message': \"This model's maximum context "
+        "length is 4096 tokens. However, your messages resulted in 4239 tokens. "
+        "Please reduce the length of the messages.\", 'type': 'invalid_request_error', "
+        "'param': 'messages', 'code': 'context_length_exceeded'}}",
+        "Error code: 400 - [{'error': {'code': 400, 'message': 'The input token count "
+        "(185586) exceeds the maximum number of tokens allowed (131072).', "
+        "'status': 'INVALID_ARGUMENT'}}]",
+        "prompt is too long: 233153 tokens > 200000 maximum",
+        "input length and max_tokens exceed context limit: 154690 + 64000 > 200000, "
+        "decrease input length or max_tokens and try again",
+        "the prompt is longer than the context length currently available to the "
+        "model; shorten the prompt, adjust the context length in settings, or use a "
+        "model with a longer context length",
+        "Your input exceeds the context window of this model. Please adjust your "
+        "input and try again.",
+    ])
+    def test_every_provider_wording_that_was_actually_captured(self, message):
+        assert ratelimit.classify(
+            FakeAPIError(message, status=400)
+        ).kind == ratelimit.CONTEXT_OVERFLOW
+
+    def test_a_string_that_is_merely_too_long_is_not_a_context_overflow(self):
+        """The look-alike, and the one place this list deliberately DIVERGES
+        from an independent implementation: OpenAI's `user` field is capped at
+        64 characters and complains in words that read like an overflow.
+        LiteLLM's matcher calls that a context-window error; it is a MALFORMED
+        request no trim can fix, so here it stays `bad_request`
+        (docs/rate-limits.md §7)."""
+        failure = ratelimit.classify(FakeAPIError(
+            "Invalid value for 'user': string too long. Expected a string with "
+            "maximum length 64", status=400,
+        ))
+        assert failure.kind == ratelimit.BAD_REQUEST
+
+    def test_the_overflow_words_can_only_split_a_4xx_never_create_one(self):
+        """The structural half. Without a 4xx status nothing here changes: the
+        same sentence in an unclassifiable error stays UNKNOWN and retryable,
+        exactly as before the list existed."""
+        failure = ratelimit.classify(RuntimeError("prompt is too long"))
+        assert failure.kind == ratelimit.UNKNOWN
+        assert failure.retryable
+
+    def test_a_quota_refusal_mentioning_the_context_window_is_still_a_quota(self):
+        """Status 429 is decided before any of these words are read."""
+        failure = ratelimit.classify(
+            FakeAPIError("quota for this context window is spent", status=429)
+        )
+        assert failure.kind == ratelimit.RATE_LIMIT
 
     def test_server_error_is_retried(self):
         failure = ratelimit.classify(FakeAPIError("upstream", status=503))
@@ -483,6 +560,210 @@ class TestModelErrorRecord:
 
 
 RAISE_TIMES = {"n": 0}
+
+
+OVERFLOW_400 = FakeAPIError(
+    "Error code: 400 - prompt is too long: 234567 tokens > 200000 maximum", status=400
+)
+
+
+class TestContextOverflowTrimsAndRetriesOnce:
+    """The one 4xx aish can answer (#388).
+
+    Every other 400 is a request the provider refuses identically forever, so
+    retrying it spends a request to relearn a permanent answer. An over-window
+    rejection is the exception — not because waiting helps, but because the
+    agent can send a SMALLER request — and the whole of that difference is
+    bounded here: one trim, one retry, and a record of both.
+    """
+
+    def agent_raising(self, exc, times, *, history_chars=9000, responses=("recovered",)):
+        """An agent whose model call fails `times` times, with `history_chars`
+        of trimmable tool output already in the conversation."""
+        from tests.test_agent import Agent, model_says
+
+        replies = list(responses)
+        steps: list[dict] = []
+        calls: list[int] = []
+
+        def chat(**kwargs):
+            # What the model was actually handed, per attempt: the only
+            # evidence that the retried request was a different one.
+            calls.append(sum(len(m.get("content") or "") for m in kwargs["messages"]))
+            if len(calls) <= times:
+                raise exc
+            return model_says(replies.pop(0) if replies else "done")
+
+        agent = Agent(model="fake", approve=lambda _c: True, client_chat=chat,
+                      step_log=steps.append)
+        agent.provider = "claude"
+        if history_chars:
+            agent.messages.append(
+                {"role": "tool", "tool_name": "run_command", "content": "y" * history_chars}
+            )
+        return agent, steps, calls
+
+    def test_the_conversation_is_trimmed_and_the_same_intent_succeeds(self):
+        agent, steps, calls = self.agent_raising(OVERFLOW_400, times=1)
+        assert agent.run_task("hi") == "recovered"
+
+        errors = [s for s in steps if s.get("kind") == "model_error"]
+        trims = [s for s in steps if s.get("kind") == "trim"]
+        assert len(errors) == 1 and len(trims) == 1
+        assert errors[0]["class"] == ratelimit.CONTEXT_OVERFLOW
+        assert errors[0]["action"] == "retry"
+        # Nothing was waited: what changes before the next attempt is the
+        # request, not the clock.
+        assert "waited_s" not in errors[0]
+        # And the retry really was smaller — the point of the whole exercise.
+        assert len(calls) == 2 and calls[1] < calls[0]
+
+    def test_the_trim_leaves_its_normal_record_and_says_what_governed_it(self):
+        agent, steps, _ = self.agent_raising(OVERFLOW_400, times=1)
+        agent.run_task("hi")
+        trim = next(s for s in steps if s.get("kind") == "trim")
+        assert trim["policy"] == "overflow_oldest_first"
+        assert trim["affected"] >= 1
+        assert trim["bytes_after"] < trim["bytes_before"]
+        assert trim["oldest_first"] is True
+        # The provenance is aish's own constant and says so: the provider said
+        # the request was too big, never by how much.
+        assert trim["cap_source"] == (
+            f"constant:OVERFLOW_TRIM_FRACTION:{agent_module.OVERFLOW_TRIM_FRACTION}"
+        )
+        assert trim["budget"] == int(trim["bytes_before"] * agent_module.OVERFLOW_TRIM_FRACTION)
+
+    def test_the_failure_is_recorded_before_the_trim_it_caused(self):
+        """Order is evidence. A `trim` sitting above the failure would read as
+        preparation for the call rather than a response to its rejection."""
+        agent, steps, _ = self.agent_raising(OVERFLOW_400, times=1)
+        agent.run_task("hi")
+        kinds = [s["kind"] for s in steps if s["kind"] in ("model_error", "trim")]
+        assert kinds == ["model_error", "trim"]
+
+    def test_a_second_overflow_ends_the_turn_instead_of_looping(self):
+        """Once. A conversation eaten a fraction at a time against a window
+        nothing here knows is a worse failure than a turn that stops."""
+        from aish.agent import ModelUnavailable
+
+        agent, steps, calls = self.agent_raising(OVERFLOW_400, times=99)
+        with pytest.raises(ModelUnavailable, match="could not make it small enough"):
+            agent.run_task("hi")
+
+        errors = [s for s in steps if s.get("kind") == "model_error"]
+        assert len(calls) == 2, "the retry is spent once, not repeatedly"
+        assert len([s for s in steps if s.get("kind") == "trim"]) == 1
+        assert [e["action"] for e in errors] == ["retry", "give_up"]
+        assert errors[-1]["bound"] == "trim_exhausted"
+
+    def test_an_overflow_with_nothing_left_to_trim_never_re_sends_it(self):
+        """The promise of a retry is only made where the next request will
+        actually be smaller; with nothing to give back it would be the same
+        request again, which is what every other 400 is refused for."""
+        from aish.agent import ModelUnavailable
+
+        agent, steps, calls = self.agent_raising(OVERFLOW_400, times=99, history_chars=0)
+        with pytest.raises(ModelUnavailable):
+            agent.run_task("hi")
+
+        errors = [s for s in steps if s.get("kind") == "model_error"]
+        assert len(calls) == 1
+        assert [s for s in steps if s.get("kind") == "trim"] == []
+        assert errors[-1]["action"] == "give_up"
+        assert errors[-1]["bound"] == "trim_exhausted"
+
+    def test_a_400_that_is_not_an_overflow_is_still_never_retried(self):
+        """The fence. Recognising one 400 must not soften the rest of the
+        class: a malformed request is refused identically forever, and nothing
+        about the conversation's size is touched."""
+        from aish.agent import ModelUnavailable
+
+        agent, steps, calls = self.agent_raising(
+            FakeAPIError("Invalid value for 'tools[0].name'", status=400), times=99
+        )
+        with pytest.raises(ModelUnavailable):
+            agent.run_task("hi")
+
+        errors = [s for s in steps if s.get("kind") == "model_error"]
+        assert len(calls) == 1
+        assert [s for s in steps if s.get("kind") == "trim"] == []
+        assert errors[-1]["class"] == ratelimit.BAD_REQUEST
+        assert errors[-1]["bound"] == "not_retryable"
+
+
+class TestContextOverflowSettlesItsReservation:
+    """The DEBIT, not the retry (#388).
+
+    Every model call is admitted on an estimate and debited from a
+    process-global window before it is sent, and the way out owes a correction.
+    A new failure class is a new way out, so the question it has to answer is
+    which of the three `Reservation` outcomes it takes — and a class that took
+    none would leave a debit nothing ever closes, throttling every other
+    session in the process for a full window.
+
+    It takes the same one every non-429 failure takes, and it cannot take a
+    different one by construction: the settle happens in `backends.governed`,
+    INSIDE the call the agent's retry loop wraps. The loop's trim-and-`continue`
+    is reached only after the exception has already passed through there, so it
+    cannot skip it, and the next attempt reserves afresh on the SMALLER history.
+    """
+
+    def failed_call(self, exc, monkeypatch):
+        """One governed call that raises, and the ticket it left behind."""
+        tickets = []
+        real = ratelimit.reserve_for_call
+
+        def capture(key, messages):
+            ticket = real(key, messages)
+            tickets.append(ticket)
+            return ticket
+
+        monkeypatch.setattr(ratelimit, "reserve_for_call", capture)
+
+        def chat(**_kwargs):
+            raise exc
+
+        with pytest.raises(type(exc)):
+            backends.governed(chat, "claude")(
+                model="m", messages=[{"role": "user", "content": "x" * 300}]
+            )
+        # The tokens only: the wall time an entry also carries differs between
+        # two runs of the same call and says nothing about how it settled.
+        entries = ratelimit.governor()._window("claude:m").entries
+        return tickets[-1], [tokens for _when, tokens in entries]
+
+    def test_the_reservation_is_closed_and_the_estimate_stands(self, monkeypatch):
+        """`settle(None)`: the request was sent and the provider may well have
+        read it, so the tokens are NOT refunded — the same direction every
+        non-quota failure errs in."""
+        ticket, entries = self.failed_call(OVERFLOW_400, monkeypatch)
+        assert ticket._closed is True
+        assert entries == [100.0]
+
+    def test_it_settles_exactly_as_a_plain_bad_request_does(self, monkeypatch):
+        """The differential that matters: splitting `BAD_REQUEST` in two must
+        not have given one half a different debit from the other."""
+        malformed = FakeAPIError("Invalid value for 'tools[0].name'", status=400)
+        overflow_ticket, overflow_entries = self.failed_call(OVERFLOW_400, monkeypatch)
+        ratelimit.reset_governor()
+        bad_ticket, bad_entries = self.failed_call(malformed, monkeypatch)
+        assert overflow_ticket._closed == bad_ticket._closed
+        assert overflow_entries == bad_entries
+
+    def test_it_is_not_treated_as_a_quota_refusal(self, monkeypatch):
+        """A 429 keeps the REQUEST debit and drops the tokens, and spells a
+        cooldown. An overflow is neither: the provider did not refuse a rate,
+        so nothing about the pacing may be learned from it."""
+        _ticket, overflow_entries = self.failed_call(OVERFLOW_400, monkeypatch)
+        assert ratelimit.governor()._cooldown_until == {}
+
+        ratelimit.reset_governor()
+        _ticket, quota_entries = self.failed_call(
+            FakeAPIError("slow down", status=429), monkeypatch
+        )
+        assert quota_entries == [0.0]
+        assert overflow_entries != quota_entries
+        assert ratelimit.governor()._cooldown_until != {}
 
 
 class TestEstimate:
