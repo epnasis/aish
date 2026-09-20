@@ -4030,6 +4030,7 @@ class TestAutoTitle:
             recv_until(ws, "approval_request")
             ws.send_json({"type": "stop"})
             assert recv_until(ws, "done")["result"] == CANCELLED_RESULT
+            assert drained(client)  # a negative about the titler needs a finished epilogue
         assert not chat.title_calls
 
     def test_a_fork_earns_its_own_name_at_its_first_turn(self, app_env):
@@ -4096,6 +4097,10 @@ class TestAutoTitle:
         with client, connected(client) as (ws, hello, _):
             name = hello["session"]
             assert self._run(ws, "a question about nothing")["result"] == "hi"
+            # The titler runs off the turn since #397 and shutdown cancels it,
+            # so "it tried" is only a fact once the epilogue has finished — a
+            # slow runner reached the assertion first and saw no call at all.
+            assert drained(client)
         assert chat.title_calls  # it tried
         assert SessionLog._parse(app_env["state_dir"] / name).title is None
 
