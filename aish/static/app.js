@@ -6522,6 +6522,101 @@ function imageLink(alt, imageTarget, url) {
   return link;
 }
 
+// [MATH-START]
+// Mathematical notation (#391): the LaTeX a model writes renders as maths,
+// through the vendored KaTeX. Kept OUT of INLINE_RE like IMAGE_LINK_RE, for
+// the same reason (its group numbers are indexed by hand); findMath is tried
+// beside the other two at each position and the earliest start wins.
+//
+// The unambiguous delimiters — $$…$$, \[…\] (display), \(…\) (inline) — are
+// taken as they come. A single `$` is the ambiguous one: `it costs $5 and the
+// other is $10` is prose, and a Gemini answer writes `$h$` and `$30\text{
+// meters}$` a hundred times. KaTeX's own auto-render leaves `$` OFF for this
+// reason; this is the conservative reading that keeps both, checked against
+// both corpora in test_math_render.js. A `$…$` span is maths only when:
+//   - the opening `$` is not preceded by a letter, digit or `$` (`US$5`), and
+//     is followed by neither whitespace nor `$`;
+//   - the span stays on one line and holds no `$`;
+//   - the closing `$` is preceded by a non-space and followed by neither a
+//     letter nor a digit (`$5-$10`, `$HOME/$PATH`);
+//   - a span that STARTS with a digit must carry a LaTeX marker (\ ^ _ {):
+//     `$30\text{ meters}$` is maths, `$5 for A$ and` is not.
+// Anything refused stays literal text, byte for byte.
+//
+// Rendering is lossless by construction: a span KaTeX cannot parse is put back
+// as its exact source (delimiters included), with KaTeX's message on `title`,
+// so a bad expression looks like it does today and never becomes a half-parse
+// that drops text. The source is model output, so nothing in it may act:
+// KaTeX's `trust` is a function that THROWS for every command that would mint
+// a link, an image or HTML attributes (\href, \url, \includegraphics, \html*),
+// which routes those spans to the same verbatim fallback. `trust: false`
+// alone was measured to render `\href` as a red word with its arguments
+// dropped — inert, but a loss of text. maxSize bounds a hostile \rule and
+// maxExpand a runaway \def.
+// A display span may run over line breaks (the model often puts `$$` on its
+// own lines) but never over a blank line: the block parser splits paragraphs
+// there, exactly as stableBoundary splits a streaming answer, so hot and cold
+// renders agree without this regex knowing about either.
+const MATH_RE = new RegExp(
+  "\\$\\$([\\s\\S]+?)\\$\\$" +
+  "|\\\\\\[([\\s\\S]+?)\\\\\\]" +
+  "|\\\\\\(([\\s\\S]+?)\\\\\\)" +
+  "|\\$(?![\\s$])([^$\\n]*?[^$\\s\\\\])\\$(?![\\p{L}\\p{N}])",
+  "gu"
+);
+const MATH_WORD_RE = /[\p{L}\p{N}$]/u;
+const MATH_MARKER_RE = /[\\^_{]/;
+const KATEX_OPTIONS = {
+  throwOnError: true, // a failed parse is OURS to render verbatim
+  trust: (context) => {
+    throw new Error(`KaTeX: ${context.command} is not rendered from an answer`);
+  },
+  strict: "ignore",
+  maxSize: 10,
+  maxExpand: 1000,
+};
+
+// The earliest maths span in `text`, or null: {index, length, tex, display}.
+function findMath(text) {
+  let from = 0;
+  while (from < text.length) {
+    MATH_RE.lastIndex = from;
+    const m = MATH_RE.exec(text);
+    if (!m) return null;
+    if (m[4] !== undefined) {
+      const before = m.index > 0 ? text[m.index - 1] : "";
+      const startsWithDigit = /^\d/.test(m[4]);
+      if (MATH_WORD_RE.test(before) || (startsWithDigit && !MATH_MARKER_RE.test(m[4]))) {
+        from = m.index + 1;
+        continue;
+      }
+    }
+    const tex = m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4];
+    if (!tex.trim()) { from = m.index + 1; continue; }
+    return { index: m.index, length: m[0].length, tex, display: m[1] !== undefined || m[2] !== undefined };
+  }
+  return null;
+}
+
+function mathNode(source, tex, display) {
+  const span = document.createElement("span");
+  if (!window.katex) { // vendor script missing/blocked — the source, as before
+    span.className = "math-source";
+    span.textContent = source;
+    return span;
+  }
+  try {
+    katex.render(tex, span, { ...KATEX_OPTIONS, displayMode: display });
+    span.className = display ? "math math-display" : "math";
+  } catch (err) {
+    span.className = "math-source";
+    span.title = String((err && err.message) || err);
+    span.textContent = source;
+  }
+  return span;
+}
+// [MATH-END]
+
 function inlineMd(text) {
   const frag = document.createDocumentFragment();
   // [no-chips] (#46) is the model's opt-out from the quick-reply safety net —
@@ -6531,17 +6626,28 @@ function inlineMd(text) {
   while (rest) {
     const inline = rest.match(INLINE_RE);
     const imageLinkMatch = rest.match(IMAGE_LINK_RE);
+    const math = findMath(rest);
     // A tie goes to the image-link: starting at the same index it is the more
     // specific reading, and INLINE_RE would otherwise tear it into three nodes.
     const nested =
       imageLinkMatch && (!inline || imageLinkMatch.index <= inline.index);
-    const match = nested ? imageLinkMatch : inline;
+    let match = nested ? imageLinkMatch : inline;
+    // Maths wins only by starting FIRST: `**$h$**` is bold holding maths (the
+    // strong branch recurses into inlineMd), `$\text{**a**}$` is maths.
+    const maths = math && (!match || math.index < match.index);
+    if (maths) match = math;
     if (!match) {
       frag.appendChild(document.createTextNode(rest));
       break;
     }
     if (match.index > 0) {
       frag.appendChild(document.createTextNode(rest.slice(0, match.index)));
+    }
+    if (maths) {
+      const end = match.index + match.length;
+      frag.appendChild(mathNode(rest.slice(match.index, end), match.tex, match.display));
+      rest = rest.slice(end);
+      continue;
     }
     if (nested) {
       frag.appendChild(imageLink(match[1], match[2], match[3]));

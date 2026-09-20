@@ -40,6 +40,9 @@
      clears it even if boot wedges, so it can never trap the user (#180). -->
 <div id="boot-loader"><div class="spin" role="status" aria-label="Loading"></div></div>
 <link rel="stylesheet" href="style.css">
+<!-- KaTeX (#391): a model's LaTeX renders as maths in the transcript. Same-origin
+     and rev-stamped like highlight.min.js; its fonts are fetched on demand. -->
+<link rel="stylesheet" href="vendor/katex.min.css">
 
 <header id="topbar">
   <!-- nav row: the chats control · chat title (menu) · console · new chat -->
@@ -792,11 +795,14 @@
   </div>
 </div>
 
-<!-- Only two scripts on the critical path now, both deferred so HTML parsing and
-     the boot loader paint without waiting on them. xterm (~285 KB) is NOT here —
+<!-- Three scripts on the critical path, all deferred so HTML parsing and the
+     boot loader paint without waiting on them. xterm (~285 KB) is NOT here —
      it's lazy-loaded by ensureXterm() the first time the console opens, since it
-     is never needed to show a chat (#180). -->
+     is never needed to show a chat (#180). KaTeX (~270 KB, #391) IS here: a
+     replayed answer renders its maths on the same synchronous path as the live
+     one, and there is no moment a chat is shown without renderMarkdown. -->
 <script defer src="vendor/highlight.min.js"></script>
+<script defer src="vendor/katex.min.js"></script>
 <script defer src="app.js"></script>
 </body>
 </html>

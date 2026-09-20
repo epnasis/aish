@@ -755,6 +755,27 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md tr:last-child td { border-bottom: none; }
 .msg.md th { background: var(--bg-elev2); font-weight: 600; }
 
+/* ---- mathematical notation (KaTeX, #391) ---- */
+/* A display equation is one unbreakable line (KaTeX sets white-space: nowrap
+   on it), and a Law-of-Sines derivation is wider than a phone: the wrapper
+   scrolls sideways like .md-table does, instead of the bubble growing past the
+   screen. Vertical padding leaves room for the scrollbar below a fraction. */
+.msg.md .math-display {
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+  padding: 2px 0;
+}
+.msg.md .math-display .katex-display { margin: 0.4em 0; }
+/* A maths span KaTeX could not parse: the exact source, marked so it reads as
+   "this was meant to be an equation" rather than as the model's prose; the
+   parser's message is on its title. */
+.msg.md .math-source {
+  text-decoration: underline dotted var(--dim);
+  text-underline-offset: 3px;
+}
+
 /* ---- inline images (![alt](url), #9) ---- */
 .msg.md .md-img {
   display: block;

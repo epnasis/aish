@@ -66,7 +66,9 @@ const SHELL_ASSETS = [
 // used offline, so bundling it into the offline shell was pure install weight
 // (#180). highlight.min.js IS needed offline (colorizing code in a replayed
 // answer) but is requested with a ?v= rev, so it rides cacheRevvedAssets below
-// with app.js/style.css rather than as an unversioned entry here.
+// with app.js/style.css rather than as an unversioned entry here. KaTeX
+// (#391) rides the same way; its fonts are fetched on first use and cached by
+// the "revalidate" route, so an equation read once reads offline too.
 
 // Live data. These must never be served from a cache: a stale session list or a
 // replayed upload would be worse than an honest failure, and the app already
@@ -112,7 +114,7 @@ async function cacheRevvedAssets(cache) {
     if (!response) return;
     const html = await response.clone().text();
     const refs = [
-      ...html.matchAll(/(?:src|href)="((?:app\.js|style\.css|vendor\/highlight\.min\.js)\?v=[^"]+)"/g),
+      ...html.matchAll(/(?:src|href)="((?:app\.js|style\.css|vendor\/highlight\.min\.js|vendor\/katex\.min\.js|vendor\/katex\.min\.css)\?v=[^"]+)"/g),
     ];
     await Promise.all(
       refs.map(([, ref]) => cache.add(new Request(ref, { cache: "reload" })).catch(() => {}))
