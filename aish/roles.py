@@ -55,7 +55,7 @@ from typing import Any
 
 import yaml
 
-from . import evidence, paths, ratelimit, skills
+from . import atomic_write, evidence, paths, ratelimit, skills
 
 CHARTERS_DIR = Path(__file__).resolve().parent / "charters"
 
@@ -821,9 +821,7 @@ def write_admission(state_dir: os.PathLike | str, admission: Admission) -> Path:
         "charter_digest": admission.charter_digest,
         "cases_digest": admission.cases_digest,
     }
-    tmp = path.with_suffix(f".tmp{os.getpid()}")
-    tmp.write_text(json.dumps(current, indent=1, sort_keys=True))
-    tmp.replace(path)
+    atomic_write.publish(path, json.dumps(current, indent=1, sort_keys=True))
     return path
 
 
