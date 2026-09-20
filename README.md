@@ -833,14 +833,18 @@ hand. Deleting a chat asks the same way.
 
 **Deleting a whole chat is not final.** It goes to **Recently deleted**, a
 collapsed section at the bottom of the chat list, and you can restore it there
-for **30 days** — the conversation and its command audit log come back exactly
-as they were, in the same place in the list. After that aish purges it. What
-the delete does destroy at once, and a restore does not bring back: the chat's
-throwaway scratch workspace, its stored copies of the requests its steps sent,
-and the copy mirrored to your devices (which re-syncs after a restore). In the
-terminal, `aish trash` lists what is there, `aish trash restore <name>` brings
-one back, and `aish trash delete <name>` destroys one for good — that last one
-is the only step here that cannot be undone, and it asks first.
+for **30 days** — the conversation and its command audit log come back as they
+were, in the same place in the list (a pinned chat comes back unpinned). After
+that aish purges it. What the delete does destroy at once, and a restore does
+not bring back: the chat's throwaway scratch workspace and its stored copies of
+the requests its steps sent. The copy mirrored to your devices goes at once
+too, and re-syncs after a restore. In the terminal, `aish trash` lists what is
+there, `aish trash restore <name>` brings one back, and `aish trash delete
+<name>` destroys one for good — that last one is the only step here that
+cannot be undone, and it asks first (y/N). A chat opened in a terminal that
+another client deletes before the terminal writes anything refuses that first
+write and says so, rather than recreating an empty log under the chat's name
+that would block the restore.
 
 **Resuming always switches, never merges.** `aish --resume`, `/resume` in the
 terminal and the web chat list all mean the same thing: the chosen chat

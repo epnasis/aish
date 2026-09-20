@@ -53,8 +53,10 @@ from .embeddings import SemanticIndex
 from .paths import config_home
 from .session import (
     TRASH_MAX_AGE_S,
+    RestoreRefused,
     SessionInfo,
     SessionLog,
+    SessionLogMoved,
     attachment_names,
     list_trash,
     purge_trash,
@@ -2156,19 +2158,47 @@ def _trash_cli(args: list[str]) -> int:
         if not found:
             print(f"{wanted}: not in the trash")
             return 1
+        if len(found) > 1:
+            # A chat deleted, restored and deleted again holds several trash
+            # entries under one chat name. Picking the newest silently would
+            # restore — or destroy for good — a copy nobody named; say which
+            # there are and ask for the entry's own name.
+            print(f"{wanted}: {len(found)} deleted chats have that name — say which entry:")
+            for entry in found:
+                when = datetime.datetime.fromtimestamp(entry.deleted_at).strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+                print(f"  {when}  {entry.path.name}")
+            return 1
+        [entry] = found
         if cmd == "restore":
-            restored = restore_session(state_dir, found[0].path.name)
-            if restored is None:
-                print(f"cannot restore {found[0].name}: a chat already holds that name")
+            try:
+                restored = restore_session(state_dir, entry.path.name)
+            except RestoreRefused as exc:
+                print(f"cannot restore {entry.name}: {exc}")
                 return 1
             print(f"restored {restored.name}")
             return 0
+        # The one step in the trash that cannot be undone, so it asks the way
+        # /delete does — same default, same shape of answer.
+        title = SessionLog._peek_title(entry.path) or "empty chat"
         try:
-            found[0].path.unlink()
+            answer = input(
+                f"{YELLOW}delete '{title}' ({entry.name}) for good?{RESET} "
+                f"it will not be in the trash afterwards and nothing can bring "
+                f"it back [y/N] "
+            ).strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer not in ("y", "yes"):
+            print(f"{DIM}cancelled{RESET}")
+            return 0
+        try:
+            entry.path.unlink()
         except OSError as exc:
-            print(f"cannot delete {found[0].name}: {exc}")
+            print(f"cannot delete {entry.name}: {exc}")
             return 1
-        print(f"deleted {found[0].name} for good")
+        print(f"deleted {entry.name} for good")
         return 0
     print(usage)
     return 2
@@ -2664,44 +2694,51 @@ def main() -> int:
             task = "/clear"
         if not task:
             continue
-        if task.startswith("/"):
-            # /learn and /feedback expand to a task prompt (recall + diff
-            # approvals apply); every other slash is handled inline.
-            expanded = parse_learn(task, lessons_path) or parse_feedback(task)
-            if expanded is None:
-                if handle_slash(
-                    task, agent, logref, state_dir,
-                    config_path=config_path, chips_out=pending_chips,
-                ) == "exit":
-                    return 0
-                continue
-            task = expanded
-        if task.startswith("!"):
-            command = task[1:].strip()
-            if command:
-                logref.command(command, "user-direct")
-                try:
-                    agent.run_user_command(command)
-                except KeyboardInterrupt:
-                    print(f"\n{YELLOW}(command interrupted){RESET}")
-            continue
         try:
-            result = agent.run_task(task)
-            # After a turn ends, the evidence store is swept to its budget
-            # (#352) — here as in the web server, never inside a tool call.
-            _sweep_turns(state_dir)
-            if chip_stream is not None:
-                chip_stream.close()
-            clean, pending_chips = parse_reply_chips(result)
-            if not stream_answers:
-                print(f"\n{GREEN}{_plain(clean)}{RESET}")
-            print_answer_images(agent, result)
-            print_sources(agent)
-            print_chip_menu(pending_chips)
-        except KeyboardInterrupt:
-            print(f"\n{YELLOW}(task interrupted){RESET}")
-        except ModelUnavailable as exc:
-            print(f"\n{RED}model unavailable:{RESET} {exc}{_backend_hint(agent)}")
+            if task.startswith("/"):
+                # /learn and /feedback expand to a task prompt (recall + diff
+                # approvals apply); every other slash is handled inline.
+                expanded = parse_learn(task, lessons_path) or parse_feedback(task)
+                if expanded is None:
+                    if handle_slash(
+                        task, agent, logref, state_dir,
+                        config_path=config_path, chips_out=pending_chips,
+                    ) == "exit":
+                        return 0
+                    continue
+                task = expanded
+            if task.startswith("!"):
+                command = task[1:].strip()
+                if command:
+                    logref.command(command, "user-direct")
+                    try:
+                        agent.run_user_command(command)
+                    except KeyboardInterrupt:
+                        print(f"\n{YELLOW}(command interrupted){RESET}")
+                continue
+            try:
+                result = agent.run_task(task)
+                # After a turn ends, the evidence store is swept to its budget
+                # (#352) — here as in the web server, never inside a tool call.
+                _sweep_turns(state_dir)
+                if chip_stream is not None:
+                    chip_stream.close()
+                clean, pending_chips = parse_reply_chips(result)
+                if not stream_answers:
+                    print(f"\n{GREEN}{_plain(clean)}{RESET}")
+                print_answer_images(agent, result)
+                print_sources(agent)
+                print_chip_menu(pending_chips)
+            except KeyboardInterrupt:
+                print(f"\n{YELLOW}(task interrupted){RESET}")
+            except ModelUnavailable as exc:
+                print(f"\n{RED}model unavailable:{RESET} {exc}{_backend_hint(agent)}")
+        except SessionLogMoved as exc:
+            # A resumed chat whose log another client trashed before this one
+            # wrote anything (#177): the write was refused rather than a stub
+            # created under the live name. Nothing was recorded; the prompt
+            # comes back and the person decides what to do with the chat.
+            print(f"\n{RED}{exc}{RESET}")
 
 
 if __name__ == "__main__":

@@ -3341,9 +3341,81 @@ class TestRecentlyDeleted:
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
             for kind in ("restore_session", "purge_session"):
-                for entry in ("../../session-x.jsonl", "1700-session-20200101-000000-000000.jsonl"):
-                    ws.send_json({"type": kind, "entry": entry})
-                    assert "Recently deleted" in recv_until(ws, "error")["text"]
+                ws.send_json({"type": kind, "entry": "1700-session-20200101-000000-000000.jsonl"})
+                assert "no longer in Recently deleted" in recv_until(ws, "error")["text"]
+                ws.send_json({"type": kind, "entry": "../../session-x.jsonl"})
+                assert recv_until(ws, "error")["text"]
+
+    def test_a_restore_blocked_by_a_live_chat_says_that_and_not_that_it_is_gone(
+        self, app_env
+    ):
+        """`restore_session` refuses for three reasons and the server used to
+        collapse all of them into "no longer in Recently deleted" — false for
+        this one, where the chat IS still there and the owner would go looking
+        in the wrong place (L8: never a cause a line did not check)."""
+        client, _ = make_client(app_env, [model_says("noted")])
+        with client, connected(client) as (ws, hello, _):
+            name = self._deleted_chat(ws, hello)
+            entry = recv_until(ws, "trash_list")["entries"][0]["entry"]
+            recv_until(ws, "session_list")
+            (app_env["state_dir"] / name).write_text(
+                '{"kind": "message", "role": "user", "content": "a newer chat"}\n'
+            )
+            ws.send_json({"type": "restore_session", "entry": entry})
+            text = recv_until_refusal(ws)["text"]
+            assert "already holds that name" in text
+            assert "no longer" not in text
+            ws.send_json({"type": "trash"})
+            assert [e["entry"] for e in recv_until(ws, "trash_list")["entries"]] == [entry]
+
+    def test_a_delete_whose_move_fails_has_changed_nothing(self, app_env, monkeypatch):
+        """The refusal says nothing happened, so nothing may have: the file is
+        where it was, the session is still open, and the viewer is still on
+        it — the move runs BEFORE the viewer hand-off and the close."""
+        monkeypatch.setattr(server_module, "trash_session", lambda *_: None)
+        client, _ = make_client(app_env, [model_says("noted"), model_says("still here")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "remember the zebra"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "delete_session", "name": name})
+            assert "would not move" in recv_until_refusal(ws)["text"]
+            assert (app_env["state_dir"] / name).is_file()
+            # Still this chat, still live: a new turn runs in it without a resume.
+            ws.send_json({"type": "task", "text": "still here?"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "sessions", "query": ""})
+            assert name in [s["name"] for s in recv_until(ws, "session_list")["sessions"]]
+
+    def test_a_cold_chat_another_client_trashed_refuses_its_first_write(
+        self, app_env, monkeypatch
+    ):
+        """The web side of the stub hazard (#177, `SessionLogMoved`): a chat
+        opened cold here — resumed, nothing written, no handle — whose log a
+        terminal `/delete` then trashed. Its first turn must not recreate the
+        log under the live name; it reports the refusal and the turn ends."""
+        from aish.session import SessionLog, list_trash, trash_session
+
+        state_dir = app_env["state_dir"]
+        state_dir.mkdir(parents=True, exist_ok=True)
+        cold = SessionLog.new(state_dir)
+        cold.message({"role": "user", "content": "written before"})
+        cold.close()
+        client, _ = make_client(app_env, [model_says("noted"), model_says("again")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "resume", "path": cold.path.name})
+            recv_until(ws, "replay")
+            # The other client's delete, while this one holds no handle.
+            entry = trash_session(state_dir, cold.path)
+            ws.send_json({"type": "task", "text": "typed after the delete"})
+            text = recv_until_refusal(ws)["text"]
+            assert "nothing was written" in text
+            assert not cold.path.exists(), "no stub under the live name"
+            assert [e.path.name for e in list_trash(state_dir)] == [entry.name]
+            assert b"typed after the delete" not in entry.read_bytes()
+            # The chat is idle again, not stuck busy behind a turn that never ran.
+            ws.send_json({"type": "new"})
+            recv_until(ws, "hello")
 
     def test_the_trash_can_be_read_without_changing_anything(self, app_env):
         client, _ = make_client(app_env, [])

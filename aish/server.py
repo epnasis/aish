@@ -125,7 +125,9 @@ from .session import (
     RATINGS,
     RESUME_MARKER,
     TRASH_MAX_AGE_S,
+    RestoreRefused,
     SessionLog,
+    SessionLogMoved,
     attachment_guidance,
     attachment_names,
     files_named,
@@ -3396,7 +3398,15 @@ class WebServer:
         # before the roster plane (#204): a triggered job showed as idle on
         # every other device until something happened to ask.
         self._touch(session)
-        session.logref.task_start(text)
+        try:
+            session.logref.task_start(text)
+        except SessionLogMoved as exc:
+            # The chat was opened cold on a log that another client has since
+            # trashed (#177): the write was refused rather than recreating the
+            # file, and there is no log to bracket, so this turn never starts.
+            session.bridge.emit({"type": "error", "text": str(exc)})
+            await self._finish_turn(session)
+            return
         # This turn has said nothing yet (#229). Cleared here rather than after
         # the answer, so a turn that is cancelled or fails publishes NO fork
         # anchor instead of the previous turn's.
@@ -4334,19 +4344,19 @@ class WebServer:
                 name=name,
             )
             return
-        if session is not None:
-            # Any client viewing the doomed session lands on a fresh empty one
-            # (the ChatGPT/Claude-app mental model) — move each viewer first so
-            # nobody is left pointing at a closed session. Snapshot the set: each
-            # _new_session → _show → _leave mutates it.
-            for viewer in list(session.viewers):
-                await self._new_session(viewer)
-            session.close()
-            self.sessions.pop(name, None)
-        # A rename only detaches the name from this directory: a terminal aish
-        # holding this file open via --resume keeps appending to the same inode,
-        # now under its trash name — harmless, and a restore brings those lines
-        # back with the rest.
+        # The move comes FIRST, before any viewer is moved or the live session
+        # closed, so a refusal here is a delete that truly did not happen: the
+        # file is where it was, the session is open, every viewer is still on
+        # it. Nothing in the hand-off below writes to this log (`_leave` only
+        # touches viewer sets), so the order is safe.
+        # A rename only detaches the name from this directory. A terminal aish
+        # that has already WRITTEN to this file holds it open and keeps
+        # appending to the same inode, now under its trash name — harmless, and
+        # a restore brings those lines back with the rest. One that resumed it
+        # but has not written yet holds no handle; its first write is refused
+        # (`SessionLogMoved`) rather than recreating the file under the live
+        # name, which would block the restore and leave the trash copy to be
+        # purged.
         # A chat that has never written a line has no file, and nothing to
         # recover — closing it IS the delete. Everything else moves.
         if path.is_file():
@@ -4358,6 +4368,15 @@ class WebServer:
                     client, "could not delete that chat — its log file would not move", name=name
                 )
                 return
+        if session is not None:
+            # Any client viewing the doomed session lands on a fresh empty one
+            # (the ChatGPT/Claude-app mental model) — move each viewer so
+            # nobody is left pointing at a closed session. Snapshot the set: each
+            # _new_session → _show → _leave mutates it.
+            for viewer in list(session.viewers):
+                await self._new_session(viewer)
+            session.close()
+            self.sessions.pop(name, None)
         # The chat's scratch workspace goes with it (#258). Deleting the chat
         # is the ONLY thing that collects it — closing the session no longer
         # does, because the workspace has to survive eviction and restart.
@@ -4420,9 +4439,12 @@ class WebServer:
         """Put a deleted chat back. It returns byte-identical and with its own
         mtime, so it lands exactly where it was in the recency order rather
         than at the top as if it had just been used."""
-        restored = await asyncio.to_thread(restore_session, self.state_dir, entry_name)
-        if restored is None:
-            await self._refuse(client, "that chat is no longer in Recently deleted")
+        try:
+            restored = await asyncio.to_thread(restore_session, self.state_dir, entry_name)
+        except RestoreRefused as exc:
+            # The condition `restore_session` observed, verbatim: a live chat
+            # holding the name is NOT the chat being gone from the trash.
+            await self._refuse(client, str(exc))
             return
         # Every client, like a delete: this one changes what is IN the list on
         # each of them, and a device that kept no copy needs to know there is

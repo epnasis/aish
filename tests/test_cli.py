@@ -948,10 +948,86 @@ def test_trash_cli_lists_restores_and_deletes_for_good(tmp_path, capsys, monkeyp
     scripted_input(monkeypatch, ["2", "y"])
     handle_slash("/delete", agent, logref, tmp_path)
     capsys.readouterr()
+    # The one irreversible step asks first, the way /delete does.
+    scripted_input(monkeypatch, ["y"])
     assert _trash_cli(["delete", doomed.name]) == 0
     assert "for good" in capsys.readouterr().out
     assert list_trash(tmp_path) == []
     assert not doomed.exists()
+
+
+def test_trash_cli_delete_default_answer_keeps_the_entry(tmp_path, capsys, monkeypatch):
+    """The README promises `aish trash delete` asks first; the first cut did
+    not. Enter (or EOF) at the y/N is No, and the entry is still there."""
+    from aish.cli import _trash_cli, handle_slash
+    from aish.session import list_trash
+
+    monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+    agent, logref = two_session_setup(tmp_path)
+    doomed = tmp_path / "session-20260101-000000-000000.jsonl"
+    scripted_input(monkeypatch, ["2", "y"])
+    handle_slash("/delete", agent, logref, tmp_path)
+    capsys.readouterr()
+
+    prompts = []
+    monkeypatch.setattr(builtins, "input", lambda prompt="": prompts.append(prompt) or "")
+    assert _trash_cli(["delete", doomed.name]) == 0  # Enter = No
+    assert "cancelled" in capsys.readouterr().out
+    assert len(prompts) == 1 and "[y/N]" in prompts[0] and "for good" in prompts[0]
+    assert len(list_trash(tmp_path)) == 1
+
+    def eof(_prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", eof)  # Ctrl-D at the prompt = No as well
+    assert _trash_cli(["delete", doomed.name]) == 0
+    assert "cancelled" in capsys.readouterr().out
+    assert len(list_trash(tmp_path)) == 1
+
+
+def test_trash_cli_refuses_an_ambiguous_chat_name(tmp_path, capsys, monkeypatch):
+    """Deleted, restored, deleted again: two trash entries share one chat
+    name. Neither `restore` nor `delete` may silently pick the newest — both
+    list the entries and ask for the entry's own name, which still works."""
+    from aish.cli import _trash_cli
+    from aish.session import SessionLog, list_trash, trash_session
+
+    monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "twice deleted"})
+    log.close()
+    first = trash_session(tmp_path, log.path, now=1_000)
+    log.path.write_text(first.read_text())  # "restored" and edited again
+    second = trash_session(tmp_path, log.path, now=2_000)
+    assert len(list_trash(tmp_path)) == 2
+
+    for cmd in ("restore", "delete"):
+        assert _trash_cli([cmd, log.path.name]) == 1
+        out = capsys.readouterr().out
+        assert "2 deleted chats have that name" in out
+        assert first.name in out and second.name in out
+    assert len(list_trash(tmp_path)) == 2, "nothing was picked for them"
+
+    assert _trash_cli(["restore", second.name]) == 0
+    assert "restored" in capsys.readouterr().out
+    assert log.path.read_text() == first.read_text()
+    assert [e.path.name for e in list_trash(tmp_path)] == [first.name]
+
+
+def test_trash_cli_restore_says_which_condition_it_saw(tmp_path, capsys, monkeypatch):
+    from aish.cli import _trash_cli
+    from aish.session import SessionLog, trash_session
+
+    monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "held"})
+    log.close()
+    trash_session(tmp_path, log.path)
+    log.path.write_text("a newer chat under the same name\n")
+    assert _trash_cli(["restore", log.path.name]) == 1
+    out = capsys.readouterr().out
+    assert "already holds that name" in out
+    assert "no longer" not in out
 
 
 def test_trash_cli_reports_a_name_it_does_not_hold(tmp_path, capsys, monkeypatch):

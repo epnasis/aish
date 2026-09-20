@@ -5,6 +5,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from aish import session as session_module
 from aish.session import (
     CLOSEST_MAX,
@@ -3339,17 +3341,90 @@ class TestTrash:
         log = self._chat(tmp_path)
         session_module.trash_session(tmp_path, log.path)
         for bad in ("", "../session-1.jsonl", "trash/x", log.path.name, "1700-notes.txt"):
-            assert session_module.restore_session(tmp_path, bad) is None
+            with pytest.raises(session_module.RestoreRefused, match="not the name"):
+                session_module.restore_session(tmp_path, bad)
         assert len(session_module.list_trash(tmp_path)) == 1
 
+    def test_restore_says_the_entry_is_gone_only_when_it_is(self, tmp_path):
+        with pytest.raises(session_module.RestoreRefused, match="no longer in Recently deleted"):
+            session_module.restore_session(tmp_path, "1700-session-20200101-000000-000000.jsonl")
+
     def test_restore_never_overwrites_a_live_chat(self, tmp_path):
-        """Recovering one chat must not destroy another."""
+        """Recovering one chat must not destroy another — and the refusal
+        names THAT, not the trash entry being gone: it is still there, and a
+        sentence saying otherwise would send the owner looking in the wrong
+        place (L8)."""
         log = self._chat(tmp_path, "original")
         entry = session_module.trash_session(tmp_path, log.path)
         log.path.write_text('{"kind": "message", "role": "user", "content": "newer"}\n')
-        assert session_module.restore_session(tmp_path, entry.name) is None
+        with pytest.raises(session_module.RestoreRefused) as refused:
+            session_module.restore_session(tmp_path, entry.name)
+        assert "already holds that name" in str(refused.value)
+        assert "no longer" not in str(refused.value)
         assert "newer" in log.path.read_text()
         assert len(session_module.list_trash(tmp_path)) == 1
+
+    def test_a_resumed_session_never_recreates_a_log_the_trash_took(self, tmp_path):
+        """The exact sequence: a terminal resumes a chat (constructs on the
+        existing log, writes nothing — the handle is lazy), another client
+        trashes it, the terminal user types. `open("a")` would recreate a stub
+        under the live name; that stub blocks the restore, and the purge then
+        destroys the only full copy. The write is refused instead, no file
+        appears, and the restore goes through."""
+        original = self._chat(tmp_path, "the whole conversation")
+        body = original.path.read_bytes()
+        resumed = SessionLog(original.path)  # --resume: opened, not written
+        entry = session_module.trash_session(tmp_path, original.path)
+        assert entry is not None
+
+        with pytest.raises(session_module.SessionLogMoved) as refused:
+            resumed.message({"role": "user", "content": "typed after the delete"})
+        assert not original.path.exists(), "no stub was created under the live name"
+        assert "nothing was written" in str(refused.value)
+        assert entry.read_bytes() == body, "the trash copy is untouched"
+
+        restored = session_module.restore_session(tmp_path, entry.name)
+        assert restored == original.path
+        assert restored.read_bytes() == body
+        assert session_module.list_trash(tmp_path) == []
+        # And the refusal was about the file's ABSENCE, not the session: with
+        # the log back where it was, the same session writes to it again.
+        resumed.message({"role": "user", "content": "typed after the restore"})
+        resumed.close()
+        assert b"typed after the restore" in original.path.read_bytes()
+        assert b"typed after the delete" not in original.path.read_bytes()
+
+    def test_a_new_session_still_creates_its_file_on_the_first_record(self, tmp_path):
+        """The guard is for a log that WAS there; a fresh chat had none and
+        keeps creating one lazily, so an unused chat still leaves no file."""
+        fresh = SessionLog.new(tmp_path)
+        assert not fresh.path.exists()
+        fresh.message({"role": "user", "content": "first"})
+        fresh.close()
+        assert fresh.path.is_file()
+
+    def test_a_handle_already_open_follows_the_log_into_the_trash(self, tmp_path):
+        """The other half of the same sequence: a terminal that has already
+        written holds the inode, and its later lines land in the trash copy —
+        a restore brings them back with the rest."""
+        live = SessionLog.new(tmp_path)
+        live.message({"role": "user", "content": "before"})
+        entry = session_module.trash_session(tmp_path, live.path)
+        live.message({"role": "user", "content": "after"})
+        live.close()
+        assert not live.path.exists()
+        assert b"after" in entry.read_bytes()
+
+    def test_a_peek_at_a_trashed_log_does_not_stay_in_the_parse_cache(self, tmp_path):
+        """The Recently deleted list peeks each entry's title, which caches
+        under `trash/`; the listing sweep drops those keys with the rest of
+        this dir's dead ones rather than letting them accumulate."""
+        log = self._chat(tmp_path, "peeked")
+        entry = session_module.trash_session(tmp_path, log.path)
+        assert SessionLog._peek_title(entry) == "peeked"
+        assert str(entry) in session_module._PARSE_CACHE
+        SessionLog._by_recency(tmp_path)
+        assert str(entry) not in session_module._PARSE_CACHE
 
     def test_a_delete_never_overwrites_a_copy_already_in_the_trash(self, tmp_path):
         """`rename` replaces silently on POSIX, so the one thing this mechanism

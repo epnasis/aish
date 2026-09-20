@@ -964,24 +964,39 @@ def list_trash(state_dir: Path) -> list[TrashEntry]:
     return entries
 
 
-def restore_session(state_dir: Path, entry_name: str) -> Path | None:
+class RestoreRefused(Exception):
+    """`restore_session` did not move the chat, and its message is the ONE
+    condition that was observed — never a summary of several. Each surface
+    shows it as-is: a refusal that names a cause a line did not check is the
+    defect L8 in `docs/agent-core.md` exists to stop, and "that chat is no
+    longer in Recently deleted" was being said for a chat that still was."""
+
+
+def restore_session(state_dir: Path, entry_name: str) -> Path:
     """Put a trashed chat back under its own name — the rename that trashed it,
     run backwards, so the log is byte-identical and its mtime never moved.
 
-    None when the name is not a trash entry, when the file is not there, or
-    when a live log already holds that name: recovering one chat must never
-    overwrite another.
+    Raises `RestoreRefused` — saying which — when the name is not a trash
+    entry's, when the entry is no longer there, when a live log already holds
+    that name (recovering one chat must never overwrite another), or when the
+    rename itself failed.
     """
     match = _TRASH_ENTRY_RE.match(entry_name)
     if match is None or Path(entry_name).name != entry_name:
-        return None
+        raise RestoreRefused("that is not the name of a deleted chat")
+    source = trash_dir(state_dir) / entry_name
+    if not source.is_file():
+        raise RestoreRefused("that chat is no longer in Recently deleted")
     target = Path(state_dir) / match.group(2)
     if target.exists():
-        return None
+        raise RestoreRefused(
+            "a chat already holds that name, so this one cannot be put back — "
+            "it is still in Recently deleted"
+        )
     try:
-        (trash_dir(state_dir) / entry_name).rename(target)
-    except OSError:
-        return None
+        source.rename(target)
+    except OSError as exc:
+        raise RestoreRefused(f"its log file would not move: {exc}") from exc
     return target
 
 
@@ -1014,10 +1029,35 @@ def purge_trash(
     return removed
 
 
+class SessionLogMoved(Exception):
+    """A write was refused because the log this session was opened ON is no
+    longer at its path (#177). The message states only what was observed and
+    where a deleted chat would be — never who moved it, which nothing here
+    can see."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        super().__init__(
+            f"nothing was written: this chat's log file has gone from {path} since "
+            "the chat was opened. If it was deleted from another aish client it is "
+            "in Recently deleted — 'aish trash' lists what is there."
+        )
+
+
 class SessionLog:
     def __init__(self, path: Path):
         self.path = path
         self._fh: TextIO | None = None
+        # Whether a log was THERE when this session was opened on it (#177).
+        # The append handle is opened lazily (see `_write_line`), so a resumed
+        # chat that has not spoken yet holds no handle — and if another client
+        # trashes the log in the meantime, the lazy `open("a")` would recreate
+        # a fresh file under the live name holding only the new records. That
+        # stub then blocks the restore (`restore_session` refuses a name a live
+        # log holds) until the purge destroys the only full copy. So a session
+        # that found a file refuses to invent one; a NEW session still creates
+        # its file on the first record, as before.
+        self._had_file = path.exists()
         self._pending_model: str | None = None
         # When this chat last put something in the CONVERSATION, epoch seconds
         # (#203 / #275). Held in memory so a LIVE session can be asked "when did
@@ -2485,11 +2525,15 @@ class SessionLog:
         paths = [path for _, path in stamped]
         # Deleted sessions leave the parse caches with the same sweep that
         # notices them gone. Keys from OTHER state dirs (tests use several)
-        # are not this dir's to prune.
+        # are not this dir's to prune. A peek at a TRASHED log (the Recently
+        # deleted list, #177) caches under `trash/` too; those are never live
+        # here, so this sweep drops them every time — a restore changes the
+        # path anyway, and holding them would only grow the cache.
         live = {str(path) for path in paths}
+        ours = (state_dir, trash_dir(state_dir))
         for cache in (_PARSE_CACHE, _ENTRY_CACHE):
             for spath in [
-                s for s in cache if s not in live and Path(s).parent == state_dir
+                s for s in cache if s not in live and Path(s).parent in ours
             ]:
                 cache.pop(spath, None)
         return paths
@@ -2947,8 +2991,10 @@ class SessionLog:
     def _record(self, kind: str, **fields) -> None:
         with self._write_lock:
             if self._pending_model is not None and kind != "model":
-                pending, self._pending_model = self._pending_model, None
-                self._write_line("model", model=pending)
+                # Cleared only once written: a refused write (`SessionLogMoved`)
+                # must not silently drop which model this chat runs.
+                self._write_line("model", model=self._pending_model)
+                self._pending_model = None
             self._write_line(kind, **fields)
 
     def _write_line(self, kind: str, **fields) -> None:
@@ -2961,6 +3007,12 @@ class SessionLog:
         if SessionLog._is_output(record):
             self.output_at = record_epoch(record) or self.output_at
         if self._fh is None:
+            # A log that was there at open and is not now has been moved (or
+            # deleted) by something else since; refuse rather than recreate it
+            # (#177, see `_had_file`). Checked only on the lazy open — a handle
+            # already held follows the inode, trash name and all.
+            if self._had_file and not self.path.exists():
+                raise SessionLogMoved(self.path)
             # Created on first record, not in __init__: a chat that never
             # gets a message must leave no file — empty session files crowd
             # every recency-ordered list and pile up across restarts.
