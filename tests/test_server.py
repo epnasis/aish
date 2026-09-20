@@ -4098,10 +4098,12 @@ class TestAutoTitle:
             name = hello["session"]
             assert self._run(ws, "a question about nothing")["result"] == "hi"
             # The titler runs off the turn since #397 and shutdown cancels it,
-            # so "it tried" is only a fact once the epilogue has finished — a
-            # slow runner reached the assertion first and saw no call at all.
-            assert drained(client)
-        assert chat.title_calls  # it tried
+            # so "it tried" has to be WAITED for: `done` lands before the
+            # epilogue is even registered, which is why draining `_epilogues`
+            # here was vacuous on a slow runner — the set was still empty.
+            # The fake records a titling call the moment it is asked.
+            assert wait_until(lambda: chat.title_calls)  # it tried
+            assert drained(client)  # and finished, so the title verdict is final
         assert SessionLog._parse(app_env["state_dir"] / name).title is None
 
 
@@ -4156,7 +4158,12 @@ def wait_until(predicate, timeout: float = 5.0) -> bool:
 def drained(client) -> bool:
     """Every post-turn task has finished — the point after which a NEGATIVE
     claim about what the titler did is a claim about a completed fact, not
-    about a task that may simply not have run yet."""
+    about a task that may simply not have run yet.
+
+    Only meaningful AFTER something has proved the epilogue was registered
+    (the titler was asked, a `session_renamed` arrived): `done` reaches the
+    client before `_after_turn` runs, so straight after `done` the set can
+    still be empty and this answers True about nothing."""
     return wait_until(lambda: not client.app.state.server._epilogues)
 
 
