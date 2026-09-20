@@ -2042,6 +2042,11 @@ class WebServer:
         # moment no client is watching that name, which is the whole of the
         # "watchers run only while a viewer has the sheet open" rule.
         self._browse_watchers: dict[str, asyncio.Task] = {}
+        # Work that follows an answer but is not part of the turn (#397): the
+        # completion push and the titling call. Held here only so the tasks
+        # survive `session.runner` moving on to the next turn, and so shutdown
+        # can cancel them.
+        self._epilogues: set[asyncio.Task] = set()
         self.worker_pool = ThreadPoolExecutor(
             max_workers=WORKER_POOL_SIZE, thread_name_prefix="aish-worker"
         )
@@ -2193,6 +2198,10 @@ class WebServer:
             if not task.done():
                 task.cancel()
         self._browse_watchers.clear()
+        for task in list(self._epilogues):
+            if not task.done():
+                task.cancel()  # a name or a push is never worth holding exit for
+        self._epilogues.clear()
         self.worker_pool.shutdown(wait=False, cancel_futures=True)
         for client in list(self.clients):
             with contextlib.suppress(Exception):
@@ -3425,6 +3434,9 @@ class WebServer:
         # anchor instead of the previous turn's.
         session.logref.last_answer_id = ""
         failure = ""  # set by either except arm; recorded on the way out
+        # What the post-answer work needs, taken while the turn still owns the
+        # session (#397); None until the answer has landed.
+        finished: tuple[str, tuple[str, str] | None] | None = None
         try:
             if resume and isinstance(session.agent, Agent):
                 # Keep the interrupted task's own tool output verbatim (#164):
@@ -3468,9 +3480,14 @@ class WebServer:
             if sources:
                 done["sources"] = list(sources)
             session.bridge.emit(done)
-            await self._notify_done(session, result)
-            if result != CANCELLED_RESULT:  # a stopped turn named nothing
-                await self._maybe_retitle(session)  # name it for its subject (#175)
+            # The turn is over for the client at `done`, so it must be over
+            # for the owner too (#397): busy clears in the `finally` below,
+            # and the push and the titling call run AFTER it, off the turn.
+            # The titler's source is read here — synchronously, before
+            # anything yields — because the moment busy clears the next turn
+            # owns `agent.messages` (L2). A stopped turn named nothing.
+            titling = None if result == CANCELLED_RESULT else self._title_request(session)
+            finished = (result, titling)
         except ModelUnavailable as exc:
             failure = f"model unavailable: {exc}{_backend_hint(session.agent)}"
             session.bridge.emit({"type": "error", "text": failure})
@@ -3491,6 +3508,32 @@ class WebServer:
             else:
                 session.logref.task_end()
             await self._finish_turn(session)
+        if finished is not None:
+            self._after_turn(session, *finished)
+
+    def _after_turn(
+        self, session: Session, result: str, titling: tuple[str, str] | None
+    ) -> None:
+        """Spawn the post-answer work — the completion push, then the titling
+        call — as its own task, once the turn has ended (#397).
+
+        Neither touches anything the next turn owns: the push reads only its
+        own arguments and the session's viewers, the titler was handed its
+        source before busy cleared and writes a `title` record under the
+        log's own lock. Held in `_epilogues` because `session.runner` is the
+        NEXT turn by now, and asyncio keeps no strong reference of its own."""
+
+        async def run() -> None:
+            try:
+                await self._notify_done(session, result)
+                if titling is not None:
+                    await self._retitle(session, *titling)
+            except Exception:  # noqa: BLE001 — a push or a name is never worth a crash
+                log.exception("post-turn work failed")
+
+        task = asyncio.ensure_future(run())
+        self._epilogues.add(task)
+        task.add_done_callback(self._epilogues.discard)
 
     async def _run_user_command(self, session: Session, command: str) -> None:
         """A ! command: run the typed text directly as the user's own action —
@@ -5906,14 +5949,25 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return True  # the title is still the raw prompt — always worth replacing
         return title_drifted(WebServer._title(session), recent)
 
-    async def _maybe_retitle(self, session: Session) -> None:
-        """Name the chat after what it is about, once a turn has finished."""
+    def _title_request(self, session: Session) -> tuple[str, str] | None:
+        """(current title, source to name from) if the turn that just finished
+        earns a titling call, else None. Synchronous on purpose (#397): it is
+        the only reader of `agent.messages` in the titler, and it runs while
+        the turn still owns them — the call itself happens off the turn, from
+        this copy, so the next turn can append whatever it likes meanwhile."""
         turns = sum(
             1 for m in getattr(session.agent, "messages", [])[1:] if m.get("role") == "user"
         )
         current, body, recent = self._title_source(session)
         if not body or not self._retitle_due(session, turns, recent):
-            return
+            return None
+        return current, body
+
+    async def _retitle(self, session: Session, current: str, body: str) -> None:
+        """Name the chat after what it is about, from a source already read.
+        Runs after the turn has ended, so everything checked before the model
+        call is re-checked after it: the owner may have renamed the chat
+        meanwhile (his name stands, permanently), or closed it."""
         try:
             title = await asyncio.wait_for(
                 asyncio.to_thread(self._model_session_title, session, current, body),
@@ -5924,6 +5978,10 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         session.retitle_forced = False  # attempted; don't re-force on the next turn
         if not title or title == current:
             return
+        if session.custom_title and not session.title_auto:
+            return  # hand-typed while the model was thinking: the owner's call
+        if self.sessions.get(session.name) is not session:
+            return  # evicted or deleted meanwhile: its log is closed, or gone
         title = title[:RENAME_MAX]
         await asyncio.to_thread(session.logref.log.set_title, title, True)
         session.custom_title = title
