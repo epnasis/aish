@@ -3417,6 +3417,40 @@ class TestRecentlyDeleted:
             ws.send_json({"type": "new"})
             recv_until(ws, "hello")
 
+    def test_a_rename_on_a_chat_another_client_trashed_is_refused_not_dropped(
+        self, app_env
+    ):
+        """The same hazard on every OTHER write — a rename, a rating — is
+        caught once at the dispatch seam (`_handle`), not per site: left to
+        propagate, `SessionLogMoved` closed this client's websocket. The
+        refusal is the log's own sentence, the socket stays open, the request
+        is still receipted, and no stub appears under the live name."""
+        from aish.session import SessionLog, list_trash, trash_session
+
+        state_dir = app_env["state_dir"]
+        state_dir.mkdir(parents=True, exist_ok=True)
+        cold = SessionLog.new(state_dir)
+        cold.message({"role": "user", "content": "written before"})
+        cold.close()
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "resume", "path": cold.path.name})
+            recv_until(ws, "replay")
+            entry = trash_session(state_dir, cold.path)
+            ws.send_json({
+                "type": "rename_session", "name": cold.path.name, "title": "renamed", "rid": "r1",
+            })
+            refusal = recv_until_refusal(ws)
+            assert "nothing was written" in refusal["text"]
+            assert refusal["name"] == cold.path.name
+            assert recv_until(ws, "ack")["rid"] == "r1"
+            assert not cold.path.exists(), "no stub under the live name"
+            assert [e.path.name for e in list_trash(state_dir)] == [entry.name]
+            assert b"renamed" not in entry.read_bytes()
+            # Still connected, still idle: the next request is served.
+            ws.send_json({"type": "new"})
+            recv_until(ws, "hello")
+
     def test_the_trash_can_be_read_without_changing_anything(self, app_env):
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):

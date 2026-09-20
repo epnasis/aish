@@ -2657,7 +2657,20 @@ class WebServer:
         so a raise means no receipt — an action that blew up did not happen,
         and the client must hear that as loudly as one that never arrived.
         """
-        await self._dispatch_message(client, message)
+        try:
+            await self._dispatch_message(client, message)
+        except SessionLogMoved as exc:
+            # Any write to a chat opened cold whose log another client has
+            # since trashed (#177) — a rename, a rating, whatever comes next —
+            # is refused by the log rather than recreating a stub under the
+            # live name. Caught ONCE, here, where every handler passes: left to
+            # propagate it closed this client's websocket, which is the method
+            # being wrong, not one site. The refusal is the log's own sentence
+            # (observation only) and the client stays connected; the receipt
+            # below still goes out, because the request WAS heard and handled,
+            # like every other refusal. The task path cannot be covered here —
+            # `_run_task` runs as its own future — so it keeps its own catch.
+            await self._refuse(client, str(exc), name=str(message.get("name", "")))
         rid = message.get("rid")
         if rid:
             await client.ws.send_json({"type": "ack", "rid": str(rid)})
