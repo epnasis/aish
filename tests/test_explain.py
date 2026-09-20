@@ -8,6 +8,8 @@ removed" — the three states redaction and a purgeable evidence store create.
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from aish import agent as agent_module
 from aish import evidence
 from aish import explain as explain_mod
@@ -1644,6 +1646,224 @@ class TestTheStepList:
         # …and the discarded attempt does not claim it.
         assert "retry" not in [s["kind"] for s in
                                explain_mod.dossier(lg.turns[0], lg, tmp_path)["steps"]]
+
+
+class TestTheKnowledgeStep:
+    """Pre-flight recall is a step of the ledger (#386): the "Recalled
+    knowledge" row has somewhere to land. The step carries what was recalled
+    with the per-item retrieval diagnostics (#183) and the text it was injected
+    as — read off the turn's own brief by position (#239), and refused in words
+    wherever the brief cannot answer."""
+
+    @pytest.fixture(autouse=True)
+    def _opt_in(self, project_scope):
+        """Corpus lives in the project's .aish — explicit opt-in (#178 P0-1)."""
+
+    @staticmethod
+    def _write_skill(cwd, name, body):
+        skills_dir = cwd / ".aish" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: Use when zzfrobbing\n---\n{body}"
+        )
+
+    @staticmethod
+    def _write(path, records):
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    def test_the_real_loop_lands_the_step_with_the_text_it_sent(self, tmp_path):
+        """Driven through the real seed path, not a hand-shaped log: the
+        `knowledge` step, the brief and the evidence bytes are all the agent's
+        own, and the text on the step is byte-identical to the reminder the
+        model was handed."""
+        self._write_skill(tmp_path, "zzfrob", "Pull the zzfrob lever twice.")
+        agent, chat, log = make_logged_agent([model_says("done")], tmp_path, cwd=str(tmp_path))
+        # Bracketed as the web server brackets it: the seed-time records land
+        # inside the turn they describe (docs/diagnostics.md, turn bracketing).
+        log.task_start("please zzfrob the thing")
+        agent.run_task("please zzfrob the thing")
+        log.task_end()
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        (step,) = [s for s in doc["steps"] if s["kind"] == "knowledge"]
+        assert step["id"] == "k1" and step["panes"] == ["event"]
+        assert step["title"] == "recalled knowledge"
+        assert step["n"] < next(s["n"] for s in doc["steps"] if s["kind"] == "model_call")
+        assert step["before"] == 1
+        assert [it["label"] for it in step["items"]] == ["zzfrob"]
+        assert step["items"][0]["kind"] == "skill"
+        assert {"rail", "score"} & set(step["items"][0]) or "sim" in step["items"][0]
+        reminder = step["reminder"]
+        assert reminder["state"] == explain_mod.RECORDED
+        assert reminder["why"] is None
+        assert reminder["located"] == explain_mod.REMINDER_BY_POSITION
+        # The role on the wire, as the brief declared it: the fake backend is
+        # the ollama shape, where a system message IS a system message.
+        assert reminder["system_role"] == "all_system"
+        # The bytes the model was sent, whole — the system message at that
+        # position of the request the fake backend received.
+        sent = chat.calls[0]["messages"][reminder["at"]]
+        assert sent["role"] == "system"
+        assert reminder["text"] == sent["content"]
+        assert "Pull the zzfrob lever twice." in reminder["text"]
+        assert reminder["chars"] == len(sent["content"])
+        assert {"k": "recalled", "v": "1 (1 skill)"} in step["facts"]
+        assert any(f["k"] == "injected text" and f["v"].startswith("recorded")
+                   for f in step["facts"])
+        assert json.loads(json.dumps(doc))["steps"]  # crosses the wire whole
+
+    def test_a_log_older_than_the_brief_says_not_recorded(self, tmp_path):
+        """The `knowledge` record predates the brief (#183 vs #239). Nothing may
+        be rebuilt from the item labels: the pane says the text is not on
+        record."""
+        path = tmp_path / "session-old.jsonl"
+        tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
+        self._write(path, [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            tr({"kind": "knowledge", "mode": "lexical",
+                "items": [{"label": "a-memory", "kind": "memory", "score": 3}]}),
+            {"ts": "t", "kind": "message", "role": "user", "content": "go", "model_call": 0},
+            tr({"kind": "reasoning", "model_call": 1, "text": "first", "tokens": [10, 2]}),
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ])
+        lg = explain_mod.load(path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        assert [s["kind"] for s in doc["steps"]] == ["knowledge", "model_call"]
+        step = doc["steps"][0]
+        assert step["reminder"]["state"] == explain_mod.MISSING
+        assert step["reminder"]["why"] == explain_mod.REMINDER_NO_BRIEF
+        assert step["reminder"]["text"] is None and step["reminder"]["located"] is None
+        assert {"k": "injected text", "v": "not recorded"} in step["facts"]
+        assert {"k": "recalled", "v": "1 (1 memory)"} in step["facts"]
+
+    def test_a_brief_that_kept_no_system_text_is_not_recorded_never_on_record(self, tmp_path):
+        """The #239 stratum before the system half joined the brief: a `brief`
+        with no `system` field at all. `_given` reports its system state as
+        not_recorded, and this step must agree — folding it into `not_located`
+        would print "on record" about a log with nothing on record."""
+        path = tmp_path / "session-239.jsonl"
+        tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
+        self._write(path, [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            tr({"kind": "knowledge", "mode": "semantic",
+                "items": [{"label": "s", "kind": "skill", "sim": 0.5, "rail": 1}]}),
+            {"ts": "t", "kind": "message", "role": "user", "content": "go", "model_call": 0},
+            tr({"kind": "brief", "model_call": 1, "tools": {"count": 0},
+                "options": {"model": "m", "provider": "gemini", "system_role": "first_only"}}),
+            tr({"kind": "reasoning", "model_call": 1, "text": "first", "tokens": [10, 2]}),
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ])
+        lg = explain_mod.load(path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        assert doc["given"]["briefs"][0]["system"]["state"] == explain_mod.MISSING
+        step = doc["steps"][0]
+        assert step["kind"] == "knowledge"
+        assert step["reminder"]["state"] == explain_mod.MISSING
+        assert step["reminder"]["why"] == explain_mod.REMINDER_SYSTEM_NOT_KEPT
+        assert step["reminder"]["text"] is None and step["reminder"]["candidates"] == 0
+        assert step["reminder"]["system_role"] == "first_only"
+        assert {"k": "injected text", "v": "not recorded"} in step["facts"]
+
+    def test_the_role_on_the_wire_rides_on_the_step(self, tmp_path):
+        """A `first_only` provider sends the reminder as a USER message (#74);
+        the brief records that, and the step carries it so no renderer can
+        call it a system message the model never saw."""
+        for provider, role in (("gemini", "first_only"), ("ollama", "all_system")):
+            path = tmp_path / f"session-{provider}.jsonl"
+            tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
+            prompt = evidence.put("the standing prompt", tmp_path)
+            reminder = evidence.put("<system-reminder>the reminder</system-reminder>", tmp_path)
+            self._write(path, [
+                {"ts": "t", "kind": "task_start", "prompt": "go"},
+                tr({"kind": "knowledge", "mode": "semantic",
+                    "items": [{"label": "s", "kind": "skill", "sim": 0.5, "rail": 1}]}),
+                {"ts": "t", "kind": "message", "role": "user", "content": "go", "model_call": 0},
+                tr({"kind": "brief", "model_call": 1,
+                    "system": [{"at": 0, "chars": 19, "digest": prompt},
+                               {"at": 1, "chars": 45, "digest": reminder}],
+                    "tools": {"count": 0},
+                    "options": {"model": "m", "provider": provider, "system_role": role}}),
+                tr({"kind": "reasoning", "model_call": 1, "text": "first", "tokens": [10, 2]}),
+                {"ts": "t", "kind": "task_end", "status": "ok"},
+            ])
+            lg = explain_mod.load(path)
+            step = explain_mod.dossier(lg.turns[0], lg, tmp_path)["steps"][0]
+            assert step["reminder"]["state"] == explain_mod.RECORDED, provider
+            assert step["reminder"]["system_role"] == role, provider
+            assert step["reminder"]["text"] == "<system-reminder>the reminder</system-reminder>"
+
+    def test_two_briefs_for_the_first_call_are_refused_not_picked(self, tmp_path):
+        """The writer emits one brief per model call. Two for call 1 is a log
+        this reader does not know; picking the last would be a guess."""
+        path = tmp_path / "session-two.jsonl"
+        tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
+        a = evidence.put("prompt", tmp_path)
+        b = evidence.put("reminder", tmp_path)
+        brief = {"kind": "brief", "model_call": 1,
+                 "system": [{"at": 0, "chars": 6, "digest": a}, {"at": 1, "chars": 8, "digest": b}],
+                 "tools": {"count": 0}, "options": {"model": "m", "provider": "ollama"}}
+        self._write(path, [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            tr({"kind": "knowledge", "mode": "semantic",
+                "items": [{"label": "s", "kind": "skill", "sim": 0.5, "rail": 1}]}),
+            {"ts": "t", "kind": "message", "role": "user", "content": "go", "model_call": 0},
+            tr(dict(brief)), tr(dict(brief)),
+            tr({"kind": "reasoning", "model_call": 1, "text": "first", "tokens": [10, 2]}),
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ])
+        lg = explain_mod.load(path)
+        step = explain_mod.dossier(lg.turns[0], lg, tmp_path)["steps"][0]
+        assert step["reminder"]["state"] == explain_mod.KNOWLEDGE_NOT_LOCATED
+        assert step["reminder"]["candidates"] == 2
+        assert step["reminder"]["text"] is None
+
+    def test_purged_bytes_are_purged_not_missing(self, tmp_path):
+        """Three states, never two (docs/diagnostics.md)."""
+        self._write_skill(tmp_path, "zzfrob", "Pull the lever.")
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path, cwd=str(tmp_path))
+        log.task_start("please zzfrob the thing")
+        agent.run_task("please zzfrob the thing")
+        log.task_end()
+        (brief,) = steps(log.path, "brief")
+        reminder_part = [p for p in brief["system"] if p["at"] != 0]
+        assert len(reminder_part) == 1
+        evidence.purge(reminder_part[0]["digest"], tmp_path)
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        (step,) = [s for s in doc["steps"] if s["kind"] == "knowledge"]
+        assert step["reminder"]["state"] == explain_mod.PURGED
+        assert step["reminder"]["text"] is None
+        assert {"k": "injected text", "v": "recorded, then deleted"} in step["facts"]
+
+    def test_a_brief_of_another_shape_is_refused_not_guessed(self, tmp_path):
+        """The join is positional — the one system part beside the standing
+        prompt — and it is a fact about the writer. A brief with two such
+        parts is a writer this reader does not know; it says so rather than
+        picking one."""
+        path = tmp_path / "session-odd.jsonl"
+        tr = lambda step: {"ts": "t", "kind": "trace", "step": step}  # noqa: E731
+        a = evidence.put("first extra system text", tmp_path)
+        b = evidence.put("second extra system text", tmp_path)
+        self._write(path, [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            tr({"kind": "knowledge", "mode": "semantic",
+                "items": [{"label": "s", "kind": "skill", "sim": 0.5, "rail": 1}]}),
+            {"ts": "t", "kind": "message", "role": "user", "content": "go", "model_call": 0},
+            tr({"kind": "brief", "model_call": 1,
+                "system": [{"at": 0, "chars": 1, "digest": a},
+                           {"at": 1, "chars": 23, "digest": a},
+                           {"at": 2, "chars": 24, "digest": b}],
+                "tools": {"count": 0}, "options": {"model": "m", "provider": "ollama"}}),
+            tr({"kind": "reasoning", "model_call": 1, "text": "first", "tokens": [10, 2]}),
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ])
+        lg = explain_mod.load(path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        step = doc["steps"][0]
+        assert step["kind"] == "knowledge"
+        assert step["reminder"]["state"] == explain_mod.KNOWLEDGE_NOT_LOCATED
+        assert step["reminder"]["candidates"] == 2
+        assert step["reminder"]["text"] is None
 
 
 class TestUsageOnTheReasoningRecord:

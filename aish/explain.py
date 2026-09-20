@@ -1796,10 +1796,25 @@ STEP_STEERING = "steering"
 STEP_BRIEF_CHANGED = "brief_changed"
 STEP_MODEL_ERROR = "model_error"
 STEP_RETRY = "retry"
+STEP_KNOWLEDGE = "knowledge"
 # Between-round kinds share one pane: the fact and its numbers.
 EVENT_STEPS = frozenset(
-    {STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED, STEP_MODEL_ERROR, STEP_RETRY}
+    {STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED, STEP_MODEL_ERROR, STEP_RETRY, STEP_KNOWLEDGE}
 )
+# The injected text of a `knowledge` step could not be told apart from the
+# other system parts of the brief (see _reminder): a state of its own, because
+# "the record has it and this reader cannot point at it" is a different answer
+# from "not recorded" and from "purged".
+KNOWLEDGE_NOT_LOCATED = "not_located"
+# How the reminder was found: by its POSITION on the turn's own brief. Said on
+# the step so a renderer can label the join, the way `placement` is.
+REMINDER_BY_POSITION = "brief_position"
+# WHY a knowledge step's injected text is `not_recorded` — two different logs:
+# no brief was written for the turn's first model call (a log predating #239,
+# or a turn cancelled before its first call), or a brief was written whose
+# system half was not kept (the #239 stratum before the system text joined it).
+REMINDER_NO_BRIEF = "no_brief"
+REMINDER_SYSTEM_NOT_KEPT = "system_not_kept"
 
 PANE_CONTEXT = "context"
 PANE_RESPONSE = "response"
@@ -2069,6 +2084,94 @@ def _event_step(kind: str, record: dict, facts: list[dict], **extra) -> dict:
     return {"kind": kind, "panes": [PANE_EVENT], "facts": facts, "record": record, **extra}
 
 
+def _reminder(doc: dict) -> dict:
+    """The per-task system message that carried the recalled knowledge into
+    the turn (#386) — located on this turn's own brief, never rebuilt.
+
+    The knowledge record names WHAT was recalled; the text the model was
+    actually handed is the per-task reminder (`agent.task_reminder`: the time
+    note, the rules in force, the preloaded knowledge), and that text is on
+    record only as one of the brief's system parts (#239) — by position and
+    digest, unlabelled. The join is positional: the loop keeps exactly two
+    system-role messages in front of a turn's first model call, the standing
+    prompt at position 0 and the reminder appended at seed (every earlier
+    reminder is stripped first), so the reminder is the one system part of the
+    brief written at model call 1 that is not at position 0. That is a fact
+    about the writer, not about the record, so the step says how it was found
+    and refuses when the brief does not have that shape: a brief with no part
+    beside the standing prompt, or with two, is `not_located` — the reader
+    cannot tell which, and a wrong text shown as "what the model was handed"
+    is the lie this whole reader exists to prevent. `not_located` is reserved
+    for a brief that HAS a system half of the wrong shape; a brief that kept
+    no system half at all is `not_recorded`, with `why` saying which of the
+    two not-recorded logs this is.
+    """
+    absent = {"state": MISSING, "why": None, "located": None, "at": None, "chars": None,
+              "digest": None, "text": None, "candidates": 0, "system_role": None}
+    briefs = [b for b in doc["given"]["briefs"]
+              if b["written_here"] and b.get("model_call") == 1]
+    if not briefs:
+        return {**absent, "why": REMINDER_NO_BRIEF}
+    if len(briefs) > 1:
+        # The writer emits one brief per model call; two for call 1 is a log
+        # this reader does not know, and picking one would be a guess.
+        return {**absent, "state": KNOWLEDGE_NOT_LOCATED, "candidates": len(briefs)}
+    brief = briefs[0]
+    # How the provider carried it on the wire (#74): a `first_only` provider
+    # relabels the reminder as a USER message, so "system message" would
+    # describe something the model never saw. Recorded on the brief for
+    # exactly this; None where the log predates the field.
+    system_role = (brief.get("options") or {}).get("system_role") or None
+    system = brief.get("system") or {}
+    if system.get("state") == MISSING:
+        # A brief WAS written; its system half was not kept (the #239 stratum
+        # before the system text was recorded). Different from "no brief", and
+        # from "on record but unlocatable" — nothing here is on record.
+        return {**absent, "why": REMINDER_SYSTEM_NOT_KEPT, "system_role": system_role}
+    parts = [p for p in system.get("parts") or [] if p.get("at") != 0]
+    if len(parts) != 1:
+        return {**absent, "state": KNOWLEDGE_NOT_LOCATED, "candidates": len(parts),
+                "system_role": system_role}
+    part = parts[0]
+    return {
+        "state": part["state"],
+        "why": None,
+        "located": REMINDER_BY_POSITION,
+        "at": part["at"],
+        "chars": part["chars"],
+        "digest": part["digest"],
+        "text": part["text"],
+        "candidates": 1,
+        "system_role": system_role,
+    }
+
+
+def _knowledge_step(step: dict, doc: dict, sid: str, before: int | None) -> dict:
+    """The pre-flight recall as a step of the ledger (#386): what was recalled,
+    with the retrieval diagnostics the record kept per item (#183), and the
+    text it was injected as."""
+    items = [dict(it) for it in step.get("items") or []]
+    skills = sum(1 for it in items if it.get("kind") == "skill")
+    memories = len(items) - skills
+    counts = " · ".join(
+        s for s in (
+            f"{skills} skill{'' if skills == 1 else 's'}" if skills else "",
+            f"{memories} memor{'y' if memories == 1 else 'ies'}" if memories else "",
+        ) if s
+    )
+    reminder = _reminder(doc)
+    injected = {
+        RECORDED: f"recorded · {_fmt_n(reminder['chars'])} chars",
+        PURGED: "recorded, then deleted",
+        KNOWLEDGE_NOT_LOCATED: "on record, but this reader cannot tell which system part it is",
+    }.get(reminder["state"], "not recorded")
+    facts = [{"k": "recalled", "v": f"{len(items)}" + (f" ({counts})" if counts else "")},
+             {"k": "mode", "v": str(step.get("mode") or "not recorded")},
+             {"k": "injected text", "v": injected}]
+    return _event_step(STEP_KNOWLEDGE, dict(step), facts, id=sid, title="recalled knowledge",
+                       items=items, reminder=reminder, before=before)
+
+
 def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
     """The turn as an ordered list of steps, in the order they happened.
 
@@ -2159,6 +2262,8 @@ def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
                                      [{"k": "chars", "v": _fmt_n(len(text))}],
                                      id=event_id("s"), title="you typed while it ran",
                                      text=text, before=before(index)))
+        elif kind == "knowledge":
+            steps.append(_knowledge_step(step, doc, event_id("k"), before(index)))
         elif kind == "reasoning":
             recorded = step.get("model_call")
             number = int(recorded or model_seen + 1)

@@ -3174,10 +3174,13 @@ function traceStep(step) {
     const parts = [];
     if (nSkill) parts.push(`${nSkill} skill${nSkill === 1 ? "" : "s"}`);
     if (nMem) parts.push(`${nMem} ${nMem === 1 ? "memory" : "memories"}`);
-    const { main } = traceRow(
+    const { main, row } = traceRow(
       t, traceSvg("knowledge", "var(--yellow)"), "Recalled knowledge",
       `${parts.join(" · ") || items.length} from past work`
     );
+    // A step of the record (#386): the dossier's `knowledge` step, counted per
+    // kind in card order like the other between-round rows (inspectKeys).
+    row.classList.add("step-knowledge");
     if (items.length) {
       const chips = document.createElement("div");
       chips.className = "know-chips";
@@ -4375,6 +4378,7 @@ function inspectKeys(rows) {
     if (cl.contains("step-steer")) { ids[i] = `s${next("s")}`; return; }
     if (cl.contains("step-model-error")) { ids[i] = `e${next("e")}`; return; }
     if (cl.contains("step-retry")) { ids[i] = `retry${next("retry")}`; return; }
+    if (cl.contains("step-knowledge")) { ids[i] = `k${next("k")}`; return; }
   });
   return ids;
 }
@@ -12691,6 +12695,28 @@ const SS_STATE_WORDS = {
   unreadable: "recorded, but the stored bytes are unreadable",
   fragments: "only a fragment was kept — this log predates the full record",
 };
+// What a knowledge step can say about the text it was injected as (#386,
+// explain._reminder). `recorded` needs no words; `purged` is in SS_STATE_WORDS.
+// `not_recorded` is two different logs, told apart by `why`: no brief at all,
+// or a brief whose system half was not kept — neither has anything on record.
+// `not_located` is reserved for a brief that HAS a system half of the wrong
+// shape.
+const SS_REMINDER_WORDS = {
+  not_recorded: "not recorded — the aish that wrote this log did not keep it",
+  no_brief: "not recorded — no brief was written at this turn's first model call",
+  system_not_kept: "not recorded — a brief was written at this turn's first model call, but the aish that wrote this log did not keep its system text",
+  not_located: "on record, but this reader cannot tell which system part carried it — the brief does not have the shape the reminder is written in",
+};
+// How the provider carried the per-task reminder on the wire (#74,
+// backends.SYSTEM_ROLE_POLICY, recorded on the brief as `options.system_role`).
+// Only `all_system` is a system message as the model saw it; a `first_only`
+// provider relabels it as a USER message, and saying "system message" there
+// would describe an authority the model was never given.
+const SS_REMINDER_ROLE_WORDS = {
+  all_system: "the per-task system message that carried it",
+  hoisted: "the per-task reminder that carried it — hoisted into the request's system parameter on this provider",
+  first_only: "the per-task reminder that carried it — sent as a USER message on this provider, which keeps only the first system message (#74)",
+};
 // How the round grouping was arrived at. `recorded` needs no words; the other
 // two do.
 const SS_GROUPING_WORDS = {
@@ -12766,6 +12792,7 @@ function ssStepIcon(doc, step) {
   }
   if (step.kind === "steering") return traceSvg("chat", "var(--blue)");
   if (step.kind === "model_error") return traceSvg("denied", "var(--red)");
+  if (step.kind === "knowledge") return traceSvg("knowledge", "var(--yellow)");
   return traceSvg("dot", "var(--dim)"); // trim, retry, brief_changed
 }
 
@@ -13358,8 +13385,49 @@ function ssEventSegs(doc, step) {
     b.rec(step.record || {});
   } else if (step.kind === "brief_changed") {
     b.meta("the brief this call was handed is in that model call's whole context");
+  } else if (step.kind === "knowledge") {
+    ssKnowledgeSegs(step, b);
   }
   return b.segs;
+}
+
+// The pre-flight recall as a pane (#386): each item with the retrieval numbers
+// the record kept for it (#183), then the text it was injected AS. That text is
+// the per-task system message — the step says how it was located (by position
+// on this turn's brief, the one system part beside the standing prompt) — and
+// it carried the time note and the rules in force in the same message, so it
+// is shown WHOLE and labelled as the message, never cut down to "the knowledge"
+// (fidelity: payload is shown exactly as the model received it). Where the
+// record cannot answer, the pane says which of the states it is in.
+function ssKnowledgeSegs(step, b) {
+  const items = step.items || [];
+  const rows = ["RECALLED — each item as the record scored it"];
+  for (const it of items) {
+    const nums = [];
+    if (it.sim !== undefined && it.sim !== null) nums.push(`sim ${it.sim}`);
+    if (it.rail !== undefined && it.rail !== null) nums.push(`rail ${it.rail}`);
+    if (it.score !== undefined && it.score !== null) nums.push(`score ${it.score}`);
+    rows.push(`· ${it.label || "?"} (${it.kind || "?"})` + (nums.length ? ` · ${nums.join(" · ")}` : ""));
+  }
+  if (!items.length) rows.push("the record lists no items");
+  b.meta(...rows);
+  const reminder = step.reminder || { state: "not_recorded" };
+  if (reminder.state === "recorded") {
+    const role = SS_REMINDER_ROLE_WORDS[reminder.system_role]
+      || "the per-task reminder that carried it — its role on the wire was not recorded";
+    b.meta(
+      `THE TEXT INJECTED — ${role}; whole: the time note and the rules in force ride in the same message`,
+      `located by position on this turn's brief: aish's message at ${reminder.at} · ${ssN(reminder.chars)} chars`,
+    );
+    if (reminder.text) b.text(reminder.text, "markdown");
+    else b.meta("recorded, and it was empty");
+  } else {
+    const words = (reminder.state === "not_recorded" && SS_REMINDER_WORDS[reminder.why])
+      || SS_REMINDER_WORDS[reminder.state] || SS_STATE_WORDS[reminder.state] || reminder.state;
+    b.meta("THE TEXT INJECTED — " + words);
+  }
+  b.meta("THE RECORD");
+  b.rec(step.record || {});
 }
 
 // Every pane of a step, as a SEGMENT LIST. `before` is a node drawn ABOVE the
@@ -15861,6 +15929,63 @@ function activeApprovalCard() {
 }
 // [ACTIVE-APPROVAL-CARD-END]
 
+// [NAV-CHORDS-START]
+// The navigation chords (#384): what a keydown asks for, decided in one pure
+// function the ONE document keydown handler below consults — there is no
+// second key-handling path. The platform's primary modifier is ⌘ on macOS/iOS
+// and Ctrl elsewhere, by the same detection the send tooltip uses, and the
+// OTHER modifier is not accepted: on macOS Ctrl+K / Ctrl+N / Ctrl+O / Ctrl+P
+// are the text field's own Emacs bindings (kill line, next line, open line,
+// previous line), so a handler that took either modifier stole them from the
+// composer. `CHORD_HINTS` is the same fact for the tooltips.
+const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
+const CHORD_HINTS = IS_MAC
+  ? { new: "⌘⇧O", search: "⌘K", rail: "⌘O" }
+  : { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+O" };
+
+function primaryChord(e) {
+  if (e.altKey) return false;
+  return IS_MAC ? Boolean(e.metaKey && !e.ctrlKey) : Boolean(e.ctrlKey && !e.metaKey);
+}
+
+// "new" = a new chat (⌘⇧O; ⌘N too, where the browser lets it through) ·
+// "search" = the chat list with its search field focused (⌘K and ⌘⇧K) ·
+// "rail" = show/hide the chat list (⌘O, ⌘⇧P) · "export" = the chat as a PDF
+// (⌘P) · null = not a navigation chord. Nothing fires while a confirmation
+// modal is asking its question, or while the terminal has the keyboard — there
+// the same keys are the shell's (Ctrl+K kills the line, Ctrl+P is history).
+function navChord(e, { modal = false, terminal = false } = {}) {
+  if (modal || terminal || !primaryChord(e)) return null;
+  const key = String(e.key || "").toLowerCase();
+  if (key === "n" || (e.shiftKey && key === "o")) return "new";
+  if (key === "k") return "search";
+  if (key === "o" || (e.shiftKey && key === "p")) return "rail";
+  if (!e.shiftKey && key === "p") return "export";
+  return null;
+}
+// [NAV-CHORDS-END]
+
+// Whether the global console's terminal holds the keyboard: xterm reads keys
+// through a hidden helper textarea inside the overlay.
+function consoleHasFocus() {
+  const active = document.activeElement;
+  return Boolean(active && active.closest && active.closest("#pty-overlay"));
+}
+
+// The chat list, with its search field ready to type into — the "Search
+// chats" chord. Opening the rail already focuses the field on a pointer
+// device; a chord means a keyboard is present, so it focuses regardless and
+// keeps whatever was typed, selected, when the list was already showing.
+function searchChats() {
+  if (!railIsOpen()) openSessionRail("");
+  const field = $("sessions-search");
+  if (!field) return;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    field.focus({ preventScroll: true });
+    if (typeof field.select === "function") field.select();
+  }));
+}
+
 document.addEventListener("keydown", (e) => {
   // A confirmation modal is asking a question and owns Escape while it is up —
   // ahead of everything, since it can be raised over any of them, and Escape
@@ -15916,28 +16041,18 @@ document.addEventListener("keydown", (e) => {
     }
   }
 
-  // Primary navigation shortcuts. Ctrl/Cmd+N = new chat, Ctrl/Cmd+O = search
-  // (open) sessions, Ctrl/Cmd+P = export (print) the session to PDF. The older
-  // Cmd/Ctrl+Shift+O (new) / Shift+P (search) command-palette combos still work.
-  if ((e.metaKey || e.ctrlKey) && !e.altKey) {
-    const key = e.key.toLowerCase();
-    if (key === "n" || (e.shiftKey && key === "o")) {
-      e.preventDefault();
-      act({ type: "new" }, { label: "the new chat" });
-      closeSheets();
-      return;
-    }
-    if (key === "o" || (e.shiftKey && key === "p")) {
-      e.preventDefault();
-      toggleSessionRail();
-      return;
-    }
-    if (!e.shiftKey && key === "p") {
-      e.preventDefault();
-      exportSessionPdf();
-      return;
-    }
+  // Primary navigation shortcuts (#384) — decided by navChord, acted on here.
+  // New chat goes the way the header button goes (reconnect-aware).
+  const chord = navChord(e, { modal: confirmIsOpen(), terminal: consoleHasFocus() });
+  if (chord === "new") {
+    e.preventDefault();
+    requestNewChat();
+    closeSheets();
+    return;
   }
+  if (chord === "search") { e.preventDefault(); searchChats(); return; }
+  if (chord === "rail") { e.preventDefault(); toggleSessionRail(); return; }
+  if (chord === "export") { e.preventDefault(); exportSessionPdf(); return; }
   // Cmd/Ctrl+\ toggles the global "Quake console" (#148 follow-up). When the
   // overlay itself has focus, xterm's own key handler catches this first; this
   // is the OPEN path from anywhere else in the app.
@@ -15957,8 +16072,13 @@ const FINE_POINTER = matchMedia("(pointer: fine)").matches;
 // the only place the platform's own glyph appears; the handler accepts either
 // modifier regardless of what is printed here.
 if (FINE_POINTER) {
-  const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
-  $("send").title = mac ? "send (↩ · multi-line: ⌘↩)" : "send (Enter · multi-line: Ctrl+Enter)";
+  $("send").title = IS_MAC ? "send (↩ · multi-line: ⌘↩)" : "send (Enter · multi-line: Ctrl+Enter)";
+  // The navigation chords, on the buttons they duplicate (#384) — the same
+  // convention as the console button's "console (⌘/Ctrl+\)", with the
+  // platform's own glyph. The chats button's title is written by
+  // syncRailToggle, which names the chord there.
+  $("new-chip").title = `new chat (${CHORD_HINTS.new})`;
+  $("sessions-new").title = `new chat (${CHORD_HINTS.new})`;
 }
 
 // Grabber: drag down to dismiss (pointer events cover touch and mouse).
@@ -17346,7 +17466,18 @@ function syncRailToggle() {
   const docked = railDocked();
   const showing = railIsOpen();
   const label = !docked ? "Chats" : showing ? "Hide chats" : "Show chats";
-  chip.title = label;
+  // The tooltip names the chord that does what the tap does (#384) — on a
+  // pointer that has a keyboard, the console button's convention. Which chord
+  // depends on the state: showing the list is the search chord (⌘K opens it
+  // and focuses the field); HIDING a docked list is the toggle chord (⌘O —
+  // ⌘K on an open list only focuses the field, so naming it here would name
+  // a chord that does not hide). Guarded by typeof: this block is loaded on
+  // its own by tests/js/test_session_rail.js, where neither identifier
+  // exists; in the app both are initialised before the first call.
+  const hints = typeof CHORD_HINTS === "object" && typeof FINE_POINTER !== "undefined" && FINE_POINTER
+    ? CHORD_HINTS : null;
+  const hint = !hints ? "" : ` (${docked && showing ? hints.rail : hints.search})`;
+  chip.title = label + hint;
   chip.setAttribute("aria-label", label);
   // aria-pressed only where the control IS a switch. On a phone it opens an
   // overlay that the scrim and a swipe also close, so announcing a pressed
