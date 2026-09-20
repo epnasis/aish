@@ -15910,6 +15910,63 @@ function activeApprovalCard() {
 }
 // [ACTIVE-APPROVAL-CARD-END]
 
+// [NAV-CHORDS-START]
+// The navigation chords (#384): what a keydown asks for, decided in one pure
+// function the ONE document keydown handler below consults — there is no
+// second key-handling path. The platform's primary modifier is ⌘ on macOS/iOS
+// and Ctrl elsewhere, by the same detection the send tooltip uses, and the
+// OTHER modifier is not accepted: on macOS Ctrl+K / Ctrl+N / Ctrl+O / Ctrl+P
+// are the text field's own Emacs bindings (kill line, next line, open line,
+// previous line), so a handler that took either modifier stole them from the
+// composer. `CHORD_HINTS` is the same fact for the tooltips.
+const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
+const CHORD_HINTS = IS_MAC
+  ? { new: "⌘⇧O", search: "⌘K" }
+  : { new: "Ctrl+Shift+O", search: "Ctrl+K" };
+
+function primaryChord(e) {
+  if (e.altKey) return false;
+  return IS_MAC ? Boolean(e.metaKey && !e.ctrlKey) : Boolean(e.ctrlKey && !e.metaKey);
+}
+
+// "new" = a new chat (⌘⇧O; ⌘N too, where the browser lets it through) ·
+// "search" = the chat list with its search field focused (⌘K and ⌘⇧K) ·
+// "rail" = show/hide the chat list (⌘O, ⌘⇧P) · "export" = the chat as a PDF
+// (⌘P) · null = not a navigation chord. Nothing fires while a confirmation
+// modal is asking its question, or while the terminal has the keyboard — there
+// the same keys are the shell's (Ctrl+K kills the line, Ctrl+P is history).
+function navChord(e, { modal = false, terminal = false } = {}) {
+  if (modal || terminal || !primaryChord(e)) return null;
+  const key = String(e.key || "").toLowerCase();
+  if (key === "n" || (e.shiftKey && key === "o")) return "new";
+  if (key === "k") return "search";
+  if (key === "o" || (e.shiftKey && key === "p")) return "rail";
+  if (!e.shiftKey && key === "p") return "export";
+  return null;
+}
+// [NAV-CHORDS-END]
+
+// Whether the global console's terminal holds the keyboard: xterm reads keys
+// through a hidden helper textarea inside the overlay.
+function consoleHasFocus() {
+  const active = document.activeElement;
+  return Boolean(active && active.closest && active.closest("#pty-overlay"));
+}
+
+// The chat list, with its search field ready to type into — the "Search
+// chats" chord. Opening the rail already focuses the field on a pointer
+// device; a chord means a keyboard is present, so it focuses regardless and
+// keeps whatever was typed, selected, when the list was already showing.
+function searchChats() {
+  if (!railIsOpen()) openSessionRail("");
+  const field = $("sessions-search");
+  if (!field) return;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    field.focus({ preventScroll: true });
+    if (typeof field.select === "function") field.select();
+  }));
+}
+
 document.addEventListener("keydown", (e) => {
   // A confirmation modal is asking a question and owns Escape while it is up —
   // ahead of everything, since it can be raised over any of them, and Escape
@@ -15965,28 +16022,18 @@ document.addEventListener("keydown", (e) => {
     }
   }
 
-  // Primary navigation shortcuts. Ctrl/Cmd+N = new chat, Ctrl/Cmd+O = search
-  // (open) sessions, Ctrl/Cmd+P = export (print) the session to PDF. The older
-  // Cmd/Ctrl+Shift+O (new) / Shift+P (search) command-palette combos still work.
-  if ((e.metaKey || e.ctrlKey) && !e.altKey) {
-    const key = e.key.toLowerCase();
-    if (key === "n" || (e.shiftKey && key === "o")) {
-      e.preventDefault();
-      act({ type: "new" }, { label: "the new chat" });
-      closeSheets();
-      return;
-    }
-    if (key === "o" || (e.shiftKey && key === "p")) {
-      e.preventDefault();
-      toggleSessionRail();
-      return;
-    }
-    if (!e.shiftKey && key === "p") {
-      e.preventDefault();
-      exportSessionPdf();
-      return;
-    }
+  // Primary navigation shortcuts (#384) — decided by navChord, acted on here.
+  // New chat goes the way the header button goes (reconnect-aware).
+  const chord = navChord(e, { modal: confirmIsOpen(), terminal: consoleHasFocus() });
+  if (chord === "new") {
+    e.preventDefault();
+    requestNewChat();
+    closeSheets();
+    return;
   }
+  if (chord === "search") { e.preventDefault(); searchChats(); return; }
+  if (chord === "rail") { e.preventDefault(); toggleSessionRail(); return; }
+  if (chord === "export") { e.preventDefault(); exportSessionPdf(); return; }
   // Cmd/Ctrl+\ toggles the global "Quake console" (#148 follow-up). When the
   // overlay itself has focus, xterm's own key handler catches this first; this
   // is the OPEN path from anywhere else in the app.
@@ -16006,8 +16053,13 @@ const FINE_POINTER = matchMedia("(pointer: fine)").matches;
 // the only place the platform's own glyph appears; the handler accepts either
 // modifier regardless of what is printed here.
 if (FINE_POINTER) {
-  const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
-  $("send").title = mac ? "send (↩ · multi-line: ⌘↩)" : "send (Enter · multi-line: Ctrl+Enter)";
+  $("send").title = IS_MAC ? "send (↩ · multi-line: ⌘↩)" : "send (Enter · multi-line: Ctrl+Enter)";
+  // The navigation chords, on the buttons they duplicate (#384) — the same
+  // convention as the console button's "console (⌘/Ctrl+\)", with the
+  // platform's own glyph. The chats button's title is written by
+  // syncRailToggle, which names the chord there.
+  $("new-chip").title = `new chat (${CHORD_HINTS.new})`;
+  $("sessions-new").title = `new chat (${CHORD_HINTS.new})`;
 }
 
 // Grabber: drag down to dismiss (pointer events cover touch and mouse).
@@ -17395,7 +17447,13 @@ function syncRailToggle() {
   const docked = railDocked();
   const showing = railIsOpen();
   const label = !docked ? "Chats" : showing ? "Hide chats" : "Show chats";
-  chip.title = label;
+  // The tooltip names the chord that does the same (#384) — on a pointer that
+  // has a keyboard, the console button's convention. Guarded by typeof: this
+  // block is loaded on its own by tests/js/test_session_rail.js, where neither
+  // identifier exists; in the app both are initialised before the first call.
+  const hint = typeof CHORD_HINTS === "object" && typeof FINE_POINTER !== "undefined" && FINE_POINTER
+    ? ` (${CHORD_HINTS.search})` : "";
+  chip.title = label + hint;
   chip.setAttribute("aria-label", label);
   // aria-pressed only where the control IS a switch. On a phone it opens an
   // overlay that the scrim and a swipe also close, so announcing a pressed
