@@ -142,7 +142,7 @@ function world() {
     replaying: false, turnStart: 0, currentTrace: null, currentTurnId: "", turnAnchorEl: null,
     offlineViewing: false,
     SPINNER: "", TOOL_META: {}, traceSvg: () => "", fmtSecs: (s) => `${s}s`,
-    updateTraceHead() {}, updateScrollHints() {}, refreshStatusline() {}, measurePinnedTrace() {},
+    updateTraceHead() {}, updateScrollHints() {}, measurePinnedTrace() {},
     releasePinnedTrace() {}, scrollToEnd() {}, removeQueueChip() {},
     renderDiff: () => fakeEl("div"), renderErrorBox() {}, clampNote: () => fakeEl("div"),
     setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {},

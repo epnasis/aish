@@ -82,7 +82,7 @@ const sandbox = {
   buildImportCard: () => {},
   buildReadCard: () => {},
   CARD_SHORTCUTS: [],
-  refreshStatusline: () => {},
+  syncPendingApproval: () => {},
   scrollToEnd: () => {},
   notify: () => {},
 };

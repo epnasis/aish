@@ -1444,6 +1444,7 @@ function resetLiveTurn(landing) {
   sawAnswer = false;
   cards.clear();
   pendingCards = 0;
+  syncPendingApproval(); // the sticky card's yield goes with the cards it yielded to
   renderedAnswers = 0; // fork ordinals restart with the rebuilt transcript
   finishTrace(); // the open trace belongs to the turn whose DOM just went away
   // The clock goes with the turn. The replay about to run re-derives it from the
@@ -1488,7 +1489,12 @@ function handle(event) {
       // card's clock. A live turn starts now; a replayed one carries its real
       // start from the server (replayedTurnStart).
       turnStart = replaying ? replayedTurnStart(event) : Date.now();
-      setBusy(true);
+      // Busy is the SERVER's word — `hello` carries it, live events move it. A
+      // replayed transcript must not re-derive it: the window can be trimmed
+      // past the running turn's `user` event, and a replayed `done` that
+      // cleared busy left a running chat with an idle dot and (#398) no card
+      // to stop it from — the landing builds that card from `clientBusy`.
+      if (!replaying) setBusy(true);
       // A synthetic turn is aish's own text (a resume note, an automation's
       // trigger prompt), so it must not seed the chat title or the composer's
       // prompt history — both are records of what YOU asked (#171).
@@ -1506,11 +1512,26 @@ function handle(event) {
       // bubble for `!` commands; the turn-boundary handling above still runs.
       // A synthetic turn takes the system-note row for the same reason: only
       // the rendering differs, every turn side effect above still fires.
+      //
+      // Which turn the card below is stamped with (#243). addUserMsg stamps a
+      // typed prompt's id; a ! command and a synthetic turn draw no user
+      // bubble, so it is stamped here or the card inherits the PREVIOUS turn's.
+      // A ! command's is deliberately empty: its `done` names no record (the
+      // replay drops the id too, session.py), and an id would keep an
+      // "Answered" card under a terminal block that hot and cold disagree on.
+      currentTurnId = event.text.startsWith("!") ? "" : (event.turn || "");
       turnAnchorEl = event.text.startsWith("!")
         ? null
         : event.synthetic
           ? addSystemMsg(event.synthetic, event.text)
           : addUserMsg(event.text, event.at, event.turn, event.files);
+      // The turn's card exists from the moment the turn does (#398): in its
+      // "Working…" head state, with Stop, so the first step lands INSIDE it
+      // rather than replacing a bottom status line that was only ever a
+      // placeholder for this gap. Built AFTER the bubble it follows, and by
+      // the one creator — a step for a turn whose start fell outside the
+      // replay window still builds it lazily ([TRACE-OPEN]).
+      ensureTrace();
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
       break;
@@ -1585,8 +1606,7 @@ function handle(event) {
       // (a past interrupted turn on a freshly-loaded session) must not: the
       // connection is fine, so keep the dot green and just show Retry.
       if (!replaying) taskErrored = true;
-      setBusy(false);
-      setStatus(null);
+      if (!replaying) setBusy(false); // hello's word stands over a replayed ending
       notify("aish — task failed", event.text);
       break;
     case "stopped": onStopped(); break;
@@ -2236,7 +2256,6 @@ function onHello(event) {
   renderWorkspace(event);
   taskErrored = false; // fresh connected view — clear any stale red
   setBusy(event.busy);
-  if (!event.busy) setStatus(null);
   // A fresh view starts with no known role: the server sends a `role` event
   // only when ANOTHER tab is already driving this session (#102). Until then,
   // hide the indicator — this tab is the presumed driver.
@@ -2351,6 +2370,19 @@ function onReplay(event) {
   // keeps its claim: that no-op is the point of the warm peek.)
   viewFp = offlineViewing ? "" : fp;
   viewDirty = false;
+  // A running turn whose `user` event fell outside the window just painted (the
+  // transcript buffer keeps the last 500 events, and one long streaming command
+  // can push a turn's start past it) leaves the view busy with no card — and the
+  // card is where Stop and the status channel live now (#398); the bottom line
+  // used to show the phase label here, and never Stop, because the replayed
+  // `done` before the tail had cleared busy. Build it in the state a step would build it in:
+  // no origin, and no turn id to name — `currentTurnId` is the last REPLAYED
+  // turn's, which this one is not. The one creator, so the manifest holds.
+  if (clientBusy && !currentTrace && !offlineViewing) {
+    currentTurnId = "";
+    turnStart = 0;
+    ensureTrace();
+  }
   // The reading position, in priority order: the place a backfill must not move
   // you from, then the place you left this chat at, then the tail.
   if (!restoreBackfillPos() && !restoreScrollPos()) scrollToEnd(true);
@@ -2626,11 +2658,12 @@ function onDone(event) {
   closeAnswer(false, event.answer);
   answerAbandoned = false; // this turn is over; the next one streams normally
   maybeSpeakReply(); // voice-in → voice-out: auto-read a reply to a dictated message (#97)
-  finishTrace();
+  // A `done` with no answer and no record to name ends the turn with nothing:
+  // a card that drew nothing is dropped rather than titled ([TRACE-CLOSE]).
+  finishTrace(false, !event.result && !event.answer);
   turnStart = 0; // no turn is running; the next card must not inherit this clock
   if (event.sources && event.sources.length) addSources(event.sources);
-  setBusy(false);
-  setStatus(null);
+  if (!replaying) setBusy(false); // hello's word stands over a replayed ending (see the `user` case)
   // Settle the view on the response start (the collapsed trace is now smaller);
   // never on the bottom of a long answer.
   if (!replaying) requestAnimationFrame(() => anchorAnswer(true));
@@ -2644,10 +2677,9 @@ function onDone(event) {
 // real `error` carries. Stop thus always succeeds instead of dead-ending.
 function onStopped() {
   closeAnswer();
-  finishTrace();
+  finishTrace(false, true); // an empty ending: a card that drew nothing is dropped, not titled
   turnStart = 0;
   setBusy(false);
-  setStatus(null);
 }
 
 function addSources(sources) {
@@ -2674,26 +2706,43 @@ function addSources(sources) {
   scrollToEnd();
 }
 
+// The status channel: unrecorded, live-only phase facts about the running
+// model call — a phase label ("thinking", "wrapping up"), a streaming thinking
+// gist, and the count of tokens streamed so far. All of it is DATA written onto
+// the live card; the header derives every string ([TRACE-STATUS]). It used to be
+// the bottom status line's whole text (#398), and the card is where the reader
+// looks now. No card means a turn this view never saw start (its `user` event
+// fell outside the replay window): the first step builds one, and a status
+// alone must not — it is a moment, not a turn.
 function onStatus(event) {
-  if (event.state === "idle") { setStatus(null); return; }
-  // A streaming thinking gist (unrecorded, live-only): stash it on the trace
-  // so the header can say "Thinking: <gist>" while the model reasons.
-  if (event.note && currentTrace) {
-    currentTrace.liveGist = event.note;
-    updateTraceHead(currentTrace);
+  const t = currentTrace;
+  if (!t) return;
+  if (event.state === "idle") {
+    t.liveLabel = null;
+    t.liveTokens = 0;
+  } else {
+    if (event.note) t.liveGist = event.note;
+    t.liveLabel = event.label || null;
+    if (event.tokens) t.liveTokens = event.tokens;
   }
-  let text = `${event.label || "working"}…`;
-  if (event.tokens) text += ` · ↓ ${event.tokens >= 1000 ? (event.tokens / 1000).toFixed(1) + "k" : event.tokens} tokens`;
-  setStatus(text);
+  updateTraceHead(t);
 }
 
 let clientBusy = false;
 let pendingCards = 0;
-let statusText = "";
 
-function setStatus(text) {
-  statusText = text || "";
-  refreshStatusline();
+// The ONE derivation of "an approval is pending" for its two readers: the live
+// card's status line (Waiting for approval…, and Stop stays on that head) and
+// the body class that lets the sticky card yield — while a card waits the model
+// is blocked, nothing streams, so the trace drops its pin rather than hovering
+// over the approval card's own buttons (CSS). Called wherever `pendingCards`
+// changes; the two used to be written from different places and could disagree.
+function syncPendingApproval() {
+  document.body.classList.toggle("awaiting-approval", pendingCards > 0);
+  if (currentTrace) {
+    currentTrace.waitingApproval = pendingCards > 0;
+    updateTraceHead(currentTrace);
+  }
 }
 
 // Header status dot (#61): red when the socket is down or the last turn
@@ -2709,30 +2758,12 @@ function updateDot() {
   dot.classList.toggle("working", !bad && clientBusy);
 }
 
+// Busy is a fact about the connection's dot and about what a reader may do
+// (rerun, fork); everything a turn SHOWS while it runs lives on its card.
 function setBusy(busy) {
   clientBusy = busy;
   updateDot();
-  refreshStatusline();
 }
-
-function refreshStatusline() {
-  // Visible whenever the session is working — including parked on an
-  // approval card — so Stop is always reachable while something runs. A live
-  // activity trace has its own header Stop + status, so suppress the bottom
-  // bar then to avoid a duplicate "thinking…" line below the timeline (#10).
-  const traceLive = currentTrace && currentTrace.el.classList.contains("live");
-  const visible = (clientBusy || Boolean(statusText)) && !traceLive;
-  $("statusline").hidden = !visible;
-  $("status-text").textContent =
-    statusText || (pendingCards > 0 ? "waiting for approval" : "working…");
-  $("stop-btn").hidden = !clientBusy;
-  // While an approval is pending the model is blocked — no progress is
-  // streaming — so let the sticky live-trace yield (CSS) rather than pinning at
-  // the top where the approval card would scroll underneath it.
-  document.body.classList.toggle("awaiting-approval", pendingCards > 0);
-}
-
-$("stop-btn").onclick = () => act({ type: "stop" }, { label: "the stop" });
 
 // ---- activity trace ------------------------------------------------------
 // One collapsible group per task, built from structured `step` events. Live
@@ -2819,9 +2850,11 @@ function releasePinnedTrace(t) {
 // [TRACE-TAIL-END]
 
 // [TRACE-OPEN-START]
-// The live trace comes into being HERE and nowhere else — one per turn, created
-// lazily by the first step that needs it. Its disposal is [TRACE-CLOSE]'s; a
-// third writer is how a trace from one chat ended up collecting another's steps.
+// The live trace comes into being HERE and nowhere else — one per turn, built
+// by the `user` event that opens the turn (#398), or lazily by the first step
+// when that event fell outside the replay window. Its disposal is
+// [TRACE-CLOSE]'s; a third writer is how a trace from one chat ended up
+// collecting another's steps.
 function ensureTrace() {
   if (currentTrace) return currentTrace;
   const el = document.createElement("div");
@@ -2851,12 +2884,12 @@ function ensureTrace() {
     el, head, body, inner: body.querySelector(".trace-inner"),
     started: 0, secs: 0, tokensIn: 0, tokensOut: 0,
     pending: null, thinkingRow: null,
-    // The live header counts the TURN, not this card: the card is created by the
-    // turn's first step, which on a slow local model lands minutes after you hit
-    // send. `turnStart` is that turn's origin (0 when no live turn is running, so
-    // a replayed or stray step can't inherit a finished turn's clock); a replay
-    // rebuilding a running turn arrives with no origin at all and back-dates this
-    // from the steps it replays — see accountStepTime.
+    // The live header counts the TURN, not this card: a card built by a step
+    // (the turn's start fell outside the replay window) may come minutes after
+    // the turn began. `turnStart` is that turn's origin (0 when no live turn is
+    // running, so a replayed or stray step can't inherit a finished turn's
+    // clock); a replay rebuilding a running turn with no origin at all
+    // back-dates this from the steps it replays — see accountStepTime.
     startedAt: turnStart || Date.now(),
     // Whether that origin is the turn's real start or a guess starting now. A
     // replay reconstructs the guess from the steps; a known origin must not be
@@ -2877,6 +2910,8 @@ function ensureTrace() {
     turnSay: null,       // model preamble alongside this turn's tool calls
     turnGist: null,      // first line of the turn's thinking text
     liveGist: null,      // streaming thinking gist (status channel, unrecorded)
+    liveLabel: null,     // the agent's phase word for the running call (status channel)
+    liveTokens: 0,       // tokens streamed so far by the running call (status channel)
     running: [],         // in-flight tool_starts: {name, summary, command}
     // Rows of actions HELD for adjustment, by their `call` id, so a later step
     // carrying `replaces` can point back at the one it followed (#323). Per
@@ -2915,7 +2950,7 @@ function ensureTrace() {
   // are reviewable, not only after it ends.
   body.addEventListener("click", (e) => inspectStepClick(t, e));
   currentTrace.timer = setInterval(() => updateTraceHead(currentTrace), 1000);
-  refreshStatusline(); // the trace header owns Stop now; hide the bottom bar
+  updateTraceHead(t); // the head is on screen now, not at the ticker's first tick
   measurePinnedTrace(t);
   scrollToEnd();
   return currentTrace;
@@ -4195,6 +4230,11 @@ function traceStatusLine(t) {
   // the timeline row already say what phase this is.
   if (t.liveGist) return t.liveGist;
   if (t.thinkingRow) return "Thinking…";
+  // The agent's own phase word from the status channel ("wrapping up"): live
+  // and unrecorded, so it ranks under everything the log carries and above the
+  // previous turn's words, which it postdates. The bottom status line used to
+  // show it (#398).
+  if (t.liveLabel) return t.liveLabel[0].toUpperCase() + t.liveLabel.slice(1) + "…";
   if (t.turnSay || t.turnGist) return t.turnSay || t.turnGist;
   return "Working…";
 }
@@ -4209,7 +4249,11 @@ function updateTraceHead(t) {
   // not at a chip-squeezed midpoint).
   const parts = [];
   if (t.tokensIn) parts.push("↑" + fmtTokens(t.tokensIn));
-  if (t.tokensOut) parts.push("↓" + fmtTokens(t.tokensOut));
+  // What the finished calls cost plus what the running one has streamed so far
+  // (status channel, cleared when the call ends and its usage lands) — so the
+  // count climbs while the model writes, and settles on the recorded figure.
+  const out = t.tokensOut + (t.liveTokens || 0);
+  if (out) parts.push("↓" + fmtTokens(out));
   const tok = parts.join(" ");
   if (live) {
     title.textContent = traceStatusLine(t);
@@ -4223,8 +4267,12 @@ function updateTraceHead(t) {
     }
   } else if (!t.started) {
     // A turn that ran nothing: "Worked for 0.0s · 0 steps" reads as a broken
-    // card. It answered, and its record is still worth opening.
-    title.textContent = "Answered";
+    // card. It answered, and its record is still worth opening — unless it
+    // ended in an error before any step (model unavailable, a moved log):
+    // the card exists from the `user` event (#398), so that turn now HAS a
+    // card, and "Answered" under a red mark would be a claim about an answer
+    // nobody saw.
+    title.textContent = t.errored ? "Failed" : "Answered";
     sub.textContent = tok;
   } else {
     title.textContent = `Worked for ${fmtSecs(t.secs)}`;
@@ -4249,9 +4297,10 @@ function finalizeAnswerRow(t, ref, secs) {
 // replay that replaced the transcript it was drawn into (resetLiveTurn calls
 // this rather than nulling the variable, so the interval timer and every
 // still-spinning row are finalized on every one of those paths).
-function finishTrace(errored) {
+function finishTrace(errored, emptyEnding) {
   if (!currentTrace) return;
   const t = currentTrace;
+  t.errored = Boolean(errored); // the finished head reads it ([TRACE-STATUS])
   if (t.timer) { clearInterval(t.timer); t.timer = null; }
   releasePinnedTrace(t); // stops pinning, and gives the arrow its base offset back
   if (t.thinkingRow) {
@@ -4284,10 +4333,17 @@ function finishTrace(errored) {
   // the turn's full record (#243), and a turn that answered without running
   // anything is exactly the one worth asking about ("why did it just answer?").
   // So it is kept whenever there is a turn to open; with no id there is nothing
-  // to open and the old removal stands.
-  if (!t.body.querySelector(".step") && !t.tokensIn && !t.tokensOut && !t.turnId) {
+  // to open and the old removal stands. It is also dropped when the turn ENDED
+  // WITH NOTHING (`emptyEnding`): a `done` carrying no answer and naming no
+  // record — the closing replay synthesizes for a turn cut off before its
+  // first trace record — or a `stopped` reconcile, where the server says
+  // nothing is running and this view saw no step, no usage and no answer. A
+  // card exists from the `user` event now (#398), and keeping one there would
+  // title it "Answered" for an answer nobody saw; hot and cold alike, since
+  // the same `done` reaches both.
+  const drewNothing = !t.body.querySelector(".step") && !t.tokensIn && !t.tokensOut;
+  if (drewNothing && (!t.turnId || emptyEnding)) {
     t.el.remove();
-    refreshStatusline();
     return;
   }
   // The card is the door to the turn's record (#243, #352): the Full record
@@ -4301,7 +4357,6 @@ function finishTrace(errored) {
     ? traceSvg("denied", "var(--red)")
     : traceSvg("check", "var(--green)");
   updateTraceHead(t);
-  refreshStatusline();
 }
 
 // ---- the inspector on a finished card (#352) ----------------------------------
@@ -7665,10 +7720,6 @@ function onApprovalRequest(event) {
     currentTrace.el.classList.remove("open");
     currentTrace.autoCollapsed = true;
   }
-  if (currentTrace) {
-    currentTrace.waitingApproval = true;
-    updateTraceHead(currentTrace);
-  }
   const card = document.createElement("div");
   card.className = "card";
   card.dataset.id = event.id;
@@ -7709,7 +7760,7 @@ function onApprovalRequest(event) {
   }
   cards.set(event.id, card);
   pendingCards += 1;
-  refreshStatusline();
+  syncPendingApproval(); // the card head says Waiting for approval…, Stop stays on it
   markShown(card); // the clock starts when it goes on screen ([CARD-LATENCY])
   messagesEl.appendChild(card);
   scrollToEnd(true);
@@ -8562,14 +8613,12 @@ function onApprovalResolved(event) {
   const card = cards.get(event.id);
   if (!card) return;
   pendingCards = Math.max(0, pendingCards - 1);
-  refreshStatusline();
+  syncPendingApproval();
   card.remove();
   cards.delete(event.id);
   // Once nothing is left to decide, restore the timeline we auto-collapsed for
   // the card (#65) — but only if the user hasn't taken over its open state.
   if (pendingCards === 0 && currentTrace) {
-    currentTrace.waitingApproval = false;
-    updateTraceHead(currentTrace);
     if (currentTrace.autoCollapsed) {
       currentTrace.el.classList.add("open");
       currentTrace.autoCollapsed = false;

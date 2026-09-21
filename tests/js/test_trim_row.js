@@ -82,7 +82,6 @@ function makeSandbox() {
     fmtSecs: (s) => `${s}s`,
     updateTraceHead() {},
     updateScrollHints() {},
-    refreshStatusline() {},
     measurePinnedTrace() {}, // needs offsetHeight + ResizeObserver
     scrollToEnd() {},
     removeQueueChip() {},

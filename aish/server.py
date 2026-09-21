@@ -663,7 +663,7 @@ def _user_event(text: str, synthetic: str = "") -> dict[str, Any]:
     same function `reconstruct_events` uses on replay, so the two agree.
 
     `ts` (epoch seconds) is when the turn began, and it is the ONLY authoritative
-    record of that: the live trace card is built by the turn's first STEP and is
+    record of that: the live trace card is built from this event (#398) and is
     rebuilt from the transcript by every replay, so without it a browser landing
     mid-turn — a reconnect, or a swipe away and back — can only guess the origin
     by summing the steps it replays, which counts the work and misses every gap

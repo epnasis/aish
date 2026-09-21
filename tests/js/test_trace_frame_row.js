@@ -96,7 +96,6 @@ function makeSandbox() {
     renderErrorBox() {},
     updateTraceHead() {},
     updateScrollHints() {},
-    refreshStatusline() {},
     measurePinnedTrace() {},
     scrollToEnd() {},
     removeQueueChip() {},

@@ -50,6 +50,11 @@ function turnWorld() {
       turnAnchorEl: null,
       lastUserPrompt: "",
       currentTrace: null,
+      currentTurnId: "",
+      // The `user` turn builds its card at once (#398) — the card's own
+      // lifecycle is test_choreo_turn_card.js's subject; here it stays a stub
+      // so the answer bubble's choreography is what this world exercises.
+      ensureTrace() {},
       // A replay settles any send held for this chat ([PENDING-SEND]); which
       // ones is that block's subject, not this one's.
       adjudicateHeldSends() {},
@@ -78,7 +83,7 @@ function turnWorld() {
       offlineSyncSoon() {},
       traceSvg: () => "",
       updateTraceHead() {},
-      refreshStatusline() {},
+      syncPendingApproval() {},
       releasePinnedTrace() {}, // needs offsetHeight + ResizeObserver
       finalizeAnswerRow() {},
     },
@@ -323,6 +328,76 @@ function turnWorld() {
   ok("the authoritative replay repainted over it",
     !w.el.children.includes(painted) && w.el.children.length > 0);
   ok("…and it is the one that claims the fingerprint", s.viewFp === s.replayFp(fresh));
+}
+
+// ---- a busy landing with no card: the running turn's start fell outside the
+// window (#398). The card is where Stop and the status channel live now, so
+// the replay builds one — through the one creator, in the state a step would
+// build it in (no turn id, no origin) — and only when nothing else did.
+function landingWorld() {
+  const w = turnWorld();
+  const s = w.sandbox;
+  w.built = [];
+  s.ensureTrace = () => {
+    w.built.push({ id: s.currentTurnId, start: s.turnStart });
+    s.currentTrace = { stub: true };
+  };
+  s.finishTrace = () => { s.currentTrace = null; };
+  s.addErrorMsg = (text) => s.addMsg("error", text);
+  const earlier = [
+    { type: "user", text: "an earlier question", turn: "prev" },
+    { type: "done", result: "the earlier answer" },
+  ];
+  w.land = (events) => w.deliver({ type: "replay", events });
+  w.earlier = earlier;
+  return w;
+}
+{
+  const w = landingWorld();
+  const s = w.sandbox;
+  s.setBusy(true); // the hello said busy
+  w.land(w.earlier);
+  ok("a busy landing whose window holds no running `user` builds the card",
+    w.built.length === 2 && s.currentTrace !== null);
+  ok("…with no turn id to name (the last replayed turn's is not this one's) and no origin",
+    w.built[1].id === "" && w.built[1].start === 0);
+}
+{
+  const w = landingWorld();
+  const s = w.sandbox;
+  s.setBusy(false);
+  w.land(w.earlier);
+  ok("an idle landing builds nothing beyond the replayed turns' own cards",
+    w.built.length === 1 && s.currentTrace === null);
+}
+{
+  // Busy is the server's word: a replayed transcript's own `user`/`done`/`error`
+  // must not move it, or a window trimmed past the running turn's start reads
+  // as idle — which is what used to hide the bottom line's Stop here.
+  const w = landingWorld();
+  const s = w.sandbox;
+  s.setBusy(true);
+  w.land([...w.earlier, { type: "user", text: "q2", turn: "t2" }, { type: "error", text: "cut off" }]);
+  ok("a busy landing stays busy through replayed endings", s.clientBusy === true);
+  s.setBusy(false);
+  w.land([{ type: "user", text: "q3", turn: "t3" }]);
+  ok("an idle landing stays idle through a replayed `user`", s.clientBusy === false);
+}
+{
+  const w = landingWorld();
+  const s = w.sandbox;
+  s.setBusy(true);
+  w.land([...w.earlier, { type: "user", text: "the running question", turn: "run", ts: 1 }]);
+  ok("a busy landing whose window holds the running `user` leaves that card alone",
+    w.built.length === 2 && w.built[1].id === "run" && s.currentTrace !== null);
+}
+{
+  const w = landingWorld();
+  const s = w.sandbox;
+  s.setBusy(true);
+  s.offlineViewing = true; // a mirror paint: no socket, so no Stop to wire
+  w.land(w.earlier);
+  ok("a mirror paint builds no card for a turn it cannot stop", w.built.length === 1);
 }
 
 report("test_choreo_midstream_replay.js");

@@ -101,7 +101,6 @@ function makeSandbox() {
     traceSvg: () => "",
     // Collaborators that need a real browser, or are beside the point here.
     updateScrollHints() {},
-    refreshStatusline() {},
     measurePinnedTrace() {},
     releasePinnedTrace() {},
     scrollToEnd() {},
@@ -114,7 +113,6 @@ function makeSandbox() {
     maybeSpeakReply() {},
     addSources() {},
     setBusy() {},
-    setStatus() {},
     notify() {},
     anchorAnswer() {},
     finishTrace() { sandbox.currentTrace = null; },

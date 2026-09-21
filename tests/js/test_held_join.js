@@ -121,7 +121,6 @@ function makeSandbox() {
     scrollToEnd() {},
     removeQueueChip() {},
     finalizeAnswerRow() {},
-    refreshStatusline() {},
     setInterval: () => 0,
     clearInterval() {},
     // Held rather than run: the flash has to still be ON the row when the test

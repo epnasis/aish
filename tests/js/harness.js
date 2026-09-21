@@ -463,7 +463,6 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       onReplay: spy("onReplay", (event) => { seen.replays.push(event); }),
       hideBootLoader: spy("hideBootLoader", () => { seen.booted = true; }),
       setBusy: spy("setBusy", (busy) => { seen.busy = busy; }),
-      setStatus: spy("setStatus"),
       setRolePill: spy("setRolePill"),
       updateEmptyHint: spy("updateEmptyHint"),
       // The share inbox rides in on hello ([SHARES]); test_shares.js drives the

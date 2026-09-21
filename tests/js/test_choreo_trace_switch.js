@@ -73,7 +73,7 @@ function traceWorld() {
       updateScrollHints() {},
       measurePinnedTrace() {},   // needs offsetHeight + ResizeObserver
       releasePinnedTrace() {},
-      refreshStatusline() {},
+      syncPendingApproval() {},
       scrollToEnd() {},
       scheduleStreamRender() {},
       appendTermLines: (term, text) => streamed.push({ term, text }),

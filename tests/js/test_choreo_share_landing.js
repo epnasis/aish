@@ -93,7 +93,9 @@ function shareWorld() {
       offlineSyncSoon() {},
       traceSvg: () => "",
       updateTraceHead() {},
-      refreshStatusline() {},
+      syncPendingApproval() {},
+      ensureTrace() {}, // the `user` turn builds its card at once (#398); not this test's subject
+      currentTurnId: "",
       releasePinnedTrace() {},
       finalizeAnswerRow() {},
       reconnect() {},
