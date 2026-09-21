@@ -344,6 +344,22 @@ class TestUsageContext:
         assert str(DEFAULT_CONFIG_HOME / "deny.txt") not in text
         assert str(DEFAULT_CONFIG_HOME / "lessons.md") not in text
 
+    def test_asks_for_unicode_maths_imperatively_with_an_example(self, tmp_path):
+        """#391: the terminal prints an answer's markdown as typed, so a model's
+        LaTeX reaches the owner raw. The web renders LaTeX and says nothing
+        about maths (tests/test_server.py pins that); the terminal's own block
+        asks for Unicode — as MUST plus an example, since capability phrasing
+        in these prompts is ignored."""
+        from aish.cli import usage_context
+
+        text = usage_context("m", False, tmp_path, tmp_path, tmp_path)
+        line = next(part for part in text.split("\n- ") if part.startswith("MATHS"))
+        assert "MUST" in line
+        assert "Unicode" in line
+        assert "∠TBP₁ = 90° − 10° = 80°" in line
+        assert "h/sin(45°)" in line
+        assert "\\frac{h}{\\sin(45^\\circ)}" in line  # the shape it must NOT write
+
     def test_grounds_identity_as_local_ollama(self, tmp_path):
         from aish.cli import usage_context
 

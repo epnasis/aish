@@ -123,6 +123,15 @@ inline images the model generates. When it asks a follow-up, tappable
 quick-reply chips appear — in the terminal they show as a numbered menu you
 pick from by typing the option's number.
 
+Mathematics renders too. A model answering a maths question writes LaTeX —
+`$$\frac{h}{\sin(45°)} = \frac{d_1}{\sin(55°)}$$` — and on the web that
+becomes a typeset equation (KaTeX, vendored, nothing leaves the machine); the
+same equations appear typeset in an exported PDF. A dollar sign in prose
+stays a dollar sign: `it costs $5 and the other is $10` is never read as
+maths. An expression that does not parse is shown exactly as written, never
+half-rendered. In the terminal, which cannot typeset, aish asks the model to
+write maths in plain Unicode instead (`∠TBP₁ = 90° − 10° = 80°`).
+
 ![A finished answer with the exchange rate, sources, and quick-reply follow-up chips](docs/images/answer.png)
 
 ### A real terminal when you need one

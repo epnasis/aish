@@ -690,6 +690,25 @@ class TestQuickReplyPromptGuidance:
         assert "useful next step" in context
 
 
+class TestMathsPromptGuidance:
+    """#391: the web renders a model's LaTeX (KaTeX), so its prompt block must
+    not ask the model to write around it. The Unicode directive belongs to the
+    terminal's block only (tests/test_cli.py pins that it is there)."""
+
+    def test_the_web_block_says_nothing_about_maths(self):
+        context = server_module.web_usage_context(
+            "model", "ollama", "/allow", "/deny", "/state"
+        )
+        lower = context.lower()
+        for word in ("maths", "latex", "unicode", "typeset", "formula", "equation"):
+            assert word not in lower, word
+        from aish.cli import usage_context
+
+        cli = usage_context("model", False, Path("/allow"), Path("/state"), Path("/config"))
+        assert "MUST write mathematics in plain Unicode" in cli
+        assert "MUST write mathematics in plain Unicode" not in context
+
+
 class TestQuickReplyNet:
     """Issue #46: a web final answer that ends in a question with no chip gets
     a deterministic fallback set; [no-chips] opts out and is stripped."""
