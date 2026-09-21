@@ -22,7 +22,7 @@ Read `CLAUDE.md` (repo root) first — architecture, the approval-gate invariant
      last=$now
    done''')
    ```
-1. **Survey** open issues: `gh issue list --repo epnasis/aish --state open --json number,title,labels`. Triage new arrivals from the Monitor as they come.
+1. **Survey** open issues: `gh issue list --repo epnasis/aish --state open --json number,title,labels`. Triage new arrivals from the Monitor as they come. **Re-run the survey after ANY gap** — a usage-limit reset, a container restart, a re-armed Monitor: the Monitor's `last` stamp is its own start time, so an issue filed while it was down is never reported (#398 sat unseen for 17 hours on 2026-09-20/21 for exactly this). Compare against the ledger, not against memory.
 2. **Triage** each issue into one of:
    - **Part of an epic → HANDS OFF.** Epic work is driven separately by the `epic` skill, in the order the epic specifies and against the epic's own properties — which is exactly what this breadth-first loop cannot do. An issue is epic-linked if it IS an epic/design-record ("Epic:" title, "child issues:" list) or belongs to one ("Part of the … epic", "Depends on #<epic-core>", "Stage N of #<epic>", listed as a child in an epic body). Do NOT build, do NOT delegate, do NOT ship — note it in the ledger, say which epic, and leave it. This overrides "Actionable" even when the issue is well-specified and buildable: an epic-linked issue built out of order, or built correctly but against the wrong design, is worse than one left alone. The exception is an issue the user has explicitly labelled for this run (e.g. `nextup`) — that is them taking it out of the epic's hands deliberately.
    - **Actionable** — a bug or small/medium feature with a clear objective and no design decision needed → fix it.
@@ -40,6 +40,7 @@ Read `CLAUDE.md` (repo root) first — architecture, the approval-gate invariant
 - The problem + root cause, file/function pointers, and the design/approach you decided.
 - Constraints: preserve the approval-gate invariant; match existing code idioms; keep the change tight; comment WHY not WHAT.
 - Quality gates it must pass: `uv run pytest`, `uv run ruff check .`, `uv run mypy`, and `node --check aish/static/app.js` for JS. Add tests in `tests/` following the FakeChat / no-model / no-network / no-real-execution pattern.
+- **NEVER touch `~/Downloads`, `~/Desktop`, `~/Documents`, `~/Library/Mobile Documents` or `~/iCloud` — not `ls`, not `find`, not a deliverable path.** From the claude-rc LaunchAgent tree those folders block forever on a TCC prompt nobody can answer: on 2026-09-20 the #391 agent's last command referenced `~/Downloads` and the ORCHESTRATOR sat 15 hours in a synchronous `openat()` — it looked like a container restart and was not. Three `find /` orphans from the day before were hung on the same thing. Deliverables (a rendered PDF, a screenshot) go under `/tmp/<task>/` or `/Users/epnasis/aish`, and the spec says so. [[rc-tcc-folders-hang-sessions]]
 - Workflow: work in its worktree; conventional-commit message with **NO** Claude attribution / co-author / footer lines; use `SSH_AUTH_SOCK= git commit ...`; do NOT deploy and do NOT merge — report back the **branch name**, a summary, gate results, and anything risky or needing a human decision.
 
 ## Guardrails & recurring gotchas (project memory)
