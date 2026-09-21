@@ -37,6 +37,13 @@ dependencies = [
     "yt-dlp>=2025.1.1",
     "uvicorn[standard]>=0.30",
     "xhtml2pdf>=0.2.16",
+    # Typesets a model's LaTeX for the PDF export (#391): LaTeX → MathML
+    # (latex2mathml, pulled in by ziamath) → SVG with the glyphs as outlines
+    # from its bundled STIX font, embedded like any other picture. Pure
+    # Python, 3.0 MB installed in all (with ziafont and latex2mathml), no
+    # numpy — matplotlib's mathtext measured 76 MB with numpy for the same
+    # equations. All three MIT.
+    "ziamath>=0.13",
 ]
 
 [project.scripts]
