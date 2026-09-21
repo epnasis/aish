@@ -43,7 +43,6 @@ function errorWorld() {
       finishTrace: () => log.push("finishTrace"),
       addErrorMsg: (text) => log.push(`addErrorMsg:${text}`),
       setBusy: (busy) => { log.push(`setBusy:${busy}`); w.sandbox.clientBusy = busy; },
-      setStatus: () => log.push("setStatus"),
       notify: (title) => log.push(`notify:${title}`),
       showToast: (text) => log.push(`toast:${text}`),
       onSessionGone: (name) => log.push(`gone:${name}`),

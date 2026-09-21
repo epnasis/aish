@@ -141,7 +141,7 @@ function world() {
     offlineViewing: false,
     SPINNER: "", TOOL_META: { recall: ["Recalled from memory", "knowledge", "--yellow"] },
     traceSvg: (name) => `<svg data-icon="${name}"></svg>`, fmtSecs: (s) => `${s}s`,
-    updateTraceHead() {}, updateScrollHints() {}, refreshStatusline() {}, measurePinnedTrace() {},
+    updateTraceHead() {}, updateScrollHints() {}, measurePinnedTrace() {},
     releasePinnedTrace() {}, scrollToEnd() {}, removeQueueChip() {},
     renderDiff: () => fakeEl("div"), renderErrorBox() {}, clampNote: () => fakeEl("div"),
     setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {},

@@ -50,6 +50,11 @@ function turnWorld() {
       turnAnchorEl: null,
       lastUserPrompt: "",
       currentTrace: null,
+      currentTurnId: "",
+      // The `user` turn builds its card at once (#398) — the card's own
+      // lifecycle is test_choreo_turn_card.js's subject; here it stays a stub
+      // so the answer bubble's choreography is what this world exercises.
+      ensureTrace() {},
       // A replay settles any send held for this chat ([PENDING-SEND]); which
       // ones is that block's subject, not this one's.
       adjudicateHeldSends() {},
@@ -78,7 +83,7 @@ function turnWorld() {
       offlineSyncSoon() {},
       traceSvg: () => "",
       updateTraceHead() {},
-      refreshStatusline() {},
+      syncPendingApproval() {},
       releasePinnedTrace() {}, // needs offsetHeight + ResizeObserver
       finalizeAnswerRow() {},
     },

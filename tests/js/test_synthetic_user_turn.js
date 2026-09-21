@@ -68,6 +68,7 @@ function makeSandbox() {
     // --- turn management: the side effects that must survive ---
     closeAnswer: () => calls.push("closeAnswer"),
     finishTrace: () => calls.push("finishTrace"),
+    ensureTrace: () => calls.push("ensureTrace"), // the card exists from the turn's start (#398)
     removeQueueChip: (t) => calls.push("removeQueueChip:" + t),
     retireQuickReplies: () => calls.push("retireQuickReplies"),
     setBusy: (v) => calls.push("setBusy:" + v),
@@ -101,6 +102,7 @@ function makeSandbox() {
     turnAnchorEl: null,
     lastUserPrompt: "",
     currentTrace: null,
+    currentTurnId: "",
     document: { createElement: fakeElement },
     // The turn's timestamp (#200) rides the prompt's tool row.
     dayStart: (ms) => ms,
@@ -198,7 +200,7 @@ check("a synthetic turn still runs every turn-management side effect", () => {
   synthetic.handle({ type: "user", text: RESUME_TEXT, synthetic: "resume" });
 
   for (const s of [genuine, synthetic]) {
-    for (const effect of ["closeAnswer", "finishTrace", "retireQuickReplies", "setBusy:true"]) {
+    for (const effect of ["closeAnswer", "finishTrace", "retireQuickReplies", "setBusy:true", "ensureTrace"]) {
       assert(s.calls.includes(effect), `${effect} must fire (calls: ${s.calls})`);
     }
     assert(s.calls.some((c) => c.startsWith("removeQueueChip:")), "queue chip must retire");
