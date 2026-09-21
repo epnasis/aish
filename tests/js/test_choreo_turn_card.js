@@ -45,8 +45,12 @@ function fnSource(name) {
   throw new Error(`unbalanced braces in ${name}`);
 }
 
+// Descends through real children AND the memoized innerHTML slots (`.trace-inner`
+// is one), so a `.step` row traceRow appended under the inner slot is found —
+// "is there a step?" can be answered YES as well as NO.
 function findByClass(root, cls) {
-  for (const child of root.children) {
+  const kids = [...root.children, ...(root._found ? root._found.values() : [])];
+  for (const child of kids) {
     if (child.classList && child.classList.contains(cls)) return child;
     const deeper = child.children ? findByClass(child, cls) : null;
     if (deeper) return deeper;
@@ -102,9 +106,10 @@ function makeElement(tag) {
       },
     },
     querySelector(sel) {
-      // Real nodes first (a `.step` row traceRow appended), so "is there a
-      // step?" is answered by the tree and can be NO. Only the slots the head
-      // builds as innerHTML (.trace-title, .trace-stop, …) are memoized.
+      // Real nodes first (a `.step` row traceRow appended under the memoized
+      // `.trace-inner` slot), so "is there a step?" is answered by the tree.
+      // Only the slots built as innerHTML (.trace-title, .trace-stop, …) are
+      // memoized.
       const cls = (sel.match(/^\.([\w-]+)$/) || [])[1];
       const hit = cls && findByClass(el, cls);
       if (hit) return hit;
@@ -318,6 +323,7 @@ function world() {
   w.handle({ type: "error", text: "model unavailable: connection refused" });
   ok("an error before any step closes the card", s.currentTrace === null && !card.classList.contains("live"));
   ok("…with the failure mark in its status slot", card.querySelector(".trace-status").innerHTML.includes('data-icon="denied"'));
+  ok("…titled Failed, never Answered: no answer was seen", w.title(card) === "Failed");
   ok("…kept as the door to the turn's record (it has an id)", card.parentNode === w.messagesEl);
   ok("…the error message follows it", w.messagesEl.lastElementChild.className === "msg error");
   ok("…and the session is no longer busy", s.clientBusy === false && s.taskErrored === true);
@@ -328,7 +334,21 @@ function world() {
   w.handle({ type: "user", text: "hello", turn: "t4" });
   const card = w.card();
   w.handle({ type: "stopped" });
-  ok("a `stopped` before any step closes the card too", s.currentTrace === null && !card.classList.contains("live") && s.clientBusy === false);
+  ok("a `stopped` before any step closes the card too", s.currentTrace === null && s.clientBusy === false);
+  ok("…and drops it from the transcript: the server says nothing ran, and this view saw no outcome to title it with",
+    card.parentNode === null && w.card() === null);
+}
+{
+  // The same reconcile on a card that DID draw something keeps it, as before:
+  // the steps are what this view saw, and the record is still worth opening.
+  const w = world();
+  const s = w.sandbox;
+  w.handle({ type: "user", text: "hello", turn: "t4b" });
+  w.handle({ type: "step", kind: "thinking_start" });
+  w.handle({ type: "step", kind: "tool_start", name: "read_docs", summary: "README", call: 1 });
+  const card = w.card();
+  w.handle({ type: "stopped" });
+  ok("a `stopped` on a card with steps keeps it", card.parentNode === w.messagesEl && s.currentTrace === null);
 }
 {
   const w = world();

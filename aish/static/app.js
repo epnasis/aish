@@ -2657,7 +2657,7 @@ function onDone(event) {
 // real `error` carries. Stop thus always succeeds instead of dead-ending.
 function onStopped() {
   closeAnswer();
-  finishTrace();
+  finishTrace(false, true); // outcome unseen: a card that drew nothing is dropped, not titled
   turnStart = 0;
   setBusy(false);
 }
@@ -4247,8 +4247,12 @@ function updateTraceHead(t) {
     }
   } else if (!t.started) {
     // A turn that ran nothing: "Worked for 0.0s · 0 steps" reads as a broken
-    // card. It answered, and its record is still worth opening.
-    title.textContent = "Answered";
+    // card. It answered, and its record is still worth opening — unless it
+    // ended in an error before any step (model unavailable, a moved log):
+    // the card exists from the `user` event (#398), so that turn now HAS a
+    // card, and "Answered" under a red mark would be a claim about an answer
+    // nobody saw.
+    title.textContent = t.errored ? "Failed" : "Answered";
     sub.textContent = tok;
   } else {
     title.textContent = `Worked for ${fmtSecs(t.secs)}`;
@@ -4273,9 +4277,10 @@ function finalizeAnswerRow(t, ref, secs) {
 // replay that replaced the transcript it was drawn into (resetLiveTurn calls
 // this rather than nulling the variable, so the interval timer and every
 // still-spinning row are finalized on every one of those paths).
-function finishTrace(errored) {
+function finishTrace(errored, outcomeUnseen) {
   if (!currentTrace) return;
   const t = currentTrace;
+  t.errored = Boolean(errored); // the finished head reads it ([TRACE-STATUS])
   if (t.timer) { clearInterval(t.timer); t.timer = null; }
   releasePinnedTrace(t); // stops pinning, and gives the arrow its base offset back
   if (t.thinkingRow) {
@@ -4308,8 +4313,13 @@ function finishTrace(errored) {
   // the turn's full record (#243), and a turn that answered without running
   // anything is exactly the one worth asking about ("why did it just answer?").
   // So it is kept whenever there is a turn to open; with no id there is nothing
-  // to open and the old removal stands.
-  if (!t.body.querySelector(".step") && !t.tokensIn && !t.tokensOut && !t.turnId) {
+  // to open and the old removal stands. It is also dropped when the view LOST
+  // the turn (`outcomeUnseen`: a `stopped` reconcile — the server says nothing
+  // is running, and this view saw no step, no usage and no answer): a card
+  // exists from the `user` event now (#398), and keeping one there would title
+  // it with an outcome nobody observed.
+  const drewNothing = !t.body.querySelector(".step") && !t.tokensIn && !t.tokensOut;
+  if (drewNothing && (!t.turnId || outcomeUnseen)) {
     t.el.remove();
     return;
   }
