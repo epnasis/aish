@@ -1,6 +1,8 @@
 """Export (Markdown -> PDF) tests. Pure functions — no server, no network."""
 
 import email.message
+import re
+from pathlib import Path
 
 from aish import export
 
@@ -407,3 +409,144 @@ def test_blocked_image_degrades_to_link_card_not_a_crash(monkeypatch):
     assert "aish-link-card" in out  # captioned link card, the export still renders
     assert "169.254.169.254" in out  # target shown as a link, never fetched
     assert "<img" not in out  # no embedded image element survives
+
+
+# ---- mathematical notation (#391) ------------------------------------------
+# The web renders a model's LaTeX with KaTeX; the PDF typesets each span to an
+# SVG <img>. The delimiter rule is the web's, mirrored — the case lists below
+# are the same ones tests/js/test_math_render.js pins, so the two move together.
+
+_LATEX_ANSWER = (
+    Path(__file__).parent / "fixtures" / "latex_answer_391.md"
+).read_text(encoding="utf-8")
+
+
+def _math_imgs(html: str) -> list[str]:
+    return re.findall(r'<img src="data:image/svg\+xml;base64,[^"]+"[^>]*>', html)
+
+
+def test_the_real_answer_typesets_every_span_and_leaves_no_dollar():
+    assert _LATEX_ANSWER.count("$") == 128, "fixture drifted"
+    html = export._markdown_to_html_fragment(_LATEX_ANSWER)
+    imgs = _math_imgs(html)
+    # 128 `$` = 13 displays (four each) + 38 inline spans (two each).
+    assert len(imgs) == 51
+    assert "$" not in html
+    prose = re.sub(r"<img [^>]*>", "", html)  # the alt text carries the TeX source
+    assert r"\frac" not in prose and r"\circ" not in prose
+    for tag in imgs:
+        assert 'align="middle"' in tag
+        assert re.search(r'width="\d+\.\d"', tag) and re.search(r'height="\d+\.\d"', tag)
+
+
+def test_the_real_answer_renders_to_a_pdf_with_the_equations_drawn():
+    pdf = export.render_answer_pdf(_LATEX_ANSWER, "Calculating Tree Height on Slope", ())
+    assert _pdf_ok(pdf)
+    # 51 SVGs of vector glyphs: the PDF carries far more drawing than the
+    # prose-only export of the same words does.
+    prose_only = export.render_answer_pdf(re.sub(r"\$+", "", _LATEX_ANSWER), "T", ())
+    assert len(pdf) > 2 * len(prose_only)
+
+
+def test_a_typeset_span_is_emphasis_safe_and_bold_holding_maths_stays_bold():
+    html = export._markdown_to_html_fragment(
+        "is **$72.08\\text{ meters}$** and *(where $d_1$ is)* and $a_1 b_2$"
+    )
+    assert len(_math_imgs(html)) == 3
+    assert "<strong>" in html and "<em>" in html
+    assert "_" not in re.sub(r"<img [^>]*>", "", html)  # never read as emphasis
+
+
+def test_prose_dollars_are_never_maths():
+    for line in (
+        "it costs $5 and the other is $10",
+        "prices range from $5-$10 per unit, or $5 to $7.50 with tax",
+        "set $HOME/$PATH first, then compare $A:$B and $X/$Y",
+        "US$5 and A$3 are not the same; US$5 to US$10 either",
+        "paid $5. Then $6, then $ 7, then $8",
+        "the $ sign alone, and a trailing $",
+        "$5 for A$ and B$ each",
+        "(costs $2x$?) no marker, digit start",
+        # the unambiguous forms are not unambiguous in prose: no LaTeX marker, no maths
+        "use $$ to get the shell PID; later $$ expands to it",
+        "critics rate it $$$ but locals say $$ at most",
+        "I ran wc -l \\(and grep\\) on it",
+    ):
+        html = export._markdown_to_html_fragment(line)
+        assert not _math_imgs(html), line
+        assert line.count("$") == html.count("$"), line
+
+
+def test_the_single_dollar_rule_case_by_case():
+    yes = ["$h$", "$B$ be", "($h$)", "so $TB = h$.", "$P_1$", "$30\\text{ meters}$ down",
+           "of $10^\\circ$ to", "**$72.08\\text{ meters}$**", "$x$-axis", "$\\alpha$",
+           "$$\\frac{a}{b}$$", "$$ x^2 $$", "\\[E=mc^2\\]", "\\(a_1\\)"]
+    no = ["$5 for A$ and", "$n$th", "x$y$", "$ x$", "$x $", "$2x$", "$$", "$ $", "a$b$c",
+          "$$ x $$", "\\(and grep\\)", "\\[ 1 + 1 = 2 \\]", "$a `b$ c` d", "$$ \\frac{a}{b} `x` $$"]
+    # The regex alone is not the rule (the marker and code-span checks live in
+    # MathInline), so each case goes through the real pipeline.
+    for s in yes:
+        assert len(_math_imgs(export._markdown_to_html_fragment(s))) == 1, f"should be maths: {s}"
+    for s in no:
+        assert not _math_imgs(export._markdown_to_html_fragment(s)), f"should be prose: {s}"
+
+
+def test_a_maths_span_never_swallows_a_code_span():
+    """`backtick` runs first and leaves a placeholder; a span holding one is
+    prose by rule, not because the renderer happened to choke on the bytes."""
+    html = export._markdown_to_html_fragment("so $x `y` z$ done")
+    assert not _math_imgs(html)
+    assert "<code>y</code>" in html
+    assert html.count("$") == 2
+
+
+def test_a_span_over_the_cap_is_verbatim_in_bounded_time():
+    import time
+
+    big = "x^2 + " * 400  # 2400 chars, over _MATH_MAX_TEX
+    assert len(big) > export._MATH_MAX_TEX
+    started = time.monotonic()
+    html = export._markdown_to_html_fragment(f"a $${big}$$ b")
+    assert time.monotonic() - started < 1.0
+    assert not _math_imgs(html)
+    assert f"$${big}$$" in html  # verbatim, delimiters included
+    under = "x^2 + " * 100  # 600 chars, under the cap: still typeset
+    assert len(under) < export._MATH_MAX_TEX
+    assert len(_math_imgs(export._markdown_to_html_fragment(f"$${under}$$"))) == 1
+
+
+def test_a_dollar_inside_a_code_span_is_never_maths():
+    html = export._markdown_to_html_fragment("run `echo $HOME` then `$PATH` and $h$")
+    assert len(_math_imgs(html)) == 1
+    assert "<code>echo $HOME</code>" in html
+    assert "<code>$PATH</code>" in html
+
+
+def test_a_span_that_fails_to_render_is_put_back_verbatim():
+    md = "before $\\frac{a}{$ after $$\\left( x_1 $$ end"
+    html = export._markdown_to_html_fragment(md)
+    assert not _math_imgs(html)
+    assert "$\\frac{a}{$" in html
+    assert "$$\\left( x_1 $$" in html  # delimiters kept, `_` not read as emphasis
+    assert "<em>" not in html
+
+
+def test_an_unclosed_display_stays_literal():
+    md = "Then:\n$$\\frac{h}{\\sin(45^\\circ)} = "
+    html = export._markdown_to_html_fragment(md)
+    assert not _math_imgs(html)
+    assert "$$\\frac{h}" in html
+
+
+def test_math_svg_refuses_rather_than_raises():
+    assert export._math_svg("\\frac{a}{", display=False) is None
+    assert export._math_svg("", display=False) is None
+    ok = export._math_svg("x^2", display=True)
+    assert ok is not None and ok[0].startswith("<svg") and ok[1] > 0 and ok[2] > 0
+
+
+def test_a_wide_display_is_scaled_to_the_page():
+    tag = export._math_img_tag("x" * 400, display=True)
+    assert tag is not None
+    width = float(re.search(r'width="([\d.]+)"', tag).group(1))
+    assert width == export._IMG_MAX_WIDTH

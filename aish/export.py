@@ -736,6 +736,110 @@ def _pre_html(code: str, lang: str) -> str:
     return f"<pre><code{cls}>{_escape(code)}</code></pre>"
 
 
+# ---- mathematical notation (#391) -----------------------------------------
+# A model answering a maths question writes LaTeX, and the web renders it with
+# KaTeX (app.js [MATH]). The PDF has no browser: each span is typeset here,
+# LaTeX → MathML (latex2mathml) → SVG (ziamath, glyphs as outlines from its
+# bundled STIX font), and embedded as a data-URI <img> — the path xhtml2pdf
+# already takes for every other picture in an export. Three pure-Python MIT
+# packages (ziamath, ziafont, latex2mathml), 3.0 MB installed, no numpy;
+# matplotlib's mathtext, the other route, measured 76 MB with numpy for the
+# same equations. Nothing leaves the machine.
+#
+# The delimiter rule is the web's, mirrored: $$…$$ and \[…\] display, \(…\)
+# and a single-`$` span inline — the latter only under the conservative rule
+# that keeps `it costs $5 and the other is $10` prose. app.js's [MATH] comment
+# is the reference; the two must move together. It runs as an inline pattern
+# AFTER `backtick` and BEFORE the escape/emphasis patterns (the `_`, `*` and
+# `\(` inside an equation are never eaten). A span that fails to render is put
+# back as its exact source, so the PDF never shows a half-parse — the same
+# rule as the web.
+#
+# Every delimiter form has a guard, because prose reaches all of them: `$$`
+# is the shell's PID and a price-guide's rating ("critics rate it $$$"), and
+# `\(…\)` is an escaped parenthesis in prose. So a $$…$$, \[…\] or \(…\) span
+# is maths only if it carries a LaTeX marker (\ ^ _ {) — every display span in
+# the real answer does, and prose never does. The single-`$` form keeps its
+# own guards INSTEAD: `$h$`, `$B$`, `$TB = h$` are real inline maths with no
+# marker (eight of the answer's 38), so it requires one only when the span
+# starts with a digit. No form may hold a stashed code span: `backtick` runs
+# first and leaves an STX…ETX placeholder, and a span holding one is prose on
+# both surfaces (the web refuses a span holding a backtick).
+_MATH_RE = re.compile(
+    r"\$\$(?P<dd>[^\x02\x03]+?)\$\$"
+    r"|\\\[(?P<br>[^\x02\x03]+?)\\\]"
+    r"|\\\((?P<par>[^\x02\x03]+?)\\\)"
+    # single `$`: not after a letter/digit/`$`; not before whitespace/`$`; a
+    # digit-first span must carry a LaTeX marker (\ ^ _ {) before it closes;
+    # one line, no `$` inside, ends on a non-space; not before a letter/digit.
+    r"|(?<![^\W_])(?<!\$)\$(?![\s$])(?!\d[^$\n\\^_{]*\$)"
+    r"(?P<d>[^$\n\x02\x03]*?[^$\s\\])\$(?![^\W_])"
+)
+_MATH_MARKER_RE = re.compile(r"[\\^_{]")
+_MATH_INLINE_PRIORITY = 185  # backtick is 190, escape 180
+# The longest span a PDF will typeset. Rendering is superlinear in the
+# source length (measured on `x^2 + x^2 + …`: 1k chars 0.09 s and a 431 KB
+# SVG, 4k 0.46 s, 8k 1.2 s, 16k 3.2 s, and a reviewer's 50k took 146 s for a
+# 44 MB SVG), the export accepts 5 MB of model output, and each export runs
+# on a thread that a retry tap stacks another onto. The longest span in the
+# real answer is 128 chars; 1000 leaves eight times that. Over it, the source
+# is printed verbatim like any other refused span.
+_MATH_MAX_TEX = 1000
+# ziamath's `size` is a font size in SVG user units, and the SVG→reportlab path
+# draws those at about 0.58 of a point: measured on `$TBH$` beside the word
+# TBH in the 17.5pt body (`_PAGE_CSS`), size 17.5 drew a 7.3pt cap height and
+# size 30 a 13.4pt one against the body's ~11.5pt. 28 puts the equation
+# glyphs on the body's cap height.
+_MATH_SIZE_PT = 28
+
+
+def _math_svg(tex: str, display: bool) -> tuple[str, float, float] | None:
+    """`(svg, width, height)` for one LaTeX expression, or None when either
+    library refuses it. Any exception is a refusal: latex2mathml raises a
+    dozen bare Exception subclasses, ziamath ValueError/KeyError, and the
+    caller's only honest response to all of them is the verbatim source. A
+    span over `_MATH_MAX_TEX` is refused before either library sees it."""
+    if len(tex) > _MATH_MAX_TEX:
+        return None
+    try:
+        import ziamath
+
+        # Plain <path> glyphs. With svg2 (each glyph a <symbol> reused by
+        # <use>) xhtml2pdf drew the same equation with its glyphs scattered
+        # across the line; aish does not know which svglib rule misplaces
+        # them, only that the plain form renders correctly (measured on the
+        # Law-of-Sines fraction, both ways through render_answer_pdf).
+        ziamath.config.svg2 = False
+        rendered = ziamath.Latex(tex, size=_MATH_SIZE_PT, inline=not display)
+        width, height = rendered.getsize()
+        return rendered.svg(), width, height
+    except Exception:
+        return None
+
+
+def _math_img_tag(tex: str, display: bool) -> str | None:
+    """A data-URI <img> for one equation, scaled to the page, or None."""
+    rendered = _math_svg(tex, display)
+    if rendered is None:
+        return None
+    svg, width, height = rendered
+    if width <= 0 or height <= 0:
+        return None
+    if width > _IMG_MAX_WIDTH:
+        height = height * _IMG_MAX_WIDTH / width
+        width = _IMG_MAX_WIDTH
+    payload = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    # align="middle" centres the picture on the text line. Without it
+    # xhtml2pdf sits the picture's bottom on the baseline, so a fraction
+    # stands a full line above its own (measured; CSS vertical-align:middle
+    # gave the same placement as the attribute, and the attribute is the
+    # form the tests pin).
+    return (
+        f'<img src="data:image/svg+xml;base64,{payload}" width="{width:.1f}" '
+        f'height="{height:.1f}" align="middle" alt="{_escape_attr(tex)}"/>'
+    )
+
+
 # Built lazily (and once) so `markdown` stays a deferred import — the classes
 # below subclass its base types, so they can't live at module level.
 @functools.lru_cache(maxsize=1)
@@ -743,9 +847,33 @@ def _pdf_markdown_extension():  # noqa: ANN202 — markdown types are import-def
     from xml.etree.ElementTree import Element
 
     from markdown.extensions import Extension
+    from markdown.inlinepatterns import InlineProcessor
     from markdown.preprocessors import Preprocessor
     from markdown.treeprocessors import Treeprocessor
     from markdown.util import HTML_PLACEHOLDER_RE
+
+    class MathInline(InlineProcessor):
+        """One LaTeX span → one typeset <img>; a refused span → its source."""
+
+        def __init__(self, md) -> None:  # type: ignore[no-untyped-def]
+            super().__init__(_MATH_RE.pattern, md)
+            self.compiled_re = _MATH_RE
+
+        def handleMatch(self, m, data):  # type: ignore[no-untyped-def]  # noqa: N802 — markdown API
+            tex = m.group("dd") or m.group("br") or m.group("par") or m.group("d") or ""
+            if not tex.strip():
+                return None, None, None
+            if m.group("d") is None and not _MATH_MARKER_RE.search(tex):
+                return None, None, None  # `$$`, `\(…\)` in prose: left as written
+            display = m.group("dd") is not None or m.group("br") is not None
+            tag = _math_img_tag(tex, display)
+            if tag is None:
+                # Verbatim, delimiters included — and stashed as raw HTML so the
+                # emphasis patterns that run after this one cannot eat the `_`
+                # and `*` inside what is still LaTeX to the reader.
+                placeholder = self.md.htmlStash.store(_escape(m.group(0)))
+                return placeholder, m.start(0), m.end(0)
+            return self.md.htmlStash.store(tag), m.start(0), m.end(0)
 
     class IndentedFence(Preprocessor):
         """Rescue fenced code blocks that `fenced_code` skips for being indented."""
@@ -872,6 +1000,7 @@ def _pdf_markdown_extension():  # noqa: ANN202 — markdown types are import-def
         def extendMarkdown(self, md) -> None:  # type: ignore[no-untyped-def]
             # 26 puts it ahead of fenced_code (25); 5 runs after inline/prettify.
             md.preprocessors.register(IndentedFence(md), "aish_indented_fence", 26)
+            md.inlinePatterns.register(MathInline(md), "aish_math", _MATH_INLINE_PRIORITY)
             md.treeprocessors.register(FlattenLists(md), "aish_pdf_lists", 5)
 
     return PdfMarkdown()

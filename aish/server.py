@@ -302,11 +302,19 @@ async def serve_index(request):  # noqa: ARG001 — Starlette route signature
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     html = html.replace('src="app.js"', f'src="app.js?v={STATIC_REV}"')
     html = html.replace('href="style.css"', f'href="style.css?v={STATIC_REV}"')
-    # The one remaining vendor script on the critical path (xterm is lazy-loaded
-    # by app.js with the same rev). Stamping it makes a device cache it immutably
-    # and a deploy bust it — the old unstamped tag was a stale-after-update gap.
+    # The vendor files on the critical path (xterm is lazy-loaded by app.js with
+    # the same rev). Stamping them makes a device cache them immutably and a
+    # deploy bust them — the old unstamped tag was a stale-after-update gap.
+    # sw.js's cacheRevvedAssets precaches exactly these stamped URLs; a new
+    # entry here needs one there too. KaTeX's fonts are NOT stamped: the
+    # stylesheet names them relatively, and a face changes only with the
+    # KaTeX version, which changes the stylesheet's own rev.
+    for vendor in ("highlight.min.js", "katex.min.js"):
+        html = html.replace(
+            f'src="vendor/{vendor}"', f'src="vendor/{vendor}?v={STATIC_REV}"'
+        )
     html = html.replace(
-        'src="vendor/highlight.min.js"', f'src="vendor/highlight.min.js?v={STATIC_REV}"'
+        'href="vendor/katex.min.css"', f'href="vendor/katex.min.css?v={STATIC_REV}"'
     )
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 

@@ -93,6 +93,8 @@ aish runs every command through a non-interactive `/bin/sh -c`, which never sour
 
 `load_config` reads `config.toml`; malformed config degrades to defaults rather than to nothing. `identity_context` and `usage_context` build the system-prompt sections that describe aish to itself — **when user-visible behaviour changes, both the README and these strings need updating**, since aish answers questions about itself from them. `load_context_files` pulls in the project's own context files. `TestConfig`, `TestUsageContext`.
 
+**The terminal cannot typeset, so its block asks for Unicode maths (#391).** A model answering a maths question writes LaTeX; the web and the PDF render it (`docs/web-frontend.md`, `docs/export-pdf.md`) and the terminal prints the raw markdown. The directive lives in `usage_context` ONLY — `web_usage_context` says nothing about maths, so the surface with a renderer is never asked to write around it. It is imperative with an example (`∠TBP₁ = 90° − 10° = 80°`, `h/sin(45°)`), because capability phrasing in these prompts gets ignored while MUST plus an example is followed. It is a request, not an enforcement: a model that writes LaTeX anyway is printed as typed, as before. `TestUsageContext` pins the CLI block carries it and `tests/test_server.py` pins the web block does not.
+
 ---
 
 ## `dir_ignore.py`

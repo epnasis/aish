@@ -1727,6 +1727,12 @@ chat's roots; mentioning the path in prose alone does not display it. \
 Terminals that support inline graphics (iTerm2, kitty, WezTerm, ghostty) \
 then show the image right under your answer; elsewhere the path stays \
 visible as text.
+- MATHS: this terminal cannot typeset LaTeX — `$…$`, `\\frac`, `^\\circ` \
+reach the user as raw text. You MUST write mathematics in plain Unicode \
+instead: subscripts and superscripts as ₁ ₂ ² ³, operators as × · − ≈ ≤ √ ∠ △, \
+degrees as °, a fraction on one line with a slash. Example: \
+∠TBP₁ = 90° − 10° = 80° and h/sin(45°) = d₁/sin(55°), never \
+$\\angle TBP_1 = 90^\\circ - 10^\\circ$ or $\\frac{{h}}{{\\sin(45^\\circ)}}$.
 - QUICK REPLIES: you CAN turn a question into a pick-by-number menu, and the \
 user EXPECTS it. Whenever you end a message with a question whose likely \
 answers are a few short options (yes/no, pick-one, a short menu), you MUST \

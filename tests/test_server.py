@@ -436,7 +436,29 @@ class TestConnect:
             assert response.status_code == 200
             assert 'src="app.js?v=' in response.text
             assert 'href="style.css?v=' in response.text
+            # The vendor files on the critical path are stamped too (#391):
+            # an unstamped tag is a stale-after-update gap on an installed PWA.
+            assert 'src="vendor/highlight.min.js?v=' in response.text
+            assert 'src="vendor/katex.min.js?v=' in response.text
+            assert 'href="vendor/katex.min.css?v=' in response.text
             assert response.headers["cache-control"] == "no-cache"
+
+    def test_vendored_katex_is_served_same_origin(self, app_env):
+        """The CSP is script-src 'self' with no font-src, so KaTeX's script,
+        stylesheet and a font all have to come from this origin — and do."""
+        client, _ = make_client(app_env, [])
+        with client:
+            for path in (
+                "/vendor/katex.min.js",
+                "/vendor/katex.min.css",
+                "/vendor/fonts/KaTeX_Main-Regular.woff2",
+            ):
+                response = client.get(path)
+                assert response.status_code == 200, path
+            csp = response.headers["content-security-policy"]
+            assert "script-src 'self'" in csp
+            assert "font-src" not in csp  # falls back to default-src 'self'
+            assert "default-src 'self'" in csp
 
     def test_hello_title_is_first_user_message(self, app_env):
         client, _ = make_client(app_env, [model_says("ok")])
@@ -666,6 +688,25 @@ class TestQuickReplyPromptGuidance:
         assert "NEVER generate a chip whose only purpose is to end the conversation" in context
         assert "Thanks, that's all" in context
         assert "useful next step" in context
+
+
+class TestMathsPromptGuidance:
+    """#391: the web renders a model's LaTeX (KaTeX), so its prompt block must
+    not ask the model to write around it. The Unicode directive belongs to the
+    terminal's block only (tests/test_cli.py pins that it is there)."""
+
+    def test_the_web_block_says_nothing_about_maths(self):
+        context = server_module.web_usage_context(
+            "model", "ollama", "/allow", "/deny", "/state"
+        )
+        lower = context.lower()
+        for word in ("maths", "latex", "unicode", "typeset", "formula", "equation"):
+            assert word not in lower, word
+        from aish.cli import usage_context
+
+        cli = usage_context("model", False, Path("/allow"), Path("/state"), Path("/config"))
+        assert "MUST write mathematics in plain Unicode" in cli
+        assert "MUST write mathematics in plain Unicode" not in context
 
 
 class TestQuickReplyNet:
