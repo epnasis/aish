@@ -139,6 +139,8 @@ The reason it was believed undrivable is worth keeping, because the evidence rea
 
 **Quick replies.** A final answer ending in a question with no chip gets a deterministic fallback set (`apply_quick_reply_net`); `[no-chips]` opts out and is stripped. The system prompt forbids terminating chips ("Thanks, that's all") — the user can end a chat at any time (`TestQuickReplyNet`, `TestQuickReplyPromptGuidance`).
 
+**Maths (#391).** The web prompt block says nothing about mathematics: the transcript renders a model's LaTeX with KaTeX (`docs/web-frontend.md`, *[MATH]*) and the PDF typesets it (`docs/export-pdf.md`), so this surface must never ask the model to write around a renderer it has. The Unicode directive belongs to the terminal's block alone (`docs/cli.md`). `TestMathsPromptGuidance` pins the absence here and the presence there.
+
 ---
 
 ## Live state, not transcript (L4)
