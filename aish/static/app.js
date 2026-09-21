@@ -1489,7 +1489,12 @@ function handle(event) {
       // card's clock. A live turn starts now; a replayed one carries its real
       // start from the server (replayedTurnStart).
       turnStart = replaying ? replayedTurnStart(event) : Date.now();
-      setBusy(true);
+      // Busy is the SERVER's word — `hello` carries it, live events move it. A
+      // replayed transcript must not re-derive it: the window can be trimmed
+      // past the running turn's `user` event, and a replayed `done` that
+      // cleared busy left a running chat with an idle dot and (#398) no card
+      // to stop it from — the landing builds that card from `clientBusy`.
+      if (!replaying) setBusy(true);
       // A synthetic turn is aish's own text (a resume note, an automation's
       // trigger prompt), so it must not seed the chat title or the composer's
       // prompt history — both are records of what YOU asked (#171).
@@ -1601,7 +1606,7 @@ function handle(event) {
       // (a past interrupted turn on a freshly-loaded session) must not: the
       // connection is fine, so keep the dot green and just show Retry.
       if (!replaying) taskErrored = true;
-      setBusy(false);
+      if (!replaying) setBusy(false); // hello's word stands over a replayed ending
       notify("aish — task failed", event.text);
       break;
     case "stopped": onStopped(); break;
@@ -2365,6 +2370,19 @@ function onReplay(event) {
   // keeps its claim: that no-op is the point of the warm peek.)
   viewFp = offlineViewing ? "" : fp;
   viewDirty = false;
+  // A running turn whose `user` event fell outside the window just painted (the
+  // transcript buffer keeps the last 500 events, and one long streaming command
+  // can push a turn's start past it) leaves the view busy with no card — and the
+  // card is where Stop and the status channel live now (#398); the bottom line
+  // used to show the phase label here, and never Stop, because the replayed
+  // `done` before the tail had cleared busy. Build it in the state a step would build it in:
+  // no origin, and no turn id to name — `currentTurnId` is the last REPLAYED
+  // turn's, which this one is not. The one creator, so the manifest holds.
+  if (clientBusy && !currentTrace && !offlineViewing) {
+    currentTurnId = "";
+    turnStart = 0;
+    ensureTrace();
+  }
   // The reading position, in priority order: the place a backfill must not move
   // you from, then the place you left this chat at, then the tail.
   if (!restoreBackfillPos() && !restoreScrollPos()) scrollToEnd(true);
@@ -2640,10 +2658,12 @@ function onDone(event) {
   closeAnswer(false, event.answer);
   answerAbandoned = false; // this turn is over; the next one streams normally
   maybeSpeakReply(); // voice-in → voice-out: auto-read a reply to a dictated message (#97)
-  finishTrace();
+  // A `done` with no answer and no record to name ends the turn with nothing:
+  // a card that drew nothing is dropped rather than titled ([TRACE-CLOSE]).
+  finishTrace(false, !event.result && !event.answer);
   turnStart = 0; // no turn is running; the next card must not inherit this clock
   if (event.sources && event.sources.length) addSources(event.sources);
-  setBusy(false);
+  if (!replaying) setBusy(false); // hello's word stands over a replayed ending (see the `user` case)
   // Settle the view on the response start (the collapsed trace is now smaller);
   // never on the bottom of a long answer.
   if (!replaying) requestAnimationFrame(() => anchorAnswer(true));
@@ -2657,7 +2677,7 @@ function onDone(event) {
 // real `error` carries. Stop thus always succeeds instead of dead-ending.
 function onStopped() {
   closeAnswer();
-  finishTrace(false, true); // outcome unseen: a card that drew nothing is dropped, not titled
+  finishTrace(false, true); // an empty ending: a card that drew nothing is dropped, not titled
   turnStart = 0;
   setBusy(false);
 }
@@ -4277,7 +4297,7 @@ function finalizeAnswerRow(t, ref, secs) {
 // replay that replaced the transcript it was drawn into (resetLiveTurn calls
 // this rather than nulling the variable, so the interval timer and every
 // still-spinning row are finalized on every one of those paths).
-function finishTrace(errored, outcomeUnseen) {
+function finishTrace(errored, emptyEnding) {
   if (!currentTrace) return;
   const t = currentTrace;
   t.errored = Boolean(errored); // the finished head reads it ([TRACE-STATUS])
@@ -4313,13 +4333,16 @@ function finishTrace(errored, outcomeUnseen) {
   // the turn's full record (#243), and a turn that answered without running
   // anything is exactly the one worth asking about ("why did it just answer?").
   // So it is kept whenever there is a turn to open; with no id there is nothing
-  // to open and the old removal stands. It is also dropped when the view LOST
-  // the turn (`outcomeUnseen`: a `stopped` reconcile — the server says nothing
-  // is running, and this view saw no step, no usage and no answer): a card
-  // exists from the `user` event now (#398), and keeping one there would title
-  // it with an outcome nobody observed.
+  // to open and the old removal stands. It is also dropped when the turn ENDED
+  // WITH NOTHING (`emptyEnding`): a `done` carrying no answer and naming no
+  // record — the closing replay synthesizes for a turn cut off before its
+  // first trace record — or a `stopped` reconcile, where the server says
+  // nothing is running and this view saw no step, no usage and no answer. A
+  // card exists from the `user` event now (#398), and keeping one there would
+  // title it "Answered" for an answer nobody saw; hot and cold alike, since
+  // the same `done` reaches both.
   const drewNothing = !t.body.querySelector(".step") && !t.tokensIn && !t.tokensOut;
-  if (drewNothing && (!t.turnId || outcomeUnseen)) {
+  if (drewNothing && (!t.turnId || emptyEnding)) {
     t.el.remove();
     return;
   }

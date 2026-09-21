@@ -77,6 +77,11 @@ function makeElement(tag) {
       el.children.push(n);
       return n;
     },
+    replaceChildren(...nodes) {
+      el.children.forEach((c) => { c.parentNode = null; });
+      el.children = [];
+      nodes.forEach((n) => el.appendChild(n));
+    },
     remove() {
       if (!el.parentNode) return;
       const siblings = el.parentNode.children;
@@ -349,6 +354,27 @@ function world() {
   const card = w.card();
   w.handle({ type: "stopped" });
   ok("a `stopped` on a card with steps keeps it", card.parentNode === w.messagesEl && s.currentTrace === null);
+}
+{
+  // A turn cut off before its first trace record replays as `user` + an empty
+  // `done` (session.py: only a turn with a RUNNING step becomes an `error`) —
+  // the same `done` a live view would get from nothing at all.
+  const w = world();
+  const s = w.sandbox;
+  w.handle({ type: "user", text: "hello", turn: "t4c" });
+  const card = w.card();
+  w.handle({ type: "done", result: "" });
+  ok("a `done` with no answer and no record drops a card that drew nothing — never an Answered nobody saw",
+    card.parentNode === null && w.card() === null && s.currentTrace === null);
+}
+{
+  const w = world();
+  const s = w.sandbox;
+  w.handle({ type: "user", text: "hello", turn: "t4d" });
+  const card = w.card();
+  w.handle({ type: "done", result: "hi there", answer: "a1" });
+  ok("a `done` that carries the answer keeps the stepless card as Answered — the door to its record",
+    card.parentNode === w.messagesEl && w.title(card) === "Answered" && s.currentTrace === null);
 }
 {
   const w = world();
