@@ -40,10 +40,10 @@ from __future__ import annotations
 
 import datetime
 import json
-import os
 from pathlib import Path
 
 from . import atomic_write
+from .paths import state_home
 from .session import SessionLog
 
 STORE_NAME = "egress-vouches.json"
@@ -63,10 +63,9 @@ def state_dir() -> Path:
     Not bound at import, because `create_app` exports `AISH_STATE_DIR` at
     startup (`server.py`), so a constant frozen at import would point the web
     server's store somewhere the CLI's is not. `browser.state_dir` and
-    `explain.state_dir` resolve it the same way, for the same reason."""
-    return Path(
-        os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
-    )
+    `explain.state_dir` resolve it the same way, for the same reason — all
+    through `paths.state_home`, so the default is spelled once (#389)."""
+    return state_home()
 
 
 def store() -> Path:

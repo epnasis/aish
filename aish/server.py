@@ -116,7 +116,7 @@ from .cli import (
 )
 from .documents import DocumentError, page_count, page_png
 from .embeddings import SemanticIndex
-from .paths import config_home
+from .paths import config_home, state_home
 from .pins import PinLedger
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
@@ -6402,14 +6402,12 @@ def create_app(
         if cwd != os.getcwd():
             print(f"started from the home directory — working in {cwd} instead "
                   "to keep personal files out of scope")
-    state_dir = Path(
-        state_dir
-        or os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
-    )
+    state_dir = Path(state_dir) if state_dir else state_home()
     # Publish what we just decided, because this app is not the only thing that
     # answers "where does aish keep its state" — `browser` (the profile and the
-    # downloads), `signin` and `secrets` each resolve AISH_STATE_DIR themselves,
-    # at call time, and none of them can see this argument (#290). Left unset,
+    # downloads) and `secrets` resolve AISH_STATE_DIR themselves, at call time,
+    # and neither can see this argument (#290). `signin` does NOT — its store is
+    # bound to the real home at import and ignores the variable (#399). Left unset,
     # a server built with its own state_dir still drove the OWNER's real,
     # signed-in Chrome profile: the argument said isolated and the environment
     # decided. Writing it back makes the server the single owner of the answer;

@@ -12,6 +12,7 @@ that property.
 
 from __future__ import annotations
 
+import pathlib
 import time
 
 import pytest
@@ -1340,12 +1341,56 @@ class TestLearnedLimitsSurviveRestart:
         assert governor.believed("g:m").source == "none"
         governor.reserve("g:m", 10_000_000).settle(1)
 
-    def test_nothing_is_written_when_there_is_no_state_dir(self, monkeypatch):
+    def test_the_store_defaults_to_the_state_tree_when_nothing_names_it(self, monkeypatch):
+        """Production's launchd plist sets no `AISH_STATE_DIR`, and until #389
+        that meant `_path()` returned `None` — the one process whose restarts
+        this persistence exists for was the one process that never persisted.
+        The default is the state tree every other consumer already uses.
+
+        Asserts the PATH only. The suite's conftest redirects the variable to a
+        tmp dir; this test strips it to see the default, and must not write
+        there — that is the owner's real state directory."""
+        from aish.paths import DEFAULT_STATE_HOME
+
         monkeypatch.delenv("AISH_STATE_DIR", raising=False)
         governor = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1.0)
-        governor.reserve("g:m", 1).settle(1)
-        governor.observe("g:m", ratelimit.classify(informative_429("q")))
-        assert governor.believed("g:m").source == "observed"  # in memory only
+        assert governor._path() == DEFAULT_STATE_HOME / "rate-limits.json"
+        assert DEFAULT_STATE_HOME == pathlib.Path.home() / ".local" / "state" / "aish"
+
+    def test_an_explicit_store_wins_over_the_state_tree(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path / "state"))
+        store = tmp_path / "elsewhere.json"
+        governor = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1.0, store=store)
+        assert governor._path() == store
+
+    def test_a_governor_given_no_store_persists_into_the_state_dir(self, tmp_path, monkeypatch):
+        """The production shape: nobody passes `store=`, the state dir is
+        whatever the environment says, and what one governor learned is what
+        the next one — a restarted server — starts from."""
+        state = tmp_path / "state"
+        monkeypatch.setenv("AISH_STATE_DIR", str(state))
+        first = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0)
+        for _ in range(10):
+            first.reserve("g:m", 1_000).settle(1_000)
+        first.observe("g:m", ratelimit.classify(informative_429("q")))
+        learned = first.believed("g:m")
+        assert (state / "rate-limits.json").is_file()
+
+        second = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0)
+        assert second.believed("g:m").rpm == learned.rpm
+        assert second.believed("g:m").tpm == learned.tpm
+        assert second.believed("g:m").source == "observed"
+
+    def test_the_latch_persists_into_the_state_dir_too(self, tmp_path, monkeypatch):
+        state = tmp_path / "state"
+        monkeypatch.setenv("AISH_STATE_DIR", str(state))
+        body = {"error": {"details": [{"violations": [{"quotaId": "RequestsPerDay"}]}]}}
+        first = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0)
+        first.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429, body=body)))
+
+        second = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1100.0)
+        with pytest.raises(ratelimit.RateLimited, match="cannot be waited out"):
+            second.reserve("g:m", 1)
 
 
 class TestAnAnonymousRefusalTeachesNothing:
