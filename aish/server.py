@@ -6413,12 +6413,11 @@ def create_app(
     state_dir = Path(state_dir) if state_dir else state_home()
     # Publish what we just decided, because this app is not the only thing that
     # answers "where does aish keep its state" — `browser` (the profile and the
-    # downloads) and `secrets` resolve AISH_STATE_DIR themselves, at call time,
-    # and neither can see this argument (#290). `signin` does NOT — its store is
-    # bound to the real home at import and ignores the variable (#399). Left unset,
-    # a server built with its own state_dir still drove the OWNER's real,
-    # signed-in Chrome profile: the argument said isolated and the environment
-    # decided. Writing it back makes the server the single owner of the answer;
+    # downloads), `secrets` and `signin` (the replay store, #399) resolve
+    # AISH_STATE_DIR themselves, at call time, and none can see this argument
+    # (#290). Left unset, a server built with its own state_dir still drove the
+    # OWNER's real, signed-in Chrome profile: the argument said isolated and the
+    # environment decided. Writing it back makes the server the single owner of the answer;
     # in production the value is the same one it was read from.
     os.environ["AISH_STATE_DIR"] = str(state_dir)
     # Base URL for notification deep-links (#163): a push tap must open the

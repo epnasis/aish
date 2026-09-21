@@ -205,11 +205,17 @@ def no_real_secrets(tmp_path_factory, monkeypatch):
     # which is how this fixture's own pinning test started shelling out to
     # `security` for their live LinkedIn password. An empty store answers "no
     # sign-ins", costs nothing, and reaches nothing.
-    monkeypatch.setattr(
-        signin_module,
-        "STATE",
-        tmp_path_factory.mktemp("signins") / "signins.json",
-    )
+    #
+    # The FUNCTION is patched, not the environment (#399): `signin.store()`
+    # follows AISH_STATE_DIR at call time, and `no_real_browser` sets that —
+    # but a test that unsets the variable to check a default (test_paths does)
+    # would then point the replay store at the real home, and any tool result
+    # scrubbed inside it would read the owner's sign-ins. A patched function
+    # answers the tmp path whatever the environment says. The real one is
+    # stashed so the one test that is ABOUT the knob can still call it;
+    # `test_the_suite_never_reaches_the_real_sign_in_store` pins the redirect.
+    monkeypatch.setattr(signin_module, "_real_store", signin_module.store, raising=False)
+    monkeypatch.setattr(signin_module, "store", lambda p=index_dir / "signins.json": p)
     # And once more, one store further over (#343). The declared personal values
     # are asked of every value the browse gate is about to type, from a name
     # index that is a real file in the developer's state dir — so left alone a

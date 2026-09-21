@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 from .files import contains
+from .paths import state_home
 
 _URLISH = re.compile(r"^(https?://|git@|ssh://|git://)")
 CLONE_TIMEOUT = 120
@@ -148,7 +149,12 @@ def stage(
     return name, entry.description, files, skipped, tmp
 
 
-QUARANTINE_ROOT = Path.home() / ".local" / "state" / "aish" / "skill-imports"
+def quarantine_root() -> Path:
+    """Where staged imports wait for review — resolved at CALL time through
+    `paths.state_home` (#399), so a run that moved its state tree stages into
+    its own tree and `aish skill list` there never shows the owner's pending
+    imports. The dir is scratch: nothing about it needs the real home."""
+    return state_home() / "skill-imports"
 
 
 def stage_to_disk(
@@ -158,7 +164,7 @@ def stage_to_disk(
     'B' path): the validated files are written under root/<name>/ so the user
     can inspect them with their own editor, then `aish skill approve <name>`
     installs. Returns (name, quarantine_dir, risk_flags)."""
-    root = root or QUARANTINE_ROOT
+    root = root or quarantine_root()
     name, _description, files, _skipped, tmp = stage(repo, path)
     try:
         dest = root / name
@@ -176,7 +182,7 @@ def stage_to_disk(
 
 
 def pending(root: Path | None = None) -> list[str]:
-    root = root or QUARANTINE_ROOT
+    root = root or quarantine_root()
     try:
         return sorted(p.name for p in root.iterdir() if (p / "SKILL.md").is_file())
     except OSError:
@@ -185,7 +191,7 @@ def pending(root: Path | None = None) -> list[str]:
 
 def install(name: str, dest_skills_dir: Path, root: Path | None = None) -> Path:
     """Move a quarantined skill into the skills dir. Returns the install path."""
-    root = root or QUARANTINE_ROOT
+    root = root or quarantine_root()
     src = root / name
     if not (src / "SKILL.md").is_file():
         raise SkillImportError(f"no staged skill named {name!r} (see `aish skill list`)")
@@ -197,7 +203,7 @@ def install(name: str, dest_skills_dir: Path, root: Path | None = None) -> Path:
 
 
 def discard(name: str, root: Path | None = None) -> bool:
-    root = root or QUARANTINE_ROOT
+    root = root or quarantine_root()
     src = root / name
     if not src.is_dir():
         return False
