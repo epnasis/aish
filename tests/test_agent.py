@@ -14596,9 +14596,10 @@ class TestTheOwnersDeclaredValues:
         # A FRESH copy of the module, because the suite-wide guard has already
         # redirected the two index functions on the imported one — asserting
         # through that patch would test the fixture. Loaded without entering
-        # `sys.modules`, so nothing else in the run sees it.
+        # `sys.modules`, so nothing else in the run sees it. Named INSIDE the
+        # package so its relative imports (`.paths`, #389) resolve.
         spec = importlib.util.spec_from_file_location(
-            "aish_secrets_probe", Path(agent_module.secrets.__file__)
+            "aish._secrets_probe", Path(agent_module.secrets.__file__)
         )
         fresh = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fresh)

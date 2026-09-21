@@ -475,9 +475,12 @@ class ModelUnavailable(RuntimeError):
 # different units. Three attempts spaced 5s and 10s spend fifteen seconds against
 # a per-minute quota and then destroy a turn that had already done its work
 # (#337). This cap exists only for the case a budget cannot bound — a provider
-# answering `Retry-After: 0` forever — so it sits far above any real retry.
-# `docs/rate-limits.md`.
-MODEL_CALL_ATTEMPT_CAP = 8
+# answering `Retry-After: 0` forever — so it sits far above any real retry: an
+# hour's budget at the 60s steady backoff is about sixty attempts, and this is
+# twice that. The price of the backstop firing is 120 re-sends of the whole
+# history (~120k tokens each in the incident that named it) instead of the
+# eight it used to be; that provider has not been met. `docs/rate-limits.md`.
+MODEL_CALL_ATTEMPT_CAP = 120
 
 # How much of a provider's error text a `model_error` record keeps. A quota
 # error carries a documentation URL and a details array; the sentence that says
@@ -4292,7 +4295,16 @@ class Agent:
         # wrong unit: a quota window is measured in seconds, so three attempts
         # spaced 5s and 10s could never outlast one, whatever the number was
         # set to. `docs/rate-limits.md`.
+        # Sized per failure once one is classified: an hour for a quota, two
+        # minutes for anything else that is retryable (`_retry_wait_budget`).
+        # The waiting is accumulated PER CLASS and each class is held to its
+        # own budget: Gemini interleaves 429 with 503 under exactly the load
+        # the hour exists for, and one accumulator against a budget that
+        # swaps with the class would let a single stray 5xx after ten minutes
+        # of quota waiting end the turn — or one 429 amid a dead backend's
+        # resets re-arm the hour.
         budget = self._retry_wait_budget()
+        waited_by_kind: dict[str, float] = {}
         waited = 0.0
         attempt = 0
         # Whether this call has already spent its one shrink-and-retry (#388).
@@ -4325,6 +4337,8 @@ class Agent:
                 raise TaskCancelled from exc
             except Exception as exc:  # noqa: BLE001 — surface, don't crash the REPL
                 last = ratelimit.classify(exc)
+                budget = self._retry_wait_budget(last)
+                waited = waited_by_kind.get(last.kind, 0.0)
                 overflow = last.kind == ratelimit.CONTEXT_OVERFLOW
                 if overflow and not shrunk and self._can_trim_history():
                     # The one 4xx aish can answer: the request was refused for
@@ -4380,8 +4394,10 @@ class Agent:
                 )
                 if final:
                     break
-                waited += delay
-                if ratelimit.wait(delay, self._cancel, self.status.note):
+                waited_by_kind[last.kind] = waited + delay
+                if ratelimit.wait(
+                    delay, self._cancel, self.status.note, what=ratelimit.wait_caption(last)
+                ):
                     # A Stop during the wait is a stop, not a failed call: the
                     # user is owed the cancel path, not a ModelUnavailable that
                     # blames the provider for their own decision.
@@ -4404,36 +4420,44 @@ class Agent:
                 return turn
         raise ModelUnavailable(_unavailable_text(last, attempt))
 
-    def _retry_wait_budget(self) -> float:
+    def _retry_wait_budget(self, failure: ratelimit.CallFailure | None = None) -> float:
         """Seconds of waiting one model call may spend across its retries (#337).
 
-        The same number as `_wait_ceiling`, and deliberately so: both answer
-        "how long may this session sit waiting on the provider", and an owner
-        who wants a turn to hold on longer means both. They are separate methods
-        because they bound different phases — queueing for headroom BEFORE a
-        call, versus backing off BETWEEN calls — and a future reason to size
-        them apart should not have to first prise them out of one constant.
+        For a QUOTA it is the same number as `_wait_ceiling`, and deliberately
+        so: both answer "how long may this session sit waiting on the
+        provider", and an owner who wants a turn to hold on longer means both.
+        They are separate methods because they bound different phases —
+        queueing for headroom BEFORE a call, versus backing off BETWEEN calls.
 
-        Attended, this buys 5+10+20+40 seconds across five attempts, which
-        crosses a per-minute quota window; the old three-attempt count spent
-        fifteen seconds and could not. Unattended it lands back on three
-        attempts, and that is not a compromise: an unattended session holds a
-        thread from the server's bounded worker pool, which is the whole reason
-        its ceiling is low.
+        An hour (#387): 5+10+20+40 and then 60s steady, so a busy per-minute
+        window is outlasted inside the first minute and a longer one inside
+        the turn — the turn FINISHES instead of dying with its work done and
+        waiting for the owner to notice it was a quota and press Retry. The
+        old 120s crossed a minute and no more; the three-attempt count before
+        it spent fifteen seconds and could not. A spent quota does not wait at
+        all (`classify` marks it not retryable), and Stop cuts the wait.
+
+        Any OTHER retryable failure — a 5xx, a connection reset, an error
+        nothing classified — keeps the old two minutes. The hour is for a
+        provider that will take the call once its window clears; a backend
+        that is down does not clear, and the owner decided about quotas.
         """
+        if failure is not None and failure.kind != ratelimit.RATE_LIMIT:
+            return ratelimit.TRANSIENT_WAIT_BUDGET_S
         return self._wait_ceiling()
 
     def _wait_ceiling(self) -> float:
         """How long this session will queue for rate-limit headroom.
 
-        An unattended session gets far less, and not out of politeness: it holds
-        a thread from the server's bounded worker pool, which exists so that a
-        session parked on an approval cannot starve short user actions. A
-        session parked on headroom would re-create that hazard inside the pool.
+        One number for every origin. An unattended session used to get 20s
+        because it holds a thread from the server's bounded worker pool; the
+        pool is sized for every triggered session to park at once
+        (`ratelimit.QUOTA_WAIT_BUDGET_S` says how), and what the short ceiling
+        actually bought was an email trigger that died whenever its minute was
+        busy, with nobody there to press Retry. Passed to the governor through
+        `hooks`, which is what keeps the hour off threads Stop cannot reach.
         """
-        if self.origin == "user":
-            return ratelimit.DEFAULT_WAIT_CEILING_S
-        return ratelimit.UNATTENDED_WAIT_CEILING_S
+        return ratelimit.QUOTA_WAIT_BUDGET_S
 
     def _record_model_error(
         self,
@@ -4468,6 +4492,12 @@ class Agent:
         the wait budget usually does. So the budget travels with the record and
         the ending names which bound it hit. Without that, a reader sees "gave
         up on attempt 5 of 8" and cannot tell a spent budget from a bug.
+
+        `waited_total_s` is the waiting spent on THIS failure's class, which is
+        the number the budget beside it bounds (#387): a quota's hour and a
+        5xx's two minutes are separate accounts, so a record of one never
+        carries the other's spend and `waited_total_s <= wait_budget_s` holds
+        on every record.
         """
         step: dict = {
             "kind": "model_error",

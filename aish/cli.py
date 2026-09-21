@@ -50,7 +50,7 @@ from .approval import (
     save_prefix,
 )
 from .embeddings import SemanticIndex
-from .paths import config_home
+from .paths import config_home, state_home
 from .session import (
     TRASH_MAX_AGE_S,
     RestoreRefused,
@@ -2454,9 +2454,7 @@ def main() -> int:
     if cwd != os.getcwd():
         print(f"{DIM}started from your home directory — working in {cwd} instead "
               f"to keep personal files out of scope (/cd moves elsewhere){RESET}")
-    state_dir = Path(
-        os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
-    )
+    state_dir = state_home()
     allow_path = Path(os.environ.get("AISH_ALLOWLIST") or default_allowlist())
     deny_path = Path(os.environ.get("AISH_DENYLIST") or default_denylist())
     lessons_path = Path(os.environ.get("AISH_LESSONS") or default_lessons())

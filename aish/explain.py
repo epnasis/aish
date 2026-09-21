@@ -37,6 +37,7 @@ from pathlib import Path
 
 from . import evidence
 from . import turns as turn_store
+from .paths import state_home
 from .session import synthetic_kind
 
 NOT_RECORDED = "not recorded"
@@ -51,7 +52,7 @@ _SECTIONED = frozenset(
 
 def state_dir() -> Path:
     """Where sessions and the evidence store live. Matches the entry points."""
-    return Path(os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish")))
+    return state_home()
 
 
 @dataclass

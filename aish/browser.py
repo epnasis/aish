@@ -62,6 +62,7 @@ from typing import Any
 from . import browse as browse_mod
 from . import media, notify, vocab
 from . import signin as signin_mod
+from .paths import state_home
 
 # A launch is ~2s, so the context is kept warm; an idle Chrome is ~400 MB, so
 # it does not stay warm for long. See the module docstring on the memory
@@ -457,9 +458,7 @@ _OWNER_LOCK = threading.Lock()
 
 
 def state_dir() -> Path:
-    return Path(
-        os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
-    )
+    return state_home()
 
 
 def frames_dir() -> Path:

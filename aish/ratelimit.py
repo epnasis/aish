@@ -51,7 +51,8 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from . import vocab
+from . import atomic_write, vocab
+from .paths import state_home
 
 # What went wrong, in the only vocabulary the retry policy needs. Closed set:
 # a value outside it is a bug, not a new case to handle downstream.
@@ -439,6 +440,20 @@ def _match_text(pattern: re.Pattern, haystack: str) -> str:
     return match.group(0) if match else ""
 
 
+# The caption `wait` shows for each retryable class — what is being waited out,
+# in the owner's words rather than the classifier's token.
+WAIT_CAPTIONS = {
+    RATE_LIMIT: "Rate-limited",
+    SERVER: "Provider error",
+    TRANSPORT: "Backend unreachable",
+    UNKNOWN: "Model call failed",
+}
+
+
+def wait_caption(failure: CallFailure) -> str:
+    return WAIT_CAPTIONS.get(failure.kind, "Model call failed")
+
+
 def backoff_delay(failure: CallFailure, attempt: int, base: float = 1.0) -> float:
     """How long to wait before attempt N+1, in seconds.
 
@@ -462,8 +477,17 @@ def backoff_delay(failure: CallFailure, attempt: int, base: float = 1.0) -> floa
 WAIT_TICK_S = 0.5
 
 
-def wait(delay: float, stop: threading.Event, note: Callable[[str], None] | None = None) -> bool:
+def wait(
+    delay: float,
+    stop: threading.Event,
+    note: Callable[[str], None] | None = None,
+    what: str = "Rate-limited",
+) -> bool:
     """Sleep `delay` seconds, interruptibly. True if `stop` was set.
+
+    `what` is the caption's subject — the failure being waited out. It used to
+    be hardcoded "Rate-limited", which was true when every wait was seconds
+    and is a false statement about an hour spent on a dead backend.
 
     THE ONE PLACE aish sleeps between model attempts, which is what makes it
     patchable suite-wide: a test that exercises the retry policy must not spend
@@ -484,7 +508,7 @@ def wait(delay: float, stop: threading.Event, note: Callable[[str], None] | None
             # The wait is the longest thing a task does without producing a
             # step, so a chat that goes quiet for half a minute says why while
             # it is happening rather than afterwards.
-            note(f"Rate-limited — retrying in {left:.0f}s")
+            note(f"{what} — retrying in {left:.0f}s")
         if stop.wait(min(WAIT_TICK_S, left)):
             return True
     return stop.is_set()
@@ -527,10 +551,34 @@ OBSERVED_MARGIN = 0.9
 COOLDOWN_S = 60.0
 COOLDOWN_SPACING_S = 2.0
 
-# Longest a caller will queue for headroom before being told to give up instead.
-# An unattended session gets a much shorter one (see `hooks`): it occupies a
-# bounded worker thread, and a chat nobody is watching must not park one for
-# minutes while a user's own action queues behind it.
+# Longest a TURN will wait on a busy quota — queueing for headroom before a call
+# and backing off between attempts (`Agent._retry_wait_budget`) — before it is
+# told to give up instead. AN HOUR, by the owner's decision (#387, 2026-09-20):
+# "finish the turn even when quota; wait if needed." The cost of a turn that
+# dies on a busy quota is the work it had already done, and the owner then has
+# to notice it was a quota and press Retry; the cost of waiting is a turn that
+# looks alive for as long as the provider is busy, which a per-minute window
+# ends within the first minute of it. A SPENT quota never waits this long —
+# `classify` marks it not retryable (`scope: long`) and the turn says so at
+# once — and Stop cuts the wait wherever it is. The hour is a backstop against
+# a provider that answers 429 without ever naming a window, not a duration any
+# healthy retry reaches. It applies to a QUOTA only: a dead backend or a
+# broken network gets `TRANSIENT_WAIT_BUDGET_S`, because waiting an hour on
+# those is not what the owner decided and not what would help.
+QUOTA_WAIT_BUDGET_S = 3600.0
+
+# What a retryable failure that is NOT a quota — a 5xx, a connection reset, an
+# unclassified error — may spend waiting before the turn gives up. The hour
+# is for a provider that will take the call once its window clears; a backend
+# that is down does not clear.
+TRANSIENT_WAIT_BUDGET_S = 120.0
+
+# What a caller that set NO hooks — the retitler, `curate`, a test — will queue
+# for headroom. Deliberately NOT the hour: such a call runs on a thread nobody
+# can cancel and nobody is watching (the retitler's is the DEFAULT executor,
+# and `TITLE_TIMEOUT` abandons the result but cannot unpark the thread), so an
+# hour here would be the pool starvation `docs/web-server.md` L3 exists to
+# prevent. A turn passes its own ceiling through `hooks`.
 DEFAULT_WAIT_CEILING_S = 120.0
 
 
@@ -1037,11 +1085,19 @@ class Governor:
 
     # -- what survives a restart ------------------------------------------
 
-    def _path(self) -> Path | None:
+    def _path(self) -> Path:
+        """Where the learned ceilings live: the state tree, always (#389).
+
+        This used to return `None` unless `AISH_STATE_DIR` was set, and the
+        production launchd plist sets it for nothing — so the server, the one
+        process whose restarts this persistence exists for, was the one
+        process that never persisted. The state tree has a default and every
+        other consumer of it already used one; `paths.state_home` is what
+        keeps this site from opting out again by omission.
+        """
         if self._store is not None:
             return self._store
-        root = os.environ.get("AISH_STATE_DIR")
-        return Path(root) / "rate-limits.json" if root else None
+        return state_home() / "rate-limits.json"
 
     def _load(self) -> None:
         """Learned ceilings and the spent-quota latch, from the last run.
@@ -1057,7 +1113,7 @@ class Governor:
             return
         self._loaded = True
         path = self._path()
-        if path is None or not path.is_file():
+        if not path.is_file():
             return
         try:
             stored = json.loads(path.read_text())
@@ -1076,8 +1132,6 @@ class Governor:
 
     def _save(self) -> None:
         path = self._path()
-        if path is None:
-            return
         payload = {
             # The BELIEF, never the relaxed view: writing a number that moves
             # with the clock would make the file disagree with itself the moment
@@ -1086,8 +1140,10 @@ class Governor:
             "exhausted_until": dict(self._exhausted_until),
         }
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, indent=2))
+            # Whole or not at all: the server and any CLI or preview run on the
+            # same tree each load once and write whole, so a torn file must never
+            # be what the next one reads (#395).
+            atomic_write.publish(path, json.dumps(payload, indent=2))
         except OSError:
             pass  # a report aish cannot write is never worth failing a call for
 
@@ -1149,12 +1205,16 @@ def reset_governor(instance: Governor | None = None) -> Governor:
 
 # ------------------------------------------------------- per-call UX wiring
 
-# What an UNATTENDED session will queue for. Far shorter than a user's own, and
-# not for politeness: a background or triggered session occupies a thread from
-# the server's bounded worker pool, and that pool exists precisely so a session
-# parked on an approval cannot starve short user actions. A session parked on
-# rate-limit headroom would re-create the same hazard inside the pool.
-UNATTENDED_WAIT_CEILING_S = 20.0
+# There is ONE turn ceiling for every origin. An unattended session used to
+# get 20s on the argument that it holds a thread from the server's bounded
+# worker pool and a chat nobody is watching must not park one while a user's
+# own action queues behind it. The pool is sized for exactly that:
+# `WORKER_POOL_SIZE` (32) is several times `MAX_OPEN_SESSIONS` +
+# `MAX_CONCURRENT_TRIGGERED` (3) + restart-resumes, so every triggered session
+# parked on a quota at once still leaves the pool mostly idle — and the ingress
+# cap, not the wait, is what bounds how many can park. What a short ceiling
+# actually bought was an email trigger that DIED whenever its minute was busy,
+# with nobody there to press Retry (#387).
 
 _HOOKS = threading.local()
 
@@ -1179,8 +1239,11 @@ class hooks:  # noqa: N801 — used as a context manager, reads as one
 
     A thread is the right scope by construction: the agent's worker thread is
     exactly the span of one session's calls. A caller that sets nothing — the
-    retitler, `curate`, a test — gets bounded default behaviour rather than
-    blocking forever, which is the correct answer for work nobody is watching.
+    retitler, `curate`, a test — gets `DEFAULT_WAIT_CEILING_S` (two minutes)
+    rather than blocking forever, which is the correct answer for work nobody
+    is watching and nobody can cancel. A turn's hour on a quota is NOT the
+    default: it rides in on `ceiling`, from the agent, on a thread Stop can
+    reach.
     """
 
     def __init__(self, should_stop=None, on_wait=None, ceiling=None):

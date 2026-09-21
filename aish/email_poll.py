@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from .notify import pushover
+from .paths import state_home
 
 ALLOWED_SENDERS = ("pawel@wenda.eu", "pawel@wenda.email")
 PROCESSED_LABEL = "aish-processed"
@@ -114,8 +115,7 @@ def _health_path() -> Path:
     """Streak/notify state, beside the rest of aish's state. Resolved from the
     environment at call time like every other AISH_STATE_DIR consumer (the
     suite redirects the variable; production launchd inherits the default)."""
-    root = os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
-    return Path(root) / "email_poll_health.json"
+    return state_home() / "email_poll_health.json"
 
 
 def _load_health(path: Path) -> tuple[int, float | None]:

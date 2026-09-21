@@ -332,7 +332,7 @@ def no_real_backoff_sleep(monkeypatch):
     restores it, which is what keeps the waiting itself covered.
     """
     monkeypatch.setattr(
-        ratelimit_module, "wait", lambda delay, stop, note=None: stop.is_set()
+        ratelimit_module, "wait", lambda delay, stop, note=None, what="": stop.is_set()
     )
 
 

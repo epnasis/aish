@@ -325,9 +325,12 @@ export AISH_RATE_LIMIT_GEMINI:GEMINI-3.5-FLASH="rpm=10,tpm=250000"   # or per mo
 
 Once a limit is known, aish also **sizes the conversation to it** — history is
 capped so a handful of steps fit in a minute, rather than one enormous step
-filling the whole budget. Waiting is shown while it happens, Stop works during
-it, and a quota that is *spent* rather than merely busy says so instead of
-retrying into a wall it cannot get past.
+filling the whole budget. A quota that is merely *busy* is waited out — backing
+off up to a minute between tries, for up to an hour — so the turn finishes on
+its own rather than dying with its work done and waiting for you to press
+Retry. Waiting is shown while it happens, Stop works during it, and a quota
+that is *spent* rather than busy says so instead of retrying into a wall it
+cannot get past.
 
 To see where the tokens went:
 
