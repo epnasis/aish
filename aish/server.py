@@ -6405,8 +6405,9 @@ def create_app(
     state_dir = Path(state_dir) if state_dir else state_home()
     # Publish what we just decided, because this app is not the only thing that
     # answers "where does aish keep its state" — `browser` (the profile and the
-    # downloads), `signin` and `secrets` each resolve AISH_STATE_DIR themselves,
-    # at call time, and none of them can see this argument (#290). Left unset,
+    # downloads) and `secrets` resolve AISH_STATE_DIR themselves, at call time,
+    # and neither can see this argument (#290). `signin` does NOT — its store is
+    # bound to the real home at import and ignores the variable (#399). Left unset,
     # a server built with its own state_dir still drove the OWNER's real,
     # signed-in Chrome profile: the argument said isolated and the environment
     # decided. Writing it back makes the server the single owner of the answer;

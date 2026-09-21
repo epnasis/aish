@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from . import vocab
+from . import atomic_write, vocab
 from .paths import state_home
 
 # What went wrong, in the only vocabulary the retry policy needs. Closed set:
@@ -1093,8 +1093,10 @@ class Governor:
             "exhausted_until": dict(self._exhausted_until),
         }
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, indent=2))
+            # Whole or not at all: the server and any CLI or preview run on the
+            # same tree each load once and write whole, so a torn file must never
+            # be what the next one reads (#395).
+            atomic_write.publish(path, json.dumps(payload, indent=2))
         except OSError:
             pass  # a report aish cannot write is never worth failing a call for
 

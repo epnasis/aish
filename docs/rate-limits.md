@@ -317,8 +317,8 @@ and re-freeze a ceiling that had spent an hour earning its way back up.
 **The location is structural, not configured (#389).** For one release `_path()` returned
 `None` unless `AISH_STATE_DIR` was set, and the production launchd plist sets it for
 nothing — so the server, the one process whose restarts this section exists for, was the
-one process that never persisted anything: `rate-limits.json` was written by CLI runs and
-never read by `aish-web`, and the latch below did not survive a restart either, while this
+one process that never persisted anything: `rate-limits.json` was written only by runs
+that exported the variable, and the latch below did not survive a restart either, while this
 section said it did. The default now comes from `paths.state_home()`, the single place the
 state tree's default is spelled (the same shape as `config_home()`, #254), so no site can
 opt out of persistence again by omitting a default. `test_the_store_defaults_to_the_state_tree_when_nothing_names_it`,

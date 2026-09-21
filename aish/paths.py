@@ -14,7 +14,10 @@ fourth is the one that writes.
 `~/.local/state/aish/` is the machine-wide STATE tree — sessions, the evidence
 store, the browser profile, the vouches, the learned rate ceilings, the job
 logs. `AISH_STATE_DIR` moves all of it at once, through `state_home()`, and
-the default is what the tree resolves to when nothing sets it. Before #389 the
+the default is what the tree resolves to when nothing sets it — with three
+stragglers still bound to the real home at import and blind to the knob:
+`signin.STATE`, `skill_import.QUARANTINE_ROOT` and `curate.run_curate`'s
+default (#399). Before #389 the
 default was spelled at each of a dozen call sites and one of them
 (`ratelimit._path`) had none, so learned ceilings were persisted only when the
 variable happened to be set — never under launchd, where the plist sets it
