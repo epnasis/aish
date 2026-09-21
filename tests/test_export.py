@@ -467,8 +467,11 @@ def test_prose_dollars_are_never_maths():
         "the $ sign alone, and a trailing $",
         "$5 for A$ and B$ each",
         "(costs $2x$?) no marker, digit start",
+        # the unambiguous forms are not unambiguous in prose: no LaTeX marker, no maths
+        "use $$ to get the shell PID; later $$ expands to it",
+        "critics rate it $$$ but locals say $$ at most",
+        "I ran wc -l \\(and grep\\) on it",
     ):
-        assert export._MATH_RE.search(line) is None, line
         html = export._markdown_to_html_fragment(line)
         assert not _math_imgs(html), line
         assert line.count("$") == html.count("$"), line
@@ -476,12 +479,40 @@ def test_prose_dollars_are_never_maths():
 
 def test_the_single_dollar_rule_case_by_case():
     yes = ["$h$", "$B$ be", "($h$)", "so $TB = h$.", "$P_1$", "$30\\text{ meters}$ down",
-           "of $10^\\circ$ to", "**$72.08\\text{ meters}$**", "$x$-axis", "$\\alpha$"]
-    no = ["$5 for A$ and", "$n$th", "x$y$", "$ x$", "$x $", "$2x$", "$$", "$ $", "a$b$c"]
+           "of $10^\\circ$ to", "**$72.08\\text{ meters}$**", "$x$-axis", "$\\alpha$",
+           "$$\\frac{a}{b}$$", "$$ x^2 $$", "\\[E=mc^2\\]", "\\(a_1\\)"]
+    no = ["$5 for A$ and", "$n$th", "x$y$", "$ x$", "$x $", "$2x$", "$$", "$ $", "a$b$c",
+          "$$ x $$", "\\(and grep\\)", "\\[ 1 + 1 = 2 \\]", "$a `b$ c` d", "$$ \\frac{a}{b} `x` $$"]
+    # The regex alone is not the rule (the marker and code-span checks live in
+    # MathInline), so each case goes through the real pipeline.
     for s in yes:
-        assert export._MATH_RE.search(s) is not None, f"should be maths: {s}"
+        assert len(_math_imgs(export._markdown_to_html_fragment(s))) == 1, f"should be maths: {s}"
     for s in no:
-        assert export._MATH_RE.search(s) is None, f"should be prose: {s}"
+        assert not _math_imgs(export._markdown_to_html_fragment(s)), f"should be prose: {s}"
+
+
+def test_a_maths_span_never_swallows_a_code_span():
+    """`backtick` runs first and leaves a placeholder; a span holding one is
+    prose by rule, not because the renderer happened to choke on the bytes."""
+    html = export._markdown_to_html_fragment("so $x `y` z$ done")
+    assert not _math_imgs(html)
+    assert "<code>y</code>" in html
+    assert html.count("$") == 2
+
+
+def test_a_span_over_the_cap_is_verbatim_in_bounded_time():
+    import time
+
+    big = "x^2 + " * 400  # 2400 chars, over _MATH_MAX_TEX
+    assert len(big) > export._MATH_MAX_TEX
+    started = time.monotonic()
+    html = export._markdown_to_html_fragment(f"a $${big}$$ b")
+    assert time.monotonic() - started < 1.0
+    assert not _math_imgs(html)
+    assert f"$${big}$$" in html  # verbatim, delimiters included
+    under = "x^2 + " * 100  # 600 chars, under the cap: still typeset
+    assert len(under) < export._MATH_MAX_TEX
+    assert len(_math_imgs(export._markdown_to_html_fragment(f"$${under}$$"))) == 1
 
 
 def test_a_dollar_inside_a_code_span_is_never_maths():

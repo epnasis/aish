@@ -20,7 +20,9 @@ Renders the LaTeX a model writes for mathematics in the web transcript.
 
 - Source: npm `katex@0.18.7`, tarball
   `https://registry.npmjs.org/katex/-/katex-0.18.7.tgz`
-  (sha256 `9a80a3fba2367e99bf67b52bfff52e9534c8c7f198e4eaa12699e4f1df9a0bda`).
+  (sha256 `9a80a3fba2367e99bf67b52bfff52e9534c8c7f198e4eaa12699e4f1df9a0bda`;
+  re-verified 2026-09-21 against a fresh download, and every file below
+  compared byte-for-byte with the tarball's `package/dist/`).
 - Files, copied byte-for-byte from the tarball's `package/dist/`:
   - `katex.min.js` (sha256 `10a91b479cd927446ceb60409fb0d72b5d0d05eaf446c9e52fafd64058c84540`)
   - `katex.min.css` (sha256 `50d9c78e03da144a021001b7de679133355179bcb06fd11e9e309223056a03dd`)

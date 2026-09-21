@@ -750,21 +750,41 @@ def _pre_html(code: str, lang: str) -> str:
 # and a single-`$` span inline — the latter only under the conservative rule
 # that keeps `it costs $5 and the other is $10` prose. app.js's [MATH] comment
 # is the reference; the two must move together. It runs as an inline pattern
-# AFTER `backtick` (a `$` inside a code span is never seen) and BEFORE the
-# escape/emphasis patterns (the `_`, `*` and `\(` inside an equation are never
-# eaten). A span that fails to render is put back as its exact source, so the
-# PDF never shows a half-parse — the same rule as the web.
+# AFTER `backtick` and BEFORE the escape/emphasis patterns (the `_`, `*` and
+# `\(` inside an equation are never eaten). A span that fails to render is put
+# back as its exact source, so the PDF never shows a half-parse — the same
+# rule as the web.
+#
+# Every delimiter form has a guard, because prose reaches all of them: `$$`
+# is the shell's PID and a price-guide's rating ("critics rate it $$$"), and
+# `\(…\)` is an escaped parenthesis in prose. So a $$…$$, \[…\] or \(…\) span
+# is maths only if it carries a LaTeX marker (\ ^ _ {) — every display span in
+# the real answer does, and prose never does. The single-`$` form keeps its
+# own guards INSTEAD: `$h$`, `$B$`, `$TB = h$` are real inline maths with no
+# marker (eight of the answer's 38), so it requires one only when the span
+# starts with a digit. No form may hold a stashed code span: `backtick` runs
+# first and leaves an STX…ETX placeholder, and a span holding one is prose on
+# both surfaces (the web refuses a span holding a backtick).
 _MATH_RE = re.compile(
-    r"\$\$(?P<dd>[\s\S]+?)\$\$"
-    r"|\\\[(?P<br>[\s\S]+?)\\\]"
-    r"|\\\((?P<par>[\s\S]+?)\\\)"
+    r"\$\$(?P<dd>[^\x02\x03]+?)\$\$"
+    r"|\\\[(?P<br>[^\x02\x03]+?)\\\]"
+    r"|\\\((?P<par>[^\x02\x03]+?)\\\)"
     # single `$`: not after a letter/digit/`$`; not before whitespace/`$`; a
     # digit-first span must carry a LaTeX marker (\ ^ _ {) before it closes;
     # one line, no `$` inside, ends on a non-space; not before a letter/digit.
     r"|(?<![^\W_])(?<!\$)\$(?![\s$])(?!\d[^$\n\\^_{]*\$)"
-    r"(?P<d>[^$\n]*?[^$\s\\])\$(?![^\W_])"
+    r"(?P<d>[^$\n\x02\x03]*?[^$\s\\])\$(?![^\W_])"
 )
+_MATH_MARKER_RE = re.compile(r"[\\^_{]")
 _MATH_INLINE_PRIORITY = 185  # backtick is 190, escape 180
+# The longest span a PDF will typeset. Rendering is superlinear in the
+# source length (measured on `x^2 + x^2 + …`: 1k chars 0.09 s and a 431 KB
+# SVG, 4k 0.46 s, 8k 1.2 s, 16k 3.2 s, and a reviewer's 50k took 146 s for a
+# 44 MB SVG), the export accepts 5 MB of model output, and each export runs
+# on a thread that a retry tap stacks another onto. The longest span in the
+# real answer is 128 chars; 1000 leaves eight times that. Over it, the source
+# is printed verbatim like any other refused span.
+_MATH_MAX_TEX = 1000
 # ziamath's `size` is a font size in SVG user units, and the SVG→reportlab path
 # draws those at about 0.58 of a point: measured on `$TBH$` beside the word
 # TBH in the 17.5pt body (`_PAGE_CSS`), size 17.5 drew a 7.3pt cap height and
@@ -777,7 +797,10 @@ def _math_svg(tex: str, display: bool) -> tuple[str, float, float] | None:
     """`(svg, width, height)` for one LaTeX expression, or None when either
     library refuses it. Any exception is a refusal: latex2mathml raises a
     dozen bare Exception subclasses, ziamath ValueError/KeyError, and the
-    caller's only honest response to all of them is the verbatim source."""
+    caller's only honest response to all of them is the verbatim source. A
+    span over `_MATH_MAX_TEX` is refused before either library sees it."""
+    if len(tex) > _MATH_MAX_TEX:
+        return None
     try:
         import ziamath
 
@@ -840,6 +863,8 @@ def _pdf_markdown_extension():  # noqa: ANN202 — markdown types are import-def
             tex = m.group("dd") or m.group("br") or m.group("par") or m.group("d") or ""
             if not tex.strip():
                 return None, None, None
+            if m.group("d") is None and not _MATH_MARKER_RE.search(tex):
+                return None, None, None  # `$$`, `\(…\)` in prose: left as written
             display = m.group("dd") is not None or m.group("br") is not None
             tag = _math_img_tag(tex, display)
             if tag is None:

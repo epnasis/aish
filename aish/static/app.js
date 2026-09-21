@@ -6541,6 +6541,15 @@ function imageLink(alt, imageTarget, url) {
 //     letter nor a digit (`$5-$10`, `$HOME/$PATH`);
 //   - a span that STARTS with a digit must carry a LaTeX marker (\ ^ _ {):
 //     `$30\text{ meters}$` is maths, `$5 for A$ and` is not.
+// The unambiguous forms are not unambiguous in prose either: `$$` is the
+// shell's PID and a price guide's rating ("critics rate it $$$"), `\(…\)` an
+// escaped parenthesis. So a $$…$$, \[…\] or \(…\) span is maths only if it
+// carries a LaTeX marker (\ ^ _ {) — every display span in the real answer
+// does, prose never does. The single-`$` form keeps its own guards instead:
+// `$h$`, `$B$`, `$TB = h$` are real inline maths with no marker (eight of
+// the answer's 38). No form may hold a backtick: a code span inside would be
+// swallowed (`$a `b$ c` d`), and the PDF's markdown stashes code spans
+// before maths runs, so this is the rule that keeps the two surfaces equal.
 // Anything refused stays literal text, byte for byte.
 //
 // Rendering is lossless by construction: a span KaTeX cannot parse is put back
@@ -6593,6 +6602,8 @@ function findMath(text) {
     }
     const tex = m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4];
     if (!tex.trim()) { from = m.index + 1; continue; }
+    if (tex.includes("`")) { from = m.index + 1; continue; }
+    if (m[4] === undefined && !MATH_MARKER_RE.test(tex)) { from = m.index + 1; continue; }
     return { index: m.index, length: m[0].length, tex, display: m[1] !== undefined || m[2] !== undefined };
   }
   return null;

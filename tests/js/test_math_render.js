@@ -104,6 +104,10 @@ const PROSE = [
   "the $ sign alone, and a trailing $",
   "$5 for A$ and B$ each",
   "(costs $2x$?) no marker, digit start",
+  // the unambiguous forms are not unambiguous in prose: no LaTeX marker, no maths
+  "use $$ to get the shell PID; later $$ expands to it",
+  "critics rate it $$$ but locals say $$ at most",
+  "I ran wc -l \\(and grep\\) on it",
 ];
 for (const line of PROSE) {
   check(`prose stays prose: ${JSON.stringify(line)}`, () => {
@@ -114,6 +118,18 @@ for (const line of PROSE) {
     assert.strictEqual(visibleText(frag), line);
   });
 }
+
+check("a maths span never swallows a code span", () => {
+  // Earliest start would let `$a …$` win over the backtick at position 3 and
+  // destroy the code span; a candidate holding a backtick is refused instead,
+  // which is what the PDF's markdown does by running `backtick` first.
+  const frag = renderMarkdown("$a `b$ c` d");
+  assert.strictEqual(collectClass(frag, "math").length, 0);
+  assert.strictEqual(collectClass(frag, "math-source").length, 0);
+  assert.strictEqual(collectTag(frag, "CODE").length, 1);
+  assert.strictEqual(collectTag(frag, "CODE")[0].textContent, "b$ c");
+  assert.strictEqual(visibleText(frag), "$a b$ c d");
+});
 
 check("a $ inside inline code or a link target is never maths", () => {
   const md = "run `echo $HOME` then `$PATH` and [x](https://h/?a=$1&b=$2) $h$";
@@ -126,8 +142,10 @@ check("a $ inside inline code or a link target is never maths", () => {
 
 check("the single-$ rule, case by case", () => {
   const yes = ["$h$", "$B$ be", "($h$)", "so $TB = h$.", "$P_1$", "$30\\text{ meters}$ down",
-    "of $10^\\circ$ to", "**$72.08\\text{ meters}$**", "$x$-axis", "$\\alpha$"];
-  const no = ["$5 for A$ and", "$n$th", "x$y$", "$ x$", "$x $", "$2x$", "$$", "$ $", "a$b$c"];
+    "of $10^\\circ$ to", "**$72.08\\text{ meters}$**", "$x$-axis", "$\\alpha$",
+    "$$\\frac{a}{b}$$", "$$ x^2 $$", "\\[E=mc^2\\]", "\\(a_1\\)"];
+  const no = ["$5 for A$ and", "$n$th", "x$y$", "$ x$", "$x $", "$2x$", "$$", "$ $", "a$b$c",
+    "$$ x $$", "\\(and grep\\)", "\\[ 1 + 1 = 2 \\]", "$a `b$ c` d", "$$ \\frac{a}{b} `x` $$"];
   for (const s of yes) assert(findMath(s) !== null, `should be maths: ${s}`);
   for (const s of no) assert(findMath(s) === null, `should be prose: ${s}`);
 });
@@ -149,10 +167,10 @@ check("with the vendor script absent every span is its source, unchanged", () =>
   const saved = sandbox.window.katex;
   sandbox.window.katex = undefined;
   try {
-    const frag = renderMarkdown("a $h$ b $$x$$ c");
+    const frag = renderMarkdown("a $h$ b $$x^2$$ c");
     assert.strictEqual(collectClass(frag, "katex").length, 0);
     assert.strictEqual(collectClass(frag, "math-source").length, 2);
-    assert.strictEqual(visibleText(frag), "a $h$ b $$x$$ c");
+    assert.strictEqual(visibleText(frag), "a $h$ b $$x^2$$ c");
   } finally {
     sandbox.window.katex = saved;
   }
