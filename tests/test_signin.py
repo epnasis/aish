@@ -20,7 +20,7 @@ SIGNIN_DOM_JS = Path(__file__).parent / "js" / "signin_dom.js"
 @pytest.fixture(autouse=True)
 def jar(tmp_path, monkeypatch):
     store: dict[str, tuple[str, str]] = {}
-    monkeypatch.setattr(signin, "STATE", tmp_path / "signins.json")
+    monkeypatch.setattr(signin, "store", lambda p=tmp_path / "signins.json": p)
     monkeypatch.setattr(
         signin.secrets, "put_signin",
         lambda origin, ident, pw: store.__setitem__(origin, (ident, pw)),
@@ -2409,7 +2409,7 @@ class TestEverySignInAttemptIsPhotographed:
     def test_the_store_holds_a_REFERENCE_and_never_the_bytes(self, state,
                                                              monkeypatch):
         result, _ = self._drive(monkeypatch)
-        written = signin.STATE.read_text(encoding="utf-8")
+        written = signin.store().read_text(encoding="utf-8")
         assert result.frame in written
         assert "hunter2hunter2" not in written
         assert self.JPEG[4:20].decode("ascii") not in written
@@ -2700,7 +2700,7 @@ class TestAFailedAttemptLeavesTheOwnersRecordAlone:
         pushes: list = []
         result, _ = self._drive(monkeypatch, pushes=pushes, page=page)
         assert result.stale
-        written = (signin.STATE).read_text(encoding="utf-8")
+        written = signin.store().read_text(encoding="utf-8")
         assert "hunter2hunter2" not in written
         assert "hunter2hunter2" not in result.why
         assert "hunter2hunter2" not in "".join(t + b for t, b in pushes)
@@ -2861,7 +2861,7 @@ class TestTheSubmitWindowIsRECORDEDButNeverJudged:
             if result.stale:
                 assert result.requests == []
                 assert "submit window" not in result.why
-            written = signin.STATE.read_text(encoding="utf-8")
+            written = signin.store().read_text(encoding="utf-8")
             assert "submit window" not in written
             assert "hunter2hunter2" not in written
         # And the ending that DOES write still writes, so this is not passing

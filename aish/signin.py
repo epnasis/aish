@@ -49,11 +49,24 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import secrets, vocab
+from .paths import state_home
 
 # Metadata lives beside the browser profile, not in ~/.config/aish: that tree is
 # auto-committed to a git remote on a timer, and while this file holds no
 # secret it is a precise map of which accounts aish can open.
-STATE = Path.home() / ".local" / "state" / "aish" / "browser" / "signins.json"
+STORE_NAME = Path("browser") / "signins.json"
+
+
+def store() -> Path:
+    """Where the sign-in records live — resolved at CALL time (#399).
+
+    Through `paths.state_home`, like the profile this file sits beside: a run
+    that moved its state tree with `AISH_STATE_DIR` (the verify harness, a
+    preview, the pytest suite) must move the replay store with it, or it is
+    reading the owner's real recorded sign-ins while believing it is isolated.
+    Bound at import, this was the one state-dir consumer the knob did not
+    reach — and `server.create_app` publishes the variable AFTER import."""
+    return state_home() / STORE_NAME
 
 
 @dataclass
@@ -530,7 +543,7 @@ def _origins(values: object) -> list[str]:
 
 def _load() -> list[Record]:
     try:
-        raw = json.loads(STATE.read_text(encoding="utf-8"))
+        raw = json.loads(store().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     out = []
@@ -553,8 +566,9 @@ def _load() -> list[Record]:
 
 
 def _write(records: list[Record]) -> None:
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(
+    path = store()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         json.dumps([asdict(r) for r in records], ensure_ascii=False, indent=1),
         encoding="utf-8",
     )

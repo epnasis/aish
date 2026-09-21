@@ -66,6 +66,7 @@ from pathlib import Path
 
 from . import explain, skills
 from .embeddings import entry_text
+from .paths import state_home
 from .session import RATING_NONE
 
 # The judge reads evidence excerpts of what the owner typed, so it must run
@@ -978,7 +979,10 @@ def run_curate(
     env = os.environ if env is None else env
     now = now or datetime.now()
     if state_dir is None:
-        state_dir = Path.home() / ".local" / "state" / "aish"
+        # The same tree `--context` reads (`explain.state_dir`), through the
+        # one knob (#399): a pass that spelled its own default ignored
+        # AISH_STATE_DIR while the report beside it honoured the variable.
+        state_dir = state_home()
     if model is None:
         model = env.get("AISH_CURATE_MODEL", "").strip() or DEFAULT_MODEL
 
