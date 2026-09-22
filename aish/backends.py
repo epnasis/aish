@@ -11,7 +11,7 @@ returning (or yielding, when stream=True) objects with a .message
 Cloud providers are addressed with a provider prefix: ``gemini:<model>``,
 ``openai:<model>`` (bare ``gemini`` / ``openai`` picks that provider's
 default model). ``local:<model>`` is a self-hosted OpenAI-compatible server
-(mlx-lm, llama.cpp, LM Studio, vLLM) at ``AISH_LOCAL_URL``. Anything without
+(tested with mlx-lm) at ``AISH_LOCAL_URL``. Anything without
 a known prefix is an Ollama model, so all existing invocations keep working
 unchanged.
 """

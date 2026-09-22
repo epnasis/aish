@@ -1815,8 +1815,8 @@ fresh conversation and clears the screen; /model <name> switches the model \
 for this chat and /model alone opens the same type-to-filter picker over \
 installed Ollama models and the cloud providers (typing provider:model inside \
 the picker offers that exact cloud model as a selectable row); local:<model> \
-runs on the user's own OpenAI-compatible server (mlx-lm, llama.cpp, LM Studio, \
-vLLM) at AISH_LOCAL_URL, with AISH_LOCAL_CTX (its context window, default \
+runs on the user's own OpenAI-compatible server (e.g. mlx-lm) \
+at AISH_LOCAL_URL, with AISH_LOCAL_CTX (its context window, default \
 32768) and AISH_LOCAL_MAX_TOKENS (answer cap, default 16384); adding --save \
 persists the choice as the startup default in the config file, and \
 /model --save alone persists the current model; /jobs lists \
@@ -2434,7 +2434,7 @@ def main() -> int:
         "claude:<m> (API keys via GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY; "
         "bare provider name picks its default), or claude-max[:opus|sonnet] to run on "
         "a Claude Pro/Max subscription via the claude CLI login, or local:<m> for your "
-        "own OpenAI-compatible server (mlx-lm, llama.cpp, …) at $AISH_LOCAL_URL. "
+        "own OpenAI-compatible server (e.g. mlx-lm) at $AISH_LOCAL_URL. "
         "Default: $AISH_MODEL, config, or qwen3.6:35b-a3b",
     )
     parser.add_argument(

@@ -293,7 +293,7 @@ in that conversation then leaves your machine, so it's an explicit choice
 | `claude[:model]` | Anthropic API | pay per token — `export ANTHROPIC_API_KEY=…` |
 | `claude-max[:opus\|sonnet]` | Claude Agent SDK via the local `claude` CLI | **your Claude Pro/Max subscription** — no API key |
 | `openai[:model]` | OpenAI API | pay per token — `export OPENAI_API_KEY=…` |
-| `local[:model]` | your own OpenAI-compatible server (mlx-lm, llama.cpp, LM Studio, vLLM) | free — `export AISH_LOCAL_URL=…` |
+| `local[:model]` | your own OpenAI-compatible server (tested with mlx-lm 0.31.3) | free — `export AISH_LOCAL_URL=…` |
 
 Bare provider names pick a sensible default model. `claude-max` strips Claude
 Code down to bare inference and hands it aish's own tools, so every command
