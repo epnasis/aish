@@ -3958,14 +3958,15 @@ class Agent:
             self._record_stop_gate("refused", call=0, round_=0)
 
     def _may_be_mail(self, name: str) -> bool:
-        """Could a carried result from the tool called `name` have been mail?
+        """Could a result from the tool called `name` have been mail?
 
-        Asked of TODAY's plugins about a result the dead attempt got from
-        YESTERDAY's: a mail plugin deleted between the death and the press, or
-        a result whose tool cannot be named, can no longer say it was not mail,
-        and silence must not make the continuation less restricted than the
-        attempt it continues. A native tool is never mail; a live plugin
-        answers for itself."""
+        The one answer for both the live turn and a continuation (#406), so a
+        continued turn and the turn it continues can never disagree about the
+        same page. A native tool is never mail; a live plugin answers for
+        itself; anything else says nothing, and silence must not read as "not
+        mail". That covers a mail plugin deleted between an attempt's death and
+        the press, a carried result whose tool cannot be named, and a paged
+        entry whose sidecar no longer names the tool that produced it."""
         tool = self._plugin_tools.get(name)
         if tool is not None:
             return tool.content_from == provenance.MAIL
@@ -5689,8 +5690,7 @@ class Agent:
                     {"url": served.source}, result, offers=served.offers
                 )
                 name = served.tool
-            tool = self._plugin_tools.get(name)
-            if tool is None or tool.content_from != provenance.MAIL:
+            if not self._may_be_mail(name):
                 continue
             for url, kind in provenance.links_in_mail(result).items():
                 # SIGN_IN is sticky: the same URL seen once in a reset mail

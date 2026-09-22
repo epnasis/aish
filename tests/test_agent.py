@@ -12953,6 +12953,29 @@ class TestALinkThatArrivedByMail:
         agent._commit_provenance()
         assert agent._mail_links == {}
 
+    @pytest.mark.parametrize("sidecar", [None, "not json", '{"untrusted": true}'])
+    def test_a_page_that_cannot_name_its_tool_counts_as_mail(self, tmp_path, sidecar):
+        """#406: the live twin of the carry path's rule (#387). An entry whose
+        sidecar is missing or unreadable can no longer say its bytes were not
+        mail, so paging it back must mark its links exactly as a continuation
+        carrying the same page would."""
+        from aish import provenance
+
+        reset = "Resetowanie hasła. Kliknij, aby zresetować hasło: https://eon.test/r?t=abc"
+        agent, chat = make_agent([], cwd=str(tmp_path), state_dir=tmp_path / "state")
+        key = tool_plugins.store_continuation(reset, agent.tool_output_dir, shown=len(reset))
+        entry = agent.tool_output_dir / f"{key[:16]}.txt"
+        if sidecar is not None:
+            entry.with_suffix(tool_plugins._SOURCE_SUFFIX).write_text(sidecar)
+        assert tool_plugins.continuation_source(key, agent.tool_output_dir).tool == ""
+        chat.responses = [
+            model_says(tool_calls=[tool_call("read_tool_output", continuation=key, page=1)]),
+            model_says("done"),
+        ]
+        agent.run_task("page it")
+        assert reset in tool_messages(agent.messages)[0]["content"]
+        assert agent._mail_links == {"https://eon.test/r?t=abc": provenance.SIGN_IN}
+
     def test_the_grant_is_per_link_never_per_host(self, tmp_path):
         agent, _ = make_agent([], approve_tool=lambda *_a: True)
         from aish import provenance

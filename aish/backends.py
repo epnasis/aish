@@ -1252,10 +1252,12 @@ def _convert_anthropic_traced(
             blocks, encoded = _anthropic_media_blocks(message)
             # A tool-produced picture arrives as a user message immediately
             # after the tool results it belongs to (agent._deliver_tool_media),
-            # and those results are themselves a user message here. Two user
-            # entries in a row is not a shape this API takes, so the media
-            # joins the entry that is already open rather than opening a second
-            # one — which is also the truthful shape: same turn, same input.
+            # and those results are themselves a user message here. The API
+            # would accept two user entries in a row — it combines consecutive
+            # same-role turns into one (Messages API reference) — but the media
+            # joins the entry that is already open anyway, because that is the
+            # truthful shape (same turn, same input) and it keeps the `sent`
+            # record's origins saying so rather than leaving the merge implicit.
             last = out[-1] if out else None
             if last and last["role"] == "user" and isinstance(last["content"], list):
                 last["content"].extend(blocks)
