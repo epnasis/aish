@@ -2937,6 +2937,38 @@ class TestActivityTraceSteps:
         cancel = next(s for s in steps if s["kind"] == "thinking_cancel")
         assert cancel["tokens"] == [120, 30]
 
+    def test_the_answering_cancel_says_it_answered(self):
+        """#403. Whether the model call's row became the answer is a fact the
+        writer holds at emit time; unstamped, a cold replay (which lifts the
+        answer out to `done`, so no token ever reaches the row) dropped the
+        answer step that the live path drew as "Answered in Xs"."""
+        steps, _ = run_with_steps([model_says("just a chat reply")])
+        cancel = next(s for s in steps if s["kind"] == "thinking_cancel")
+        assert cancel["answered"] is True
+
+    def test_a_rejected_answer_cancel_says_it_did_not_answer(self):
+        """A Verify-rejected answer is not delivered, so its call's row must
+        retire (live, nothing streamed into it). Stamped False rather than
+        omitted, so a reader can tell it from a log written before the key."""
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [model_says("first try"), model_says("second try")], on_step=steps.append
+        )
+        verdicts = iter(["the price is missing", None])
+        agent._verify_answer = lambda _result, ask=True: next(verdicts)
+        assert agent.run_task("go") == "second try"
+        cancels = [s for s in steps if s["kind"] == "thinking_cancel"]
+        assert [c["answered"] for c in cancels] == [False, True]
+
+    def test_the_wrapup_cancel_says_whether_it_answered(self):
+        steps, _ = run_with_steps(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")])] * 6
+            + [model_says("here's where I got to")],
+            max_steps=25,
+        )
+        assert steps[-1]["kind"] == "thinking_cancel"
+        assert steps[-1]["answered"] is True
+
     def test_plugin_tool_rows_are_not_blank(self):
         """_arg_summary ended at a `command` key that only native tools have,
         so EVERY plugin tool drew an empty subtitle: a `youtube_analyze` row

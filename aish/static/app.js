@@ -3132,7 +3132,12 @@ function traceStep(step) {
     accountStepTime(t, step.secs);
     if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
     if (t.thinkingRow) {
-      if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow, step.secs);
+      // `answered` is the record's own word that this call wrote the answer
+      // (#403). A cold replay lifts the answer out to `done`, so no token ever
+      // reaches this row and `isAnswer` alone dropped the answer step on every
+      // reopened chat; the step carries it so hot and cold take one branch.
+      // `isAnswer` stays for a live stream from a server older than the stamp.
+      if (t.thinkingRow.isAnswer || step.answered) finalizeAnswerRow(t, t.thinkingRow, step.secs);
       else { retireThinkingRow(t, t.thinkingRow); t.started -= 1; }
       t.thinkingRow = null;
     }

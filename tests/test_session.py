@@ -228,6 +228,93 @@ def test_reconstruct_events_old_logs_are_byte_identical(tmp_path):
     assert events[-1]["result"] == "hello"
 
 
+def _cancels(events: list[dict]) -> list[dict]:
+    return [e for e in events if e.get("kind") == "thinking_cancel"]
+
+
+class TestTheAnswerStepReplays:
+    """#403. Live, the answer streams into the last model call's Thinking… row
+    BEFORE its `thinking_cancel`, and that row is finalised as "Answered in Xs".
+    Cold, the answer is lifted out to `done`, so no token reaches the row — the
+    cancel must say by itself that its call answered, or the step (and the
+    reasoning it opens) vanishes on replay."""
+
+    def _issue_shape(self, log, cancel: dict) -> None:
+        # session-20260919-214336-530249.jsonl, turn "Solve", reduced.
+        log.message({"role": "user", "content": "Solve"})
+        log.step({"kind": "thinking_start"})
+        log.step({"kind": "thinking", "secs": 29.0, "tokens": [30000, 200]})
+        log.step({"kind": "tool", "name": "read_docs", "ok": True, "secs": 0.1})
+        log.step({"kind": "thinking_start"})
+        log.message({"role": "assistant", "content": "The tree is about 12 m tall."})
+        log.step(cancel)
+
+    def test_a_legacy_answering_cancel_is_marked_from_the_record(self, tmp_path):
+        """A log written before the stamp: the call that produced the promoted
+        answer is the one whose cancel closed it — structural, no guess."""
+        log = SessionLog.new(tmp_path)
+        self._issue_shape(log, {"kind": "thinking_cancel", "secs": 16.26,
+                                "tokens": [41955, 1330]})
+        events = SessionLog.reconstruct_events(log.path)
+        [cancel] = _cancels(events)
+        assert cancel["answered"] is True
+        assert events[-1] == {"type": "done", "result": "The tree is about 12 m tall.",
+                              "answer": events[-1]["answer"]}
+        # The answer text is still delivered once, by `done` — never as a token.
+        assert not [e for e in events if e["type"] in ("token", "delivery")]
+
+    def test_the_writers_stamp_is_passed_through(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._issue_shape(log, {"kind": "thinking_cancel", "secs": 16.26,
+                                "tokens": [41955, 1330], "answered": True})
+        [cancel] = _cancels(SessionLog.reconstruct_events(log.path))
+        assert cancel["answered"] is True
+
+    def test_the_writers_no_is_never_overridden(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._issue_shape(log, {"kind": "thinking_cancel", "secs": 1, "answered": False})
+        [cancel] = _cancels(SessionLog.reconstruct_events(log.path))
+        assert cancel["answered"] is False
+
+    def test_a_cancel_that_did_not_answer_is_left_unmarked(self, tmp_path):
+        """Verify only rejects on a bound turn, where the answer is held and
+        never logged, so the rejected call's cancel has no delivery inside it;
+        only the call that answered is marked."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "price?"})
+        log.step({"kind": "thinking_start"})
+        log.step({"kind": "thinking_cancel", "secs": 2})
+        log.message({"role": "user", "content": "[aish: the price is missing]"})
+        log.step({"kind": "thinking_start"})
+        log.message({"role": "assistant", "content": "249 PLN."})
+        log.step({"kind": "thinking_cancel", "secs": 3})
+        first, second = _cancels(SessionLog.reconstruct_events(log.path))
+        assert "answered" not in first
+        assert second["answered"] is True
+
+    def test_a_wrapup_with_no_row_of_its_own_is_left_unmarked(self, tmp_path):
+        """The wrap-up call opens no Thinking… row (no thinking_start), so there
+        is no row to keep — live or cold. Marking the previous call's close
+        would relabel a `thinking` row, so nothing is marked."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "go"})
+        log.step({"kind": "thinking_start"})
+        log.step({"kind": "thinking", "secs": 1})
+        log.step({"kind": "tool", "name": "read_docs", "ok": True})
+        log.step({"kind": "thinking_cancel", "secs": 4})
+        log.message({"role": "assistant", "content": "here's where I got to"})
+        events = SessionLog.reconstruct_events(log.path)
+        [cancel] = _cancels(events)
+        assert "answered" not in cancel
+
+    def test_a_failed_turn_marks_nothing(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._issue_shape(log, {"kind": "thinking_cancel", "secs": 1})
+        log.task_end("failed", "task failed: boom")
+        [cancel] = _cancels(SessionLog.reconstruct_events(log.path))
+        assert "answered" not in cancel
+
+
 def test_reconstruct_events_replays_the_one_delivery(tmp_path):
     """#212. A turn says several things on its way to the answer; the harness
     delivers only the FIRST (the acknowledgement) and drops the play-by-play,
