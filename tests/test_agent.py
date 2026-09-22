@@ -15023,6 +15023,40 @@ class TestAContinuationInheritsTheRestrictions:
         agent.run_task(self.NOTE, continuing=_carried(results=(("", "whatever"),)))
         assert seen == [True]
 
+    RESET_MAIL = "Resetowanie hasła. Kliknij, aby zresetować hasło: https://eon.test/r?t=abc"
+
+    def test_a_mail_plugin_deleted_before_the_press_still_marks_its_links(self):
+        """The dead attempt held these links as mail links; a TOOL.md deleted
+        between the death and the press must not hand them back unmarked."""
+        agent, _ = make_agent([model_says("done")])
+        agent.run_task(
+            self.NOTE, continuing=_carried(results=(("tuta_read", self.RESET_MAIL),))
+        )
+        assert agent._mail_links == {
+            "https://eon.test/r?t=abc": agent_module.provenance.SIGN_IN
+        }
+
+    def test_an_unnamed_tool_results_links_count_as_mail(self):
+        agent, _ = make_agent([model_says("done")])
+        agent.run_task(self.NOTE, continuing=_carried(results=(("", self.RESET_MAIL),)))
+        assert "https://eon.test/r?t=abc" in agent._mail_links
+
+    def test_a_page_whose_entry_is_gone_counts_as_mail(self):
+        agent, _ = make_agent([model_says("done")])
+        agent.run_task(self.NOTE, continuing=_carried(
+            calls=(("read_tool_output", {"continuation": "deadbeef"}, False),),
+            results=(("read_tool_output", self.RESET_MAIL),),
+        ))
+        assert "https://eon.test/r?t=abc" in agent._mail_links
+
+    def test_a_native_tools_links_are_not_mail(self):
+        """Exactness in the other direction: a native tool is never mail."""
+        agent, _ = make_agent([model_says("done")])
+        agent.run_task(
+            self.NOTE, continuing=_carried(results=(("read_url", self.RESET_MAIL),))
+        )
+        assert agent._mail_links == {}
+
     def test_sources_read_before_carry_into_the_answer(self):
         agent, _ = make_agent([model_says("done")])
         agent.run_task(self.NOTE, continuing=_carried(sources=("https://a.example/",)))

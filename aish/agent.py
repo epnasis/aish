@@ -1889,6 +1889,8 @@ UNTRUSTED_SOURCE_TOOLS = frozenset(EGRESS_TOOLS | set(BROWSE_TOOLS))
 # URL, so the tool's name alone does not say whether anything was fetched.
 DUAL_SOURCE_TOOLS = frozenset({"show_image", "read_pdf", "read_media"})
 
+NATIVE_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in tools.TOOL_SCHEMAS)
+
 BROWSE_NO_PAGE = (
     "NOT EXECUTED: nothing is open to act on. Call browse(url) first, then act "
     "on a control by the name in the list it gives you."
@@ -3829,7 +3831,11 @@ class Agent:
         would vanish on a cold reopen and hot and cold histories would
         disagree. Only the shape a crash leaves is repaired — trailing tool
         results and nothing else after the call — which is also the only shape
-        in which the missing results can be told apart by position."""
+        in which the missing results can be told apart by position.
+
+        Hot only: a reopened chat's messages carry no `tool_calls`
+        (`SessionLog._parse`), so cold there is nothing to pair. The note's
+        in-flight list names the cut-off calls on both paths."""
         for i in range(len(self.messages) - 1, 0, -1):
             message = self.messages[i]
             role = message.get("role")
@@ -3876,7 +3882,8 @@ class Agent:
         - Links that arrived by mail are remembered as such, from the full
           logged result of every mail tool — and from every paged result when
           any page came from a mail tool, since which page is which is not
-          something the log joins.
+          something the log joins. A tool that is no plugin today and no
+          native tool either — deleted since, or unnamed — counts as mail.
         - A stop gate still armed when the attempt died stays armed: deny
           means stop, and a failed model call is not an answer to it.
         - Values typed into a page ride every later press unless the live
@@ -3900,8 +3907,9 @@ class Agent:
                 )
                 if source is None or source.untrusted:
                     self._tainted = True
-                served = self._plugin_tools.get(source.tool) if source is not None else None
-                if served is not None and served.content_from == provenance.MAIL:
+                # An entry that is gone, or that names no tool, can no longer
+                # say its page was not mail.
+                if source is None or self._may_be_mail(source.tool):
                     paged_from_mail = True
         if not carried.calls:
             for name, _content in carried.results:
@@ -3921,9 +3929,7 @@ class Agent:
                 if pair[1] and pair not in held and pair not in self._typed_carried:
                     self._typed_carried.append(pair)
         for name, content in carried.results:
-            tool = self._plugin_tools.get(name)
-            from_mail = tool is not None and tool.content_from == provenance.MAIL
-            if not (from_mail or (paged_from_mail and name == "read_tool_output")):
+            if not (self._may_be_mail(name) or (paged_from_mail and name == "read_tool_output")):
                 continue
             for url, kind in provenance.links_in_mail(content).items():
                 if self._mail_links.get(url) != provenance.SIGN_IN:
@@ -3950,6 +3956,20 @@ class Agent:
                 "from_call": gate.get("from_call", gate.get("armed_by_call")),
             }
             self._record_stop_gate("refused", call=0, round_=0)
+
+    def _may_be_mail(self, name: str) -> bool:
+        """Could a carried result from the tool called `name` have been mail?
+
+        Asked of TODAY's plugins about a result the dead attempt got from
+        YESTERDAY's: a mail plugin deleted between the death and the press, or
+        a result whose tool cannot be named, can no longer say it was not mail,
+        and silence must not make the continuation less restricted than the
+        attempt it continues. A native tool is never mail; a live plugin
+        answers for itself."""
+        tool = self._plugin_tools.get(name)
+        if tool is not None:
+            return tool.content_from == provenance.MAIL
+        return name not in NATIVE_TOOL_NAMES
 
     def run_task(
         self,
