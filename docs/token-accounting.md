@@ -14,7 +14,7 @@ with one meaning. It is three:
 
 | provider | what the first number is |
 |---|---|
-| OpenAI-shaped (incl. Gemini's compat layer) | `prompt_tokens` — **includes** cached tokens |
+| OpenAI-shaped (incl. Gemini's compat layer and a `local:` mlx-lm server) | `prompt_tokens` — **includes** cached tokens |
 | Anthropic | the adapter **summed** `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` |
 | Ollama | `prompt_eval_count` — **excludes** tokens served from KV-cache reuse |
 
@@ -34,6 +34,14 @@ failure `docs/trace-contract.md` §0 exists to stop.
 (`INPUT_INCLUDES_CACHE` / `INPUT_EXCLUDES_CACHE` / `INPUT_EXCLUDES_KV_REUSE`). The
 semantics flag is not decoration — it is the only thing that makes two providers' numbers
 addable. `TestUsageDetail` (`tests/test_backends.py`).
+
+**A `local:` server's calls are counted, not priced (#404).** They are attributed to
+provider `local` through the ordinary `model` record, so they never read as OpenAI spend.
+mlx_lm.server 0.31.3 reports `prompt_tokens` for the whole prompt and its prompt-cache
+hit as `prompt_tokens_details.cached_tokens` (source: `completion_usage_response`), so
+`cached` is the number that shows whether the server's KV cache was reused. Nothing in
+aish prices any provider; "free" is a fact about the owner's hardware, not a figure in a
+report. `TestLocalAccounting` (`tests/test_local_provider.py`).
 
 **Zero-valued counts are dropped.** A provider that does not report cache reads and a turn
 that had none are different facts, and only the absent key can tell them apart. Same rule

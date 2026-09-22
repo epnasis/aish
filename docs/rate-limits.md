@@ -79,6 +79,13 @@ the one error here that costs a whole task), and a hint longer than `LONG_WAIT_S
 as exhausted even when nothing named a day. Retrying into a daily quota burns every
 remaining request of the day without ever completing a call. `TestQuotaScope`.
 
+**A server on the LAN that is not listening (#404)** reaches `classify` as the openai
+SDK's `APIConnectionError`, whose text is `Connection error.` and which carries no status.
+It lands in `transport` (retryable, `TRANSIENT_WAIT_BUDGET_S`) with `matched: Connection` —
+the record says which words it saw, not why the connection failed. The `local:` provider shares the
+governor like any other (key `local:<model>`); it has no quota, so nothing is learned
+unless the server itself answers 429. `TestLocalFailures` (`tests/test_local_provider.py`).
+
 `UNKNOWN` is retryable **on purpose**. The old behaviour retried everything once; a
 classifier that silently stopped retrying a case it failed to recognise would be a
 regression wearing a refinement's clothes.

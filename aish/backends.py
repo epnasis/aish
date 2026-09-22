@@ -10,8 +10,10 @@ returning (or yielding, when stream=True) objects with a .message
 
 Cloud providers are addressed with a provider prefix: ``gemini:<model>``,
 ``openai:<model>`` (bare ``gemini`` / ``openai`` picks that provider's
-default model). Anything without a known prefix is an Ollama model, so all
-existing invocations keep working unchanged.
+default model). ``local:<model>`` is a self-hosted OpenAI-compatible server
+(mlx-lm, llama.cpp, LM Studio, vLLM) at ``AISH_LOCAL_URL``. Anything without
+a known prefix is an Ollama model, so all existing invocations keep working
+unchanged.
 """
 
 import base64
@@ -223,6 +225,9 @@ class Provider:
     default_model: str
     key_url: str
     kind: str = "openai-compat"
+    # False for a server the owner runs himself: no account, no bill, and the
+    # conversation goes to his own machine rather than a company's.
+    cloud: bool = True
 
 
 PROVIDERS = {
@@ -248,7 +253,29 @@ PROVIDERS = {
         key_url="https://platform.claude.com/ (or `ant auth login`)",
         kind="anthropic",
     ),
+    "local": Provider(
+        name="local",
+        env_key="AISH_LOCAL_API_KEY",  # optional; see `_local_client`
+        base_url=None,  # AISH_LOCAL_URL, read when a local model is selected
+        # mlx-lm's own name for "the model the server was started with".
+        default_model="default_model",
+        key_url="",
+        cloud=False,
+    ),
 }
+
+LOCAL = "local"
+LOCAL_URL_ENV = "AISH_LOCAL_URL"
+LOCAL_KEY_ENV = "AISH_LOCAL_API_KEY"
+LOCAL_CTX_ENV = "AISH_LOCAL_CTX"
+LOCAL_MAX_TOKENS_ENV = "AISH_LOCAL_MAX_TOKENS"
+DEFAULT_LOCAL_CTX = 32_768
+# mlx-lm answers a request that names no `max_tokens` with at most 512 tokens,
+# which cuts a tool call or an answer off mid-sentence; aish always says.
+DEFAULT_LOCAL_MAX_TOKENS = 16_384
+# The openai SDK refuses to build a client without some key; a local server
+# without auth ignores whatever arrives.
+LOCAL_API_KEY_PLACEHOLDER = "aish-local-no-key"
 
 
 class BackendError(RuntimeError):
@@ -334,8 +361,39 @@ def context_window(provider_name: str, num_ctx: int = 0) -> tuple[int, str]:
         # For Ollama num_ctx IS the real window — it is the option the server
         # is launched with, not a number we hope applies.
         return num_ctx, f"num_ctx:{num_ctx}"
+    if provider_name == LOCAL:
+        # The owner's own server: its window is whatever he loaded and gave
+        # KV-cache memory to, so it is his number to state, never a table's.
+        window = local_context_window()
+        return window, f"backend:{LOCAL}:{window}"
     window = CONTEXT_WINDOWS.get(provider_name, DEFAULT_CONTEXT_WINDOW)
     return window, f"backend:{provider_name}:{window}"
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise BackendError(
+            f"{name}={raw!r} is not a positive whole number of tokens — "
+            f"e.g. `export {name}={default}`, or unset it for the default"
+        )
+    return value
+
+
+def local_context_window() -> int:
+    """The `local:` server's context window in tokens (`AISH_LOCAL_CTX`)."""
+    return _positive_int_env(LOCAL_CTX_ENV, DEFAULT_LOCAL_CTX)
+
+
+def local_max_tokens() -> int:
+    """The `max_tokens` every `local:` request carries (`AISH_LOCAL_MAX_TOKENS`)."""
+    return _positive_int_env(LOCAL_MAX_TOKENS_ENV, DEFAULT_LOCAL_MAX_TOKENS)
 
 
 # How each provider carries aish's SECOND system message — the per-task
@@ -351,6 +409,7 @@ def context_window(provider_name: str, num_ctx: int = 0) -> tuple[int, str]:
 SYSTEM_ROLE_POLICY = {
     "gemini": "first_only",  # #74: the compat gateway drops ALL system messages when >1
     "openai": "first_only",
+    "local": "first_only",  # the same convert_messages path as openai
     "claude": "hoisted",  # every system message is hoisted into the `system` parameter
     "ollama": "all_system",
 }
@@ -373,6 +432,9 @@ MEDIA_SUPPORT = {
     "gemini": frozenset({"image"}),
     "openai": frozenset({"image", "pdf"}),
     "claude": frozenset({"image", "pdf"}),
+    # mlx_lm.server rejects any content part that is not text (0.31.3,
+    # `process_message_content`), and `local:` promises no more than that.
+    "local": frozenset(),
 }
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
@@ -423,6 +485,13 @@ def make_chat(model_arg: str, client=None) -> tuple[Callable, str, str]:
             client = _anthropic_client(provider)
         anthropic = AnthropicBackend(client, provider_name)
         return governed(anthropic, provider_name), provider_name, model_name
+    if provider_name == LOCAL:
+        max_tokens = local_max_tokens()
+        local_context_window()  # a bad AISH_LOCAL_CTX fails here, not mid-turn
+        if client is None:
+            client = _local_client()
+        backend = OpenAICompatBackend(client, provider_name, max_tokens=max_tokens)
+        return governed(backend, provider_name), provider_name, model_name
     if client is None:
         api_key = os.environ.get(provider.env_key, "").strip()
         if not api_key:
@@ -513,7 +582,9 @@ def list_models(provider_name: str) -> list[str]:
     if provider.kind == "anthropic":
         client = _anthropic_client(provider)
         return [m.id for m in client.models.list(limit=100)]
-    api_key = os.environ.get(provider.env_key, "").strip()
+    if provider_name == LOCAL:
+        return sorted({m.id for m in _local_client(timeout=10).models.list()})
+    api_key =os.environ.get(provider.env_key, "").strip()
     if not api_key:
         raise BackendError(f"{provider.env_key} is not set")
     from openai import OpenAI
@@ -527,6 +598,39 @@ def list_models(provider_name: str) -> list[str]:
         # keep chat models; drop whisper/tts/dall-e/embeddings noise
         ids = [i for i in ids if i.startswith("gpt") or (i[:1] == "o" and i[1:2].isdigit())]
     return sorted(set(ids), reverse=True)  # newer version numbers first
+
+
+def _local_client(timeout: float | None = None):
+    """An openai client for the owner's own server, and nothing of OpenAI's.
+
+    Every value is passed explicitly because the SDK otherwise fills each one
+    from the environment — `OPENAI_BASE_URL` would send a `local:` call to
+    whatever that names, and `OPENAI_API_KEY` would hand the real OpenAI key to
+    a LAN box. Organization and project are cleared after construction for the
+    same reason: the SDK reads them from `OPENAI_ORG_ID`/`OPENAI_PROJECT_ID`
+    whenever they are None, and sends them as headers on every request.
+    """
+    url = os.environ.get(LOCAL_URL_ENV, "").strip()
+    if not url:
+        raise BackendError(
+            f"{LOCAL_URL_ENV} is not set — a local: model needs the address of your "
+            f"OpenAI-compatible server, e.g. `export {LOCAL_URL_ENV}=http://mi.lan:8080/v1`"
+        )
+    try:
+        from openai import OpenAI
+    except ModuleNotFoundError as exc:
+        raise BackendError(
+            "the 'openai' package is missing — reinstall aish "
+            "(uv tool install --force --reinstall /path/to/aish)"
+        ) from exc
+    api_key = os.environ.get(LOCAL_KEY_ENV, "").strip() or LOCAL_API_KEY_PLACEHOLDER
+    options: dict[str, Any] = {"max_retries": SDK_RETRIES}
+    if timeout is not None:
+        options["timeout"] = timeout
+    client = OpenAI(api_key=api_key, base_url=url, **options)
+    client.organization = None
+    client.project = None
+    return client
 
 
 def _anthropic_client(provider: Provider):
@@ -633,11 +737,13 @@ def _rejects_stream_options(exc: BaseException) -> bool:
 
 
 class OpenAICompatBackend:
-    """Chat-completions backend for any OpenAI-compatible API (OpenAI, Gemini)."""
+    """Chat-completions backend for any OpenAI-compatible API (OpenAI, Gemini,
+    a `local:` server)."""
 
-    def __init__(self, client, provider_name: str):
+    def __init__(self, client, provider_name: str, max_tokens: int | None = None):
         self.client = client
         self.provider = provider_name
+        self.max_tokens = max_tokens
 
     def __call__(
         self,
@@ -646,13 +752,19 @@ class OpenAICompatBackend:
         messages: list,
         tools: list | None = None,
         options: dict | None = None,  # Ollama-only (num_ctx); ignored here
-        think: bool = False,  # Ollama-only; cloud models manage reasoning themselves
+        think: bool = False,  # cloud models manage reasoning themselves; local: maps it
         stream: bool = False,
     ):
         converted, origins, media = _convert_messages_traced(messages)
         kwargs: dict[str, Any] = dict(model=model, messages=converted)
         if tools:
             kwargs["tools"] = tools  # aish schemas are already OpenAI-format
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.provider == LOCAL:
+            # Thinking on a self-hosted Qwen-style model is a chat-template
+            # switch; mlx-lm reads `chat_template_kwargs` per request.
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": bool(think)}}
         if self.provider == "gemini":
             # Surface thought summaries so the trace can show what the model
             # is thinking; the tagged text is split out of content below and
@@ -713,6 +825,8 @@ class OpenAICompatBackend:
             delta = chunk.choices[0].delta
             if delta is None:
                 continue
+            if reasoning := _reasoning_of(delta):
+                yield ChatChunk(message=ChatMessage(thinking=reasoning))
             if delta.content:
                 if thoughts is not None:
                     thinking, visible = thoughts.feed(delta.content)
@@ -903,6 +1017,22 @@ def _extra_content(tool_call) -> dict | None:
     return extra if isinstance(extra, dict) else None
 
 
+def _reasoning_of(message) -> str:
+    """Reasoning a server returned beside the answer rather than inside it:
+    `reasoning` is mlx_lm.server's field (0.31.3, `generate_response`),
+    `reasoning_content` the spelling other OpenAI-compatible servers use. The
+    openai SDK keeps unknown fields as pydantic extras, which plain attribute
+    access reaches; `model_extra` is the fallback for a stricter model."""
+    for name in ("reasoning", "reasoning_content"):
+        value = getattr(message, name, None)
+        if value is None:
+            extra = getattr(message, "model_extra", None)
+            value = extra.get(name) if isinstance(extra, dict) else None
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _from_completion(response) -> ChatChunk:
     choice = response.choices[0]
     message = choice.message
@@ -918,6 +1048,7 @@ def _from_completion(response) -> ChatChunk:
         message=ChatMessage(
             content=message.content or "",
             tool_calls=tool_calls,
+            thinking=_reasoning_of(message),
             stop=str(getattr(choice, "finish_reason", "") or ""),
         ),
         prompt_eval_count=(usage.prompt_tokens or 0) if usage else 0,

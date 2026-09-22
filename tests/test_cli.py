@@ -1304,7 +1304,9 @@ class TestModelPicker:
         monkeypatch.setitem(sys.modules, "ollama", SimpleNamespace(list=boom))
         agent = SimpleNamespace(model="x", provider="gemini")
         models = available_models(agent)
-        assert [name for name, _ in models] == ["gemini", "openai", "claude", "claude-max"]
+        assert [name for name, _ in models] == [
+            "gemini", "openai", "claude", "local", "claude-max"
+        ]
         assert "current" in dict(models)["gemini"]
 
     def test_cloud_model_catalog_fetches_and_caches(self, tmp_path, monkeypatch):

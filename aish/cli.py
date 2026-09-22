@@ -222,7 +222,8 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
   {CYAN}/new, /clear{RESET}   fresh conversation in a new chat (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
-                 openai:/claude: — bare provider name picks a default); no
+                 openai:/claude:, or local:<m> for your own OpenAI-compatible
+                 server at $AISH_LOCAL_URL — bare provider name picks a default); no
                  arg opens a searchable picker of local + cloud models
                  (typing provider:model there offers that exact model);
                  add --save to persist as the startup default (config.toml),
@@ -1130,15 +1131,23 @@ def available_models(agent, state_dir: Path | None = None) -> list[tuple[str, st
         models.append((name, f"local · {size:.0f} GB{current}"))
     for pname, provider in backends.PROVIDERS.items():
         current = " · current" if provider_now == pname else ""
-        models.append((pname, f"cloud · default {provider.default_model}{current}"))
+        models.append(
+            (pname, f"{_where(pname)} · default {provider.default_model}{current}")
+        )
     models.append(("claude-max", "cloud · Claude subscription (restart to switch)"))
     catalog = cloud_model_catalog(state_dir) if state_dir is not None else {}
     for pname, ids in catalog.items():
         label = PROVIDER_LABELS.get(pname, pname)
         for model_id in ids:
             current = " · current" if provider_now == pname and agent.model == model_id else ""
-            models.append((f"{pname}:{model_id}", f"cloud · {label}{current}"))
+            models.append((f"{pname}:{model_id}", f"{_where(pname)} · {label}{current}"))
     return models
+
+
+def _where(provider_name: str) -> str:
+    """The picker's first word for a provider: whose machine the chat goes to."""
+    provider = backends.PROVIDERS.get(provider_name)
+    return "cloud" if provider is None or provider.cloud else "your server"
 
 
 def rank_models(models: list[tuple[str, str]], query: str) -> list[tuple[str, str]]:
@@ -1160,7 +1169,9 @@ def rank_models(models: list[tuple[str, str]], query: str) -> list[tuple[str, st
     provider = provider.casefold()
     if sep and rest and (provider in backends.PROVIDERS or provider == "claude-max"):
         label = PROVIDER_LABELS.get(provider, provider)
-        ranked.append((6, (f"{provider}:{rest}", f"cloud · {label} · this exact model")))
+        ranked.append(
+            (6, (f"{provider}:{rest}", f"{_where(provider)} · {label} · this exact model"))
+        )
     for model in models:
         name_cf = model[0].casefold()
         hay = f"{name_cf} {model[1].casefold()}"
@@ -1551,7 +1562,8 @@ def handle_slash(
                     logref.model(model_spec(agent))
             else:
                 print(f"{DIM}current model: {agent.model} — /model <name> to switch "
-                      f"('ollama list' shows local models; gemini:/openai: for cloud); "
+                      f"('ollama list' shows local models; gemini:/openai: for cloud; "
+                      f"local:<m> for your own server at $AISH_LOCAL_URL); "
                       f"--save makes it the startup default{RESET}")
             return "handled"
         if save:
@@ -1648,6 +1660,7 @@ PROVIDER_LABELS = {
     "openai": "OpenAI",
     "claude": "Anthropic Claude",
     "claude-max": "Anthropic Claude (subscription)",
+    "local": "OpenAI-compatible server",
 }
 
 
@@ -1665,6 +1678,16 @@ def identity_context(model: str, provider: str) -> str:
             "say plainly that it is you; never recommend or run a command that kills it "
             "without first warning that it cuts this chat off until Ollama is back, "
             "and let them decide."
+        )
+    if provider == backends.LOCAL:
+        where = os.environ.get(backends.LOCAL_URL_ENV, "").strip()
+        where = where or f"the address in {backends.LOCAL_URL_ENV}"
+        return (
+            f"- YOUR IDENTITY: you are the model '{model}' served by the user's own "
+            f"OpenAI-compatible server at {where} — not a cloud service, and not Ollama. "
+            "aish executes approved commands on this machine and sends this conversation "
+            "to that server over the network. Stopping Ollama does not affect this chat; "
+            "stopping that server stops you mid-answer."
         )
     label = PROVIDER_LABELS.get(provider, provider)
     model_desc = f"the model '{model}'" if model else "a Claude model"
@@ -1791,7 +1814,10 @@ working files and the stored copies of the requests its steps sent. \
 fresh conversation and clears the screen; /model <name> switches the model \
 for this chat and /model alone opens the same type-to-filter picker over \
 installed Ollama models and the cloud providers (typing provider:model inside \
-the picker offers that exact cloud model as a selectable row); adding --save \
+the picker offers that exact cloud model as a selectable row); local:<model> \
+runs on the user's own OpenAI-compatible server (mlx-lm, llama.cpp, LM Studio, \
+vLLM) at AISH_LOCAL_URL, with AISH_LOCAL_CTX (its context window, default \
+32768) and AISH_LOCAL_MAX_TOKENS (answer cap, default 16384); adding --save \
 persists the choice as the startup default in the config file, and \
 /model --save alone persists the current model; /jobs lists \
 background jobs; /chat shows this chat's log file (its older name /session \
@@ -1918,6 +1944,9 @@ def _backend_hint(agent) -> str:
         return " — is Ollama running and not overloaded? (check `ollama ps` / system load)"
     if provider == "claude-max":
         return " — is the claude CLI installed and logged in? (run `claude` then /login)"
+    if provider == backends.LOCAL:
+        url = os.environ.get(backends.LOCAL_URL_ENV, "").strip()
+        return f" — is the server at {url or backends.LOCAL_URL_ENV} running and reachable?"
     return " — check your API key, network, and the provider's rate limits"
 
 
@@ -2404,7 +2433,8 @@ def main() -> int:
         help="Ollama model name, or a cloud model: gemini:<m> / openai:<m> / "
         "claude:<m> (API keys via GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY; "
         "bare provider name picks its default), or claude-max[:opus|sonnet] to run on "
-        "a Claude Pro/Max subscription via the claude CLI login. "
+        "a Claude Pro/Max subscription via the claude CLI login, or local:<m> for your "
+        "own OpenAI-compatible server (mlx-lm, llama.cpp, …) at $AISH_LOCAL_URL. "
         "Default: $AISH_MODEL, config, or qwen3.6:35b-a3b",
     )
     parser.add_argument(

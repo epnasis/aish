@@ -6220,6 +6220,7 @@ class Agent:
            role adds a provider dependency to nothing.
         3. Nothing. `claude-max` has no seam at all (the SDK owns its loop and
            the inner chat callable raises by construction), and a LOCAL model
+           (Ollama, or the owner's own `local:` server)
            is refused here on purpose: the shipped charter declares the class
            `cloud-fast`, and quietly routing it onto an 8B would make the
            declaration mean nothing.
@@ -6229,7 +6230,8 @@ class Agent:
         override = os.environ.get("AISH_ROLE_MODEL", "").strip()
         if override:
             return override
-        if self.provider in backends.PROVIDERS:
+        provider = backends.PROVIDERS.get(self.provider)
+        if provider is not None and provider.cloud:
             return f"{self.provider}:{self.model}"
         return ""
 

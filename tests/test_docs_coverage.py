@@ -110,6 +110,10 @@ _EXTERNAL_SYMBOLS: set[str] = {
     # deployment's plist, not this tree. Neither can appear in the code.
     "EnvironmentVariables",
     "GOOGLE_WORKSPACE_CLI_CONFIG_DIR",
+    # openai SDK env var — docs/agent-core.md names it as the one OPENAI_*
+    # value the `local:` client cannot keep out (#404): the SDK merges it into
+    # every client's headers and offers no public opt-out.
+    "OPENAI_CUSTOM_HEADERS",
 }
 
 # The trailing `()` is optional because docs spell a function both ways, and
