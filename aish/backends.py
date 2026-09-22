@@ -584,7 +584,7 @@ def list_models(provider_name: str) -> list[str]:
         return [m.id for m in client.models.list(limit=100)]
     if provider_name == LOCAL:
         return sorted({m.id for m in _local_client(timeout=10).models.list()})
-    api_key =os.environ.get(provider.env_key, "").strip()
+    api_key = os.environ.get(provider.env_key, "").strip()
     if not api_key:
         raise BackendError(f"{provider.env_key} is not set")
     from openai import OpenAI
