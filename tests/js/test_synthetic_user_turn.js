@@ -182,6 +182,21 @@ check("the resume row says what happened, not what the model was told", () => {
   assert(text.includes("picked up where it left off"), "one line, in his language");
 });
 
+check("a continuation Retry picked up says it was cut off, not that aish restarted", () => {
+  // #387: nothing restarted — a model call failed or the task crashed, and
+  // the owner's Retry continued it. The row must not state a restart.
+  const s = makeSandbox();
+  s.handle({
+    type: "user", synthetic: "resume",
+    text: "[automatic resume] aish's previous attempt at this task was cut off: " +
+          "model unavailable: 503. Everything above is what had already happened.",
+  });
+  const text = JSON.stringify(s.messagesEl.children[0].children.map((c) => c.children || []));
+  assert(!text.includes("restarted"), `claims a restart: ${text}`);
+  assert(text.includes("cut off before it answered"), text);
+  assert(!text.includes("503"), "the note's detail stays in the log, not the row");
+});
+
 check("an automation's trigger prompt renders as a system row too", () => {
   const s = makeSandbox();
   s.handle({ type: "user", text: "new mail from the bank", synthetic: "trigger" });

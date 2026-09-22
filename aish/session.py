@@ -704,6 +704,34 @@ INTERRUPTED_TASK = (
 # enough for a repr of a backend exception, short enough that a crash loop
 # cannot grow the log without bound.
 TASK_ERROR_CAP = 500
+# The assistant text a STOPPED task leaves in the conversation. `agent.
+# CANCELLED_RESULT` is bound to this string rather than copied, because it is
+# how `last_task` tells a turn the owner stopped from one that answered —
+# reading only the log, where both end `task_end: ok` (#387).
+STOPPED_ANSWER = "(task stopped by user — any partial work is above)"
+
+
+class CarriedWork(NamedTuple):
+    """What a CONTINUED attempt inherits from the attempts before it at the same
+    question (#387), read off the log so a Retry pressed a second after the
+    failure and one pressed on a reopened chat the next morning hand the agent
+    the same facts.
+
+    Nothing here is a permission. It is what the dead attempts BROUGHT IN — the
+    calls they made and what came back — so the continuation is restricted
+    exactly as they were (taint, links that arrived by mail, an armed stop
+    gate); every grant the owner gave in a dead attempt is left behind, so the
+    worst a carried fact can do is cost a card.
+    """
+
+    prompt: str  # the typed question, as `task_start` recorded it
+    images: tuple[str, ...]  # its attachments, from its own message record
+    documents: tuple[str, ...]
+    calls: tuple[tuple[str, dict, bool], ...]  # every `call`: name, args, args-were-cut
+    results: tuple[tuple[str, str], ...]  # every tool result: tool name, content
+    sources: tuple[str, ...]  # read_url addresses that came back ok, in order
+    stop_gate: dict | None  # the stop gate's evidence if it was still armed at the end
+    cut_off: str  # the last attempt's recorded failure, "" when it recorded none
 
 # A rating's reason is a sentence, not an essay — and it is the owner's own
 # words, so it is quoted back to him in the weekly pass and must stay readable.
@@ -835,6 +863,30 @@ def _discarded_before(records: list[dict], first: int) -> int:
             continue
         break
     return start
+
+
+def _question_at(records: list[dict]) -> int | None:
+    """The index of the last LIVE user message the owner typed — the question
+    a Retry acts on — or None when there is no live user message at all.
+
+    Not simply the last user message (#387): aish writes `role:"user"` text of
+    its own — a continuation note, an `[aish: …]` nudge — and taking one of
+    those as the question would discard only the attempts after it and hand
+    the note to the rerun as its prompt. A log whose only live user messages
+    are aish's own falls back to the last of them, which is what this read
+    before there was a distinction to draw."""
+    typed: int | None = None
+    last: int | None = None
+    for i, record in enumerate(records):
+        if (
+            record.get("kind") == "message"
+            and record.get("role") == "user"
+            and not _is_superseded(record)
+        ):
+            last = i
+            if not synthetic_kind(str(record.get("content") or "")):
+                typed = i
+    return typed if typed is not None else last
 
 
 def _turn_opens_at(records: list[dict], user_index: int) -> int:
@@ -1634,47 +1686,280 @@ class SessionLog:
 
         `origin` rides along (from the `kind:"origin"` record, "user" when none
         was written) so the resume path can decide by provenance — a scheduled
-        job must never be resumed (#187)."""
-        pending: dict | None = None
-        attempts = 0
-        origin = "user"
-        started: list[dict] = []
+        job must never be resumed (#187).
+
+        One filter over `last_task`'s scan (#387): recovery and Retry read how
+        the last attempt ended from ONE place, so they cannot disagree about
+        whether a turn is still open."""
+        scan = SessionLog._task_scan(SessionLog._live_records(path))
+        if scan is None or scan["closed"]:
+            return None
+        return {
+            "prompt": scan["prompt"],
+            "ts": scan["ts"],
+            "attempts": scan["attempts"],
+            "in_flight": scan["in_flight"],
+            "origin": scan["origin"],
+        }
+
+    @staticmethod
+    def _live_records(path: Path) -> list[dict]:
+        """Every parseable record that is not part of a discarded Retry attempt.
+
+        A turn the owner discarded with Retry is not a dead process (#339) and
+        is not work a continuation may build on (#387): its records stay on
+        disk as evidence and are invisible to both — the same answer the
+        delete gave, now without destroying the record to get it."""
+        out: list[dict] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
-            if record is None or _is_superseded(record):
-                # A turn the owner discarded with Retry is not a dead process
-                # (#339). Its `task_start` stays on disk as evidence and is
-                # invisible here — the same answer the delete gave, now without
-                # destroying the record to get it.
-                continue
+            if record is not None and not _is_superseded(record):
+                out.append(record)
+        return out
+
+    @staticmethod
+    def _chain_opens_at(records: list[dict], starts: list[int]) -> int:
+        """Where the attempts at the current QUESTION begin: the index of the
+        latest `task_start` whose prompt is not a continuation note (#387).
+
+        A continuation — restart recovery's, or a Retry's — is a `task_start`
+        carrying aish's own `RESUME_MARKER` note, so the trailing run of those
+        belongs to the question the typed `task_start` before them opened. Read
+        off the start records alone, which is what keeps a start whose user
+        message was never logged (a process killed before it got that far) from
+        being counted into the previous question's chain."""
+        position = len(starts) - 1
+        while position > 0 and (
+            synthetic_kind(str(records[starts[position]].get("prompt") or "")) == "resume"
+        ):
+            position -= 1
+        # Restart recovery re-issues the recorded prompt, not a note, when the
+        # attempt died before its message was logged — so that attempt is the
+        # same question too: the start before carries the same prompt and
+        # left no typed message behind it.
+        while position > 0 and SessionLog._reissued(
+            records, starts[position - 1], starts[position]
+        ):
+            position -= 1
+        return starts[position]
+
+    @staticmethod
+    def _reissued(records: list[dict], earlier: int, later: int) -> bool:
+        """Is the `task_start` at `later` restart recovery re-issuing the one at
+        `earlier`: the same prompt, and nothing typed logged in between?"""
+        if records[earlier].get("prompt") != records[later].get("prompt"):
+            return False
+        return not any(
+            records[i].get("kind") == "message"
+            and records[i].get("role") == "user"
+            and not synthetic_kind(str(records[i].get("content") or ""))
+            for i in range(earlier + 1, later)
+        )
+
+    @staticmethod
+    def _task_scan(records: list[dict]) -> dict | None:
+        """Everything `last_task` and `pending_task` read, in one pass over the
+        live records. None when no `task_start` was ever written (a CLI chat, a
+        log from before #164)."""
+        origin = "user"
+        starts: list[int] = []
+        attempts = 0
+        for i, record in enumerate(records):
             kind = record.get("kind")
             if kind == "task_start":
+                starts.append(i)
                 attempts += 1
-                started = []
-                pending = {
-                    "prompt": record.get("prompt") or "",
-                    "ts": record.get("ts") or "",
-                }
             elif kind == "task_end":
-                pending, attempts, started = None, 0, []
+                attempts = 0
             elif kind == "origin":
                 origin = record.get("origin") or origin
-            elif kind == "trace" and pending is not None:
+        if not starts:
+            return None
+        last = starts[-1]
+        first = SessionLog._chain_opens_at(records, starts)
+        closed = False
+        status: str | None = None
+        error = ""
+        failure: dict | None = None
+        last_assistant: str | None = None
+        started: list[dict] = []
+        # The question's own typed message is the first one after the chain's
+        # first start; a typed message after THAT is a later question that no
+        # bracket recorded (a CLI turn, a `!` command), so the last attempt does
+        # not describe what a Retry now would be retrying.
+        typed_logged = False
+        later_question = False
+        # By index, never a slice: L6's sweep reads a slice of a log's records
+        # as a CUT, and this only reads.
+        for i in range(first, len(records)):
+            record = records[i]
+            kind = record.get("kind")
+            if (
+                kind == "message"
+                and record.get("role") == "user"
+                and not synthetic_kind(str(record.get("content") or ""))
+            ):
+                later_question = typed_logged
+                typed_logged = True
+            if i <= last:
+                continue
+            if kind == "task_end":
+                closed = True
+                status = record.get("status")
+                error = str(record.get("error") or "")
+            elif kind == "message" and record.get("role") == "assistant":
+                last_assistant = str(record.get("content") or "")
+            elif kind == "trace":
                 step = record.get("step") or {}
-                if step.get("kind") == "tool_start":
+                sk = step.get("kind")
+                if sk == "model_error" and step.get("action") == "give_up":
+                    # The LAST attempt's own give-up, and only one that gave up:
+                    # a call that failed and then recovered did not end anything.
+                    failure = {
+                        "class": str(step.get("class") or ""),
+                        "retryable": step.get("retryable"),
+                    }
+                elif sk == "tool_start":
                     started.append(step)
-                elif step.get("kind") == "tool":
+                elif sk == "tool":
                     # Read-only calls run in parallel, so match by name rather
                     # than assuming the last start is the one finishing.
-                    for i, pending_step in enumerate(started):
+                    for j, pending_step in enumerate(started):
                         if pending_step.get("name") == step.get("name"):
-                            del started[i]
+                            del started[j]
                             break
-        if pending is not None:
-            pending["attempts"] = attempts
-            pending["in_flight"] = [SessionLog._describe_step(s) for s in started]
-            pending["origin"] = origin
-        return pending
+        if not closed:
+            ended = "unknown"
+        elif status is None:
+            ended = "unrecorded"
+        elif status == "ok":
+            ended = "stopped" if last_assistant == STOPPED_ANSWER else "ok"
+        else:
+            ended = "failed"
+        return {
+            "ended": "none" if later_question else ended,
+            "closed": closed,
+            "error": error,
+            "failure": failure,
+            "in_flight": [SessionLog._describe_step(s) for s in started],
+            "attempts": attempts,
+            "chain_attempts": sum(1 for s in starts if s >= first),
+            "typed_logged": typed_logged,
+            "origin": origin,
+            "prompt": records[last].get("prompt") or "",
+            "ts": records[last].get("ts") or "",
+        }
+
+    @staticmethod
+    def last_task(path: Path) -> dict:
+        """How the last attempt at the current question ENDED, as the log
+        recorded it (#387) — the fact Retry's two acts are told apart by.
+
+        `ended` is one of: `ok` (it answered) · `stopped` (it ended `ok` on the
+        stop sentence — the owner pressed Stop) · `failed` (with `error`, the
+        server's own `task_end` text, and `failure`, the last attempt's
+        `model_error` give-up as `{class, retryable}` or None when none was
+        written) · `unknown` (a `task_start` nothing closed: the process died) ·
+        `unrecorded` (a `task_end` with no status — a log from before #203; not
+        the `retry` record's `unknown`, and it must never be read as a death) ·
+        `none` (nothing bracketed the question: no `task_start` at all, or a
+        typed message after the last attempt that none opened).
+
+        `chain_attempts` counts the LIVE starts at this question — the original
+        attempt and every continuation — and is the bound's figure;
+        `attempts` is restart recovery's own counter (starts since the last
+        `task_end`), reported beside it because the two answer different
+        questions and neither reads the other.
+        """
+        scan = SessionLog._task_scan(SessionLog._live_records(path))
+        if scan is None:
+            return {
+                "ended": "none", "closed": True, "error": "", "failure": None,
+                "in_flight": [], "attempts": 0, "chain_attempts": 0,
+                "typed_logged": False, "origin": "user", "prompt": "", "ts": "",
+            }
+        return scan
+
+    @staticmethod
+    def carried_work(path: Path) -> CarriedWork | None:
+        """What the live attempts at the current question brought in (#387),
+        for a continuation to inherit — see `CarriedWork`. None when no
+        `task_start` brackets the question.
+
+        `calls` is every `call` record in the chain, the model's own arguments
+        as they reached `_call_result` — which is the set the live agent's
+        provenance capture saw, a call that was then denied or crashed
+        included, because a fetch that failed had still reached out. The
+        stop gate is read off its own §6.1 rows: armed by a refusal, cleared
+        by an `allowed`, last row wins."""
+        records = SessionLog._live_records(path)
+        starts = [i for i, r in enumerate(records) if r.get("kind") == "task_start"]
+        if not starts:
+            return None
+        first = SessionLog._chain_opens_at(records, starts)
+        prompt = str(records[first].get("prompt") or "")
+        images: tuple[str, ...] = ()
+        documents: tuple[str, ...] = ()
+        typed_seen = False
+        calls: list[tuple[str, dict, bool]] = []
+        results: list[tuple[str, str]] = []
+        pending_reads: dict[tuple, str] = {}
+        sources: list[str] = []
+        stop_gate: dict | None = None
+        cut_off = ""
+        for i in range(first, len(records)):
+            record = records[i]
+            kind = record.get("kind")
+            if kind == "task_start":
+                cut_off = ""  # a later attempt's ending is the one that counts
+            elif kind == "task_end":
+                cut_off = str(record.get("error") or "")
+            elif kind == "message":
+                role = record.get("role")
+                content = record.get("content")
+                if (
+                    role == "user"
+                    and not typed_seen
+                    and not synthetic_kind(str(content or ""))
+                ):
+                    typed_seen = True
+                    images = tuple(str(p) for p in record.get("images") or ())
+                    documents = tuple(str(p) for p in record.get("documents") or ())
+                elif role == "tool" and isinstance(content, str):
+                    results.append((str(record.get("tool_name") or ""), content))
+            elif kind == "trace":
+                step = record.get("step")
+                if not isinstance(step, dict):
+                    continue
+                sk = step.get("kind")
+                if sk == "call" and isinstance(step.get("args"), dict):
+                    name = str(step.get("name") or "")
+                    calls.append((name, dict(step["args"]), bool(step.get("truncated"))))
+                    if name == "read_url":
+                        pending_reads[(step.get("turn"), step.get("call"))] = str(
+                            step["args"].get("url") or ""
+                        ).strip()
+                elif sk == "tool" and step.get("name") == "read_url":
+                    # Joined by (turn, call), never by position (contract §2).
+                    url = pending_reads.pop((step.get("turn"), step.get("call")), "")
+                    ok = (step.get("status") or ("ok" if step.get("ok") else "")) == "ok"
+                    if url and ok and url not in sources:
+                        sources.append(url)
+                elif sk == "gate" and step.get("gate") == "stop_gate":
+                    if step.get("verdict") == "allowed":
+                        stop_gate = None
+                    elif step.get("verdict") == "refused":
+                        stop_gate = {**(step.get("evidence") or {}), "turn": step.get("turn")}
+        return CarriedWork(
+            prompt=prompt,
+            images=images,
+            documents=documents,
+            calls=tuple(calls),
+            results=tuple(results),
+            sources=tuple(sources),
+            stop_gate=stop_gate,
+            cut_off=cut_off,
+        )
 
     @staticmethod
     def _describe_step(step: dict) -> str:
@@ -2140,7 +2425,7 @@ class SessionLog:
                 break
         return "\n".join(lines[:end]) + "\n"
 
-    def supersede_last_turn(self, by: str = "owner") -> dict | None:
+    def supersede_last_turn(self, by: str = "owner", bound: str = "") -> dict | None:
         """Mark the most recent user turn SUPERSEDED and say so, in one write.
 
         Web Retry (#60) calls this before re-running the prompt. Until #339 it
@@ -2172,22 +2457,20 @@ class SessionLog:
         or None when there is no file yet or no live user turn to discard. One
         of the two in-place rewrites: the handle is closed here and reopened
         lazily on the next record.
+
+        The turn is the last TYPED question's (#387): a continuation note is a
+        user message too, and marking from it would leave the attempts before
+        it live — and hand the note to the rerun as its prompt. So the whole
+        chain (the original attempt and every continuation) is discarded as
+        one, which is #60's contract applied to the question. `bound` says the
+        continuation bound forced this regenerate (`"attempts"`).
         """
         with self._write_lock:
             if not self.path.exists():
                 return None
             lines = self.path.read_text(encoding="utf-8").splitlines()
             records = [_record_or_none(line) or {} for line in lines]
-            last_user: int | None = None
-            for i, record in enumerate(records):
-                # The last LIVE one: retrying twice must discard the second
-                # attempt, not re-discard the first.
-                if (
-                    record.get("kind") == "message"
-                    and record.get("role") == "user"
-                    and not _is_superseded(record)
-                ):
-                    last_user = i
+            last_user = _question_at(records)
             if last_user is None:
                 return None
             first = _turn_opens_at(records, last_user)
@@ -2200,11 +2483,18 @@ class SessionLog:
                 # inventing a record (`_record_or_none`).
                 if not record or _is_superseded(record):
                     continue
+                if _step_kind(record) == RETRY_STEP:
+                    # An earlier press at this question (#387): since the range
+                    # opens at the TYPED message, a chain's continue-presses
+                    # fall inside it. They are the tombstones `_discarded_before`
+                    # walks, and the press history #339 exists to keep —
+                    # marking them would hide the owner's own decisions.
+                    continue
                 record = {**record, "superseded": True}
                 records[i] = record
                 kept[i] = json.dumps(record, ensure_ascii=False)
                 marked += 1
-            step = self._retry_step(records, first, marked, by)
+            step = self._retry_step(records, first, marked, by, bound=bound)
             if self._fh is not None:
                 self._fh.close()
                 self._fh = None
@@ -2219,18 +2509,65 @@ class SessionLog:
             self.path.write_text("\n".join(kept) + "\n", encoding="utf-8")
             return step
 
-    @staticmethod
-    def _retry_step(records: list[dict], first: int, marked: int, by: str) -> dict:
-        """The `retry` record for the turn opening at `first` (#339).
+    def record_retry(self, by: str = "owner") -> dict | None:
+        """Write the `retry` record for a press that CONTINUES the question
+        (#387) — nothing is marked, because nothing is discarded. Returns the
+        step, or None when there is no file or no typed question to name.
 
-        Every field is read off the discarded turn's own records. `ended` is its
-        `task_end` status verbatim and `"unknown"` when it never wrote one —
-        said out loud rather than omitted, because a vocabulary that cannot say
-        "aish does not know how that ended" gets handed a guess, and the guess
-        then stands where the disproving evidence should be (L8, contract §0).
-        `failure` is named only by a `model_error` that gave up; a call that
-        failed and then recovered did not end the turn.
+        Appended BEFORE the continuation's own `task_start`, as a regenerating
+        press's record is, so `reconstruct_events` holds it until the next
+        `user` event — the continuation's note — and hot and cold put the row
+        in the same place (contract §3.11)."""
+        with self._write_lock:
+            if not self.path.exists():
+                return None
+            records = [
+                _record_or_none(line) or {}
+                for line in self.path.read_text(encoding="utf-8").splitlines()
+            ]
+            question = _question_at(records)
+            if question is None:
+                return None
+            step = self._retry_step(
+                records, _turn_opens_at(records, question), 0, by, continued=True
+            )
+            self._record_locked("trace", step=step)
+            return step
+
+    @staticmethod
+    def _retry_step(
+        records: list[dict],
+        first: int,
+        marked: int,
+        by: str,
+        *,
+        continued: bool = False,
+        bound: str = "",
+    ) -> dict:
+        """The `retry` record for the question whose turn opens at `first`
+        (#339, #387).
+
+        Every field is read off the LAST attempt's own records — the one whose
+        ending decided what the press does; an earlier attempt in a continued
+        chain has its own ending, already named by the press that followed it.
+        `ended` is its `task_end` status verbatim and `"unknown"` when it never
+        wrote one — said out loud rather than omitted, because a vocabulary
+        that cannot say "aish does not know how that ended" gets handed a
+        guess, and the guess then stands where the disproving evidence should
+        be (L8, contract §0). `failure` is named only by a `model_error` that
+        gave up; a call that failed and then recovered did not end the turn.
+
+        `attempt` counts every attempt at this question already on disk — each
+        `task_start`, the discarded chain's (`_discarded_before`) and the live
+        ones since the typed message alike — plus the one now beginning, so a
+        chain of continue, continue, regenerate, continue numbers 2, 3, 4, 5
+        and survives a restart between presses. A log with no brackets counts
+        its user messages, as before.
         """
+        opens = first
+        for i in range(first, len(records)):
+            if records[i].get("kind") == "task_start":
+                opens = i
         ended = ""
         error = ""
         failure = ""
@@ -2238,7 +2575,7 @@ class SessionLog:
         # By index, never a slice: L6's sweep reads a slice of a log's records
         # as a CUT, and this one only reads. Keeping `ALLOWED` empty is worth
         # more than the shorter loop.
-        for i in range(first, len(records)):
+        for i in range(opens, len(records)):
             record = records[i]
             if record.get("kind") == "task_end":
                 ended = str(record.get("status") or "")
@@ -2250,19 +2587,27 @@ class SessionLog:
                 turn = step["turn"]
             if step.get("kind") == "model_error" and step.get("action") == "give_up":
                 failure = str(step.get("class") or "")
-        # Attempts already discarded for this prompt, plus the one being
-        # discarded now — so the number names the attempt about to START.
         chain = _discarded_before(records, first)
-        attempt = 2 + sum(
-            1
-            for i in range(chain, first)
-            if _is_superseded(records[i])
-            and records[i].get("kind") == "message"
-            and records[i].get("role") == "user"
+        started = sum(
+            1 for i in range(chain, len(records)) if records[i].get("kind") == "task_start"
         )
+        if started:
+            attempt = started + 1
+        else:
+            # Attempts already discarded for this prompt, plus the one being
+            # discarded now — so the number names the attempt about to START.
+            attempt = 2 + sum(
+                1
+                for i in range(chain, first)
+                if _is_superseded(records[i])
+                and records[i].get("kind") == "message"
+                and records[i].get("role") == "user"
+            )
         previous: dict = {
             "records": marked,
-            "at": str(records[first].get("ts") or ""),
+            # When what this press acts on opened: the discarded question for a
+            # regenerate, the attempt being picked up for a continuation.
+            "at": str(records[opens if continued else first].get("ts") or ""),
             "ended": ended or "unknown",
         }
         if error:
@@ -2273,8 +2618,15 @@ class SessionLog:
             "kind": RETRY_STEP,
             "by": by,
             "attempt": attempt,
+            # Which of Retry's two acts this press performed (#387): carry on
+            # from the completed work, or discard it and start the question over.
+            "continued": continued,
             "previous": previous,
         }
+        if bound:
+            # The regenerate was forced: the question had already been
+            # continued as many times as the bound allows.
+            step_out["bound"] = bound
         if turn is not None:
             # The join key of the attempt this record is evidence ABOUT
             # (contract §2). Omitted, never invented, when the discarded turn

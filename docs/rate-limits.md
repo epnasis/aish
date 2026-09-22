@@ -175,7 +175,13 @@ hour is a backstop against a provider that answers 429 without ever naming a win
 *spent* quota never waits it out, because `classify` marks it not retryable (`scope: long`)
 and the turn says so at once, and Stop cuts the wait wherever it is (`ratelimit.wait` polls
 the cancel Event). If aish-web restarts mid-wait, the unmatched `task_start` is exactly what
-restart recovery resumes (`docs/web-server.md`).
+restart recovery resumes (`docs/web-server.md`). And if the attempt still DIES — the hour's
+backstop, the attempt cap, a transient failure's two minutes — its finished work is not
+lost to the Retry he presses next: an attempt that ended `model unavailable` on a give-up
+marked `retryable: true` is CONTINUED, fed its completed tool results instead of re-running
+them (#387, `docs/web-server.md`). A failure `classify` marked not retryable — a spent
+quota, a 400, a bad key, the governor's own refusal — still regenerates: resending the
+request it refused cannot change the answer.
 
 **The hour is for quotas only.** A retryable failure of any other class — a 5xx, a
 connection reset, an error nothing classified — keeps the old two minutes

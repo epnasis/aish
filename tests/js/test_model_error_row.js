@@ -509,6 +509,42 @@ check("retrying an answer that finished does not call it a failure", () => {
   assert(!subOf(row).includes("failed"), subOf(row));
 });
 
+// ---- Retry's two acts (#387) ---------------------------------------------
+// A press that CONTINUED the question discarded nothing, so "kept, superseded"
+// would be a false sentence about it; the record says which act it was.
+
+check("a continuing retry says it carries on, not that anything was discarded", () => {
+  const s = makeSandbox();
+  const row = retryRow(s, {
+    kind: "retry", by: "owner", attempt: 2, continued: true,
+    previous: { records: 0, ended: "failed", failure: "server" },
+  });
+  assert(subOf(row).includes("the attempt before it failed — server"), subOf(row));
+  assert(subOf(row).includes("continuing from what it had already done"), subOf(row));
+  assert(!subOf(row).includes("superseded"), subOf(row));
+});
+
+check("a regenerate the bound forced says why it started over", () => {
+  const s = makeSandbox();
+  const row = retryRow(s, {
+    kind: "retry", by: "owner", attempt: 5, continued: false, bound: "attempts",
+    previous: { records: 30, ended: "failed" },
+  });
+  assert(subOf(row).includes("starting over"), subOf(row));
+  assert(subOf(row).includes("superseded"), subOf(row));
+  assert(!subOf(row).includes("continuing"), subOf(row));
+});
+
+check("an ordinary regenerate reads as before", () => {
+  const s = makeSandbox();
+  const row = retryRow(s, {
+    kind: "retry", by: "owner", attempt: 2, continued: false,
+    previous: { records: 9, ended: "ok" },
+  });
+  assert(subOf(row) === "the attempt before it had finished · its records are kept, superseded",
+         subOf(row));
+});
+
 check("a record from a newer aish still draws a legible row", () => {
   const s = makeSandbox();
   s.traceStep({ kind: "retry", attempt: 7 });

@@ -125,6 +125,7 @@ from .session import (
     RATINGS,
     RESUME_MARKER,
     TRASH_MAX_AGE_S,
+    CarriedWork,
     RestoreRefused,
     SessionLog,
     SessionLogMoved,
@@ -479,6 +480,90 @@ RESUME_NOTE = (
     "that sent, wrote, or changed something. Check what is actually still "
     "missing, pick up from there, and finish the task."
 )
+# The same note for an attempt whose ending WAS recorded (#387) — a failed model
+# call, a crash — and which the owner's Retry picks up. The cause is the
+# server's own `task_end` text, quoted rather than paraphrased: it is the one
+# sentence here a line checked.
+CUT_OFF_NOTE = (
+    f"{RESUME_MARKER} aish's previous attempt at this task was cut off: {{error}}. "
+    "Everything above is what had already happened. Do NOT repeat steps that "
+    "already completed — especially anything that sent, wrote, or changed "
+    "something. Check what is actually still missing, pick up from there, and "
+    "finish the task."
+)
+# Stamped by `_run_task` on the two ways a task ends `failed`, and read back by
+# `retry_decision`: the prefix is how the server's own record says which of the
+# two it was, so it must never drift from the writer.
+MODEL_UNAVAILABLE_PREFIX = "model unavailable: "
+TASK_FAILED_PREFIX = "task failed: "
+
+
+def retry_decision(last: dict, native: bool) -> tuple[bool, str]:
+    """Does a Retry CONTINUE the question or regenerate it (#387)? Returns
+    (continue, bound) — `bound` is `"attempts"` when the continuation bound is
+    what forced a regenerate, "" otherwise.
+
+    Decided by how the last attempt ENDED as the log recorded it
+    (`SessionLog.last_task`), never by reading intent:
+
+    - it answered, or the owner stopped it (Stop is a verdict on the work, and
+      "everything above already happened" would tell the model to build on
+      what he rejected), or nothing bracketed it, or the log is too old to say
+      → regenerate, #60 unchanged;
+    - a model call gave up on a failure the provider may yet take → continue;
+      one it will never take (a spent quota, a 400, a bad key), or one that
+      left no give-up record to say which → regenerate: resending the refused
+      request cannot change anything, and retryability unknown is not
+      retryability;
+    - the task crashed, or the process died with the attempt open → continue:
+      what completed is still valid, and the note names what never reported.
+
+    claude-max keeps today's Retry: its SDK holds its own session, and whether
+    that retains a failed turn's results is asserted nowhere. And the question
+    must have been LOGGED — an attempt killed before its message was written
+    left nothing to continue from.
+
+    Bounded like restart recovery: while the live chain holds at most
+    RESUME_MAX_ATTEMPTS starts. An attempt that keeps dying the same way is not
+    rescued by another identical try, and past the bound a Retry drops the
+    question's bulk, which is the owner's way out of a context the provider
+    will not take at any wait."""
+    if not native or not last.get("typed_logged"):
+        return False, ""
+    ended = last.get("ended")
+    error = str(last.get("error") or "")
+    failure = last.get("failure") or {}
+    if ended == "failed":
+        if error.startswith(MODEL_UNAVAILABLE_PREFIX):
+            continues = failure.get("retryable") is True
+        else:
+            continues = error.startswith(TASK_FAILED_PREFIX)
+    else:
+        continues = ended == "unknown"
+    if not continues:
+        return False, ""
+    if int(last.get("chain_attempts") or 0) > RESUME_MAX_ATTEMPTS:
+        return False, "attempts"
+    return True, ""
+
+
+def continuation_note(last: dict) -> str:
+    """The synthetic turn that continues a question, from its RECORDED ending
+    (#387). Every sentence states what the log says and nothing it does not: a
+    recorded failure is quoted, an unrecorded ending is the restart it was, and
+    the steps that started and never reported back are named — the one part of
+    a continuation whose effect is genuinely unknown."""
+    if last.get("ended") == "failed":
+        note = CUT_OFF_NOTE.format(error=str(last.get("error") or "no reason recorded"))
+    else:
+        note = RESUME_NOTE
+    if last.get("in_flight"):
+        note += (
+            "\n\nCut off mid-step. These had STARTED and never reported a result, "
+            "so whether they took effect is UNKNOWN — check each before repeating "
+            "it:\n- " + "\n- ".join(last["in_flight"])
+        )
+    return note
 
 # The global "Quake console" (issue #148 follow-up). ONE interactive PTY for
 # the whole server — not per-session — openable from any chat and surviving
@@ -1724,9 +1809,11 @@ SENDING is paused while \
 offline — by design, not by accident: a prompt queued for later would run \
 commands with nobody there to approve them. If the user asks how to keep a \
 conversation for reference while travelling, tell them to pin it that way.
-- If a user message starts with "[automatic resume]", aish was RESTARTED while \
-your previous task was still running and that same task has been picked up \
-again — the conversation above is your OWN interrupted work. You MUST check \
+- If a user message starts with "[automatic resume]", your previous attempt at \
+that same task was cut off before it answered — aish restarted, the task \
+crashed, or a model call kept failing and the user pressed Retry — and it \
+has been picked up again: the conversation above, tool results included, is \
+your OWN interrupted work, and nothing in it was re-run. You MUST check \
 what actually completed before acting (re-read the real state rather than \
 assuming from the transcript), you MUST NOT repeat any step that already sent, \
 wrote, or changed something, and you then finish whatever is still missing. \
@@ -2173,28 +2260,21 @@ class WebServer:
                 continue
             # A run that died before its own user message was logged left the
             # model nothing to continue FROM, so that one re-issues the recorded
-            # prompt; every other resume continues the conversation (RESUME_NOTE).
-            text = RESUME_NOTE if any(m.get("role") == "user" for m in history) else info["prompt"]
-            if not text:
+            # prompt — the user's own words, a normal bubble; every other resume
+            # continues the conversation, through the same primitive a
+            # continuing Retry uses (#387). The steps that never reported back
+            # are named in its note: the only ones whose effect is genuinely
+            # unknown.
+            if any(m.get("role") == "user" for m in history):
+                self._continue_task(session, info)
+            elif info["prompt"]:
+                session.busy = True
+                session.open_turn(_user_event(info["prompt"]))
+                session.runner = asyncio.ensure_future(
+                    self._run_task(session, info["prompt"], resume=True)
+                )
+            else:
                 continue
-            if text is RESUME_NOTE and info.get("in_flight"):
-                # The steps that never reported back are the only ones whose
-                # effect is genuinely unknown — name them so the model verifies
-                # those specifically instead of re-running the whole task.
-                text += "\n\nCut off mid-step. These had STARTED and never " \
-                        "reported a result, so whether they took effect is " \
-                        "UNKNOWN — check each before repeating it:\n- " \
-                        + "\n- ".join(info["in_flight"])
-            session.busy = True
-            # A resume note is a real turn (it starts a task) that the human
-            # never typed, so it renders as a system row rather than a blue user
-            # bubble — classified by the SAME function the cold replay uses, so
-            # hot and cold cannot drift (#171). A re-issued original prompt is
-            # the user's own words and stays a normal bubble.
-            session.open_turn(_user_event(text))
-            session.runner = asyncio.ensure_future(
-                self._run_task(session, text, resume=True)
-            )
             resumed += 1
             print(f"[resume] {path.name}: retrying an interrupted task "
                   f"(attempt {info['attempts'] + 1})", file=sys.stderr)
@@ -3113,6 +3193,19 @@ class WebServer:
         await self._launch_retry(session, text)
 
     async def _launch_retry(self, session: Session, client_text: str) -> None:
+        # Retry is one button with two acts, and a recorded fact picks (#387):
+        # an attempt that died with work in hand is CONTINUED — nothing is
+        # rewound, superseded or rolled back, and the continuation is fed what
+        # the attempt completed instead of being asked to redo it. Read
+        # synchronously, like the supersede below: nothing may start a turn on
+        # this chat between the decision and the act.
+        native = isinstance(session.agent, Agent)
+        path = session.logref.log.path
+        last = SessionLog.last_task(path) if native and path.exists() else {}
+        continues, bound = retry_decision(last, native) if last else (False, "")
+        if continues:
+            self._continue_task(session, last, by="owner")
+            return
         # Two acts, and only one of them removes anything (#339). The MODEL's
         # context is rewound — #60's intent, and the rerun must not be informed
         # by the attempt it replaces. The LOG keeps every record and marks them
@@ -3129,7 +3222,7 @@ class WebServer:
         # Every path here is the owner pressing Retry in his own UI: this call
         # and the deferred one in _finish_turn, both from a `retry` message on a
         # viewer's socket. Nothing else in the server calls it.
-        retried = session.logref.supersede_last_turn("owner")
+        retried = session.logref.supersede_last_turn("owner", bound)
         self._rollback_transcript_to_last_user(session)
         if retried is not None:
             # Recorded into the live transcript BEFORE the replay snapshot below
@@ -3155,13 +3248,67 @@ class WebServer:
 
     @staticmethod
     def _rollback_transcript_to_last_user(session: Session) -> None:
-        """Drop everything after the last `user` event (the discarded answer and
-        its trace), keeping the user bubble — the visual half of a retry."""
+        """Drop everything after the last TYPED `user` event (the discarded
+        answer and its trace), keeping the user bubble — the visual half of a
+        retry.
+
+        A continuation's note is a `user` event too (`synthetic: "resume"`), so
+        the walk goes back over it to the question (#387), and the `retry` rows
+        it passes on the way are KEPT: they are the owner's earlier presses at
+        this question, the same records the log keeps unmarked, and cold replay
+        puts them on the rerun's turn — so hot and cold both read question →
+        earlier presses → this press → the rerun."""
         transcript = session.bridge.transcript
         for i in range(len(transcript) - 1, -1, -1):
-            if transcript[i].get("type") == "user":
-                del transcript[i + 1:]
+            event = transcript[i]
+            if event.get("type") == "user" and event.get("synthetic") != "resume":
+                presses = [
+                    e
+                    for e in transcript[i + 1:]
+                    if e.get("type") == "step" and e.get("kind") == "retry"
+                ]
+                transcript[i + 1:] = presses
                 return
+
+    def _continue_task(self, session: Session, last: dict, *, by: str = "") -> None:
+        """Run a continuation of the question on top of what its attempts
+        already did (#164, #387) — the one primitive restart recovery and a
+        continuing Retry share.
+
+        The note comes from the RECORDED ending (`continuation_note`). What the
+        attempts brought in is read off the log and handed to the agent
+        (`SessionLog.carried_work`) so the continuation is as restricted as they
+        were; nothing is re-run and nothing is approved by being carried —
+        every call the continuation proposes goes through `_dispatch` and its
+        gates as any call does.
+
+        `by` is who pressed Retry; a press is an owner decision on the turn's
+        timeline, so it writes its `retry` record BEFORE the continuation's
+        `task_start` (where a regenerating press's sits too) and shows it
+        right AFTER the note that opens the turn — which is where cold replay
+        puts it. Restart recovery presses nothing and writes no record.
+        Synchronous up to the launch, so no other turn can start on this chat
+        between the decision and the act."""
+        note = continuation_note(last)
+        carried = (
+            SessionLog.carried_work(session.logref.log.path)
+            if isinstance(session.agent, Agent)
+            else None
+        )
+        pressed = session.logref.record_retry(by) if by else None
+        session.busy = True
+        # A resume note is a real turn (it starts a task) that the human never
+        # typed, so it renders as a system row rather than a blue user bubble —
+        # classified by the SAME function the cold replay uses, so hot and cold
+        # cannot drift (#171).
+        session.open_turn(_user_event(note))
+        if pressed is not None:
+            # `emit`, like `open_turn`: both are deferred to the loop in order,
+            # so the row lands UNDER the note rather than ahead of it.
+            session.bridge.emit({"type": "step", **pressed})
+        session.runner = asyncio.ensure_future(
+            self._run_task(session, note, resume=True, carried=carried)
+        )
 
     async def _rate_turn(self, client: Client, message: dict) -> None:
         """Record 👍/👎 (+ an optional reason) against one answer (#207).
@@ -3447,6 +3594,7 @@ class WebServer:
         images: list[str] | None = None,
         documents: list[str] | None = None,
         resume: bool = False,
+        carried: CarriedWork | None = None,
     ) -> None:
         # Bracket the run on disk (#164). Only a killed process leaves the
         # task_start unmatched, which is exactly what makes it the restart
@@ -3481,7 +3629,8 @@ class WebServer:
                 # the resumed run must not recompute. claude-max keeps its own
                 # session state and takes no such flag.
                 result = await self._in_worker(
-                    session.agent.run_task, text, images, documents, keep_history=True
+                    session.agent.run_task, text, images, documents,
+                    keep_history=True, continuing=carried,
                 )
             elif images or documents:
                 result = await self._in_worker(
@@ -3526,10 +3675,10 @@ class WebServer:
             titling = None if result == CANCELLED_RESULT else self._title_request(session)
             finished = (result, titling)
         except ModelUnavailable as exc:
-            failure = f"model unavailable: {exc}{_backend_hint(session.agent)}"
+            failure = f"{MODEL_UNAVAILABLE_PREFIX}{exc}{_backend_hint(session.agent)}"
             session.bridge.emit({"type": "error", "text": failure})
         except Exception as exc:  # noqa: BLE001 — a task bug must not kill the server
-            failure = f"task failed: {exc!r}"
+            failure = f"{TASK_FAILED_PREFIX}{exc!r}"
             # The card shows only repr(exc); without the traceback in the log
             # a crash inside a dependency is undiagnosable (the 2026-09-12
             # OverflowError took a live repro to locate).

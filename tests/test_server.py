@@ -26,6 +26,8 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from uvicorn.protocols.utils import ClientDisconnected
 
+import aish.agent as agent_module
+import aish.backends as backends_module
 import aish.browse as browse_module
 import aish.browser as browser_module
 import aish.notify as notify_module
@@ -4999,7 +5001,7 @@ class TestRetry:
                 model_says("clean answer"),
             ],
         )
-        with client, connected(client) as (ws, _, _):
+        with client, connected(client) as (ws, hello, _):
             ws.send_json({"type": "task", "text": "run it"})
             recv_until(ws, "approval_request")  # now busy, blocked on the card
             ws.send_json({"type": "retry", "text": "run it"})
@@ -5012,6 +5014,450 @@ class TestRetry:
         rerun_messages = json.dumps(chat.calls[1]["messages"])
         assert "run it" in rerun_messages
         assert str(marker) not in rerun_messages  # discarded tool call is not replayed
+        # #387 continues only an attempt that DIED. A press that had to stop a
+        # running one stopped it, and a stopped attempt regenerates — the
+        # busy-press continuation v4 designed dissolved once app.js refused
+        # Retry while busy; this pins the behaviour chosen instead.
+        steps = _retry_steps(Path(app_env["state_dir"]) / hello["session"])
+        assert [s["continued"] for s in steps] == [False]
+
+
+class ProviderDown(RuntimeError):
+    """A provider refusing the call: `status_code` is where `ratelimit` reads
+    the verdict from, so 503 classifies as a retryable server failure and 401
+    as a permanent one."""
+
+    def __init__(self, status: int):
+        super().__init__(f"{status} provider refused")
+        self.status_code = status
+
+
+class FlakyChat(FakeChat):
+    """FakeChat that refuses every conversation call while its script is empty
+    and `down` is set — a provider that stays down until the test brings it
+    back. The retry policy spends its budget against it (no real sleeping, see
+    conftest) and the turn ends `task_end: failed`, which is the ending #387
+    is about."""
+
+    def __init__(self, responses: list, status: int = 503):
+        super().__init__(responses)
+        self.down = True
+        self.status = status
+
+    def __call__(self, **kwargs):
+        # The agent hands over its LIVE list, so a later append would rewrite
+        # what an earlier call was sent: each call keeps a snapshot.
+        kwargs = {**kwargs, "messages": [dict(m) for m in kwargs.get("messages") or []]}
+        if not _is_title_call(kwargs) and not self.responses and self.down:
+            self.calls.append(kwargs)
+            raise ProviderDown(self.status)
+        return super().__call__(**kwargs)
+
+
+def flaky_client(app_env, responses, status=503):
+    chat = FlakyChat(responses, status=status)
+    app = create_app("fake", client_chat=chat, token=TEST_TOKEN, **app_env)
+    return TokenClient(app, auto_token=TEST_TOKEN), chat
+
+
+def _log_records(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines()]
+
+
+def _retry_steps(path):
+    return [
+        r["step"] for r in _log_records(path)
+        if r.get("kind") == "trace" and r.get("step", {}).get("kind") == "retry"
+    ]
+
+
+def collect_until(ws, wanted: str, limit: int = 400) -> list[dict]:
+    """Every event up to and including the first of type `wanted` — for a
+    test that asserts on what arrived on the way."""
+    events = []
+    for _ in range(limit):
+        events.append(ws.receive_json())
+        if events[-1]["type"] == wanted:
+            return events
+    raise AssertionError(f"no {wanted!r} event within {limit} events")
+
+
+def _last_user(messages):
+    return next(m for m in reversed(messages) if m.get("role") == "user")
+
+
+class TestRetryContinues:
+    """#387: a turn that DIED with work in hand is continued by Retry, not
+    thrown away. The owner's decision: "build fallback to keep the progress
+    for retry to finish what was done so far".
+
+    The approval story is the invariant every test here leans on: reusing a
+    result is not re-running a command. What the dead attempt completed goes
+    back to the model as history; nothing is re-dispatched, and anything the
+    continuation proposes meets the gate like any other call."""
+
+    @staticmethod
+    def _searches(monkeypatch):
+        """web_search stubbed at the module boundary, counting every dispatch —
+        a re-executed call is a second entry here."""
+        seen: list[str] = []
+
+        def fake_search(query, **_kw):
+            seen.append(query)
+            return f"RESULT for {query}"
+
+        monkeypatch.setattr(agent_module.web, "web_search", fake_search)
+        return seen
+
+    @staticmethod
+    def _three_searches():
+        return [
+            model_says(tool_calls=[tool_call("web_search", query=f"q{i}")]) for i in (1, 2, 3)
+        ]
+
+    @staticmethod
+    def _tool_messages(messages):
+        return [
+            (m.get("tool_name"), m.get("content")) for m in messages if m.get("role") == "tool"
+        ]
+
+    def test_a_failed_turn_is_continued_with_its_results_verbatim(self, app_env, monkeypatch):
+        """The incident, live: three searches completed, the model call that
+        would have answered died, and Retry used to throw all three away and
+        run the discovery again. Now the next call is handed the three results
+        exactly as the dead attempt's context held them, and none re-runs."""
+        searches = self._searches(monkeypatch)
+        client, chat = flaky_client(app_env, self._three_searches())
+        with client, connected(client) as (ws, hello, _):
+            path = Path(app_env["state_dir"]) / hello["session"]
+            ws.send_json({"type": "task", "text": "find the order mails"})
+            error = recv_any(ws, "error")
+            assert error["text"].startswith("model unavailable: ")
+            dead_context = chat.calls[-1]["messages"]
+            chat.down = False
+            chat.responses.append(model_says("found them: three mails"))
+            calls_before = len(chat.calls)
+            ws.send_json({"type": "retry", "text": "find the order mails"})
+            events = collect_until(ws, "done")
+        assert [e.get("synthetic") for e in events if e["type"] == "user"] == ["resume"]
+        assert events[-1]["result"] == "found them: three mails"
+        assert searches == ["q1", "q2", "q3"], "nothing the dead attempt did ran again"
+        continued = chat.calls[calls_before]["messages"]
+        carried = self._tool_messages(dead_context)
+        assert len(carried) == 3
+        assert self._tool_messages(continued) == carried, "verbatim, in order"
+        note = _last_user(continued)["content"]
+        assert note.startswith("[automatic resume]")
+        assert "was cut off: model unavailable: " in note
+        # The press is on the record, saying which act it performed; nothing
+        # was discarded, so nothing is marked.
+        steps = _retry_steps(path)
+        assert len(steps) == 1
+        assert steps[0]["continued"] is True
+        assert steps[0]["attempt"] == 2
+        assert steps[0]["previous"]["ended"] == "failed"
+        assert steps[0]["previous"]["records"] == 0
+        assert not any(r.get("superseded") for r in _log_records(path))
+        # The typed question was asked once, and is still the question.
+        typed = [
+            r for r in _log_records(path)
+            if r.get("kind") == "message" and r.get("role") == "user"
+            and not synthetic_kind(r.get("content", ""))
+        ]
+        assert [r["content"] for r in typed] == ["find the order mails"]
+
+    def test_a_cold_reopened_chat_continues_the_same_way(self, app_env, monkeypatch):
+        """The decision and the facts are read from the LOG, so a Retry pressed
+        after a restart takes the act one pressed a second later would."""
+        searches = self._searches(monkeypatch)
+        client, chat = flaky_client(app_env, self._three_searches())
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "find the order mails"})
+            recv_any(ws, "error")
+            dead_results = self._tool_messages(chat.calls[-1]["messages"])
+        client2, chat2 = flaky_client(app_env, [model_says("found them")])
+        chat2.down = False
+        with client2, connected(client2) as (ws2, _, _):
+            ws2.send_json({"type": "resume", "path": name})
+            recv_until(ws2, "hello")
+            recv_until(ws2, "replay")
+            ws2.send_json({"type": "retry", "text": "find the order mails"})
+            recv_until(ws2, "done")
+        assert searches == ["q1", "q2", "q3"]
+        continued = chat2.calls[0]["messages"]
+        assert self._tool_messages(continued) == dead_results
+        assert _last_user(continued)["content"].startswith("[automatic resume]")
+        path = Path(app_env["state_dir"]) / name
+        assert _retry_steps(path)[-1]["continued"] is True
+
+    def test_the_continuation_is_tainted_like_the_attempt_it_continues(
+        self, app_env, monkeypatch
+    ):
+        """Taint follows the content. The searches brought the outside in; a
+        fresh task resets the fence, and a continuation holding the same
+        results in context must not be handed a fence that is down."""
+        self._searches(monkeypatch)
+        client, chat = flaky_client(app_env, self._three_searches())
+        observed: list[bool] = []
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "find the order mails"})
+            recv_any(ws, "error")
+            agent = client.app.state.server.active.agent
+            original = FlakyChat.__call__
+
+            def spy(self_, **kwargs):
+                if not _is_title_call(kwargs):
+                    observed.append(agent._tainted)
+                return original(self_, **kwargs)
+
+            monkeypatch.setattr(FlakyChat, "__call__", spy)
+            chat.down = False
+            chat.responses.append(model_says("done"))
+            ws.send_json({"type": "retry", "text": "find the order mails"})
+            recv_until(ws, "done")
+        assert observed == [True], "tainted before the continuation's first model call"
+
+    def test_a_denied_call_is_not_carried_forward_as_done(self, app_env, tmp_path):
+        """Only what EXECUTED is work in hand. A command the owner denied stays
+        denied in the history — it is not re-run, not approved by being
+        carried, and a continuation that proposes it again meets the card."""
+        marker = tmp_path / "pwned"
+        client, chat = flaky_client(
+            app_env,
+            [model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")])],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "make the file"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
+            recv_any(ws, "error")
+            chat.down = False
+            chat.responses.extend([
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("left it alone"),
+            ])
+            calls_before = len(chat.calls)
+            ws.send_json({"type": "retry", "text": "make the file"})
+            again = recv_until(ws, "approval_request")  # the gate, not a pass
+            assert not marker.exists()
+            ws.send_json({"type": "approval", "id": again["id"], "action": "deny"})
+            recv_until(ws, "done")
+        assert not marker.exists()
+        continued = chat.calls[calls_before]["messages"]
+        results = [c for _n, c in self._tool_messages(continued)]
+        assert results == [DENIED_RESULT], "carried as the denial it was"
+        assert "Cut off mid-step" not in _last_user(continued)["content"]
+
+    def test_a_crash_mid_batch_is_repaired_and_named(self, app_env, monkeypatch):
+        """A task that crashed inside a batch left an assistant message with a
+        tool call and no result — which the Anthropic API rejects on every
+        later request. The continuation pairs it with a LOGGED placeholder
+        saying what is known, and never runs it to find out."""
+        searches = self._searches(monkeypatch)
+        client, chat = make_client(
+            app_env,
+            [model_says(tool_calls=[tool_call("web_search", query="q1")]), model_says("ok")],
+        )
+        agent_cls = server_module.Agent
+        original = agent_cls._execute_tool_calls
+        crashes = []
+
+        def crash_once(self_, tool_calls, model_call=0):
+            if not crashes:
+                crashes.append(1)
+                raise RuntimeError("worker exploded")
+            return original(self_, tool_calls, model_call)
+
+        monkeypatch.setattr(agent_cls, "_execute_tool_calls", crash_once)
+        with client, connected(client) as (ws, hello, _):
+            path = Path(app_env["state_dir"]) / hello["session"]
+            ws.send_json({"type": "task", "text": "search once"})
+            error = recv_any(ws, "error")
+            assert error["text"].startswith("task failed: ")
+            ws.send_json({"type": "retry", "text": "search once"})
+            recv_until(ws, "done")
+        assert searches == [], "the call that never reported was not re-run"
+        continued = chat.calls[1]["messages"]
+        calls = [m for m in continued if m.get("tool_calls")]
+        assert len(calls) == 1
+        after = continued[continued.index(calls[0]) + 1]
+        assert after["role"] == "tool" and after["content"].startswith("(no result")
+        assert "task failed: " in after["content"]
+        # The adapter this shape would have broken: every tool_use has a result.
+        _system, out, *_ = backends_module._convert_anthropic_traced(continued)
+        uses = [b["id"] for m in out if m["role"] == "assistant" and isinstance(m["content"], list)
+                for b in m["content"] if b.get("type") == "tool_use"]
+        results = [b["tool_use_id"] for m in out if m["role"] == "user"
+                   and isinstance(m["content"], list)
+                   for b in m["content"] if b.get("type") == "tool_result"]
+        assert uses and uses == results
+        # Logged, so a cold reopen holds the same fact.
+        cold = SessionLog.load_messages(path)
+        assert any(
+            m.get("role") == "tool" and m["content"].startswith("(no result") for m in cold
+        )
+
+    def test_a_permanent_failure_regenerates(self, app_env, monkeypatch):
+        """A provider that refused the request for good (a 401) would refuse
+        the continuation identically — only starting over changes anything."""
+        searches = self._searches(monkeypatch)
+        client, chat = flaky_client(app_env, self._three_searches(), status=401)
+        with client, connected(client) as (ws, hello, _):
+            path = Path(app_env["state_dir"]) / hello["session"]
+            ws.send_json({"type": "task", "text": "find the order mails"})
+            recv_any(ws, "error")
+            chat.down = False
+            chat.responses.append(model_says("from scratch"))
+            calls_before = len(chat.calls)
+            ws.send_json({"type": "retry", "text": "find the order mails"})
+            recv_until(ws, "replay")
+            recv_until(ws, "done")
+        rerun = chat.calls[calls_before]["messages"]
+        assert self._tool_messages(rerun) == []
+        assert _last_user(rerun)["content"] == "find the order mails"
+        step = _retry_steps(path)[-1]
+        assert step["continued"] is False and "bound" not in step
+        assert searches == ["q1", "q2", "q3"]
+
+    def test_stop_then_retry_regenerates(self, app_env, tmp_path):
+        """Stop is a verdict on the work. A continuation opening with
+        "everything above already happened" would build on what he stopped."""
+        client, chat = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+                model_says("fresh answer"),
+            ],
+        )
+        with client, connected(client) as (ws, hello, _):
+            path = Path(app_env["state_dir"]) / hello["session"]
+            ws.send_json({"type": "task", "text": "do the thing"})
+            recv_until(ws, "approval_request")
+            ws.send_json({"type": "stop"})
+            recv_until(ws, "done")
+            assert SessionLog.last_task(path)["ended"] == "stopped"
+            ws.send_json({"type": "retry", "text": "do the thing"})
+            recv_until(ws, "replay")
+            recv_until(ws, "done")
+        step = _retry_steps(path)[-1]
+        assert step["continued"] is False
+        assert _last_user(chat.calls[-1]["messages"])["content"] == "do the thing"
+
+    def test_the_bound_stops_an_endless_chain_and_resets(self, app_env, monkeypatch):
+        """At most RESUME_MAX_ATTEMPTS live starts at one question: past that a
+        Retry drops the bulk and starts over, and says why. The regenerate
+        starts a new chain, so the NEXT death there is continuable again."""
+        self._searches(monkeypatch)
+        client, chat = flaky_client(
+            app_env, [model_says(tool_calls=[tool_call("web_search", query="q1")])]
+        )
+        acts = []
+        with client, connected(client) as (ws, hello, _):
+            path = Path(app_env["state_dir"]) / hello["session"]
+            ws.send_json({"type": "task", "text": "find it"})
+            recv_any(ws, "error")
+            for _ in range(server_module.RESUME_MAX_ATTEMPTS + 2):
+                ws.send_json({"type": "retry", "text": "find it"})
+                recv_any(ws, "error")
+                acts.append(_retry_steps(path)[-1])
+        assert [s["continued"] for s in acts] == [True, True, True, False, True]
+        assert acts[3]["bound"] == "attempts"
+        assert [s["attempt"] for s in acts] == [2, 3, 4, 5, 6]
+        # The earlier presses are the owner's decisions: never hidden.
+        assert not any(
+            r.get("superseded") for r in _log_records(path)
+            if r.get("kind") == "trace" and r["step"].get("kind") == "retry"
+        )
+
+    def test_regenerate_after_continuations_reruns_the_typed_question(
+        self, app_env, monkeypatch
+    ):
+        """The note is aish's, never the prompt. A regenerate after
+        continuations discards the whole chain and reruns what he TYPED; the
+        presses stay visible, hot and cold alike."""
+        self._searches(monkeypatch)
+        client, chat = flaky_client(
+            app_env, [model_says(tool_calls=[tool_call("web_search", query="q1")])]
+        )
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            path = Path(app_env["state_dir"]) / name
+            ws.send_json({"type": "task", "text": "find it"})
+            recv_any(ws, "error")
+            for _ in range(server_module.RESUME_MAX_ATTEMPTS):
+                ws.send_json({"type": "retry", "text": "whatever the client held"})
+                recv_any(ws, "error")
+            chat.down = False
+            chat.responses.append(model_says("rerun answer"))
+            calls_before = len(chat.calls)
+            ws.send_json({"type": "retry", "text": "whatever the client held"})
+            live = recv_until(ws, "replay")["events"]
+            recv_until(ws, "done")
+        rerun = chat.calls[calls_before]["messages"]
+        assert _last_user(rerun)["content"] == "find it"
+        assert not any(
+            str(m.get("content", "")).startswith("[automatic resume]") for m in rerun
+        )
+        assert self._tool_messages(rerun) == []
+
+        def shape(events):
+            return [
+                e.get("kind") if e.get("type") == "step" else e.get("type")
+                for e in events
+            ]
+
+        # question → the three continuing presses → this press
+        assert shape(live) == ["user", "retry", "retry", "retry", "retry"], shape(live)
+        cold = SessionLog.reconstruct_events(path)
+        assert shape(cold)[:5] == shape(live), shape(cold)
+        assert [e.get("text") for e in cold if e["type"] == "user"] == ["find it"]
+        steps = _retry_steps(path)
+        assert [s["continued"] for s in steps] == [True, True, True, False]
+
+    def test_the_frontend_tells_a_cut_off_note_from_a_restart(self):
+        """app.js captions a continuation row by the note's opening: a Retry
+        continuation must not be told to the owner as "aish restarted". The
+        prefix is the server's, so the two are pinned together here."""
+        app_js = (Path(server_module.__file__).parent / "static" / "app.js").read_text()
+        match = re.search(r'const CUT_OFF_NOTE_PREFIX = "([^"]+)";', app_js)
+        assert match, "app.js no longer names the cut-off note's prefix"
+        assert server_module.CUT_OFF_NOTE.format(error="x").startswith(match.group(1))
+        assert not server_module.RESUME_NOTE.startswith(match.group(1))
+
+    def test_cold_replay_of_a_continued_turn_matches_the_live_one(
+        self, app_env, monkeypatch
+    ):
+        """L1: the press sits under the continuation's note, live and cold."""
+        self._searches(monkeypatch)
+        client, chat = flaky_client(app_env, self._three_searches())
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "find the order mails"})
+            recv_any(ws, "error")
+            chat.down = False
+            chat.responses.append(model_says("found them"))
+            ws.send_json({"type": "retry", "text": "find the order mails"})
+            recv_until(ws, "done")
+            live = list(client.app.state.server.sessions[name].bridge.transcript)
+        cold = SessionLog.reconstruct_events(Path(app_env["state_dir"]) / name)
+
+        def turns(events):
+            return [
+                (e["type"], e.get("synthetic"), e.get("kind"))
+                for e in events
+                if e["type"] in ("user", "error", "done")
+                or (e["type"] == "step" and e.get("kind") == "retry")
+            ]
+
+        assert turns(live) == turns(cold), (turns(live), turns(cold))
+        assert turns(cold) == [
+            ("user", None, None),
+            ("error", None, None),
+            ("user", "resume", None),
+            ("step", None, "retry"),
+            ("done", None, None),
+        ]
 
 
 class TestModels:
