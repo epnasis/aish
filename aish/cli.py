@@ -1067,10 +1067,16 @@ def cloud_model_catalog(state_dir: Path) -> dict[str, list[str]]:
     (a slow provider is just absent this time) and land in a 24h disk cache
     so the picker usually opens instantly."""
     cache_path = state_dir / "cloud-models.json"
+    configured = _configured_providers()
     try:
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         fetched = datetime.datetime.fromisoformat(cached["fetched"])
-        if datetime.datetime.now() - fetched < CATALOG_TTL:
+        # A provider set up since the fetch (a new key, AISH_LOCAL_URL) would
+        # otherwise stay out of the picker until the cache expired a day later.
+        if (
+            datetime.datetime.now() - fetched < CATALOG_TTL
+            and cached.get("configured") == configured
+        ):
             return cached["models"]
     except (OSError, ValueError, KeyError):
         pass
@@ -1100,13 +1106,27 @@ def cloud_model_catalog(state_dir: Path) -> dict[str, list[str]]:
             state_dir.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(
                 json.dumps(
-                    {"fetched": datetime.datetime.now().isoformat(), "models": catalog}
+                    {
+                        "fetched": datetime.datetime.now().isoformat(),
+                        "configured": configured,
+                        "models": catalog,
+                    }
                 ),
                 encoding="utf-8",
             )
         except OSError:
             pass
     return catalog
+
+
+def _configured_providers() -> list[str]:
+    """Providers whose gating environment variable is set: the API key, or for
+    `local:` the server address (its key is optional)."""
+    gates = {
+        name: backends.LOCAL_URL_ENV if name == backends.LOCAL else provider.env_key
+        for name, provider in backends.PROVIDERS.items()
+    }
+    return sorted(name for name, var in gates.items() if os.environ.get(var, "").strip())
 
 
 def available_models(agent, state_dir: Path | None = None) -> list[tuple[str, str]]:

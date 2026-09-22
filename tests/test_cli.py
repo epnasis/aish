@@ -1327,6 +1327,47 @@ class TestModelPicker:
         monkeypatch.setattr(cli.backends, "list_models", explode)
         assert cli.cloud_model_catalog(tmp_path) == catalog
 
+    def test_a_provider_set_up_after_the_fetch_is_not_hidden_by_the_cache(
+        self, tmp_path, monkeypatch
+    ):
+        import aish.cli as cli
+
+        for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AISH_LOCAL_URL"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+
+        def before(name):
+            if name == "gemini":
+                return ["gemini-3.5-flash"]
+            raise cli.backends.BackendError("not configured")
+
+        monkeypatch.setattr(cli.backends, "list_models", before)
+        assert cli.cloud_model_catalog(tmp_path) == {"gemini": ["gemini-3.5-flash"]}
+
+        monkeypatch.setenv("AISH_LOCAL_URL", "http://mi.lan:8080/v1")
+
+        def after(name):
+            return {"gemini": ["gemini-3.5-flash"], "local": ["mlx/qwen"]}.get(name) or []
+
+        monkeypatch.setattr(cli.backends, "list_models", after)
+        assert cli.cloud_model_catalog(tmp_path) == {
+            "gemini": ["gemini-3.5-flash"], "local": ["mlx/qwen"]
+        }
+
+    def test_a_cache_written_before_it_recorded_its_providers_is_refetched(
+        self, tmp_path, monkeypatch
+    ):
+        import datetime
+        import json
+
+        import aish.cli as cli
+
+        (tmp_path / "cloud-models.json").write_text(json.dumps({
+            "fetched": datetime.datetime.now().isoformat(), "models": {"gemini": ["old"]},
+        }))
+        monkeypatch.setattr(cli.backends, "list_models", lambda name: ["new"])
+        assert cli.cloud_model_catalog(tmp_path)["gemini"] == ["new"]
+
     def test_available_models_includes_fetched_catalog(self, tmp_path, monkeypatch):
         import sys
         from types import SimpleNamespace
