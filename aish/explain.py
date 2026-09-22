@@ -2254,6 +2254,15 @@ def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
                      {"k": "attempt", "v": str(record.get("attempt") or "?")},
                      {"k": "the attempt before", "v": ended
                       + (f" — {prev['failure']}" if prev.get("failure") else "")}]
+            if "continued" in record:
+                # Which of Retry's two acts it was (#387), as the record says:
+                # a continuation is this turn building on the one before it,
+                # a regenerate is this turn replacing it. Absent on a record
+                # from before the distinction, which is not guessed at.
+                act = "continued" if record["continued"] else "started over"
+                if record.get("bound"):
+                    act += f" (bound: {record['bound']})"
+                facts.append({"k": "act", "v": act})
             steps.append(_event_step(STEP_RETRY, dict(record), facts,
                                      id=event_id("retry"), title="you retried"))
 

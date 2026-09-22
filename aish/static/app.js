@@ -3313,12 +3313,22 @@ function traceStep(step) {
       : prev.ended === "ok"
         ? "the attempt before it had finished"
         : "aish did not record how the attempt before it ended";
+    // Which of Retry's two acts the press performed (#387) — the record says
+    // it, the row does not work it out. A continuation keeps what the attempt
+    // had already done; a regenerate discards it (kept on disk, superseded),
+    // and one the continuation bound forced says so. A record from before
+    // #387 carries no `continued` and was always a regenerate.
+    const act = step.continued
+      ? "continuing from what it had already done"
+      : step.bound === "attempts"
+        ? "continued as many times as allowed — starting over; its records are kept, superseded"
+        : "its records are kept, superseded";
     traceRow(
       // The same icon "You added" uses: both rows are the owner reaching into
       // a turn, and they should read as the same kind of thing.
       t, traceSvg("chat", "var(--blue)"),
       step.by === "owner" ? `You retried — attempt ${step.attempt}` : `Retried — attempt ${step.attempt}`,
-      `${ended} · its records are kept, superseded`
+      `${ended} · ${act}`
     ).row.classList.add("step-retry");
     updateTraceHead(t);
     return;
@@ -4642,6 +4652,17 @@ const SYNTHETIC_LABELS = { resume: "Automatic resume", trigger: "Triggered reque
 // needs is the one fact that explains why the transcript above looks half
 // finished. The note is still in the log, in full, for `aish explain`.
 const RESUME_ROW_TEXT = "aish restarted mid-task and picked up where it left off.";
+// A continuation is not always a restart (#387): Retry continues an attempt
+// that died with its work in hand — a failed model call, a crash — and "aish
+// restarted" would be a false sentence about that. The note's own opening is
+// what says which (server.CUT_OFF_NOTE, pinned by test_server's
+// TestRetryContinues); anything else keeps the restart line it always had.
+const CUT_OFF_NOTE_PREFIX = "[automatic resume] aish's previous attempt at this task was cut off";
+const CUT_OFF_ROW_TEXT = "The last attempt was cut off before it answered; aish picked up where it left off.";
+
+function resumeRowText(text) {
+  return String(text || "").startsWith(CUT_OFF_NOTE_PREFIX) ? CUT_OFF_ROW_TEXT : RESUME_ROW_TEXT;
+}
 
 function addSystemMsg(kind, text) {
   const el = document.createElement("div");
@@ -4656,7 +4677,7 @@ function addSystemMsg(kind, text) {
   label.textContent = SYNTHETIC_LABELS[kind] || "System";
   const detail = document.createElement("div");
   detail.className = "sysnote-text";
-  detail.textContent = kind === "resume" ? RESUME_ROW_TEXT : text;
+  detail.textContent = kind === "resume" ? resumeRowText(text) : text;
   body.append(label, detail);
   el.append(ico, body);
   messagesEl.appendChild(el);
@@ -13569,7 +13590,9 @@ function ssEventSegs(doc, step) {
     b.meta("THE RECORD");
     b.rec(step.record || {});
   } else if (step.kind === "retry") {
-    b.meta("its records are kept, superseded", "THE RECORD");
+    const record = step.record || {};
+    b.meta(record.continued ? "continued from what it had already done"
+                            : "its records are kept, superseded", "THE RECORD");
     b.rec(step.record || {});
   } else if (step.kind === "brief_changed") {
     b.meta("the brief this call was handed is in that model call's whole context");

@@ -556,7 +556,7 @@ _WHEN_SUBJECT = (
     "binds every turn costs every turn."
 )
 
-TOOL_SCHEMAS = [
+TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {

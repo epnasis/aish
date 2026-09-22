@@ -360,7 +360,12 @@ off up to a minute between tries, for up to an hour — so the turn finishes on
 its own rather than dying with its work done and waiting for you to press
 Retry. Waiting is shown while it happens, Stop works during it, and a quota
 that is *spent* rather than busy says so instead of retrying into a wall it
-cannot get past.
+cannot get past. If a turn still dies with work done — the wait runs out, a
+crash — pressing **Retry picks it up from where it stopped**: the tool results
+it already had go back to the model as they were, nothing is re-run, and
+anything new it proposes is approved as usual. Retry on a turn that answered,
+or that you stopped, starts it over from scratch as before; so does the fourth
+Retry in a row on the same failing question.
 
 To see where the tokens went:
 

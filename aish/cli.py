@@ -366,8 +366,11 @@ class LogRef:
     def workspace(self, record: dict) -> None:
         self.log.workspace(record)
 
-    def supersede_last_turn(self, by: str = "owner") -> dict | None:
-        return self.log.supersede_last_turn(by)
+    def supersede_last_turn(self, by: str = "owner", bound: str = "") -> dict | None:
+        return self.log.supersede_last_turn(by, bound)
+
+    def record_retry(self, by: str = "owner") -> dict | None:
+        return self.log.record_retry(by)
 
     def rating(self, turn: str, rating: str, comment: str = "") -> None:
         self.log.rating(turn, rating, comment)

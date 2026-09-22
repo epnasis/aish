@@ -63,12 +63,15 @@ from . import (
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import (
     NOTE_MARKER,
+    STOPPED_ANSWER,
+    CarriedWork,
     SessionLog,
     attachment_guidance,
     attachment_names,
     message_body,
     real_attachments,
     strip_attachment_notes,
+    synthetic_kind,
     to_record_form,
 )
 
@@ -493,7 +496,9 @@ class TaskCancelled(Exception):
     """Raised inside the loop when cancel() interrupts a streaming turn."""
 
 
-CANCELLED_RESULT = "(task stopped by user — any partial work is above)"
+# session.py's string, not a copy: it is how the log tells a stopped turn from
+# an answered one (`SessionLog.last_task`, #387).
+CANCELLED_RESULT = STOPPED_ANSWER
 NOT_EXECUTED = "(not executed — the user stopped the task)"
 
 # How much of a tool result this turn's record keeps. Enough for the line a
@@ -1884,6 +1889,8 @@ UNTRUSTED_SOURCE_TOOLS = frozenset(EGRESS_TOOLS | set(BROWSE_TOOLS))
 # URL, so the tool's name alone does not say whether anything was fetched.
 DUAL_SOURCE_TOOLS = frozenset({"show_image", "read_pdf", "read_media"})
 
+NATIVE_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in tools.TOOL_SCHEMAS)
+
 BROWSE_NO_PAGE = (
     "NOT EXECUTED: nothing is open to act on. Call browse(url) first, then act "
     "on a control by the name in the list it gives you."
@@ -2869,6 +2876,9 @@ class Agent:
         # fields, and it would miss a value the page hides the moment it is
         # entered.
         self._typed_this_task: dict[str, list[tuple[str, str]]] = {}
+        # Values a continued attempt typed that the log cannot tie to a page
+        # host (#387): they ride EVERY press this task, see `_adopt_carried`.
+        self._typed_carried: list[tuple[str, str]] = []
         # Declared value classes the owner has agreed may go to a host, as
         # (class, host), for THIS TASK (#295 M5, #343). One yes covers that
         # class at that host until the task ends — a shipping form takes an
@@ -3121,6 +3131,7 @@ class Agent:
         self._stop_gate_armed_call = 0
         self._stop_gate_comment = ""
         self._stop_gate_refusals = 0
+        self._stop_gate_origin: dict = {"armed_by": "denial_comment"}
         # tool name -> the call number of an action HELD for adjustment and not
         # yet stood in for (#323). Consumed by the next call to that tool.
         self._held_calls: dict[str, int] = {}
@@ -3261,13 +3272,22 @@ class Agent:
         self.messages.extend(
             self._restore_attachments(m) for m in messages if m.get("role") != "system"
         )
-        # Restore egress provenance (#178): user-role turns are owner-authored
-        # by construction (typed messages, the trigger prompt, aish's own
-        # notes) — tool results stay excluded, so a cold reopen neither widens
-        # nor narrows what the live session had granted from owner text.
+        # Restore egress provenance (#178): typed user turns and the trigger
+        # prompt are owner-authored — tool results stay excluded, so a cold
+        # reopen neither widens nor narrows what the live session had granted
+        # from owner text. aish's OWN user-role text is excluded too, as it is
+        # live (`add_system_note`, a continuation's note): a resume note quotes
+        # the model's arguments to calls that never reported back, and a host
+        # read out of that is the laundering this provenance exists to stop
+        # (#387).
         for message in messages:
-            if message.get("role") == "user" and isinstance(message.get("content"), str):
-                self.note_owner_hosts(message["content"])
+            content = message.get("content")
+            if (
+                message.get("role") == "user"
+                and isinstance(content, str)
+                and not synthetic_kind(content)
+            ):
+                self.note_owner_hosts(content)
 
     @property
     def uploads_dir(self) -> Path | None:
@@ -3343,19 +3363,65 @@ class Agent:
         the TASK_REMINDER that preceded it. Web retry (#60) calls this so a rerun
         regenerates from a clean context — the model never sees its discarded
         answer (run_task re-adds the prompt and reminder fresh). Returns the
-        removed user text, or None when there is no user turn to undo."""
+        removed user text, or None when there is no user turn to undo.
+
+        The turn is the last TYPED question's (#387, `_question_index`): a
+        continuation note or an `[aish: …]` nudge is a user message too, and
+        stopping at one would keep the attempts before it in context and
+        re-run aish's own note as the prompt."""
+        i = self._question_index()
+        if i is None:
+            return None
+        text = self.messages[i].get("content")
+        cut = i
+        prev = self.messages[cut - 1]
+        if prev.get("role") == "system" and str(prev.get("content", "")).startswith(
+            TASK_REMINDER_MARK
+        ):
+            cut -= 1
+        del self.messages[cut:]
+        return text if isinstance(text, str) else None
+
+    def _question_index(self) -> int | None:
+        """Where the current QUESTION opens in `self.messages`: the last user
+        message the owner typed, or None when there is no user message.
+
+        Two kinds of user message are not a question and are walked over. The
+        ones aish wrote itself (`synthetic_kind`: a continuation note, a nudge,
+        a delivered picture) are recognisable in the text, live and cold alike.
+        Mid-task steering is typed, but is never logged and is not preceded by
+        a TASK_REMINDER — which every `run_task` puts immediately before the
+        message that opens it — so a typed message WITH a reminder in front of
+        it outranks a later one without. A history restored cold carries no
+        reminders at all and no steering either, so there the last typed
+        message is the answer. With nothing typed, the last user message is
+        what this read before the distinction existed."""
+        latest_typed: int | None = None
+        latest_user: int | None = None
+        # Set once a task's opening message has been passed: run_task strips
+        # every older reminder, so the reminder in front of a CONTINUATION's
+        # note is the only one left, and the question is then the nearest
+        # typed message before it.
+        past_opener = False
         for i in range(len(self.messages) - 1, 0, -1):
-            if self.messages[i].get("role") == "user":
-                text = self.messages[i].get("content")
-                cut = i
-                prev = self.messages[cut - 1]
-                if prev.get("role") == "system" and str(
-                    prev.get("content", "")
-                ).startswith(TASK_REMINDER_MARK):
-                    cut -= 1
-                del self.messages[cut:]
-                return text if isinstance(text, str) else None
-        return None
+            message = self.messages[i]
+            if message.get("role") != "user":
+                continue
+            if latest_user is None:
+                latest_user = i
+            content = message.get("content")
+            prev = self.messages[i - 1]
+            opens_a_task = prev.get("role") == "system" and str(
+                prev.get("content", "")
+            ).startswith(TASK_REMINDER_MARK)
+            if isinstance(content, str) and synthetic_kind(content):
+                past_opener = past_opener or opens_a_task
+                continue
+            if opens_a_task or past_opener:
+                return i
+            if latest_typed is None:
+                latest_typed = i
+        return latest_typed if latest_typed is not None else latest_user
 
     @staticmethod
     def _same_turn(mine: object, theirs: str) -> bool:
@@ -3715,6 +3781,10 @@ class Agent:
         self._stop_gate_armed_call = 0
         self._stop_gate_comment = ""
         self._stop_gate_refusals = 0
+        # Where the armed gate came from, for its evidence (§6.1): a denial in
+        # THIS turn, or one carried over from the attempt a continuation
+        # picked up (#387) — which names that attempt's turn and call.
+        self._stop_gate_origin = {"armed_by": "denial_comment"}
         # A hold belongs to the turn it was proposed in — `call` numbers restart
         # here, so a stale entry would join a replacement to another turn's id.
         self._held_calls = {}
@@ -3730,6 +3800,7 @@ class Agent:
         # offered links do: a value sent to a form while answering one question
         # is not a licence to send the next task's values to the same host.
         self._typed_this_task = {}
+        self._typed_carried = []
         # And so does a yes to sending one of his declared values there (#343):
         # agreeing that a shop may have his address while it ships him a parcel
         # is not agreeing that the next task may hand it to the same shop.
@@ -3743,6 +3814,163 @@ class Agent:
         # brief can change between them.
         self._model_call = 0
 
+    def _close_dangling_calls(self, cut_off: str) -> None:
+        """Pair every tool call the attempt being continued proposed and never
+        reported back on (#387).
+
+        Results are appended only once a whole batch has returned, so a task
+        that CRASHED inside one left its assistant message with tool calls and
+        nothing after them — and a request carrying an unpaired `tool_use` is
+        rejected by the Anthropic API, so the continuation would fail on every
+        call. Each gets a result saying what is actually known: nothing reached
+        the conversation, and whether it took effect is unknown. Nothing is
+        re-run to find out, and the call is not treated as done — the model is
+        told to check.
+
+        Through `_append`, so the placeholder is LOGGED: held only here it
+        would vanish on a cold reopen and hot and cold histories would
+        disagree. Only the shape a crash leaves is repaired — trailing tool
+        results and nothing else after the call — which is also the only shape
+        in which the missing results can be told apart by position.
+
+        Hot only: a reopened chat's messages carry no `tool_calls`
+        (`SessionLog._parse`), so cold there is nothing to pair. The note's
+        in-flight list names the cut-off calls on both paths."""
+        for i in range(len(self.messages) - 1, 0, -1):
+            message = self.messages[i]
+            role = message.get("role")
+            if role == "tool":
+                continue
+            if role != "assistant" or not message.get("tool_calls"):
+                return
+            answered = len(self.messages) - 1 - i
+            reason = cut_off or "aish recorded no reason"
+            for call in message["tool_calls"][answered:]:
+                self._append(
+                    {
+                        "role": "tool",
+                        "tool_name": call["function"]["name"],
+                        "content": (
+                            "(no result — aish's previous attempt was cut off before "
+                            f"this call reported back: {reason}. Whether it took "
+                            "effect is unknown: check before repeating it.)"
+                        ),
+                    }
+                )
+            return
+
+    def _adopt_carried(self, carried: CarriedWork) -> None:
+        """Make a continuation exactly as RESTRICTED as the attempts it
+        continues (#387). Called right after `_reset_task_state`, which would
+        otherwise hand the same question, holding the same fetched pages, a
+        fence that is down.
+
+        Everything is re-derived from what the log recorded, through the same
+        predicates the live capture uses, so a continuation pressed on a chat
+        reopened the next morning gets the same answer as one pressed a second
+        after the failure — and so the batch whose provenance the dead attempt
+        CAPTURED but never committed (it died before the next model response)
+        is counted too.
+
+        - Taint: `_brings_outside_content` over every recorded call, with the
+          model's own arguments — the set `_capture_provenance` saw, denied and
+          crashed calls included. Where an argument was cut to fit the record
+          and the rule depends on it, taint rises: failing to rise is the one
+          direction this may never move. A paged continuation asks its entry;
+          an entry that is gone can no longer say, so it counts as outside.
+          A log from before `call` records falls back to the tool names alone.
+        - Links that arrived by mail are remembered as such, from the full
+          logged result of every mail tool — and from every paged result when
+          any page came from a mail tool, since which page is which is not
+          something the log joins. A tool that is no plugin today and no
+          native tool either — deleted since, or unnamed — counts as mail.
+        - A stop gate still armed when the attempt died stays armed: deny
+          means stop, and a failed model call is not an answer to it.
+        - Values typed into a page ride every later press unless the live
+          record ties them to a host (`_values_riding_this_press`): the page
+          may still be open holding them, whatever process is asking.
+
+        Deliberately NOT carried: the links a page offered, the mail links and
+        personal values the owner approved, and held calls. Each of those only
+        ever EXCUSES a card, and an answer he gave inside an attempt that died
+        is not stretched over its continuation — the cost is at most a card."""
+        self._refresh_plugin_tools()
+        paged_from_mail = False
+        for name, args, cut in carried.calls:
+            if self._brings_outside_content(name, args) or (
+                cut and (name in DUAL_SOURCE_TOOLS or name == "read_file")
+            ):
+                self._tainted = True
+            if name == "read_tool_output":
+                source = tool_plugins.continuation_source(
+                    str(args.get("continuation", "") or "").strip(), self.tool_output_dir
+                )
+                if source is None or source.untrusted:
+                    self._tainted = True
+                # An entry that is gone, or that names no tool, can no longer
+                # say its page was not mail.
+                if source is None or self._may_be_mail(source.tool):
+                    paged_from_mail = True
+        if not carried.calls:
+            for name, _content in carried.results:
+                # A result whose tool cannot even be named can no longer say
+                # where it came from, and silence must not read as clean.
+                if not name or self._brings_outside_content(name, None):
+                    self._tainted = True
+        # What was typed into a page. The live agent's own record is exact and
+        # keyed by the page's host; the log holds the values but not reliably
+        # the page each went into (a press can navigate), and a chat can be
+        # evicted and reopened cold while its page stays open in Chrome. So
+        # every logged value the live record does not already hold rides EVERY
+        # press — more cards, never fewer.
+        held = {pair for pairs in self._typed_this_task.values() for pair in pairs}
+        for name, args, _cut in carried.calls:
+            for pair in browse.typed_values(name, args):
+                if pair[1] and pair not in held and pair not in self._typed_carried:
+                    self._typed_carried.append(pair)
+        for name, content in carried.results:
+            if not (self._may_be_mail(name) or (paged_from_mail and name == "read_tool_output")):
+                continue
+            for url, kind in provenance.links_in_mail(content).items():
+                if self._mail_links.get(url) != provenance.SIGN_IN:
+                    self._mail_links[url] = kind
+        for url in carried.sources:
+            # Titles come from this process's page cache, so a chat reopened
+            # cold carries its sources by address alone.
+            cited = {"url": url}
+            title = web.PAGE_TITLES.get(url)
+            if title:
+                cited["title"] = title
+            self.task_sources.append(cited)
+        gate = carried.stop_gate
+        if gate is not None:
+            self._pending_comment_response = True
+            self._stop_gate_armed_call = 0
+            self._stop_gate_comment = str(gate.get("comment") or "")
+            self._stop_gate_refusals = 0
+            # Named by where it was ARMED, which a gate carried more than once
+            # already names itself.
+            self._stop_gate_origin = {
+                "armed_by": "carried_over",
+                "from_turn": gate.get("from_turn", gate.get("turn")),
+                "from_call": gate.get("from_call", gate.get("armed_by_call")),
+            }
+            self._record_stop_gate("refused", call=0, round_=0)
+
+    def _may_be_mail(self, name: str) -> bool:
+        """Could a carried result from the tool called `name` have been mail?
+
+        Asked of TODAY's plugins about a result the dead attempt got from
+        YESTERDAY's: a mail plugin deleted between the death and the press, or
+        a result whose tool cannot be named, can no longer say it was not mail,
+        and silence must not make the continuation less restricted than the
+        attempt it continues. A native tool is never mail; a live plugin
+        answers for itself."""
+        tool = self._plugin_tools.get(name)
+        if tool is not None:
+            return tool.content_from == provenance.MAIL
+        return name not in NATIVE_TOOL_NAMES
+
     def run_task(
         self,
         task: str,
@@ -3750,6 +3978,7 @@ class Agent:
         documents: list[str] | None = None,
         *,
         keep_history: bool = False,
+        continuing: CarriedWork | None = None,
     ) -> str:
         """The task loop, with this task's word-list consultations recorded.
 
@@ -3761,7 +3990,9 @@ class Agent:
         `_reset_task_state` is shared.
         """
         try:
-            return self._run_task(task, images, documents, keep_history=keep_history)
+            return self._run_task(
+                task, images, documents, keep_history=keep_history, continuing=continuing
+            )
         finally:
             self._flush_vocab()
 
@@ -3776,7 +4007,15 @@ class Agent:
         # results are the last to go and a resume's unfinished work is the
         # newest there is.
         keep_history: bool = False,  # noqa: ARG002 — see above
+        # This task CONTINUES the attempts before it at the same question
+        # (#387): `task` is aish's note, the question is theirs, and so is
+        # everything they brought in. See `_adopt_carried`.
+        continuing: CarriedWork | None = None,
     ) -> str:
+        # Where the question opens, read BEFORE the reminders are stripped
+        # below: the reminder in front of a message is what tells the question
+        # apart from typed steering (`_question_index`).
+        question = self._question_index() if continuing is not None else None
         # Fresh scan every task: skills/memory created mid-session (or after
         # /cd) show up immediately, in every open session — no restart needed.
         # That freshness is exactly why the selection must be RECORDED: the
@@ -3809,19 +4048,33 @@ class Agent:
         # Safe to hoist: nothing between here and the old call site reads the
         # fields it clears, and `_pending_skill_reads` is re-armed from this
         # task's own preflight immediately below.
+        # What was typed into a page in the attempt being continued: the live
+        # record, keyed by the page's exact host, survives the reset here, and
+        # `_adopt_carried` adds whatever the log holds that it does not.
+        typed_into_pages = self._typed_this_task if continuing is not None else {}
         self._reset_task_state()
+        if continuing is not None:
+            self._typed_this_task = typed_into_pages
+            self._close_dangling_calls(continuing.cut_off)
+            self._adopt_carried(continuing)
 
         # Old tool outputs are shrunk only when the history no longer fits the
         # window actually in force — one policy, oldest-first, whether this is a
         # fresh task or a resumed one (`_trim_history_to_budget` says why there
         # used to be two).
         task_start = len(self.messages)
-        self._expire_delivered_images(task_start)
+        # A continuation's pictures belong to the question it continues, so
+        # only those delivered BEFORE the question are expired.
+        self._expire_delivered_images(task_start if question is None else question)
         self._trim_history_to_budget()
 
         # Task text is owner-authored (a typed message or the trigger prompt),
-        # so its hosts enter egress provenance (#178 P0-2).
-        self.note_owner_hosts(task)
+        # so its hosts enter egress provenance (#178 P0-2). A continuation's
+        # text is NOT: aish composed it, from a recorded error and from the
+        # MODEL's own arguments to the calls that never reported back — so its
+        # hosts would be laundered into "the owner typed this" (#387). The
+        # question he typed is what counts, as it did when it first ran.
+        self.note_owner_hosts(continuing.prompt if continuing is not None else task)
 
         # Media rides on the user message as file paths; each backend encodes
         # them for its API (ollama `images`, data URLs, Anthropic blocks).
@@ -3845,10 +4098,21 @@ class Agent:
             and content.strip()
             and not content.lstrip().startswith("[")
         )
+        # A continuation's own text is aish's note. What the knowledge and the
+        # rules are selected FOR is the owner's question, so a rule that bound
+        # the attempt being continued binds its continuation too — a rule only
+        # restricts, and one that lapsed at a continuation would let the
+        # answer out from under it (#387).
+        seed = task
+        seed_images, seed_documents = images, documents
+        if continuing is not None and continuing.prompt:
+            seed = continuing.prompt
+            seed_images = list(continuing.images) or None
+            seed_documents = list(continuing.documents) or None
         preload = skills.preflight(
             self.cwd,
             self.lessons_path,
-            task,
+            seed,
             char_budget=min(
                 skills.PREFLIGHT_TOTAL_CHARS,
                 self.num_ctx * CHARS_PER_TOKEN_BUDGET // 8,
@@ -3866,7 +4130,7 @@ class Agent:
         # Seed (#191): evaluate the rule corpus against this turn and create the
         # bindings, at the same position `knowledge` is emitted from — before
         # the user message, so nothing this turn dispatches can outrun the gate.
-        rules_text = self.seed_rules(task, images, documents)
+        rules_text = self.seed_rules(seed, seed_images, seed_documents)
         reminder = task_reminder(index, preload.text, rules_text)
         self.messages.append({"role": "system", "content": reminder})
         if rules_text:
@@ -8174,6 +8438,7 @@ class Agent:
         step would otherwise have nothing recorded yet and go free."""
         return [
             *self._typed_this_task.get(host, []),
+            *self._typed_carried,
             *[(t, v) for t, v in browse.typed_values(name, args) if v],
         ]
 
@@ -10529,6 +10794,7 @@ class Agent:
             self._stop_gate_armed_call = self._current_call()
             self._stop_gate_comment = _owner_comment(comment)
             self._stop_gate_refusals = 0
+            self._stop_gate_origin = {"armed_by": "denial_comment"}
             self._record_stop_gate(
                 "refused", call=self._stop_gate_armed_call, round_=0
             )
@@ -10571,7 +10837,7 @@ class Agent:
     def _stop_gate_evidence(self) -> dict:
         return {
             "armed_by_call": self._stop_gate_armed_call,
-            "armed_by": "denial_comment",
+            **self._stop_gate_origin,
             "comment": self._stop_gate_comment,
         }
 

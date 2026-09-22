@@ -2520,6 +2520,181 @@ class TestEveryCutWalksBackToTaskStart:
         assert kept[0]["text"] == "q one" and kept[1]["result"] == "a one"
 
 
+class TestLastTask:
+    """`last_task` (#387): how the last attempt at the current question ENDED,
+    read from the log alone — the fact Retry's two acts are told apart by, so
+    one pressed a second after the failure and one pressed on a reopened chat
+    the next morning take the same decision."""
+
+    NOTE = session_module.RESUME_MARKER + " aish's previous attempt was cut off"
+
+    def _attempt(self, log, prompt, *, end=None, error="", give_up=None, answer=None):
+        log.task_start(prompt)
+        log.message({"role": "user", "content": prompt})
+        if give_up is not None:
+            log.step({"kind": "model_error", "action": "give_up", **give_up})
+        if answer is not None:
+            log.message({"role": "assistant", "content": answer})
+        if end == "failed":
+            log.task_end("failed", error)
+        elif end == "ok":
+            log.task_end()
+        elif end == "statusless":
+            log._record("task_end")
+
+    def test_every_ending_in_the_table(self, tmp_path):
+        cases = {
+            "ok": dict(end="ok", answer="4"),
+            "stopped": dict(end="ok", answer=session_module.STOPPED_ANSWER),
+            "failed": dict(end="failed", error="model unavailable: 503",
+                           give_up={"class": "server", "retryable": True}),
+            "unknown": dict(),
+            "unrecorded": dict(end="statusless", answer="4"),
+        }
+        for ended, kwargs in cases.items():
+            log = SessionLog(tmp_path / f"session-{ended}.jsonl")
+            self._attempt(log, "q", **kwargs)
+            log.close()
+            assert SessionLog.last_task(log.path)["ended"] == ended, ended
+
+    def test_the_failure_is_the_last_attempts_give_up_only(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._attempt(log, "q", end="failed", error="model unavailable: 503",
+                      give_up={"class": "server", "retryable": True})
+        log.task_start(self.NOTE)
+        log.message({"role": "user", "content": self.NOTE})
+        log.step({"kind": "tool_start", "name": "gmail_send", "summary": "to pawel"})
+        log.close()
+        last = SessionLog.last_task(log.path)
+        assert last["ended"] == "unknown"
+        assert last["failure"] is None, "an earlier attempt's give-up is not this one's"
+        assert last["in_flight"] == ["gmail_send: to pawel"]
+        assert last["chain_attempts"] == 2
+        assert last["attempts"] == 1, "restart recovery's own counter, unchanged"
+        assert last["typed_logged"] is True
+
+    def test_a_regenerate_record_names_the_last_attempts_ending_only(self, tmp_path):
+        """An earlier attempt's give-up is that attempt's cause. A record about
+        the last one — which crashed without any `model_error` — must not
+        borrow it (L8)."""
+        log = SessionLog.new(tmp_path)
+        self._attempt(log, "q", end="failed", error="model unavailable: 429",
+                      give_up={"class": "rate_limit", "retryable": True})
+        log.task_start(self.NOTE)
+        log.message({"role": "user", "content": self.NOTE})
+        log.task_end("failed", "task failed: RuntimeError('boom')")
+        step = log.supersede_last_turn(bound="attempts")
+        log.close()
+        assert step["previous"]["ended"] == "failed"
+        assert "failure" not in step["previous"]
+        assert step["previous"]["error"].startswith("task failed: ")
+        assert step["continued"] is False and step["bound"] == "attempts"
+        assert step["attempt"] == 3
+
+    def test_a_reissued_prompt_is_the_same_question(self, tmp_path):
+        """Restart recovery re-issues the recorded prompt (not a note) when the
+        attempt died before its message was logged — still one question, and
+        the bound counts both starts."""
+        log = SessionLog.new(tmp_path)
+        log.task_start("read msg 42")  # killed before the message was logged
+        self._attempt(log, "read msg 42", end="failed", error="task failed: x")
+        log.close()
+        last = SessionLog.last_task(log.path)
+        assert last["chain_attempts"] == 2
+        assert last["typed_logged"] is True
+        assert last["ended"] == "failed"
+
+    def test_nothing_bracketed_is_none(self, tmp_path):
+        """A CLI turn writes no task_start; absence is not a death."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "q"})
+        log.close()
+        assert SessionLog.last_task(log.path)["ended"] == "none"
+        # …and a CLI question typed after a web attempt is not that attempt.
+        log = SessionLog.new(tmp_path)
+        self._attempt(log, "q", end="failed", error="task failed: boom")
+        log.message({"role": "user", "content": "a later question"})
+        log.close()
+        assert SessionLog.last_task(log.path)["ended"] == "none"
+
+    def test_the_chain_is_the_live_one(self, tmp_path):
+        """A regenerate starts a new chain: what it discarded is not counted
+        against the bound."""
+        log = SessionLog.new(tmp_path)
+        self._attempt(log, "q", end="failed", error="task failed: boom")
+        log.task_start(self.NOTE)
+        log.message({"role": "user", "content": self.NOTE})
+        log.task_end("failed", "task failed: boom")
+        log.supersede_last_turn()
+        self._attempt(log, "q", end="failed", error="task failed: boom")
+        log.close()
+        last = SessionLog.last_task(log.path)
+        assert last["chain_attempts"] == 1
+        assert last["ended"] == "failed"
+
+    def test_a_start_whose_message_was_never_logged_is_its_own_question(self, tmp_path):
+        """A process killed before the question reached the log left nothing to
+        continue from — and must not be counted into the previous chain."""
+        log = SessionLog.new(tmp_path)
+        self._attempt(log, "first", end="ok", answer="a")
+        log.task_start("second")
+        log.close()
+        last = SessionLog.last_task(log.path)
+        assert last["ended"] == "unknown"
+        assert last["chain_attempts"] == 1
+        assert last["typed_logged"] is False
+
+    def test_pending_task_reads_the_same_scan(self, tmp_path):
+        """Recovery and Retry read one fact from one place: pending_task keeps
+        its exact shape."""
+        log = SessionLog.new(tmp_path)
+        log.origin("email")
+        log.task_start("answer the mail")
+        log.message({"role": "user", "content": "answer the mail"})
+        log.step({"kind": "tool_start", "name": "gmail_send", "summary": "to pawel"})
+        log.close()
+        pending = SessionLog.pending_task(log.path)
+        assert set(pending) == {"prompt", "ts", "attempts", "in_flight", "origin"}
+        assert pending["prompt"] == "answer the mail"
+        assert pending["attempts"] == 1
+        assert pending["in_flight"] == ["gmail_send: to pawel"]
+        assert pending["origin"] == "email"
+
+    def test_carried_work_reads_what_the_chain_brought_in(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.task_start("find it")
+        log.message({"role": "user", "content": "find it", "images": ["/u/cat.png"]})
+        log.step({"kind": "call", "turn": 1, "call": 1, "name": "read_url",
+                  "args": {"url": "https://a.example/"}})
+        log.step({"kind": "tool", "turn": 1, "call": 1, "name": "read_url", "status": "ok"})
+        log.message({"role": "tool", "tool_name": "read_url", "content": "PAGE"})
+        log.step({"kind": "gate", "turn": 1, "gate": "stop_gate", "verdict": "refused",
+                  "evidence": {"armed_by_call": 2, "armed_by": "denial_comment",
+                               "comment": "not that"}})
+        log.task_end("failed", "model unavailable: 503")
+        log.close()
+        carried = SessionLog.carried_work(log.path)
+        assert carried.prompt == "find it"
+        assert carried.images == ("/u/cat.png",)
+        assert carried.calls == (("read_url", {"url": "https://a.example/"}, False),)
+        assert carried.results == (("read_url", "PAGE"),)
+        assert carried.sources == ("https://a.example/",)
+        assert carried.stop_gate["comment"] == "not that"
+        assert carried.cut_off == "model unavailable: 503"
+
+    def test_carried_work_skips_what_a_regenerate_discarded(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.task_start("find it")
+        log.message({"role": "user", "content": "find it"})
+        log.message({"role": "tool", "tool_name": "read_url", "content": "DISCARDED"})
+        log.task_end("failed", "task failed: x")
+        log.supersede_last_turn()
+        log.task_start("find it")
+        log.message({"role": "user", "content": "find it"})
+        log.close()
+        assert SessionLog.carried_work(log.path).results == ()
+
+
 class TestSupersedeInsteadOfDelete:
     """Retry keeps what it discards (#339).
 
