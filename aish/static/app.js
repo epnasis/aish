@@ -16124,33 +16124,38 @@ function activeApprovalCard() {
 // function the ONE document keydown handler below consults — there is no
 // second key-handling path. The platform's primary modifier is ⌘ on macOS/iOS
 // and Ctrl elsewhere, by the same detection the send tooltip uses, and the
-// OTHER modifier is not accepted: on macOS Ctrl+K / Ctrl+N / Ctrl+O / Ctrl+P
-// are the text field's own Emacs bindings (kill line, next line, open line,
-// previous line), so a handler that took either modifier stole them from the
-// composer. `CHORD_HINTS` is the same fact for the tooltips.
+// OTHER modifier is not accepted: on macOS Ctrl+B / Ctrl+K / Ctrl+N / Ctrl+O /
+// Ctrl+P are the text field's own Emacs bindings (back a char, kill line, next
+// line, open line, previous line), so a handler that took either modifier
+// stole them from the composer. `CHORD_HINTS` is the same fact for the
+// tooltips.
 const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
 const CHORD_HINTS = IS_MAC
-  ? { new: "⌘⇧O", search: "⌘K", rail: "⌘O" }
-  : { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+O" };
+  ? { new: "⌘⇧O", search: "⌘K", rail: "⌘B" }
+  : { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+B" };
 
 function primaryChord(e) {
   if (e.altKey) return false;
   return IS_MAC ? Boolean(e.metaKey && !e.ctrlKey) : Boolean(e.ctrlKey && !e.metaKey);
 }
 
-// "new" = a new chat (⌘⇧O; ⌘N too, where the browser lets it through) ·
+// The chords are the ones the chat apps the owner already uses bind, so a hand
+// that knows them lands here without being told (owner call, 2026-09-21):
+// "new" = a new chat (⌘⇧O and ⌘O; ⌘N too, where the browser lets it through) ·
 // "search" = the chat list with its search field focused (⌘K and ⌘⇧K) ·
-// "rail" = show/hide the chat list (⌘O, ⌘⇧P) · "export" = the chat as a PDF
-// (⌘P) · null = not a navigation chord. Nothing fires while a confirmation
-// modal is asking its question, or while the terminal has the keyboard — there
-// the same keys are the shell's (Ctrl+K kills the line, Ctrl+P is history).
+// "rail" = show/hide the chat list (⌘B, the editors' sidebar toggle) ·
+// "export" = the chat as a PDF (⌘P) · null = not a navigation chord. ⌘O used
+// to be the rail toggle and ⌘⇧P its double; both went when ⌘B arrived — one
+// toggle, one chord. Nothing fires while a confirmation modal is asking its
+// question, or while the terminal has the keyboard — there the same keys are
+// the shell's (Ctrl+K kills the line, Ctrl+P is history, Ctrl+B is tmux).
 function navChord(e, { modal = false, terminal = false } = {}) {
   if (modal || terminal || !primaryChord(e)) return null;
   const key = String(e.key || "").toLowerCase();
-  if (key === "n" || (e.shiftKey && key === "o")) return "new";
+  if (key === "n" || key === "o") return "new";
   if (key === "k") return "search";
-  if (key === "o" || (e.shiftKey && key === "p")) return "rail";
-  if (!e.shiftKey && key === "p") return "export";
+  if (key === "b" && !e.shiftKey) return "rail";
+  if (key === "p" && !e.shiftKey) return "export";
   return null;
 }
 // [NAV-CHORDS-END]
@@ -17549,7 +17554,7 @@ const RAIL_DOCK_MIN = 900; // px of viewport width at which the rail docks open
 // screen, and want the whole window for the chat.
 //
 // Only the width used to count, and the consequence was a dead control — the
-// topbar's chats button and ⌘O both route to `closeSessionRail`, which refuses
+// topbar's chats button and the toggle chord both routed to `closeSessionRail`, which refuses
 // while docked, so on the only screens wide enough to dock there was no way to
 // hide the list at all. The two facts are deliberately separate writers: this
 // preference is written ONLY by the toggle and by an explicit open, never by
@@ -17578,7 +17583,7 @@ function railWidth() {
 
 function openSessionRail(query = "") {
   // An explicit open is the owner asking for the list, so it unfiles a sidebar
-  // they had put away — /resume and ⌘O must be able to bring it back.
+  // they had put away — /resume and ⌘B must be able to bring it back.
   if (railDocked()) setRailFiledAway(false);
   // Whatever else owns the screen stands down first — the rail is not a sheet
   // and does not stack with one. DOCKED it is not a mode and does not overlap
@@ -17657,16 +17662,16 @@ function syncRailToggle() {
   const showing = railIsOpen();
   const label = !docked ? "Chats" : showing ? "Hide chats" : "Show chats";
   // The tooltip names the chord that does what the tap does (#384) — on a
-  // pointer that has a keyboard, the console button's convention. Which chord
-  // depends on the state: showing the list is the search chord (⌘K opens it
-  // and focuses the field); HIDING a docked list is the toggle chord (⌘O —
-  // ⌘K on an open list only focuses the field, so naming it here would name
-  // a chord that does not hide). Guarded by typeof: this block is loaded on
-  // its own by tests/js/test_session_rail.js, where neither identifier
-  // exists; in the app both are initialised before the first call.
+  // pointer that has a keyboard, the console button's convention. The tap is
+  // toggleSessionRail in every state and so is the rail chord (⌘B), so one
+  // hint is honest everywhere; the search chord (⌘K) is NOT named here, since
+  // on an open list it only focuses the field and would name a chord that
+  // does not hide. Guarded by typeof: this block is loaded on its own by
+  // tests/js/test_session_rail.js, where neither identifier exists; in the app
+  // both are initialised before the first call.
   const hints = typeof CHORD_HINTS === "object" && typeof FINE_POINTER !== "undefined" && FINE_POINTER
     ? CHORD_HINTS : null;
-  const hint = !hints ? "" : ` (${docked && showing ? hints.rail : hints.search})`;
+  const hint = !hints ? "" : ` (${hints.rail})`;
   chip.title = label + hint;
   chip.setAttribute("aria-label", label);
   // aria-pressed only where the control IS a switch. On a phone it opens an
