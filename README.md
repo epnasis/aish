@@ -578,9 +578,11 @@ this UI. Highlights:
   needs approving, a glyph when a schedule or an email started it. Pin a chat to
   keep it above the fold and permanently available offline — the pin is yours,
   not the device's, so it applies on every browser and phone you use.
-- **Keyboard shortcuts.** `⌘⇧O` starts a new chat, `⌘K` (or `⌘⇧K`) opens the
-  chat list with its search field focused — `⌘` on a Mac, `Ctrl` on Windows and
-  Linux. Each button's tooltip names its chord.
+- **Keyboard shortcuts**, the ones every other chat app binds. `⌘⇧O` (or `⌘O`)
+  starts a new chat, `⌘K` (or `⌘⇧K`) opens the chat list with its search field
+  focused, `⌘B` shows or hides the chat list — `⌘` on a Mac, `Ctrl` on Windows
+  and Linux, and only that one: on a Mac `Ctrl+K` stays the text field's own
+  kill-line. Each button's tooltip names its chord.
 - **Global interactive console.** The real TTY shell described above, openable
   from any chat (`⌘/Ctrl+\`), `tmux`-backed for restart survival. URLs in its
   output are tappable — including the ones an auth CLI wraps across several

@@ -4,9 +4,10 @@
 //
 // What is pinned:
 //
-//   1. New chat is ⌘⇧O on macOS and Ctrl+Shift+O elsewhere; search chats is
-//      ⌘K and ⌘⇧K (Ctrl+K / Ctrl+Shift+K). The platform is DETECTED and the
-//      other modifier is not accepted: on macOS Ctrl+K is the text field's own
+//   1. New chat is ⌘⇧O and ⌘O on macOS (Ctrl+Shift+O / Ctrl+O elsewhere);
+//      search chats is ⌘K and ⌘⇧K (Ctrl+K / Ctrl+Shift+K); the chat list
+//      shows/hides on ⌘B (Ctrl+B). The platform is DETECTED and the other
+//      modifier is not accepted: on macOS Ctrl+K is the text field's own
 //      kill-line, and on Linux Ctrl+K in the terminal is the shell's.
 //   2. Nothing fires while the confirmation modal is up or while the terminal
 //      holds the keyboard; the composer is not such a field — the chords
@@ -43,45 +44,55 @@ const key = (k, mods = {}) => ({ key: k, metaKey: false, ctrlKey: false, altKey:
 
 // ---- 1. the chords, per platform --------------------------------------------------
 
-check("macOS: ⌘⇧O is new chat, ⌘K and ⌘⇧K are search; Ctrl is not accepted", () => {
+check("macOS: ⌘⇧O and ⌘O are new chat, ⌘K and ⌘⇧K are search, ⌘B is the chat list; Ctrl is not accepted", () => {
   const s = chords("MacIntel");
   assert.equal(s.IS_MAC, true);
   assert.equal(s.navChord(key("O", { metaKey: true, shiftKey: true })), "new");
   assert.equal(s.navChord(key("o", { metaKey: true, shiftKey: true })), "new");
+  assert.equal(s.navChord(key("o", { metaKey: true })), "new", "⌘O is new chat, not the rail");
   assert.equal(s.navChord(key("k", { metaKey: true })), "search");
   assert.equal(s.navChord(key("K", { metaKey: true, shiftKey: true })), "search");
+  assert.equal(s.navChord(key("b", { metaKey: true })), "rail");
+  assert.equal(s.navChord(key("B", { metaKey: true })), "rail");
   // The Emacs bindings of a macOS text field stay with the field.
   assert.equal(s.navChord(key("k", { ctrlKey: true })), null, "Ctrl+K is kill-line on macOS");
   assert.equal(s.navChord(key("o", { ctrlKey: true, shiftKey: true })), null);
+  assert.equal(s.navChord(key("o", { ctrlKey: true })), null, "Ctrl+O is open-line on macOS");
+  assert.equal(s.navChord(key("b", { ctrlKey: true })), null, "Ctrl+B is back-a-char on macOS");
   assert.equal(s.navChord(key("n", { ctrlKey: true })), null, "Ctrl+N is next-line on macOS");
   assert.equal(s.navChord(key("p", { ctrlKey: true })), null, "Ctrl+P is previous-line on macOS");
   // Both modifiers at once is neither.
   assert.equal(s.navChord(key("k", { metaKey: true, ctrlKey: true })), null);
   // Alt is never a navigation chord.
   assert.equal(s.navChord(key("k", { metaKey: true, altKey: true })), null);
-  // The older combos still resolve.
-  assert.equal(s.navChord(key("o", { metaKey: true })), "rail");
-  assert.equal(s.navChord(key("p", { metaKey: true, shiftKey: true })), "rail");
+  // The older combos: ⌘P still exports and ⌘N is still new; ⌘⇧P (the rail's
+  // former double) and ⌘⇧B are nothing — one toggle, one chord.
   assert.equal(s.navChord(key("p", { metaKey: true })), "export");
   assert.equal(s.navChord(key("n", { metaKey: true })), "new");
+  assert.equal(s.navChord(key("p", { metaKey: true, shiftKey: true })), null);
+  assert.equal(s.navChord(key("b", { metaKey: true, shiftKey: true })), null);
   // A plain key is nothing.
   assert.equal(s.navChord(key("k")), null);
   assert.equal(s.navChord(key("k", { shiftKey: true })), null);
-  assert.deepEqual(s.CHORD_HINTS, { new: "⌘⇧O", search: "⌘K", rail: "⌘O" });
+  assert.equal(s.navChord(key("b")), null);
+  assert.deepEqual(s.CHORD_HINTS, { new: "⌘⇧O", search: "⌘K", rail: "⌘B" });
 });
 
-check("Windows/Linux: Ctrl+Shift+O is new chat, Ctrl+K and Ctrl+Shift+K are search; ⌘ (Win key) is not accepted", () => {
+check("Windows/Linux: Ctrl+Shift+O / Ctrl+O are new chat, Ctrl+K and Ctrl+Shift+K are search, Ctrl+B is the chat list; ⌘ (Win key) is not accepted", () => {
   for (const platform of ["Win32", "Linux x86_64"]) {
     const s = chords(platform);
     assert.equal(s.IS_MAC, false, platform);
     assert.equal(s.navChord(key("o", { ctrlKey: true, shiftKey: true })), "new", platform);
+    assert.equal(s.navChord(key("o", { ctrlKey: true })), "new", platform);
     assert.equal(s.navChord(key("k", { ctrlKey: true })), "search", platform);
     assert.equal(s.navChord(key("k", { ctrlKey: true, shiftKey: true })), "search", platform);
+    assert.equal(s.navChord(key("b", { ctrlKey: true })), "rail", platform);
     assert.equal(s.navChord(key("k", { metaKey: true })), null, `${platform}: the Win key is not the primary modifier`);
     assert.equal(s.navChord(key("o", { metaKey: true, shiftKey: true })), null, platform);
+    assert.equal(s.navChord(key("b", { metaKey: true })), null, platform);
     // Ctrl+Alt is AltGr on many layouts: never a chord.
     assert.equal(s.navChord(key("k", { ctrlKey: true, altKey: true })), null, platform);
-    assert.deepEqual(s.CHORD_HINTS, { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+O" }, platform);
+    assert.deepEqual(s.CHORD_HINTS, { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+B" }, platform);
   }
 });
 
@@ -140,6 +151,14 @@ check("⌘K opens the chat list and focuses its search field through the one han
   assert.equal(w.fire(key("O", { metaKey: true, shiftKey: true })), true);
   assert.deepEqual(w.calls, ["requestNewChat", "closeSheets"], "new chat is the reconnect-aware path the button uses");
   w.calls.length = 0;
+  // ⌘O is the same new chat — and the browser's own Open dialog is prevented.
+  assert.equal(w.fire(key("o", { metaKey: true })), true);
+  assert.deepEqual(w.calls, ["requestNewChat", "closeSheets"]);
+  w.calls.length = 0;
+  // ⌘B is the chats button's own tap.
+  assert.equal(w.fire(key("b", { metaKey: true })), true);
+  assert.deepEqual(w.calls, ["toggleSessionRail"]);
+  w.calls.length = 0;
   // Ctrl+K on macOS falls through untouched.
   assert.equal(w.fire(key("k", { ctrlKey: true })), false);
   assert.deepEqual(w.calls, []);
@@ -177,7 +196,7 @@ check("the buttons' tooltips name the chord in the platform's glyph, the console
   assert(block.includes('$("sessions-new").title = `new chat (${CHORD_HINTS.new})`'), block);
 });
 
-check("the chats button names the chord that does what its tap does, per state", () => {
+check("the chats button names the toggle chord — its tap is the toggle in every state", () => {
   // The REAL syncRailToggle, with the hints present (as in the app) and absent
   // (as test_session_rail.js loads it).
   const run = (docked, showing, hints, fine) => {
@@ -190,25 +209,22 @@ check("the chats button names the chord that does what its tap does, per state",
     return chip;
   };
   const mac = chords("MacIntel").CHORD_HINTS;
-  // Slide-over: the tap opens the list, and so does ⌘K.
-  assert.equal(run(false, false, mac, true).title, "Chats (⌘K)");
-  assert.equal(run(false, true, mac, true).title, "Chats (⌘K)");
-  // Docked and put away: the tap shows it, and so does ⌘K.
-  assert.equal(run(true, false, mac, true).title, "Show chats (⌘K)");
-  // Docked and showing: the tap HIDES it. ⌘K would only focus the search
-  // field, so the chord named is the toggle, ⌘O, which does hide.
-  assert.equal(run(true, true, mac, true).title, "Hide chats (⌘O)");
+  // Every state names ⌘B, because ⌘B does what the tap does in every state.
+  assert.equal(run(false, false, mac, true).title, "Chats (⌘B)");
+  assert.equal(run(false, true, mac, true).title, "Chats (⌘B)");
+  assert.equal(run(true, false, mac, true).title, "Show chats (⌘B)");
+  assert.equal(run(true, true, mac, true).title, "Hide chats (⌘B)");
   const win = chords("Win32").CHORD_HINTS;
-  assert.equal(run(true, true, win, true).title, "Hide chats (Ctrl+O)");
-  assert.equal(run(false, false, win, true).title, "Chats (Ctrl+K)");
+  assert.equal(run(true, true, win, true).title, "Hide chats (Ctrl+B)");
+  assert.equal(run(false, false, win, true).title, "Chats (Ctrl+B)");
   // aria-label never carries the chord; a coarse pointer gets no hint; the
   // block loaded alone (no hints) keeps the bare titles the rail test pins.
   assert.equal(run(true, true, mac, true).attrs["aria-label"], "Hide chats");
   assert.equal(run(true, true, mac, false).title, "Hide chats");
   assert.equal(run(true, true, null).title, "Hide chats");
-  // And ⌘O really is the chord that hides a docked, showing rail.
+  // And ⌘B really is the chord that hides a docked, showing rail.
   const s = chords("MacIntel");
-  assert.equal(s.navChord(key("o", { metaKey: true })), "rail");
+  assert.equal(s.navChord(key("b", { metaKey: true })), "rail");
 });
 
 if (failures) { console.error(`nav chords: ${failures} check(s) failed`); process.exit(1); }
