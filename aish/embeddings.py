@@ -18,6 +18,7 @@ return None and the caller falls back to lexical matching; `error` carries
 the reason for a one-time notice.
 """
 
+import functools
 import hashlib
 import json
 import math
@@ -40,10 +41,25 @@ def _prefixes(model: str) -> tuple[str, str]:
     return _PREFIXES.get(model.partition(":")[0], ("", ""))
 
 
-def _ollama_embed(model: str, texts: list[str]) -> list[list[float]]:
+EMBED_HOST_ENV = "AISH_EMBED_HOST"
+
+
+@functools.cache
+def _embed_client(host: str):
     import ollama
 
-    return [list(vec) for vec in ollama.embed(model=model, input=texts)["embeddings"]]
+    return ollama.Client(host=host)
+
+
+def _ollama_embed(model: str, texts: list[str]) -> list[list[float]]:
+    """Unset `AISH_EMBED_HOST` keeps the module-level client, which follows
+    `OLLAMA_HOST`. Set, it moves ONLY embeddings — chat can live on another
+    machine (a `local:` server) while the embedder stays on this one."""
+    import ollama
+
+    host = os.environ.get(EMBED_HOST_ENV, "").strip()
+    embed = _embed_client(host).embed if host else ollama.embed
+    return [list(vec) for vec in embed(model=model, input=texts)["embeddings"]]
 
 
 def _normalize(vec: list[float]) -> list[float]:

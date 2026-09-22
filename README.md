@@ -293,10 +293,40 @@ in that conversation then leaves your machine, so it's an explicit choice
 | `claude[:model]` | Anthropic API | pay per token — `export ANTHROPIC_API_KEY=…` |
 | `claude-max[:opus\|sonnet]` | Claude Agent SDK via the local `claude` CLI | **your Claude Pro/Max subscription** — no API key |
 | `openai[:model]` | OpenAI API | pay per token — `export OPENAI_API_KEY=…` |
+| `local[:model]` | your own OpenAI-compatible server (tested with mlx-lm 0.31.3) | free — `export AISH_LOCAL_URL=…` |
 
 Bare provider names pick a sensible default model. `claude-max` strips Claude
 Code down to bare inference and hands it aish's own tools, so every command
 still goes through aish's approval gate and denylist.
+
+### Your own model server
+
+`local:` runs the model on a server you host — typically a bigger Mac on your
+network running `mlx_lm.server`. The conversation leaves this machine for that
+server and nowhere else. Everything after `local:` is sent as the request's
+`model` verbatim (an mlx-lm server loads it on first use); bare `local` asks
+mlx-lm for the model it was started with.
+
+```sh
+export AISH_LOCAL_URL=http://mi.lan:8080/v1   # required — no fallback when unset
+export AISH_LOCAL_CTX=65536          # the server's real context window (default 32768)
+export AISH_LOCAL_MAX_TOKENS=16384   # answer cap sent on every request (default 16384)
+export AISH_LOCAL_API_KEY=…          # only if your server checks one
+export AISH_EMBED_HOST=http://localhost:11434  # optional: where the embedder runs
+aish --model local:mlx-community/Qwen3.6-35B-A3B-8bit
+```
+
+`AISH_LOCAL_CTX` is what aish sizes history and tool output to, so set it to
+what the server can actually hold. `max_tokens` is always sent because
+mlx-lm stops at 512 tokens when a request leaves it out. `--think` turns the
+model's thinking on through the chat template (`enable_thinking`). The OpenAI
+variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) are never read for `local:`,
+so it and real OpenAI can be used side by side. Usage is counted from the
+server's own token report and shows up under `local` in `aish usage`.
+
+Semantic retrieval still uses Ollama's `embeddinggemma`. `AISH_EMBED_HOST`
+moves only the embedder, so chat can go to the server while embeddings stay on
+this machine (unset, it follows `OLLAMA_HOST` as before).
 
 ### Rate limits and quotas
 

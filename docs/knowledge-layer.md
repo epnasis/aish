@@ -143,6 +143,8 @@ One local Ollama embedding model (`embeddinggemma` by default — multilingual, 
 
 Entries embed as a single **identity line** (`name: description (keywords: …)`), never bodies — selection reads identity, so vectors stay stable while playbooks grow. Vectors cache in the state dir keyed by `sha256(model + text)`. Retrieval-tuned models need task-type **prefixes that Ollama does not add** (`_PREFIXES`); skipping them measurably collapses similarity separation by about 2×.
 
+**The embedder's host is its own setting (#404).** `AISH_EMBED_HOST` builds one cached `ollama.Client(host=…)` for embeddings only; unset, the module-level client is used exactly as before (it follows `OLLAMA_HOST`). This is what lets chat run on a `local:` server on another machine while `embeddinggemma` stays on this one. An unreachable embed host is just another embedding failure: `scores()` returns `None` and retrieval degrades to the lexical floor (L2). `TestEmbedHost`.
+
 Both entry points wire it identically — `Agent(semantic=SemanticIndex(state_dir))` — and the agent threads `scores` into preflight, recall and the dedup gate. `TestSemanticIndex`, `TestPreflightSemantic`.
 
 **Retrieval quality is regression-gated.** `tests/test_retrieval_quality.py` is a recall@3 harness over a fixture corpus with a deterministic concept-axis embedder injected at the `embed=` seam: semantic must score 1.0 on both preflight and recall including the Polish→English cases, and lexical-only floors of 0.6/0.3 are asserted. `TestSemanticRecallAtK`, `TestLexicalFloor`, `TestHarnessSeam`.
