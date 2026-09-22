@@ -1752,6 +1752,32 @@ class SessionLog:
         # whole job is to be visible.
         pending_retries: list[dict] = []
 
+        def model_call_edge(event: dict) -> str | None:
+            kind = event.get("kind") if event.get("type") == "step" else None
+            return kind if kind in ("thinking_start", "thinking", "thinking_cancel") else None
+
+        def mark_answering_call(at: int) -> None:
+            """The delivery at `at` is being lifted out to become `done`, so no
+            token will reach the Thinking… row it streamed into live — and that
+            row is the answer step ("Answered in Xs", #403). Say so on the call's
+            closing `thinking_cancel`, which is what the one frontend handler
+            reads on both paths.
+
+            The writer stamps `answered` itself; this serves only a log written
+            before it did, and never overrides the writer's word. Structural,
+            not a guess: live, the row became the answer exactly when the text
+            arrived while the call was OPEN — between its `thinking_start` and
+            its close — and that is the file order here. A wrap-up call opens no
+            row, so its text sits after a close and nothing is marked."""
+            before = next(
+                (model_call_edge(e) for e in reversed(steps[:at]) if model_call_edge(e)), None
+            )
+            if before != "thinking_start":
+                return
+            close = next((e for e in steps[at + 2 :] if model_call_edge(e)), None)
+            if close is not None and close["kind"] == "thinking_cancel":
+                close.setdefault("answered", True)
+
         def flush() -> None:
             nonlocal steps, answer, open_turn, running_steps, failure, deliveries
             nonlocal delivery_ids, answer_id
@@ -1774,6 +1800,7 @@ class SessionLog:
                 last = deliveries[-1]
                 answer = steps[last]["text"]
                 answer_id = delivery_ids[-1]
+                mark_answering_call(last)
                 del steps[last : last + 2]
                 deliveries = deliveries[:-1]
                 delivery_ids = delivery_ids[:-1]

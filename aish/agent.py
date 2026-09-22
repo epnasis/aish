@@ -4061,7 +4061,8 @@ class Agent:
                     # the cancel below and leave a Thinking… ticker running for
                     # every rejected answer, live and on replay.
                     self._emit_step(
-                        kind="thinking_cancel", secs=turn_secs, tokens=list(usage)
+                        kind="thinking_cancel", secs=turn_secs, tokens=list(usage),
+                        answered=False,
                     )
                     # Marked as aish's own words (#171), or replay renders the
                     # harness's question as a blue bubble the owner never typed.
@@ -4082,7 +4083,12 @@ class Agent:
                 # and token usage so the web trace can label the answer step
                 # ("Answered in Xs") and keep the "↑N ↓M tokens" header (#84) —
                 # a text-only turn has no later "thinking" step to carry it.
-                self._emit_step(kind="thinking_cancel", secs=turn_secs, tokens=list(usage))
+                # `answered` says this call's row IS the answer step (#403): a
+                # cold replay lifts the answer out to `done`, so no token reaches
+                # the row there, and without the record's word it was dropped.
+                self._emit_step(
+                    kind="thinking_cancel", secs=turn_secs, tokens=list(usage), answered=True
+                )
                 return result
 
             # NARRATION (#212). This turn has tool calls, so its prose is not
@@ -4199,7 +4205,7 @@ class Agent:
         # any other, and without this step the trace header reports a total that
         # excludes the very turn the user is reading.
         self._emit_step(kind="thinking_cancel", secs=time.perf_counter() - turn_start,
-                        tokens=list(usage))
+                        tokens=list(usage), answered=bool(content))
         if content or tool_calls:
             entry: dict = {"role": "assistant", "content": content}
             if tool_calls:

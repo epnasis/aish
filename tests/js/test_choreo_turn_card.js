@@ -399,14 +399,16 @@ function world() {
   ok("…from the stamp the server carries, not from the steps", s.currentTrace.startedAt === began * 1000 && s.currentTrace.originKnown === true);
   ok("…counting the whole turn so far", w.sub(card).startsWith("10:00"));
   w.handle({ type: "step", kind: "thinking_start" });
-  w.handle({ type: "step", kind: "thinking_cancel", secs: 4, tokens: [100, 20] });
+  // As reconstruct_events emits it: the cancel says its call wrote the answer
+  // (#403), because on replay no token reaches the row to say so.
+  w.handle({ type: "step", kind: "thinking_cancel", secs: 4, tokens: [100, 20], answered: true });
   s.sawAnswer = true;
   w.handle({ type: "done", result: "about 2 MB" });
   s.replaying = false;
   ok("…and finishes as the live turn does: one finished card, not live",
     w.cards().length === 1 && !card.classList.contains("live") && s.currentTrace === null);
-  ok("…summarising the same turn (text-only: Answered, with its usage)",
-    w.title(card) === "Answered" && w.sub(card) === "↑100 ↓20");
+  ok("…summarising the same turn as live: its one answer step, with its usage",
+    w.title(card) === "Worked for 4.0s" && w.sub(card) === "1 step · ↑100 ↓20");
 }
 
 // ---- 5. The status channel lands on the card ---------------------------------
