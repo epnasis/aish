@@ -407,7 +407,10 @@ def probe(source: str, *, extract=_yt_dlp_info, run=_run_ffmpeg) -> Recording:
         raise RecordingError(f"the resolved stream is blocked: {exc}") from exc
 
     chapters = tuple(
-        Chapter(start=float(c.get("start_time") or 0.0), title=str(c.get("title") or "").strip())
+        Chapter(
+            start=float(c.get("start_time") or 0.0),
+            title=provenance.disarm_markers(str(c.get("title") or "").strip()),
+        )
         for c in (info.get("chapters") or [])
         if c
     )
@@ -419,9 +422,11 @@ def probe(source: str, *, extract=_yt_dlp_info, run=_run_ffmpeg) -> Recording:
         identity=f"{extractor}:{ident}",
         media_url=media_url,
         is_local=False,
-        title=str(info.get("title") or ""),
-        uploader=str(info.get("uploader") or info.get("channel") or ""),
-        description=str(info.get("description") or ""),
+        title=provenance.disarm_markers(str(info.get("title") or "")),
+        uploader=provenance.disarm_markers(
+            str(info.get("uploader") or info.get("channel") or "")
+        ),
+        description=provenance.disarm_markers(str(info.get("description") or "")),
         original_language=_spoken_language(info, captions),
         duration=float(info.get("duration") or 0.0),
         is_live=bool(info.get("is_live")),
@@ -717,7 +722,7 @@ def parse_cues(text: str) -> list[Cue]:
     def flush() -> None:
         if not open_cue or not buffer:
             return
-        line = re.sub(r"\s+", " ", " ".join(buffer)).strip()
+        line = provenance.disarm_markers(re.sub(r"\s+", " ", " ".join(buffer)).strip())
         # Rolling auto-captions repeat the previous cue's words with one line
         # added, which would otherwise duplicate every sentence in the store.
         if line and (not cues or cues[-1].text != line):

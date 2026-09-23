@@ -28,7 +28,7 @@ from html.parser import HTMLParser
 from typing import Any, NamedTuple
 
 from . import browse as browse_mod
-from . import browser, tools, vocab
+from . import browser, provenance, tools, vocab
 from .tools import DOCS_MAX_CHARS, _filter_topic, truncate
 
 SEARCH_MAX_RESULTS = 5
@@ -1512,11 +1512,8 @@ RESULT_SUMMARY_CHARS = 300
 # position: an LLM is not a parser. So the marker is BROKEN instead — the
 # bracket becomes a parenthesis, a form aish never uses for its own notes — and
 # the words survive so the model can still see what the title said.
-_AISH_VOICE = re.compile(r"\[\s*aish\s*:", re.I)
-
-
 def _not_aishs_voice(text: str) -> str:
-    return _AISH_VOICE.sub("(aish:", text)
+    return provenance.disarm_markers(text)
 
 
 def _flat(text: str) -> str:
@@ -2504,7 +2501,9 @@ def _present(
     """The read, as the model receives it. Shared by the fetch and the browser
     so a rendered page is filtered, truncated and image-noted identically."""
     source = f"{url} — rendered in the browser" if via_browser else url
-    facts = page_facts(declared or [], text, url)
+    text = provenance.disarm_markers(text)
+    declared = [provenance.disarm_markers(item) for item in declared or []]
+    facts = page_facts(declared, text, url)
     text = compact_tiles(text)
     if topic:
         # The declaration rides along on a topic read too. A topic read is the

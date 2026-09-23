@@ -41,6 +41,26 @@ _TRAILING = ".,;:!?)]}>\"'"
 
 MAIL = "email"  # the one `content_from` value that means anything so far
 
+# aish speaks to the model through two markers, and the system prompt tells the
+# model both are true and binding. Text someone ELSE wrote must never arrive
+# wearing either, so it is disarmed where it is captured: the bracket becomes a
+# parenthesis and the angle brackets become guillemets — forms aish never uses —
+# and the words survive so the model still sees what the source said. Same
+# length, and `[ \t]` rather than `\s`, so no line ever joins another and every
+# line number and offset aish has promised stays put.
+#
+# `[aish]` is deliberately left alone: it is the Obsidian opt-in tag the vault
+# gate reads (`tags: [aish]`), the model must see it verbatim, and aish never
+# uses it to address the model.
+_AISH_VOICE = re.compile(r"\[[ \t]*aish[ \t]*:", re.I)
+_REMINDER_TAG = re.compile(r"<[ \t]*(/?)[ \t]*system-reminder[ \t]*>", re.I)
+
+
+def disarm_markers(text: str) -> str:
+    """`text` with anything that would read as aish's own voice broken."""
+    text = _AISH_VOICE.sub("(aish:", text)
+    return _REMINDER_TAG.sub(r"‹\1system-reminder›", text)
+
 # What a sign-in or recovery mail says, in the two languages the owner's mail
 # arrives in. Matched against ONE message, never the whole search result, so a
 # single reset mail among ten hits does not refuse everybody's links.

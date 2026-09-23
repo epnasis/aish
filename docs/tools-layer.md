@@ -10,7 +10,7 @@
 
 **Skills-primary, tools-as-scalpel** (epic #141). A tool is added only for operations that are **frequent**, have **shell-fragile arguments**, and need **reliability** — never for read-only, simple, or one-off work, which a documented skill snippet does better. That test lives imperatively in `create_tool`'s own description, because it is the model that decides.
 
-**Schema on the way IN, prose on the way OUT.** Validated JSON args are handed to the executable on **stdin, with no shell** — so free-text arguments cannot be mangled by quoting, which is the one irreducible win over a skill's shell-invoked script. Output is raw stdout+stderr plus `[exit code: N]`; there is no output schema.
+**Schema on the way IN, prose on the way OUT.** Validated JSON args are handed to the executable on **stdin, with no shell** — so free-text arguments cannot be mangled by quoting, which is the one irreducible win over a skill's shell-invoked script. Output is raw stdout+stderr plus `[exit code: N]`; there is no output schema. **stdout is the data and stderr is the wrapper's voice**: stdout has aish's markers disarmed (`provenance.disarm_markers` — a mail body must not arrive as `[aish: …]`), stderr is passed through, so a wrapper that needs to speak as aish (gwslib's re-login note) MUST write to stderr. See `docs/agent-core.md`, *Only aish may wear aish's voice*.
 
 **Indistinguishable from native tools.** `to_tool_def()` emits the exact `{"type":"function","function":{…}}` shape `tools.TOOL_SCHEMAS` uses, and `agent._dispatch` routes both through the same gate. Anything that makes plugin tools a second class — a separate dispatch path, a separate approval channel, a separate parallelism rule — is a regression. `TestToolDef`, `TestValidateArgs`, `TestExecute`.
 
