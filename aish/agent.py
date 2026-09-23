@@ -1218,7 +1218,7 @@ SUPERSEDES_EARLIER = (
     "them remains valid.</system-reminder>"
 )
 KNOWLEDGE_SHOWN_EARLIER = (
-    "Also relevant, shown in full in an earlier reminder in this conversation: {names}"
+    "Also relevant, shown verbatim in an earlier reminder in this conversation: {names}"
 )
 _REMINDER_SEGMENT = re.compile(r"<system-reminder>(.*?)</system-reminder>", re.DOTALL)
 
