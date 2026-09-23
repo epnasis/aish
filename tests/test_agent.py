@@ -8012,6 +8012,123 @@ Open a link before you hand it over.
 """
 
 
+class TestARejectedDraftIsNeverLost:
+    """session-20260923-212625: a rule rejected a full answer the owner never
+    saw, the model opened one of the links it was sent to open and then went
+    silent, and the owner got a placeholder. The answer that existed ships,
+    with the rule's note checked against the evidence as it stands then."""
+
+    A = "https://a.example/one"
+    B = "https://b.example/two"
+    DRAFT = f"It changed: see [one]({A}) and [two]({B})."
+
+    def _run(self, tmp_path, monkeypatch, responses, rule_texts=(RULE_LINKS,)):
+        monkeypatch.setattr(agent_module.web, "read_url", fake_read_url())
+        streamed: list[str] = []
+        logged: list[dict] = []
+        agent, chat = rules_agent(
+            tmp_path, responses, rule_texts=rule_texts,
+            on_token=streamed.append, on_message=logged.append,
+        )
+        result = agent.run_task("did the word list change?")
+        answers = [m["content"] for m in logged if m.get("role") == "assistant"
+                   and not m.get("interim") and not m.get("tool_calls")]
+        return agent, chat, result, "".join(streamed), answers
+
+    def test_silence_after_a_rejection_delivers_the_draft_with_a_fresh_note(
+        self, tmp_path, monkeypatch
+    ):
+        from aish.agent import REJECTED_DRAFT_DELIVERED
+
+        _, _, result, streamed, answers = self._run(tmp_path, monkeypatch, [
+            model_says(self.DRAFT),
+            model_says("Opening them.", tool_calls=[tool_call("read_url", url=self.A)]),
+            model_says(""),
+            model_says(""),
+        ])
+        assert result.startswith(REJECTED_DRAFT_DELIVERED)
+        assert self.DRAFT in result
+        # The note is as of NOW: one link was opened after the rejection.
+        assert "not followed" in result
+        assert "b.example" in result.split(self.DRAFT)[1]
+        assert "a.example" not in result.split(self.DRAFT)[1]
+        assert answers == [result], "exactly one answer in the log, the delivered text"
+        assert streamed.count(self.DRAFT) == 1
+
+    def test_a_banned_draft_ships_with_its_note_like_any_exhausted_ask(
+        self, tmp_path, monkeypatch
+    ):
+        rule = """---
+name: no-eur
+description: Prices are never quoted in EUR.
+when: always
+then:
+  answer_must_not_include:
+    pattern: "EUR"
+---
+"""
+        _, _, result, _, _ = self._run(
+            tmp_path, monkeypatch,
+            [model_says("It costs 40 EUR."), model_says(""), model_says("")],
+            rule_texts=(rule,),
+        )
+        assert "It costs 40 EUR." in result and "not followed" in result
+
+    def test_a_good_redo_is_delivered_alone(self, tmp_path, monkeypatch):
+        from aish.agent import REJECTED_DRAFT_DELIVERED
+
+        _, _, result, _, answers = self._run(tmp_path, monkeypatch, [
+            model_says(self.DRAFT),
+            model_says("It changed; I could not open the sources."),
+        ])
+        assert result == "It changed; I could not open the sources."
+        assert REJECTED_DRAFT_DELIVERED not in result
+        assert answers == [result]
+
+    def test_the_LAST_rejected_draft_is_the_one_delivered(self, tmp_path, monkeypatch):
+        second = f"Changed, per [one]({self.A})."
+        _, _, result, _, _ = self._run(tmp_path, monkeypatch, [
+            model_says(self.DRAFT),
+            model_says(second),
+            model_says(""),
+            model_says(""),
+        ])
+        assert second in result and self.DRAFT not in result
+
+    def test_a_rejected_draft_does_not_outlive_its_task(self, tmp_path, monkeypatch):
+        from aish.agent import REJECTED_DRAFT_DELIVERED
+
+        agent, _, _, _, _ = self._run(tmp_path, monkeypatch, [
+            model_says(self.DRAFT),
+            model_says("It changed."),
+            model_says(""),
+            model_says(""),
+        ])
+        result = agent.run_task("and now?")
+        assert REJECTED_DRAFT_DELIVERED not in result
+        assert self.DRAFT not in result
+
+    def test_a_stopped_turn_never_logs_the_draft_without_its_note(
+        self, tmp_path, monkeypatch
+    ):
+        """Found in review: the rejected entry stayed the one a release would
+        log, so a stopped turn whose wrap-up failed logged the draft whole,
+        with no note. Loop detection stops this turn; the wrap-up call finds
+        no response left and fails."""
+        from aish.agent import REJECTED_DRAFT_DELIVERED
+
+        again = tool_call("read_docs", command="ls")
+        _, _, result, _, answers = self._run(
+            tmp_path, monkeypatch,
+            [model_says(self.DRAFT)] + [model_says(tool_calls=[again])] * 6,
+        )
+        assert all(self.DRAFT not in a or REJECTED_DRAFT_DELIVERED in a for a in answers)
+        assert all(
+            self.DRAFT not in a or "not followed" in a for a in answers
+        ), "the draft reached the log without its note"
+        assert self.DRAFT in result and "not followed" in result
+
+
 class TestTheChatsOpenedLinks:
     """What aish has opened is a fact about the CHAT, not about the turn (#267).
 

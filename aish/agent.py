@@ -519,6 +519,12 @@ ANSWER_WITHHELD = (
 )
 
 
+REJECTED_DRAFT_DELIVERED = (
+    "[aish] the model's last reply contained no answer text; below is the "
+    "answer it gave earlier in this turn, which a rule held back"
+)
+
+
 class ModelUnavailable(RuntimeError):
     """The model call failed after every attempt it was entitled to."""
 
@@ -3235,6 +3241,10 @@ class Agent:
         # unverified. `None` means stream normally.
         self._held_answer: list[str] | None = None
         self._held_entry: dict | None = None
+        # The last answer a rule rejected this task, kept so that a turn which
+        # then produces nothing still delivers it — with its note — instead of
+        # a placeholder over an answer that existed.
+        self._last_rejected: str | None = None
         # Harness-written lines for rules that could not be satisfied — appended
         # to the answer at delivery so a failure is never silent.
         self._not_followed: list[str] = []
@@ -3910,6 +3920,7 @@ class Agent:
         self._intent = ""
         self._held_answer = None
         self._held_entry = None
+        self._last_rejected = None
         self._not_followed = []
         # Skill-read gates belong to the task that armed them; run_task re-arms
         # from its own preflight right after this reset.
@@ -4484,6 +4495,16 @@ class Agent:
 
             if not tool_calls:
                 result = content if content.strip() else empty_answer(*empty_facts)
+                checked, may_ask = result, not was_stopped
+                if not content.strip() and self._last_rejected is not None:
+                    # The model went silent after a rule rejected its answer.
+                    # That answer is delivered, checked against the evidence
+                    # as it stands NOW — the rejection's own notes may be
+                    # stale (a link opened since) — and never asked about:
+                    # asking re-enters the loop that just produced nothing.
+                    checked = self._last_rejected
+                    result = REJECTED_DRAFT_DELIVERED + "\n\n" + checked
+                    may_ask = False
                 # VERIFY (#191). A finished answer is a PROPOSAL until the
                 # turn's rules have been checked against it — so the check runs
                 # here, inside the loop, rather than after run_task returns.
@@ -4497,7 +4518,7 @@ class Agent:
                 # rules still get their say: the checks run, nothing is asked,
                 # and an unmet rule is still SAID, so a denial cannot silence a
                 # disclosure either.
-                unmet = self._verify_answer(result, ask=not was_stopped)
+                unmet = self._verify_answer(checked, ask=may_ask)
                 if unmet is not None:
                     # Not delivered. The model is told what is missing and the
                     # turn goes on — the ask provokes the work, the work lands
@@ -4506,6 +4527,11 @@ class Agent:
                     # owner has provably not seen.
                     withheld = self._held_answer is not None
                     self._release_held(discard=True)
+                    self._last_rejected = result
+                    # The rejected entry must not stay the one a later release
+                    # logs: a wrap-up that produced nothing would otherwise log
+                    # this draft whole, with no note (found in review).
+                    self._held_entry = None
                     # Close the turn's live row: `continue` would otherwise skip
                     # the cancel below and leave a Thinking… ticker running for
                     # every rejected answer, live and on replay.
@@ -4688,7 +4714,13 @@ class Agent:
         # A terminal answer is still an answer, so the rules still get their
         # say — note-only, because there is no turn left to ask into and asking
         # here would restart the very loop the terminator just concluded.
-        self._verify_answer(content, ask=False)
+        checked = content
+        if not content.strip() and self._last_rejected is not None:
+            # Same fallback as the loop's: the wrap-up said nothing, and an
+            # answer a rule held back earlier in the turn is not thrown away.
+            checked = self._last_rejected
+            content = REJECTED_DRAFT_DELIVERED + "\n\n" + checked
+        self._verify_answer(checked, ask=False)
         # Every exit releases the hold, or a bound turn that ends at the loop
         # detector, the stall cap or the ceiling delivers NOTHING: the wrap-up
         # text sits in the buffer and the client shows a dead turn. The note
