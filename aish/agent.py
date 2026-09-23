@@ -439,6 +439,12 @@ Rules:
 # known, so the static prompt stays byte-identical for callers that render it
 # without one. Imperative phrasing on purpose — small local models ignore
 # capability-style hints (the "prompt hints must be imperative" convention).
+#
+# The Agent names the PATH in the per-task reminder, not here: the path is per
+# chat, and a system message that differs chat to chat is a system message no
+# prompt cache can share — every new chat on a `local:` server re-read all
+# ~35k tokens of tools and rules before answering (26 s on mi, 2026-09-22).
+# claude-max has no reminder, so it still renders the path in place.
 SCRATCH_RULE = """
 8. SCRATCH WORKSPACE: {scratch_dir} is your OWN private scratch directory. You
    MUST use it for throwaway files — staging a gh issue or PR body, a commit
@@ -449,6 +455,10 @@ SCRATCH_RULE = """
    there, and nothing you leave there outlives the chat. Writing or deleting
    ANYWHERE ELSE still requires user approval exactly as above — the
    auto-approval applies ONLY inside this directory."""
+SCRATCH_IN_REMINDER = (
+    "The directory on the `Scratch workspace:` line of each task's system reminder"
+)
+SCRATCH_REMINDER_LINE = "Scratch workspace: {scratch_dir}"
 
 DENIED_RESULT = (
     "USER DENIED this command — it was NOT executed. "
@@ -1174,16 +1184,23 @@ PRELOAD_REMINDER = (
 RULES_REMINDER = "<system-reminder>{rules}</system-reminder>"
 
 
-def task_reminder(index: str, preload_text: str = "", rules_text: str = "") -> str:
+def task_reminder(
+    index: str,
+    preload_text: str = "",
+    rules_text: str = "",
+    scratch_dir: os.PathLike | str | None = None,
+) -> str:
     """The per-task system reminder: always the current local time (issue #36
     — it lives here, not in the system prompt, so messages[0] stays
     byte-stable for prompt caching and the time is fresh every task), plus
     the preloaded knowledge when pre-flight retrieval found any (issue #40),
     else the skills nudge whenever any skills/memory are advertised — and the
     rules in force for this turn (#191), which are not knowledge to consult but
-    constraints the harness will enforce whatever the model concludes."""
+    constraints the harness will enforce whatever the model concludes. The
+    chat's scratch path rides here too, for the reason at SCRATCH_RULE."""
     now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-    time_note = f"{TASK_REMINDER_MARK}Current local time: {now}</system-reminder>"
+    scratch = SCRATCH_REMINDER_LINE.format(scratch_dir=scratch_dir) + "\n" if scratch_dir else ""
+    time_note = f"{TASK_REMINDER_MARK}{scratch}Current local time: {now}</system-reminder>"
     if rules_text:
         time_note += "\n" + RULES_REMINDER.format(rules=rules_text)
     if preload_text:
@@ -2501,9 +2518,14 @@ OPENED_LINKS_MAX = 500
 TRIM_STUBBED_MAX = 40
 
 
-def system_prompt(scratch_dir: os.PathLike | str | None = None) -> str:
+def system_prompt(
+    scratch_dir: os.PathLike | str | None = None, *, scratch_in_reminder: bool = False
+) -> str:
     note = _PLATFORM_NOTES.get(sys.platform, f"{sys.platform} (verify userland conventions).")
-    scratch_note = SCRATCH_RULE.format(scratch_dir=scratch_dir) if scratch_dir else ""
+    scratch_note = ""
+    if scratch_dir:
+        where = SCRATCH_IN_REMINDER if scratch_in_reminder else scratch_dir
+        scratch_note = SCRATCH_RULE.format(scratch_dir=where)
     return SYSTEM_PROMPT_TEMPLATE.format(platform_note=note, scratch_note=scratch_note)
 
 
@@ -2513,15 +2535,18 @@ def compose_system_content(
     lessons_path=None,
     index: str | None = None,
     scratch_dir: os.PathLike | str | None = None,
+    scratch_in_reminder: bool = False,
 ) -> str:
     """The full system message: static rules + caller context + the live
     skills/memory index. Rebuilt at every run_task so entries created
     mid-session (or after /cd) are advertised without a restart.
-    Deterministic: unchanged inputs yield a byte-identical string (the scratch
-    path is stable for a session's life), keeping API prompt caches valid."""
+    Deterministic: unchanged inputs yield a byte-identical string, keeping
+    prompt caches valid. With `scratch_in_reminder` it is also identical
+    across CHATS, which is what lets a new chat reuse a cache at all."""
     if index is None:
         index = skills.knowledge_index(cwd, lessons_path)
-    content = system_prompt(scratch_dir) + (f"\n{base_context}" if base_context else "")
+    content = system_prompt(scratch_dir, scratch_in_reminder=scratch_in_reminder)
+    content += f"\n{base_context}" if base_context else ""
     return content + (f"\n\n{index}" if index else "")
 
 
@@ -2532,8 +2557,9 @@ def environment_context(cwd: str) -> str:
         os_desc = platform.platform(terse=True)
     return (
         "Environment:\n"
-        f"- session started: {datetime.datetime.now().astimezone().isoformat(timespec='seconds')}"
-        " (current time arrives with each task)\n"
+        # No start time: it changed the system message on every restart (web)
+        # and every session (CLI), defeating the prompt cache, and the current
+        # time already arrives with each task.
         f"- project directory (all commands run here): {cwd}\n"
         f"- user: {getpass.getuser()}\n"
         f"- OS: {os_desc} ({platform.machine()})"
@@ -3228,7 +3254,8 @@ class Agent:
         # keyed on the caption BYTES, so an unchanged track reconverts nothing.
         self._transcripts: dict[str, recordings.Transcript] = {}
         content = compose_system_content(
-            context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir
+            context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir,
+            scratch_in_reminder=True,
         )
         self.messages: list[dict] = [{"role": "system", "content": content}]
 
@@ -3711,7 +3738,8 @@ class Agent:
         if result.startswith("ERROR"):
             return  # a vanished/invalid dir: rebase already reported it
         self.messages[0]["content"] = compose_system_content(
-            self.base_context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir
+            self.base_context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir,
+            scratch_in_reminder=True,
         )
 
     def _inject_pending_messages(self) -> None:
@@ -4027,7 +4055,8 @@ class Agent:
             self.cwd, self.lessons_path, on_index=index_record.update
         )
         self.messages[0]["content"] = compose_system_content(
-            self.base_context, self.cwd, self.lessons_path, index, scratch_dir=self.scratch_dir
+            self.base_context, self.cwd, self.lessons_path, index, scratch_dir=self.scratch_dir,
+            scratch_in_reminder=True,
         )
         self.messages[1:] = [
             m
@@ -4132,7 +4161,7 @@ class Agent:
         # bindings, at the same position `knowledge` is emitted from — before
         # the user message, so nothing this turn dispatches can outrun the gate.
         rules_text = self.seed_rules(seed, seed_images, seed_documents)
-        reminder = task_reminder(index, preload.text, rules_text)
+        reminder = task_reminder(index, preload.text, rules_text, self.scratch_dir)
         self.messages.append({"role": "system", "content": reminder})
         if rules_text:
             self.mark_rules_seeded()  # the prose reached context — record it

@@ -3234,7 +3234,7 @@ class TestSessions:
         the model kept writing to the path its history named — the previous
         agent's — and aish raised an approval card for its own throwaway file
         mid-task."""
-        client, _ = make_client(app_env, [model_says("ok")])
+        client, chat = make_client(app_env, [model_says("ok"), model_says("again")])
         with client, connected(client) as (ws, hello, _):
             name = hello["session"]
             ws.send_json({"type": "task", "text": "hello"})
@@ -3250,7 +3250,10 @@ class TestSessions:
             assert session.agent.scratch_dir == before.scratch_dir
             assert staged.read_text() == "x"  # what it staged is still there
             # …and the prompt it is given names the dir the gate will scope to.
-            assert str(session.agent.scratch_dir) in session.agent.messages[0]["content"]
+            assert session.agent.run_task("again") == "again"
+            sent = [str(m.get("content")) for m in chat.calls[-1]["messages"]]
+            reminder = next(c for c in reversed(sent) if c.startswith("<system-reminder>"))
+            assert f"Scratch workspace: {session.agent.scratch_dir}\n" in reminder
 
     def test_delete_takes_the_chat_scratch_workspace_with_it(self, app_env):
         """#258: the workspace is keyed on the chat's log and outlives every
