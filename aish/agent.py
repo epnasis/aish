@@ -475,19 +475,55 @@ CD_NOT_STICKY = (
 # Only what was observed: an earlier wording blamed an overloaded backend,
 # and the first time it was checked the backend was fine and the answer was
 # sitting in the reasoning channel (session-20260923-183501).
-EMPTY_RESPONSE = "(the model's reply contained no answer text; try again)"
+# What the first of two consecutive empty replies was; the second adds
+# ASKED_AGAIN_FACT. Observed facts only.
+EMPTY_REPLY_FACT = "the model's reply contained no text and no tool call"
+REASONING_ONLY_FACT = (
+    "the model's reply contained no answer text, only {chars} characters of reasoning"
+)
+ASKED_AGAIN_FACT = "asked once more, it again gave no answer text"
+# Named only when a provider sent one, and never interpreted: "stop" on an
+# empty reply is exactly the unexplained case. No reason is not "none sent" —
+# a stream cut mid-way looks the same — so absence adds nothing.
+FINISH_REASON_FACT = 'the provider reported finish reason "{stop}"'
 
-REASONING_ONLY_RESPONSE = (
-    "(the model's reply contained no answer text, only {chars} characters of "
-    "reasoning; asked once more for the answer, it again gave none; try again)"
+
+def empty_answer(*facts: str) -> str:
+    """The placeholder for a turn that ends with nothing to show: observed
+    facts only, and "aish does not know why" left sayable (L8)."""
+    return "(" + "; ".join((*facts, "try again")) + ")"
+
+
+# An empty reply is asked once, in the model's own conversation: a server can
+# file the whole answer under reasoning (mlx_lm.server did), and a provider
+# can return nothing mid-task (Gemini did, with two links still to open).
+REPLY_WAS_EMPTY = "your last reply contained no text and no tool call"
+REPLY_WAS_REASONING_ONLY = (
+    "your last reply contained reasoning but no answer text and no tool call"
+)
+USER_SAW_NOTHING = ", so the user saw nothing. "
+# After a denial every tool call is refused until a text-only reply, so
+# "continue the task" there would goad calls the stop gate will refuse.
+REPLY_NOW_IN_TEXT = "Reply now, in plain text."
+CONTINUE_OR_ANSWER = "Continue the task where you left off, or give your answer if it is done."
+
+
+# The fact a model lacks after a rejection: its draft sits in its own history,
+# so "add it" read as "send the missing part" and the owner got a fragment
+# (session-20260923-214217: an email list lost, only its closing chips sent).
+# Here, not in rules.py's templates: the hold is the agent's, and only the
+# agent knows the draft was held.
+ANSWER_WITHHELD = (
+    "The user has not seen that answer — it was withheld. Give the complete "
+    "answer again, with the change."
 )
 
-# A server can file the whole reply under reasoning (mlx_lm.server did, with
-# the answer after the last line of thought), and aish never shows reasoning
-# as an answer. So the model is asked once, in its own conversation.
-ANSWER_WAS_REASONING_ONLY = (
-    "your last reply contained reasoning but no answer text, so the user saw "
-    "nothing. Reply now with your answer to the user as plain text."
+
+# About the TURN, not a reply: on _finish_stopped the wrap-up call can fail,
+# and then no reply arrived at all.
+REJECTED_DRAFT_DELIVERED = (
+    "[aish] the turn ended with no answer text; below is the answer the model "
+    "gave earlier in this turn, which a rule held back"
 )
 
 
@@ -3207,6 +3243,10 @@ class Agent:
         # unverified. `None` means stream normally.
         self._held_answer: list[str] | None = None
         self._held_entry: dict | None = None
+        # The last answer a rule rejected this task, kept so that a turn which
+        # then produces nothing still delivers it — with its note — instead of
+        # a placeholder over an answer that existed.
+        self._last_rejected: str | None = None
         # Harness-written lines for rules that could not be satisfied — appended
         # to the answer at delivery so a failure is never silent.
         self._not_followed: list[str] = []
@@ -3882,6 +3922,7 @@ class Agent:
         self._intent = ""
         self._held_answer = None
         self._held_entry = None
+        self._last_rejected = None
         self._not_followed = []
         # Skill-read gates belong to the task that armed them; run_task re-arms
         # from its own preflight right after this reset.
@@ -4319,9 +4360,10 @@ class Agent:
         # stalled one stops at MAX_STALL_STEPS.
         ceiling = max(self.max_steps, HARD_STEP_CEILING)
         stall = 0
-        # Chars of reasoning in the reply that was just asked again for its
-        # answer; 0 when the previous turn was not such a reply.
-        reasoning_only_chars = 0
+        # The fact describing an empty reply that was just asked again; None
+        # when the previous turn was not one. Bounds the re-ask to once per
+        # run of empty replies, whatever kind they were.
+        empty_reply_asked: str | None = None
         step = 0
         while step < ceiling:
             step += 1
@@ -4355,25 +4397,39 @@ class Agent:
             turn_secs = time.perf_counter() - turn_start
             tokens_in += usage[0]
             tokens_out += usage[1]
-            if not tool_calls and not content.strip() and thinking_text.strip():
-                if not reasoning_only_chars:
+            empty_facts: list[str] = []
+            if not tool_calls and not content.strip():
+                if empty_reply_asked is None:
                     # Kept out of the history and the log: an empty assistant
                     # turn is nothing the owner saw, and the note says why.
-                    reasoning_only_chars = len(thinking_text)
+                    reasoning_only = bool(thinking_text.strip())
+                    empty_reply_asked = (
+                        REASONING_ONLY_FACT.format(chars=len(thinking_text))
+                        if reasoning_only
+                        else EMPTY_REPLY_FACT
+                    )
+                    note = (
+                        (REPLY_WAS_REASONING_ONLY if reasoning_only else REPLY_WAS_EMPTY)
+                        + USER_SAW_NOTHING
+                        + (
+                            REPLY_NOW_IN_TEXT
+                            if self._pending_comment_response
+                            else CONTINUE_OR_ANSWER
+                        )
+                    )
                     self._emit_step(
                         kind="thinking_cancel", secs=turn_secs, tokens=list(usage),
                         answered=False,
                     )
-                    self._append(
-                        {"role": "user", "content": AISH_NOTE + ANSWER_WAS_REASONING_ONLY + "]"}
-                    )
+                    self._append({"role": "user", "content": AISH_NOTE + note + "]"})
                     continue
-            empty_answer = (
-                REASONING_ONLY_RESPONSE.format(chars=reasoning_only_chars)
-                if reasoning_only_chars and thinking_text.strip()
-                else EMPTY_RESPONSE
-            )
-            reasoning_only_chars = 0
+                empty_facts = [empty_reply_asked, ASKED_AGAIN_FACT]
+                if finish_reason := (self._response_meta or {}).get("stop"):
+                    empty_facts.append(FINISH_REASON_FACT.format(stop=finish_reason))
+            else:
+                # Only a reply with something in it ends the run: a Verify ask
+                # after the placeholder must not buy the empty run a second one.
+                empty_reply_asked = None
             # The gate's copy of this step's prose (#252), taken before any of
             # its tool calls are dispatched and independent of whether the
             # owner is told it. Assigned on every response, so a silent step
@@ -4420,7 +4476,7 @@ class Agent:
             # Captured BEFORE the clear: a denial's stop gate is lifted by this
             # very turn, and Verify must not then use the turn to keep going.
             was_stopped = self._pending_comment_response
-            if content and not tool_calls:
+            if content.strip() and not tool_calls:
                 self._pending_comment_response = False
                 # Emitted from the line that clears it, so `cleared_by` states
                 # what this branch actually tested and not a later guess
@@ -4440,7 +4496,17 @@ class Agent:
                     )
 
             if not tool_calls:
-                result = content or empty_answer
+                result = content if content.strip() else empty_answer(*empty_facts)
+                checked, may_ask = result, not was_stopped
+                if not content.strip() and self._last_rejected is not None:
+                    # The model went silent after a rule rejected its answer.
+                    # That answer is delivered, checked against the evidence
+                    # as it stands NOW — the rejection's own notes may be
+                    # stale (a link opened since) — and never asked about:
+                    # asking re-enters the loop that just produced nothing.
+                    checked = self._last_rejected
+                    result = REJECTED_DRAFT_DELIVERED + "\n\n" + checked
+                    may_ask = False
                 # VERIFY (#191). A finished answer is a PROPOSAL until the
                 # turn's rules have been checked against it — so the check runs
                 # here, inside the loop, rather than after run_task returns.
@@ -4454,12 +4520,24 @@ class Agent:
                 # rules still get their say: the checks run, nothing is asked,
                 # and an unmet rule is still SAID, so a denial cannot silence a
                 # disclosure either.
-                unmet = self._verify_answer(result, ask=not was_stopped)
+                unmet = self._verify_answer(checked, ask=may_ask)
                 if unmet is not None:
                     # Not delivered. The model is told what is missing and the
                     # turn goes on — the ask provokes the work, the work lands
                     # in the trace, and the trace is what the next check reads.
+                    # Read BEFORE the discard: only a held draft is one the
+                    # owner has provably not seen.
+                    withheld = self._held_answer is not None
                     self._release_held(discard=True)
+                    if content.strip():
+                        # Only the model's own words: a rejected placeholder is
+                        # aish's text, and delivering it as "the answer it gave
+                        # earlier" would claim an answer that never existed.
+                        self._last_rejected = result
+                    # The rejected entry must not stay the one a later release
+                    # logs: a wrap-up that produced nothing would otherwise log
+                    # this draft whole, with no note (found in review).
+                    self._held_entry = None
                     # Close the turn's live row: `continue` would otherwise skip
                     # the cancel below and leave a Thinking… ticker running for
                     # every rejected answer, live and on replay.
@@ -4469,13 +4547,14 @@ class Agent:
                     )
                     # Marked as aish's own words (#171), or replay renders the
                     # harness's question as a blue bubble the owner never typed.
-                    self._append({"role": "user", "content": AISH_NOTE + unmet + "]"})
+                    ask = unmet + ("\n" + ANSWER_WITHHELD if withheld else "")
+                    self._append({"role": "user", "content": AISH_NOTE + ask + "]"})
                     continue
                 was_held = self._held_answer is not None
                 result = self._release_held(text=result)
                 self._log_held_entry(result)
                 # A released hold has already streamed itself, notes included.
-                if not content and not was_held and self.on_token:
+                if not content.strip() and not was_held and self.on_token:
                     self.on_token(result + "\n")
                 self._note(f"✓ answered in {format_secs(turn_secs)}{_tokens_note(usage)}")
                 total = time.perf_counter() - task_started
@@ -4641,7 +4720,13 @@ class Agent:
         # A terminal answer is still an answer, so the rules still get their
         # say — note-only, because there is no turn left to ask into and asking
         # here would restart the very loop the terminator just concluded.
-        self._verify_answer(content, ask=False)
+        checked = content
+        if not content.strip() and self._last_rejected is not None:
+            # Same fallback as the loop's: the wrap-up said nothing, and an
+            # answer a rule held back earlier in the turn is not thrown away.
+            checked = self._last_rejected
+            content = REJECTED_DRAFT_DELIVERED + "\n\n" + checked
+        self._verify_answer(checked, ask=False)
         # Every exit releases the hold, or a bound turn that ends at the loop
         # detector, the stall cap or the ceiling delivers NOTHING: the wrap-up
         # text sits in the buffer and the client shows a dead turn. The note

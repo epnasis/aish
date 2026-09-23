@@ -2781,6 +2781,22 @@ class TestSentRecord:
         last = turns.get(received[-1]["digest"], tmp_path, log.path)
         assert "done" in last
 
+    def test_a_streamed_empty_reply_keeps_the_reason_the_provider_gave(self, tmp_path):
+        """session-20260923-212625: a zero-token reply whose finish reason the
+        streaming path dropped, so nothing could say what the provider said."""
+        from aish import turns
+        reply = model_says("")
+        reply.message.stop = "MALFORMED_FUNCTION_CALL"
+        streamed: list[str] = []
+        agent, _, log = self._agent(
+            [model_says(""), reply], tmp_path, on_token=streamed.append
+        )
+        result = agent.run_task("hello")
+        assert '"MALFORMED_FUNCTION_CALL"' in result
+        received = steps(log.path, "received")
+        body = json.loads(turns.get(received[-1]["digest"], tmp_path, log.path))
+        assert body["stop"] == "MALFORMED_FUNCTION_CALL"
+
     def test_the_reader_and_step_carry_the_complete_response(self, tmp_path):
         agent, _, log = self._agent([model_says("hi there")], tmp_path)
         agent.run_task("hello")
