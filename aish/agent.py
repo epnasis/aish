@@ -11453,7 +11453,7 @@ class Agent:
         if tool is not None:
             return self._dispatch_plugin_tool(tool, args)
 
-        return f"ERROR: unknown tool '{name}'"
+        return f"{tools.UNKNOWN_TOOL_PREFIX}{name}'"
 
     def _refresh_plugin_tools(self) -> None:
         """Rescan TOOL.md manifests when the tool dirs' signature changed

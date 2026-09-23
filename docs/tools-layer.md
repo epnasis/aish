@@ -70,7 +70,7 @@ Read-only tools auto-run. **Mutating tools are gated by `approve_tool`**, a four
 
 ### The preview seam (#157)
 
-A manifest may declare `preview: yes`. Before gating, `_dispatch_plugin_tool` calls `preview()`, which re-runs the SAME wrapper with `AISH_TOOL_PREVIEW=1`; the wrapper is contracted to RESOLVE and describe its arguments — an id-addressed `reminders_delete` runs `rem show <id>` — and print ONE human sentence WITHOUT mutating. That ground-truth string rides the optional third argument of `approve_tool` onto the card, above the now-secondary raw args.
+A manifest may declare `preview: yes`. Before gating, `_dispatch_plugin_tool` calls `preview()`, which re-runs the SAME wrapper with `AISH_TOOL_PREVIEW=1`; the wrapper is contracted to RESOLVE and describe its arguments — an id-addressed reminders-delete tool runs `rem show <id>` — and print ONE human sentence WITHOUT mutating. That ground-truth string rides the optional third argument of `approve_tool` onto the card, above the now-secondary raw args.
 
 This is the tool layer's **plan/commit gap**, mirroring `files.py`'s diff: it fixes id-opacity, so the human sees *what* they are approving rather than `id=F5D0…`. It is **fail-OPEN** — no `preview`, an error, empty output, a timeout or an unset secret all yield None and the raw-args card — and it is **ground truth produced by the system**, deliberately NOT a model-supplied summary, because a wrong id with a right-sounding summary is exactly what the gate exists to catch. `TestPreview`.
 
