@@ -472,9 +472,22 @@ CD_NOT_STICKY = (
     "command ends). Only the user can move the project directory (/cd)."
 )
 
-EMPTY_RESPONSE = (
-    "(the model returned an empty response — the backend may be overloaded or "
-    "still loading; try again)"
+# Only what was observed: an earlier wording blamed an overloaded backend,
+# and the first time it was checked the backend was fine and the answer was
+# sitting in the reasoning channel (session-20260923-183501).
+EMPTY_RESPONSE = "(the model's reply contained no answer text; try again)"
+
+REASONING_ONLY_RESPONSE = (
+    "(the model's reply contained no answer text, only {chars} characters of "
+    "reasoning; asked once more for the answer, it again gave none; try again)"
+)
+
+# A server can file the whole reply under reasoning (mlx_lm.server did, with
+# the answer after the last line of thought), and aish never shows reasoning
+# as an answer. So the model is asked once, in its own conversation.
+ANSWER_WAS_REASONING_ONLY = (
+    "your last reply contained reasoning but no answer text, so the user saw "
+    "nothing. Reply now with your answer to the user as plain text."
 )
 
 
@@ -4232,6 +4245,9 @@ class Agent:
         # stalled one stops at MAX_STALL_STEPS.
         ceiling = max(self.max_steps, HARD_STEP_CEILING)
         stall = 0
+        # Chars of reasoning in the reply that was just asked again for its
+        # answer; 0 when the previous turn was not such a reply.
+        reasoning_only_chars = 0
         step = 0
         while step < ceiling:
             step += 1
@@ -4265,6 +4281,25 @@ class Agent:
             turn_secs = time.perf_counter() - turn_start
             tokens_in += usage[0]
             tokens_out += usage[1]
+            if not tool_calls and not content.strip() and thinking_text.strip():
+                if not reasoning_only_chars:
+                    # Kept out of the history and the log: an empty assistant
+                    # turn is nothing the owner saw, and the note says why.
+                    reasoning_only_chars = len(thinking_text)
+                    self._emit_step(
+                        kind="thinking_cancel", secs=turn_secs, tokens=list(usage),
+                        answered=False,
+                    )
+                    self._append(
+                        {"role": "user", "content": AISH_NOTE + ANSWER_WAS_REASONING_ONLY + "]"}
+                    )
+                    continue
+            empty_answer = (
+                REASONING_ONLY_RESPONSE.format(chars=reasoning_only_chars)
+                if reasoning_only_chars and thinking_text.strip()
+                else EMPTY_RESPONSE
+            )
+            reasoning_only_chars = 0
             # The gate's copy of this step's prose (#252), taken before any of
             # its tool calls are dispatched and independent of whether the
             # owner is told it. Assigned on every response, so a silent step
@@ -4331,7 +4366,7 @@ class Agent:
                     )
 
             if not tool_calls:
-                result = content or EMPTY_RESPONSE
+                result = content or empty_answer
                 # VERIFY (#191). A finished answer is a PROPOSAL until the
                 # turn's rules have been checked against it — so the check runs
                 # here, inside the loop, rather than after run_task returns.
