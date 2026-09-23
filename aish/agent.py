@@ -475,11 +475,13 @@ CD_NOT_STICKY = (
 # Only what was observed: an earlier wording blamed an overloaded backend,
 # and the first time it was checked the backend was fine and the answer was
 # sitting in the reasoning channel (session-20260923-183501).
-NO_ANSWER_TEXT = "the model's reply contained no answer text"
+# What the first of two consecutive empty replies was; the second adds
+# ASKED_AGAIN_FACT. Observed facts only.
+EMPTY_REPLY_FACT = "the model's reply contained no text and no tool call"
 REASONING_ONLY_FACT = (
-    "the model's reply contained no answer text, only {chars} characters of "
-    "reasoning; asked once more for the answer, it again gave none"
+    "the model's reply contained no answer text, only {chars} characters of reasoning"
 )
+ASKED_AGAIN_FACT = "asked once more, it again gave no answer text"
 # Named only when a provider sent one, and never interpreted: "stop" on an
 # empty reply is exactly the unexplained case. No reason is not "none sent" —
 # a stream cut mid-way looks the same — so absence adds nothing.
@@ -492,15 +494,18 @@ def empty_answer(*facts: str) -> str:
     return "(" + "; ".join((*facts, "try again")) + ")"
 
 
-EMPTY_RESPONSE = empty_answer(NO_ANSWER_TEXT)
-
-# A server can file the whole reply under reasoning (mlx_lm.server did, with
-# the answer after the last line of thought), and aish never shows reasoning
-# as an answer. So the model is asked once, in its own conversation.
-ANSWER_WAS_REASONING_ONLY = (
-    "your last reply contained reasoning but no answer text, so the user saw "
-    "nothing. Reply now with your answer to the user as plain text."
+# An empty reply is asked once, in the model's own conversation: a server can
+# file the whole answer under reasoning (mlx_lm.server did), and a provider
+# can return nothing mid-task (Gemini did, with two links still to open).
+REPLY_WAS_EMPTY = "your last reply contained no text and no tool call"
+REPLY_WAS_REASONING_ONLY = (
+    "your last reply contained reasoning but no answer text and no tool call"
 )
+USER_SAW_NOTHING = ", so the user saw nothing. "
+# After a denial every tool call is refused until a text-only reply, so
+# "continue the task" there would goad calls the stop gate will refuse.
+REPLY_NOW_IN_TEXT = "Reply now, in plain text."
+CONTINUE_OR_ANSWER = "Continue the task where you left off, or give your answer if it is done."
 
 
 class ModelUnavailable(RuntimeError):
@@ -4331,9 +4336,10 @@ class Agent:
         # stalled one stops at MAX_STALL_STEPS.
         ceiling = max(self.max_steps, HARD_STEP_CEILING)
         stall = 0
-        # Chars of reasoning in the reply that was just asked again for its
-        # answer; 0 when the previous turn was not such a reply.
-        reasoning_only_chars = 0
+        # The fact describing an empty reply that was just asked again; None
+        # when the previous turn was not one. Bounds the re-ask to once per
+        # run of empty replies, whatever kind they were.
+        empty_reply_asked: str | None = None
         step = 0
         while step < ceiling:
             step += 1
@@ -4367,27 +4373,39 @@ class Agent:
             turn_secs = time.perf_counter() - turn_start
             tokens_in += usage[0]
             tokens_out += usage[1]
-            if not tool_calls and not content.strip() and thinking_text.strip():
-                if not reasoning_only_chars:
+            empty_facts: list[str] = []
+            if not tool_calls and not content.strip():
+                if empty_reply_asked is None:
                     # Kept out of the history and the log: an empty assistant
                     # turn is nothing the owner saw, and the note says why.
-                    reasoning_only_chars = len(thinking_text)
+                    reasoning_only = bool(thinking_text.strip())
+                    empty_reply_asked = (
+                        REASONING_ONLY_FACT.format(chars=len(thinking_text))
+                        if reasoning_only
+                        else EMPTY_REPLY_FACT
+                    )
+                    note = (
+                        (REPLY_WAS_REASONING_ONLY if reasoning_only else REPLY_WAS_EMPTY)
+                        + USER_SAW_NOTHING
+                        + (
+                            REPLY_NOW_IN_TEXT
+                            if self._pending_comment_response
+                            else CONTINUE_OR_ANSWER
+                        )
+                    )
                     self._emit_step(
                         kind="thinking_cancel", secs=turn_secs, tokens=list(usage),
                         answered=False,
                     )
-                    self._append(
-                        {"role": "user", "content": AISH_NOTE + ANSWER_WAS_REASONING_ONLY + "]"}
-                    )
+                    self._append({"role": "user", "content": AISH_NOTE + note + "]"})
                     continue
-            empty_facts = [
-                REASONING_ONLY_FACT.format(chars=reasoning_only_chars)
-                if reasoning_only_chars and thinking_text.strip()
-                else NO_ANSWER_TEXT
-            ]
-            if finish_reason := (self._response_meta or {}).get("stop"):
-                empty_facts.append(FINISH_REASON_FACT.format(stop=finish_reason))
-            reasoning_only_chars = 0
+                empty_facts = [empty_reply_asked, ASKED_AGAIN_FACT]
+                if finish_reason := (self._response_meta or {}).get("stop"):
+                    empty_facts.append(FINISH_REASON_FACT.format(stop=finish_reason))
+            else:
+                # Only a reply with something in it ends the run: a Verify ask
+                # after the placeholder must not buy the empty run a second one.
+                empty_reply_asked = None
             # The gate's copy of this step's prose (#252), taken before any of
             # its tool calls are dispatched and independent of whether the
             # owner is told it. Assigned on every response, so a silent step
@@ -4454,7 +4472,7 @@ class Agent:
                     )
 
             if not tool_calls:
-                result = content or empty_answer(*empty_facts)
+                result = content if content.strip() else empty_answer(*empty_facts)
                 # VERIFY (#191). A finished answer is a PROPOSAL until the
                 # turn's rules have been checked against it — so the check runs
                 # here, inside the loop, rather than after run_task returns.
@@ -4489,7 +4507,7 @@ class Agent:
                 result = self._release_held(text=result)
                 self._log_held_entry(result)
                 # A released hold has already streamed itself, notes included.
-                if not content and not was_held and self.on_token:
+                if not content.strip() and not was_held and self.on_token:
                     self.on_token(result + "\n")
                 self._note(f"✓ answered in {format_secs(turn_secs)}{_tokens_note(usage)}")
                 total = time.perf_counter() - task_started

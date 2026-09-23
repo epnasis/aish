@@ -2788,7 +2788,9 @@ class TestSentRecord:
         reply = model_says("")
         reply.message.stop = "MALFORMED_FUNCTION_CALL"
         streamed: list[str] = []
-        agent, _, log = self._agent([reply], tmp_path, on_token=streamed.append)
+        agent, _, log = self._agent(
+            [model_says(""), reply], tmp_path, on_token=streamed.append
+        )
         result = agent.run_task("hello")
         assert '"MALFORMED_FUNCTION_CALL"' in result
         received = steps(log.path, "received")

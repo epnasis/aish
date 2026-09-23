@@ -58,9 +58,11 @@ class FakeChat:
     def __init__(self, responses: list):
         self.responses = list(responses)
         self.calls: list[dict] = []
+        self.snapshots: list[list] = []
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
+        self.snapshots.append(list(kwargs.get("messages") or []))
         response = self.responses.pop(0)
         # The streaming shape ollama yields, so a test that wires `on_token`
         # exercises the same path the web server uses rather than a second one.
@@ -1497,20 +1499,97 @@ class TestBlockedAndBackground:
 
 
 class TestModelResilience:
-    def test_empty_response_gives_clear_hint(self):
-        from aish.agent import EMPTY_RESPONSE
+    @staticmethod
+    def _note(first: str, then: str) -> dict:
+        from aish.agent import USER_SAW_NOTHING
 
-        agent, chat = make_agent([model_says("")])  # no content, no tool calls
-        assert agent.run_task("hi") == EMPTY_RESPONSE
-        assert len(chat.calls) == 1  # nothing to recover, so nothing is re-asked
+        return {"role": "user", "content": AISH_NOTE + first + USER_SAW_NOTHING + then + "]"}
+
+    @staticmethod
+    def _asked_with(chat, call: int) -> list[dict]:
+        """The history request `call` carried, as it was AT the call: the chat
+        is handed the live list, which grows afterwards."""
+        return chat.snapshots[call]
+
+    def test_empty_twice_says_what_was_observed(self):
+        from aish.agent import ASKED_AGAIN_FACT, EMPTY_REPLY_FACT, empty_answer
+
+        streamed: list[str] = []
+        agent, chat = make_agent([model_says(""), model_says("")], on_token=streamed.append)
+        expected = empty_answer(EMPTY_REPLY_FACT, ASKED_AGAIN_FACT)
+        assert agent.run_task("hi") == expected
+        assert expected in "".join(streamed)
+        assert len(chat.calls) == 2  # asked once, never a loop
+
+    def test_whitespace_only_twice_ends_with_the_placeholder_not_whitespace(self):
+        from aish.agent import ASKED_AGAIN_FACT, EMPTY_REPLY_FACT, empty_answer
+
+        agent, _ = make_agent([model_says("\n\n"), model_says("\n")])
+        assert agent.run_task("hi") == empty_answer(EMPTY_REPLY_FACT, ASKED_AGAIN_FACT)
 
     def test_empty_reply_names_the_finish_reason_the_provider_sent(self):
         reply = model_says("")
         reply.message.stop = "MAX_TOKENS"
-        agent, _ = make_agent([reply])
+        agent, _ = make_agent([model_says(""), reply])
         assert agent.run_task("hi") == (
-            "(the model's reply contained no answer text; the provider reported "
-            'finish reason "MAX_TOKENS"; try again)'
+            "(the model's reply contained no text and no tool call; asked once more, "
+            'it again gave no answer text; the provider reported finish reason "MAX_TOKENS"; '
+            "try again)"
+        )
+
+    def test_an_empty_reply_mid_task_is_asked_to_continue(self):
+        """session-20260923-212625: Gemini returned nothing with work still in
+        hand, and the turn ended there."""
+        from aish.agent import CONTINUE_OR_ANSWER, REPLY_WAS_EMPTY
+
+        agent, chat = make_agent(
+            [
+                model_says("Opening the links.", tool_calls=[tool_call("read_docs")]),
+                model_says(""),
+                model_says("Both links open; here is the answer."),
+            ]
+        )
+        assert agent.run_task("check") == "Both links open; here is the answer."
+        asked_with = self._asked_with(chat, 2)
+        assert asked_with[-1] == self._note(REPLY_WAS_EMPTY, CONTINUE_OR_ANSWER)
+        assert not any(
+            m.get("role") == "assistant" and not (m.get("content") or "").strip()
+            and not m.get("tool_calls")
+            for m in asked_with
+        ), "the empty turn must not be in the history the model is shown again"
+
+    def test_after_a_denial_the_re_ask_asks_for_text_not_work(self, tmp_path):
+        """Deny means STOP: every tool call is refused until a text-only reply,
+        so the note must not goad the model toward one."""
+        from aish.agent import REPLY_NOW_IN_TEXT, REPLY_WAS_EMPTY, STOP_GATE_REFUSAL
+        from aish.approval import Denied
+
+        marker = tmp_path / "never"
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says(""),
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("Understood, stopping."),
+            ],
+            approve=lambda _cmd: Denied("not that"),
+        )
+        assert agent.run_task("do it") == "Understood, stopping."
+        assert not marker.exists()
+        assert self._asked_with(chat, 2)[-1] == self._note(REPLY_WAS_EMPTY, REPLY_NOW_IN_TEXT)
+        assert tool_messages(agent.messages)[-1]["content"].startswith(
+            STOP_GATE_REFUSAL.split("{")[0][:40]
+        ), "the stop gate stays armed through the re-ask"
+
+    def test_a_tool_call_with_no_text_is_not_an_empty_reply(self):
+        agent, chat = make_agent(
+            [model_says(tool_calls=[tool_call("read_docs")]), model_says("done")]
+        )
+        assert agent.run_task("hi") == "done"
+        assert len(chat.calls) == 2
+        assert not any(
+            AISH_NOTE in (m.get("content") or "") for m in agent.messages
+            if m.get("role") == "user"
         )
 
     # The shape of session-20260923-183501: the server filed the whole reply,
@@ -1520,7 +1599,7 @@ class TestModelResilience:
     )
 
     def test_reasoning_only_reply_is_asked_once_for_its_answer(self):
-        from aish.agent import AISH_NOTE, ANSWER_WAS_REASONING_ONLY
+        from aish.agent import CONTINUE_OR_ANSWER, REPLY_WAS_REASONING_ONLY
 
         streamed: list[str] = []
         agent, chat = make_agent(
@@ -1529,13 +1608,8 @@ class TestModelResilience:
         )
         assert agent.run_task("o której mecz?") == "Mecz rozpocznie się o 20:45."
         assert "Mecz rozpocznie się o 20:45." in "".join(streamed)
-        # `messages` is the live list, so the second request's history is
-        # everything before the answer it produced.
-        asked_with = chat.calls[1]["messages"][:-1]
-        assert asked_with[-1] == {
-            "role": "user", "content": AISH_NOTE + ANSWER_WAS_REASONING_ONLY + "]"
-        }
-        # The empty turn is not in the history the model is shown again.
+        asked_with = self._asked_with(chat, 1)
+        assert asked_with[-1] == self._note(REPLY_WAS_REASONING_ONLY, CONTINUE_OR_ANSWER)
         assert not any(
             m.get("role") == "assistant" and not m.get("content") for m in asked_with
         )
@@ -1570,24 +1644,34 @@ then:
         assert len(chat.calls) == 2
 
     def test_reasoning_only_twice_says_what_was_observed(self):
-        from aish.agent import REASONING_ONLY_FACT, empty_answer
+        from aish.agent import ASKED_AGAIN_FACT, REASONING_ONLY_FACT, empty_answer
 
         streamed: list[str] = []
         agent, chat = make_agent(
             [self.REASONING_ONLY, self.REASONING_ONLY], on_token=streamed.append
         )
         chars = len(self.REASONING_ONLY.message.thinking)
-        expected = empty_answer(REASONING_ONLY_FACT.format(chars=chars))
+        expected = empty_answer(REASONING_ONLY_FACT.format(chars=chars), ASKED_AGAIN_FACT)
         assert agent.run_task("o której mecz?") == expected
         assert expected in "".join(streamed)
-        assert len(chat.calls) == 2  # asked once, never a loop
+        assert len(chat.calls) == 2
 
-    def test_reasoning_only_is_re_asked_again_after_a_real_turn(self):
+    def test_reasoning_only_then_empty_shares_the_one_re_ask(self):
+        from aish.agent import ASKED_AGAIN_FACT, REASONING_ONLY_FACT, empty_answer
+
+        agent, chat = make_agent([self.REASONING_ONLY, model_says("")])
+        chars = len(self.REASONING_ONLY.message.thinking)
+        assert agent.run_task("hi") == empty_answer(
+            REASONING_ONLY_FACT.format(chars=chars), ASKED_AGAIN_FACT
+        )
+        assert len(chat.calls) == 2
+
+    def test_the_re_ask_re_arms_after_a_real_turn(self):
         agent, chat = make_agent(
             [
                 self.REASONING_ONLY,
                 model_says(tool_calls=[tool_call("read_docs")]),
-                self.REASONING_ONLY,
+                model_says(""),
                 model_says("done"),
             ]
         )
