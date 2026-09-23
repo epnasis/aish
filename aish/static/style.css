@@ -2970,12 +2970,26 @@ body.kb-open .rail-searchbar { padding-bottom: 7px; }
   display: flex; align-items: center; gap: 7px;
   background: var(--input-bg2); border-radius: 11px; padding: 6px 11px;
 }
-.rail-search svg { width: 16px; height: 16px; flex: none; color: var(--dim); }
+.rail-search svg { width: 16px; height: 16px; flex: none; color: var(--dim); transition: color 0.12s ease; }
 .rail-search input {
   flex: 1; min-width: 0; background: none; border: none; outline: none;
   color: var(--fg); font-size: 17px;
 }
 .rail-search input::placeholder { color: var(--dim); }
+/* Focus is VISIBLE here or the search chord is a keypress with no reply: ⌘K
+   opens the rail and focuses this field, and with `outline: none` on the input
+   and no border on the pill, nothing on screen changed — on a list that was
+   already open, nothing at all did (owner, 2026-09-23). The ring goes on the
+   PILL rather than the input, because the pill is the thing that looks like a
+   control; the magnifier picks up the accent so the eye lands on the field it
+   is now typing into, and the fill lifts so the shape reads as active even
+   where the ring meets the bar's own tint. `:focus-within`, not `:focus`: the
+   input is the only focusable child, and the pill is what gets painted. */
+.rail-search:focus-within {
+  background: var(--bg-elev3);
+  box-shadow: 0 0 0 2px var(--blue);
+}
+.rail-search:focus-within svg { color: var(--blue); }
 .rail-search { flex: 1; min-width: 0; }
 /* New chat. The SAME control as the header's, so it looks the same: one action
    should not present as two things depending on where you found it. Sized as a
