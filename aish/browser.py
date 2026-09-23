@@ -5425,7 +5425,7 @@ async def _snapshot(
         commit_evidence=commit,
     )
     session.touched = time.monotonic()
-    return snapshot
+    return browse_mod.disarm_page_voice(snapshot)
 
 
 async def _session(owner: _Owner, key: str, *, opening: bool) -> _Session:

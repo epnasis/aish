@@ -762,7 +762,10 @@ def execute(
         from . import browse
 
         browse.prune_downloads(Path(downloads_dir))
-    out = (proc.stdout or "") + (proc.stderr or "")
+    # stdout is the DATA — a mail body, a note, a search hit — written by
+    # whoever wrote that content. stderr is the wrapper's own voice, and the
+    # one channel a wrapper may speak as aish on (gwslib's re-login note).
+    out = provenance.disarm_markers(proc.stdout or "") + (proc.stderr or "")
     return envelope(
         tool.name,
         out,

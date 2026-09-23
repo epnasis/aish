@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from typing import Any
 
-from . import secrets, vocab
+from . import provenance, secrets, vocab
 
 # How many controls one snapshot may carry. A portal page runs to a few hundred
 # interactive elements once every nav link and footer link is counted, and a
@@ -1449,6 +1449,32 @@ class Snapshot:
             if control.n == n:
                 return control
         return None
+
+
+def disarm_page_voice(snapshot: Snapshot) -> Snapshot:
+    """Every string the PAGE wrote, with aish's markers broken — done once, on
+    the snapshot, because the renderers that print it are many and each
+    interleaves aish's own `[aish: …]` notes with the page's words."""
+    disarm = provenance.disarm_markers
+    snapshot.title = disarm(snapshot.title)
+    snapshot.text = disarm(snapshot.text)
+    snapshot.dialog = disarm(snapshot.dialog)
+    # Composed by aish but quoting the page (an overlay's text, a field's
+    # read-back value), and spoken INSIDE aish's own `[aish: …]` note.
+    snapshot.problem = disarm(snapshot.problem)
+    snapshot.notice = disarm(snapshot.notice)
+    snapshot.ledger = [disarm(line) for line in snapshot.ledger]
+    snapshot.console = [disarm(line) for line in snapshot.console]
+    for control in (*snapshot.controls, *snapshot.revealable):
+        control.name = disarm(control.name)
+        control.detail = disarm(control.detail)
+        control.row = [disarm(cell) for cell in control.row]
+    for section in snapshot.sections:
+        section.name = disarm(section.name)
+        section.text = disarm(section.text)
+    snapshot.covered.by = disarm(snapshot.covered.by)
+    snapshot.covered.controls = [disarm(name) for name in snapshot.covered.controls]
+    return snapshot
 
 
 def landed_elsewhere(asked: str, got: str) -> bool:

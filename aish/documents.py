@@ -182,7 +182,8 @@ class Rendition:
         """The rendition body, without the machine-readable header line."""
         raw = self.path.read_text(encoding="utf-8", errors="replace")
         _, _, body = raw.partition("\n")
-        return body
+        # At read time, never into the file: see `provenance.disarm_markers`.
+        return provenance.disarm_markers(body)
 
 
 # ----------------------------------------------------------------- geometry

@@ -23,7 +23,7 @@ import threading
 from functools import partial
 from typing import Any
 
-from . import tools
+from . import provenance, tools
 from .agent import Agent, ModelUnavailable, compose_system_content, format_secs
 
 SESSION_NOTE = (
@@ -363,6 +363,7 @@ class ClaudeMaxAgent:
         # denial's stop gate (and stale _run_meta/skill gates/cancel) would
         # wedge every later tool call in this AND future tasks (#178 P0-4).
         self.inner._reset_task_state()
+        task = provenance.disarm_markers(task)  # as Agent.run_task, for its reason
         try:
             return self._run_task_body(task)
         finally:
