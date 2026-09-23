@@ -119,10 +119,124 @@ if [ "$run_tests" -eq 1 ]; then
     echo "  passed"
 fi
 
-# ------------------------------------------------------------------ install
+# ------------------------------------------------- install, with the job out
+
+# The install runs with the job OUT of launchd, not merely stopped. The service
+# is KeepAlive, so while it is loaded launchd will respawn it whenever the
+# process exits — and during `uv tool install` that means starting it against
+# an env that is being replaced. On 2026-09-24 the log for the install window
+# held exactly such respawns (an ImportError inside a half-written package,
+# then "aish-web: No such file or directory"), and after the install and a
+# `kickstart -k` the job sat in `spawn scheduled` past the health window. With
+# the job booted out nothing can start it mid-install, and the bootstrap after
+# the install loads a fresh job (its `runs` counter starts at 1 again) that
+# starts because the plist says RunAtLoad — so no restart has to race anything.
+#
+# Two launchctl facts this leans on, both checked against a throwaway job:
+#   - `bootout` returns 0 while the process is still exiting (`state =
+#     SIGTERMed`, `print` still succeeds), and a `bootstrap` in that window
+#     fails with "5: Input/output error". So we wait until `print` stops
+#     finding the job before going on.
+#   - `bootstrap` returns 0 even when the program it names does not exist; it
+#     says the job is loaded, not that it runs. Only the health check says that.
+DOMAIN="gui/$(id -u)"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+UNLOAD_TIMEOUT_POLLS=120 # × 0.5 s; launchd SIGKILLs after its own ExitTimeOut
+HEALTH_SECONDS=10
+
+if [ ! -f "$PLIST" ]; then
+    echo "✗ ${PLIST} not found — run scripts/install-web-service.sh once" >&2
+    exit 1
+fi
+
+loaded() { launchctl print "${DOMAIN}/${LABEL}" >/dev/null 2>&1; }
+
+report_launchd_state() {
+    echo "  launchctl print ${DOMAIN}/${LABEL}:" >&2
+    launchctl print "${DOMAIN}/${LABEL}" 2>&1 | grep -E "state|last exit" | sed 's/^[[:space:]]*/    /' >&2 || true
+}
+
+# The service may bind one interface only (ours binds the LAN address, so
+# probing 127.0.0.1 reports a false failure) — ask the kernel what it listens
+# on, retrying while it comes back up.
+healthy() {
+    local addr code
+    for _ in $(seq 1 "$HEALTH_SECONDS"); do
+        # `awk … {exit}` closed the pipe while netstat was still writing, so netstat
+        # died of SIGPIPE and `pipefail` made that 141 the SCRIPT's exit status: a
+        # successful ship reported as a failed one, intermittently, depending on how
+        # much netstat had buffered. Take the first match without closing the pipe.
+        addr="$(netstat -an | awk "/\.${PORT}.*LISTEN/ && !seen++{print \$4}" | sed "s/\.${PORT}\$//")"
+        if [ -n "$addr" ]; then
+            [ "$addr" = "*" ] && addr=127.0.0.1
+            code="$(curl -s -o /dev/null --connect-timeout 5 -w '%{http_code}' "http://${addr}:${PORT}/" || true)"
+            echo "  health (${addr}:${PORT}): HTTP ${code}"
+            [ "$code" = "200" ] && return 0
+            echo "✗ unhealthy" >&2
+            report_launchd_state
+            return 1
+        fi
+        sleep 1
+    done
+    echo "✗ no listener on ${PORT} after ${HEALTH_SECONDS}s — check ~/Library/Logs/aish-web.log" >&2
+    report_launchd_state
+    return 1
+}
+
+# Once the job is out, EVERY way this script ends must put it back — an
+# install that failed must not become an outage. The EXIT trap is the one place
+# that guarantees it, including for an interrupt or a `set -e` stop.
+job_out=0
+restore_old_install() {
+    [ "$job_out" -eq 1 ] || return 0
+    job_out=0
+    echo "→ bringing ${LABEL} back on the install that is on disk now" >&2
+    # If uv had already replaced part of the old env before failing, what is on
+    # disk is neither build, and this bootstrap loads a job that may not start.
+    # The health check below is what says whether it did.
+    if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
+        echo "✗ could not load ${LABEL} again — the service is DOWN. Recover with:" >&2
+        echo "    launchctl bootstrap ${DOMAIN} ${PLIST}" >&2
+        return 0
+    fi
+    healthy || echo "✗ ${LABEL} is loaded but not serving — see above" >&2
+}
+trap restore_old_install EXIT
+trap 'exit 130' INT TERM
+
+was_loaded=0
+loaded && was_loaded=1
+launchctl bootout "${DOMAIN}/${LABEL}" 2>/dev/null || true
+job_out=1
+if [ "$was_loaded" -eq 1 ]; then
+    for _ in $(seq 1 "$UNLOAD_TIMEOUT_POLLS"); do
+        loaded || break
+        sleep 0.5
+    done
+    if loaded; then
+        # Nothing has been installed yet, so there is nothing to put back that
+        # launchd has not still got; bootstrapping now would fail anyway.
+        job_out=0
+        echo "✗ ${LABEL} is still loaded $((UNLOAD_TIMEOUT_POLLS / 2))s after bootout — nothing installed." >&2
+        report_launchd_state
+        echo "  Once \`launchctl print ${DOMAIN}/${LABEL}\` no longer finds it, recover with:" >&2
+        echo "    launchctl bootstrap ${DOMAIN} ${PLIST}" >&2
+        exit 1
+    fi
+    echo "→ stopped ${LABEL} (booted out of launchd for the install)"
+else
+    echo "→ ${LABEL} was not loaded — it will be loaded after the install"
+fi
 
 echo "→ installing"
-uv tool install --force --reinstall --no-cache "$PROJECT" >/dev/null 2>&1
+install_log="$(mktemp -t aish-ship-install)"
+if ! uv tool install --force --reinstall --no-cache "$PROJECT" >"$install_log" 2>&1; then
+    echo "✗ uv tool install failed:" >&2
+    tail -n 20 "$install_log" | sed 's/^/    /' >&2
+    rm -f "$install_log"
+    exit 1
+fi
+rm -f "$install_log"
 for exe in aish aish-web; do
     [ -x "$HOME/.local/bin/$exe" ] || { echo "✗ $exe missing after install" >&2; exit 1; }
 done
@@ -130,30 +244,15 @@ echo "  installed"
 
 # ------------------------------------------------------------------ restart
 
-if ! launchctl kickstart -k "gui/$(id -u)/${LABEL}" 2>/dev/null; then
-    echo "  ${LABEL} not loaded — run scripts/install-web-service.sh once" >&2
+job_out=0
+if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
+    echo "✗ launchctl bootstrap failed after a completed install — ${LABEL} is DOWN." >&2
+    report_launchd_state
+    echo "  Recover with:" >&2
+    echo "    launchctl bootstrap ${DOMAIN} ${PLIST}" >&2
     exit 1
 fi
-echo "→ restarted ${LABEL}"
+echo "→ loaded ${LABEL}"
 
-# The service may bind one interface only (ours binds the LAN address, so
-# probing 127.0.0.1 reports a false failure) — ask the kernel what it listens
-# on, retrying while it comes back up.
-for _ in $(seq 1 10); do
-    # `awk … {exit}` closed the pipe while netstat was still writing, so netstat
-    # died of SIGPIPE and `pipefail` made that 141 the SCRIPT's exit status: a
-    # successful ship reported as a failed one, intermittently, depending on how
-    # much netstat had buffered. Take the first match without closing the pipe.
-    addr="$(netstat -an | awk "/\.${PORT}.*LISTEN/ && !seen++{print \$4}" | sed "s/\.${PORT}\$//")"
-    if [ -n "$addr" ]; then
-        [ "$addr" = "*" ] && addr=127.0.0.1
-        code="$(curl -s -o /dev/null --connect-timeout 5 -w '%{http_code}' "http://${addr}:${PORT}/")"
-        echo "  health (${addr}:${PORT}): HTTP ${code}"
-        [ "$code" = "200" ] || { echo "✗ unhealthy" >&2; exit 1; }
-        echo "✓ shipped ${head_sha}"
-        exit 0
-    fi
-    sleep 1
-done
-echo "✗ no listener on ${PORT} after 10s — check ~/Library/Logs/aish-web.log" >&2
-exit 1
+healthy || exit 1
+echo "✓ shipped ${head_sha}"
