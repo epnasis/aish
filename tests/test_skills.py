@@ -825,6 +825,107 @@ class TestPreflight:
         assert preload.unread == []
 
 
+class TestWithheldSkills:
+    """A playbook whose every command a rule in force forbids is not preloaded
+    (the live case: "check my emails" preloaded a Gmail Pub/Sub watcher whose
+    every command was `gws gmail`, in a turn where a rule forbade exactly
+    that). Only preloading changes — the index and read_skill are untouched."""
+
+    WATCH = "```bash\ngws gmail +watch\n$ gws gmail +watch --once\n```\n"
+
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "gm")
+
+    def _skill(self, tmp_path, name, body):
+        write_skill(tmp_path / "gs", f"{name}.md",
+                    f"---\nname: {name}\ndescription: {name} for new emails\n---\n{body}\n")
+
+    @staticmethod
+    def _forbid(prefix):
+        return lambda command: "no-raw-gmail" if command.startswith(prefix) else None
+
+    def test_shell_commands_reads_only_shell_fences(self):
+        body = ("Run it:\n```bash\n# a comment\n$ gws gmail +watch \\\n  --once\n\n```\n"
+                "```\ngws gmail output sample\n```\n```zsh\nls\n```\n")
+        assert skills_module.shell_commands(body) == ["gws gmail +watch --once", "ls"]
+
+    def test_a_comment_ending_in_a_backslash_swallows_nothing(self):
+        body = "```bash\n# see the docs \\\ngws schema gmail\ngws gmail +watch\n```\n"
+        assert skills_module.shell_commands(body) == ["gws schema gmail", "gws gmail +watch"]
+
+    def test_a_fully_forbidden_skill_is_withheld_and_frees_its_slot(
+        self, tmp_path, monkeypatch
+    ):
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "gmail-watch", self.WATCH)
+        self._skill(tmp_path, "mail-notes", "Plain prose, no commands.")
+        sims = {"gmail-watch": 0.45, "mail-notes": 0.40}
+
+        def semantic(query, entries):
+            return {id(e): sims[e.name] for e in entries}
+
+        preload = preflight(str(tmp_path), None, "check my emails", semantic=semantic,
+                            forbidden_command=self._forbid("gws gmail"))
+        assert preload.names == ["mail-notes"]
+        assert preload.withheld == [{"name": "gmail-watch", "rule": "no-raw-gmail"}]
+
+    def test_one_allowed_command_keeps_the_skill(self, tmp_path, monkeypatch):
+        # Conservative direction: the rule restricts RUNNING; a playbook that
+        # still teaches something runnable is preloaded exactly as before.
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "gmail-watch", self.WATCH + "```bash\ngws schema gmail\n```\n")
+        preload = preflight(str(tmp_path), None, "watch for new emails",
+                            forbidden_command=self._forbid("gws gmail"))
+        assert preload.names == ["gmail-watch"]
+        assert preload.withheld == []
+
+    def test_a_named_skill_is_never_withheld(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "gmail-watch", self.WATCH)
+        preload = preflight(str(tmp_path), None, "what does gmail-watch do?",
+                            forbidden_command=self._forbid("gws gmail"))
+        assert preload.names == ["gmail-watch"]
+        assert preload.withheld == []
+
+    def test_only_a_skill_that_would_have_been_preloaded_is_reported(
+        self, tmp_path, monkeypatch
+    ):
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "gmail-watch", self.WATCH)
+        preload = preflight(str(tmp_path), None, "book a table for dinner",
+                            forbidden_command=self._forbid("gws gmail"))
+        assert preload.names == [] and preload.withheld == []
+
+    def test_a_forbidden_skill_below_the_cut_is_not_reported(self, tmp_path, monkeypatch):
+        """Withheld means "would have been preloaded": ranked past the last
+        slot, it was never going to be, and reporting it would be noise."""
+        self._isolate(tmp_path, monkeypatch)
+        sims = {}
+        for i in range(skills_module.PREFLIGHT_TOP):
+            self._skill(tmp_path, f"top-{i}", "Prose only.")
+            sims[f"top-{i}"] = 0.60 - i / 100
+        self._skill(tmp_path, "gmail-watch", self.WATCH)
+        sims["gmail-watch"] = 0.40
+        preload = preflight(str(tmp_path), None, "check my emails",
+                            semantic=lambda q, es: {id(e): sims[e.name] for e in es},
+                            forbidden_command=self._forbid("gws gmail"))
+        assert len(preload.names) == skills_module.PREFLIGHT_TOP
+        assert preload.withheld == []
+
+    def test_memories_and_command_free_skills_are_never_withheld(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "mail-prose", "No commands at all.")
+        write_skill(tmp_path / "gm", "mail-fact.md",
+                    "---\nname: mail-fact\ndescription: mail fact\n---\ngws gmail is raw\n")
+        sims = {"mail-prose": 0.5, "mail-fact": 0.5}
+        preload = preflight(str(tmp_path), None, "check my emails",
+                            semantic=lambda q, es: {id(e): sims[e.name] for e in es},
+                            forbidden_command=lambda command: "any-rule")
+        assert sorted(preload.names) == ["mail-fact", "mail-prose"]
+        assert preload.withheld == []
+
+
 class TestPreflightPrecision:
     """#183: unsolicited injection must be able to abstain. A separate,
     higher similarity floor for preflight; keyword rails confirm against

@@ -678,11 +678,23 @@ def judge_prompt(entry, stat: EntryStats | None, category: str) -> str:
         body or "(empty)",
         "",
     ]
+    # The envelope refuses this disable (run_curate), so it is not offered.
+    unobservable = category == "dead-weight" and entry.kind == "memory"
+    verbs = "repair|pin|skip" if unobservable else "repair|pin|disable|skip"
     if stat is not None and category == "dead-weight":
         sim = f"{stat.median_sim:.2f}" if stat.median_sim is not None else "n/a"
+        # Only a skill has a use signal (read_skill). Telling the judge a
+        # memory was "NEVER used" states what the ledger cannot see, and the
+        # judge retired the owner's primary-mailbox fact on that sentence.
+        used = (
+            "and NEVER opened with read_skill"
+            if entry.kind == "skill" else
+            "— whether a memory was used cannot be observed (a fact shapes an "
+            "answer without a trace), so this is NOT evidence it went unused"
+        )
         lines += [
             "RETRIEVAL EVIDENCE (last two weeks): this entry was auto-injected "
-            f"into {stat.injections} tasks and NEVER used ({stat.rails} entered "
+            f"into {stat.injections} tasks {used} ({stat.rails} entered "
             f"via keyword match, median similarity {sim}). Tasks it was "
             "injected into:",
         ]
@@ -705,11 +717,13 @@ def judge_prompt(entry, stat: EntryStats | None, category: str) -> str:
         "words like 'code', 'change', 'file').",
         "- pin — it is a standing always/never behavior rule that must apply "
         "to every task regardless of topic.",
-        "- disable — stale, redundant, or noise; reversible retirement.",
+        *([] if unobservable else [
+            "- disable — stale, redundant, or noise; reversible retirement."
+        ]),
         "- skip — the entry is fine as-is, or the evidence is insufficient.",
         "",
         "Answer EXACTLY in this format, nothing after it:",
-        "VERDICT: <repair|pin|disable|skip>",
+        f"VERDICT: <{verbs}>",
         "REASON: <one sentence>",
         "DESCRIPTION: <only for repair>",
         "KEYWORDS: <comma-separated, only for repair>",
@@ -1075,6 +1089,16 @@ def run_curate(
             # retire it (the first live v2 run disabled two pinned rules).
             counts["skip"] += 1
             record = {"action": "skip", "reason": "refused: pinned standing rule"}
+        elif (
+            verdict.action == "disable"
+            and category == "dead-weight"
+            and entry.kind == "memory"
+        ):
+            # Same kind of guard: dead-weight means "injected, never read", and
+            # a memory is never read — its use is invisible to the ledger, so
+            # the category carries no evidence that retiring it is safe.
+            counts["skip"] += 1
+            record = {"action": "skip", "reason": "refused: memory use is unobservable"}
         else:
             counts[verdict.action] += 1
             record = {"action": verdict.action, "reason": verdict.reason}

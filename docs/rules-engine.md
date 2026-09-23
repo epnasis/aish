@@ -530,6 +530,10 @@ Two rules, both falling out of R5 rather than fighting it:
 
 A **scalar is taken whole and never split**: `gh issue` is one prefix containing a space, and splitting on whitespace would quietly widen that rule to every `gh` command there is. `TestOneCommandHasManySpellings`.
 
+### A rule also shapes what is OFFERED — `forbids`
+
+The preload asks the bindings before it offers a playbook: a skill ALL of whose shell commands a rule in force forbids is not preloaded (`docs/knowledge-layer.md`, pre-flight). It asks through `rules.forbids`, never `gate`, because `gate` spends a refusal round — asking would burn the model's two refusals before it had proposed anything. `forbids` is also deliberately narrower than `gate`: only an **action-shape** binding counts (a topic rule forbidding `run_command` forbids every command, and would turn "every command in the playbook" into "any"), and a **held** binding (`max_rounds == 0`, `fail: hold` on an unevaluable trigger) never counts — acting on it early decides on a trigger nobody confirmed and makes sure the owner is never asked. Still a restriction only: it can keep a playbook out of the preload, never put one in. `TestForbidsAsksWithoutSpending`.
+
 ### Retro-match — a rule is a function of logged facts
 
 The card also answers *"what would this have done?"* by replaying the candidate over the owner's own recent turns: **this would have bound on 3 of your last 200, here they are.** For a tool you must execute it to know; for a rule you must not — manufacturing a synthetic turn tests the harness, not the rule.

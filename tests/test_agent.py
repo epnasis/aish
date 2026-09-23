@@ -2763,6 +2763,65 @@ class TestSkillsFreshness:
         )
 
 
+class TestRuleForbiddenPlaybookIsNotPreloaded:
+    """The live case: "check my emails" preloaded a Gmail Pub/Sub watcher whose
+    every command was `gws gmail`, in a turn where the owner's rule forbade
+    running exactly that. Driven through the real run_task, so the order —
+    rules seeded BEFORE the preload — is what is tested."""
+
+    @pytest.fixture(autouse=True)
+    def _opt_in(self, project_scope):
+        """Corpus lives in the project's .aish — explicit opt-in (#178 P0-1)."""
+
+    RULE = (
+        "---\nname: gmail-through-its-tools\ndescription: Use the gmail tools.\n"
+        "when:\n  action:\n    command_starts_with: gws gmail\n"
+        "then:\n  never_use: [run_command]\n---\n"
+    )
+
+    def _write(self, cwd, with_rule=True):
+        skills_dir = cwd / ".aish" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / "zzmail-watch.md").write_text(
+            "---\nname: zzmail-watch\ndescription: watch zzmail\nkeywords: zzmail\n---\n"
+            "PUBSUB-PLAYBOOK\n```bash\ngws gmail +watch --once\n```\n"
+        )
+        if with_rule:
+            rules_dir = agent_module.rules.GLOBAL_RULES_DIR
+            rules_dir.mkdir(parents=True, exist_ok=True)
+            (rules_dir / "gmail-through-its-tools.md").write_text(self.RULE)
+
+    def _run(self, tmp_path):
+        steps: list[dict] = []
+        self.notes: list[str] = []
+        agent, _ = make_agent(
+            [model_says("done")], cwd=str(tmp_path), step_log=steps.append
+        )
+        agent.echo = self.notes.append
+        agent.run_task("check my zzmail")
+        injected = "\n".join(
+            str(m.get("content", "")) for m in agent.messages[1:] if m.get("role") == "system"
+        )
+        context = next(s for s in steps if s.get("kind") == "context")
+        return injected, context["preload"]
+
+    def test_withheld_and_recorded_when_a_rule_forbids_every_command(self, tmp_path):
+        self._write(tmp_path)
+        injected, preload = self._run(tmp_path)
+        assert "PUBSUB-PLAYBOOK" not in injected
+        assert preload["withheld"] == [
+            {"name": "zzmail-watch", "rule": "gmail-through-its-tools"}
+        ]
+        # Relayed, not only logged — the refusal and its appeal never happen.
+        assert any("zzmail-watch (gmail-through-its-tools)" in n for n in self.notes)
+
+    def test_preloaded_as_before_without_the_rule(self, tmp_path):
+        self._write(tmp_path, with_rule=False)
+        injected, preload = self._run(tmp_path)
+        assert "PUBSUB-PLAYBOOK" in injected
+        assert "withheld" not in preload
+
+
 class TestPreflightInjection:
     """Pre-flight retrieval (issue #40): knowledge matching the task is
     injected into the hidden reminder slot, not waited for via recall."""
