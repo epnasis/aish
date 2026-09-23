@@ -816,12 +816,17 @@ class OpenAICompatBackend:
         usage = (0, 0)
         detail: dict | None = None
         thoughts = _ThoughtFilter() if self.provider == "gemini" else None
+        # The only record of WHY a reply came back empty (evidence:
+        # session-20260923-212625, zero output tokens and no reason kept).
+        # Last non-empty wins; absent stays "" and is never filled in.
+        stop = ""
         for chunk in chunks:
             if getattr(chunk, "usage", None):
                 usage = (chunk.usage.prompt_tokens or 0, chunk.usage.completion_tokens or 0)
                 detail = _openai_usage(chunk.usage)
             if not chunk.choices:
                 continue
+            stop = str(getattr(chunk.choices[0], "finish_reason", "") or "") or stop
             delta = chunk.choices[0].delta
             if delta is None:
                 continue
@@ -861,7 +866,8 @@ class OpenAICompatBackend:
         tail_thinking, tail_visible = thoughts.flush() if thoughts is not None else ("", "")
         yield ChatChunk(
             message=ChatMessage(
-                content=tail_visible, tool_calls=tool_calls, thinking=tail_thinking
+                content=tail_visible, tool_calls=tool_calls, thinking=tail_thinking,
+                stop=stop,
             ),
             prompt_eval_count=usage[0],
             eval_count=usage[1],

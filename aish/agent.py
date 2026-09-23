@@ -475,12 +475,24 @@ CD_NOT_STICKY = (
 # Only what was observed: an earlier wording blamed an overloaded backend,
 # and the first time it was checked the backend was fine and the answer was
 # sitting in the reasoning channel (session-20260923-183501).
-EMPTY_RESPONSE = "(the model's reply contained no answer text; try again)"
-
-REASONING_ONLY_RESPONSE = (
-    "(the model's reply contained no answer text, only {chars} characters of "
-    "reasoning; asked once more for the answer, it again gave none; try again)"
+NO_ANSWER_TEXT = "the model's reply contained no answer text"
+REASONING_ONLY_FACT = (
+    "the model's reply contained no answer text, only {chars} characters of "
+    "reasoning; asked once more for the answer, it again gave none"
 )
+# Named only when a provider sent one, and never interpreted: "stop" on an
+# empty reply is exactly the unexplained case. No reason is not "none sent" —
+# a stream cut mid-way looks the same — so absence adds nothing.
+FINISH_REASON_FACT = 'the provider reported finish reason "{stop}"'
+
+
+def empty_answer(*facts: str) -> str:
+    """The placeholder for a turn that ends with nothing to show: observed
+    facts only, and "aish does not know why" left sayable (L8)."""
+    return "(" + "; ".join((*facts, "try again")) + ")"
+
+
+EMPTY_RESPONSE = empty_answer(NO_ANSWER_TEXT)
 
 # A server can file the whole reply under reasoning (mlx_lm.server did, with
 # the answer after the last line of thought), and aish never shows reasoning
@@ -4368,11 +4380,13 @@ class Agent:
                         {"role": "user", "content": AISH_NOTE + ANSWER_WAS_REASONING_ONLY + "]"}
                     )
                     continue
-            empty_answer = (
-                REASONING_ONLY_RESPONSE.format(chars=reasoning_only_chars)
+            empty_facts = [
+                REASONING_ONLY_FACT.format(chars=reasoning_only_chars)
                 if reasoning_only_chars and thinking_text.strip()
-                else EMPTY_RESPONSE
-            )
+                else NO_ANSWER_TEXT
+            ]
+            if finish_reason := (self._response_meta or {}).get("stop"):
+                empty_facts.append(FINISH_REASON_FACT.format(stop=finish_reason))
             reasoning_only_chars = 0
             # The gate's copy of this step's prose (#252), taken before any of
             # its tool calls are dispatched and independent of whether the
@@ -4440,7 +4454,7 @@ class Agent:
                     )
 
             if not tool_calls:
-                result = content or empty_answer
+                result = content or empty_answer(*empty_facts)
                 # VERIFY (#191). A finished answer is a PROPOSAL until the
                 # turn's rules have been checked against it — so the check runs
                 # here, inside the loop, rather than after run_task returns.

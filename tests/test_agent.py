@@ -1504,6 +1504,15 @@ class TestModelResilience:
         assert agent.run_task("hi") == EMPTY_RESPONSE
         assert len(chat.calls) == 1  # nothing to recover, so nothing is re-asked
 
+    def test_empty_reply_names_the_finish_reason_the_provider_sent(self):
+        reply = model_says("")
+        reply.message.stop = "MAX_TOKENS"
+        agent, _ = make_agent([reply])
+        assert agent.run_task("hi") == (
+            "(the model's reply contained no answer text; the provider reported "
+            'finish reason "MAX_TOKENS"; try again)'
+        )
+
     # The shape of session-20260923-183501: the server filed the whole reply,
     # answer included, under reasoning, and the owner was told "empty response".
     REASONING_ONLY = model_says(
@@ -1561,14 +1570,14 @@ then:
         assert len(chat.calls) == 2
 
     def test_reasoning_only_twice_says_what_was_observed(self):
-        from aish.agent import REASONING_ONLY_RESPONSE
+        from aish.agent import REASONING_ONLY_FACT, empty_answer
 
         streamed: list[str] = []
         agent, chat = make_agent(
             [self.REASONING_ONLY, self.REASONING_ONLY], on_token=streamed.append
         )
         chars = len(self.REASONING_ONLY.message.thinking)
-        expected = REASONING_ONLY_RESPONSE.format(chars=chars)
+        expected = empty_answer(REASONING_ONLY_FACT.format(chars=chars))
         assert agent.run_task("o której mecz?") == expected
         assert expected in "".join(streamed)
         assert len(chat.calls) == 2  # asked once, never a loop

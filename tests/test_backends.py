@@ -184,9 +184,35 @@ def test_tools_passed_through_and_ollama_kwargs_dropped():
 # ----------------------------------------------------------------- streaming
 
 
-def _delta_chunk(content=None, tool_calls=None, usage=None):
+def _delta_chunk(content=None, tool_calls=None, usage=None, finish_reason=None):
     delta = SimpleNamespace(content=content, tool_calls=tool_calls)
-    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=usage)
+    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice], usage=usage)
+
+
+def test_stream_keeps_the_finish_reason_the_provider_sent():
+    # The only evidence of why a streamed reply came back empty: without it
+    # session-20260923-212625's zero-token reply could not say what happened.
+    chunks = [_delta_chunk(content="hi"), _delta_chunk(finish_reason="MAX_TOKENS")]
+    backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "gemini")
+    out = list(backend(model="m", messages=[], stream=True))
+    assert out[-1].message.stop == "MAX_TOKENS"
+
+
+def test_stream_with_no_finish_reason_records_none():
+    chunks = [_delta_chunk(content="hi")]
+    backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "local")
+    out = list(backend(model="m", messages=[], stream=True))
+    assert out[-1].message.stop == ""
+
+
+def test_stream_finish_reason_on_a_chunk_with_no_delta():
+    chunk = SimpleNamespace(
+        choices=[SimpleNamespace(delta=None, finish_reason="stop")], usage=None
+    )
+    backend = OpenAICompatBackend(FakeClient(stream_chunks=[chunk]), "local")
+    out = list(backend(model="m", messages=[], stream=True))
+    assert out[-1].message.stop == "stop"
 
 
 def test_stream_preserves_gemini_thought_signature():
