@@ -2678,9 +2678,11 @@ class TestRuleForbiddenPlaybookIsNotPreloaded:
 
     def _run(self, tmp_path):
         steps: list[dict] = []
+        self.notes: list[str] = []
         agent, _ = make_agent(
             [model_says("done")], cwd=str(tmp_path), step_log=steps.append
         )
+        agent.echo = self.notes.append
         agent.run_task("check my zzmail")
         injected = "\n".join(
             str(m.get("content", "")) for m in agent.messages[1:] if m.get("role") == "system"
@@ -2695,6 +2697,8 @@ class TestRuleForbiddenPlaybookIsNotPreloaded:
         assert preload["withheld"] == [
             {"name": "zzmail-watch", "rule": "gmail-through-its-tools"}
         ]
+        # Relayed, not only logged — the refusal and its appeal never happen.
+        assert any("zzmail-watch (gmail-through-its-tools)" in n for n in self.notes)
 
     def test_preloaded_as_before_without_the_rule(self, tmp_path):
         self._write(tmp_path, with_rule=False)

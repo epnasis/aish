@@ -641,12 +641,23 @@ def shell_commands(body: str) -> list[str]:
     injecting the skill as before."""
     commands: list[str] = []
     for block in _SHELL_FENCE.findall(body):
-        for line in block.replace("\\\n", " ").splitlines():
-            line = line.strip()
-            if line.startswith("$ "):
-                line = line[2:].strip()
-            if line and not line.startswith("#"):
-                commands.append(line)
+        pending = ""
+        for raw in block.splitlines():
+            line = raw.strip()
+            if not pending:
+                if line.startswith("$ "):
+                    line = line[2:].strip()
+                # A comment is dropped BEFORE continuations join: a comment
+                # ending in `\` must not swallow the command under it.
+                if not line or line.startswith("#"):
+                    continue
+            if line.endswith("\\"):
+                pending += line[:-1].rstrip() + " "
+                continue
+            commands.append(pending + line)
+            pending = ""
+        if pending.strip():
+            commands.append(pending.strip())
     return commands
 
 

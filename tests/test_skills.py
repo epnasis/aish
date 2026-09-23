@@ -848,7 +848,11 @@ class TestWithheldSkills:
     def test_shell_commands_reads_only_shell_fences(self):
         body = ("Run it:\n```bash\n# a comment\n$ gws gmail +watch \\\n  --once\n\n```\n"
                 "```\ngws gmail output sample\n```\n```zsh\nls\n```\n")
-        assert skills_module.shell_commands(body) == ["gws gmail +watch    --once", "ls"]
+        assert skills_module.shell_commands(body) == ["gws gmail +watch --once", "ls"]
+
+    def test_a_comment_ending_in_a_backslash_swallows_nothing(self):
+        body = "```bash\n# see the docs \\\ngws schema gmail\ngws gmail +watch\n```\n"
+        assert skills_module.shell_commands(body) == ["gws schema gmail", "gws gmail +watch"]
 
     def test_a_fully_forbidden_skill_is_withheld_and_frees_its_slot(
         self, tmp_path, monkeypatch
@@ -892,6 +896,22 @@ class TestWithheldSkills:
         preload = preflight(str(tmp_path), None, "book a table for dinner",
                             forbidden_command=self._forbid("gws gmail"))
         assert preload.names == [] and preload.withheld == []
+
+    def test_a_forbidden_skill_below_the_cut_is_not_reported(self, tmp_path, monkeypatch):
+        """Withheld means "would have been preloaded": ranked past the last
+        slot, it was never going to be, and reporting it would be noise."""
+        self._isolate(tmp_path, monkeypatch)
+        sims = {}
+        for i in range(skills_module.PREFLIGHT_TOP):
+            self._skill(tmp_path, f"top-{i}", "Prose only.")
+            sims[f"top-{i}"] = 0.60 - i / 100
+        self._skill(tmp_path, "gmail-watch", self.WATCH)
+        sims["gmail-watch"] = 0.40
+        preload = preflight(str(tmp_path), None, "check my emails",
+                            semantic=lambda q, es: {id(e): sims[e.name] for e in es},
+                            forbidden_command=self._forbid("gws gmail"))
+        assert len(preload.names) == skills_module.PREFLIGHT_TOP
+        assert preload.withheld == []
 
     def test_memories_and_command_free_skills_are_never_withheld(self, tmp_path, monkeypatch):
         self._isolate(tmp_path, monkeypatch)
