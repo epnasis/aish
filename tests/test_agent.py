@@ -1500,8 +1500,90 @@ class TestModelResilience:
     def test_empty_response_gives_clear_hint(self):
         from aish.agent import EMPTY_RESPONSE
 
-        agent, _ = make_agent([model_says("")])  # no content, no tool calls
+        agent, chat = make_agent([model_says("")])  # no content, no tool calls
         assert agent.run_task("hi") == EMPTY_RESPONSE
+        assert len(chat.calls) == 1  # nothing to recover, so nothing is re-asked
+
+    # The shape of session-20260923-183501: the server filed the whole reply,
+    # answer included, under reasoning, and the owner was told "empty response".
+    REASONING_ONLY = model_says(
+        "", thinking="Mam wystarczająco informacji.\nMecz rozpocznie się o 20:45."
+    )
+
+    def test_reasoning_only_reply_is_asked_once_for_its_answer(self):
+        from aish.agent import AISH_NOTE, ANSWER_WAS_REASONING_ONLY
+
+        streamed: list[str] = []
+        agent, chat = make_agent(
+            [self.REASONING_ONLY, model_says("Mecz rozpocznie się o 20:45.")],
+            on_token=streamed.append,
+        )
+        assert agent.run_task("o której mecz?") == "Mecz rozpocznie się o 20:45."
+        assert "Mecz rozpocznie się o 20:45." in "".join(streamed)
+        # `messages` is the live list, so the second request's history is
+        # everything before the answer it produced.
+        asked_with = chat.calls[1]["messages"][:-1]
+        assert asked_with[-1] == {
+            "role": "user", "content": AISH_NOTE + ANSWER_WAS_REASONING_ONLY + "]"
+        }
+        # The empty turn is not in the history the model is shown again.
+        assert not any(
+            m.get("role") == "assistant" and not m.get("content") for m in asked_with
+        )
+
+    def test_reasoning_only_reply_recovers_on_a_rule_bound_turn(self, tmp_path):
+        """The live session had rules bound, so its answer was HELD for checking;
+        the recovered answer has to be released through that same hold. The
+        rule is one the placeholder satisfies, so Verify cannot re-ask on its
+        own and mask a missing recovery."""
+        rule = """---
+name: no-eur
+description: Prices are never quoted in EUR.
+when: always
+then:
+  answer_must_not_include:
+    pattern: "EUR"
+---
+"""
+        streamed: list[str] = []
+        logged: list[dict] = []
+        agent, chat = rules_agent(
+            tmp_path,
+            [self.REASONING_ONLY, model_says("Mecz rozpocznie się o 20:45.")],
+            rule_texts=(rule,),
+            on_token=streamed.append,
+            on_message=logged.append,
+        )
+        assert agent.run_task("o której mecz?") == "Mecz rozpocznie się o 20:45."
+        assert "Mecz rozpocznie się o 20:45." in "".join(streamed)
+        answers = [m for m in logged if m.get("role") == "assistant"]
+        assert [m["content"] for m in answers] == ["Mecz rozpocznie się o 20:45."]
+        assert len(chat.calls) == 2
+
+    def test_reasoning_only_twice_says_what_was_observed(self):
+        from aish.agent import REASONING_ONLY_RESPONSE
+
+        streamed: list[str] = []
+        agent, chat = make_agent(
+            [self.REASONING_ONLY, self.REASONING_ONLY], on_token=streamed.append
+        )
+        chars = len(self.REASONING_ONLY.message.thinking)
+        expected = REASONING_ONLY_RESPONSE.format(chars=chars)
+        assert agent.run_task("o której mecz?") == expected
+        assert expected in "".join(streamed)
+        assert len(chat.calls) == 2  # asked once, never a loop
+
+    def test_reasoning_only_is_re_asked_again_after_a_real_turn(self):
+        agent, chat = make_agent(
+            [
+                self.REASONING_ONLY,
+                model_says(tool_calls=[tool_call("read_docs")]),
+                self.REASONING_ONLY,
+                model_says("done"),
+            ]
+        )
+        assert agent.run_task("hi") == "done"
+        assert len(chat.calls) == 4
 
     def test_retries_once_then_succeeds(self):
         calls = {"n": 0}
