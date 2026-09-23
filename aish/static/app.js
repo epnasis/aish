@@ -4490,6 +4490,8 @@ function inspectDossier(t, signal) {
   });
 }
 
+const STEP_NOT_RECORDED_YET = "not in the record yet — this step is still running";
+
 function inspectStepClick(t, e) {
   const target = e && e.target;
   if (!target || !target.closest) return;
@@ -4502,13 +4504,23 @@ function inspectStepClick(t, e) {
   if (!t.turnId) { showToast("this turn has no record to open yet"); return; }
   const rows = [...t.body.querySelectorAll(".step")];
   const id = inspectKeys(rows)[rows.indexOf(row)];
-  if (!id) return;
+  if (!id) {
+    // A tap on a step always gets an answer (#409, #410). A row the card names
+    // no step for is either still running — a live "Thinking…" row: a model
+    // call is written to the record only once it returns (`sent`, `reasoning`
+    // and `received` all follow success), so there is nothing to fetch yet —
+    // or a row that is not joined to any step, like a workspace note.
+    showToast(row.classList.contains("running")
+      ? STEP_NOT_RECORDED_YET
+      : "this row is not matched to a step of the record — there is nothing to open");
+    return;
+  }
   const land = (doc) => {
     const resolved = inspectResolve(id, doc);
     const step = (doc.steps || []).find((x) => x.id === resolved);
     if (step) { ssOpenDoc(doc, step.id, undefined, t.turnId); return; }
     ssClose();
-    showToast("not in the record yet — this step is still running");
+    showToast(STEP_NOT_RECORDED_YET);
   };
   // A cached record (a finished turn, tapped before) opens with no wait, so no
   // placeholder flashes on the common re-tap; anything else shows it at once.

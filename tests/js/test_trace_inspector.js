@@ -593,6 +593,69 @@ check("/explain waits behind the same placeholder, and the ✕ reaches it", asyn
   assert.equal(d.steps[s.ssView.index].id, "c1", "lands on the first worth-a-look row");
 });
 
+// ---- 4c. a row the card cannot name still answers the tap (#410) ---------------------
+// A running "Thinking…" row carries no call id and no step-think class, so the
+// card names no step for it; the tap got as far as `if (!id) return;` and
+// ended there — no screen, no toast. A model call enters the record only once
+// it SUCCEEDS (`sent`, `reasoning` and `received` are all written after the
+// call returns), so there is nothing to fetch for it yet, and the tap says so.
+
+check("a tap on a running Thinking… row says it is still running, without a fetch", async () => {
+  const w = world();
+  const s = w.sandbox;
+  let fetches = 0;
+  s.fetchDossier = async () => { fetches += 1; return docFor(); };
+  s.currentTurnId = "turn-r";
+  // The first model call, still out.
+  s.traceStep({ kind: "thinking_start" });
+  const t = s.currentTrace;
+  fire(t.thinkingRow.row);
+  await settle();
+  assert(w.toasts.some((x) => x.includes("still running")), `no response to the tap: ${JSON.stringify(w.toasts)}`);
+  assert.equal(fetches, 0, "nothing of a running model call is in the record, so nothing is fetched");
+  assert(!s.ssIsOpen(), "no placeholder left up");
+  // A later call after a round of tools, and the same call once the answer is
+  // streaming into it ("Answering…"): still running, still answered.
+  s.traceStep({ kind: "thinking", secs: 1, tokens: [1, 1] });
+  s.traceStep({ kind: "tool_start", name: "read_docs", call: 1, model_call: 1, summary: "" });
+  s.traceStep({ kind: "tool", name: "read_docs", call: 1, model_call: 1, ok: true, secs: 0.1 });
+  s.traceStep({ kind: "thinking_start" });
+  t.thinkingRow.isAnswer = true;
+  w.toasts.length = 0;
+  fire(t.thinkingRow.row);
+  await settle();
+  assert(w.toasts.some((x) => x.includes("still running")), `second call: ${JSON.stringify(w.toasts)}`);
+  assert.equal(fetches, 0);
+  // Once it answers, the same row is a model call of the record and opens.
+  s.traceStep({ kind: "thinking_cancel", secs: 2, tokens: [3, 4], answered: true });
+  s.finishTrace();
+  const answer = rows(t).find((r) => r.dataset.inspect === "m:last");
+  fire(answer);
+  await settle();
+  assert(s.ssIsOpen(), "the finished answer row opens");
+});
+
+check("a finished row the card cannot name answers the tap in words", async () => {
+  const w = world();
+  const s = w.sandbox;
+  let fetches = 0;
+  s.fetchDossier = async () => { fetches += 1; return docFor(); };
+  s.currentTurnId = "turn-a";
+  liveTurn(s);
+  const t = s.currentTrace;
+  // A row that is no step of the record — a workspace note, drawn by the same
+  // row builder addWorkspaceNote uses.
+  const note = s.traceRow(t, "", "Working directory", "~/x").row;
+  s.finishTrace();
+  assert.equal(note.dataset.inspect, undefined, "the note is not joined to a step");
+  fire(note);
+  await settle();
+  assert.equal(w.toasts.length, 1, `exactly one answer: ${JSON.stringify(w.toasts)}`);
+  assert(!w.toasts[0].includes("still running"), "a finished row is not running");
+  assert.equal(fetches, 0);
+  assert(!s.ssIsOpen());
+});
+
 // ---- 5. the ordinary card is unchanged ------------------------------------------------
 
 check("a plain answer keeps its card, and a card with no turn to open is still dropped", () => {
