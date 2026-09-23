@@ -1298,14 +1298,17 @@ class TestContextAndHistory:
         assert "MAGIC-CONTEXT-42" in agent.messages[0]["content"]
         assert "read_docs" in agent.messages[0]["content"]
 
-    def test_environment_context_has_date_and_cwd(self):
+    def test_environment_context_has_cwd_and_no_clock(self):
+        """A start time here made the system message differ per restart and per
+        session, so no prompt cache survived either; the time rides the task
+        reminder instead."""
         from aish.agent import environment_context
 
         text = environment_context("/some/dir")
         import datetime
 
-        assert datetime.date.today().isoformat() in text
         assert "/some/dir" in text
+        assert datetime.date.today().isoformat() not in text
 
     def test_on_message_records_serialized_messages(self):
         records = []
@@ -3168,12 +3171,31 @@ class TestScratchWorkspace:
         agent = Agent(model="fake", client_chat=chat, cwd=str(tmp_path), **kwargs)
         return agent, chat
 
-    def test_scratch_dir_created_and_in_system_prompt(self, tmp_path):
-        agent, _ = self._agent(tmp_path)
+    def test_scratch_dir_created_and_named_in_the_task_reminder(self, tmp_path):
+        agent, chat = self._agent(tmp_path)
         assert agent.scratch_dir.is_dir()
         assert "aish-scratch-" in agent.scratch_dir.name
-        assert str(agent.scratch_dir) in agent.messages[0]["content"]
         assert "SCRATCH WORKSPACE" in agent.messages[0]["content"]
+        chat.responses = [model_says("ok")]
+        agent.run_task("hi")
+        reminder = next(
+            m["content"]
+            for m in agent.messages
+            if m["role"] == "system" and m["content"].startswith("<system-reminder>")
+        )
+        assert f"Scratch workspace: {agent.scratch_dir}\n" in reminder
+
+    def test_system_message_is_identical_across_chats(self, tmp_path):
+        """Each chat has its own scratch dir; if its path sat in messages[0], no
+        two chats could share a prompt-cache prefix (26 s per new chat on a
+        local mlx-lm server, whose cache reuses only exact-prefix checkpoints)."""
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        first, _ = self._agent(tmp_path, state_dir=str(tmp_path / "a"))
+        second, _ = self._agent(tmp_path, state_dir=str(tmp_path / "b"))
+        assert first.scratch_dir != second.scratch_dir
+        assert str(first.scratch_dir) not in first.messages[0]["content"]
+        assert first.messages[0]["content"] == second.messages[0]["content"]
 
     def test_write_into_scratch_auto_approves(self, tmp_path):
         agent, chat = self._agent(
@@ -3324,13 +3346,15 @@ class TestScratchBelongsToTheChat:
         assert one.scratch_dir != two.scratch_dir
 
     def test_the_path_the_model_is_told_is_the_path_that_auto_approves(self, tmp_path):
-        """The system prompt names the workspace; the gate scopes to it. When
+        """The task reminder names the workspace; the gate scopes to it. When
         those two came from different agents the card appeared."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         log = state_dir / "session-1.jsonl"
         agent = self._agent(tmp_path, state_dir, log)
-        told = agent.messages[0]["content"]
+        agent.chat.responses = [model_says("ok")]
+        agent.run_task("hi")
+        told = agent.chat.calls[0]["messages"][1]["content"]
         assert str(agent_module.chat_scratch_dir(state_dir, log).resolve()) in told
         assert agent.workspace_roots() and agent.scratch_dir in agent.workspace_roots()
 

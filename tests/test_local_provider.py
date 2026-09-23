@@ -564,3 +564,30 @@ class TestPromptPrefixStability:
         assert task == {"role": "user", "content": "deploy the photo gallery"}
         assert "Current local time: 2026-09-22T" in reminder["content"]
         assert _AdvancingClock.ticks >= 1
+
+    def test_two_chats_send_the_same_prefix(self, monkeypatch, tmp_path):
+        """mlx-lm checkpoints the cache at the end of the leading system
+        messages and, on a model whose cache cannot be trimmed, reuses only an
+        EXACT prefix. Each chat has its own scratch dir, so a path in the
+        system message meant no chat could reuse another's: every new chat
+        re-read ~35k tokens (26 s on mi, 2026-09-22)."""
+        monkeypatch.setattr(datetime, "datetime", _AdvancingClock)
+        sent = []
+        for chat_name in ("one", "two"):
+            client = FakeClient([_completion(content="hi")])
+            chat, _, _ = make_chat(f"local:{REPO}", client=client)
+            state = tmp_path / chat_name
+            state.mkdir()
+            log = state / "session-x.jsonl"
+            agent = Agent(
+                model=REPO, approve=lambda _c: True, client_chat=chat, cwd=str(tmp_path),
+                state_dir=str(state), current_session=lambda log=log: log,
+            )
+            agent.provider = "local"
+            agent.run_task("hello")
+            sent.append((client.calls[0], agent.scratch_dir))
+        (one, one_dir), (two, two_dir) = sent
+        assert one_dir != two_dir
+        assert json.dumps(one["tools"]) == json.dumps(two["tools"])
+        assert json.dumps(one["messages"][0]) == json.dumps(two["messages"][0])
+        assert str(one_dir) in one["messages"][1]["content"]  # the path still reaches it
