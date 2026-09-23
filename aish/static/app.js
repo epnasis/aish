@@ -727,6 +727,11 @@ function enterSession(name, { source = "hello", title, stash = false } = {}) {
   // A backfill in flight belongs to the chat being LEFT ([BACKFILL]): its
   // reading position must not be applied to the one arriving.
   if (name !== currentSession) { backfillFromBottom = -1; endBackfill(); }
+  // Busy is a fact about ONE chat, stated by that chat's hello (#407). It goes
+  // with the chat being left — after the stash above, which reads it — so a
+  // warm paint that lands before the new chat's hello cannot read the old
+  // chat's turn as this one's and build a live card for it.
+  if (name !== currentSession) setBusy(false);
   currentSession = name;
   // Only the mirror paints a truncated copy, and only an unstashable view may
   // come from one — so provenance is a property of the SOURCE, not a flag each
@@ -2331,6 +2336,9 @@ function onReplay(event) {
     // reading position, and even a read-aloud in progress: rebuilding here is
     // what made every app-open jump to the bottom and re-render the world.
     viewFp = fp;
+    // The DOM is kept, but it may be a warm paint made BEFORE this chat's hello
+    // said it is busy (#407) — so the running turn's card is owed here too.
+    adoptRunningTurn();
     return;
   }
   stopSpeaking(); // the active button is about to be detached with the DOM
@@ -2370,19 +2378,7 @@ function onReplay(event) {
   // keeps its claim: that no-op is the point of the warm peek.)
   viewFp = offlineViewing ? "" : fp;
   viewDirty = false;
-  // A running turn whose `user` event fell outside the window just painted (the
-  // transcript buffer keeps the last 500 events, and one long streaming command
-  // can push a turn's start past it) leaves the view busy with no card — and the
-  // card is where Stop and the status channel live now (#398); the bottom line
-  // used to show the phase label here, and never Stop, because the replayed
-  // `done` before the tail had cleared busy. Build it in the state a step would build it in:
-  // no origin, and no turn id to name — `currentTurnId` is the last REPLAYED
-  // turn's, which this one is not. The one creator, so the manifest holds.
-  if (clientBusy && !currentTrace && !offlineViewing) {
-    currentTurnId = "";
-    turnStart = 0;
-    ensureTrace();
-  }
+  adoptRunningTurn();
   // The reading position, in priority order: the place a backfill must not move
   // you from, then the place you left this chat at, then the tail.
   if (!restoreBackfillPos() && !restoreScrollPos()) scrollToEnd(true);
@@ -2391,6 +2387,26 @@ function onReplay(event) {
   // Every replay marks a fresh view (new chat, resume, reconnect) — on
   // desktop, land the cursor in the composer ready to type.
   if (FINE_POINTER && $("backdrop").hidden) input.focus();
+}
+
+// A running turn whose `user` event fell outside the window just painted (the
+// transcript buffer keeps the last 500 events, and one long streaming command
+// can push a turn's start past it) leaves the view busy with no card — and the
+// card is where Stop and the status channel live now (#398); the bottom line
+// used to show the phase label here, and never Stop, because the replayed
+// `done` before the tail had cleared busy. Build it in the state a step would
+// build it in: no origin, and no turn id to name — `currentTurnId` is the last
+// REPLAYED turn's, which this one is not. The one creator, so the manifest holds.
+//
+// `clientBusy` is safe to read here only because it describes the chat ON
+// SCREEN: enterSession drops it on every switch and the new chat's hello
+// restates it (#407). When it outlived a switch, a warm paint of an idle chat
+// read the chat it had left as running and built a live card at 0:00.
+function adoptRunningTurn() {
+  if (!clientBusy || currentTrace || offlineViewing) return;
+  currentTurnId = "";
+  turnStart = 0;
+  ensureTrace();
 }
 // [REPLAY-LANDING-END]
 
