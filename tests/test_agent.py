@@ -1581,6 +1581,28 @@ class TestModelResilience:
             STOP_GATE_REFUSAL.split("{")[0][:40]
         ), "the stop gate stays armed through the re-ask"
 
+    def test_whitespace_does_not_lift_the_stop_gate(self, tmp_path):
+        """The gate lifts on a text-only reply and records `cleared_by:
+        text_only_turn`; a reply of blank lines is not one, and the placeholder
+        beside it says so."""
+        from aish.approval import Denied
+
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch x")]),
+                model_says("\n\n"),
+                model_says("\n"),
+            ],
+            approve=lambda _cmd: Denied("not that"),
+            step_log=steps.append,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("do it")
+        assert not any(
+            (s.get("evidence") or {}).get("cleared_by") == "text_only_turn" for s in steps
+        )
+
     def test_a_tool_call_with_no_text_is_not_an_empty_reply(self):
         agent, chat = make_agent(
             [model_says(tool_calls=[tool_call("read_docs")]), model_says("done")]
@@ -8107,6 +8129,30 @@ then:
         result = agent.run_task("and now?")
         assert REJECTED_DRAFT_DELIVERED not in result
         assert self.DRAFT not in result
+
+    def test_aish_s_own_placeholder_is_never_delivered_as_the_model_s_answer(
+        self, tmp_path, monkeypatch
+    ):
+        """Found in delivery review: a rule the placeholder fails rejected it,
+        the placeholder was stashed as "the draft", and the next empty reply
+        shipped it under "the answer it gave earlier" — aish's own text,
+        presented as an answer that never existed."""
+        from aish.agent import REJECTED_DRAFT_DELIVERED
+
+        rule = """---
+name: chips
+description: Always give tap buttons.
+when: always
+then:
+  answer_must_include:
+    pattern: "aish-reply://"
+---
+"""
+        _, _, result, _, _ = self._run(
+            tmp_path, monkeypatch, [model_says("")] * 6, rule_texts=(rule,)
+        )
+        assert REJECTED_DRAFT_DELIVERED not in result
+        assert result.startswith("(the model's reply contained no text")
 
     def test_a_stopped_turn_never_logs_the_draft_without_its_note(
         self, tmp_path, monkeypatch

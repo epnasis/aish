@@ -514,14 +514,16 @@ CONTINUE_OR_ANSWER = "Continue the task where you left off, or give your answer 
 # Here, not in rules.py's templates: the hold is the agent's, and only the
 # agent knows the draft was held.
 ANSWER_WITHHELD = (
-    "The user has not seen that answer — it was withheld and will not be "
-    "shown. Give the complete answer again, with the change."
+    "The user has not seen that answer — it was withheld. Give the complete "
+    "answer again, with the change."
 )
 
 
+# About the TURN, not a reply: on _finish_stopped the wrap-up call can fail,
+# and then no reply arrived at all.
 REJECTED_DRAFT_DELIVERED = (
-    "[aish] the model's last reply contained no answer text; below is the "
-    "answer it gave earlier in this turn, which a rule held back"
+    "[aish] the turn ended with no answer text; below is the answer the model "
+    "gave earlier in this turn, which a rule held back"
 )
 
 
@@ -4474,7 +4476,7 @@ class Agent:
             # Captured BEFORE the clear: a denial's stop gate is lifted by this
             # very turn, and Verify must not then use the turn to keep going.
             was_stopped = self._pending_comment_response
-            if content and not tool_calls:
+            if content.strip() and not tool_calls:
                 self._pending_comment_response = False
                 # Emitted from the line that clears it, so `cleared_by` states
                 # what this branch actually tested and not a later guess
@@ -4527,7 +4529,11 @@ class Agent:
                     # owner has provably not seen.
                     withheld = self._held_answer is not None
                     self._release_held(discard=True)
-                    self._last_rejected = result
+                    if content.strip():
+                        # Only the model's own words: a rejected placeholder is
+                        # aish's text, and delivering it as "the answer it gave
+                        # earlier" would claim an answer that never existed.
+                        self._last_rejected = result
                     # The rejected entry must not stay the one a later release
                     # logs: a wrap-up that produced nothing would otherwise log
                     # this draft whole, with no note (found in review).
