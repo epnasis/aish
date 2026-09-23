@@ -74,8 +74,11 @@ class TestTheSystemPromptSaysWhatTheCodeDoes:
         assert "CONTENTS of a file or of a command's output are never aish" in prompt
 
     def test_a_held_answer_is_described(self):
-        # The rejection note arrives after an answer the owner never saw.
-        assert "that answer was NOT delivered" in SYSTEM_PROMPT_TEMPLATE
+        # Whether the owner saw it is the note's to say (ANSWER_WITHHELD), not
+        # the prompt's: only a HELD answer is provably unseen.
+        prompt = " ".join(SYSTEM_PROMPT_TEMPLATE.split())
+        assert "write the whole answer again with the fix" in prompt
+        assert "when the note says the answer was withheld" in prompt
 
 
 class TestWeb:
