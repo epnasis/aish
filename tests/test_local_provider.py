@@ -536,6 +536,7 @@ class TestPromptPrefixStability:
         )
         agent.provider = "local"
         assert agent.run_task("deploy the photo gallery") == "deployed"
+        self._last_agent = agent
         return client.calls
 
     def test_every_call_in_a_task_extends_the_one_before(self, monkeypatch, tmp_path):
@@ -564,6 +565,24 @@ class TestPromptPrefixStability:
         assert task == {"role": "user", "content": "deploy the photo gallery"}
         assert "Current local time: 2026-09-22T" in reminder["content"]
         assert _AdvancingClock.ticks >= 1
+
+    def test_the_next_message_extends_the_previous_request(self, monkeypatch, tmp_path):
+        """Across user messages too: nothing already sent is rewritten, so the
+        server's checkpoint at the end of the previous request is an exact
+        prefix of the next one. Deleting the previous reminder broke this, and
+        on a model whose cache cannot be trimmed every message re-read the
+        whole conversation (cached stuck at 33,627 tokens on mi, 2026-09-22)."""
+        sent = self._run(monkeypatch, tmp_path)  # a task with preload
+        client = FakeClient([_completion(content="again")])
+        chat, _, _ = make_chat(f"local:{REPO}", client=client)
+        agent = self._last_agent
+        agent.chat = chat
+        assert agent.run_task("deploy the photo gallery again") == "again"
+        before, after = sent[-1], client.calls[0]
+        assert json.dumps(after["tools"]) == json.dumps(before["tools"])
+        prefix = after["messages"][: len(before["messages"])]
+        assert json.dumps(prefix) == json.dumps(before["messages"])
+        assert len(after["messages"]) > len(before["messages"])
 
     def test_two_chats_send_the_same_prefix(self, monkeypatch, tmp_path):
         """mlx-lm checkpoints the cache at the end of the leading system

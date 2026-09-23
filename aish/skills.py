@@ -831,6 +831,7 @@ class Preload:
     # trace persists them so retrieval quality is auditable from logs alone.
     items: list[dict] = field(default_factory=list)
     mode: str = ""  # "semantic" | "lexical" — which selector actually ran
+    blocks: list[str] = field(default_factory=list)  # one per name, as joined into `text`
 
 
 def preflight(
@@ -952,7 +953,7 @@ def preflight(
         names.append(entry.name)
         items.append({"name": entry.name, "kind": entry.kind, **diag})
         remaining -= len(block) + 2  # +2 covers the join's blank line
-    return Preload("\n\n".join(blocks), names, unread, items, mode)
+    return Preload("\n\n".join(blocks), names, unread, items, mode, blocks)
 
 
 def _gate_arms(diag: dict) -> bool:
