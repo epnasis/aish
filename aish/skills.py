@@ -628,6 +628,28 @@ def knowledge_index(cwd: str, lessons_path=None, on_index=None) -> str:
     return text
 
 
+_SHELL_FENCE = re.compile(
+    r"^```[ \t]*(?:bash|sh|shell|zsh|console)[ \t]*\n(.*?)^```", re.M | re.S
+)
+
+
+def shell_commands(body: str) -> list[str]:
+    """The shell commands a playbook teaches: every line of its bash/sh/zsh
+    fenced blocks, continuations joined, comments and blanks dropped, a
+    leading prompt `$ ` stripped. Untagged fences are NOT read — prose and
+    output samples live there, and a missed command only errs toward
+    injecting the skill as before."""
+    commands: list[str] = []
+    for block in _SHELL_FENCE.findall(body):
+        for line in block.replace("\\\n", " ").splitlines():
+            line = line.strip()
+            if line.startswith("$ "):
+                line = line[2:].strip()
+            if line and not line.startswith("#"):
+                commands.append(line)
+    return commands
+
+
 def _block_header(entry: Entry) -> str:
     """"[kind: name] description" — the description rides along unless it is
     already the body's opening line, because for memories saved via `remember`
@@ -832,6 +854,9 @@ class Preload:
     items: list[dict] = field(default_factory=list)
     mode: str = ""  # "semantic" | "lexical" — which selector actually ran
     blocks: list[str] = field(default_factory=list)  # one per name, as joined into `text`
+    # {name, rule}: skills kept out because a rule in force forbids every
+    # command they teach — recorded so "why wasn't it preloaded" has an answer.
+    withheld: list[dict] = field(default_factory=list)
 
 
 def preflight(
@@ -841,6 +866,7 @@ def preflight(
     char_budget: int = PREFLIGHT_TOTAL_CHARS,
     semantic=None,
     context: str = "",
+    forbidden_command=None,
 ) -> Preload:
     """Pre-flight retrieval: the top skills/memories matching a task,
     rendered as blocks the agent injects directly — the model wakes up with
@@ -865,7 +891,16 @@ def preflight(
     embedding query only for short tasks — a bare follow-up is a hopeless
     query alone — while the rails keep reading only the current message.
     In lexical mode (no embeddings) the keyword rail remains a full
-    guarantee: there is no similarity signal to confirm against."""
+    guarantee: there is no similarity signal to confirm against.
+
+    `forbidden_command(command)` names the rule in force that forbids running
+    that command, or None. A skill ALL of whose commands are forbidden is
+    passed over and its slot goes to the next entry: a playbook the model may
+    not follow is noise however well its identity line matches. One runnable
+    command keeps it — the rule restricts running, not reading — and so does
+    NAMING it, for the reason a name hit is unconditional everywhere else. It
+    stays in the index and read_skill still loads it. Only a skill that would
+    otherwise have taken a slot is reported in `withheld`."""
     if not task.split():
         return Preload()
     task_padded = _pad_words(task)
@@ -909,6 +944,18 @@ def preflight(
             (entry, {"score": score, "rail": _exact_rail(entry, task_padded)})
             for score, entry in picked
         ]
+    withheld: list[dict] = []
+    if forbidden_command is not None:
+        kept: list[tuple[Entry, dict]] = []
+        for entry, diag in chosen:
+            if len(kept) >= PREFLIGHT_TOP:
+                break
+            rule = None if diag.get("rail", 0) >= 4 else _forbids_all(entry, forbidden_command)
+            if rule:
+                withheld.append({"name": entry.name, "rule": rule})
+            else:
+                kept.append((entry, diag))
+        chosen = kept
     blocks: list[str] = []
     names: list[str] = []
     unread: list[str] = []
@@ -953,7 +1000,25 @@ def preflight(
         names.append(entry.name)
         items.append({"name": entry.name, "kind": entry.kind, **diag})
         remaining -= len(block) + 2  # +2 covers the join's blank line
-    return Preload("\n\n".join(blocks), names, unread, items, mode, blocks)
+    return Preload("\n\n".join(blocks), names, unread, items, mode, blocks, withheld)
+
+
+def _forbids_all(entry: Entry, forbidden_command) -> str | None:
+    """The rule(s) forbidding every command a skill teaches, or None when it
+    is a memory, teaches no command, or teaches one that may still run."""
+    if entry.kind != "skill":
+        return None
+    commands = shell_commands(entry.body)
+    if not commands:
+        return None
+    rules: list[str] = []
+    for command in commands:
+        rule = forbidden_command(command)
+        if not rule:
+            return None
+        if rule not in rules:
+            rules.append(rule)
+    return ", ".join(rules)
 
 
 def _gate_arms(diag: dict) -> bool:

@@ -4220,6 +4220,14 @@ class Agent:
             seed = continuing.prompt
             seed_images = list(continuing.images) or None
             seed_documents = list(continuing.documents) or None
+        # Seed (#191): evaluate the rule corpus against this turn and create the
+        # bindings, at the same position `knowledge` is emitted from — before
+        # the user message, so nothing this turn dispatches can outrun the gate.
+        # Before preflight, because a rule forbidding every command a playbook
+        # teaches keeps that playbook out of the preload: "check my emails"
+        # preloaded a Gmail Pub/Sub watcher made of nothing but `gws gmail`
+        # commands, in a turn where a rule forbade exactly those.
+        rules_text = self.seed_rules(seed, seed_images, seed_documents)
         preload = skills.preflight(
             self.cwd,
             self.lessons_path,
@@ -4230,6 +4238,7 @@ class Agent:
             ),
             semantic=self.semantic.scores if self.semantic is not None else None,
             context=prior_user_text[-skills.PREFLIGHT_CONTEXT_CHARS :],
+            forbidden_command=self._rule_forbidding,
         )
         if self.semantic is not None and self.semantic.error and not self._semantic_warned:
             self._semantic_warned = True
@@ -4238,10 +4247,6 @@ class Agent:
                 f"({self.semantic.error[:80]}); falling back to word matching"
             )
         self._pending_skill_reads = {n: GATE_MAX_REFUSALS for n in preload.unread}
-        # Seed (#191): evaluate the rule corpus against this turn and create the
-        # bindings, at the same position `knowledge` is emitted from — before
-        # the user message, so nothing this turn dispatches can outrun the gate.
-        rules_text = self.seed_rules(seed, seed_images, seed_documents)
         knowledge_text, rules_prose = reminder_delta(
             earlier_reminders, preload.blocks, preload.names, rules_text
         )
@@ -4276,8 +4281,15 @@ class Agent:
                 "mode": preload.mode,
                 "count": len(preload.names),
                 "names": list(preload.names),
+                **({"withheld": preload.withheld} if preload.withheld else {}),
             },
         )
+        if preload.withheld:
+            # Relayed, not only logged: the rule's usual refusal and its appeal
+            # to the owner never happen for a playbook that was never offered.
+            self._note("⚑ not preloaded, every command in it is forbidden: " + ", ".join(
+                f"{item['name']} ({item['rule']})" for item in preload.withheld
+            ))
         if preload.names:
             self._note("⚑ preloaded knowledge: " + ", ".join(preload.names))
             # sim/rail/score diagnostics persist to the session log via the
@@ -10075,6 +10087,12 @@ class Agent:
         for binding in self._bindings:
             self._note(f"⚖ rule in force: {binding.name}")
         return rules.seed_text(self._bindings)
+
+    def _rule_forbidding(self, command: str) -> str | None:
+        """The name of the rule in force that forbids running `command`, or
+        None. Asks without spending a refusal round — nothing is being run."""
+        binding = rules.forbids(self._bindings, "run_command", {"command": command}, self.cwd)
+        return binding.name if binding is not None else None
 
     def mark_rules_seeded(self) -> None:
         """The binding record is written only once the PROSE has reached the

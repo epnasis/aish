@@ -1828,6 +1828,35 @@ def gate(bindings: list[Binding], tool: str, args: dict | None = None,
     return verdicts
 
 
+def forbids(
+    bindings: list[Binding], tool: str, args: dict | None = None, cwd: str = ""
+) -> Binding | None:
+    """The action-shape binding whose `never_use` would refuse this call, or
+    None — the question `gate` answers, asked without spending a refusal
+    round. For callers deciding what to OFFER the model rather than what to
+    run; the secret check is left out because nothing offered is a real
+    command.
+
+    Narrower than `gate` on purpose. Only an action-shape rule is about THIS
+    command — a topic rule forbidding run_command forbids every command, and
+    would make "all of a playbook's commands" mean "any". And a held binding
+    (`max_rounds == 0`: its trigger was unevaluable, so the first violation
+    goes to the owner) never counts: acting on it early would decide on a
+    trigger nobody confirmed and make sure the owner is never asked."""
+    for binding in bindings:
+        rule = binding.rule
+        if rule.trigger != TRIGGER_ACTION_SHAPE or binding.max_rounds == 0:
+            continue
+        if not action_matches(rule.action, tool, args or {}, cwd):
+            continue
+        if not binding.active or binding.overridden:
+            continue
+        for obligation in binding.obligations:
+            if obligation["verb"] == VERB_NEVER_USE and tool in obligation["what"]:
+                return binding
+    return None
+
+
 def _gate_one(
     binding: Binding, tool: str, args: dict, cwd: str, secrets_in=None
 ) -> GateVerdict:

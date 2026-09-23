@@ -356,8 +356,8 @@ class TestJudgeLoop:
         assert not (state / "curation-actions.jsonl").exists()
 
     def test_notification_summarizes_actions(self, tmp_path, monkeypatch):
-        gm = self._corpus(monkeypatch, tmp_path)
-        make_entry(gm, "noisy", "desc")
+        self._corpus(monkeypatch, tmp_path)
+        make_entry(tmp_path / "gs", "noisy", "desc")  # a skill: a memory refuses disable
         state = tmp_path / "state"
         self._dead_weight_logs(state)
         pushed = []
@@ -431,7 +431,8 @@ class TestJudgePrompt:
         gm = tmp_path / "gm"
         monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", gm)
         monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
-        make_entry(gm, "noisy", "a desc", keywords="k1", body="the full body")
+        # A skill: the one kind every verb is offered for.
+        make_entry(tmp_path / "gs", "noisy", "a desc", keywords="k1", body="the full body")
         entry = skills_module.load_entries(str(tmp_path), None)[0]
         from aish.curate import EntryStats
 
@@ -442,6 +443,23 @@ class TestJudgePrompt:
         assert "injected into 7 tasks" in prompt or "auto-injected" in prompt
         assert "VERDICT: <repair|pin|disable|skip>" in prompt
         assert "Example:" in prompt  # small models need MUST + example
+
+    def test_memory_evidence_never_claims_it_went_unused(self, tmp_path, monkeypatch):
+        import aish.skills as skills_module
+
+        gm = tmp_path / "gm"
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", gm)
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
+        make_entry(gm, "fact", "primary mailbox is Tuta")
+        entry = skills_module.load_entries(str(tmp_path), None)[0]
+        from aish.curate import EntryStats
+
+        stat = EntryStats(name="fact", injections=7, rails=0, sims=[0.3], evidence=[])
+        prompt = judge_prompt(entry, stat, "dead-weight")
+        assert "NEVER used" not in prompt
+        assert "cannot be observed" in prompt
+        assert "- disable" not in prompt  # the envelope refuses it; do not offer it
+        assert "VERDICT: <repair|pin|skip>" in prompt
 
 
 class TestEnvelopeGuards:
@@ -487,6 +505,40 @@ class TestEnvelopeGuards:
         text = path.read_text(encoding="utf-8")
         assert "status: disabled" not in text
         assert load_recent_actions(state, NOW)["noisy"] == "skip"
+
+    def _dead_weight_log(self, state, name, kind):
+        records = []
+        for i in range(MIN_INJECTIONS):
+            records += [
+                knowledge([{"label": name, "kind": kind, "sim": 0.29}]),
+                user(f"task {i}"),
+            ]
+        write_log(state, "session-20260728-100000-000001.jsonl", records)
+
+    def test_a_memory_is_never_disabled_for_going_unused(self, tmp_path, monkeypatch):
+        """The ledger cannot see a memory being used — a fact shapes an answer
+        without a trace — so "never used" is not evidence against one. The
+        live judge retired the owner's primary-mailbox fact on exactly that."""
+        gm = self._corpus(monkeypatch, tmp_path)
+        path = make_entry(gm, "owner-mailboxes", "primary mailbox is Tuta")
+        state = tmp_path / "state"
+        self._dead_weight_log(state, "owner-mailboxes", "memory")
+        run_curate(judge=lambda p: "VERDICT: disable\nREASON: never used",
+                   scores=lambda q, e: {}, notify_fn=lambda *a: None,
+                   env={}, state_dir=state, now=NOW)
+        assert "status: disabled" not in path.read_text(encoding="utf-8")
+        assert load_recent_actions(state, NOW)["owner-mailboxes"] == "skip"
+
+    def test_a_skill_can_still_be_disabled_for_going_unread(self, tmp_path, monkeypatch):
+        """Skills keep the verb: an unread playbook IS observable (read_skill)."""
+        self._corpus(monkeypatch, tmp_path)
+        path = make_entry(tmp_path / "gs", "unread-play", "a playbook nobody opens")
+        state = tmp_path / "state"
+        self._dead_weight_log(state, "unread-play", "skill")
+        run_curate(judge=lambda p: "VERDICT: disable\nREASON: never read",
+                   scores=lambda q, e: {}, notify_fn=lambda *a: None,
+                   env={}, state_dir=state, now=NOW)
+        assert "status: disabled" in path.read_text(encoding="utf-8")
 
     def test_skill_never_loses_a_merge_to_a_memory(self, tmp_path, monkeypatch):
         gm = self._corpus(monkeypatch, tmp_path)

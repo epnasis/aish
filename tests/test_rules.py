@@ -2681,3 +2681,47 @@ class TestOpeningIsTheAnswers:
         evidence = rules.TurnEvidence(answer=f"{self.GROVEL}\n\n{self.ANSWER}")
         assert evidence.looked_at("opening") == self.GROVEL
         assert evidence.looked_at("ending") == self.ANSWER
+
+
+class TestForbidsAsksWithoutSpending:
+    """`forbids` answers what `gate` would refuse, for a caller deciding what to
+    OFFER the model (the preload) — so it must not burn a refusal round, and it
+    must only count a binding that is about THIS command."""
+
+    CAPS = {"run_command", "web_search"}
+
+    def _binding(self, max_rounds=rules.RULE_MAX_REFUSALS, **over):
+        fields = {"name": "gmail-through-its-tools", "description": "d",
+                  "when_subject": "action",
+                  "when_action": {"command_starts_with": "gws gmail"},
+                  "never_use": ["run_command"]}
+        fields.update(over)
+        rule, errors = rules.lint(rules.render(fields), capabilities=self.CAPS)
+        assert not errors, errors
+        return rules.bind(rule, {"on": "action"}, "b1", self.CAPS, max_rounds=max_rounds)
+
+    def test_names_the_rule_and_spends_no_round(self):
+        binding = self._binding()
+        found = rules.forbids([binding], "run_command", {"command": "gws gmail +watch"})
+        assert found is binding
+        assert binding.rounds == 0
+        assert rules.forbids([binding], "run_command", {"command": "gws drive ls"}) is None
+        assert rules.forbids([binding], "web_search", {"query": "gws gmail"}) is None
+
+    def test_an_overridden_binding_forbids_nothing(self):
+        binding = self._binding()
+        binding.overridden = True
+        assert rules.forbids([binding], "run_command", {"command": "gws gmail x"}) is None
+
+    def test_a_held_binding_is_left_for_the_owner(self):
+        """Unevaluable + fail: hold binds with max_rounds 0 so the FIRST
+        violation reaches the owner; pre-empting it would make sure it never
+        does."""
+        binding = self._binding(max_rounds=0)
+        assert rules.forbids([binding], "run_command", {"command": "gws gmail x"}) is None
+
+    def test_a_rule_not_about_the_command_does_not_count(self):
+        """A blanket run_command ban would make "every command a playbook
+        teaches is forbidden" true of any playbook with a command in it."""
+        binding = self._binding(when_subject="always", when_action=None)
+        assert rules.forbids([binding], "run_command", {"command": "ls"}) is None
