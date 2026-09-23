@@ -2570,15 +2570,19 @@ class TestSkillsFreshness:
         agent.run_task("task two")
         assert "- gh-issues: Use when asked to open a GitHub issue" in agent.messages[0]["content"]
 
-    def test_reminder_present_exactly_once_before_user_message(self, tmp_path):
-        from aish.agent import TASK_REMINDER_MARK
+    def test_each_task_appends_a_reminder_and_never_rewrites_one(self, tmp_path):
+        """History the model has read is never edited: a local server whose
+        cache cannot be trimmed re-reads everything after the first edit."""
+        from aish.agent import SUPERSEDES_EARLIER, TASK_REMINDER_MARK
 
         self._write_skill(tmp_path, "demo", "Use when demoing")
         agent, _ = make_agent(
             [model_says("first"), model_says("second")], cwd=str(tmp_path)
         )
         agent.run_task("task one")
+        after_one = [dict(m) for m in agent.messages[1:]]
         agent.run_task("task two")
+        assert agent.messages[1 : 1 + len(after_one)] == after_one
         reminders = [
             i
             for i, m in enumerate(agent.messages)
@@ -2586,9 +2590,10 @@ class TestSkillsFreshness:
             and str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
             and i > 0
         ]
-        assert len(reminders) == 1
-        # sits directly before the latest user message
-        assert agent.messages[reminders[0] + 1]["content"] == "task two"
+        assert len(reminders) == 2
+        assert [agent.messages[i + 1]["content"] for i in reminders] == ["task one", "task two"]
+        assert SUPERSEDES_EARLIER not in agent.messages[reminders[0]]["content"]
+        assert agent.messages[reminders[1]]["content"].startswith(SUPERSEDES_EARLIER)
 
     def test_no_skills_nudge_when_no_skills(self, tmp_path):
         from aish.agent import TASK_REMINDER_MARK
@@ -2691,19 +2696,37 @@ class TestPreflightInjection:
             str(m.get("content", "")).startswith(TASK_REMINDER_MARK) for m in logged
         )
 
-    def test_second_task_strips_first_preload(self, tmp_path):
+    def test_a_preload_already_in_history_is_named_not_repeated(self, tmp_path):
+        """Earlier reminders stay (append-only history), so a skill already
+        shown in full is only named again — shown once per chat, not per turn."""
+        from aish.agent import KNOWLEDGE_SHOWN_EARLIER
+
         self._write_skill(tmp_path, "zzfrob", "Pull the zzfrob lever twice.")
         agent, _ = make_agent(
             [model_says("first"), model_says("second")], cwd=str(tmp_path)
         )
         agent.run_task("please zzfrob the thing")
-        agent.run_task("unrelated follow-up request")
+        agent.run_task("zzfrob it again please")
         bodies = [
             m
             for m in agent.messages[1:]
             if "Pull the zzfrob lever twice." in str(m.get("content", ""))
         ]
-        assert bodies == []  # old injection gone; only the plain reminder remains
+        assert len(bodies) == 1
+        latest = agent.messages[-3]["content"]  # reminder, task, answer
+        assert KNOWLEDGE_SHOWN_EARLIER.format(names="zzfrob") in latest
+
+    def test_a_preload_whose_earlier_copy_is_gone_is_shown_in_full_again(self, tmp_path):
+        """"Shown earlier" is read from the history, so a rewound turn cannot
+        leave the model pointed at a reminder that no longer exists."""
+        self._write_skill(tmp_path, "zzfrob", "Pull the zzfrob lever twice.")
+        agent, _ = make_agent(
+            [model_says("first"), model_says("second")], cwd=str(tmp_path)
+        )
+        agent.run_task("please zzfrob the thing")
+        agent.rewind_last_task()
+        agent.run_task("please zzfrob the thing")
+        assert "Pull the zzfrob lever twice." in agent.messages[-3]["content"]
 
     def test_echo_announces_preloaded_names(self, tmp_path):
         self._write_skill(tmp_path, "zzfrob", "Pull the lever.")
@@ -7149,13 +7172,29 @@ class TestRuleSeeding:
         [row] = records(logged, "rule_eval")[0]["evaluated"]
         assert row["verdict"] == "bind" and row["binding"] == binding["id"]
 
-    def test_the_seeded_block_does_not_survive_into_the_next_turn(self, tmp_path):
+    def test_a_turn_without_rules_says_the_earlier_ones_lapsed(self, tmp_path):
         """A rule that bound three turns ago must not still claim to govern
-        this one — the reminder is replaced per task, not appended to."""
+        this one. Its reminder stays in history (never rewritten), so the next
+        reminder says so: superseded, and no rules in force now."""
+        from aish.agent import RULES_NONE, SUPERSEDES_EARLIER
+
         agent, _ = rules_agent(tmp_path, [model_says("a"), model_says("b")])
         agent.run_task(TASK)
         agent.run_task("what is the weather")
-        assert not _seeded_reminders(agent)
+        latest = agent.messages[-3]["content"]
+        assert latest.startswith(SUPERSEDES_EARLIER)
+        assert RULES_NONE in latest
+        assert len(_seeded_reminders(agent)) == 2
+
+    def test_unchanged_rules_are_confirmed_not_restated(self, tmp_path):
+        from aish.agent import RULES_UNCHANGED
+        from aish.rules import SEED_HEADER
+
+        agent, _ = rules_agent(tmp_path, [model_says("a"), model_says("b"), model_says("c")])
+        agent.run_task(TASK)
+        agent.run_task(TASK)
+        second = agent.messages[-3]["content"]
+        assert RULES_UNCHANGED in second and SEED_HEADER not in second
 
     def test_a_source_with_no_available_reader_is_unsatisfiable_at_bind_time(self, tmp_path):
         """A YouTube link routes to `youtube_analyze`, which is a plugin tool
@@ -15272,3 +15311,46 @@ class TestRewindWalksBackToTheTypedQuestion:
             {"role": "user", "content": "also check the spam folder"},
         ]
         assert agent.rewind_last_task() == "the question"
+
+
+class TestReminderDelta:
+    """What a new reminder carries, given the reminders already in history.
+    Read from the history alone, so nothing can point at a reminder that is gone."""
+
+    def _rules(self, body):
+        from aish.rules import SEED_HEADER
+
+        return f"{SEED_HEADER}\n• {body}"
+
+    def _reminder(self, rules_text):
+        from aish.agent import RULES_REMINDER
+
+        return "<system-reminder>time</system-reminder>\n" + RULES_REMINDER.format(
+            rules=rules_text
+        )
+
+    def test_the_rules_chain(self):
+        from aish.agent import RULES_NONE, RULES_UNCHANGED, reminder_delta
+
+        one, two = self._rules("rule one"), self._rules("rule two")
+        history: list[str] = []
+        steps = [(one, one), (one, RULES_UNCHANGED), (one, RULES_UNCHANGED),
+                 (two, two), ("", RULES_NONE), ("", ""), (two, two)]
+        for rules_text, expected in steps:
+            _, rules = reminder_delta(history, [], [], rules_text)
+            assert rules == expected, (rules_text, history)
+            history.append(self._reminder(rules))
+
+    def test_no_rules_ever_adds_nothing(self):
+        from aish.agent import reminder_delta
+
+        assert reminder_delta([], [], [], "") == ("", "")
+        assert reminder_delta(["<system-reminder>time</system-reminder>"], [], [], "") == ("", "")
+
+    def test_knowledge_is_split_into_new_blocks_and_names(self):
+        from aish.agent import KNOWLEDGE_SHOWN_EARLIER, reminder_delta
+
+        earlier = ["<system-reminder>…[skill: a]\nbody a…</system-reminder>"]
+        knowledge, _ = reminder_delta(earlier, ["[skill: a]\nbody a", "[skill: b]\nbody b"],
+                                      ["a", "b"], "")
+        assert knowledge == "[skill: b]\nbody b\n\n" + KNOWLEDGE_SHOWN_EARLIER.format(names="a")

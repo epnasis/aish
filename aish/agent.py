@@ -1165,8 +1165,13 @@ _CATALOGUE: dict[str, Any] = {}
 # recency is what they obey, so the reminder is (re)inserted directly before
 # each user message instead of relying on the system prompt alone. It is
 # appended to self.messages directly (never via _append) so it stays out of
-# the session log and the web transcript, and the previous task's copy is
-# removed first so exactly one exists in history.
+# the session log and the web transcript.
+#
+# Earlier reminders are KEPT, never deleted: history the model has already read
+# must not change, or a local server whose cache cannot be trimmed re-reads the
+# whole conversation on every message (docs/agent-core.md, "The prompt prefix
+# must be stable"). A later reminder supersedes the earlier ones by saying so,
+# and carries only what they do not already hold (`reminder_delta`).
 TASK_REMINDER_MARK = "<system-reminder>"
 TASK_REMINDER = (
     "<system-reminder>Before acting: scan the Skills index in your system "
@@ -1178,7 +1183,7 @@ TASK_REMINDER = (
 
 # When pre-flight retrieval finds matching knowledge (skills.preflight), the
 # reminder slot carries the content itself instead of a nudge to go look for
-# it. Shares TASK_REMINDER_MARK so the strip-previous logic treats both alike.
+# it. Shares TASK_REMINDER_MARK so every reader of the reminders treats both alike.
 PRELOAD_REMINDER = (
     "<system-reminder>Saved knowledge relevant to this task, preloaded for "
     "you — follow it over your training data:\n\n{knowledge}\n\n"
@@ -1191,10 +1196,72 @@ PRELOAD_REMINDER = (
 
 
 # The seeded half of "prose explains, gate enforces" (#191). It rides the SAME
-# per-task system message as the time note and preloaded knowledge, so it is
-# replaced every turn by the strip-previous logic instead of accumulating — a rule
-# that bound three turns ago must not still be claiming to govern this one.
+# per-task system message as the time note and preloaded knowledge. Earlier
+# reminders stay in history, so a rule that bound three turns ago must not still
+# be claiming to govern this one: every reminder after the first says the
+# earlier ones are superseded, and states the rules for THIS turn — in full,
+# as unchanged, or as none. The gate enforces per turn whatever the prose says.
 RULES_REMINDER = "<system-reminder>{rules}</system-reminder>"
+RULES_UNCHANGED = (
+    "RULES IN FORCE FOR THIS TURN: unchanged — exactly the rules listed in full "
+    "in the most recent earlier reminder that lists them. The harness still "
+    "enforces them."
+)
+RULES_NONE = (
+    "RULES IN FORCE FOR THIS TURN: none. Rules listed in earlier reminders no "
+    "longer apply."
+)
+SUPERSEDES_EARLIER = (
+    "<system-reminder>This reminder supersedes the earlier <system-reminder> "
+    "blocks in this conversation: their time no longer holds, and their rules "
+    "apply only as this one restates or confirms them. Saved knowledge shown in "
+    "them remains valid.</system-reminder>"
+)
+KNOWLEDGE_SHOWN_EARLIER = (
+    "Also relevant, shown verbatim in an earlier reminder in this conversation: {names}"
+)
+_REMINDER_SEGMENT = re.compile(r"<system-reminder>(.*?)</system-reminder>", re.DOTALL)
+
+
+def _rules_in_force(earlier: list[str]) -> str:
+    """The rule prose the newest earlier reminder left in force, "" for none —
+    read from the history itself, so a rewound or deleted turn can never leave
+    it pointing at a reminder that is gone."""
+    for reminder in reversed(earlier):
+        for segment in reversed(_REMINDER_SEGMENT.findall(reminder)):
+            if segment == RULES_NONE:
+                return ""
+            if segment.startswith(rules.SEED_HEADER):
+                return segment
+    return ""
+
+
+def reminder_delta(
+    earlier: list[str], blocks: list[str], names: list[str], rules_text: str
+) -> tuple[str, str]:
+    """(knowledge, rules) for a new reminder, given the reminders already in
+    history: a knowledge block already shown verbatim is named instead of
+    repeated, and rules identical to the ones in force are confirmed instead of
+    restated. Only text still present in `earlier` counts as shown."""
+    fresh: list[str] = []
+    repeated: list[str] = []
+    for name, block in zip(names, blocks, strict=True):
+        if any(block in reminder for reminder in earlier):
+            repeated.append(name)
+        else:
+            fresh.append(block)
+    knowledge = "\n\n".join(fresh)
+    if repeated:
+        line = KNOWLEDGE_SHOWN_EARLIER.format(names=", ".join(repeated))
+        knowledge = f"{knowledge}\n\n{line}" if knowledge else line
+    in_force = _rules_in_force(earlier)
+    if rules_text and rules_text == in_force:
+        rules = RULES_UNCHANGED
+    elif rules_text:
+        rules = rules_text
+    else:
+        rules = RULES_NONE if in_force else ""
+    return knowledge, rules
 
 
 def task_reminder(
@@ -1202,6 +1269,7 @@ def task_reminder(
     preload_text: str = "",
     rules_text: str = "",
     scratch_dir: os.PathLike | str | None = None,
+    supersedes: bool = False,
 ) -> str:
     """The per-task system reminder: always the current local time (issue #36
     — it lives here, not in the system prompt, so messages[0] stays
@@ -1210,10 +1278,13 @@ def task_reminder(
     else the skills nudge whenever any skills/memory are advertised — and the
     rules in force for this turn (#191), which are not knowledge to consult but
     constraints the harness will enforce whatever the model concludes. The
-    chat's scratch path rides here too, for the reason at SCRATCH_RULE."""
+    chat's scratch path rides here too, for the reason at SCRATCH_RULE.
+    `supersedes` opens it with the notice that earlier reminders are history."""
     now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     scratch = SCRATCH_REMINDER_LINE.format(scratch_dir=scratch_dir) + "\n" if scratch_dir else ""
     time_note = f"{TASK_REMINDER_MARK}{scratch}Current local time: {now}</system-reminder>"
+    if supersedes:
+        time_note = f"{SUPERSEDES_EARLIER}\n{time_note}"
     if rules_text:
         time_note += "\n" + RULES_REMINDER.format(rules=rules_text)
     if preload_text:
@@ -3438,10 +3509,9 @@ class Agent:
         what this read before the distinction existed."""
         latest_typed: int | None = None
         latest_user: int | None = None
-        # Set once a task's opening message has been passed: run_task strips
-        # every older reminder, so the reminder in front of a CONTINUATION's
-        # note is the only one left, and the question is then the nearest
-        # typed message before it.
+        # Set once a task's opening message has been passed: walking back, the
+        # newest reminder is met first, so when it fronts a CONTINUATION's
+        # note the question is the nearest typed message before it.
         past_opener = False
         for i in range(len(self.messages) - 1, 0, -1):
             message = self.messages[i]
@@ -4054,9 +4124,9 @@ class Agent:
         # everything they brought in. See `_adopt_carried`.
         continuing: CarriedWork | None = None,
     ) -> str:
-        # Where the question opens, read BEFORE the reminders are stripped
-        # below: the reminder in front of a message is what tells the question
-        # apart from typed steering (`_question_index`).
+        # Where the question opens, read BEFORE this task appends its own
+        # reminder: the reminder in front of a message is what tells the
+        # question apart from typed steering (`_question_index`).
         question = self._question_index() if continuing is not None else None
         # Fresh scan every task: skills/memory created mid-session (or after
         # /cd) show up immediately, in every open session — no restart needed.
@@ -4071,13 +4141,11 @@ class Agent:
             self.base_context, self.cwd, self.lessons_path, index, scratch_dir=self.scratch_dir,
             scratch_in_reminder=True,
         )
-        self.messages[1:] = [
-            m
+        earlier_reminders = [
+            str(m.get("content", ""))
             for m in self.messages[1:]
-            if not (
-                m.get("role") == "system"
-                and str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
-            )
+            if m.get("role") == "system"
+            and str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
         ]
 
         # Per-task state (including the turn counter) is reset HERE, before
@@ -4174,7 +4242,13 @@ class Agent:
         # bindings, at the same position `knowledge` is emitted from — before
         # the user message, so nothing this turn dispatches can outrun the gate.
         rules_text = self.seed_rules(seed, seed_images, seed_documents)
-        reminder = task_reminder(index, preload.text, rules_text, self.scratch_dir)
+        knowledge_text, rules_prose = reminder_delta(
+            earlier_reminders, preload.blocks, preload.names, rules_text
+        )
+        reminder = task_reminder(
+            index, knowledge_text, rules_prose, self.scratch_dir,
+            supersedes=bool(earlier_reminders),
+        )
         self.messages.append({"role": "system", "content": reminder})
         if rules_text:
             self.mark_rules_seeded()  # the prose reached context — record it
