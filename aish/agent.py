@@ -508,6 +508,17 @@ REPLY_NOW_IN_TEXT = "Reply now, in plain text."
 CONTINUE_OR_ANSWER = "Continue the task where you left off, or give your answer if it is done."
 
 
+# The fact a model lacks after a rejection: its draft sits in its own history,
+# so "add it" read as "send the missing part" and the owner got a fragment
+# (session-20260923-214217: an email list lost, only its closing chips sent).
+# Here, not in rules.py's templates: the hold is the agent's, and only the
+# agent knows the draft was held.
+ANSWER_WITHHELD = (
+    "The user has not seen that answer — it was withheld and will not be "
+    "shown. Give the complete answer again, with the change."
+)
+
+
 class ModelUnavailable(RuntimeError):
     """The model call failed after every attempt it was entitled to."""
 
@@ -4491,6 +4502,9 @@ class Agent:
                     # Not delivered. The model is told what is missing and the
                     # turn goes on — the ask provokes the work, the work lands
                     # in the trace, and the trace is what the next check reads.
+                    # Read BEFORE the discard: only a held draft is one the
+                    # owner has provably not seen.
+                    withheld = self._held_answer is not None
                     self._release_held(discard=True)
                     # Close the turn's live row: `continue` would otherwise skip
                     # the cancel below and leave a Thinking… ticker running for
@@ -4501,7 +4515,8 @@ class Agent:
                     )
                     # Marked as aish's own words (#171), or replay renders the
                     # harness's question as a blue bubble the owner never typed.
-                    self._append({"role": "user", "content": AISH_NOTE + unmet + "]"})
+                    ask = unmet + ("\n" + ANSWER_WITHHELD if withheld else "")
+                    self._append({"role": "user", "content": AISH_NOTE + ask + "]"})
                     continue
                 was_held = self._held_answer is not None
                 result = self._release_held(text=result)

@@ -8359,6 +8359,38 @@ class TestVerify:
         assert answers[0] == answer
         assert "not followed" in answer
 
+    def test_a_rejection_tells_the_model_the_user_never_saw_the_draft(self, tmp_path):
+        """session-20260923-214217: told only "add it", the model sent the
+        missing buttons alone and the email list it had drafted was lost. The
+        draft sits in its own history, so it must be told the owner has not
+        seen it."""
+        from aish.agent import ANSWER_WITHHELD
+
+        rule = """---
+name: chips
+description: A question gets tap buttons.
+when: always
+then:
+  answer_must_include:
+    pattern: "aish-reply://"
+---
+"""
+        asked: list[str] = []
+        agent, chat = rules_agent(
+            tmp_path,
+            [
+                model_says("1. Bali costs\n2. Tax summary\nOpen one?"),
+                model_says(
+                    "1. Bali costs\n2. Tax summary\nOpen one?\n[Yes](aish-reply://yes)"
+                ),
+            ],
+            rule_texts=(rule,),
+        )
+        agent._append = _recording_append(agent, asked)
+        assert "Tax summary" in agent.run_task("check my mail")
+        notes = [text for text in asked if text.startswith(AISH_NOTE)]
+        assert len(notes) == 1 and ANSWER_WITHHELD in notes[0]
+
     def test_an_empty_answer_streams_its_note_once(self, tmp_path):
         """The hold streams itself, notes included. A caller that streams the
         result again shows the owner every not-followed line twice."""
