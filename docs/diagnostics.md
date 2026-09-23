@@ -304,6 +304,14 @@ Neither row is page-specific. `tool_plugins` has written this same block since #
 
 Rows are collapsed per outcome rather than per rule — ten verify verdicts are one row naming the rules, not ten rows — because a list as long as the evidence is not a shortcut. `TestWorthALook` pins the citation, the collapse and the empty state. The web half of all this is `docs/web-server.md`'s `/explain`, tested by `TestExplainEndpoint`.
 
+## `aish tooluse` — the tool menu's own counters
+
+`tooluse.py` is the instrument the 2026-09 menu shrink shipped with: a pure `scan_*` pass (contract §7, same law as `usage` and `vocab`) over the session logs, answering two questions the shrink argument depends on. **Per tool, what happened when it was called** — calls, `failed` (recorded `ok` false), `refused` (`decision` in `REFUSED_DECISIONS`, imported from `rules`), and `unknown` (the recorded `error` opens with `ERROR: unknown tool '` — a model calling a tool that is not on the menu, the failure a shrunken menu would be first to cause). **Per day, how big the menu each call was handed actually was** — the `brief`'s `tools.digest` resolved through the evidence store (purged bytes are `purged`, never 0), plus the brief's own `tools.count`, which survives a purge because it is in the log.
+
+Two joins are worth knowing about. A brief is written only when the menu or system text CHANGES, so counting briefs would count changes, not calls: each `reasoning` step (one per recorded model call) is joined to the most recent brief before it in the same log, and a call with no brief before it counts as `missing`. And on logs written before the refusals-are-never-green rule, a denied shell command was recorded `ok: true`, so `refused ⊆ failed` holds only for logs written since — the reader counts what was recorded and does not restate it. claude-max writes neither briefs nor reasoning records (#242 above), so its calls do not appear in the menu section at all.
+
+What it deliberately cannot say, stated in the report itself: whether the tool a model picked was the RIGHT one — no record captures intent. It measures only; nothing reads it to decide. The size fence on the other side is `tests/test_tool_menu_size.py`, which pins the serialized native menu and each description to a budget so the essays the shrink removed cannot grow back sentence by sentence. The `unknown` counter reads the recorded error's opening — `tools.UNKNOWN_TOOL_PREFIX`, one spelling the writer imports rather than respells, so rewording it cannot silently zero the count. `TestPerToolOutcomes`, `TestEmptyAndBrokenLogs`, `TestTheWindow`, `TestMenuSizes`, `TestTheReport`, `TestTheSubcommand`, `TestOneSpellingOfUnknown`.
+
 ## What is still missing
 
 The reader reports each of these as *not recorded* rather than guessing:

@@ -2418,6 +2418,37 @@ def _vocab_cli(args: list[str]) -> int:
     return 0
 
 
+def _tooluse_cli(args: list[str]) -> int:
+    """`aish tooluse` — how each tool call came out, and how big a menu each
+    model call held. The recorded baseline a change to the tool menu is judged
+    against."""
+    from . import tooluse as tooluse_mod
+
+    usage_line = "usage: aish tooluse [--days N | --all] [--json]"
+    days: int | None = 30
+    as_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    while rest:
+        flag = rest.pop(0)
+        if flag == "--days" and rest:
+            value = rest.pop(0)
+            if not value.isdigit():
+                print(usage_line)
+                return 2
+            days = int(value)
+        elif flag == "--all":
+            days = None
+        else:
+            print(usage_line)
+            return 2
+    report = tooluse_mod.scan(days=days)
+    if as_json:
+        print(json.dumps(tooluse_mod.json_report(report, days), indent=2))
+    else:
+        print(tooluse_mod.render(report, days))
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "secret":
         return _secret_cli(sys.argv[2:])
@@ -2433,6 +2464,8 @@ def main() -> int:
         return _usage_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "vocab":
         return _vocab_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "tooluse":
+        return _tooluse_cli(sys.argv[2:])
 
     config_path = Path(
         os.environ.get("AISH_CONFIG", str(config_home() / "config.toml"))

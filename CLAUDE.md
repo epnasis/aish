@@ -76,7 +76,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
 | `roles.py`, `aish/charters/`, `web_search`'s rendering, anything a role reads or a charter declares | `docs/roles.md` |
 | `tool_plugins.py`, `secrets.py` | `docs/tools-layer.md` |
-| `explain.py`, `evidence.py`, `turns.py`, the `brief` and `sent` records | `docs/diagnostics.md` |
+| `explain.py`, `evidence.py`, `turns.py`, `tooluse.py`, the `brief` and `sent` records | `docs/diagnostics.md` |
 | `ratelimit.py`, `_chat_turn`'s retry loop, anything that retries a model call | `docs/rate-limits.md` |
 | `usage.py`, `aish usage`, anything that reports or attributes token spend | `docs/token-accounting.md` |
 | `vocab.py`, `aish vocab`, **any list of words matched against page text, a control label, error text or a command name** | `docs/vocabularies.md` |
@@ -157,6 +157,10 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`vocab.py`** — the counters on every word list, and the inventory of what a miss costs
   for each. Measures only; it decides nothing, and no list was changed by its arrival. →
   `docs/vocabularies.md`
+- **`tooluse.py`** — the tool menu's own counters: per-tool call outcomes and the recorded
+  size of the menu each model call was handed. A pure scan under the same reader law as
+  `usage`; it measures only, and the size fence is `tests/test_tool_menu_size.py`. →
+  `docs/diagnostics.md`
 - **`usage.py`** — what was spent and what filled the context that made it cost that. A pure
   scan over the logs, under the same reader law as `explain`; it reports what was RECORDED
   and says plainly what it cannot know. → `docs/token-accounting.md`
