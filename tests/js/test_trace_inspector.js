@@ -15,6 +15,10 @@
 //      on the cited step and pane.
 //   4. Offline, a failed read and a running turn are said in words, in the
 //      row itself.
+//   4b. The loading placeholder is a state every way out reaches (#409): the
+//      ✕, Escape and a swipe down close it, a step not recorded yet and a
+//      failed read take it down, closing aborts the fetch, and a late or
+//      superseded answer never reopens or repaints the screen.
 //   5. The ordinary card — a plain answer with no tools — is unchanged.
 //
 // Run manually: node tests/js/test_trace_inspector.js
@@ -421,6 +425,172 @@ check("offline and a failed read toast; a running turn is reviewable step by ste
   await settle();
   assert(w2.toasts.some((x) => x.includes("still running")), "a not-yet-recorded step toasts");
   assert(liveFetches >= 2, "a running turn re-fetches to reflect the latest steps");
+});
+
+// ---- 4b. the placeholder is a state every way out knows about (#409) ----------------
+// The placeholder went up behind `ssView`'s back, so ssClose — the ✕, Escape,
+// a swipe down, and inspectStepClick's own two ways out — returned before it
+// hid anything, and the reader could only leave the page.
+
+// A real AbortController (the sandbox's default is an inert stand-in) and a
+// fetch that answers only when the test says so, recording the signal it got.
+function slowFetch(s) {
+  s.AbortController = AbortController;
+  const calls = [];
+  s.fetchDossier = (ref, signal) => new Promise((resolve, reject) => {
+    calls.push({ ref, signal, resolve, reject });
+    if (signal) signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+  });
+  return calls;
+}
+
+function runningCard(s) {
+  s.currentTurnId = "turn-b";
+  liveTurn(s); // built, NOT finished: every tap re-fetches
+  return s.currentTrace;
+}
+
+check("the loading placeholder closes: ✕, Escape and a swipe down all reach it", () => {
+  const w = world();
+  const s = w.sandbox;
+  const box = w.el("step-screen");
+  box.hidden = true;
+  // The ✕ — the button's own handler, as ssWire attached it.
+  s.ssShowLoading();
+  assert.equal(box.hidden, false, "the placeholder is up");
+  w.el("ss-close").onclick();
+  assert.equal(box.hidden, true, "the ✕ must take the placeholder down");
+  assert(!s.ssIsOpen());
+  assert.equal(s.ssClose(), false, "a second close is a no-op");
+  // Escape is routed to ssClose only when ssIsOpen() says the screen is up.
+  s.ssShowLoading();
+  assert(s.ssIsOpen(), "the placeholder is an open step screen, or Escape never reaches it");
+  // A flick down on the header — the sheet's dismissal — reaches it too.
+  s.ssDragStart({ touches: [{ clientY: 100 }], timeStamp: 1000 });
+  s.ssDragMove({ touches: [{ clientY: 400 }], timeStamp: 1010 });
+  s.ssDragEnd({ timeStamp: 1011 });
+  assert.equal(box.hidden, true, "a swipe down must take the placeholder down");
+  assert(!s.ssIsOpen());
+});
+
+check("the placeholder shows nothing from the view before it", () => {
+  const w = world();
+  const s = w.sandbox;
+  s.ssOpen(docFor(), "c1", "result", "turn-a");
+  assert(w.el("ss-count").textContent.startsWith("Step 4 of 9"), w.el("ss-count").textContent);
+  assert(w.el("ss-panes").children.length > 0);
+  assert.equal(w.el("ss-findings").hidden, false, "the earlier view had a finding");
+  s.ssClose();
+  s.ssShowLoading();
+  assert.equal(w.el("ss-count").textContent, "", "no count from the earlier view");
+  assert.equal(w.el("ss-panes").children.length, 0, "no pane tabs from the earlier view");
+  assert.equal(w.el("ss-findings").hidden, true, "no findings chip from the earlier view");
+  assert.equal(w.el("ss-note").hidden, true, "no state note from the earlier view");
+  assert.equal(w.el("ss-prev").disabled, true);
+  assert.equal(w.el("ss-next").disabled, true);
+});
+
+check("a tapped step that is not in the record yet takes the placeholder down and says so", async () => {
+  const w = world();
+  const s = w.sandbox;
+  const box = w.el("step-screen");
+  box.hidden = true;
+  const running = docFor();
+  running.running = true;
+  running.steps = running.steps.slice(0, 4); // recorded so far: up to c1
+  s.fetchDossier = async () => running;
+  const t = runningCard(s);
+  const c2 = rows(t).find((r) => r.dataset && r.dataset.call === "2");
+  assert(c2, "the running card has a row for tool call 2");
+  fire(c2);
+  assert.equal(box.hidden, false, "the placeholder went up at once");
+  await settle();
+  assert.equal(box.hidden, true, "the placeholder must come down when the step is not recorded yet");
+  assert(!s.ssIsOpen());
+  assert(w.toasts.some((x) => x.includes("still running")), w.toasts.join(" | "));
+});
+
+check("a record that never arrives: the ✕ closes the placeholder and aborts the fetch", async () => {
+  const w = world();
+  const s = w.sandbox;
+  const box = w.el("step-screen");
+  box.hidden = true;
+  const calls = slowFetch(s);
+  const t = runningCard(s);
+  fire(rows(t)[3]);
+  await settle();
+  assert.equal(box.hidden, false, "still waiting");
+  assert.equal(calls.length, 1);
+  w.el("ss-close").onclick();
+  assert.equal(box.hidden, true, "the ✕ closes the placeholder");
+  assert(calls[0].signal, "the dossier fetch must carry an abort signal");
+  assert.equal(calls[0].signal.aborted, true, "closing aborts the fetch");
+  await settle();
+  assert.deepEqual(w.toasts, [], "a close the reader asked for is not an error");
+  assert.equal(box.hidden, true);
+});
+
+check("a late record after close never reopens or repaints the screen", async () => {
+  const w = world();
+  const s = w.sandbox;
+  const box = w.el("step-screen");
+  box.hidden = true;
+  const calls = slowFetch(s);
+  // A server that answers anyway (the abort raced the response).
+  s.fetchDossier = (ref, signal) => new Promise((resolve, reject) => { calls.push({ ref, signal, resolve, reject }); });
+  const t = runningCard(s);
+  fire(rows(t)[3]);
+  s.ssClose();
+  const d = docFor();
+  d.running = true;
+  calls[0].resolve(d);
+  await settle();
+  assert.equal(box.hidden, true, "the late record must not reopen the screen");
+  assert(!s.ssIsOpen());
+  assert.equal(w.el("ss-count").textContent, "", "nor repaint it");
+  // …and a late failure is silent too: the reader already left.
+  fire(rows(t)[3]);
+  s.ssClose();
+  calls[1].reject(new Error("the record could not be read (500)"));
+  await settle();
+  assert.deepEqual(w.toasts, []);
+  // A second tap supersedes the first: the first's answer is dropped, the
+  // second's opens.
+  const c1 = rows(t).find((r) => r.dataset && r.dataset.call === "1");
+  const c2 = rows(t).find((r) => r.dataset && r.dataset.call === "2");
+  fire(c1);
+  fire(c2);
+  assert.equal(calls[2].signal.aborted, true, "the superseded fetch is aborted");
+  calls[3].resolve(d);
+  await settle();
+  assert(s.ssIsOpen());
+  assert.equal(d.steps[s.ssView.index].id, "c2");
+  calls[2].resolve(d);
+  await settle();
+  assert.equal(d.steps[s.ssView.index].id, "c2", "the superseded answer must not repaint");
+});
+
+check("/explain waits behind the same placeholder, and the ✕ reaches it", async () => {
+  const w = world();
+  const s = w.sandbox;
+  const box = w.el("step-screen");
+  box.hidden = true;
+  const calls = slowFetch(s);
+  const opening = s.openExplain("turn-a");
+  assert.equal(box.hidden, false, "the by-id door shows the placeholder too");
+  w.el("ss-close").onclick();
+  assert.equal(box.hidden, true);
+  assert.equal(calls[0].signal.aborted, true, "closing aborts the by-id read");
+  await opening;
+  assert(!s.ssIsOpen());
+  assert.deepEqual(w.toasts, []);
+  // …and an ordinary answer still opens it.
+  const d = docFor();
+  s.fetchDossier = async () => d;
+  await s.openExplain("turn-a");
+  assert(s.ssIsOpen());
+  assert.equal(box.hidden, false);
+  assert.equal(d.steps[s.ssView.index].id, "c1", "lands on the first worth-a-look row");
 });
 
 // ---- 5. the ordinary card is unchanged ------------------------------------------------

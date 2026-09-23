@@ -4476,47 +4476,18 @@ function inspectResolve(id, doc) {
 }
 
 // Once per card. A failure is not cached, so the next tap tries again — the
-// ordinary failure is a phone that was briefly offline.
-function inspectDossier(t) {
+// ordinary failure is a phone that was briefly offline. Every read carries the
+// signal of the open it serves, so closing the step screen aborts it (#409);
+// two taps never share one request, because the second supersedes the first.
+function inspectDossier(t, signal) {
   // A running turn re-fetches every time, so a tap reflects the steps completed
   // SINCE the last read; a finished turn is immutable and cached once.
-  if (!t.finished) return fetchDossier(t.turnId);
+  if (!t.finished) return fetchDossier(t.turnId, signal);
   if (t.dossier) return Promise.resolve(t.dossier);
-  if (!t.dossierFetch) {
-    t.dossierFetch = fetchDossier(t.turnId).then((doc) => {
-      t.dossier = doc;
-      return doc;
-    }, (err) => {
-      t.dossierFetch = null;
-      throw err;
-    });
-  }
-  return t.dossierFetch;
-}
-
-// The step-screen, revealed at ONCE on a tap with a loading placeholder (#UX):
-// the record is a server fetch that takes a second or three, and until this
-// the box only appeared AFTER it resolved — so a tap sat with no feedback and
-// the reader could not tell it had registered. A cached (finished) turn skips
-// this and opens straight, so there is no flash on the common re-tap.
-function ssShowLoading() {
-  const box = $("step-screen");
-  if (!box) return;
-  box.hidden = false;
-  const title = $("ss-title");
-  if (title) title.textContent = "opening step…";
-  const facts = $("ss-facts");
-  if (facts) facts.textContent = "";
-  const content = $("ss-content");
-  if (content) {
-    content.textContent = "";
-    const wrap = document.createElement("div");
-    wrap.className = "ss-loading";
-    wrap.append(document.createElement("span"));
-    wrap.lastChild.className = "ss-spinner";
-    wrap.append(document.createTextNode(" opening the record…"));
-    content.appendChild(wrap);
-  }
+  return fetchDossier(t.turnId, signal).then((doc) => {
+    t.dossier = doc;
+    return doc;
+  });
 }
 
 function inspectStepClick(t, e) {
@@ -4532,19 +4503,17 @@ function inspectStepClick(t, e) {
   const rows = [...t.body.querySelectorAll(".step")];
   const id = inspectKeys(rows)[rows.indexOf(row)];
   if (!id) return;
-  // Instant feedback: reveal the inspector NOW, unless the record is already
-  // cached (a finished turn, tapped before) and will open with no wait.
-  const cached = t.finished && t.dossier;
-  if (!cached) ssShowLoading();
-  inspectDossier(t).then(
-    (doc) => {
-      const resolved = inspectResolve(id, doc);
-      const step = (doc.steps || []).find((x) => x.id === resolved);
-      if (step) ssOpenDoc(doc, step.id, undefined, t.turnId);
-      else { if (!cached) ssClose(); showToast("not in the record yet — this step is still running"); }
-    },
-    (err) => { if (!cached) ssClose(); showToast((err && err.message) || "the record could not be read"); },
-  );
+  const land = (doc) => {
+    const resolved = inspectResolve(id, doc);
+    const step = (doc.steps || []).find((x) => x.id === resolved);
+    if (step) { ssOpenDoc(doc, step.id, undefined, t.turnId); return; }
+    ssClose();
+    showToast("not in the record yet — this step is still running");
+  };
+  // A cached record (a finished turn, tapped before) opens with no wait, so no
+  // placeholder flashes on the common re-tap; anything else shows it at once.
+  if (t.finished && t.dossier) { land(t.dossier); return; }
+  ssOpenPending((signal) => inspectDossier(t, signal), land);
 }
 
 // [TRACE-CLOSE-END]
@@ -12842,7 +12811,16 @@ function rdRenderInto(pre, pieces, query, marks, cap) {
 // clears it — a half-applied step (new pane under an old title, a find count
 // from the previous body) is the class of bug the single writer exists for.
 let ssView = null;
+// The open in flight (#409): the controller of the record fetch whose answer
+// will paint this screen, and whether its placeholder is up. The placeholder
+// is a STATE of this screen, not a box shown behind `ssView`'s back — it was
+// once, and the ✕, Escape, a swipe down and the tap's own ways out all
+// returned before hiding it, leaving the reader to leave the page. A close
+// aborts the fetch and a newer open supersedes it; an answer lands only while
+// its controller is still this one, so a late record never reopens or repaints
+// a screen the reader has left.
 let ssAbort = null;
+let ssLoading = false;
 // What the touch in flight was decided to be, recorded at the moment the axis
 // is known (L5): "page" claims it for a step change, "scroll" yields it to the
 // pane's own vertical scroll and nothing here reads it again.
@@ -13736,7 +13714,75 @@ function ssPaneBrief(doc, step, pane) {
 
 // ---- the surface ----------------------------------------------------------
 
-function ssIsOpen() { return !!ssView; }
+function ssIsOpen() { return !!ssView || ssLoading; }
+
+// The placeholder, shown at ONCE on a tap (#UX): the record is a server fetch
+// that takes a second or three, and until this the box only appeared AFTER it
+// resolved — so a tap sat with no feedback. It clears everything an earlier
+// view painted into the chrome (count, tabs, findings, notes), or the reader
+// sees "Step 4 of 13" and "3 worth a look" from a turn he is not opening.
+function ssShowLoading() {
+  const box = $("step-screen");
+  if (!box) return false;
+  ssResetView();
+  ssLoading = true;
+  const icon = $("ss-icon");
+  if (icon) icon.innerHTML = "";
+  $("ss-title").textContent = "opening step…";
+  $("ss-count").textContent = "";
+  $("ss-prev").disabled = true;
+  $("ss-next").disabled = true;
+  $("ss-facts").textContent = "";
+  $("ss-panes").textContent = "";
+  const note = $("ss-note");
+  note.textContent = "";
+  note.hidden = true;
+  $("ss-findings").hidden = true;
+  $("ss-find").value = "";
+  const findCount = $("ss-find-count");
+  if (findCount) findCount.textContent = "";
+  const content = $("ss-content");
+  if (content) {
+    content.textContent = "";
+    const wrap = document.createElement("div");
+    wrap.className = "ss-loading";
+    const spinner = document.createElement("span");
+    spinner.className = "ss-spinner";
+    wrap.append(spinner, document.createTextNode(" opening the record…"));
+    content.appendChild(wrap);
+  }
+  box.hidden = false;
+  ssFitChrome();
+  return true;
+}
+
+// Every open that waits on the record goes through here: the placeholder goes
+// up, `read(signal)` fetches, and `land(doc)` paints — but only if this is
+// still the open in flight. A failure takes the placeholder down and says why
+// (L7); an abort is the reader's own close, or a newer tap, and says nothing.
+// Resolves once the answer has landed or been dropped.
+function ssOpenPending(read, land) {
+  if (ssAbort) ssAbort.abort();
+  const ctl = new AbortController();
+  ssAbort = ctl;
+  if (!ssShowLoading()) { ssAbort = null; return Promise.resolve(); }
+  const current = () => ssAbort === ctl;
+  let reading;
+  try { reading = Promise.resolve(read(ctl.signal)); } catch (err) { reading = Promise.reject(err); }
+  return reading.then(
+    (doc) => {
+      if (!current()) return;
+      ssAbort = null; // landed: nothing in flight for a close to abort
+      land(doc);
+    },
+    (err) => {
+      if (!current()) return;
+      ssClose();
+      if (err && err.name === "AbortError") return;
+      showToast((err && err.message) || "the record could not be read");
+    },
+  );
+}
 
 // Open on the step `stepId` names (else the first), on `pane` where that step
 // has it (else its first). Synchronous: a worth-a-look tap lands on its first
@@ -13747,6 +13793,10 @@ function ssOpen(doc, stepId, pane, ref) {
   const steps = doc.steps || [];
   let index = steps.findIndex((s) => s.id === stepId);
   if (index < 0) index = 0;
+  // A direct open supersedes any open still in flight, and replaces the
+  // placeholder if one is up.
+  if (ssAbort) { ssAbort.abort(); ssAbort = null; }
+  ssLoading = false;
   ssRef = ref || "";
   ssView = { doc, index: 0, pane: "", text: "", nodes: [] };
   ssFind = { query: "", hits: 0, at: -1, marks: [] };
@@ -13839,8 +13889,11 @@ function ssTape(delta) {
   return ssShow(ssView.index + delta, delta > 0 ? (target[0] || "") : (target[target.length - 1] || ""));
 }
 
+// Closes the screen in whichever state it is in — a view or the placeholder —
+// and aborts the open in flight, so a record that never comes back cannot hold
+// the reader (#409).
 function ssClose() {
-  if (!ssView) return false;
+  if (!ssView && !ssLoading) return false;
   const box = $("step-screen");
   if (box) box.hidden = true;
   // Drop the pane content (a turn's context is hundreds of KB); the chrome and
@@ -13848,6 +13901,14 @@ function ssClose() {
   const content = $("ss-content");
   if (content) content.textContent = "";
   if (ssAbort) { ssAbort.abort(); ssAbort = null; }
+  ssLoading = false;
+  ssResetView();
+  return true;
+}
+
+// What a view leaves behind, dropped — shared by the close and the placeholder,
+// which replaces whatever view was up.
+function ssResetView() {
   ssView = null;
   ssStopPoll();
   ssRef = "";
@@ -13855,7 +13916,6 @@ function ssClose() {
   ssFindingAt = -1;
   const list = $("ss-findings-list");
   if (list) list.hidden = true;
-  return true;
 }
 
 // The step position, its duration, a flag marker, and — while the turn runs —
@@ -14565,17 +14625,9 @@ ssWire();
 // fourth turn is not the log's fourth on a long chat ([FORK-ANCHOR]'s lesson).
 // For a turn outside the bounded first paint and for a log written before
 // cards existed, this is the only door.
-async function openExplain(ref) {
-  if (!currentSession) return;
-  if (ssAbort) ssAbort.abort();
-  ssAbort = new AbortController();
-  try {
-    const doc = await fetchDossier(ref, ssAbort.signal);
-    ssOpenDoc(doc, undefined, undefined, ref);
-  } catch (err) {
-    if (err && err.name === "AbortError") return;
-    showToast((err && err.message) || "the record could not be read");
-  }
+function openExplain(ref) {
+  if (!currentSession) return Promise.resolve();
+  return ssOpenPending((signal) => fetchDossier(ref, signal), (doc) => ssOpenDoc(doc, undefined, undefined, ref));
 }
 // [STEP-SCREEN-END]
 
