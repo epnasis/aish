@@ -58,9 +58,11 @@ class FakeChat:
     def __init__(self, responses: list):
         self.responses = list(responses)
         self.calls: list[dict] = []
+        self.snapshots: list[list] = []
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
+        self.snapshots.append(list(kwargs.get("messages") or []))
         response = self.responses.pop(0)
         # The streaming shape ollama yields, so a test that wires `on_token`
         # exercises the same path the web server uses rather than a second one.
@@ -1497,12 +1499,120 @@ class TestBlockedAndBackground:
 
 
 class TestModelResilience:
-    def test_empty_response_gives_clear_hint(self):
-        from aish.agent import EMPTY_RESPONSE
+    @staticmethod
+    def _note(first: str, then: str) -> dict:
+        from aish.agent import USER_SAW_NOTHING
 
-        agent, chat = make_agent([model_says("")])  # no content, no tool calls
-        assert agent.run_task("hi") == EMPTY_RESPONSE
-        assert len(chat.calls) == 1  # nothing to recover, so nothing is re-asked
+        return {"role": "user", "content": AISH_NOTE + first + USER_SAW_NOTHING + then + "]"}
+
+    @staticmethod
+    def _asked_with(chat, call: int) -> list[dict]:
+        """The history request `call` carried, as it was AT the call: the chat
+        is handed the live list, which grows afterwards."""
+        return chat.snapshots[call]
+
+    def test_empty_twice_says_what_was_observed(self):
+        from aish.agent import ASKED_AGAIN_FACT, EMPTY_REPLY_FACT, empty_answer
+
+        streamed: list[str] = []
+        agent, chat = make_agent([model_says(""), model_says("")], on_token=streamed.append)
+        expected = empty_answer(EMPTY_REPLY_FACT, ASKED_AGAIN_FACT)
+        assert agent.run_task("hi") == expected
+        assert expected in "".join(streamed)
+        assert len(chat.calls) == 2  # asked once, never a loop
+
+    def test_whitespace_only_twice_ends_with_the_placeholder_not_whitespace(self):
+        from aish.agent import ASKED_AGAIN_FACT, EMPTY_REPLY_FACT, empty_answer
+
+        agent, _ = make_agent([model_says("\n\n"), model_says("\n")])
+        assert agent.run_task("hi") == empty_answer(EMPTY_REPLY_FACT, ASKED_AGAIN_FACT)
+
+    def test_empty_reply_names_the_finish_reason_the_provider_sent(self):
+        reply = model_says("")
+        reply.message.stop = "MAX_TOKENS"
+        agent, _ = make_agent([model_says(""), reply])
+        assert agent.run_task("hi") == (
+            "(the model's reply contained no text and no tool call; asked once more, "
+            'it again gave no answer text; the provider reported finish reason "MAX_TOKENS"; '
+            "try again)"
+        )
+
+    def test_an_empty_reply_mid_task_is_asked_to_continue(self):
+        """session-20260923-212625: Gemini returned nothing with work still in
+        hand, and the turn ended there."""
+        from aish.agent import CONTINUE_OR_ANSWER, REPLY_WAS_EMPTY
+
+        agent, chat = make_agent(
+            [
+                model_says("Opening the links.", tool_calls=[tool_call("read_docs")]),
+                model_says(""),
+                model_says("Both links open; here is the answer."),
+            ]
+        )
+        assert agent.run_task("check") == "Both links open; here is the answer."
+        asked_with = self._asked_with(chat, 2)
+        assert asked_with[-1] == self._note(REPLY_WAS_EMPTY, CONTINUE_OR_ANSWER)
+        assert not any(
+            m.get("role") == "assistant" and not (m.get("content") or "").strip()
+            and not m.get("tool_calls")
+            for m in asked_with
+        ), "the empty turn must not be in the history the model is shown again"
+
+    def test_after_a_denial_the_re_ask_asks_for_text_not_work(self, tmp_path):
+        """Deny means STOP: every tool call is refused until a text-only reply,
+        so the note must not goad the model toward one."""
+        from aish.agent import REPLY_NOW_IN_TEXT, REPLY_WAS_EMPTY, STOP_GATE_REFUSAL
+        from aish.approval import Denied
+
+        marker = tmp_path / "never"
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says(""),
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("Understood, stopping."),
+            ],
+            approve=lambda _cmd: Denied("not that"),
+        )
+        assert agent.run_task("do it") == "Understood, stopping."
+        assert not marker.exists()
+        assert self._asked_with(chat, 2)[-1] == self._note(REPLY_WAS_EMPTY, REPLY_NOW_IN_TEXT)
+        assert tool_messages(agent.messages)[-1]["content"].startswith(
+            STOP_GATE_REFUSAL.split("{")[0][:40]
+        ), "the stop gate stays armed through the re-ask"
+
+    def test_whitespace_does_not_lift_the_stop_gate(self, tmp_path):
+        """The gate lifts on a text-only reply and records `cleared_by:
+        text_only_turn`; a reply of blank lines is not one, and the placeholder
+        beside it says so."""
+        from aish.approval import Denied
+
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch x")]),
+                model_says("\n\n"),
+                model_says("\n"),
+            ],
+            approve=lambda _cmd: Denied("not that"),
+            step_log=steps.append,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("do it")
+        assert not any(
+            (s.get("evidence") or {}).get("cleared_by") == "text_only_turn" for s in steps
+        )
+
+    def test_a_tool_call_with_no_text_is_not_an_empty_reply(self):
+        agent, chat = make_agent(
+            [model_says(tool_calls=[tool_call("read_docs")]), model_says("done")]
+        )
+        assert agent.run_task("hi") == "done"
+        assert len(chat.calls) == 2
+        assert not any(
+            AISH_NOTE in (m.get("content") or "") for m in agent.messages
+            if m.get("role") == "user"
+        )
 
     # The shape of session-20260923-183501: the server filed the whole reply,
     # answer included, under reasoning, and the owner was told "empty response".
@@ -1511,7 +1621,7 @@ class TestModelResilience:
     )
 
     def test_reasoning_only_reply_is_asked_once_for_its_answer(self):
-        from aish.agent import AISH_NOTE, ANSWER_WAS_REASONING_ONLY
+        from aish.agent import CONTINUE_OR_ANSWER, REPLY_WAS_REASONING_ONLY
 
         streamed: list[str] = []
         agent, chat = make_agent(
@@ -1520,13 +1630,8 @@ class TestModelResilience:
         )
         assert agent.run_task("o której mecz?") == "Mecz rozpocznie się o 20:45."
         assert "Mecz rozpocznie się o 20:45." in "".join(streamed)
-        # `messages` is the live list, so the second request's history is
-        # everything before the answer it produced.
-        asked_with = chat.calls[1]["messages"][:-1]
-        assert asked_with[-1] == {
-            "role": "user", "content": AISH_NOTE + ANSWER_WAS_REASONING_ONLY + "]"
-        }
-        # The empty turn is not in the history the model is shown again.
+        asked_with = self._asked_with(chat, 1)
+        assert asked_with[-1] == self._note(REPLY_WAS_REASONING_ONLY, CONTINUE_OR_ANSWER)
         assert not any(
             m.get("role") == "assistant" and not m.get("content") for m in asked_with
         )
@@ -1561,24 +1666,34 @@ then:
         assert len(chat.calls) == 2
 
     def test_reasoning_only_twice_says_what_was_observed(self):
-        from aish.agent import REASONING_ONLY_RESPONSE
+        from aish.agent import ASKED_AGAIN_FACT, REASONING_ONLY_FACT, empty_answer
 
         streamed: list[str] = []
         agent, chat = make_agent(
             [self.REASONING_ONLY, self.REASONING_ONLY], on_token=streamed.append
         )
         chars = len(self.REASONING_ONLY.message.thinking)
-        expected = REASONING_ONLY_RESPONSE.format(chars=chars)
+        expected = empty_answer(REASONING_ONLY_FACT.format(chars=chars), ASKED_AGAIN_FACT)
         assert agent.run_task("o której mecz?") == expected
         assert expected in "".join(streamed)
-        assert len(chat.calls) == 2  # asked once, never a loop
+        assert len(chat.calls) == 2
 
-    def test_reasoning_only_is_re_asked_again_after_a_real_turn(self):
+    def test_reasoning_only_then_empty_shares_the_one_re_ask(self):
+        from aish.agent import ASKED_AGAIN_FACT, REASONING_ONLY_FACT, empty_answer
+
+        agent, chat = make_agent([self.REASONING_ONLY, model_says("")])
+        chars = len(self.REASONING_ONLY.message.thinking)
+        assert agent.run_task("hi") == empty_answer(
+            REASONING_ONLY_FACT.format(chars=chars), ASKED_AGAIN_FACT
+        )
+        assert len(chat.calls) == 2
+
+    def test_the_re_ask_re_arms_after_a_real_turn(self):
         agent, chat = make_agent(
             [
                 self.REASONING_ONLY,
                 model_says(tool_calls=[tool_call("read_docs")]),
-                self.REASONING_ONLY,
+                model_says(""),
                 model_says("done"),
             ]
         )
@@ -7919,6 +8034,147 @@ Open a link before you hand it over.
 """
 
 
+class TestARejectedDraftIsNeverLost:
+    """session-20260923-212625: a rule rejected a full answer the owner never
+    saw, the model opened one of the links it was sent to open and then went
+    silent, and the owner got a placeholder. The answer that existed ships,
+    with the rule's note checked against the evidence as it stands then."""
+
+    A = "https://a.example/one"
+    B = "https://b.example/two"
+    DRAFT = f"It changed: see [one]({A}) and [two]({B})."
+
+    def _run(self, tmp_path, monkeypatch, responses, rule_texts=(RULE_LINKS,)):
+        monkeypatch.setattr(agent_module.web, "read_url", fake_read_url())
+        streamed: list[str] = []
+        logged: list[dict] = []
+        agent, chat = rules_agent(
+            tmp_path, responses, rule_texts=rule_texts,
+            on_token=streamed.append, on_message=logged.append,
+        )
+        result = agent.run_task("did the word list change?")
+        answers = [m["content"] for m in logged if m.get("role") == "assistant"
+                   and not m.get("interim") and not m.get("tool_calls")]
+        return agent, chat, result, "".join(streamed), answers
+
+    def test_silence_after_a_rejection_delivers_the_draft_with_a_fresh_note(
+        self, tmp_path, monkeypatch
+    ):
+        from aish.agent import REJECTED_DRAFT_DELIVERED
+
+        _, _, result, streamed, answers = self._run(tmp_path, monkeypatch, [
+            model_says(self.DRAFT),
+            model_says("Opening them.", tool_calls=[tool_call("read_url", url=self.A)]),
+            model_says(""),
+            model_says(""),
+        ])
+        assert result.startswith(REJECTED_DRAFT_DELIVERED)
+        assert self.DRAFT in result
+        # The note is as of NOW: one link was opened after the rejection.
+        assert "not followed" in result
+        assert "b.example" in result.split(self.DRAFT)[1]
+        assert "a.example" not in result.split(self.DRAFT)[1]
+        assert answers == [result], "exactly one answer in the log, the delivered text"
+        assert streamed.count(self.DRAFT) == 1
+
+    def test_a_banned_draft_ships_with_its_note_like_any_exhausted_ask(
+        self, tmp_path, monkeypatch
+    ):
+        rule = """---
+name: no-eur
+description: Prices are never quoted in EUR.
+when: always
+then:
+  answer_must_not_include:
+    pattern: "EUR"
+---
+"""
+        _, _, result, _, _ = self._run(
+            tmp_path, monkeypatch,
+            [model_says("It costs 40 EUR."), model_says(""), model_says("")],
+            rule_texts=(rule,),
+        )
+        assert "It costs 40 EUR." in result and "not followed" in result
+
+    def test_a_good_redo_is_delivered_alone(self, tmp_path, monkeypatch):
+        from aish.agent import REJECTED_DRAFT_DELIVERED
+
+        _, _, result, _, answers = self._run(tmp_path, monkeypatch, [
+            model_says(self.DRAFT),
+            model_says("It changed; I could not open the sources."),
+        ])
+        assert result == "It changed; I could not open the sources."
+        assert REJECTED_DRAFT_DELIVERED not in result
+        assert answers == [result]
+
+    def test_the_LAST_rejected_draft_is_the_one_delivered(self, tmp_path, monkeypatch):
+        second = f"Changed, per [one]({self.A})."
+        _, _, result, _, _ = self._run(tmp_path, monkeypatch, [
+            model_says(self.DRAFT),
+            model_says(second),
+            model_says(""),
+            model_says(""),
+        ])
+        assert second in result and self.DRAFT not in result
+
+    def test_a_rejected_draft_does_not_outlive_its_task(self, tmp_path, monkeypatch):
+        from aish.agent import REJECTED_DRAFT_DELIVERED
+
+        agent, _, _, _, _ = self._run(tmp_path, monkeypatch, [
+            model_says(self.DRAFT),
+            model_says("It changed."),
+            model_says(""),
+            model_says(""),
+        ])
+        result = agent.run_task("and now?")
+        assert REJECTED_DRAFT_DELIVERED not in result
+        assert self.DRAFT not in result
+
+    def test_aish_s_own_placeholder_is_never_delivered_as_the_model_s_answer(
+        self, tmp_path, monkeypatch
+    ):
+        """Found in delivery review: a rule the placeholder fails rejected it,
+        the placeholder was stashed as "the draft", and the next empty reply
+        shipped it under "the answer it gave earlier" — aish's own text,
+        presented as an answer that never existed."""
+        from aish.agent import REJECTED_DRAFT_DELIVERED
+
+        rule = """---
+name: chips
+description: Always give tap buttons.
+when: always
+then:
+  answer_must_include:
+    pattern: "aish-reply://"
+---
+"""
+        _, _, result, _, _ = self._run(
+            tmp_path, monkeypatch, [model_says("")] * 6, rule_texts=(rule,)
+        )
+        assert REJECTED_DRAFT_DELIVERED not in result
+        assert result.startswith("(the model's reply contained no text")
+
+    def test_a_stopped_turn_never_logs_the_draft_without_its_note(
+        self, tmp_path, monkeypatch
+    ):
+        """Found in review: the rejected entry stayed the one a release would
+        log, so a stopped turn whose wrap-up failed logged the draft whole,
+        with no note. Loop detection stops this turn; the wrap-up call finds
+        no response left and fails."""
+        from aish.agent import REJECTED_DRAFT_DELIVERED
+
+        again = tool_call("read_docs", command="ls")
+        _, _, result, _, answers = self._run(
+            tmp_path, monkeypatch,
+            [model_says(self.DRAFT)] + [model_says(tool_calls=[again])] * 6,
+        )
+        assert all(self.DRAFT not in a or REJECTED_DRAFT_DELIVERED in a for a in answers)
+        assert all(
+            self.DRAFT not in a or "not followed" in a for a in answers
+        ), "the draft reached the log without its note"
+        assert self.DRAFT in result and "not followed" in result
+
+
 class TestTheChatsOpenedLinks:
     """What aish has opened is a fact about the CHAT, not about the turn (#267).
 
@@ -8265,6 +8521,38 @@ class TestVerify:
         # cold reload would show an unfollowed rule as followed.
         assert answers[0] == answer
         assert "not followed" in answer
+
+    def test_a_rejection_tells_the_model_the_user_never_saw_the_draft(self, tmp_path):
+        """session-20260923-214217: told only "add it", the model sent the
+        missing buttons alone and the email list it had drafted was lost. The
+        draft sits in its own history, so it must be told the owner has not
+        seen it."""
+        from aish.agent import ANSWER_WITHHELD
+
+        rule = """---
+name: chips
+description: A question gets tap buttons.
+when: always
+then:
+  answer_must_include:
+    pattern: "aish-reply://"
+---
+"""
+        asked: list[str] = []
+        agent, chat = rules_agent(
+            tmp_path,
+            [
+                model_says("1. Bali costs\n2. Tax summary\nOpen one?"),
+                model_says(
+                    "1. Bali costs\n2. Tax summary\nOpen one?\n[Yes](aish-reply://yes)"
+                ),
+            ],
+            rule_texts=(rule,),
+        )
+        agent._append = _recording_append(agent, asked)
+        assert "Tax summary" in agent.run_task("check my mail")
+        notes = [text for text in asked if text.startswith(AISH_NOTE)]
+        assert len(notes) == 1 and ANSWER_WITHHELD in notes[0]
 
     def test_an_empty_answer_streams_its_note_once(self, tmp_path):
         """The hold streams itself, notes included. A caller that streams the

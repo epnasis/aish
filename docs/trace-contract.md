@@ -650,6 +650,8 @@ Every other record answers what the model **did**, what **governed** it, what it
 
 **The states a reader reports** are `sent`'s, per the one blob: *recorded* / *evicted on <date>* / *purged* / *not recorded* (a log before this record, or `coverage: "sdk"`) / *empty* (the writer existed, no call succeeded). No cap on the blob, same as `sent`; bounded by the same chat-level eviction. `redact_turn` unlinks the response digest with the request's (`session._sent_digests` collects both). The step screen shows THE COMPLETE RESPONSE beside the curated view, labelling which is aish's parse and which is the source. `TestReceivedRecord`.
 
+**`stop` changed meaning on the OpenAI-compatible streaming path (gemini, local) on 2026-09-23.** Before that, the stream never read `finish_reason`, so an absent `stop` on those records means *nobody looked*; from then on it means *no chunk carried one*. The two are different facts and a reader must not treat an old record's absence as the provider sending none. Non-streaming and Anthropic records were unaffected. `test_stream_keeps_the_finish_reason_the_provider_sent`.
+
 ---
 
 ## 4 · Evidence, not conclusions
