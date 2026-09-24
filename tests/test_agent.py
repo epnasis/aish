@@ -13409,6 +13409,48 @@ class TestALinkThatArrivedByMail:
         assert fetched == ["https://inpost.test/track/999"]
         assert any("arrived in an e-mail" in (a or "") for a in asked)
 
+    TRACKING = [{"from": "InPost <powiadomienia@allegromail.pl>",
+                 "subject": "InPost - Potwierdzenie nadania przesyłki",
+                 "body": "Śledź: https://inpost.test/sledzenie?number=620999673300"}]
+
+    def test_a_mailed_link_with_a_query_asks_once_not_twice(
+        self, tmp_path, monkeypatch
+    ):
+        """Session 20260924-210833: one InPost tracking link drew the mail-link
+        card and then the egress card, which said the turn had "read the open
+        web" (it had read mail) and that the address was one "it built" (it
+        was copied verbatim). His yes to the exact address is the answer both
+        gates were asking for."""
+        url = "https://inpost.test/sledzenie?number=620999673300"
+        agent, fetched, asked = self._agent(
+            tmp_path, monkeypatch, self.TRACKING, [tool_call("read_url", url=url)]
+        )
+        assert fetched == [url]
+        assert len(asked) == 1 and "arrived in an e-mail" in asked[0]
+
+    def test_an_address_the_mail_did_not_carry_still_asks_and_says_mail(
+        self, tmp_path, monkeypatch
+    ):
+        """The exemption is the exact link, never the host — and the card names
+        what the turn really read."""
+        url = "https://inpost.test/sledzenie?number=123"
+        agent, fetched, asked = self._agent(
+            tmp_path, monkeypatch, self.TRACKING, [tool_call("read_url", url=url)]
+        )
+        assert len(asked) == 1
+        assert "this turn has read e-mail," in asked[0]
+        assert "open web" not in asked[0]
+
+    def test_declining_the_mailed_link_raises_no_second_card(
+        self, tmp_path, monkeypatch
+    ):
+        url = "https://inpost.test/sledzenie?number=620999673300"
+        agent, fetched, asked = self._agent(
+            tmp_path, monkeypatch, self.TRACKING, [tool_call("read_url", url=url)],
+            approve_tool=lambda *_a: False,
+        )
+        assert fetched == [] and len(asked) == 1
+
     def test_denying_it_never_fetches(self, tmp_path, monkeypatch):
         agent, fetched, _ = self._agent(
             tmp_path, monkeypatch, self.ORDINARY,
