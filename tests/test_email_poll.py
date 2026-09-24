@@ -295,3 +295,6 @@ class TestPrompt:
         # Everything beyond the owner is draft-and-hold.
         assert "HELD for the owner to approve" in prompt
         assert "message id: m1" in prompt
+        # The gmail tools have no default mailbox: the trigger names the bot's.
+        assert prompt.count("account='aish@wenda.eu'") == 2
+        assert "gws-gmail-read" not in prompt
