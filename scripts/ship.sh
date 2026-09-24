@@ -141,7 +141,9 @@ fi
 #     says the job is loaded, not that it runs. Only the health check says that.
 DOMAIN="gui/$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
-UNLOAD_TIMEOUT_POLLS=120 # × 0.5 s; launchd SIGKILLs after its own ExitTimeOut
+# × 0.5 s. The plist sets no ExitTimeOut, so launchd's default applies; how long
+# aish-web actually takes to exit was not measured — 60 s is a generous bound.
+UNLOAD_TIMEOUT_POLLS=120
 HEALTH_SECONDS=10
 
 if [ ! -f "$PLIST" ]; then
@@ -149,7 +151,28 @@ if [ ! -f "$PLIST" ]; then
     exit 1
 fi
 
-loaded() { launchctl print "${DOMAIN}/${LABEL}" >/dev/null 2>&1; }
+# loaded | gone | unknown. Only exit 113 ("Could not find service", observed)
+# means gone: any other failure of `print` says nothing about the job, and
+# reading it as gone would let a bootstrap race a job launchd still holds.
+job_state() {
+    local rc=0
+    launchctl print "${DOMAIN}/${LABEL}" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+        0) echo loaded ;;
+        113) echo gone ;;
+        *) echo unknown ;;
+    esac
+}
+
+# Poll until launchd no longer has the job; nonzero if it still does (or
+# cannot be read) after UNLOAD_TIMEOUT_POLLS.
+wait_until_gone() {
+    for _ in $(seq 1 "$UNLOAD_TIMEOUT_POLLS"); do
+        [ "$(job_state)" = gone ] && return 0
+        sleep 0.5
+    done
+    [ "$(job_state)" = gone ]
+}
 
 report_launchd_state() {
     echo "  launchctl print ${DOMAIN}/${LABEL}:" >&2
@@ -185,12 +208,28 @@ healthy() {
 
 # Once the job is out, EVERY way this script ends must put it back — an
 # install that failed must not become an outage. The EXIT trap is the one place
-# that guarantees it, including for an interrupt or a `set -e` stop.
+# that guarantees it, including for an interrupt, a hangup or a `set -e` stop.
 job_out=0
+install_log=""
 restore_old_install() {
+    # The bootstrap must run whatever else fails. Under `set -e` a failing
+    # command in the trap ends the trap, and when the terminal has gone (the
+    # hangup case) even an `echo` to it fails — so errors no longer stop
+    # anything here, a write to a closed pipe returns instead of killing us, and
+    # a second signal cannot cut the restore short (the wait in it is bounded).
+    set +e
+    trap '' PIPE INT TERM HUP
+    [ -n "$install_log" ] && rm -f "$install_log"
     [ "$job_out" -eq 1 ] || return 0
     job_out=0
     echo "→ bringing ${LABEL} back on the install that is on disk now" >&2
+    # An interrupt can land while the booted-out job is still exiting, and a
+    # bootstrap in that window fails — so the same wait as before the install.
+    if ! wait_until_gone; then
+        echo "✗ ${LABEL} did not leave launchd — the service is DOWN. Once it has, recover with:" >&2
+        echo "    launchctl bootstrap ${DOMAIN} ${PLIST}" >&2
+        return 0
+    fi
     # If uv had already replaced part of the old env before failing, what is on
     # disk is neither build, and this bootstrap loads a job that may not start.
     # The health check below is what says whether it did.
@@ -202,22 +241,20 @@ restore_old_install() {
     healthy || echo "✗ ${LABEL} is loaded but not serving — see above" >&2
 }
 trap restore_old_install EXIT
-trap 'exit 130' INT TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 was_loaded=0
-loaded && was_loaded=1
+[ "$(job_state)" = gone ] || was_loaded=1
 launchctl bootout "${DOMAIN}/${LABEL}" 2>/dev/null || true
 job_out=1
 if [ "$was_loaded" -eq 1 ]; then
-    for _ in $(seq 1 "$UNLOAD_TIMEOUT_POLLS"); do
-        loaded || break
-        sleep 0.5
-    done
-    if loaded; then
+    if ! wait_until_gone; then
         # Nothing has been installed yet, so there is nothing to put back that
         # launchd has not still got; bootstrapping now would fail anyway.
         job_out=0
-        echo "✗ ${LABEL} is still loaded $((UNLOAD_TIMEOUT_POLLS / 2))s after bootout — nothing installed." >&2
+        echo "✗ ${LABEL} is still loaded (or unreadable) $((UNLOAD_TIMEOUT_POLLS / 2))s after bootout — nothing installed." >&2
         report_launchd_state
         echo "  Once \`launchctl print ${DOMAIN}/${LABEL}\` no longer finds it, recover with:" >&2
         echo "    launchctl bootstrap ${DOMAIN} ${PLIST}" >&2
@@ -233,10 +270,10 @@ install_log="$(mktemp -t aish-ship-install)"
 if ! uv tool install --force --reinstall --no-cache "$PROJECT" >"$install_log" 2>&1; then
     echo "✗ uv tool install failed:" >&2
     tail -n 20 "$install_log" | sed 's/^/    /' >&2
-    rm -f "$install_log"
     exit 1
 fi
 rm -f "$install_log"
+install_log=""
 for exe in aish aish-web; do
     [ -x "$HOME/.local/bin/$exe" ] || { echo "✗ $exe missing after install" >&2; exit 1; }
 done
