@@ -2053,6 +2053,16 @@ UNTRUSTED_SOURCE_TOOLS = frozenset(EGRESS_TOOLS | set(BROWSE_TOOLS))
 # URL, so the tool's name alone does not say whether anything was fetched.
 DUAL_SOURCE_TOOLS = frozenset({"show_image", "read_pdf", "read_media"})
 
+# What a tainted turn READ, in the words a card says it with. A card used to
+# open "this turn has read the open web" whatever raised the taint, and a turn
+# that had only read the owner's mailbox was told it had read the web — a cause
+# no line checked. Recorded per source as the taint rises, so the sentence is
+# the record's and never a guess; anything that is neither a web read nor a
+# declared mail tool says only what was established.
+READ_THE_WEB = "the open web"
+READ_MAIL = "e-mail"
+READ_OUTSIDE = "content from outside this machine"
+
 NATIVE_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in tools.TOOL_SCHEMAS)
 
 BROWSE_NO_PAGE = (
@@ -3096,6 +3106,8 @@ class Agent:
         # the owner having pressed start says nothing about whether the model
         # is currently echoing an instruction it read on a page.
         self._tainted = False
+        # WHAT raised it, for the card to say (READ_THE_WEB and friends).
+        self._taint_reads: set[str] = set()
         # Links a PAGE (or any other tool result) actually offered this task,
         # recorded as whole addresses rather than re-derived by searching raw
         # text later. Read by _url_was_offered.
@@ -4036,6 +4048,7 @@ class Agent:
         # Taint belongs to the task that acquired it. A page read while
         # answering one question must not put a card in front of the next.
         self._tainted = False
+        self._taint_reads = set()
         # Offered links belong to the task that read them, exactly as taint
         # does: the gate that consults them only exists while a task is
         # tainted, and a link a page showed while answering one question is not
@@ -4145,13 +4158,13 @@ class Agent:
             if self._brings_outside_content(name, args) or (
                 cut and (name in DUAL_SOURCE_TOOLS or name == "read_file")
             ):
-                self._tainted = True
+                self._mark_tainted(name, args)
             if name == "read_tool_output":
                 source = tool_plugins.continuation_source(
                     str(args.get("continuation", "") or "").strip(), self.tool_output_dir
                 )
                 if source is None or source.untrusted:
-                    self._tainted = True
+                    self._mark_tainted(source.tool if source else "", None)
                 # An entry that is gone, or that names no tool, can no longer
                 # say its page was not mail.
                 if source is None or self._may_be_mail(source.tool):
@@ -4161,7 +4174,7 @@ class Agent:
                 # A result whose tool cannot even be named can no longer say
                 # where it came from, and silence must not read as clean.
                 if not name or self._brings_outside_content(name, None):
-                    self._tainted = True
+                    self._mark_tainted(name, None)
         # What was typed into a page. The live agent's own record is exact and
         # keyed by the page's host; the log holds the values but not reliably
         # the page each went into (a press can navigate), and a chat can be
@@ -6018,7 +6031,8 @@ class Agent:
                 # Paging text aish already fetched is not a second, cleaner
                 # acquisition of it — so the entry's own record decides, and
                 # the call that served it is only the courier (#314).
-                self._tainted = self._tainted or served.untrusted
+                if served.untrusted:
+                    self._mark_tainted(served.tool, None)
                 self._note_offered_links(
                     {"url": served.source}, result, offers=served.offers
                 )
@@ -6140,9 +6154,38 @@ class Agent:
         this machine does not own — which includes every plugin tool, since a
         wrapper is arbitrary code and the manifest never says where its bytes
         came from."""
-        if self._tainted:
-            return
-        self._tainted = self._brings_outside_content(name, args)
+        if self._brings_outside_content(name, args):
+            self._mark_tainted(name, args)
+
+    def _mark_tainted(self, name: str, args: dict | None) -> None:
+        """Raise the taint, and record what kind of source raised it."""
+        self._tainted = True
+        self._taint_reads.add(self._what_a_source_is(name, args))
+
+    def _what_a_source_is(self, name: str, args: dict | None) -> str:
+        """READ_MAIL for a tool that DECLARES mail, READ_THE_WEB for a web read
+        whose address is known to be one, READ_OUTSIDE for everything else —
+        the unknown answer is the wide one, never a guess at the narrow."""
+        tool = self._plugin_tools.get(name)
+        if tool is not None and tool.content_from == provenance.MAIL:
+            return READ_MAIL
+        if name in UNTRUSTED_SOURCE_TOOLS and (
+            name not in DUAL_SOURCE_TOOLS
+            or (
+                args is not None
+                and str(args.get("url") or args.get("source") or "")
+                .lower()
+                .startswith(("http://", "https://"))
+            )
+        ):
+            return READ_THE_WEB
+        return READ_OUTSIDE
+
+    def _what_the_turn_read(self) -> str:
+        """The object of "this turn has read …", from the record alone."""
+        if not self._taint_reads or READ_OUTSIDE in self._taint_reads:
+            return READ_OUTSIDE
+        return " and ".join(sorted(self._taint_reads))
 
     def _brings_outside_content(self, name: str, args: dict | None) -> bool:
         """Does a result from this call hold content from outside this machine?
@@ -8125,6 +8168,14 @@ class Agent:
             # and that channel is accepted rather than fenced (#294), because
             # closing it means re-gating plain reads.
             return None
+        if self._mail_link_url(name, args) in self._approved_mail_links:
+            # The same argument, for a link a MAIL offered — and narrower: the
+            # mail-link card has already shown him this exact address and he
+            # said yes to it. Copied verbatim, it carries nothing the message
+            # did not already hold, so a second card about "the address it
+            # built" asked the same question twice and described a composition
+            # that never happened.
+            return None
         if not self._carries_payload(name, args):
             return None
         if self._searching_a_vouched_site(hosts, name, args):
@@ -8505,8 +8556,8 @@ class Agent:
             preview = PERSONAL_UNREADABLE_IN_A_SEARCH
         elif name == "web_search":
             preview = (
-                f"this turn has read the open web, and now wants to put an "
-                f"address it composed — {shown} — into a web search"
+                f"this turn has read {self._what_the_turn_read()}, and now wants "
+                f"to put an address it composed — {shown} — into a web search"
                 if self.origin == "user"
                 else f"automated session wants to search for {shown} — a host "
                 "not mentioned by the owner in this conversation"
@@ -8544,7 +8595,8 @@ class Agent:
             # itself is `_payload_finding`'s, unchanged and now JOINED, so a
             # card naming a redirect still names the value riding beside it.
             opening = (
-                "this turn has read the open web, and the address it built for"
+                f"this turn has read {self._what_the_turn_read()}, and the "
+                "address it built for"
                 if self._tainted
                 else "the address aish built for"
             )
@@ -9856,7 +9908,7 @@ class Agent:
             return _gate_outcome(REMEMBER_NO_APPROVER, decision="blocked")
         what = "save the memory" if name == "remember" else "delete the memory"
         who = (
-            "this turn has read the open web, and now wants to"
+            f"this turn has read {self._what_the_turn_read()}, and now wants to"
             if tainted_attended
             else f"automated session ({self.origin}) wants to"
         )
