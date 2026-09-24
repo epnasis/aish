@@ -281,7 +281,7 @@ Retry is one button with two acts, and a recorded fact picks between them. **Reg
 
 ## Shipping a new build (#221)
 
-`make ship` (`scripts/ship.sh`) is the ONE local path from a checkout to the running service: guard → lint → tests → `uv tool install` → `launchctl kickstart` → health-check. `scripts/deploy-web.sh <host>` is the remote equivalent.
+`make ship` (`scripts/ship.sh`) is the ONE local path from a checkout to the running service: guard → lint → tests → `launchctl bootout` → `uv tool install` → `launchctl bootstrap` → health-check. `scripts/deploy-web.sh <host>` is the remote equivalent.
 
 **The guard is the reason it is a script at all.** `uv tool install` builds the wheel from the **WORKING TREE, not from HEAD** — verified, not assumed: an uncommitted line in `aish/static/app.js` was found inside a freshly built wheel. So a bare install silently ships whatever happens to be uncommitted, and there is nowhere to put a check when the ship step is a command pasted from a doc.
 
@@ -292,6 +292,17 @@ So: a dirty tree **refuses**, naming the files and separating those that land in
 The remote script keeps working-tree shipping as its normal mode — that is the point of a remote dev loop — but prompts when the tree is dirty, and with **no tty to prompt on** it refuses rather than treating silence as consent. That non-interactive branch is the one that matters: the failure above happened while nobody was watching a terminal.
 
 `--check` runs the preflight and stops before anything is installed or restarted, which is what makes the guard testable — `TestShipGuard` drives the REAL script against throwaway git repos, never a Python restatement of its logic.
+
+**The install runs with the job OUT of launchd (#411).** `com.aish.web` is `KeepAlive`, so while it is loaded launchd may start it at any moment — including while `uv tool install` is replacing the env it runs from. On 2026-09-24 the log for the install window held respawns failing against a half-written env (an ImportError inside `wcwidth`, then `aish-web: No such file or directory`); after the install, ship's `kickstart -k` and its 10 s window, `launchctl print` showed `spawn scheduled`, and one more `kickstart -k` brought it up in ~4 s. Why the first kickstart was not enough was never established, and nothing here claims it. The sequence is changed so the question does not arise: `bootout` before the install, `bootstrap` after it. Booted out, the job cannot be started mid-install; bootstrapped, it is a fresh job (`runs = 1` in `launchctl print`) that starts because the plist sets RunAtLoad, with no restart to race. Two launchctl behaviours it depends on, both observed on macOS 26 against a throwaway label, never the live service:
+
+- `bootout` returns 0 while the process is still exiting (`state = SIGTERMed`, `print` still finds the job), and a `bootstrap` in that window fails with `5: Input/output error`. So ship polls `print` until the job is gone (up to 60 s) before installing; if it never goes, ship installs nothing and prints the recovery command. Only exit 113 (`Could not find service`, observed) counts as gone — any other `print` failure says nothing about the job and is polled through, never read as gone. The 60 s is a bound, not a measurement: the plist sets no ExitTimeOut, and how long aish-web takes to exit was not measured.
+- `bootstrap` returns 0 for a plist whose program does not exist — it means *loaded*, not *running*. Only the health check says running, and on failure it prints what `launchctl print` reports (`state`, `last exit`) as an observation.
+
+Every exit after the bootout puts the job back (an `EXIT` trap): a failed install bootstraps the install that is on disk and health-checks it, but ship still exits non-zero. If uv had already replaced part of the old env before failing, what is on disk is neither build and that job may not start — the health check is what reports it. A failed `bootstrap` says the service is DOWN and prints the exact `launchctl bootstrap gui/<uid> <plist>` to run. A job not loaded at the start is loaded after the install.
+
+The trap is written so nothing can stop it before the bootstrap. It turns `set -e` off and ignores SIGPIPE, INT, TERM and HUP first: under `set -e` a failing command inside an `EXIT` trap ends the trap, and once the terminal has gone (a dropped ssh session: SIGHUP mid-install) even the `echo >&2` announcing the restore fails — which, before this, ended the trap one line short of the bootstrap. It also runs the same gone-poll before bootstrapping, because an interrupt can land while the booted-out job is still exiting, and bootstrapping then fails with 5.
+
+`TestShipRestart` drives the real script past the preflight against PATH stand-ins for `launchctl`, `uv`, `netstat`, `curl` and `sleep`, with a throwaway HOME — including runs with stderr closed, a SIGHUP sent from inside the install, and a SIGINT sent during the gone-poll.
 
 Health-checking probes whatever address the kernel says is listening rather than assuming loopback: this service binds the LAN address, so a `127.0.0.1` probe reports a false failure on a perfectly healthy restart.
 

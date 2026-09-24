@@ -22,7 +22,7 @@ uv run aish                            # run from source
 After changing code, the user's installed `aish` does NOT pick it up — uv freezes the wheel and caches it at the same version. Ship with:
 
 ```sh
-make ship          # guard → lint → tests → reinstall → restart → health-check
+make ship          # guard → lint → tests → bootout → reinstall → bootstrap → health-check
 make ship-check    # the preflight alone: what would ship, and whether it may
 ```
 
