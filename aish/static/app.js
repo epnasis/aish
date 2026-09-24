@@ -18368,18 +18368,6 @@ function openModelSheet(query) {
   send({ type: "models", query });
 }
 
-const RECENT_MODELS_KEY = "aish-recent-models";
-function recentModels() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(RECENT_MODELS_KEY));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch { return []; }
-}
-function rememberModel(name) {
-  const list = [name, ...recentModels().filter((n) => n !== name)].slice(0, 5);
-  localStorage.setItem(RECENT_MODELS_KEY, JSON.stringify(list));
-}
-
 function renderModels(event) {
   const list = $("model-list");
   list.replaceChildren();
@@ -18401,21 +18389,22 @@ function renderModels(event) {
       row.appendChild(check);
     }
     row.onclick = () => {
-      rememberModel(model.name);
       act({ type: "set_model", spec: model.name, save: $("model-save").checked },
         { label: "the model switch" });
     };
     return row;
   };
-  // Browsing (no search): surface recently-chosen models up top.
-  if (!$("model-search").value.trim()) {
-    const recents = recentModels()
-      .filter((n) => n !== event.current && event.models.some((m) => m.name === n));
-    if (recents.length) {
-      list.appendChild(sectionLabel("Recent"));
-      for (const n of recents) list.appendChild(modelRow(event.models.find((m) => m.name === n)));
-      list.appendChild(sectionLabel("All models"));
-    }
+  // Browsing (no search): the models the owner's chats actually ran on, as the
+  // SERVER reads them from the logs (#412). Not a per-device memory of taps:
+  // that missed every model used on another device, inherited by a new chat,
+  // restored by reopening one, or chosen in the terminal. The server has
+  // already dropped the current model, claude-max, Ollama models that are not
+  // installed, and models of providers that are not set up (`recent_models`).
+  const recents = event.recent || [];
+  if (!$("model-search").value.trim() && recents.length) {
+    list.appendChild(sectionLabel("Recent"));
+    for (const model of recents) list.appendChild(modelRow(model));
+    list.appendChild(sectionLabel("All models"));
   }
   for (const model of event.models) list.appendChild(modelRow(model));
 }

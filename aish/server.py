@@ -112,6 +112,7 @@ from .cli import (
     parse_feedback,
     parse_learn,
     rank_models,
+    recent_models,
     save_default_model,
 )
 from .documents import DocumentError, page_count, page_png
@@ -4780,16 +4781,24 @@ class WebServer:
         if session is None:
             return
         agent, state_dir = session.agent, self.state_dir
+        current = model_spec(agent)
 
         def load():
-            return rank_models(available_models(agent, state_dir), query)
+            models = available_models(agent, state_dir)
+            # Recent is read off the chats' own model records, so it is the same
+            # on every device and includes a model however it came to be used
+            # (#412). Only the browsing view shows it, so a search skips the scan.
+            browsing = not query.strip() and state_dir is not None
+            used = SessionLog.models_used(state_dir) if browsing else iter(())
+            return rank_models(models, query), recent_models(used, models, current)
 
-        ranked = await asyncio.to_thread(load)
+        ranked, recent = await asyncio.to_thread(load)
         await client.ws.send_json(
             {
                 "type": "model_list",
-                "current": model_spec(session.agent),
+                "current": current,
                 "models": [{"name": name, "desc": desc} for name, desc in ranked],
+                "recent": [{"name": name, "desc": desc} for name, desc in recent],
             }
         )
 
