@@ -1512,6 +1512,16 @@ async def _has_password_field(page: Any) -> bool:
     return await _password_field_state(page) is True
 
 
+async def _visible_password_boxes(page: Any) -> int:
+    """How many password boxes the replay would see. A page that will not
+    answer counts 0, which spends no sign-in: the safe direction here is to
+    not type a password where aish could not look."""
+    try:
+        return int(await page.evaluate(VISIBLE_PASSWORDS_JS) or 0)
+    except Exception:  # noqa: BLE001 — could-not-tell is not one box
+        return 0
+
+
 # The page's own <main>, when it declares one. Purely a BUDGET decision: a read
 # is capped at DOCS_MAX_CHARS, and on a shop the leading kilobytes are category
 # navigation — so the cap fell inside the chrome and cut the offers short.
@@ -2318,6 +2328,25 @@ def _submit(job: Callable[[_Owner], Any], timeout: float) -> Any:
 #      password in the query string, and `remember_page` then writes that URL
 #      to recent.json in cleartext, outside every scrubbing path there is.
 
+# What counts as a VISIBLE field for the replay. Shared with the count a
+# driven snapshot takes, so "this page shows exactly one password box" means
+# the same thing when an act decides to spend a sign-in as when the replay
+# decides whether it may type.
+SIGNIN_VIS_JS = """
+  const vis = (el) => {
+    if (!el || el.disabled) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 1 && r.height > 1 && el.checkVisibility?.({
+      checkOpacity: true, checkVisibilityCSS: true,
+    }) !== false;
+  };
+"""
+
+VISIBLE_PASSWORDS_JS = (
+    "() => {" + browse_mod.DEEP_JS + SIGNIN_VIS_JS
+    + "  return deepAll('input[type=password]').filter(vis).length;\n}"
+)
+
 SIGNIN_FORM_JS = "(expected) => {" + browse_mod.DEEP_JS + """
   // The origin is checked HERE, against the origin the credential was saved
   // for, and in the SAME step that tags the fields. Doing it in Python before
@@ -2326,13 +2355,7 @@ SIGNIN_FORM_JS = "(expected) => {" + browse_mod.DEEP_JS + """
   if (location.origin !== expected) {
     return {ok: false, why: 'the page moved to ' + location.origin};
   }
-  const vis = (el) => {
-    if (!el || el.disabled) return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 1 && r.height > 1 && el.checkVisibility?.({
-      checkOpacity: true, checkVisibilityCSS: true,
-    }) !== false;
-  };
+""" + SIGNIN_VIS_JS + """
   // Through shadow roots, like `_has_password_field` already is: a login form
   // inside a web component used to read as "no password field on the page",
   // which fails closed — aish refuses to fill a credential it could have
@@ -3838,13 +3861,23 @@ def _save_held_credential(owner: Any) -> str:
     return record.origin
 
 
-def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
+def sign_in(
+    url: str, *, at: str = "", timeout: float = 120.0
+) -> SignInResult | None:
     """Re-establish the owner's session at this URL's origin, or None when
     there is nothing stored for it.
 
     Never called by the model, and it takes no model-supplied argument beyond
     the URL that was already being read. The page it drives is the one the
     OWNER recorded, not the one that was asked for.
+
+    **`at`** is the one exception, and it is bounded by the recording: an act
+    that LANDED on his login page hands in the address it landed at, query and
+    all, so the site's return address survives the sign-in. It is loaded on a
+    fresh page by aish's own navigation exactly as `record.url` would be, and
+    it is refused unless it is the same login page (`signin.same_login_page`)
+    both before the load and after it settled — a same-origin redirect after
+    load would otherwise put the typing on a page nobody compared.
 
     **`url` is also what the outcome is judged against.** A sign-in's outcome
     is whether the session came up (#296), so the ending that claims one reads
@@ -3856,6 +3889,11 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
     record = signin_mod.find(url)
     if record is None:
         return None
+    if at and not signin_mod.same_login_page(at, record.url):
+        return SignInResult(
+            why="the page is not the login page the sign-in was saved at"
+        )
+    login_page = at or record.url
     pair = signin_mod.credential(record.origin)
     if pair is None:
         # The record says WHY it was marked, so that is what is said — "was
@@ -3905,9 +3943,22 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
         _watch_console(page, console)
         owner.read_pages.add(page)
         try:
-            await page.goto(record.url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            await page.goto(login_page, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             await page.wait_for_timeout(SETTLE_MS)
             await _dismiss_consent(page)
+            # Asked of the SETTLED page. Nothing has been typed yet, so a page
+            # that moved is refused at no cost to the credential. What remains
+            # is an in-document path change between here and the tagging; the
+            # origin check inside `SIGNIN_FORM_JS` and the network fence still
+            # hold across that gap, and the path is not re-asked there.
+            if at and not signin_mod.same_login_page(str(page.url or ""), record.url):
+                outcome = SignInResult(
+                    why="the login page moved to another address before anything "
+                    "was typed"
+                )
+                outcome.frame, outcome.frame_skipped = await _signin_frame(owner, page)
+                outcome.console = console.drain()
+                return outcome
             # Armed BEFORE anything is typed and left up through the submit and
             # the settle, so a delayed exfiltration is caught too.
             await _fence_the_origin(page, record, password, watch)
@@ -5353,6 +5404,7 @@ async def _snapshot(
     # consults it (#320): a browse-path login form is an EMPTY login form, and
     # refusing to photograph it cost the picture and protected nothing.
     signin = await _has_password_field(page)
+    password_boxes = await _visible_password_boxes(page) if signin else 0
     frame, frame_skipped = await _evidence_frame(owner, page)
     after_frame = clock()
     phases = {
@@ -5410,6 +5462,7 @@ async def _snapshot(
         reasons=reasons,
         epoch=session.epoch,
         signin=signin,
+        password_boxes=password_boxes,
         frame=frame,
         # Drained, not read: a snapshot is taken once per call, and this is
         # what ties a message to the press that provoked it instead of leaving

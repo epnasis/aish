@@ -591,6 +591,56 @@ def find(url: str) -> Record | None:
     return next((r for r in _load() if r.origin == origin), None)
 
 
+# A fragment that starts like a PATH is the page's own router — `#/login`,
+# `#!/login` — and names a different screen, so it takes part in the
+# comparison. Any other fragment is an anchor on the same page (`#main`) and
+# does not. The syntax cannot tell the two apart (the first `#` always starts
+# the fragment); this is the convention hash routers follow, and it is a
+# convention, not a guarantee.
+_ROUTE_FRAGMENT = ("/", "!")
+
+
+def _login_page_key(url: str) -> tuple[str, str, str] | None:
+    """(origin, path, route) — the parts of a URL that say WHICH page it is.
+
+    The query is dropped because it is per-visit: a return address, a
+    one-time Keycloak `execution` token. It stays in the URL the browser
+    loads; it only never decides whether two URLs are the same login page."""
+    origin = origin_of(url)
+    if not origin:
+        return None
+    parts = urllib.parse.urlsplit(url.strip())
+    path = urllib.parse.unquote(parts.path or "/").rstrip("/") or "/"
+    fragment = urllib.parse.unquote(parts.fragment or "")
+    route = ""
+    if fragment.startswith(_ROUTE_FRAGMENT):
+        route = fragment.split("?", 1)[0].rstrip("/") or "/"
+    return origin, path, route
+
+
+def same_login_page(url: str, recorded: str) -> bool:
+    """Is `url` the login page the owner recorded at `recorded`?
+
+    Same origin and path, the query ignored on both sides, an anchor ignored
+    and a hash route compared. This is what licenses typing his password at
+    an address aish did not record verbatim, so anything it cannot parse is
+    not the same page."""
+    here, there = _login_page_key(url), _login_page_key(recorded)
+    return here is not None and here == there
+
+
+# How many times each origin's sign-in has been saved in this process. A fresh
+# capture is a new credential even when `saved` — a DATE — reads the same, and
+# the per-chat bound on act-path sign-ins must not outlive the credential it
+# was about (`web.BrowseView.signin_failed`). Process-local on purpose: the
+# views that consult it die with the process too.
+_SAVES: dict[str, int] = {}
+
+
+def saves(origin: str) -> int:
+    return _SAVES.get(origin, 0)
+
+
 def save(
     login_url: str,
     identifier: str,
@@ -619,6 +669,7 @@ def save(
         destinations=_origins(destinations),
     )
     _write([*kept, record])
+    _SAVES[origin] = _SAVES.get(origin, 0) + 1
     return record
 
 

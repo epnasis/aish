@@ -1354,6 +1354,12 @@ class Snapshot:
     # and was stopped by the owner. A page cannot be driven usefully until
     # somebody signs in, and saying so is what stops the guessing.
     signin: bool = False
+    # How many password boxes are VISIBLE, counted by the rule the sign-in
+    # replay itself applies before it types anything, and only when `signin`
+    # is set (0 otherwise). `signin` counts a hidden box too, which is right
+    # for telling the model it is looking at a wall and wrong for deciding to
+    # spend a sign-in: the replay refuses anything but exactly one.
+    password_boxes: int = 0
     # disabled control). The page is still returned, because the model's next
     # move depends on seeing where it actually is.
     problem: str = ""

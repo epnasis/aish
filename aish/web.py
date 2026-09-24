@@ -29,6 +29,7 @@ from typing import Any, NamedTuple
 
 from . import browse as browse_mod
 from . import browser, provenance, tools, vocab
+from . import signin as signin_mod
 from .tools import DOCS_MAX_CHARS, _filter_topic, truncate
 
 SEARCH_MAX_RESULTS = 5
@@ -2177,6 +2178,18 @@ BROWSE_SIGNIN_HELD = (
     "Do NOT try other buttons on this page.]\n"
 )
 
+# An act landed on the login page again after this chat's one attempt did not
+# bring the session up. Its own note because HELD would say the saved sign-in
+# "is not the problem", and after an attempt that did not work nothing here
+# knows that.
+BROWSE_SIGNIN_NOT_AGAIN = (
+    "[aish: {host} is asking for a password. aish already used the sign-in "
+    "the user saved once in this chat and the session did not come up, so it "
+    "will not try it again here: a saved sign-in that did not work is tried "
+    "once per chat, never repeatedly. Tell them to run /browser {host} and "
+    "sign in themselves. Do NOT try other buttons on this page.]\n"
+)
+
 BROWSE_SIGNED_OUT_STALE = (
     "[aish: {host} is asking for a password. The sign-in the user saved was "
     "not accepted, so aish will not try it again — {why}. Tell them to run "
@@ -2241,7 +2254,7 @@ BROWSE_RENEWED_NOT_REOPENED = (
 
 
 def _renew_session(
-    url: str, *, seen: SignInSeen | None = None
+    url: str, *, seen: SignInSeen | None = None, at: str = ""
 ) -> "browser.SignInResult | None":
     """Sign in again at this URL's origin, or None when nothing is stored.
 
@@ -2253,7 +2266,7 @@ def _renew_session(
     recording site is a second thing to keep in step, and the read path and the
     driving path have already drifted apart once over exactly this feature."""
     try:
-        outcome = browser.sign_in(url)
+        outcome = browser.sign_in(url, at=at) if at else browser.sign_in(url)
     except Exception:  # noqa: BLE001 — a renewal failing is a read without one
         return None
     if outcome is not None and seen is not None:
@@ -2625,6 +2638,16 @@ class BrowseView:
         # it. Compared before an act so a page another chat drove is refused
         # rather than acted on — see `browser.PAGE_TAKEN`.
         self.epoch: int | None = None
+        # Origins whose saved sign-in an ACT spent in this chat without the
+        # session coming up, each with `signin.saves()` at the time, so a
+        # credential he saved afresh since is a new one and gets its attempt.
+        # A failed replay on eon.pl is silent — the form just comes back —
+        # and nothing marks the record, so without this every act that
+        # landed on the login page again would type the
+        # password again, which is how accounts lock. A success does not
+        # enter it: a session that came up proves the password, and eon.pl
+        # signs him out again within the quarter hour.
+        self.signin_failed: dict[str, int] = {}
         # The evidence frame of the page this chat was SHOWN by the call now
         # running (#289), and why there is none when there is none. Cleared at
         # the top of every browse entry point rather than only written at the
@@ -2738,6 +2761,7 @@ class BrowseView:
         self.epoch = None
         self.sections_seen.clear()
         self.refs.clear()
+        self.signin_failed.clear()
         self.start_call()
 
 
@@ -3449,9 +3473,8 @@ def browse(
     can be pressed on it."""
     seen = _seen(view)
     seen.start_call()
-    # Created HERE, once per call: `browse` is the only browse verb that can
-    # renew a session (renewal belongs on the open, never on an act), so it is
-    # the only one that can have a sign-in to show for itself.
+    # Created HERE, once per call — the same as the act verbs, which renew
+    # only when the act landed on the login page he recorded.
     signin_seen = SignInSeen()
     text = _browse(
         url, topic, section=section, cut=cut, view=view, signin_seen=signin_seen
@@ -3510,16 +3533,31 @@ def _browse(
     )
 
 
-def _renew_driving(url, snapshot, *, topic, view, signin_seen=None):
+def _renew_driving(url, snapshot, *, topic, view, signin_seen=None, at=""):
     """(note, snapshot) after one attempt to sign back in on the driving path.
 
     Returns the ORIGINAL snapshot when nothing could be done, because a signed-
     out page is still a page: the model has to be able to say which one it was
-    looking at when it reports that it could not get in."""
+    looking at when it reports that it could not get in.
+
+    `at` is set when an act landed on the login page itself: the sign-in
+    loads that address, and a failure is remembered on the view so no later
+    act in this chat spends the password again."""
     host = browser.host_of(url)
-    outcome = _renew_session(url, seen=signin_seen)
+    outcome = _renew_session(url, seen=signin_seen, at=at)
     if outcome is None:
+        if at:
+            # An act reaches here only holding a record, so None is the
+            # attempt itself failing to run — "nothing is saved" would be
+            # false, and would send him to re-save a sign-in he has.
+            return BROWSE_SIGNIN_HELD.format(
+                host=host,
+                why="the sign-in could not be run: the browser did not complete it",
+            ), snapshot
         return BROWSE_SIGNED_OUT_NOTE.format(host=host), snapshot
+    if at and not outcome.ok:
+        origin = signin_mod.origin_of(url)
+        _seen(view).signin_failed[origin] = signin_mod.saves(origin)
     if not outcome.ok:
         # Routed on what was OBSERVED of the credential and nothing else. A
         # `captcha` branch used to be first here — a script tag on the page
@@ -3558,6 +3596,42 @@ def _renew_driving(url, snapshot, *, topic, view, signin_seen=None):
     return RENEWED_SESSION_NOTE.format(host=host), again
 
 
+def _renew_after_act(snapshot, *, topic, view, signin_seen=None):
+    """(note, snapshot) for a page an act LANDED on, when it asks for a password.
+
+    Renewal used to happen on the open only, and a model that clicked its way
+    to the login page — eon.pl's home page, then "Mój E.ON" — met a password
+    box with no note at all, pressed "Zaloguj się" on the empty form and asked
+    the owner to sign in by hand, with his sign-in saved the whole time
+    (session-20260922-234413). So an act that lands on the page he RECORDED
+    signs in there, once; any other wall gets a note that says what aish saw,
+    because a system with no verb guesses."""
+    if not getattr(snapshot, "signin", False):
+        return "", snapshot
+    landed = str(getattr(snapshot, "url", "") or "")
+    host = browser.host_of(landed)
+    record = signin_mod.find(landed)
+    if record is None:
+        return BROWSE_SIGNED_OUT_NOTE.format(host=host), snapshot
+    if not signin_mod.same_login_page(landed, record.url):
+        why = "this is not the login page it was saved at"
+    elif getattr(snapshot, "password_boxes", 0) != 1:
+        why = (
+            "aish did not see exactly one password box on this page, and that "
+            "is the only form it types a saved password into"
+        )
+    elif _seen(view).signin_failed.get(record.origin) == signin_mod.saves(
+        record.origin
+    ):
+        return BROWSE_SIGNIN_NOT_AGAIN.format(host=host), snapshot
+    else:
+        return _renew_driving(
+            landed, snapshot, topic=topic, view=view,
+            signin_seen=signin_seen, at=landed,
+        )
+    return BROWSE_SIGNIN_HELD.format(host=host, why=why), snapshot
+
+
 def browse_act(
     target: str,
     action: str = "click",
@@ -3572,12 +3646,11 @@ def browse_act(
     """Do one thing to the control the model named, and hand back what changed."""
     seen = _seen(view)
     seen.start_call()
+    signin_seen = SignInSeen()
     text_out = _browse_act(
-        target, action, text, value, submit, topic, cut, view, section=section
+        target, action, text, value, submit, topic, cut, view, section=section,
+        signin_seen=signin_seen,
     )
-    # No `signin=`: renewal happens on the OPEN and never on an act, so an act
-    # that claimed a sign-in block would be claiming something that cannot have
-    # happened inside it.
     return sealed(
         text_out,
         cut,
@@ -3591,6 +3664,7 @@ def browse_act(
         unchanged=seen.unchanged,
         phases=seen.phases,
         pressed=seen.pressed,
+        signin=signin_seen,
     )
 
 
@@ -3604,6 +3678,7 @@ def _browse_act(
     cut: PageCut | None = None,
     view: BrowseView | None = None,
     section: str | None = None,
+    signin_seen: SignInSeen | None = None,
 ) -> str:
     # The pull side of #361 (slice 4): both are reads — the page is fully
     # loaded and fully checked either way, and only what is DELIVERED narrows.
@@ -3694,7 +3769,10 @@ def _browse_act(
         )
     if action == "sections":
         return _present_sections_index(snapshot, view)
-    return _present_snapshot(
+    note, snapshot = _renew_after_act(
+        snapshot, topic=topic, view=view, signin_seen=signin_seen
+    )
+    return note + _present_snapshot(
         snapshot,
         topic=topic,
         acted=not reading,
@@ -3718,7 +3796,8 @@ def browse_fill(
     most one press — as one act."""
     seen = _seen(view)
     seen.start_call()
-    text = _browse_fill(steps, topic, cut=cut, view=view)
+    signin_seen = SignInSeen()
+    text = _browse_fill(steps, topic, cut=cut, view=view, signin_seen=signin_seen)
     return sealed(
         text,
         cut,
@@ -3731,6 +3810,7 @@ def browse_fill(
         problem=seen.problem,
         unchanged=seen.unchanged,
         phases=seen.phases,
+        signin=signin_seen,
     )
 
 
@@ -3740,6 +3820,7 @@ def _browse_fill(
     *,
     cut: PageCut | None = None,
     view: BrowseView | None = None,
+    signin_seen: SignInSeen | None = None,
 ) -> str:
     seen = _seen(view)
     current = seen.shown
@@ -3762,7 +3843,10 @@ def _browse_fill(
         return f"ERROR: {exc}"
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: could not fill this form: {type(exc).__name__}: {exc}"
-    return _present_snapshot(
+    note, snapshot = _renew_after_act(
+        snapshot, topic=topic, view=view, signin_seen=signin_seen
+    )
+    return note + _present_snapshot(
         snapshot, topic=topic, acted=True, cut=cut, view=view
     )
 
