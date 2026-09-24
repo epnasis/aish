@@ -290,10 +290,11 @@ class TestConfig:
 
 class TestUsageContext:
     def test_mentions_all_self_knowledge(self, tmp_path):
+        from aish.agent import IDENTITY_SLOT
         from aish.cli import usage_context
 
         text = usage_context(
-            "qwen3.6:35b-a3b", False, tmp_path / "allow.txt", tmp_path / "state",
+            False, tmp_path / "allow.txt", tmp_path / "state",
             tmp_path / "config.toml",
         )
         for needle in (
@@ -306,14 +307,16 @@ class TestUsageContext:
             str(tmp_path / "allow.txt"),
             str(tmp_path / "config.toml"),
             "currently false",
-            "qwen3.6:35b-a3b",
+            # The identity is the SLOT here — the agent fills it from its LIVE
+            # model at every rebuild, so no model name is baked at startup.
+            IDENTITY_SLOT,
         ):
             assert needle in text, needle
 
     def test_reflects_vi_mode_state(self, tmp_path):
         from aish.cli import usage_context
 
-        text = usage_context("m", True, tmp_path, tmp_path, tmp_path)
+        text = usage_context(True, tmp_path, tmp_path, tmp_path)
         assert "currently true" in text
 
     def test_names_the_skills_dir_in_effect_now(self, tmp_path):
@@ -325,7 +328,7 @@ class TestUsageContext:
         from aish.cli import usage_context
         from aish.paths import DEFAULT_CONFIG_HOME
 
-        text = usage_context("m", False, tmp_path, tmp_path, tmp_path)
+        text = usage_context(False, tmp_path, tmp_path, tmp_path)
         assert str(skills_module.GLOBAL_SKILLS_DIR) in text
         assert str(DEFAULT_CONFIG_HOME / "skills") not in text
 
@@ -338,7 +341,7 @@ class TestUsageContext:
         from aish.cli import usage_context
         from aish.paths import DEFAULT_CONFIG_HOME, config_home
 
-        text = usage_context("m", False, tmp_path, tmp_path, tmp_path)
+        text = usage_context(False, tmp_path, tmp_path, tmp_path)
         assert str(config_home() / "deny.txt") in text
         assert str(config_home() / "lessons.md") in text
         assert str(DEFAULT_CONFIG_HOME / "deny.txt") not in text
@@ -352,7 +355,7 @@ class TestUsageContext:
         in these prompts is ignored."""
         from aish.cli import usage_context
 
-        text = usage_context("m", False, tmp_path, tmp_path, tmp_path)
+        text = usage_context(False, tmp_path, tmp_path, tmp_path)
         line = next(part for part in text.split("\n- ") if part.startswith("MATHS"))
         assert "MUST" in line
         assert "Unicode" in line
@@ -360,10 +363,11 @@ class TestUsageContext:
         assert "h/sin(45°)" in line
         assert "\\frac{h}{\\sin(45^\\circ)}" in line  # the shape it must NOT write
 
-    def test_grounds_identity_as_local_ollama(self, tmp_path):
-        from aish.cli import usage_context
+    def test_grounds_identity_as_local_ollama(self):
+        # The identity section itself (usage_context carries only the SLOT).
+        from aish.agent import identity_context
 
-        text = usage_context("qwen3:8b", False, tmp_path, tmp_path, tmp_path)
+        text = identity_context("qwen3:8b", "ollama")
         lower = text.lower()
         # names its real model, says it's local (not cloud), and that killing
         # the server stops it answering. NOT "ends the chat" (#260): the chat's
@@ -1985,10 +1989,10 @@ class TestLaunchResume:
         seen: dict = {}
         real_usage_context = cli.usage_context
 
-        def record(model, vi, allow_path, state_dir, config_path, deny_path, lessons_path, **kw):
+        def record(vi, allow_path, state_dir, config_path, deny_path, lessons_path, **kw):
             seen.update(allow=allow_path, deny=deny_path, lessons=lessons_path)
             return real_usage_context(
-                model, vi, allow_path, state_dir, config_path, deny_path, lessons_path, **kw
+                vi, allow_path, state_dir, config_path, deny_path, lessons_path, **kw
             )
 
         monkeypatch.setattr(cli, "usage_context", record)

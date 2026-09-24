@@ -89,7 +89,7 @@ _PLATFORM_NOTES = {
 }
 
 SYSTEM_PROMPT_TEMPLATE = """\
-You are aish, a CLI agent on {platform_note}
+You are aish, an AI agent on {platform_note}
 
 Rules:
 1. GROUNDING: before running any command whose flags you are not 100% certain
@@ -240,9 +240,9 @@ Rules:
    A page that is bot-blocked (HTTP 403/429/503), unresponsive, or
    JavaScript-only is retried FOR YOU in a real browser on this machine, so
    just call read_url once and read what comes back — a result marked
-   "rendered in the browser" already IS the retry. Only if that still fails
-   may you retry ONCE via read_url on https://r.jina.ai/<url>, a third-party
-   reader; never send it a URL containing tokens or other secrets.
+   "rendered in the browser" already IS the retry. If that still fails, say
+   so and use a different source — never a third-party reader proxy, which
+   fetches signed-out from a datacenter and does worse.
    You MUST NOT fetch a web page any other way. No curl, no wget, and no
    script you write yourself in Python or any other language — a hand-rolled
    request is curl with extra steps, it fails on exactly the sites read_url
@@ -2676,6 +2676,63 @@ def system_prompt(
     return SYSTEM_PROMPT_TEMPLATE.format(platform_note=note, scratch_note=scratch_note)
 
 
+# Where the caller's context wants the identity section. cli.usage_context and
+# server.web_usage_context embed this SLOT instead of a baked identity string,
+# and every compose fills it from the agent's LIVE (model, provider) — so a
+# /model switch, a resume onto the recorded model, or a per-session override
+# corrects the identity on the next rebuild instead of describing the backend
+# the server happened to start with (the bug: a local mlx chat told it was
+# gemini on Google's cloud, privacy warning included).
+IDENTITY_SLOT = "<aish:identity>"
+
+PROVIDER_LABELS = {
+    "gemini": "Google Gemini",
+    "openai": "OpenAI",
+    "claude": "Anthropic Claude",
+    "claude-max": "Anthropic Claude (subscription)",
+    "local": "OpenAI-compatible server",
+}
+
+
+def identity_context(model: str, provider: str) -> str:
+    """The one system-prompt section that depends on where the model runs."""
+    if provider == "ollama":
+        return (
+            f"- YOUR IDENTITY: you are the local model '{model}' running through Ollama "
+            "ON THIS MACHINE — you are NOT a cloud service and NOT accessed over any API. "
+            "The Ollama process (ollama / llama-server, often ~20+ GB RAM) that the user "
+            "sees in `top`/`ps` IS you: it is the server executing your weights right now. "
+            "If the user stops Ollama, quits the Ollama app, or runs `killall llama-server` "
+            "/ `ollama stop`, YOU STOP MID-ANSWER — you would be killing "
+            "yourself. So when the user is hunting memory hogs or asks about that process, "
+            "say plainly that it is you; never recommend or run a command that kills it "
+            "without first warning that it cuts this chat off until Ollama is back, "
+            "and let them decide."
+        )
+    if provider == "local":
+        where = os.environ.get(backends.LOCAL_URL_ENV, "").strip()
+        where = where or f"the address in {backends.LOCAL_URL_ENV}"
+        return (
+            f"- YOUR IDENTITY: you are the model '{model}' served by the user's own "
+            f"OpenAI-compatible server at {where} — not a cloud service, and not Ollama. "
+            "aish executes approved commands on this machine and sends this conversation "
+            "to that server over the network. Stopping Ollama does not affect this chat; "
+            "stopping that server stops you mid-answer."
+        )
+    label = PROVIDER_LABELS.get(provider, provider)
+    model_desc = f"the model '{model}'" if model else "a Claude model"
+    return (
+        f"- YOUR IDENTITY: you are {model_desc}, reached over the {label} "
+        "cloud API — you do NOT run on this machine. aish executes approved commands "
+        f"locally and sends only this conversation to {label}. PRIVACY: everything "
+        "in the conversation — the user's messages, files you read, command output — "
+        f"leaves this machine for {label}'s servers, so be conservative about "
+        "pulling sensitive local data (keys, credentials, personal files) into "
+        "context, and warn the user before reading such files. Local Ollama models "
+        "are unrelated to you; stopping Ollama does not affect this chat."
+    )
+
+
 def compose_system_content(
     base_context: str,
     cwd: str,
@@ -2683,15 +2740,21 @@ def compose_system_content(
     index: str | None = None,
     scratch_dir: os.PathLike | str | None = None,
     scratch_in_reminder: bool = False,
+    identity: str = "",
 ) -> str:
     """The full system message: static rules + caller context + the live
     skills/memory index. Rebuilt at every run_task so entries created
     mid-session (or after /cd) are advertised without a restart.
     Deterministic: unchanged inputs yield a byte-identical string, keeping
     prompt caches valid. With `scratch_in_reminder` it is also identical
-    across CHATS, which is what lets a new chat reuse a cache at all."""
+    across CHATS, which is what lets a new chat reuse a cache at all.
+    `identity` fills the caller context's IDENTITY_SLOT from the agent's
+    live model, so it says what is actually serving this chat — same model,
+    same bytes, so caches stay valid until the model really changes."""
     if index is None:
         index = skills.knowledge_index(cwd, lessons_path)
+    if identity:
+        base_context = base_context.replace(IDENTITY_SLOT, identity)
     content = system_prompt(scratch_dir, scratch_in_reminder=scratch_in_reminder)
     content += f"\n{base_context}" if base_context else ""
     return content + (f"\n\n{index}" if index else "")
@@ -3407,6 +3470,7 @@ class Agent:
         content = compose_system_content(
             context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir,
             scratch_in_reminder=True,
+            identity=identity_context(self.model, self.provider),
         )
         self.messages: list[dict] = [{"role": "system", "content": content}]
 
@@ -3890,6 +3954,7 @@ class Agent:
         self.messages[0]["content"] = compose_system_content(
             self.base_context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir,
             scratch_in_reminder=True,
+            identity=identity_context(self.model, self.provider),
         )
 
     def _inject_pending_messages(self) -> None:
@@ -4213,6 +4278,7 @@ class Agent:
         self.messages[0]["content"] = compose_system_content(
             self.base_context, self.cwd, self.lessons_path, index, scratch_dir=self.scratch_dir,
             scratch_in_reminder=True,
+            identity=identity_context(self.model, self.provider),
         )
         earlier_reminders = [
             str(m.get("content", ""))

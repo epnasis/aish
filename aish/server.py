@@ -100,12 +100,12 @@ from .approval import (
     save_prefix,
 )
 from .cli import (
+    IDENTITY_SLOT,
     LogRef,
     _backend_hint,
     available_models,
     default_lessons,
     default_workspace,
-    identity_context,
     load_config,
     load_context_files,
     model_spec,
@@ -1688,12 +1688,15 @@ def list_files(cwd: str, query: str, ignore: Sequence[str] | None = None) -> lis
     return [path for _, path in scored[:ATFILE_MAX_RESULTS]]
 
 
-def web_usage_context(model, provider, allow_path, deny_path, state_dir) -> str:
+def web_usage_context(allow_path, deny_path, state_dir) -> str:
     """Self-knowledge for the system prompt, web-UI edition — aish should
-    describe the interface the user is actually looking at."""
+    describe the interface the user is actually looking at. The identity line
+    is the SLOT, filled by the agent from its live model at every rebuild:
+    baked at startup it described the server's launch model to every chat,
+    telling a local mlx session it was gemini on Google's cloud."""
     return f"""\
 About aish (you) — use this to answer questions about your own usage:
-{identity_context(model, provider)}
+{IDENTITY_SLOT}
 - The user talks to you through the aish WEB UI in a browser (often a phone), \
 not a terminal. Every command you propose appears as an approval card with \
 Approve / This chat / Always / Deny buttons and a pencil \
@@ -6598,7 +6601,7 @@ def create_app(
         part
         for part in [
             environment_context(cwd),
-            web_usage_context(model_name, provider, allow_path, deny_path, state_dir),
+            web_usage_context(allow_path, deny_path, state_dir),
             *load_context_files(cwd),
         ]
         if part

@@ -2652,9 +2652,30 @@ def seed_text(bindings: list[Binding]) -> str:
                 + " is not available in this session — say so in your answer "
                 "instead of substituting another source silently."
             )
-        if rule.prose and not _merely_watching(binding):
-            lines.append("  " + rule.prose.replace("\n", "\n  "))
+        prose = shown_prose(rule.prose)
+        if prose and not _merely_watching(binding):
+            lines.append("  " + prose.replace("\n", "\n  "))
     return "\n".join(lines)
+
+
+# Everything under this heading in a rule's body is the OWNER's: why the rule
+# exists, the measurement that justified it, links. It stays in the file (an
+# edit_rule round-trips the body verbatim) and is never seeded to the acting
+# model — the model needs the obligation and the intent above the heading, not
+# the experiment write-up. Before this, answer-me-first's A/B narrative rode
+# every turn's reminder.
+OWNER_NOTES_HEADING = "## Notes"
+
+
+def shown_prose(prose: str) -> str:
+    """The part of a rule's body the model is shown: everything above the
+    owner-notes heading. A body with no heading is shown whole, as before."""
+    lines = []
+    for line in prose.splitlines():
+        if line.strip() == OWNER_NOTES_HEADING:
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def _merely_watching(binding: Binding) -> bool:
