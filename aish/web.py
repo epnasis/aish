@@ -2185,9 +2185,9 @@ BROWSE_SIGNIN_HELD = (
 BROWSE_SIGNIN_NOT_AGAIN = (
     "[aish: {host} is asking for a password. aish already used the sign-in "
     "the user saved once in this chat and the session did not come up, so it "
-    "will not try again here — trying a password again and again is how "
-    "accounts get locked. Tell them to run /browser {host} and sign in "
-    "themselves. Do NOT try other buttons on this page.]\n"
+    "will not try it again here: a saved sign-in that did not work is tried "
+    "once per chat, never repeatedly. Tell them to run /browser {host} and "
+    "sign in themselves. Do NOT try other buttons on this page.]\n"
 )
 
 BROWSE_SIGNED_OUT_STALE = (
@@ -2639,13 +2639,15 @@ class BrowseView:
         # rather than acted on — see `browser.PAGE_TAKEN`.
         self.epoch: int | None = None
         # Origins whose saved sign-in an ACT spent in this chat without the
-        # session coming up. A failed replay on eon.pl is silent — the form
-        # just comes back — and nothing marks the record, so without this
-        # every act that landed on the login page again would type the
+        # session coming up, each with `signin.saves()` at the time, so a
+        # credential he saved afresh since is a new one and gets its attempt.
+        # A failed replay on eon.pl is silent — the form just comes back —
+        # and nothing marks the record, so without this every act that
+        # landed on the login page again would type the
         # password again, which is how accounts lock. A success does not
         # enter it: a session that came up proves the password, and eon.pl
         # signs him out again within the quarter hour.
-        self.signin_failed: set[str] = set()
+        self.signin_failed: dict[str, int] = {}
         # The evidence frame of the page this chat was SHOWN by the call now
         # running (#289), and why there is none when there is none. Cleared at
         # the top of every browse entry point rather than only written at the
@@ -3544,9 +3546,18 @@ def _renew_driving(url, snapshot, *, topic, view, signin_seen=None, at=""):
     host = browser.host_of(url)
     outcome = _renew_session(url, seen=signin_seen, at=at)
     if outcome is None:
+        if at:
+            # An act reaches here only holding a record, so None is the
+            # attempt itself failing to run — "nothing is saved" would be
+            # false, and would send him to re-save a sign-in he has.
+            return BROWSE_SIGNIN_HELD.format(
+                host=host,
+                why="the sign-in could not be run: the browser did not complete it",
+            ), snapshot
         return BROWSE_SIGNED_OUT_NOTE.format(host=host), snapshot
     if at and not outcome.ok:
-        _seen(view).signin_failed.add(signin_mod.origin_of(url))
+        origin = signin_mod.origin_of(url)
+        _seen(view).signin_failed[origin] = signin_mod.saves(origin)
     if not outcome.ok:
         # Routed on what was OBSERVED of the credential and nothing else. A
         # `captcha` branch used to be first here — a script tag on the page
@@ -3606,10 +3617,12 @@ def _renew_after_act(snapshot, *, topic, view, signin_seen=None):
         why = "this is not the login page it was saved at"
     elif getattr(snapshot, "password_boxes", 0) != 1:
         why = (
-            "this page does not show exactly one password box, and that is the "
-            "only form aish types a saved password into"
+            "aish did not see exactly one password box on this page, and that "
+            "is the only form it types a saved password into"
         )
-    elif record.origin in _seen(view).signin_failed:
+    elif _seen(view).signin_failed.get(record.origin) == signin_mod.saves(
+        record.origin
+    ):
         return BROWSE_SIGNIN_NOT_AGAIN.format(host=host), snapshot
     else:
         return _renew_driving(

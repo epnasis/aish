@@ -7581,7 +7581,7 @@ class TestAnActThatLandsOnTheRecordedLoginPage:
         view.remember(snapshot(url=self.HOME, controls=[control(n=3, name="Mój E.ON")]))
         out = str(web_module.browse_act("Mój E.ON", view=view))
         assert len(calls) == 1
-        assert "will not try again here" in out
+        assert "will not try it again here" in out
         assert "is not the problem" not in out
 
     def test_another_chat_gets_its_own_attempt(self, monkeypatch):
@@ -7633,3 +7633,64 @@ class TestAnActThatLandsOnTheRecordedLoginPage:
         out = web_module.browse_fill([{"target": "Mój E.ON"}], view=view)
         assert calls == [(self.LOGIN, self.LOGIN)]
         assert out.meta["signin"]["host"] == "eon.pl"
+
+    def test_a_sign_in_saved_afresh_gets_its_own_attempt(self, monkeypatch):
+        """The bound is about ONE credential. He re-saves at /browser after a
+        failure, and eon.pl signs him out again within the quarter hour — the
+        new sign-in must not inherit the old one's refusal, and "aish already
+        used the sign-in the user saved" would be false about it."""
+        from aish import signin
+
+        failed = browser.SignInResult(why="the session did not come up", filled=True)
+        calls = self._site(monkeypatch, outcomes=[failed])
+        monkeypatch.setattr(signin, "_SAVES", {})
+        view = self._home()
+        web_module.browse_act("Mój E.ON", view=view)
+        signin._SAVES["https://eon.pl"] = 1  # what `signin.save` does
+        view.remember(snapshot(url=self.HOME, controls=[control(n=3, name="Mój E.ON")]))
+        out = str(web_module.browse_act("Mój E.ON", view=view))
+        assert len(calls) == 2
+        assert "will not try it again here" not in out
+
+    def test_a_sign_in_that_could_not_run_never_says_nothing_is_saved(
+        self, monkeypatch
+    ):
+        """`_renew_session` answers None both for "nothing stored" and for a
+        replay that raised. On the act path a record is in hand, so the
+        signed-out note would be false and send him to re-save a sign-in he
+        has."""
+        self._site(monkeypatch)
+
+        def sign_in(url, *, at="", timeout=120.0):
+            raise RuntimeError("the browser died")
+
+        monkeypatch.setattr(web_module.browser, "sign_in", sign_in)
+        out = str(web_module.browse_act("Mój E.ON", view=self._home()))
+        assert "no sign-in saved" not in out
+        assert "HAS a sign-in saved" in out
+        assert "could not be run" in out
+
+    def test_a_read_of_the_login_page_is_a_wall_like_any_act(self, monkeypatch):
+        """Decided, not left to fall out: the wall is the wall whatever verb
+        found it, so a read of the recorded login page signs in too. The
+        `sections` index is the one act that presents no page, and says
+        nothing."""
+        calls = self._site(monkeypatch)
+        view = web_module.BrowseView()
+        view.remember(snapshot(url=self.LOGIN, text="Zaloguj się", controls=[]))
+        web_module.browse_act("", action="read", view=view)
+        assert calls == [(self.LOGIN, self.LOGIN)]
+
+    def test_callers_with_no_chat_share_one_bound(self, monkeypatch):
+        """The CLI and other chatless callers degrade to `_DEFAULT_VIEW`, so
+        for them the bound is process-wide — pinned so it is a decision."""
+        failed = browser.SignInResult(why="the session did not come up", filled=True)
+        calls = self._site(monkeypatch, outcomes=[failed])
+        web_module.forget_shown_page()
+        try:
+            for _ in range(2):
+                shown(snapshot(url=self.HOME, controls=[control(n=3, name="Mój E.ON")]))
+                web_module.browse_act("Mój E.ON")
+            assert len(calls) == 1
+        finally:
+            web_module.forget_shown_page()

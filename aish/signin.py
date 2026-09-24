@@ -629,6 +629,18 @@ def same_login_page(url: str, recorded: str) -> bool:
     return here is not None and here == there
 
 
+# How many times each origin's sign-in has been saved in this process. A fresh
+# capture is a new credential even when `saved` — a DATE — reads the same, and
+# the per-chat bound on act-path sign-ins must not outlive the credential it
+# was about (`web.BrowseView.signin_failed`). Process-local on purpose: the
+# views that consult it die with the process too.
+_SAVES: dict[str, int] = {}
+
+
+def saves(origin: str) -> int:
+    return _SAVES.get(origin, 0)
+
+
 def save(
     login_url: str,
     identifier: str,
@@ -657,6 +669,7 @@ def save(
         destinations=_origins(destinations),
     )
     _write([*kept, record])
+    _SAVES[origin] = _SAVES.get(origin, 0) + 1
     return record
 
 
