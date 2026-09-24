@@ -11,6 +11,7 @@ import threading
 import time
 import tomllib
 import urllib.parse
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1062,28 +1063,66 @@ def replay_history(messages: list[dict]) -> list[tuple[str, str]]:
 
 CATALOG_TTL = datetime.timedelta(hours=24)
 CATALOG_FETCH_WAIT = 3.0  # seconds the picker will wait for provider APIs
+# How soon a configured provider that the cached catalog LACKS is asked again.
+CATALOG_RETRY = datetime.timedelta(minutes=10)
 
 
 def cloud_model_catalog(state_dir: Path) -> dict[str, list[str]]:
     """{provider: [model ids]} from the providers' list endpoints, for every
     provider with credentials. Fetches run in parallel with a hard wait cap
     (a slow provider is just absent this time) and land in a 24h disk cache
-    so the picker usually opens instantly."""
+    so the picker usually opens instantly.
+
+    "Absent this time" must stay true: the cache is written when ANY provider
+    answered, so one slow reply used to hide that provider's whole catalog for
+    the cache's day (#412). A configured provider the cache lacks is asked
+    again — alone, merged into the rest — at most every `CATALOG_RETRY`."""
     cache_path = state_dir / "cloud-models.json"
     configured = _configured_providers()
+    now = datetime.datetime.now()
+    kept: dict[str, list[str]] = {}
+    kept_since: datetime.datetime | None = None
+    missing: list[str] = []
     try:
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         fetched = datetime.datetime.fromisoformat(cached["fetched"])
         # A provider set up since the fetch (a new key, AISH_LOCAL_URL) would
         # otherwise stay out of the picker until the cache expired a day later.
-        if (
-            datetime.datetime.now() - fetched < CATALOG_TTL
-            and cached.get("configured") == configured
-        ):
-            return cached["models"]
+        if now - fetched < CATALOG_TTL and cached.get("configured") == configured:
+            kept, kept_since = cached["models"], fetched
+            missing = [name for name in configured if name not in kept]
+            checked = datetime.datetime.fromisoformat(cached.get("checked", cached["fetched"]))
+            if not missing or now - checked < CATALOG_RETRY:
+                return kept
     except (OSError, ValueError, KeyError):
         pass
 
+    wanted = missing if kept_since is not None else list(backends.PROVIDERS)
+    catalog = {**kept, **_fetch_catalogs(wanted)}
+    if catalog:
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        # The day's clock runs from the FULL fetch; a retry of
+                        # the missing ones only moves `checked`.
+                        "fetched": (kept_since or now).isoformat(),
+                        "checked": now.isoformat(),
+                        "configured": configured,
+                        "models": catalog,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return catalog
+
+
+def _fetch_catalogs(names: list[str]) -> dict[str, list[str]]:
+    """Each named provider's model ids, fetched in parallel; whoever has not
+    answered within `CATALOG_FETCH_WAIT`, or failed, is simply absent."""
     results: dict[str, list[str]] = {}
 
     def fetch(name: str) -> None:
@@ -1094,32 +1133,13 @@ def cloud_model_catalog(state_dir: Path) -> dict[str, list[str]]:
         if ids:
             results[name] = ids
 
-    threads = [
-        threading.Thread(target=fetch, args=(name,), daemon=True)
-        for name in backends.PROVIDERS
-    ]
+    threads = [threading.Thread(target=fetch, args=(name,), daemon=True) for name in names]
     for thread in threads:
         thread.start()
     deadline = time.monotonic() + CATALOG_FETCH_WAIT
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
-    catalog = dict(results)
-    if catalog:
-        try:
-            state_dir.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(
-                json.dumps(
-                    {
-                        "fetched": datetime.datetime.now().isoformat(),
-                        "configured": configured,
-                        "models": catalog,
-                    }
-                ),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
-    return catalog
+    return dict(results)
 
 
 def _configured_providers() -> list[str]:
@@ -1165,6 +1185,49 @@ def available_models(agent, state_dir: Path | None = None) -> list[tuple[str, st
             current = " · current" if provider_now == pname and agent.model == model_id else ""
             models.append((f"{pname}:{model_id}", f"{_where(pname)} · {label}{current}"))
     return models
+
+
+RECENT_MODELS = 5  # rows in the picker's Recent section
+
+
+def recent_models(
+    used: Iterable[str],
+    models: list[tuple[str, str]],
+    current: str,
+    limit: int = RECENT_MODELS,
+) -> list[tuple[str, str]]:
+    """The picker's Recent rows (#412): `used` models (most recent first) minus
+    the current one and those a tap plainly could not switch to.
+
+    A provider's model (`gemini`, `local:<id>`, …) counts when that provider is
+    configured — whether or not the catalog listed the id this time, since the
+    catalog is the only way those ids reach `models` and one slow fetch leaves
+    them out, while `make_chat` builds the id either way. A bare provider name
+    is spelled out as its default model, so it is one model, not two. An Ollama
+    name counts only when listed (unlisted means gone, or Ollama down), and
+    claude-max never: the web cannot switch to it without a restart."""
+    listed = dict(models)
+    configured = set(_configured_providers())
+    recent: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for spec in used:
+        if spec.startswith("claude-max"):
+            continue
+        provider, name = backends.parse_model(spec)
+        if provider != "ollama":
+            spec = f"{provider}:{name}"
+        if spec == current or spec in seen:
+            continue
+        seen.add(spec)
+        if provider == "ollama":
+            if spec in listed:
+                recent.append((spec, listed[spec]))
+        elif provider in configured:
+            label = PROVIDER_LABELS.get(provider, provider)
+            recent.append((spec, listed.get(spec, f"{_where(provider)} · {label}")))
+        if len(recent) >= limit:
+            break  # `used` is lazy: stop before it parses another chat's log
+    return recent
 
 
 def _where(provider_name: str) -> str:

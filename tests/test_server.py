@@ -5479,6 +5479,30 @@ class TestModels:
             listing = recv_until(ws, "model_list")
             assert listing["current"] == "fake"
             assert listing["models"][0]["name"] == "gemini"
+            assert listing["recent"] == []  # a search is ranked; Recent is for browsing
+
+    def test_model_list_says_which_models_the_chats_ran_on(self, app_env, monkeypatch):
+        """#412: Recent comes from the chats' own model records, so a model is
+        Recent on every device however it came to be used — here one the
+        catalog did not list this time."""
+        for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AISH_LOCAL_URL", "http://127.0.0.1:1/v1")
+        monkeypatch.setattr(
+            server_module, "available_models",
+            lambda agent, state_dir: [("qwen3:8b", "local · 5 GB")],
+        )
+        used = SessionLog.new(Path(app_env["state_dir"]))
+        used.model("local:mlx-community/Qwen3.6-35B-A3B-8bit")
+        used.message({"role": "user", "content": "hi"})
+        used.close()
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "models", "query": ""})
+            listing = recv_until(ws, "model_list")
+            assert [r["name"] for r in listing["recent"]] == [
+                "local:mlx-community/Qwen3.6-35B-A3B-8bit"
+            ]
 
     def test_set_model_swaps_backend_and_saves(self, app_env, monkeypatch):
         new_chat = FakeChat([])

@@ -1368,6 +1368,121 @@ class TestModelPicker:
         monkeypatch.setattr(cli.backends, "list_models", lambda name: ["new"])
         assert cli.cloud_model_catalog(tmp_path)["gemini"] == ["new"]
 
+    def test_a_provider_that_missed_the_wait_is_not_hidden_for_the_day(
+        self, tmp_path, monkeypatch
+    ):
+        """#412: the cache is written when ANY provider answered, so one slow
+        reply from the owner's MLX server hid every local: model for 24 hours.
+        It is asked again — alone — once `CATALOG_RETRY` has passed."""
+        import datetime
+        import threading
+
+        import aish.cli as cli
+
+        for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AISH_LOCAL_URL"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+        monkeypatch.setenv("AISH_LOCAL_URL", "http://127.0.0.1:1/v1")
+        monkeypatch.setattr(cli, "CATALOG_FETCH_WAIT", 0.05)
+        release = threading.Event()
+
+        def slow_local(name):
+            if name == "gemini":
+                return ["gemini-3.5-flash"]
+            if name == "local":
+                release.wait(5)  # misses the wait; released at the end of the test
+                return ["mlx/qwen"]
+            raise cli.backends.BackendError("not configured")
+
+        monkeypatch.setattr(cli.backends, "list_models", slow_local)
+        try:
+            assert cli.cloud_model_catalog(tmp_path) == {"gemini": ["gemini-3.5-flash"]}
+        finally:
+            release.set()
+
+        asked: list[str] = []
+
+        def answering(name):
+            asked.append(name)
+            return {"local": ["mlx/qwen"]}.get(name) or []
+
+        monkeypatch.setattr(cli.backends, "list_models", answering)
+        # Inside the retry window the cache stands: a server that is really down
+        # must not cost every picker open the full wait.
+        assert cli.cloud_model_catalog(tmp_path) == {"gemini": ["gemini-3.5-flash"]}
+        assert asked == []
+
+        monkeypatch.setattr(cli, "CATALOG_RETRY", datetime.timedelta(0), raising=False)
+        assert cli.cloud_model_catalog(tmp_path) == {
+            "gemini": ["gemini-3.5-flash"], "local": ["mlx/qwen"]
+        }
+        assert asked == ["local"]  # only the missing provider, never the whole set
+
+        asked.clear()
+        assert cli.cloud_model_catalog(tmp_path)["local"] == ["mlx/qwen"]
+        assert asked == []  # complete again, so served from the cache
+
+    def test_recent_keeps_a_used_model_the_list_lacks_when_it_is_selectable(
+        self, monkeypatch
+    ):
+        """#412: Recent used to keep only names present in the list, and a
+        `provider:model` id is in the list only via the catalog. A configured
+        provider's id stays; an unlisted Ollama name (gone, or Ollama down) and
+        an unconfigured provider's id do not — not even as the bare provider
+        row the list always carries; the current model never shows."""
+        from aish.cli import recent_models
+
+        for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AISH_LOCAL_URL"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AISH_LOCAL_URL", "http://127.0.0.1:1/v1")
+        listed = [
+            ("qwen3:8b", "local · 5 GB"),
+            ("gemini", "cloud · default x"),  # always listed, key or not
+            ("claude-max", "cloud · Claude subscription (restart to switch)"),
+            ("local:mlx/listed", "your server · OpenAI-compatible server"),
+        ]
+        used = iter([
+            "gemini:gemini-3.5-pro",  # gemini not configured here
+            "gemini",  # its bare row: listed, but still not configured
+            "claude-max",  # listed, but the web cannot switch to it
+            "qwen3:8b",  # the current model
+            "local:mlx-community/Qwen3.6-35B-A3B-8bit",  # catalog missed it
+            "qwen3:14b",  # an Ollama model no longer installed
+            "local:mlx/listed",
+        ])
+        recent = recent_models(used, listed, current="qwen3:8b")
+        assert [name for name, _ in recent] == [
+            "local:mlx-community/Qwen3.6-35B-A3B-8bit", "local:mlx/listed"
+        ]
+        assert dict(recent)["local:mlx/listed"] == "your server · OpenAI-compatible server"
+        assert dict(recent)["local:mlx-community/Qwen3.6-35B-A3B-8bit"].startswith(
+            "your server"
+        )
+
+    def test_recent_spells_a_bare_provider_as_its_default_model(self, monkeypatch):
+        """`aish --model gemini` logs the spec raw, and model_spec() reports the
+        same model as `gemini:<default>`: one model, one row, and never the
+        current model under its other spelling."""
+        from aish import backends
+        from aish.cli import recent_models
+
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+        default = f"gemini:{backends.PROVIDERS['gemini'].default_model}"
+        names = [n for n, _ in recent_models(iter(["gemini", default]), [], current="qwen3:8b")]
+        assert names == [default]
+        assert recent_models(iter(["gemini"]), [], current=default) == []
+
+    def test_recent_stops_reading_once_it_has_enough(self):
+        from aish.cli import recent_models
+
+        def used():
+            yield from ("a", "b")
+            raise AssertionError("read past the limit")
+
+        assert [n for n, _ in recent_models(used(), [("a", ""), ("b", "")], "", limit=2)] == [
+            "a", "b"
+        ]
+
     def test_available_models_includes_fetched_catalog(self, tmp_path, monkeypatch):
         import sys
         from types import SimpleNamespace

@@ -3741,3 +3741,49 @@ class TestTrash:
 
     def test_trashing_a_log_that_will_not_move_answers_none(self, tmp_path):
         assert session_module.trash_session(tmp_path, tmp_path / "session-nope.jsonl") is None
+
+
+class TestModelsUsed:
+    """The picker's Recent, read off the chats' own model records (#412): the
+    same on every device, and a model counts however it came to be used."""
+
+    @staticmethod
+    def chat(state_dir, *specs, origin="user", at=0.0):
+        log = SessionLog.new(state_dir)
+        if origin != "user":
+            log.origin(origin)
+        for spec in specs:
+            log.model(spec)
+            log.message({"role": "user", "content": f"on {spec}"})
+        log.close()
+        if at:
+            os.utime(log.path, (at, at))
+        return log.path
+
+    def test_chats_newest_first_and_a_switched_away_model_still_counts(self, tmp_path):
+        now = time.time()
+        self.chat(tmp_path, "gemini:gemini-3.5-flash", at=now - 300)
+        # Used local, then switched away in the SAME chat: the issue's first step.
+        self.chat(tmp_path, "local:mlx/qwen", "qwen3:8b", at=now - 100)
+        assert list(SessionLog.models_used(tmp_path)) == [
+            "qwen3:8b", "local:mlx/qwen", "gemini:gemini-3.5-flash"
+        ]
+
+    def test_a_model_selected_but_never_used_is_not_recent(self, tmp_path):
+        self.chat(tmp_path, "gemini:gemini-3.5-flash")
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hello"})
+        log.model("local:mlx/qwen")  # lazy: written only before the NEXT real record
+        log.close()
+        assert list(SessionLog.models_used(tmp_path)) == ["gemini:gemini-3.5-flash"]
+
+    def test_a_triggered_chat_model_is_not_the_owners_choice(self, tmp_path):
+        self.chat(tmp_path, "local:mlx/private", origin="email")
+        self.chat(tmp_path, "gemini:gemini-3.5-flash")
+        assert list(SessionLog.models_used(tmp_path)) == ["gemini:gemini-3.5-flash"]
+
+    def test_one_unreadable_log_is_skipped_not_fatal(self, tmp_path):
+        now = time.time()
+        self.chat(tmp_path, "gemini:gemini-3.5-flash", at=now - 100)
+        (tmp_path / "session-20990101-000000-000000.jsonl").write_bytes(b"\xff\xfe not utf-8")
+        assert list(SessionLog.models_used(tmp_path)) == ["gemini:gemini-3.5-flash"]

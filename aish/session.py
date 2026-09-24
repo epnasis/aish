@@ -9,7 +9,7 @@ import threading
 import time
 import urllib.parse
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NamedTuple, TextIO
@@ -562,6 +562,9 @@ class ParsedLog(NamedTuple):
     user_cmds: list[str]  # successful user-direct ! commands, in file order
     activity_ts: int | None  # epoch seconds of the last record that IS activity
     output_ts: int | None  # …and of the last that is OUTPUT (see _is_output)
+    # Every model the chat ran on, each once, in order of its LAST model record —
+    # so a chat that switched away still says what it used before (#412).
+    models: tuple[str, ...] = ()
 
 
 # Stat-keyed caches for the read-only listing paths (drawer, pager, offline
@@ -1175,6 +1178,7 @@ class SessionLog:
         It also carries the chat's last ACTIVITY (#201) — see `_is_activity`."""
         messages: list[dict] = []
         model = ""
+        models: dict[str, None] = {}  # insertion-ordered set
         custom_title: str | None = None
         title_auto = False
         origin = "user"
@@ -1205,6 +1209,10 @@ class SessionLog:
                     output_ts = stamp
             if kind == "model":
                 model = record.get("model") or model
+                spec = record.get("model")
+                if spec and isinstance(spec, str):
+                    models.pop(spec, None)
+                    models[spec] = None
             elif kind == "title":
                 title = (record.get("title") or "").strip()
                 if title:  # latest non-empty title wins
@@ -1233,7 +1241,7 @@ class SessionLog:
                 messages.append({k: v for k, v in record.items() if k in keys})
         return ParsedLog(
             messages, model, custom_title, origin, cwd, title_auto, user_cmds,
-            activity_ts, output_ts,
+            activity_ts, output_ts, tuple(models),
         )
 
     @staticmethod
@@ -3020,6 +3028,31 @@ class SessionLog:
             path, parsed.messages, parsed.model, parsed.title, parsed.origin,
             parsed.cwd, parsed.activity_ts, parsed.output_ts,
         )
+
+    @staticmethod
+    def models_used(state_dir: Path) -> Iterator[str]:
+        """Every model the owner's chats ran on, each once: chats newest first,
+        and within a chat the model it used last first — the picker's Recent
+        (#412). Lazy, so a caller that needs five stops parsing there.
+
+        A model record is written only just before the chat's next record of
+        any other kind (see `model()`), so a model selected and followed by
+        nothing is not here — though one followed by, say, a rename is.
+        Triggered chats are left out: their model is what the trigger's config
+        chose, not the owner. One unreadable log is skipped, not fatal.
+        """
+        seen: set[str] = set()
+        for path in SessionLog._by_recency(state_dir):
+            try:
+                parsed = SessionLog._cached_parse(path)
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not parsed.messages or parsed.origin != "user":
+                continue
+            for spec in reversed(parsed.models):
+                if spec not in seen:
+                    seen.add(spec)
+                    yield spec
 
     @staticmethod
     def list_sessions(state_dir: Path, exclude: set | None = None) -> list[SessionInfo]:
