@@ -3382,3 +3382,179 @@ class TestOKIsTheSESSIONComingUpAndNothingLess:
             wall_check=_WallCheckPage(walled=True),
         )
         assert not held.ok and held.tried is False
+
+
+class TestWhichAddressIsTheLoginPageHeRecorded:
+    """The comparison that licenses signing in at an address aish did not
+    record verbatim. The query is per-visit — a return address, a one-time
+    token — and an anchor is a place on the same page; neither says WHICH page
+    it is. A hash route does."""
+
+    def test_the_query_is_ignored_on_both_sides(self):
+        assert signin.same_login_page(
+            "https://eon.pl/mojeon/Logowanie?ReturnUrl=%2Ffaktury",
+            "https://eon.pl/mojeon/Logowanie",
+        )
+        # The laczynaspilka.pl shape: the RECORDED address carries a one-time
+        # Keycloak token, so no fresh visit could ever match it verbatim.
+        assert signin.same_login_page(
+            "https://login.x.pl/realms/P/login-actions/authenticate?execution=new",
+            "https://login.x.pl/realms/P/login-actions/authenticate?execution=old&tab_id=1",
+        )
+
+    def test_an_anchor_is_ignored_and_a_hash_route_is_compared(self):
+        assert signin.same_login_page("https://eon.pl/login#main", "https://eon.pl/login")
+        assert signin.same_login_page(
+            "https://www.e-kartoteka.pl/#/login", "https://www.e-kartoteka.pl/#/login"
+        )
+        assert signin.same_login_page(
+            "https://www.e-kartoteka.pl/#/login?next=x", "https://www.e-kartoteka.pl/#/login"
+        )
+        assert signin.same_login_page("https://a.pl/#!/login", "https://a.pl/#!/login/")
+        # The whole point of comparing a route: every page of the app is `/`.
+        assert not signin.same_login_page(
+            "https://www.e-kartoteka.pl/#/konto", "https://www.e-kartoteka.pl/#/login"
+        )
+        assert not signin.same_login_page(
+            "https://www.e-kartoteka.pl/", "https://www.e-kartoteka.pl/#/login"
+        )
+
+    def test_spelling_that_does_not_change_the_page_does_not_matter(self):
+        assert signin.same_login_page("HTTPS://EON.PL:443/login/", "https://eon.pl/login")
+        assert signin.same_login_page("https://eon.pl/log%69n", "https://eon.pl/login")
+        assert signin.same_login_page("https://ebok.myorlen.pl", "https://ebok.myorlen.pl/")
+
+    def test_another_page_origin_or_scheme_is_not_the_login_page(self):
+        recorded = "https://eon.pl/mojeon/Logowanie"
+        assert not signin.same_login_page("https://eon.pl/mojeon/Rejestracja", recorded)
+        assert not signin.same_login_page("https://eon.pl/mojeon", recorded)
+        assert not signin.same_login_page("https://evil.pl/mojeon/Logowanie", recorded)
+        assert not signin.same_login_page("http://eon.pl/mojeon/Logowanie", recorded)
+        assert not signin.same_login_page("https://sub.eon.pl/mojeon/Logowanie", recorded)
+        assert not signin.same_login_page("", recorded)
+        assert not signin.same_login_page("javascript:alert(1)", recorded)
+
+
+class TestASignInAtTheAddressAnActLandedOn:
+    """`sign_in(url, at=landed)`: the page an act landed on is loaded on a
+    fresh page by aish's own navigation, query and all, so the site's return
+    address survives — and it is compared against the recording before the
+    load and again after it settled."""
+
+    class _Landing(_SignInPage):
+        def __init__(self, *, moves_to="", **kw):
+            super().__init__(**kw)
+            self.loaded: list[str] = []
+            self._moves_to = moves_to
+
+        async def goto(self, url, **_kw):
+            self.loaded.append(url)
+            self.url = self._moves_to or url
+
+    def _drive(self, monkeypatch, at, *, moves_to=""):
+        import asyncio
+
+        from aish import browser
+
+        signin.save("https://eon.pl/login", "him", "hunter2hunter2", today="d")
+        page = self._Landing(moves_to=moves_to)
+        owner = _SignInOwner(page)
+        self.owner = owner
+        monkeypatch.setattr(browser, "_has_password_field", _fake_has_password(page))
+        monkeypatch.setattr(browser, "notify", _SilentNotifier([]))
+        monkeypatch.setattr(
+            browser, "_submit", lambda job, timeout: asyncio.run(job(owner))
+        )
+        return browser.sign_in(at, at=at), page
+
+    def test_the_landed_address_is_loaded_with_its_query(self, monkeypatch):
+        landed = "https://eon.pl/login?ReturnUrl=%2Fmojeon%2Ffaktury"
+        result, page = self._drive(monkeypatch, landed)
+        assert page.loaded == [landed]
+        assert result.ok and page.typed == ["him", "hunter2hunter2"]
+
+    def test_an_address_that_is_not_the_recorded_page_never_opens_a_page(
+        self, monkeypatch
+    ):
+        result, page = self._drive(monkeypatch, "https://eon.pl/user-content/login")
+        assert self.owner.pages_opened == 0 and page.typed == []
+        assert not result.ok and "not the login page" in result.why
+        record = signin.find("https://eon.pl")
+        assert record.used == 0 and record.suspect == ""
+
+    def test_a_redirect_after_the_load_is_refused_before_anything_is_typed(
+        self, monkeypatch
+    ):
+        """The origin-only check in the form snippet would pass a same-origin
+        redirect, so the path is asked again of the SETTLED page."""
+        result, page = self._drive(
+            monkeypatch, "https://eon.pl/login?next=x",
+            moves_to="https://eon.pl/user-content/login",
+        )
+        assert page.typed == [] and not page.submitted
+        assert not result.ok and "moved to another address" in result.why
+        record = signin.find("https://eon.pl")
+        assert record.used == 0 and record.suspect == ""
+
+    def test_without_at_the_recorded_address_is_what_loads(self, monkeypatch):
+        import asyncio
+
+        from aish import browser
+
+        signin.save("https://eon.pl/login", "him", "hunter2hunter2", today="d")
+        page = self._Landing()
+        owner = _SignInOwner(page)
+        monkeypatch.setattr(browser, "_has_password_field", _fake_has_password(page))
+        monkeypatch.setattr(browser, "notify", _SilentNotifier([]))
+        monkeypatch.setattr(
+            browser, "_submit", lambda job, timeout: asyncio.run(job(owner))
+        )
+        browser.sign_in("https://eon.pl/faktury?id=7")
+        assert page.loaded == ["https://eon.pl/login"]
+
+
+class TestTheVisiblePasswordCountIsTheReplaysOwnRule:
+    """An act spends a sign-in only where the page shows exactly one password
+    box, counted by the SAME visibility rule the replay applies before typing.
+    Run over the fake DOM in node, like the form snippet it shares that rule
+    with, so the count that decides and the check that refuses cannot drift."""
+
+    _submit = TestWhichControlIsTheSUBMIT()
+
+    def _count(self, dom):
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        from aish import browser
+
+        payload = json.dumps({
+            "js": browser.VISIBLE_PASSWORDS_JS,
+            "origin": "https://eon.pl",
+            "dom": dom,
+        })
+        done = subprocess.run(
+            [node, str(SIGNIN_DOM_JS)],
+            input=payload, text=True, capture_output=True, timeout=60,
+        )
+        assert done.returncode == 0, done.stdout + done.stderr
+        return json.loads(done.stdout)["result"]
+
+    def test_the_eon_form_shows_one(self):
+        form = self._submit._form(
+            self._submit.HIDDEN, self._submit.TEXT, self._submit.PASSWORD
+        )
+        assert self._count(form) == 1
+
+    def test_a_hidden_password_box_is_not_counted(self):
+        hidden_pw = {**self._submit.PASSWORD, "hidden": True}
+        assert self._count(self._submit._form(self._submit.TEXT, hidden_pw)) == 0
+
+    def test_a_change_password_form_shows_two(self):
+        form = self._submit._form(self._submit.PASSWORD, self._submit.PASSWORD)
+        assert self._count(form) == 2
+
+    def test_it_shares_the_replays_visibility_rule_verbatim(self):
+        from aish import browser
+
+        assert browser.SIGNIN_VIS_JS in browser.SIGNIN_FORM_JS
+        assert browser.SIGNIN_VIS_JS in browser.VISIBLE_PASSWORDS_JS

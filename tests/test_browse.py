@@ -3638,7 +3638,7 @@ class TestADrivenPageThatIsAskingForAPassword:
         # stub that swallows it keeps these tests about the NOTES, which is
         # what they are for.
         monkeypatch.setattr(
-            web_module, "_renew_session", lambda _u, *, seen=None: renewal
+            web_module, "_renew_session", lambda _u, *, seen=None, at="": renewal
         )
         return opens
 
@@ -7457,3 +7457,179 @@ class TestAReferenceMeansTheControlItNamedNotTheSeat:
         found = browse.resolve_ref_or_name(render_b, None, "press:c0·aaaa0000", led)
         assert found.control is None
         assert "no name of its own" in found.problem
+
+
+class TestAnActThatLandsOnTheRecordedLoginPage:
+    """session-20260922-234413: the model opened eon.pl's home page, pressed
+    "Mój E.ON", and landed on the login page it had signed in at fourteen times
+    before. Renewal lived on the OPEN only, so the act came back as a bare
+    password form with no note at all; the model pressed "Zaloguj się" on the
+    empty form and asked the owner to sign in by hand.
+
+    An act that lands on the page he RECORDED signs in there, once; every other
+    wall an act lands on says what aish saw."""
+
+    HOME = "https://eon.pl/dla-domu"
+    LOGIN = "https://eon.pl/mojeon/Logowanie"
+
+    def _site(self, monkeypatch, *, recorded=LOGIN, lands=LOGIN, boxes=1,
+              outcomes=(), reopen_walls=False):
+        from aish import signin
+
+        record = (
+            signin.Record(origin="https://eon.pl", url=recorded, saved="d")
+            if recorded else None
+        )
+        monkeypatch.setattr(
+            web_module.signin_mod, "find",
+            lambda url: record if record and url.startswith(record.origin) else None,
+        )
+        calls: list = []
+        results = list(outcomes) or [browser.SignInResult(ok=True)]
+
+        def sign_in(url, *, at="", timeout=120.0):
+            calls.append((url, at))
+            return results[min(len(calls), len(results)) - 1]
+
+        def browse_act(target, action, **kw):
+            snap = snapshot(url=lands, text="Zaloguj się", controls=[])
+            snap.signin = True
+            snap.password_boxes = boxes
+            return snap
+
+        def browse_open(url, *, topic="", key=""):
+            snap = snapshot(url="https://eon.pl/mojeon/Faktury-i-platnosci",
+                            text="Saldo", controls=[])
+            snap.signin = reopen_walls
+            return snap
+
+        monkeypatch.setattr(web_module.browser, "sign_in", sign_in)
+        monkeypatch.setattr(web_module.browser, "browse_act", browse_act)
+        monkeypatch.setattr(web_module.browser, "browse_open", browse_open)
+        return calls
+
+    def _home(self):
+        view = web_module.BrowseView()
+        view.remember(snapshot(url=self.HOME, controls=[control(n=3, name="Mój E.ON")]))
+        return view
+
+    def test_the_incident_is_serviced_end_to_end(self, monkeypatch):
+        calls = self._site(monkeypatch)
+        view = self._home()
+        out = web_module.browse_act("Mój E.ON", view=view)
+        assert calls == [(self.LOGIN, self.LOGIN)]
+        assert "signed in again" in str(out)
+        assert "Saldo" in str(out)
+        # The attempt rides the act's step, as it does the open's.
+        assert out.meta["signin"]["host"] == "eon.pl"
+        assert out.meta["signin"]["ok"] is True
+
+    def test_the_return_address_in_the_query_is_kept_for_the_load(self, monkeypatch):
+        landed = self.LOGIN + "?ReturnUrl=%2Fmojeon%2FFaktury-i-platnosci"
+        calls = self._site(monkeypatch, lands=landed)
+        web_module.browse_act("Mój E.ON", view=self._home())
+        assert calls == [(landed, landed)]
+
+    def test_a_wall_with_no_sign_in_saved_says_so_and_types_nothing(self, monkeypatch):
+        calls = self._site(monkeypatch, recorded="")
+        out = str(web_module.browse_act("Mój E.ON", view=self._home()))
+        assert calls == []
+        assert "there is no sign-in saved for this site" in out
+        assert "Do NOT try other buttons" in out
+
+    def test_a_wall_at_another_address_never_claims_nothing_is_saved(self, monkeypatch):
+        """A record EXISTS here, so "no sign-in saved" would be a false
+        statement in aish's own voice."""
+        calls = self._site(monkeypatch, lands="https://eon.pl/mojeon/Rejestracja")
+        out = str(web_module.browse_act("Mój E.ON", view=self._home()))
+        assert calls == []
+        assert "no sign-in saved" not in out
+        assert "HAS a sign-in saved" in out
+        assert "not the login page it was saved at" in out
+
+    def test_a_page_not_showing_exactly_one_password_box_spends_nothing(
+        self, monkeypatch
+    ):
+        for boxes in (0, 2):
+            calls = self._site(monkeypatch, boxes=boxes)
+            out = str(web_module.browse_act("Mój E.ON", view=self._home()))
+            assert calls == []
+            assert "exactly one password box" in out
+
+    def test_an_act_that_is_not_a_wall_is_left_alone(self, monkeypatch):
+        calls = self._site(monkeypatch)
+
+        def browse_act(target, action, **kw):
+            return snapshot(url=self.LOGIN, text="Saldo", controls=[])
+
+        monkeypatch.setattr(web_module.browser, "browse_act", browse_act)
+        out = web_module.browse_act("Mój E.ON", view=self._home())
+        assert calls == []
+        assert "[aish: eon.pl is asking" not in str(out)
+        assert "signin" not in getattr(out, "meta", {})
+
+    def test_after_an_attempt_that_did_not_come_up_it_is_never_tried_again(
+        self, monkeypatch
+    ):
+        """eon.pl's failures are silent — the form comes back and nothing
+        marks the record — so without this bound every act that landed on the
+        login page again would type the password again."""
+        failed = browser.SignInResult(why="the session did not come up", filled=True)
+        calls = self._site(monkeypatch, outcomes=[failed])
+        view = self._home()
+        web_module.browse_act("Mój E.ON", view=view)
+        view.remember(snapshot(url=self.HOME, controls=[control(n=3, name="Mój E.ON")]))
+        out = str(web_module.browse_act("Mój E.ON", view=view))
+        assert len(calls) == 1
+        assert "will not try again here" in out
+        assert "is not the problem" not in out
+
+    def test_another_chat_gets_its_own_attempt(self, monkeypatch):
+        failed = browser.SignInResult(why="the session did not come up", filled=True)
+        calls = self._site(monkeypatch, outcomes=[failed])
+        web_module.browse_act("Mój E.ON", view=self._home())
+        web_module.browse_act("Mój E.ON", view=self._home())
+        assert len(calls) == 2
+
+    def test_a_session_that_came_up_does_not_use_up_the_chat(self, monkeypatch):
+        """eon.pl signs him out again within the quarter hour; a sign-in that
+        worked proved the password, so a later lapse may sign in again."""
+        calls = self._site(monkeypatch)
+        view = self._home()
+        web_module.browse_act("Mój E.ON", view=view)
+        view.remember(snapshot(url=self.HOME, controls=[control(n=3, name="Mój E.ON")]))
+        web_module.browse_act("Mój E.ON", view=view)
+        assert len(calls) == 2
+
+    def test_the_note_survives_the_change_report(self, monkeypatch):
+        """An act is presented as what CHANGED; a wall on the page the model
+        was already looking at must still carry its note."""
+        calls = self._site(monkeypatch, recorded="")
+        view = web_module.BrowseView()
+        view.remember(snapshot(url=self.LOGIN, text="Zaloguj się",
+                               controls=[control(n=3, name="Zaloguj się")]))
+        out = str(web_module.browse_act("Zaloguj się", view=view))
+        assert calls == []
+        assert "there is no sign-in saved for this site" in out
+
+    def test_filling_a_form_that_lands_on_the_login_page_signs_in_too(
+        self, monkeypatch
+    ):
+        calls = self._site(monkeypatch)
+
+        def browse_fill(steps, **kw):
+            snap = snapshot(url=self.LOGIN, text="Zaloguj się", controls=[])
+            snap.signin = True
+            snap.password_boxes = 1
+            return snap
+
+        monkeypatch.setattr(web_module.browser, "browse_fill", browse_fill)
+        monkeypatch.setattr(
+            web_module.browse_mod, "plan_batch",
+            lambda controls, steps: type("P", (), {"problem": ""})(),
+        )
+        monkeypatch.setattr(web_module.browse_mod, "batch_is_mutating", lambda plan: False)
+        view = self._home()
+        out = web_module.browse_fill([{"target": "Mój E.ON"}], view=view)
+        assert calls == [(self.LOGIN, self.LOGIN)]
+        assert out.meta["signin"]["host"] == "eon.pl"
