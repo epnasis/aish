@@ -24,7 +24,13 @@ from functools import partial
 from typing import Any
 
 from . import provenance, tools
-from .agent import Agent, ModelUnavailable, compose_system_content, format_secs
+from .agent import (
+    Agent,
+    ModelUnavailable,
+    compose_system_content,
+    format_secs,
+    identity_context,
+)
 
 SESSION_NOTE = (
     "[note for the model: the user ran `{command}` directly; output:]\n{output}"
@@ -469,6 +475,7 @@ class ClaudeMaxAgent:
                 self.cwd,
                 self.inner.lessons_path,
                 scratch_dir=self.inner.scratch_dir,
+                identity=identity_context(self.model, self.provider),
             ),
             model=self.model or None,
             tools=[],  # no Claude Code built-ins — aish tools only

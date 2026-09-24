@@ -384,7 +384,7 @@ class TestLocalSelectable:
         assert built == [10]
 
     def test_identity_says_where_it_runs(self, local_env):
-        text = cli.identity_context(REPO, "local")
+        text = agent_module.identity_context(REPO, "local")
         assert URL in text
         assert "not a cloud service" in text
         assert "not Ollama" in text

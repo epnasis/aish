@@ -31,6 +31,8 @@ from .agent import (
     ASKED_BY_READ,
     ASKED_BY_SHELL,
     ASKED_BY_WRITE,
+    IDENTITY_SLOT,
+    PROVIDER_LABELS,
     Agent,
     ModelUnavailable,
     environment_context,
@@ -1297,18 +1299,16 @@ def switch_model(agent, arg: str, saving: bool = False) -> bool:
     except backends.BackendError as exc:
         print(f"{RED}{exc}{RESET}")
         return False
-    switched_provider = provider != getattr(agent, "provider", "ollama")
     agent.chat = chat
     agent.model = name
     agent.provider = provider
+    # No "restart to refresh" note: the system prompt's identity is the SLOT,
+    # filled from these attributes at the next task's rebuild.
     if saving:
         print(f"{DIM}model switched to {arg}{RESET}")
     else:
         print(f"{DIM}model switched to {arg} (this chat — /model --save "
               f"makes it the startup default){RESET}")
-    if switched_provider:
-        print(f"{DIM}note: the system prompt still describes the startup "
-              f"backend — restart aish to refresh its self-description{RESET}")
     return True
 
 
@@ -1741,71 +1741,29 @@ def default_workspace(cwd: str) -> str:
         return cwd
 
 
-PROVIDER_LABELS = {
-    "gemini": "Google Gemini",
-    "openai": "OpenAI",
-    "claude": "Anthropic Claude",
-    "claude-max": "Anthropic Claude (subscription)",
-    "local": "OpenAI-compatible server",
-}
-
-
-def identity_context(model: str, provider: str) -> str:
-    """The one system-prompt section that depends on where the model runs."""
-    if provider == "ollama":
-        return (
-            f"- YOUR IDENTITY: you are the local model '{model}' running through Ollama "
-            "ON THIS MACHINE — you are NOT a cloud service and NOT accessed over any API. "
-            "The Ollama process (ollama / llama-server, often ~20+ GB RAM) that the user "
-            "sees in `top`/`ps` IS you: it is the server executing your weights right now. "
-            "If the user stops Ollama, quits the Ollama app, or runs `killall llama-server` "
-            "/ `ollama stop`, YOU STOP MID-ANSWER — you would be killing "
-            "yourself. So when the user is hunting memory hogs or asks about that process, "
-            "say plainly that it is you; never recommend or run a command that kills it "
-            "without first warning that it cuts this chat off until Ollama is back, "
-            "and let them decide."
-        )
-    if provider == backends.LOCAL:
-        where = os.environ.get(backends.LOCAL_URL_ENV, "").strip()
-        where = where or f"the address in {backends.LOCAL_URL_ENV}"
-        return (
-            f"- YOUR IDENTITY: you are the model '{model}' served by the user's own "
-            f"OpenAI-compatible server at {where} — not a cloud service, and not Ollama. "
-            "aish executes approved commands on this machine and sends this conversation "
-            "to that server over the network. Stopping Ollama does not affect this chat; "
-            "stopping that server stops you mid-answer."
-        )
-    label = PROVIDER_LABELS.get(provider, provider)
-    model_desc = f"the model '{model}'" if model else "a Claude model"
-    return (
-        f"- YOUR IDENTITY: you are {model_desc}, reached over the {label} "
-        "cloud API — you do NOT run on this machine. aish executes approved commands "
-        f"locally and sends only this conversation to {label}. PRIVACY: everything "
-        "in the conversation — the user's messages, files you read, command output — "
-        f"leaves this machine for {label}'s servers, so be conservative about "
-        "pulling sensitive local data (keys, credentials, personal files) into "
-        "context, and warn the user before reading such files. Local Ollama models "
-        "are unrelated to you; stopping Ollama does not affect this chat."
-    )
+# identity_context / PROVIDER_LABELS moved to agent.py: the agent fills
+# IDENTITY_SLOT from its LIVE (model, provider) at every system-message
+# rebuild, so a /model switch corrects the identity instead of describing
+# the backend the process started with. Re-exported above for old importers.
 
 
 def usage_context(
-    model: str,
     vi_mode: bool,
     allow_path: Path,
     state_dir: Path,
     config_path: Path,
     deny_path: Path | None = None,
     lessons_path: Path | None = None,
-    provider: str = "ollama",
 ) -> str:
     """Self-knowledge for the system prompt: aish should be able to explain
-    and (via approved commands) reconfigure itself."""
+    and (via approved commands) reconfigure itself. The identity line is the
+    SLOT, filled by the agent from its live model at every rebuild — never a
+    string baked at startup that a /model switch would silently outdate."""
     deny_path = deny_path if deny_path is not None else default_denylist()
     lessons_path = lessons_path if lessons_path is not None else default_lessons()
     return f"""\
 About aish (you) — use this to answer questions about your own usage:
-{identity_context(model, provider)}
+{IDENTITY_SLOT}
 - Approval prompt keys: y=run once, n=deny, a=always allow (saves command \
 prefixes to {allow_path}; the suggested prefix is the static subcommand path \
 — e.g. 'gh issue create', never a blanket 'gh'; chained |/&&/|| segments are \
@@ -1966,8 +1924,9 @@ body of workflows, exact commands, gotchas, and safety rules. The \
 description MUST state the trigger ("Use when the user asks to …") — it is \
 what makes the skill discoverable. The index refreshes every task, so a \
 new skill is available immediately, no restart needed.
-- Current model: {model} (change via --model, $AISH_MODEL, or config; \
-/model <name> --save persists a switch as the startup default).
+- The current model is named on YOUR IDENTITY above. /model <name> switches \
+this chat; --model, $AISH_MODEL, or config set the startup default, and \
+/model <name> --save persists a switch as that default.
 When the user asks you to change one of your settings, edit the config file \
 with a normal shell command (it goes through approval like any command)."""
 
@@ -2653,8 +2612,8 @@ def main() -> int:
         for part in [
             environment_context(cwd),
             usage_context(
-                model_name, args.vi_mode, allow_path, state_dir, config_path,
-                deny_path, lessons_path, provider=provider,
+                args.vi_mode, allow_path, state_dir, config_path,
+                deny_path, lessons_path,
             ),
             *load_context_files(cwd),
         ]

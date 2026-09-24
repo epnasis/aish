@@ -2725,3 +2725,48 @@ class TestForbidsAsksWithoutSpending:
         teaches is forbidden" true of any playbook with a command in it."""
         binding = self._binding(when_subject="always", when_action=None)
         assert rules.forbids([binding], "run_command", {"command": "ls"}) is None
+
+
+NOTED = """---
+name: speak-first
+description: Answer me before you go running anything.
+when:
+  prompt:
+    matches: deploy
+then:
+  never_use: [web_search]
+---
+
+Say something to the user first, then use tools.
+
+## Notes
+
+WHY THIS IS ON, measured 2026-08-04: rule ON narrated on 30/30 turns, rule
+OFF on 0. Perfect separation.
+"""
+
+
+class TestOwnerNotes:
+    """Everything under `## Notes` in a rule's body is the owner's — the
+    measurement that justified the rule, links, history. It stays in the file
+    and is never seeded to the acting model, which needs the obligation and
+    the intent, not the experiment write-up (before this, answer-me-first's
+    A/B narrative rode every turn's reminder)."""
+
+    def test_prose_below_the_notes_heading_is_never_seeded(self, tmp_path):
+        rule = load_one(tmp_path, NOTED, "speak-first")
+        verdict, evidence = rules.evaluate(rule, rules.TurnContext(task="deploy it"))
+        assert verdict == rules.VERDICT_BIND
+        binding = rules.bind(rule, evidence, "b1", {"web_search", "read_url"})
+        text = rules.seed_text([binding])
+        assert "Say something to the user first" in text
+        assert "measured 2026-08-04" not in text
+        assert "## Notes" not in text
+
+    def test_a_body_with_no_notes_heading_is_shown_whole(self):
+        assert rules.shown_prose("Answer from the material.") == "Answer from the material."
+
+    def test_the_file_keeps_the_notes_an_edit_round_trips_them(self, tmp_path):
+        path = write(tmp_path, "speak-first", NOTED)
+        fields = rules.author_fields(path)
+        assert "measured 2026-08-04" in fields["prose"]

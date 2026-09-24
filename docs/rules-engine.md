@@ -185,7 +185,14 @@ then:
 
 Prose the model is shown verbatim when this rule binds. Explain the intent —
 this is the half that keeps a refusal from being an ambush.
+
+## Notes
+
+Everything under a `## Notes` heading is the OWNER's and is never seeded to
+the model: the measurement that justified the rule, links, history.
 ```
+
+**`## Notes` is the owner's half of the body (2026-09-24).** `shown_prose` cuts the seeded prose at that heading; the file keeps it whole, and an edit round-trips it verbatim (`author_fields` carries the body untouched). It exists because the WHY had nowhere else to live: `answer-me-first`'s prose carried its full A/B experiment write-up — run counts, the retracted speed claim — and rules prose is seeded whenever the rule binds, which for that rule is every turn. The model needs the obligation and the intent; the evidence that convinced the owner is for the owner. `TestOwnerNotes`.
 
 **The shape is borrowed, the words are not.** Reviewed against the industry policy languages (Azure Policy, Kyverno, Cedar, OPA/Rego, AWS IAM, Sigma, ESLint), because a model is better at a language that already exists than at a bespoke one. What transfers is the **grammar**, and only the grammar: none of those languages can be adopted wholesale, since they govern *resources* and nothing in Azure or Cedar can say "the answer must come from the material the owner handed over" — clouds have no answers and no conversational turns. Four conventions every one of them shares, all adopted here:
 

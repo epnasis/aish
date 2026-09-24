@@ -15701,3 +15701,52 @@ class TestReminderDelta:
         knowledge, _ = reminder_delta(earlier, ["[skill: a]\nbody a", "[skill: b]\nbody b"],
                                       ["a", "b"], "")
         assert knowledge == "[skill: b]\nbody b\n\n" + KNOWLEDGE_SHOWN_EARLIER.format(names="a")
+
+
+class TestIdentityFollowsTheModel:
+    """The system prompt's identity section is filled from the agent's LIVE
+    (model, provider) at every rebuild — never a string baked at startup. The
+    bug: aish-web composed it once from the server's launch model, so a chat
+    switched to a local mlx backend was told, every turn, that it was gemini
+    on Google's cloud, privacy warning included."""
+
+    def _base(self):
+        return f"About aish (you):\n{agent_module.IDENTITY_SLOT}\n- more lines"
+
+    def test_the_first_task_names_the_model_actually_serving(self):
+        agent, chat = make_agent([model_says("hi")], context=self._base())
+        agent.run_task("hello")
+        system = chat.snapshots[0][0]["content"]
+        assert "local model 'fake' running through Ollama" in system
+        assert agent_module.IDENTITY_SLOT not in system
+
+    def test_a_model_switch_corrects_the_identity_on_the_next_task(self):
+        agent, chat = make_agent(
+            [model_says("hi"), model_says("hi again")], context=self._base()
+        )
+        agent.run_task("hello")
+        # What /model does, on both entry points: mutate the live attributes.
+        agent.model, agent.provider = "qwen-x", "local"
+        agent.run_task("again")
+        system = chat.snapshots[1][0]["content"]
+        assert "'qwen-x'" in system
+        assert "OpenAI-compatible server" in system
+        assert "through Ollama" not in system
+        assert agent_module.IDENTITY_SLOT not in system
+
+    def test_a_cloud_identity_names_the_provider_and_the_privacy_cost(self):
+        agent, chat = make_agent([model_says("hi")], context=self._base())
+        agent.model, agent.provider = "gemini-3.5-flash", "gemini"
+        agent.run_task("hello")
+        system = chat.snapshots[0][0]["content"]
+        assert "Google Gemini" in system
+        assert "leaves this machine" in system
+
+    def test_two_chats_on_one_model_fill_the_slot_to_identical_bytes(self):
+        # The cross-chat cache reuse (#404) must survive the slot: same model,
+        # same fill, byte-identical system message in two fresh chats.
+        one, chat_one = make_agent([model_says("hi")], context=self._base())
+        two, chat_two = make_agent([model_says("hi")], context=self._base())
+        one.run_task("hello")
+        two.run_task("hello")
+        assert chat_one.snapshots[0][0]["content"] == chat_two.snapshots[0][0]["content"]
