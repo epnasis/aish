@@ -16245,7 +16245,9 @@ function primaryChord(e) {
 // The chords are the ones the chat apps the owner already uses bind, so a hand
 // that knows them lands here without being told (owner call, 2026-09-21):
 // "new" = a new chat (⌘⇧O and ⌘O; ⌘N too, where the browser lets it through) ·
-// "search" = the chat list with its search field focused (⌘K and ⌘⇧K) ·
+// "search" / "search-up" = the chat list with its search field focused (⌘K /
+// ⌘⇧K); once the field has focus each further press moves the highlight a row
+// down / up ([RAIL-CURSOR]) ·
 // "rail" = show/hide the chat list (⌘B, the editors' sidebar toggle) ·
 // "export" = the chat as a PDF (⌘P) · "models" = the model list, and each
 // further press while it is up is one row down, as ↓ is (⌘⇧M) ·
@@ -16260,7 +16262,7 @@ function navChord(e, { modal = false, terminal = false } = {}) {
   if (modal || terminal || !primaryChord(e)) return null;
   const key = String(e.key || "").toLowerCase();
   if (key === "n" || key === "o") return "new";
-  if (key === "k") return "search";
+  if (key === "k") return e.shiftKey ? "search-up" : "search";
   if (key === "b" && !e.shiftKey) return "rail";
   if (key === "p" && !e.shiftKey) return "export";
   if (key === "m") return e.shiftKey ? "models" : "model-toggle";
@@ -16283,6 +16285,7 @@ function searchChats() {
   if (!railIsOpen()) openSessionRail("");
   const field = $("sessions-search");
   if (!field) return;
+  startRailCursor(field.value.trim());
   requestAnimationFrame(() => requestAnimationFrame(() => {
     field.focus({ preventScroll: true });
     if (typeof field.select === "function") field.select();
@@ -16353,7 +16356,12 @@ document.addEventListener("keydown", (e) => {
     closeSheets();
     return;
   }
-  if (chord === "search") { e.preventDefault(); searchChats(); return; }
+  if (chord === "search" || chord === "search-up") {
+    e.preventDefault();
+    if (document.activeElement === $("sessions-search")) stepRailCursor(chord === "search" ? 1 : -1);
+    else searchChats();
+    return;
+  }
   if (chord === "rail") { e.preventDefault(); toggleSessionRail(); return; }
   if (chord === "export") { e.preventDefault(); exportSessionPdf(); return; }
   if (chord === "models") {
@@ -16442,8 +16450,8 @@ function setActiveRow(rows, index) {
 
 // One row up (-1) or down (1), wrapping; from no highlight, down lands on the
 // first row and up on the last. The arrows and the model-list chord share it.
-function stepListRow(listEl, step) {
-  const rows = [...listEl.querySelectorAll(".row")];
+function stepListRow(listEl, step, selector = ".row") {
+  const rows = [...listEl.querySelectorAll(selector)];
   if (!rows.length) return;
   const index = rows.findIndex((row) => row.classList.contains("active"));
   const next = index < 0
@@ -16451,6 +16459,49 @@ function stepListRow(listEl, step) {
     : (index + step + rows.length) % rows.length;
   setActiveRow(rows, next);
 }
+
+// [RAIL-CURSOR-START]
+// The chat list's keyboard highlight, held by NAME rather than as a class on a
+// row: the list is repainted whenever the roster moves (a chat starts working,
+// another one's title lands), and a class would vanish with the row it was on
+// in the middle of ⌘K-ing down the list. `railCursor` is the chat to highlight,
+// or "first" — the top result, settled once the rows it means have arrived.
+// Typing resets it (the rows are new; Enter takes the top match as it always
+// has) and so does closing the list.
+let railCursor = null;
+
+function railCursorRows() {
+  return [...$("sessions-list").querySelectorAll(".session-row")];
+}
+
+function applyRailCursor() {
+  if (railCursor === null) return;
+  const rows = railCursorRows();
+  if (!rows.length) return;
+  let index = rows.findIndex((row) => row.dataset.name === railCursor);
+  // "first", or a chat the list does not show (a fresh chat is in no list yet):
+  // the top row, so the press always lands visibly somewhere.
+  if (index < 0) index = 0;
+  railCursor = rows[index].dataset.name;
+  setActiveRow(rows, index);
+}
+
+// The first press: with nothing typed the chat you are in, since that is where
+// "one down" should be measured from; with a search, its top result. The
+// helper names say "cursor" on purpose — this file is one script scope, and a
+// second `railRows` silently replaced the offline list's own.
+function startRailCursor(query) {
+  railCursor = query ? "first" : (currentSession || "first");
+  applyRailCursor();
+}
+
+function stepRailCursor(step) {
+  const list = $("sessions-list");
+  stepListRow(list, step, ".session-row");
+  const active = list.querySelector(".session-row.active");
+  if (active) railCursor = active.dataset.name;
+}
+// [RAIL-CURSOR-END]
 
 function attachListNav(searchEl, listEl) {
   searchEl.addEventListener("keydown", (e) => {
@@ -17654,6 +17705,13 @@ function requestSessions(query) {
   if (ws && ws.readyState === WebSocket.OPEN) send({ type: "sessions", query });
 }
 
+$("sessions-search").addEventListener("input", () => { railCursor = null; });
+// The highlight means "Enter opens this", which is only true while the field
+// has the keyboard — a docked list otherwise keeps a stale cursor on screen.
+$("sessions-search").addEventListener("blur", () => {
+  railCursor = null;
+  for (const row of railCursorRows()) row.classList.remove("active");
+});
 $("sessions-search").addEventListener(
   "input",
   debounce(() => requestSessions($("sessions-search").value), 150)
@@ -18308,6 +18366,11 @@ function railSection(label, sessions, current, unreadState) {
 }
 
 function renderSessions(event) {
+  paintSessionList(event);
+  applyRailCursor();
+}
+
+function paintSessionList(event) {
   lastSessionEvent = event;
   // Carry the pin onto server-supplied rows: the ledger answers first
   // ([PIN-SYNC]), the mirror's meta stands in for a pre-sync pin — so a chat

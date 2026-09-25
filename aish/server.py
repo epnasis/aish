@@ -1738,7 +1738,8 @@ distills the conversation into saved skills/memory (an optional hint \
 follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \
 lessons file); the composer also accepts /model /resume /delete /new /fork \
 /cd /add-dir /jobs /watch /help. \
-On a desktop keyboard, Cmd/Ctrl+Shift+M opens the model list (pressed again it \
+On a desktop keyboard, Cmd/Ctrl+K opens the chat list (pressed again it moves \
+down a row, with Shift up, Enter opens), Cmd/Ctrl+Shift+M opens the model list (pressed again it \
 moves down a row, Enter picks), and Cmd/Ctrl+M switches between local and cloud \
 — to whichever model on the other side a chat used most recently. \
 When you are driving a page in this chat with browse/browse_act/browse_fill, \
