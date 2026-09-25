@@ -106,6 +106,7 @@ from .cli import (
     available_models,
     default_lessons,
     default_workspace,
+    last_model_elsewhere,
     load_config,
     load_context_files,
     model_spec,
@@ -113,6 +114,7 @@ from .cli import (
     parse_learn,
     rank_models,
     recent_models,
+    runs_locally,
     save_default_model,
 )
 from .documents import DocumentError, page_count, page_png
@@ -1736,6 +1738,9 @@ distills the conversation into saved skills/memory (an optional hint \
 follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \
 lessons file); the composer also accepts /model /resume /delete /new /fork \
 /cd /add-dir /jobs /watch /help. \
+On a desktop keyboard, Cmd/Ctrl+Shift+M opens the model list (pressed again it \
+moves down a row, Enter picks), and Cmd/Ctrl+M switches between local and cloud \
+— to whichever model on the other side a chat used most recently. \
 When you are driving a page in this chat with browse/browse_act/browse_fill, \
 the user CAN see it: /watch opens a live, read-only window on the page you are \
 on, in this chat. Say so when they ask what a page looks like, say they cannot \
@@ -2874,6 +2879,9 @@ class WebServer:
         elif kind == "set_model":
             self._claim(client)
             await self._set_model(client, message)
+        elif kind == "toggle_model":
+            self._claim(client)
+            await self._toggle_model(client)
         elif kind == "cd":
             self._claim(client)
             await self._cd(client, str(message.get("path", "")).strip())
@@ -4804,6 +4812,28 @@ class WebServer:
                 "recent": [{"name": name, "desc": desc} for name, desc in recent],
             }
         )
+
+    async def _toggle_model(self, client: Client) -> None:
+        """Switch between local and cloud: to the model last used on the other
+        side, read from the chats' own records like the picker's Recent."""
+        session = client.viewing
+        if session is None or self.state_dir is None:
+            return
+        agent, state_dir = session.agent, self.state_dir
+        current = model_spec(agent)
+
+        def pick() -> str | None:
+            models = available_models(agent, state_dir)
+            return last_model_elsewhere(SessionLog.models_used(state_dir), models, current)
+
+        target = await asyncio.to_thread(pick)
+        if target is None:
+            side = "cloud" if runs_locally(current) else "local"
+            await self._refuse(
+                client, f"no {side} model used recently to switch to — pick one in the model list"
+            )
+            return
+        await self._set_model(client, {"spec": target})
 
     async def _set_model(self, client: Client, message: dict) -> None:
         session = client.viewing
