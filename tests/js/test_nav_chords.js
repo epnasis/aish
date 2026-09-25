@@ -51,7 +51,7 @@ check("macOS: ⌘⇧O and ⌘O are new chat, ⌘K and ⌘⇧K are search, ⌘B i
   assert.equal(s.navChord(key("o", { metaKey: true, shiftKey: true })), "new");
   assert.equal(s.navChord(key("o", { metaKey: true })), "new", "⌘O is new chat, not the rail");
   assert.equal(s.navChord(key("k", { metaKey: true })), "search");
-  assert.equal(s.navChord(key("K", { metaKey: true, shiftKey: true })), "search");
+  assert.equal(s.navChord(key("K", { metaKey: true, shiftKey: true })), "search-up");
   assert.equal(s.navChord(key("b", { metaKey: true })), "rail");
   assert.equal(s.navChord(key("B", { metaKey: true })), "rail");
   // The Emacs bindings of a macOS text field stay with the field.
@@ -90,7 +90,7 @@ check("Windows/Linux: Ctrl+Shift+O / Ctrl+O are new chat, Ctrl+K and Ctrl+Shift+
     assert.equal(s.navChord(key("o", { ctrlKey: true, shiftKey: true })), "new", platform);
     assert.equal(s.navChord(key("o", { ctrlKey: true })), "new", platform);
     assert.equal(s.navChord(key("k", { ctrlKey: true })), "search", platform);
-    assert.equal(s.navChord(key("k", { ctrlKey: true, shiftKey: true })), "search", platform);
+    assert.equal(s.navChord(key("k", { ctrlKey: true, shiftKey: true })), "search-up", platform);
     assert.equal(s.navChord(key("b", { ctrlKey: true })), "rail", platform);
     assert.equal(s.navChord(key("k", { metaKey: true })), null, `${platform}: the Win key is not the primary modifier`);
     assert.equal(s.navChord(key("o", { metaKey: true, shiftKey: true })), null, platform);
@@ -133,9 +133,10 @@ function handlerWorld(platform, { modal = false, terminal = false } = {}) {
   const el = (id) => { if (!els.has(id)) els.set(id, { id, hidden: true, focus: () => calls.push(`focus:${id}`), select: () => calls.push(`select:${id}`), disabled: false, value: "" }); return els.get(id); };
   let handler = null;
   const active = terminal ? { closest: (sel) => (sel === "#pty-overlay" ? {} : null) } : null;
+  const doc = { addEventListener: (type, fn) => { if (type === "keydown") handler = fn; }, activeElement: active, querySelectorAll: () => [] };
   const sandbox = {
     navigator: { platform, userAgent: "" }, Boolean, String, Set, Map, Array, Object,
-    document: { addEventListener: (type, fn) => { if (type === "keydown") handler = fn; }, activeElement: active, querySelectorAll: () => [] },
+    document: doc,
     $: el,
     closePreview: () => false, previewKey: () => false, ssIsOpen: () => false, ssClose() {}, ssTape() {}, ssScrollPage() {},
     confirmIsOpen: () => modal, closeConfirm() {}, consoleLinkMenuOpen: () => false, closeConsoleLinkMenu() {},
@@ -147,18 +148,20 @@ function handlerWorld(platform, { modal = false, terminal = false } = {}) {
     openModelSheet: (q) => { calls.push(`openModelSheet:${q}`); el("model-sheet").hidden = false; },
     stepListRow: (list, step) => calls.push(`stepListRow:${list.id}:${step}`),
     act: (message) => calls.push(`act:${message.type}`),
+    startRailCursor: (q) => calls.push(`startRailCursor:${q}`),
+    stepRailCursor: (step) => calls.push(`stepRailCursor:${step}`),
     requestAnimationFrame: (fn) => fn(),
   };
   vm.createContext(sandbox);
   vm.runInContext(surface(extract(src, "// [NAV-CHORDS-START]", "// Desktop only: auto-focusing on a phone")), sandbox);
   assert(typeof handler === "function", "the keydown handler was not registered");
-  return { calls, fire: (e) => { let prevented = false; handler({ ...e, preventDefault: () => { prevented = true; } }); return prevented; } };
+  return { calls, el, doc, fire: (e) => { let prevented = false; handler({ ...e, preventDefault: () => { prevented = true; } }); return prevented; } };
 }
 
 check("⌘K opens the chat list and focuses its search field through the one handler; ⌘⇧O goes the header button's way", () => {
   const w = handlerWorld("MacIntel");
   assert.equal(w.fire(key("k", { metaKey: true })), true, "the browser's own ⌘K is prevented");
-  assert.deepEqual(w.calls, ["openSessionRail:", "focus:sessions-search", "select:sessions-search"]);
+  assert.deepEqual(w.calls, ["openSessionRail:", "startRailCursor:", "focus:sessions-search", "select:sessions-search"]);
   w.calls.length = 0;
   assert.equal(w.fire(key("O", { metaKey: true, shiftKey: true })), true);
   assert.deepEqual(w.calls, ["requestNewChat", "closeSheets"], "new chat is the reconnect-aware path the button uses");
@@ -210,10 +213,77 @@ check("stepListRow is ↓/↑: from no highlight down is the first row, up the l
   sandbox.stepListRow(list, -1); assert.equal(at(), 2, "up from nothing is the last row");
 });
 
+check("once the search field has the keyboard, ⌘K is one row down and ⌘⇧K one row up", () => {
+  const w = handlerWorld("MacIntel");
+  w.doc.activeElement = w.el("sessions-search");
+  assert.equal(w.fire(key("k", { metaKey: true })), true);
+  assert.equal(w.fire(key("k", { metaKey: true })), true);
+  assert.equal(w.fire(key("K", { metaKey: true, shiftKey: true })), true);
+  assert.deepEqual(w.calls, ["stepRailCursor:1", "stepRailCursor:1", "stepRailCursor:-1"]);
+});
+
+// ---- the chat list's cursor ([RAIL-CURSOR]) -----------------------------------------
+
+function railWorld(names) {
+  const list = { id: "sessions-list", rows: [], querySelectorAll: () => list.rows,
+    querySelector: () => list.rows.find((r) => r.active) || null };
+  const paint = (ns) => {
+    list.rows = ns.map((name) => {
+      const row = { active: false, dataset: { name }, scrollIntoView() {} };
+      row.classList = { contains: (c) => c === "active" && row.active, toggle: (c, on) => { row.active = on; } };
+      return row;
+    });
+  };
+  paint(names);
+  const sandbox = { Array, $: () => list, currentSession: "c" };
+  vm.createContext(sandbox);
+  vm.runInContext(surface(
+    extract(src, "function setActiveRow(rows, index) {", "function attachListNav(")), sandbox);
+  const at = () => list.rows.filter((r) => r.active).map((r) => r.dataset.name);
+  return { s: sandbox, paint, at };
+}
+
+check("⌘K with nothing typed starts on the chat you are in; with a search, on its top result", () => {
+  const w = railWorld(["a", "b", "c", "d"]);
+  w.s.startRailCursor("");
+  assert.deepEqual(w.at(), ["c"]);
+  w.s.stepRailCursor(1); assert.deepEqual(w.at(), ["d"]);
+  w.s.stepRailCursor(-1); w.s.stepRailCursor(-1); assert.deepEqual(w.at(), ["b"]);
+  w.s.startRailCursor("gem");
+  assert.deepEqual(w.at(), ["a"]);
+});
+
+check("the highlight follows its CHAT across a repaint, and a search waits for its rows", () => {
+  const w = railWorld(["a", "b", "c"]);
+  w.s.startRailCursor("");
+  w.s.stepRailCursor(1);                   // on "a" (wrapped past the end)
+  w.paint(["x", "a", "b", "c"]);           // a chat started working: the roster moved
+  w.s.applyRailCursor();
+  assert.deepEqual(w.at(), ["a"], "still the chat it was on, not the index");
+  w.paint([]);
+  w.s.startRailCursor("q");                // nothing to highlight yet
+  assert.deepEqual(w.at(), []);
+  w.paint(["r1", "r2"]);
+  w.s.applyRailCursor();
+  assert.deepEqual(w.at(), ["r1"]);
+});
+
+check("a chat the list does not show (a fresh one) starts the cursor on the top row", () => {
+  const w = railWorld(["a", "b"]);
+  w.s.startRailCursor("");               // currentSession "c" is not listed
+  assert.deepEqual(w.at(), ["a"]);
+  w.s.stepRailCursor(1); assert.deepEqual(w.at(), ["b"]);
+});
+
+check("renderSessions re-applies the cursor after every paint", () => {
+  const body = extract(src, "function renderSessions(event) {", "function paintSessionList(event) {");
+  assert(/paintSessionList\(event\);\s*applyRailCursor\(\);/.test(body), body);
+});
+
 check("on Windows/Linux the same handler answers to Ctrl", () => {
   const w = handlerWorld("Win32");
   assert.equal(w.fire(key("k", { ctrlKey: true, shiftKey: true })), true);
-  assert.deepEqual(w.calls, ["openSessionRail:", "focus:sessions-search", "select:sessions-search"]);
+  assert.deepEqual(w.calls, ["openSessionRail:", "startRailCursor:", "focus:sessions-search", "select:sessions-search"]);
   w.calls.length = 0;
   assert.equal(w.fire(key("k", { metaKey: true })), false, "the Win key is not the modifier");
   assert.deepEqual(w.calls, []);

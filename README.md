@@ -622,8 +622,9 @@ this UI. Highlights:
   keep it above the fold and permanently available offline — the pin is yours,
   not the device's, so it applies on every browser and phone you use.
 - **Keyboard shortcuts**, the ones every other chat app binds. `⌘⇧O` (or `⌘O`)
-  starts a new chat, `⌘K` (or `⌘⇧K`) opens the chat list with its search field
-  focused, `⌘B` shows or hides the chat list, `⌘⇧M` opens the model list (press
+  starts a new chat, `⌘K` opens the chat list with its search field focused and
+  the chat you are in highlighted (or the top result, if you had searched) —
+  press it again to move down the list, `⌘⇧K` to move up, `↩` to open — `⌘B` shows or hides the chat list, `⌘⇧M` opens the model list (press
   it again to move down a row, `↑`/`↓` work too, `↩` picks) and `⌘M` switches
   between local and cloud — to the model on the other side that a chat used
   most recently — `⌘` on a Mac, `Ctrl` on Windows and Linux, and only that one:
