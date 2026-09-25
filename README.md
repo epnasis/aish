@@ -367,6 +367,14 @@ anything new it proposes is approved as usual. Retry on a turn that answered,
 or that you stopped, starts it over from scratch as before; so does the fourth
 Retry in a row on the same failing question.
 
+How full the context window is shows at a glance: as a percentage in the web
+app's model chip (hover it for the tokens and the window), and at the right end
+of the line under the terminal prompt as `ctx 34% · 68.0k/200.0k`. It is the
+last model call's whole prompt, cached part included, against the window aish
+sizes history for. On Ollama it reads `~34%`: Ollama does not report the prompt
+prefix it reused from its cache, so the figure is estimated from the request's
+characters (pictures not counted) and never shown below what Ollama did report.
+
 To see where the tokens went:
 
 ```sh

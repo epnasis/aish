@@ -37,6 +37,7 @@ const sandbox = {
   pendingSends: [], // un-acknowledged send bubbles ([PENDING-SEND])
   offlineViewing: false,
   renderedAnswers: 0,
+  ctxFill: null, // [CTX-METER] rides with the stashed view
   messagesEl: { children: [] },
 };
 vm.createContext(sandbox);

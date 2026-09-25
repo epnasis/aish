@@ -175,6 +175,9 @@ class ClaudeMaxAgent:
     def close(self) -> None:
         self.inner.close()
 
+    def current_context_fill(self) -> dict | None:
+        return self.inner.current_context_fill()
+
     @property
     def roots(self):
         return self.inner.roots
@@ -534,6 +537,12 @@ class ClaudeMaxAgent:
                         # Surface which model the CLI's default resolved to.
                         self.model = (message.data or {}).get("model") or self.model
                 elif isinstance(message, sdk.AssistantMessage):
+                    if not getattr(message, "parent_tool_use_id", None):
+                        # A message with a parent belongs to a sub-agent the SDK
+                        # ran inside a tool call — its own, smaller context.
+                        self.inner.note_reported_fill(
+                            _prompt_tokens(getattr(message, "usage", None))
+                        )
                     for block in message.content:
                         if isinstance(block, sdk.TextBlock) and block.text:
                             close_pending()
@@ -585,6 +594,17 @@ class ClaudeMaxAgent:
             else:
                 note += f" · subscription (≈${result.total_cost_usd:.4f} API-equivalent)"
         self.echo(note)
+
+
+def _prompt_tokens(usage: dict | None) -> int:
+    """The whole prompt of one API call, from the Messages-API usage the CLI
+    passes through: `input_tokens` excludes the cache reads and writes, and
+    both still occupy the window."""
+    usage = usage or {}
+    return sum(
+        int(usage.get(key) or 0)
+        for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    )
 
 
 def _delta_text(event) -> str:

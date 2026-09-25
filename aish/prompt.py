@@ -161,6 +161,9 @@ class BoxPrompt:
         # Rebindable after construction (the agent that owns the live cwd is
         # created later): path completion for /cd et al. resolves against it.
         self.get_cwd = os.getcwd
+        # Rebindable the same way: a short label drawn at the right end of the
+        # bottom rule (the context meter); "" draws nothing.
+        self.get_status = lambda: ""
         self._history = FileHistory(str(state_dir / "history"))
         self._completer = merge_completers(
             [
@@ -292,7 +295,8 @@ class BoxPrompt:
         vi_mode = self.vi_mode
 
         def bottom_bar():
-            """The bottom rule doubles as completion bar and vi-mode indicator.
+            """The bottom rule doubles as completion bar, vi-mode indicator and
+            context meter.
             On the final render after submit (app.is_done) it goes back to a
             plain rule so no stale mode label lingers on screen."""
             app = get_app()
@@ -311,8 +315,12 @@ class BoxPrompt:
                 used = sum(len(text) for _, text in fragments)
                 fragments.append((RULE_STYLE, "─" * max(0, width - used)))
                 return fragments
-            if app.is_done or not vi_mode:
+            if app.is_done:
                 return [(RULE_STYLE, "─" * width)]
+            status = self.get_status()
+            right = f" {status} ─" if status else ""
+            if not vi_mode:
+                return [(RULE_STYLE, "─" * max(0, width - len(right)) + right)]
             mode = app.vi_state.input_mode
             if mode == InputMode.NAVIGATION:
                 label = " NORMAL "
@@ -320,7 +328,8 @@ class BoxPrompt:
                 label = " REPLACE "
             else:
                 label = " INSERT "
-            return [(RULE_STYLE, "─" * 3 + label + "─" * max(0, width - len(label) - 3))]
+            fill = "─" * max(0, width - len(label) - 3 - len(right))
+            return [(RULE_STYLE, "─" * 3 + label + fill + right)]
 
         keys = KeyBindings()
 

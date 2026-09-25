@@ -966,6 +966,20 @@ class LiveTimer:
             print("\r\033[K", end="", flush=True)
 
 
+def context_meter(fill: dict | None) -> str:
+    """'ctx 34% · 68.0k/200.0k' for the prompt's bottom rule; '~' marks a fill
+    estimated from characters (a backend that does not report its reused
+    prompt prefix). "" when nothing was measured."""
+    if not fill or not fill.get("window") or not fill.get("used"):
+        return ""
+    raw = fill["used"] / fill["window"] * 100
+    pct = "<1%" if 0 < raw < 1 else f"{round(raw)}%"
+    mark = "~" if fill.get("basis") == "estimated" else ""
+    return (
+        f"ctx {mark}{pct} · {mark}{format_tokens(fill['used'])}/{format_tokens(fill['window'])}"
+    )
+
+
 def read_task(cwd: str) -> str:
     """Boxed prompt (rules hugging the input, expanding with multiline entry);
     plain prompt when stdin is piped."""
@@ -1828,7 +1842,10 @@ size). For ONE turn, `aish explain <chat> <turn>` ends with what it cost: \
 each model call's reported tokens, what each step added, and what the fullest \
 call's context was made of. Long pages and images are what fill it fastest, \
 and the standing prompt plus the tool menu are paid on every call before the \
-task starts.
+task starts. How full the context was on the last model call is shown in the \
+web model chip as a percentage and at the right end of the line under the \
+terminal prompt (`ctx 34% · 68.0k/200.0k`); a leading ~ means estimated from \
+characters, because Ollama does not report the prompt prefix it reused.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` is an alias for /cd — it moves the project directory and \
 re-anchors this chat's root. Ctrl-C cancels only the \
@@ -2752,6 +2769,9 @@ def main() -> int:
     agent_holder.append(agent)
     if _box is not None:
         _box.get_cwd = lambda: agent.cwd  # /cd path completion follows the agent
+        _box.get_status = lambda: context_meter(
+            fill() if (fill := getattr(agent, "current_context_fill", None)) else None
+        )
     if history:
         agent.load_history(history)
         # Continue on the model the session last used, like /resume and the web's

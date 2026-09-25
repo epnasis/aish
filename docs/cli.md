@@ -24,6 +24,8 @@ This law reaches plugin tools too, and #377 is the case that proved it. `make_to
 
 `read_task` reads through `prompt.py`'s boxed input UI — built as a small prompt_toolkit `Application` rather than a `PromptSession`, because the footer-under-input layout requires it. `@`-mention file completion comes from `list_files` (the same walk, cap and scoring as the web's), filtered by `dir_ignore`. `TestAtFileCompleter`, `TestSlashCompleter`.
 
+**The rule under the input carries the context meter** (`ctx 34% · 68.0k/200.0k`, right-aligned; beside the vi-mode label when that is on, and yielding to the completion list). `BoxPrompt.get_status` is rebindable like `get_cwd`; `cli.context_meter` formats `Agent.current_context_fill()`, which is empty until this process has made a model call in the chat — a resumed chat shows nothing until its first answer. What the figure means is in `docs/token-accounting.md`. `TestTheTerminalMeter`.
+
 **Slash commands** are declared in `SLASH_COMMANDS` and dispatched by `handle_slash`. Adding one needs every place in that chain — and, if it should exist on the web too, the frontend's own handler; a missing case there falls through to "unknown command", which is how a shipped command can exist everywhere except the browser. `TestSlashCommands`.
 
 `/learn` and `/feedback` are parsed into flow prompts by `parse_learn` and `parse_feedback` (`TestParseLearn`, `TestParseFeedback`). `parse_feedback` takes `block_flow`/`attachments` flags that the CLI always passes as neither — the block flow is web-only, because the classic flow's `gh issue create` has to upload assets. See `docs/web-server.md`.
