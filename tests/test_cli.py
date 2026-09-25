@@ -1487,6 +1487,33 @@ class TestModelPicker:
             "a", "b"
         ]
 
+    def test_toggle_goes_to_the_last_model_used_on_the_other_side(self, monkeypatch):
+        """Cmd+M: from a local model, the most recent cloud one; from a cloud
+        model, the most recent local one — `local:` counts as local."""
+        from aish.cli import last_model_elsewhere, runs_locally
+
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+        monkeypatch.setenv("AISH_LOCAL_URL", "http://127.0.0.1:1/v1")
+        listed = [("qwen3:8b", "local · 5 GB"), ("llama3:8b", "local · 5 GB")]
+        used = [
+            "qwen3:8b", "gemini:gemini-3.5-pro", "local:mlx/x", "llama3:8b", "gemini:older",
+        ]
+        assert last_model_elsewhere(iter(used), listed, "llama3:8b") == "gemini:gemini-3.5-pro"
+        assert last_model_elsewhere(iter(used), listed, "gemini:gemini-3.5-pro") == "qwen3:8b"
+        assert runs_locally("local:mlx/x") and runs_locally("qwen3:8b")
+        assert not runs_locally("gemini") and not runs_locally("claude-max")
+
+    def test_toggle_skips_what_the_picker_could_not_switch_to(self, monkeypatch):
+        """The same Recent rules as the picker: an uninstalled Ollama model and
+        claude-max are passed over; nothing left on the other side is None."""
+        from aish.cli import last_model_elsewhere
+
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        used = ["claude-max", "gemini:gemini-3.5-pro", "qwen3:14b", "qwen3:8b"]
+        listed = [("qwen3:8b", "local · 5 GB")]
+        assert last_model_elsewhere(iter(used), listed, "claude-max") == "qwen3:8b"
+        assert last_model_elsewhere(iter(used), listed, "qwen3:8b") is None
+
     def test_available_models_includes_fetched_catalog(self, tmp_path, monkeypatch):
         import sys
         from types import SimpleNamespace

@@ -75,7 +75,12 @@ check("macOS: ⌘⇧O and ⌘O are new chat, ⌘K and ⌘⇧K are search, ⌘B i
   assert.equal(s.navChord(key("k")), null);
   assert.equal(s.navChord(key("k", { shiftKey: true })), null);
   assert.equal(s.navChord(key("b")), null);
-  assert.deepEqual(s.CHORD_HINTS, { new: "⌘⇧O", search: "⌘K", rail: "⌘B" });
+  // ⌘⇧M is the model list, ⌘M local ⇄ cloud; Ctrl+M is not either.
+  assert.equal(s.navChord(key("M", { metaKey: true, shiftKey: true })), "models");
+  assert.equal(s.navChord(key("m", { metaKey: true })), "model-toggle");
+  assert.equal(s.navChord(key("m", { ctrlKey: true })), null);
+  assert.equal(s.navChord(key("m", { ctrlKey: true, shiftKey: true })), null);
+  assert.deepEqual(s.CHORD_HINTS, { new: "⌘⇧O", search: "⌘K", rail: "⌘B", models: "⌘⇧M", modelToggle: "⌘M" });
 });
 
 check("Windows/Linux: Ctrl+Shift+O / Ctrl+O are new chat, Ctrl+K and Ctrl+Shift+K are search, Ctrl+B is the chat list; ⌘ (Win key) is not accepted", () => {
@@ -92,7 +97,11 @@ check("Windows/Linux: Ctrl+Shift+O / Ctrl+O are new chat, Ctrl+K and Ctrl+Shift+
     assert.equal(s.navChord(key("b", { metaKey: true })), null, platform);
     // Ctrl+Alt is AltGr on many layouts: never a chord.
     assert.equal(s.navChord(key("k", { ctrlKey: true, altKey: true })), null, platform);
-    assert.deepEqual(s.CHORD_HINTS, { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+B" }, platform);
+    assert.equal(s.navChord(key("M", { ctrlKey: true, shiftKey: true })), "models", platform);
+    assert.equal(s.navChord(key("m", { ctrlKey: true })), "model-toggle", platform);
+    // Ctrl+M is the terminal's carriage return there: the terminal keeps it.
+    assert.equal(s.navChord(key("m", { ctrlKey: true }), { terminal: true }), null, platform);
+    assert.deepEqual(s.CHORD_HINTS, { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+B", models: "Ctrl+Shift+M", modelToggle: "Ctrl+M" }, platform);
   }
 });
 
@@ -135,6 +144,9 @@ function handlerWorld(platform, { modal = false, terminal = false } = {}) {
     requestNewChat: () => calls.push("requestNewChat"), openSessionRail: (q) => calls.push(`openSessionRail:${q}`),
     toggleSessionRail: () => calls.push("toggleSessionRail"), exportSessionPdf: () => calls.push("exportSessionPdf"),
     toggleConsole: () => calls.push("toggleConsole"),
+    openModelSheet: (q) => { calls.push(`openModelSheet:${q}`); el("model-sheet").hidden = false; },
+    stepListRow: (list, step) => calls.push(`stepListRow:${list.id}:${step}`),
+    act: (message) => calls.push(`act:${message.type}`),
     requestAnimationFrame: (fn) => fn(),
   };
   vm.createContext(sandbox);
@@ -167,6 +179,37 @@ check("⌘K opens the chat list and focuses its search field through the one han
   assert.deepEqual(w.calls, ["toggleConsole"]);
 });
 
+check("⌘⇧M opens the model list, and each further press moves one row down; ⌘M asks the server to toggle", () => {
+  const w = handlerWorld("MacIntel");
+  assert.equal(w.fire(key("M", { metaKey: true, shiftKey: true })), true);
+  assert.deepEqual(w.calls, ["openModelSheet:"]);
+  w.calls.length = 0;
+  assert.equal(w.fire(key("M", { metaKey: true, shiftKey: true })), true);
+  assert.equal(w.fire(key("M", { metaKey: true, shiftKey: true })), true);
+  assert.deepEqual(w.calls, ["stepListRow:model-list:1", "stepListRow:model-list:1"]);
+  w.calls.length = 0;
+  assert.equal(w.fire(key("m", { metaKey: true })), true, "the browser's own ⌘M (minimise) is prevented");
+  assert.deepEqual(w.calls, ["act:toggle_model"]);
+});
+
+check("stepListRow is ↓/↑: from no highlight down is the first row, up the last, and it wraps", () => {
+  const rows = [0, 1, 2].map(() => ({ active: false, classList: null, scrollIntoView() {} }));
+  for (const row of rows) {
+    row.classList = { contains: (c) => c === "active" && row.active, toggle: (c, on) => { row.active = on; } };
+  }
+  const list = { querySelectorAll: () => rows };
+  const sandbox = { Array };
+  vm.createContext(sandbox);
+  vm.runInContext(surface(extract(src, "function setActiveRow(rows, index) {", "function attachListNav(")), sandbox);
+  const at = () => rows.findIndex((r) => r.active);
+  sandbox.stepListRow(list, 1); assert.equal(at(), 0);
+  sandbox.stepListRow(list, 1); assert.equal(at(), 1);
+  sandbox.stepListRow(list, 1); sandbox.stepListRow(list, 1); assert.equal(at(), 0, "wraps");
+  sandbox.stepListRow(list, -1); assert.equal(at(), 2);
+  rows[2].active = false;
+  sandbox.stepListRow(list, -1); assert.equal(at(), 2, "up from nothing is the last row");
+});
+
 check("on Windows/Linux the same handler answers to Ctrl", () => {
   const w = handlerWorld("Win32");
   assert.equal(w.fire(key("k", { ctrlKey: true, shiftKey: true })), true);
@@ -194,6 +237,7 @@ check("the buttons' tooltips name the chord in the platform's glyph, the console
   const block = extract(src, "if (FINE_POINTER) {", "// Grabber: drag down to dismiss");
   assert(block.includes('$("new-chip").title = `new chat (${CHORD_HINTS.new})`'), block);
   assert(block.includes('$("sessions-new").title = `new chat (${CHORD_HINTS.new})`'), block);
+  assert(block.includes('$("model-chip").title = `switch model (${CHORD_HINTS.models} · local ⇄ cloud: ${CHORD_HINTS.modelToggle})`'), block);
 });
 
 check("the chats button names the toggle chord — its tap is the toggle in every state", () => {

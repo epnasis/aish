@@ -1232,6 +1232,32 @@ def recent_models(
     return recent
 
 
+RUNS_HERE = frozenset({"ollama", backends.LOCAL})
+TOGGLE_SCAN = 50  # switchable recent models the local/cloud toggle looks through
+
+
+def runs_locally(spec: str) -> bool:
+    """Whether a model spec runs on the owner's own hardware (Ollama, or the
+    `local:` server) rather than a cloud provider's."""
+    if spec.startswith("claude-max"):
+        return False
+    return backends.parse_model(spec)[0] in RUNS_HERE
+
+
+def last_model_elsewhere(
+    used: Iterable[str], models: list[tuple[str, str]], current: str
+) -> str | None:
+    """The local/cloud toggle's target: the most recently used model on the
+    OTHER side of `current` — cloud when it runs locally, local when it does
+    not. Drawn from the picker's own Recent rules, so it never names a model
+    the picker could not switch to; None when no chat has used one."""
+    want_local = not runs_locally(current)
+    for spec, _ in recent_models(used, models, current, limit=TOGGLE_SCAN):
+        if runs_locally(spec) == want_local:
+            return spec
+    return None
+
+
 def _where(provider_name: str) -> str:
     """The picker's first word for a provider: whose machine the chat goes to."""
     provider = backends.PROVIDERS.get(provider_name)

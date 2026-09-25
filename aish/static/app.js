@@ -16234,8 +16234,8 @@ function activeApprovalCard() {
 // tooltips.
 const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
 const CHORD_HINTS = IS_MAC
-  ? { new: "⌘⇧O", search: "⌘K", rail: "⌘B" }
-  : { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+B" };
+  ? { new: "⌘⇧O", search: "⌘K", rail: "⌘B", models: "⌘⇧M", modelToggle: "⌘M" }
+  : { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+B", models: "Ctrl+Shift+M", modelToggle: "Ctrl+M" };
 
 function primaryChord(e) {
   if (e.altKey) return false;
@@ -16247,7 +16247,11 @@ function primaryChord(e) {
 // "new" = a new chat (⌘⇧O and ⌘O; ⌘N too, where the browser lets it through) ·
 // "search" = the chat list with its search field focused (⌘K and ⌘⇧K) ·
 // "rail" = show/hide the chat list (⌘B, the editors' sidebar toggle) ·
-// "export" = the chat as a PDF (⌘P) · null = not a navigation chord. ⌘O used
+// "export" = the chat as a PDF (⌘P) · "models" = the model list, and each
+// further press while it is up is one row down, as ↓ is (⌘⇧M) ·
+// "model-toggle" = local ⇄ cloud, to the model last used on the other side
+// (⌘M) · null = not a navigation chord. On Linux Ctrl+M is the terminal's
+// carriage return, which the terminal guard below already keeps there. ⌘O used
 // to be the rail toggle and ⌘⇧P its double; both went when ⌘B arrived — one
 // toggle, one chord. Nothing fires while a confirmation modal is asking its
 // question, or while the terminal has the keyboard — there the same keys are
@@ -16259,6 +16263,7 @@ function navChord(e, { modal = false, terminal = false } = {}) {
   if (key === "k") return "search";
   if (key === "b" && !e.shiftKey) return "rail";
   if (key === "p" && !e.shiftKey) return "export";
+  if (key === "m") return e.shiftKey ? "models" : "model-toggle";
   return null;
 }
 // [NAV-CHORDS-END]
@@ -16351,6 +16356,17 @@ document.addEventListener("keydown", (e) => {
   if (chord === "search") { e.preventDefault(); searchChats(); return; }
   if (chord === "rail") { e.preventDefault(); toggleSessionRail(); return; }
   if (chord === "export") { e.preventDefault(); exportSessionPdf(); return; }
+  if (chord === "models") {
+    e.preventDefault();
+    if ($("model-sheet").hidden) openModelSheet("");
+    else stepListRow($("model-list"), 1);
+    return;
+  }
+  if (chord === "model-toggle") {
+    e.preventDefault();
+    act({ type: "toggle_model" }, { label: "the model switch" });
+    return;
+  }
   // Cmd/Ctrl+\ toggles the global "Quake console" (#148 follow-up). When the
   // overlay itself has focus, xterm's own key handler catches this first; this
   // is the OPEN path from anywhere else in the app.
@@ -16377,6 +16393,7 @@ if (FINE_POINTER) {
   // syncRailToggle, which names the chord there.
   $("new-chip").title = `new chat (${CHORD_HINTS.new})`;
   $("sessions-new").title = `new chat (${CHORD_HINTS.new})`;
+  $("model-chip").title = `switch model (${CHORD_HINTS.models} · local ⇄ cloud: ${CHORD_HINTS.modelToggle})`;
 }
 
 // Grabber: drag down to dismiss (pointer events cover touch and mouse).
@@ -16423,20 +16440,28 @@ function setActiveRow(rows, index) {
   if (rows[index]) rows[index].scrollIntoView({ block: "nearest" });
 }
 
+// One row up (-1) or down (1), wrapping; from no highlight, down lands on the
+// first row and up on the last. The arrows and the model-list chord share it.
+function stepListRow(listEl, step) {
+  const rows = [...listEl.querySelectorAll(".row")];
+  if (!rows.length) return;
+  const index = rows.findIndex((row) => row.classList.contains("active"));
+  const next = index < 0
+    ? (step === 1 ? 0 : rows.length - 1)
+    : (index + step + rows.length) % rows.length;
+  setActiveRow(rows, next);
+}
+
 function attachListNav(searchEl, listEl) {
   searchEl.addEventListener("keydown", (e) => {
     const rows = [...listEl.querySelectorAll(".row")];
     if (!rows.length) return;
-    const index = rows.findIndex((row) => row.classList.contains("active"));
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      const step = e.key === "ArrowDown" ? 1 : -1;
-      const next = index < 0
-        ? (step === 1 ? 0 : rows.length - 1)
-        : (index + step + rows.length) % rows.length;
-      setActiveRow(rows, next);
+      stepListRow(listEl, e.key === "ArrowDown" ? 1 : -1);
     } else if (e.key === "Enter") {
       e.preventDefault();
+      const index = rows.findIndex((row) => row.classList.contains("active"));
       (index >= 0 ? rows[index] : rows[0]).click();
     }
   });
