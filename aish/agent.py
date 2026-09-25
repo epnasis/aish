@@ -3242,6 +3242,14 @@ class Agent:
         # use has not been named in this run of the process.
         self._brief_stamp: tuple = ()
         self._response_meta: dict = {}
+        # How full the context window was on the last model call, for the
+        # meters in the web model chip and under the terminal prompt.
+        # `_call_fill` is THIS call's (None when it failed), so a step never
+        # carries a previous call's figure; `context_fill` keeps the last one
+        # measured, with the model it was measured against.
+        self._call_fill: dict | None = None
+        self.context_fill: dict | None = None
+        self._context_fill_for: tuple[str, str] = ("", "")
         self.rule_compiler = rule_compiler_ask
         self.current_session = current_session
         # Embedding-based preflight selection (issue #43); opt-in from the
@@ -3510,6 +3518,7 @@ class Agent:
     def reset(self) -> None:
         """Drop the conversation, keep the system prompt."""
         del self.messages[1:]
+        self.context_fill = None
 
     def load_history(self, messages: list[dict]) -> None:
         """Adopt messages from a previous session (already logged — appended
@@ -3523,6 +3532,7 @@ class Agent:
         the model exactly as a live one did — the alternative was a model that
         saw rich guidance during the conversation and a bare wiki-link on every
         reopen, and no test would have caught the difference."""
+        self.context_fill = None  # it described the chat being left
         self.messages.extend(
             self._restore_attachments(m) for m in messages if m.get("role") != "system"
         )
@@ -4542,7 +4552,7 @@ class Agent:
                     )
                     self._emit_step(
                         kind="thinking_cancel", secs=turn_secs, tokens=list(usage),
-                        answered=False,
+                        answered=False, **self._fill_field(),
                     )
                     self._append({"role": "user", "content": AISH_NOTE + note + "]"})
                     continue
@@ -4666,7 +4676,7 @@ class Agent:
                     # every rejected answer, live and on replay.
                     self._emit_step(
                         kind="thinking_cancel", secs=turn_secs, tokens=list(usage),
-                        answered=False,
+                        answered=False, **self._fill_field(),
                     )
                     # Marked as aish's own words (#171), or replay renders the
                     # harness's question as a blue bubble the owner never typed.
@@ -4692,7 +4702,8 @@ class Agent:
                 # cold replay lifts the answer out to `done`, so no token reaches
                 # the row there, and without the record's word it was dropped.
                 self._emit_step(
-                    kind="thinking_cancel", secs=turn_secs, tokens=list(usage), answered=True
+                    kind="thinking_cancel", secs=turn_secs, tokens=list(usage), answered=True,
+                    **self._fill_field(),
                 )
                 return result
 
@@ -4712,7 +4723,9 @@ class Agent:
             # can say WHY the coming tools run: `say` = preamble emitted
             # alongside the tool calls, `gist` = first line of its reasoning.
             # Keys are omitted when empty — old logs replay byte-identically.
-            thinking_step: dict = {"kind": "thinking", "secs": turn_secs, "tokens": list(usage)}
+            thinking_step: dict = {
+                "kind": "thinking", "secs": turn_secs, "tokens": list(usage), **self._fill_field()
+            }
             if say := _status_snippet(content):
                 thinking_step["say"] = say
             if gist := _status_snippet(thinking_text):
@@ -4810,7 +4823,7 @@ class Agent:
         # any other, and without this step the trace header reports a total that
         # excludes the very turn the user is reading.
         self._emit_step(kind="thinking_cancel", secs=time.perf_counter() - turn_start,
-                        tokens=list(usage), answered=bool(content))
+                        tokens=list(usage), answered=bool(content), **self._fill_field())
         if content or tool_calls:
             entry: dict = {"role": "assistant", "content": content}
             if tool_calls:
@@ -4897,6 +4910,7 @@ class Agent:
         self._refresh_plugin_tools()
         menu = tools.TOOL_SCHEMAS + self._plugin_defs
         self._model_call += 1
+        self._call_fill = None
         self._record_brief(menu)
         kwargs = dict(
             model=self.model,
@@ -5343,7 +5357,67 @@ class Agent:
                 if getattr(getattr(c, "function", None), "malformed", False)
             ],
         }
+        self._measure_fill(usage, detail, kwargs)
         return content, [self._normalize_call(c) for c in raw_calls], usage, raw_blocks, thinking
+
+    def _measure_fill(self, usage: tuple[int, int], detail: dict | None, kwargs: dict) -> None:
+        """How much of the context window this call's request occupied.
+
+        The provider's input count IS the fill wherever it covers the whole
+        prompt: the OpenAI shape reports cached tokens inside it, and the
+        Anthropic adapter adds its cache reads and writes back in. Ollama's
+        count skips the prefix it reused from its KV cache, so after the first
+        call it reads far below what the window holds; there the fill is
+        ESTIMATED from the request's characters at the same divisor the history
+        trimmer sizes by, never less than the count Ollama did report, and
+        labelled as an estimate. Images are not in that character count.
+        """
+        window, window_source = backends.context_window(self.provider, self.num_ctx)
+        semantics = (detail or {}).get("semantics")
+        if not window or not semantics:
+            return
+        if semantics == backends.INPUT_EXCLUDES_KV_REUSE:
+            request_chars = len(json.dumps(kwargs.get("messages") or [], default=str)) + len(
+                json.dumps(kwargs.get("tools") or [], default=str)
+            )
+            used, basis = max(usage[0], request_chars // CHARS_PER_TOKEN_BUDGET), "estimated"
+        else:
+            used, basis = usage[0], "reported"
+        if used > 0:
+            self._set_fill(used, basis, window, window_source)
+
+    def note_reported_fill(self, used: int) -> None:
+        """A fill measured outside `_chat_turn` — claude-max, whose model calls
+        the SDK makes, reports each one's usage on its assistant message."""
+        window, window_source = backends.context_window(self.provider, self.num_ctx)
+        if window and used > 0:
+            self._set_fill(used, "reported", window, window_source)
+
+    def _set_fill(self, used: int, basis: str, window: int, window_source: str) -> None:
+        self._call_fill = {
+            "used": used,
+            "window": window,
+            "window_source": window_source,
+            "basis": basis,
+            # The model it was measured on, spelled as the web chip names it
+            # (`cli.model_spec`), so a replayed figure from before a model
+            # switch is not shown against the new model.
+            "model": self.model if self.provider == "ollama" else f"{self.provider}:{self.model}",
+        }
+        self.context_fill = self._call_fill
+        self._context_fill_for = (self.provider, self.model)
+
+    def current_context_fill(self) -> dict | None:
+        """The last measured fill, or None once it no longer describes the
+        model in use — a figure against another model's window is not one."""
+        if self._context_fill_for != (self.provider, self.model):
+            return None
+        return self.context_fill
+
+    def _fill_field(self) -> dict:
+        """The `ctx` key for this call's step, or nothing when it was not
+        measured — absent, never zeroed (trace-contract §0 corollary 2)."""
+        return {"ctx": self._call_fill} if self._call_fill else {}
 
     @staticmethod
     def _normalize_call(call: Any) -> dict:

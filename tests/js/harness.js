@@ -283,6 +283,11 @@ function hostileWorld({ visible = false, width = 1100, globals = {} } = {}) {
     noteWindow() {},
     restoreBackfillPos: () => false,
     backfillFromBottom: -1,
+    // The model chip's context meter ([CTX-METER]): replays, stashes and
+    // trace steps all set it, so most blocks reach it incidentally;
+    // test_ctx_meter.js drives the real thing.
+    setCtxFill() {},
+    ctxFill: null,
   };
   sandbox.window = sandbox;
   sandbox.self = sandbox;

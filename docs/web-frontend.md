@@ -212,6 +212,9 @@ An id cannot be counted wrong: it either names a record in that log or it names 
 
 ---
 
+### `[CTX-METER]` — the context meter in the model chip
+How full the window was on the chat's last model call, next to the model's name (`34%`, `~34%` when estimated; tokens and the window's provenance in the title). The figure is the agent's `ctx` on the call's `thinking` / `thinking_cancel` step (`docs/token-accounting.md`), read in `traceStep`, so the live turn and a replay take the same path. It is a fact about the chat ON SCREEN, which is why it rides with the view: a `rebuild` landing clears it before the replayed steps set it again, a `reuse` landing restores the value stashed with the nodes (no steps are replayed there), a `noop` keeps it, and the legacy flat replay has no steps and clears it. A switch of chat clears it at once (the incoming replay sets it), and so does a model switch; and a figure whose `model` is not the one the chip names is not shown, so a replayed step from before a mid-chat switch cannot read as the new model's. — `test_ctx_meter.js`
+
 ## The trace card
 
 ### `[TRACE-OPEN]` / `[TRACE-CLOSE]` — the live card's whole lifetime

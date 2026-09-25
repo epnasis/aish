@@ -732,6 +732,8 @@ function enterSession(name, { source = "hello", title, stash = false } = {}) {
   // warm paint that lands before the new chat's hello cannot read the old
   // chat's turn as this one's and build a live card for it.
   if (name !== currentSession) setBusy(false);
+  // So is the context meter ([CTX-METER]): the incoming chat's replay sets it.
+  if (name !== currentSession) setCtxFill(null);
   currentSession = name;
   // Only the mirror paints a truncated copy, and only an unstashable view may
   // come from one — so provenance is a property of the SOURCE, not a flag each
@@ -2140,6 +2142,7 @@ function stashCurrentView() {
     nodes: [...messagesEl.children],
     fp: viewFp,
     renderedAnswers,
+    ctxFill,
   });
   while (viewCache.size > VIEW_CACHE_MAX) {
     viewCache.delete(viewCache.keys().next().value);
@@ -2231,6 +2234,9 @@ function onHello(event) {
   if (consoleOpen) send({ type: "console_open" });
   else if (location.hash === "#console") openConsole();
   $("model-name").textContent = event.model;
+  // A warm paint may have set the meter before this chat's model was named,
+  // and the replay that follows can land noop — so re-judge it here.
+  setCtxFill(ctxFill);
   recentSessions = event.pager || [];
   cmdHistory = event.cmd_history || []; // personal command palette (#104)
   // Identity and everything coupled to it — the stash of the view we are
@@ -2356,7 +2362,10 @@ function onReplay(event) {
   if (landing === "reuse") {
     messagesEl.replaceChildren(...cached.nodes);
     renderedAnswers = cached.renderedAnswers;
+    setCtxFill(cached.ctxFill);
   } else {
+    // The replayed steps set it again; a chat with none has no figure.
+    setCtxFill(null);
     if (event.truncated) messagesEl.appendChild(earlierRow());
     replaying = true; // replayed history must not re-fire notifications
     try {
@@ -3147,6 +3156,7 @@ function traceStep(step) {
     // the work the turn is usually mostly made of.
     accountStepTime(t, step.secs);
     if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
+    if (step.ctx) setCtxFill(step.ctx);
     if (t.thinkingRow) {
       // `answered` is the record's own word that this call wrote the answer
       // (#403). A cold replay lifts the answer out to `done`, so no token ever
@@ -3163,6 +3173,7 @@ function traceStep(step) {
   if (step.kind === "thinking") {
     accountStepTime(t, step.secs);
     if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
+    if (step.ctx) setCtxFill(step.ctx);
     // The model's own words for this turn (say = preamble, gist = thinking
     // text) — the header prefers these over the deterministic tool line.
     t.turnSay = step.say || null;
@@ -4540,6 +4551,42 @@ function fmtTokens(n) {
   return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
 
+// [CTX-METER-START]
+// How full the context window was on the chat's last model call, shown in the
+// model chip. The figure is the agent's (`ctx` on the call's thinking /
+// thinking_cancel step), so a live turn and a replayed chat read the same
+// value; it belongs to the chat on screen and is stashed with its view.
+let ctxFill = null;
+
+function ctxMeter(fill) {
+  if (!fill || !fill.window || !(fill.used > 0)) return null;
+  const raw = (fill.used / fill.window) * 100;
+  const pct = raw > 0 && raw < 1 ? "<1%" : Math.round(raw) + "%";
+  const estimated = fill.basis === "estimated";
+  let title = `${fmtTokens(fill.used)} of ${fmtTokens(fill.window)} tokens in context `
+    + "on the last model call";
+  if (estimated) {
+    title += " — estimated from the request's characters: this backend does not "
+      + "report the prompt prefix it reused from its cache, and pictures are not counted";
+  }
+  if (fill.window_source) title += ` (window: ${fill.window_source})`;
+  return { text: (estimated ? "~" : "") + pct, title };
+}
+
+function setCtxFill(fill) {
+  ctxFill = fill || null;
+  const el = $("ctx-meter");
+  // A figure measured on another model (the chat was switched since) is not
+  // one for the model the chip names. Logs from before the stamp carry none.
+  const current = !ctxFill || !ctxFill.model || ctxFill.model === $("model-name").textContent;
+  const meter = current ? ctxMeter(ctxFill) : null;
+  el.hidden = !meter;
+  el.textContent = meter ? meter.text : "";
+  el.title = meter ? meter.title : "";
+  $("model-chip").title = meter ? `switch model · ${meter.title}` : "switch model";
+}
+// [CTX-METER-END]
+
 // ---- message rendering ---------------------------------------------------
 function addMsg(kind, text) {
   const el = document.createElement("div");
@@ -5436,6 +5483,7 @@ function onHistory(history) {
   // whole conversation, so it ends the live turn for the same reason a replay
   // does — via the owner, not by zeroing its own corner of the cluster.
   resetLiveTurn("rebuild");
+  setCtxFill(null); // a flat transcript carries no steps to measure from
   let prevPrompt = "";
   for (const message of history) {
     const content = (message.content || "").trim();
@@ -18436,6 +18484,7 @@ function renderModels(event) {
 
 function onModelChanged(event) {
   $("model-name").textContent = event.model;
+  setCtxFill(null); // the last figure was against the previous model's window
   closeSheets();
   showToast(event.saved ? `model: ${event.model} (saved as default)` : `model: ${event.model}`);
 }

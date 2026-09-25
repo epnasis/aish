@@ -155,6 +155,18 @@ Both are worth reporting; conflating them makes every report wrong in the same d
    has no superseded filter, so a retried turn's calls are counted rather than lost, and
    nothing sets `session.rewritten` for them.
 
+## The context meter — how full the window is right now
+
+The web model chip shows a percentage and the terminal's prompt rule shows `ctx 34% · 68.0k/200.0k`. Both read ONE figure the agent measures after every model call (`Agent._measure_fill`) and stamps as `ctx` on that call's `thinking` / `thinking_cancel` step (`docs/trace-contract.md`); the terminal reads it off the agent (`current_context_fill`), the browser off the step, so a reopened chat shows what the live one did.
+
+**The numerator is the last call's whole prompt, never the turn's sum.** The trace header's `↑` adds every call's input, which counts resent history once per call — spend, not fill (above). And the whole prompt means the cached part too, because a cache read still occupies the window: the OpenAI shape reports cached tokens inside `prompt_tokens`, the Anthropic adapter sums `input_tokens` + cache reads + cache writes (`input_tokens` alone was 10 of 22,340 on a real claude-max message), and claude-max takes the same sum off each SDK assistant message's usage.
+
+**Ollama is estimated and says so.** `prompt_eval_count` skips the prefix Ollama reused from its KV cache, so after the first call it reads far below what the window holds. The fill there is the request's characters ÷ `CHARS_PER_TOKEN_BUDGET` — the divisor the history trimmer sizes by, so the meter and the trimmer share one belief — floored at the count Ollama did report, with `basis: "estimated"` rendered as `~`. The real ratio runs 2.01–4.11 chars/token across the corpus (above), so the estimate can be off by a third either way, and pictures are not in the character count at all.
+
+**The denominator is `backends.context_window`**, with its provenance in the tooltip: exact on Ollama (`num_ctx`) and `local:` (`AISH_LOCAL_CTX`), a conservative per-provider table figure on the cloud backends. It is not marked where trimming starts: the trimmer budgets HISTORY in characters, with the system text and tool menu on top, so there is no single token line to draw.
+
+A figure is shown only against the model it was measured on: `ctx` carries that model (as the web chip spells it), the chip hides a figure whose model it is not showing, and the terminal compares the agent's provider and model; a new or loaded chat clears it. claude-max skips assistant messages with a `parent_tool_use_id` — a sub-agent's call inside a tool, with its own context. `TestTheAgentMeasuresEveryCall` (`tests/test_context_fill.py`), `tests/js/test_ctx_meter.js`.
+
 ## Seam with the rate governor
 
 `docs/rate-limits.md` covers the other half. They share **vocabulary and pure extraction
