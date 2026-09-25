@@ -5536,6 +5536,45 @@ class TestModels:
             hello = recv_until(ws, "hello")
             assert hello["model"] == "gemini:gemini-3-pro"  # sticky, not reset
 
+    def test_toggle_model_switches_to_the_last_cloud_model(self, app_env, monkeypatch):
+        """Cmd+M from a local model: the server reads which cloud model a chat
+        used last and switches to it through the ordinary set_model path."""
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+        monkeypatch.setattr(
+            server_module, "available_models", lambda agent, state_dir: []
+        )
+        asked = []
+
+        def make_chat(spec):
+            asked.append(spec)
+            return FakeChat([]), "gemini", "gemini-3-pro"
+
+        monkeypatch.setattr(server_module.backends, "make_chat", make_chat)
+        used = SessionLog.new(Path(app_env["state_dir"]))
+        used.model("gemini:gemini-3-pro")
+        used.message({"role": "user", "content": "hi"})
+        used.close()
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "toggle_model"})
+            changed = recv_until(ws, "model_changed")
+            assert changed["model"] == "gemini:gemini-3-pro"
+            assert changed["saved"] is False
+            assert asked == ["gemini:gemini-3-pro"]
+
+    def test_toggle_model_with_nothing_on_the_other_side_says_so(self, app_env, monkeypatch):
+        for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AISH_LOCAL_URL"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(
+            server_module, "available_models", lambda agent, state_dir: []
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "toggle_model"})
+            error = recv_until(ws, "error")
+            assert "no cloud model used recently" in error["text"]
+            assert client.app.state.server.active.agent.model == "fake"
+
     def test_set_model_claude_max_needs_restart(self, app_env):
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):

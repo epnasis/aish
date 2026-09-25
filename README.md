@@ -623,9 +623,12 @@ this UI. Highlights:
   not the device's, so it applies on every browser and phone you use.
 - **Keyboard shortcuts**, the ones every other chat app binds. `⌘⇧O` (or `⌘O`)
   starts a new chat, `⌘K` (or `⌘⇧K`) opens the chat list with its search field
-  focused, `⌘B` shows or hides the chat list — `⌘` on a Mac, `Ctrl` on Windows
-  and Linux, and only that one: on a Mac `Ctrl+K` stays the text field's own
-  kill-line. Each button's tooltip names its chord.
+  focused, `⌘B` shows or hides the chat list, `⌘⇧M` opens the model list (press
+  it again to move down a row, `↑`/`↓` work too, `↩` picks) and `⌘M` switches
+  between local and cloud — to the model on the other side that a chat used
+  most recently — `⌘` on a Mac, `Ctrl` on Windows and Linux, and only that one:
+  on a Mac `Ctrl+K` stays the text field's own kill-line. Each button's tooltip
+  names its chord.
 - **Global interactive console.** The real TTY shell described above, openable
   from any chat (`⌘/Ctrl+\`), `tmux`-backed for restart survival. URLs in its
   output are tappable — including the ones an auth CLI wraps across several
