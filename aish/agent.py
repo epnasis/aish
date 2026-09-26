@@ -3275,6 +3275,10 @@ class Agent:
         # reported for it. The next request is sized from it plus an estimate
         # of what was added since; any rewrite of history drops it.
         self._token_anchor: tuple[str, int, int] | None = None
+        # The `provider:model` keys this agent has already looked for in its
+        # own chat log to seed an empty ratio ledger with (#416): once each,
+        # so a chat with no recorded calls is not re-read on every estimate.
+        self._ratio_seed_tried: set[str] = set()
         # THIS call's estimate, for its `reasoning` record beside the count.
         self._call_estimate: dict | None = None
         self._over_budget_recorded = False  # per task; see _reset_task_state
@@ -5752,6 +5756,7 @@ class Agent:
         own words are cut too — oldest first, never at or after
         `protect_from` (the task being prepared), never a system message.
         """
+        self._menu_for_estimate()
         if budget is None:
             budget, _ = self._history_budget()
             target = self._low_water(budget)
@@ -5794,6 +5799,22 @@ class Agent:
             estimate_before=estimate_before, low_water=target,
         )
 
+    def _menu_for_estimate(self) -> None:
+        """Scan the plugin tools before a `local:` size is taken, because the
+        estimate counts the menu the next call will send (#416).
+
+        A fresh agent holds no plugin tools until something scans them, and
+        the first scan used to come AFTER the boundary trim (the rule seeding
+        and the call itself do it): in `session-20260925-204008-294943`, turn
+        22, the boundary trim's `estimate_after` (69,432 tokens at 2.0) is
+        exactly the stored request that went out less its reminder, its
+        question and its 33 plugin schemas (44,684 characters), so the menu
+        the call carried was never in what the trim fitted, and the call went
+        out marked `over_budget`. Other providers do not count the menu, so
+        they are left alone."""
+        if self._token_budgeted():
+            self._refresh_plugin_tools()
+
     def _estimate_for_record(self) -> int | None:
         return self._history_size() if self._token_budgeted() else None
 
@@ -5803,7 +5824,18 @@ class Agent:
         menu, the task in hand and its two newest results — is estimated above
         what the budget allows. The call goes out anyway, since the one thing
         left to cut is the task itself, and the record says so, once per task
-        (#415). Only from `_enforce_budget`, which runs right before a call."""
+        (#415). Only from `_enforce_budget`, which runs right before a call.
+
+        Nothing downstream bounds that send (#416). mlx-lm 0.31.3, the only
+        `local:` server checked, has no context-length check: its request
+        handler's only 400s are a bad Content-Length, bad JSON and a body that
+        is not an object (`mlx_lm/server.py` 1129/1140/1153 on mi), so the
+        #388 shrink-and-retry, which needs a provider refusal, never fires
+        here. The server prefills whatever arrives. Whether that fits is
+        decided by its memory, and a stream it drops is retried as-is
+        (`StreamCutOff`). `fits: false` is an estimate, and so it can be
+        wrong in either direction: in #416 it was a 2.0 constant's
+        over-count of a request the server read as 46,954 tokens."""
         if not self._token_budgeted() or self._over_budget_recorded:
             return
         estimate = self._history_size()
@@ -5926,6 +5958,7 @@ class Agent:
         by step 7 with no trace of when or why. That is worse than an unrecorded
         omission: the log still holds the full text, so it positively suggests
         the model had something it did not."""
+        self._menu_for_estimate()
         budget, _ = self._history_budget()
         if self._history_size() <= budget:
             return
@@ -7470,6 +7503,7 @@ class Agent:
             menu = tools.TOOL_SCHEMAS + self._plugin_defs
         chars = backends.request_chars(self.provider, self.messages, menu)
         key = f"{self.provider}:{self.model}"
+        self._seed_ratio(key)
         ratio = token_ratio.ratio(key)
         anchor = self._token_anchor
         if anchor is not None and (anchor[0] != key or chars < anchor[1]):
@@ -7485,6 +7519,27 @@ class Agent:
             "chars_per_token": round(ratio.chars_per_token, 3),
             "ratio_source": ratio.source,
         }
+
+    def _seed_ratio(self, key: str) -> None:
+        """A model the ledger has no sample for, in a chat that has already
+        called it: learn from those calls before estimating at the constant
+        (#416). The first `local:` call after #415 shipped estimated a
+        47k-token request at 95k and cut 18 whole turns for it, while its own
+        log held 90 earlier calls to the same model, every request stored."""
+        if key in self._ratio_seed_tried:
+            return
+        self._ratio_seed_tried.add(key)
+        if token_ratio.has_samples(key) or self.state_dir is None:
+            return
+        if self.current_session is None:
+            return
+        try:
+            log = self.current_session()
+        except OSError:
+            return
+        token_ratio.seed(
+            key, token_ratio.recorded_samples(log, self.state_dir, self.provider, self.model)
+        )
 
     def _spend_budget(self) -> tuple[int | None, str]:
         """(tokens of history the rate limit affords, provenance), or (None, "")
