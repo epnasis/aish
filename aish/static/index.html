@@ -8,7 +8,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <title>aish</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="icon.svg">
@@ -772,8 +772,13 @@
     <p>This server requires a token. Paste it once — it's remembered on this
     device.</p>
     <form id="token-form">
-      <input id="token-input" type="password" placeholder="token"
-             autocomplete="off" autocapitalize="off" spellcheck="false">
+      <!-- A password manager (1Password, iCloud Keychain) saves and fills this
+           token: it is a password field with current-password, and the hidden
+           username gives the saved entry an account name to match on. -->
+      <input type="text" name="username" autocomplete="username" value="aish"
+             hidden aria-hidden="true" tabindex="-1">
+      <input id="token-input" name="password" type="password" placeholder="token"
+             autocomplete="current-password" autocapitalize="off" spellcheck="false">
       <button type="submit" class="primary">Connect</button>
     </form>
   </div>
