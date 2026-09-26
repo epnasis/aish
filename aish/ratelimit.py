@@ -459,6 +459,33 @@ def describe_chain(exc: BaseException) -> str:
     )
 
 
+# A clock expiring on aish's side: the openai SDK's `APITimeoutError` over
+# httpx's read/write/pool timeouts. Not an observed drop — nothing says the
+# server went away, only that aish stopped waiting — so it is never counted
+# as a lost connection (#419). `ConnectTimeout` is in `_NEVER_CONNECTED`.
+_TIMED_OUT = frozenset({"APITimeoutError", "ReadTimeout", "WriteTimeout", "PoolTimeout"})
+
+
+def timed_out(exc: BaseException) -> bool:
+    """Whether the chain shows aish's own timeout expired."""
+    return any(name in _TIMED_OUT for name in exception_chain(exc))
+
+
+def read_timeout_s(exc: BaseException) -> float | None:
+    """The read timeout the request was sent with, where the chain carries it:
+    httpx stamps it on every request as `extensions["timeout"]["read"]`, and
+    the SDK's exceptions keep that request. None when nothing says."""
+    for link in _chain(exc):
+        try:
+            # httpx's `.request` raises RuntimeError when none was attached.
+            value = link.request.extensions["timeout"]["read"]  # type: ignore[attr-defined]
+        except (AttributeError, RuntimeError, TypeError, KeyError):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
 def never_connected(exc: BaseException) -> bool:
     """Whether the chain shows the connection was never made — the one
     transport failure that says the server never saw the request."""

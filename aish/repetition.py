@@ -9,14 +9,16 @@ This module only OBSERVES. It says "the tail of this text is one passage of N
 characters repeated M times"; it never says why, and nothing here reads the
 words for meaning. What to do about it is the agent's (`Agent._one_chat`).
 
-The test is EXACT periodicity of the tail, which is why ordinary text does not
-trip it: a table's rows, a log's lines and a list's items differ from each other
-somewhere (a name, a number, a timestamp), and one differing character anywhere
-in the span breaks the period. What remains is text that is character-for-
-character the same passage again, many times, over thousands of characters.
+The test is EXACT periodicity of the tail: one differing character anywhere in
+the span breaks the period. In the corpus measured — every session log on the
+owner's machine on 2026-09-26 — nothing but the six recorded loops tripped it.
+That is a fact about that corpus, not a guarantee: text that legitimately
+repeats itself exactly (identical table rows, a zero matrix, "say X a thousand
+times") trips it too. That is why the agent watches only the REASONING, which
+nobody watches and where every recorded loop was, and never the answer text.
 
-The thresholds are measured, not guessed — `docs/agent-core.md` (Backends, "A
-reply that repeats itself") has the corpus they were checked against.
+The thresholds and the corpus are in `docs/agent-core.md` (Backends, "A reply
+that repeats itself").
 """
 
 from __future__ import annotations

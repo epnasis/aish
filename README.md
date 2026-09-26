@@ -336,13 +336,15 @@ says otherwise, and has no server flag for `presence_penalty`; the defaults
 are Qwen3.6's own settings plus `presence_penalty` 1.5 (replaying one request
 that had looped: greedy looped in 2 of 2 runs, these settings in 0 of 4 — a
 small sample). `AISH_LOCAL_SAMPLING` replaces them whole (`{}` sends none);
-a field mlx-lm does not read, or a value that is not a number, is refused at
-startup. On every backend whose reply streams, a reply whose tail has become
-one passage repeated many times is stopped rather than left to run to the
-answer cap, and the model is told what aish saw. If the connection is lost
+a field mlx-lm does not read, or a value that is not a finite number within the range
+mlx-lm accepts, is refused at startup. On every backend whose reply streams
+through aish's own loop (not claude-max), reasoning whose tail has become one
+passage repeated many times is stopped rather than left to run to the answer
+cap, and the model is told what aish saw; the answer text is never stopped. If the connection is lost
 after a request went out, aish sends that same request once more; if it is
 lost again, it shortens the conversation once and tries again; a third loss
-ends the turn with what was sent and when. If it was the request that brought
+ends the turn saying how big each send was and how long it ran. A read
+timeout is aish's own clock and is not counted as a loss. If it was the request that brought
 the server down, sending it again would only bring it down again. A connection
 that was never made is retried as before: that request never reached the
 server. `--think` turns the model's thinking on through the chat template

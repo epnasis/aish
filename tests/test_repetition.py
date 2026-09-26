@@ -207,18 +207,76 @@ class TestARepeatingReplyIsStopped:
         assert "aish stopped that reply too after" in result
         assert "76-character passage" in result
 
-    def test_a_loop_in_the_answer_is_kept_as_shown_and_marked(self):
-        """The owner watched it stream in, so it is not taken back; the
-        answer says aish stopped it, live and in the history alike."""
-        chat = Streams(_looping("content"))
+    @pytest.mark.parametrize("answer", [
+        "| 0 | 0 | 0 | 0 |\n" * 1000,        # identical table rows
+        "[" + "0, " * 4000 + "]",            # a zero matrix
+        "-" * 8000,                          # a rule the owner asked for
+        "INSERT INTO t VALUES (1);\n" * 500,  # identical statements
+    ])
+    def test_an_answer_that_repeats_itself_is_never_stopped(self, answer):
+        """Answer text is not watched: it streams to the owner, who has Stop,
+        and it may repeat itself exactly on purpose."""
+        pieces = [_chunk(content=answer[i:i + 5]) for i in range(0, len(answer), 5)]
+        chat = Streams(pieces)
         steps: list[dict] = []
-        tokens: list[str] = []
-        result = _agent(chat, steps, tokens).run_task("go")
-        assert chat.closed[0] is True
-        assert result.rstrip().endswith("76-character passage repeated "
-                                        f"{steps_repeats(steps):,} times]")
-        assert "[aish stopped this reply after" in "".join(tokens)
-        assert len(chat.calls) == 1
+        result = _agent(chat, steps).run_task("go")
+        assert result == answer
+        assert chat.pulled[0] == len(pieces)
+        assert not any("repetition" in s for s in steps if s.get("kind") == "reasoning")
+
+    def test_a_close_that_fails_on_stop_does_not_become_a_model_error(self):
+        """The owner's Stop stays a Stop: a failing close must not replace it."""
+        steps: list[dict] = []
+
+        class BadClose:
+            def __init__(self):
+                self.pulled = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.pulled += 1
+                return _chunk(thinking=LOOP)
+
+            def close(self):
+                raise RuntimeError("close blew up")
+
+        stream = BadClose()
+        agent = Agent(model="fake", approve=lambda _c: True, client_chat=lambda **_: stream,
+                      on_token=lambda _t: None, step_log=steps.append)
+        original = agent.status.add_tokens
+
+        def stop_after_some(n):
+            if stream.pulled > 3:
+                agent._cancel.set()
+            original(n)
+
+        agent.status.add_tokens = stop_after_some
+        assert agent.run_task("go") == agent_module.CANCELLED_RESULT
+        assert not [s for s in steps if s.get("kind") == "model_error"]
+
+    def test_a_close_that_fails_after_a_whole_reply_is_recorded_not_raised(self):
+        class BadClose:
+            def __init__(self):
+                self.chunks = iter([_chunk(content="fine")])
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.chunks)
+
+            def close(self):
+                raise RuntimeError("close blew up")
+
+        steps: list[dict] = []
+        agent = Agent(model="fake", approve=lambda _c: True,
+                      client_chat=lambda **_: BadClose(), on_token=lambda _t: None,
+                      step_log=steps.append)
+        assert agent.run_task("go") == "fine"
+        (record,) = [s for s in steps if s.get("kind") == "reasoning"]
+        assert record["close_error"] == "RuntimeError: close blew up"
 
     def test_ordinary_streams_are_untouched(self):
         chat = Streams(_answer("| a | b |\n|---|---|\n| 1 | 2 |\n"))
@@ -266,8 +324,6 @@ class TestARepeatingReplyIsStopped:
         assert "76-character passage repeated 79 times" in row["text"]
 
 
-def steps_repeats(steps: list[dict]) -> int:
-    return next(s for s in steps if s.get("kind") == "reasoning")["repetition"]["repeats"]
 
 
 @pytest.mark.parametrize("piece", [1, 3, 64])

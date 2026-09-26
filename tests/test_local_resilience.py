@@ -61,7 +61,9 @@ class TestLocalSampling:
     @pytest.mark.parametrize(
         "value",
         ["hot", "[1.0]", '{"temprature": 1.0}', '{"top_k": 20.5}', '{"temperature": "1"}',
-         '{"temperature": true}'],
+         '{"temperature": true}', '{"temperature": NaN}', '{"temperature": Infinity}',
+         '{"top_p": -3}', '{"top_p": 1.5}', '{"temperature": -0.1}', '{"xtc_probability": 0}',
+         '{"top_k": -1}'],
     )
     def test_anything_it_cannot_mean_is_a_clear_error(self, local_env, value):
         local_env.setenv("AISH_LOCAL_SAMPLING", value)
@@ -237,8 +239,8 @@ class TestLocalLostConnection:
 
         said = str(caught.value)
         assert "lost on 3 sends of the same model call" in said
-        assert "send 2: the same request" in said
-        assert "send 3: after the history was shortened" in said
+        assert "lost send 2 (attempt 2): the same request" in said
+        assert "lost send 3 (attempt 3): after the history was shortened" in said
         assert "RemoteProtocolError: Server disconnected without sending a response." in said
         assert "aish does not know why" in said
 
@@ -294,6 +296,42 @@ class TestLocalLostConnection:
         assert _errors(steps)[-1]["bound"] == "wait_budget"
         assert not any("lost_connection" in e for e in _errors(steps))
         assert not [s for s in steps if s.get("kind") == "trim"]
+
+
+class TestLocalTimeouts:
+    """A timeout is aish's own clock expiring, not a drop anyone saw (#419):
+    never counted toward the three sends, and said as what it is."""
+
+    def test_a_read_timeout_is_not_a_lost_connection(self, local_env):
+        server = _Server(
+            httpx.ReadTimeout("timed out"), httpx.ReadTimeout("timed out"),
+            httpx.ReadTimeout("timed out"), (200, _answer_body()),
+        )
+        agent, steps = _local_agent(server)
+        assert agent.run_task("hi") == "recovered"
+        assert len(server.bodies) == 4
+        assert all(body == server.bodies[0] for body in server.bodies)
+        errors = _errors(steps)
+        assert not any("lost_connection" in e for e in errors)
+        assert all(e["timed_out"] is True for e in errors)
+        assert errors[0]["exception_chain"][:2] == ["APITimeoutError", "ReadTimeout"]
+        # The client's own read timeout, read off the request httpx stamped.
+        assert errors[0]["read_timeout_s"] == 600.0
+        assert not [s for s in steps if s.get("kind") == "trim"]
+
+    def test_the_ending_says_whose_clock_it_was(self, local_env):
+        server = _Server(httpx.ReadTimeout("timed out"))
+        agent, _steps = _local_agent(server)
+        with pytest.raises(agent_module.ModelUnavailable) as caught:
+            agent.run_task("hi")
+        assert "aish's read timeout of 600 s expired" in str(caught.value)
+        assert "lost" not in str(caught.value)
+
+    def test_timeouts_and_losses_mix_without_the_timeouts_counting(self, local_env):
+        server = _Server(_dropped(), httpx.ReadTimeout("t"), _dropped(), (200, _answer_body()))
+        agent, steps = _local_agent(server)
+        assert agent.run_task("hi") == "recovered"
+        assert [e.get("lost_connection") for e in _errors(steps)] == [1, None, 2]
 
 
 class TestLocalOverWindowRefusal:

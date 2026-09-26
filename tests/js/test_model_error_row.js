@@ -249,6 +249,16 @@ check("a call ended by lost connections says so, not an attempt count (#419)", (
   assert(!subOf(row).includes("of 120"), subOf(row));
 });
 
+check("a timeout says it was aish's own clock (#419)", () => {
+  const s = makeSandbox();
+  const row = errorRow(s, {
+    kind: "model_error", class: "transport", attempt: 1, attempts: 120,
+    action: "retry", waited_s: 1, timed_out: true, read_timeout_s: 600,
+  });
+  assert(subOf(row).includes("aish's read timeout of 600 s expired"), subOf(row));
+  assert(!subOf(row).includes("connection lost"), subOf(row));
+});
+
 check("a retry with no stated wait does not claim one", () => {
   // "Retry-After: 0" is legal. Rendering "retrying in 0s" would be noise
   // dressed as a fact.

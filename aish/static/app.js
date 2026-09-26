@@ -3335,6 +3335,11 @@ function traceStep(step) {
     } else {
       tail = `gave up after ${step.attempt} of ${step.attempts} attempts`;
     }
+    if (step.timed_out) {
+      // aish's own clock expired (#419) — not a connection anyone saw drop.
+      const limit = typeof step.read_timeout_s === "number" ? ` of ${step.read_timeout_s} s` : "";
+      tail = `aish's read timeout${limit} expired · ${tail}`;
+    }
     const into = t.thinkingRow ? stepUnder(t.thinkingRow) : null;
     traceRow(t, traceSvg("denied", "var(--red)"), `Model call failed — ${what}${status}`, tail, into)
       .row.classList.add("step-model-error");

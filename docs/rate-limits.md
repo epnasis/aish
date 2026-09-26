@@ -92,7 +92,9 @@ that refused the connection, never read as an empty answer (`docs/agent-core.md`
 On `local:` those two are no longer retried alike for two minutes (#419): a connection lost
 AFTER the request went out is re-sent unchanged once, then once with the history shrunk, and a
 third loss ends the turn (`bound: lost_connection`); a connection never made — `ConnectError`
-anywhere in the exception chain — delivered nothing and keeps the ordinary retry. The rule and
+anywhere in the exception chain — delivered nothing and keeps the ordinary retry, and so does a
+timeout (`APITimeoutError` / `ReadTimeout`), which is aish's own clock expiring, not an observed
+drop, and is recorded as `timed_out` with `read_timeout_s`. The rule and
 its evidence are in `docs/agent-core.md` (Backends); here it is one more way a retry ends.
 `TestLocalLostConnection`.
 
@@ -147,6 +149,7 @@ owner is reading.
 | `attempt` / `attempts` / `action` | `action` is **passed in, never re-derived from `waited_s`** — a provider may legitimately answer `Retry-After: 0`, and the last attempt of a retryable failure also waits zero. Both would record the opposite of what happened. |
 | `elapsed_s` | How long the failed send ran before it failed (#419) — aish's own clock. A connection lost at 0.2 s and one lost at 300 s are different events, and the record is the only place the difference survives. |
 | `exception_chain` | Transport failures only: the class names down the cause chain, outermost first (`["APIConnectionError", "RemoteProtocolError"]`). The SDK's text is "Connection error." whether the connection was never made or was lost mid-request, and on `local:` those route differently (#419), so the record carries what the verdict was a function of — the same reason `matched` exists. |
+| `timed_out`, `read_timeout_s` | Transport failures whose chain shows aish's own timeout expired (#419), and the read timeout the request carried when httpx stamped it. Said as "aish's read timeout of N s expired", never as a lost connection. |
 | `lost_connection` | On `local:`, how many sends of this model call have now lost their connection after the request went out (1, 2, 3). Absent where nothing is counted — another provider, or a connection never made. |
 | `sent_chars`, `sent_messages` | Chars, not an estimated token count: chars are a measured fact, and a token estimate here would wear the same unit as the provider's own number and invite a false comparison (#262). |
 | `text` + `truncated` + `cap_source` | Capped at `MODEL_ERROR_CHARS`, saying which cap cut it (contract §8.5). |

@@ -20,6 +20,7 @@ import base64
 import copy
 import functools
 import json
+import math
 import mimetypes
 import os
 import threading
@@ -303,15 +304,31 @@ DEFAULT_LOCAL_SAMPLING: dict[str, float | int] = {
 # and which of them it insists are whole numbers (`validate_model_parameters`).
 # A key outside this list is refused at startup: the server would ignore a
 # misspelt one silently, and the owner would be tuning nothing.
-LOCAL_SAMPLING_KEYS = frozenset({
-    "temperature", "top_p", "top_k", "min_p", "presence_penalty", "presence_context_size",
-    "frequency_penalty", "frequency_context_size", "repetition_penalty",
-    "repetition_context_size", "xtc_probability", "xtc_threshold", "seed",
-})
+# Each maps to the (min, max) its `_validate` call allows, None where it sets
+# no bound — mlx-lm would answer anything outside with an HTTP error on every
+# request, so it is refused once, at startup, instead.
+LOCAL_SAMPLING_RANGES: dict[str, tuple[float | None, float | None]] = {
+    "temperature": (0, None),
+    "top_p": (0, 1),
+    "top_k": (0, None),
+    "min_p": (0, 1),
+    "presence_penalty": (None, None),
+    "presence_context_size": (0, None),
+    "frequency_penalty": (None, None),
+    "frequency_context_size": (0, None),
+    "repetition_penalty": (0, None),
+    "repetition_context_size": (0, None),
+    "xtc_probability": (0, 1),
+    "xtc_threshold": (0, 1),
+    "seed": (None, None),
+}
+LOCAL_SAMPLING_KEYS = frozenset(LOCAL_SAMPLING_RANGES)
 LOCAL_SAMPLING_INT_KEYS = frozenset({
     "top_k", "presence_context_size", "frequency_context_size", "repetition_context_size",
     "seed",
 })
+# mlx-lm validates these as `float` alone, so a JSON `0` would be refused.
+LOCAL_SAMPLING_FLOAT_KEYS = frozenset({"xtc_probability", "xtc_threshold"})
 # Providers whose streams always end with a finish_reason, checked in the
 # server's source (mlx-lm 0.31.3 `handle_completion` writes one on every path
 # that finishes, then `[DONE]`). A stream from these that ends without one was
@@ -456,7 +473,9 @@ def local_sampling() -> dict[str, float | int]:
     a field can be dropped as well as changed (`{}` sends none, and the server
     falls back to its own flags). Anything it cannot mean is a `BackendError`
     here, never a silent default: not an object, a key mlx-lm does not read,
-    a value that is not a number, or a fraction where mlx-lm wants a whole one.
+    a value that is not a finite number, a fraction where mlx-lm wants a whole
+    one (or a whole one where it wants a decimal), or a value outside the range
+    mlx-lm's `validate_model_parameters` accepts.
     """
     raw = os.environ.get(LOCAL_SAMPLING_ENV, "").strip()
     if not raw:
@@ -481,6 +500,17 @@ def local_sampling() -> dict[str, float | int]:
             )
         if not whole and not isinstance(number, float):
             raise BackendError(f"{LOCAL_SAMPLING_ENV}: {key} must be a number, not {number!r}")
+        if key in LOCAL_SAMPLING_FLOAT_KEYS and not isinstance(number, float):
+            raise BackendError(
+                f"{LOCAL_SAMPLING_ENV}: {key} must be written as a decimal (e.g. 0.0), "
+                f"not {number!r}"
+            )
+        if not math.isfinite(number):
+            raise BackendError(f"{LOCAL_SAMPLING_ENV}: {key} must be finite, not {number!r}")
+        low, high = LOCAL_SAMPLING_RANGES[key]
+        if (low is not None and number < low) or (high is not None and number > high):
+            bounds = f"at least {low}" if high is None else f"between {low} and {high}"
+            raise BackendError(f"{LOCAL_SAMPLING_ENV}: {key} must be {bounds}, not {number!r}")
     return value
 
 
@@ -668,9 +698,16 @@ def _close(stream: object) -> None:
     """Close a stream if it can be closed. Every consumer that stops reading
     early relies on this reaching the HTTP response: a server keeps generating
     for a connection that is still open (mlx-lm 0.31.3 stops only when a write
-    to the client fails, `handle_completion`)."""
+    to the client fails, `handle_completion`).
+
+    Never raises: it runs in `finally` on every way out, and a failing close
+    must not replace what is in flight — a Stop, a cut-off stream — with an
+    error about a connection that was being given up anyway."""
     if (close := getattr(stream, "close", None)) is not None:
-        close()
+        try:
+            close()
+        except Exception:  # noqa: BLE001, S110 — see the docstring
+            pass
 
 
 def _settle_failure(key: str, ticket, exc: BaseException) -> None:

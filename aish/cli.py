@@ -1912,9 +1912,9 @@ cap, default 16384) and AISH_LOCAL_SAMPLING (a JSON object of sampling fields \
 sent on every request, replacing the default temperature 1.0, top_p 0.95, \
 top_k 20, presence_penalty 1.5; the server is greedy without them); a local: \
 request whose connection is lost after sending is re-sent once, then once \
-with a shortened conversation, then the turn ends saying what was seen; any \
-streamed reply that has become one passage repeated many times is stopped \
-early; adding --save \
+with a shortened conversation, then the turn ends saying what was seen; \
+streamed reasoning (not the answer, and not on claude-max) that has become \
+one passage repeated many times is stopped early; adding --save \
 persists the choice as the startup default in the config file, and \
 /model --save alone persists the current model; /jobs lists \
 background jobs; /chat shows this chat's log file (its older name /session \
