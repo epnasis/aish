@@ -309,14 +309,22 @@ mlx-lm for the model it was started with.
 
 ```sh
 export AISH_LOCAL_URL=http://mi.lan:8080/v1   # required — no fallback when unset
-export AISH_LOCAL_CTX=65536          # the server's real context window (default 32768)
+export AISH_LOCAL_CTX=98304          # tokens one whole request may use, answer included (default 98304)
 export AISH_LOCAL_MAX_TOKENS=16384   # answer cap sent on every request (default 16384)
 export AISH_LOCAL_API_KEY=…          # only if your server checks one
 export AISH_EMBED_HOST=http://localhost:11434  # optional: where the embedder runs
 aish --model local:mlx-community/Qwen3.6-35B-A3B-8bit
 ```
 
-`AISH_LOCAL_CTX` is what aish sizes history and tool output to, so set it to
+`AISH_LOCAL_CTX` is the whole request as the server counts it: the system
+prompt, the tool list, the conversation and the answer cap together. aish
+keeps the prompt under `AISH_LOCAL_CTX` minus `AISH_LOCAL_MAX_TOKENS` (less a
+5% margin), measured in tokens: it anchors on the prompt size the server
+reported for the previous request and estimates only what was added since,
+at a characters-per-token ratio it learns per model and remembers across
+restarts. When the conversation outgrows that, old tool results are shortened
+first and then old messages, oldest first, down to three quarters of the
+budget, so it happens rarely. Everything shortened can be read back. Set it to
 what the server can actually hold. `max_tokens` is always sent because
 mlx-lm stops at 512 tokens when a request leaves it out. `--think` turns the
 model's thinking on through the chat template (`enable_thinking`). The OpenAI

@@ -269,7 +269,13 @@ LOCAL_URL_ENV = "AISH_LOCAL_URL"
 LOCAL_KEY_ENV = "AISH_LOCAL_API_KEY"
 LOCAL_CTX_ENV = "AISH_LOCAL_CTX"
 LOCAL_MAX_TOKENS_ENV = "AISH_LOCAL_MAX_TOKENS"
-DEFAULT_LOCAL_CTX = 32_768
+# The WHOLE request, answer included (#415): the prompt is budgeted to this
+# minus `max_tokens`. 98,304 = a prompt of at most 81,920 + an answer of at most
+# 16,384, which is below the largest prompt the old default actually sent
+# (88,026 tokens, 2026-09-26) and below the largest prefill measured passing on
+# mi (100,094). Neither a long-uptime server nor a long answer at this size has
+# been tested.
+DEFAULT_LOCAL_CTX = 98_304
 # mlx-lm answers a request that names no `max_tokens` with at most 512 tokens,
 # which cuts a tool call or an answer off mid-sentence; aish always says.
 DEFAULT_LOCAL_MAX_TOKENS = 16_384
@@ -392,7 +398,8 @@ def _positive_int_env(name: str, default: int) -> int:
 
 
 def local_context_window() -> int:
-    """The `local:` server's context window in tokens (`AISH_LOCAL_CTX`)."""
+    """The `local:` server's context window in tokens (`AISH_LOCAL_CTX`): what
+    one whole request may occupy, prompt and answer together (#415)."""
     return _positive_int_env(LOCAL_CTX_ENV, DEFAULT_LOCAL_CTX)
 
 
@@ -492,7 +499,13 @@ def make_chat(model_arg: str, client=None) -> tuple[Callable, str, str]:
         return governed(anthropic, provider_name), provider_name, model_name
     if provider_name == LOCAL:
         max_tokens = local_max_tokens()
-        local_context_window()  # a bad AISH_LOCAL_CTX fails here, not mid-turn
+        window = local_context_window()  # a bad AISH_LOCAL_CTX fails here, not mid-turn
+        if max_tokens >= window:
+            raise BackendError(
+                f"{LOCAL_MAX_TOKENS_ENV}={max_tokens} leaves no room for a prompt in "
+                f"{LOCAL_CTX_ENV}={window}: the window holds the whole request, answer "
+                f"included, so it must be larger than the answer cap"
+            )
         if client is None:
             client = _local_client()
         backend = OpenAICompatBackend(client, provider_name, max_tokens=max_tokens)
@@ -885,6 +898,22 @@ class OpenAICompatBackend:
             eval_count=usage[1],
             usage=detail,
         )
+
+
+def request_chars(provider_name: str, messages: list, tools: list) -> int:
+    """A request's size in characters, as JSON, in the shape the provider
+    receives it: tool-call arguments, ids and the tool menu included (#415).
+
+    `local:`'s token estimate is calibrated with this and predicted with it,
+    before the request exists, so it must be computable from the aish side —
+    and it must match what is SENT, or the ids and wrappers the converter adds
+    to every tool call are missing from the estimate of each new one. Other
+    providers keep the aish shape: Ollama receives it as it is, and nothing
+    else budgets by this yet.
+    """
+    if provider_name == LOCAL:
+        messages = convert_messages(messages)
+    return len(json.dumps(messages, default=str)) + len(json.dumps(tools, default=str))
 
 
 def convert_messages(messages: list[dict]) -> list[dict]:
