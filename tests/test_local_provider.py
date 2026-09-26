@@ -386,19 +386,27 @@ class TestLocalStreamCutOff:
 
 class TestLocalWindow:
     def test_default_window_and_its_provenance(self):
-        assert backends.context_window("local") == (32_768, "backend:local:32768")
+        """The WHOLE request, answer included (#415): 81,920 of prompt plus the
+        default 16,384 answer cap."""
+        assert backends.context_window("local") == (98_304, "backend:local:98304")
 
     def test_the_owner_states_it(self, monkeypatch):
         monkeypatch.setenv("AISH_LOCAL_CTX", "131072")
         assert backends.context_window("local") == (131_072, "backend:local:131072")
 
     def test_the_agent_sizes_history_and_caps_from_it(self, monkeypatch):
+        """History is budgeted in estimated TOKENS of the whole prompt: the
+        window less the answer cap, less a safety share (#415)."""
         monkeypatch.setenv("AISH_LOCAL_CTX", "65536")
         agent = Agent(model=REPO, approve=lambda _c: True, client_chat=lambda **_: None)
         agent.provider = "local"
         budget, source = agent._history_budget()
-        assert source == "backend:local:65536"
-        assert budget == 65_536 * agent_module.CHARS_PER_TOKEN_BUDGET
+        assert source == (
+            "backend:local:65536-max_tokens:16384"
+            f"*LOCAL_PROMPT_SAFETY:{agent_module.LOCAL_PROMPT_SAFETY}"
+        )
+        assert budget == int((65_536 - 16_384) * agent_module.LOCAL_PROMPT_SAFETY)
+        assert agent._history_size() == agent._prompt_estimate()["tokens"]
         caps, cap_source = agent._output_caps()
         assert cap_source == "backend:local:65536"
         assert caps == tool_plugins.output_caps(65_536)

@@ -16,6 +16,7 @@ from aish import rules as rules_module
 from aish import secrets as secrets_module
 from aish import signin as signin_module
 from aish import skills as skills_module
+from aish import token_ratio as token_ratio_module
 from aish import tool_plugins as tool_plugins_module
 from aish.paths import DEFAULT_CONFIG_HOME, config_home
 
@@ -362,3 +363,13 @@ def isolated_rate_governor(monkeypatch, no_inherited_aish_env):
     ratelimit_module.reset_governor()
     yield
     ratelimit_module.reset_governor()
+
+
+@pytest.fixture(autouse=True)
+def isolated_token_ratios():
+    """The learned chars-per-token ledger is process-global like the governor,
+    so a ratio one test taught would size the next test's `local:` history.
+    Its file lives in the state dir, which `no_real_browser` redirects."""
+    token_ratio_module.reset()
+    yield
+    token_ratio_module.reset()

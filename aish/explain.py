@@ -284,7 +284,13 @@ def _refused(gate: dict) -> bool:
 #: was handed and belongs to the turn's starting state. `overflow_oldest_first`
 #: joined it with #388 — it runs when a call has already been refused, which is
 #: as mid-turn as a trim gets.
-MID_TURN_TRIM = frozenset({"mid_task_budget", "overflow_oldest_first"})
+#: `mid_task_turns` and `over_budget` (#415) are `_enforce_budget`'s too: the
+#: `local:` window's second lever, and its record that nothing was left to cut.
+MID_TURN_TRIM = frozenset(
+    {"mid_task_budget", "overflow_oldest_first", "mid_task_turns", "over_budget"}
+)
+#: Trims that cut earlier turns' own words rather than tool results (#415).
+TURN_TRIM = frozenset({"turns_oldest_first", "mid_task_turns"})
 
 RECORDED = "recorded"
 MISSING = "not_recorded"
@@ -330,6 +336,7 @@ CHECKS: tuple[tuple[str, str], ...] = (
     ("args_malformed", "the model's arguments did not parse"),
     ("reasoning_truncated", "reasoning was cut by a cap"),
     ("result_stubbed", "a result was stubbed after the model had read it"),
+    ("over_budget", "a request went out estimated over the local window's budget"),
     ("steering", "text was typed while the task ran"),
     ("reminder_demoted", "the per-task reminder reached the model as a user message"),
     ("brief_changed", "what the model was handed changed mid-turn"),
@@ -725,6 +732,7 @@ def _thought(turn: Turn, log: Log) -> dict:
                 "said_truncated": record.get("said_truncated") or 0,
                 "stop": record.get("stop") or "",
                 "tokens": record.get("tokens") or [],
+                "prompt_estimate": record.get("prompt_estimate") or {},
                 "blocks": record.get("blocks") or [],
                 # A LIST of tool names, not a count: "arguments did not parse
                 # for read_url" routes to a different repair from "one call
@@ -1969,6 +1977,12 @@ def _model_step(number: int, doc: dict, numbering: str, fragment: str = "") -> d
                       f"{_fmt_n(tokens[1] if len(tokens) > 1 else 0)} out"})
     else:
         facts.append({"k": "tokens", "v": "not recorded"})
+    if thought and (estimate := thought.get("prompt_estimate")):
+        # Beside the count, never instead of it (#415): the drift is the fact.
+        facts.append({"k": "prompt estimate", "v": (
+            f"{_fmt_n(estimate.get('tokens') or 0)} tokens ({estimate.get('basis')}, "
+            f"{estimate.get('chars_per_token')} chars/token, {estimate.get('ratio_source')})"
+        )})
     if thought and thought["stop"]:
         facts.append({"k": "stop", "v": thought["stop"]})
     errors = [e for e in doc["context_cost"]["failed"] if e.get("model_call") == number]
@@ -2472,15 +2486,21 @@ def _event_note(
         when = "at some point in this turn"
     if event["kind"] == "trim":
         record = event["record"]
+        what = "message(s)" if record.get("policy") in TURN_TRIM else "result(s)"
         if stubbed := record.get("stubbed"):
             listed = ", ".join(f"{x.get('tool')} (#{x.get('at')})" for x in stubbed)
             rows.append({"check": "result_stubbed", "where": where,
-                         "text": f"{record.get('affected')} earlier result(s) were replaced "
+                         "text": f"{record.get('affected')} earlier {what} were replaced "
                                  f"with a stub {when}: {listed}"})
         elif record.get("affected"):
             rows.append({"check": "result_stubbed", "where": where,
-                         "text": f"{record.get('affected')} earlier result(s) were stubbed "
+                         "text": f"{record.get('affected')} earlier {what} were stubbed "
                                  f"{when}; which ones was not recorded"})
+        elif record.get("policy") == "over_budget":
+            rows.append({"check": "over_budget", "where": where,
+                         "text": f"the request was estimated at {record.get('estimate_after')} "
+                                 f"tokens, over the local budget of {record.get('budget')}, "
+                                 f"with nothing left to shorten {when}; it was sent anyway"})
     elif event["kind"] == "steering":
         rows.append({"check": "steering", "where": where,
                      "text": "you typed while the task was running and it was folded into "

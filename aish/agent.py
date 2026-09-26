@@ -53,6 +53,7 @@ from . import (
     secrets,
     skill_import,
     skills,
+    token_ratio,
     tool_plugins,
     tools,
     turns,
@@ -2570,6 +2571,25 @@ TRIMMED_RECOVERABLE = (
     ' read_tool_output(continuation="{key}", page=1) and keep paging to the end.'
     " Do NOT re-run the tool.]"
 )
+# The second lever on a `local:` window (#415), reached only once every tool
+# output that may be stubbed already is: an earlier turn's own words. Without
+# it the budget is a target, not a bound — the system prompt, the owner's
+# messages and the replies alone outgrew it in the session that filed #415.
+TURN_TRIMMED_NOTE = "\n[earlier turn shortened to fit the local context window]"
+TURN_TRIMMED_RECOVERABLE = (
+    "\n[earlier turn shortened to fit the local context window. The rest is CACHED:"
+    ' call read_tool_output(continuation="{key}", page=1) to read it back.]'
+)
+# `local:` (#415): the share of AISH_LOCAL_CTX − max_tokens a prompt may fill.
+# The rest is margin for what a per-model ratio cannot see: the ratio is an
+# average over whole requests, and one dense tool output (hex, base64,
+# minified code) tokenizes well below it.
+LOCAL_PROMPT_SAFETY = 0.95
+# When a `local:` trim fires it cuts down to this share of the budget, not just
+# under it. Every trim changes the prompt prefix, and on a model whose cache
+# cannot be trimmed (Qwen3.6 on mlx-lm) that re-reads the whole conversation,
+# so it happens rarely and in big steps.
+LOCAL_LOW_WATER = 0.75
 # Rough tokens→chars margin: ~4 chars/token, keep well under num_ctx so the
 # system prompt is never silently evicted by Ollama's own truncation.
 CHARS_PER_TOKEN_BUDGET = 3
@@ -3250,6 +3270,14 @@ class Agent:
         self._call_fill: dict | None = None
         self.context_fill: dict | None = None
         self._context_fill_for: tuple[str, str] = ("", "")
+        # The last `local:` request the server counted (#415): its
+        # `provider:model`, its `request_chars`, and the `prompt_tokens`
+        # reported for it. The next request is sized from it plus an estimate
+        # of what was added since; any rewrite of history drops it.
+        self._token_anchor: tuple[str, int, int] | None = None
+        # THIS call's estimate, for its `reasoning` record beside the count.
+        self._call_estimate: dict | None = None
+        self._over_budget_recorded = False  # per task; see _reset_task_state
         self.rule_compiler = rule_compiler_ask
         self.current_session = current_session
         # Embedding-based preflight selection (issue #43); opt-in from the
@@ -3519,6 +3547,18 @@ class Agent:
         """Drop the conversation, keep the system prompt."""
         del self.messages[1:]
         self.context_fill = None
+        self._history_rewritten()
+
+    def _history_rewritten(self) -> None:
+        """Something already sent was changed or removed, so the server's
+        count for the last request no longer describes a prefix of the next
+        one: the next `local:` estimate converts the whole request (#415)."""
+        self._token_anchor = None
+
+    def _set_system_content(self, content: str) -> None:
+        if self.messages[0].get("content") != content:
+            self.messages[0]["content"] = content
+            self._history_rewritten()
 
     def load_history(self, messages: list[dict]) -> None:
         """Adopt messages from a previous session (already logged — appended
@@ -3644,6 +3684,7 @@ class Agent:
         ):
             cut -= 1
         del self.messages[cut:]
+        self._history_rewritten()
         return text if isinstance(text, str) else None
 
     def _question_index(self) -> int | None:
@@ -3745,6 +3786,7 @@ class Agent:
                 len(self.messages),
             )
             del self.messages[cut:end]
+            self._history_rewritten()
             return True
         return False
 
@@ -3973,11 +4015,11 @@ class Agent:
         result = self.rebase(target, announce=False)
         if result.startswith("ERROR"):
             return  # a vanished/invalid dir: rebase already reported it
-        self.messages[0]["content"] = compose_system_content(
+        self._set_system_content(compose_system_content(
             self.base_context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir,
             scratch_in_reminder=True,
             identity=identity_context(self.model, self.provider),
-        )
+        ))
 
     def _inject_pending_messages(self) -> None:
         """Fold in text the user typed while this task runs (issue #95): instead
@@ -4045,6 +4087,10 @@ class Agent:
         # A new task starts un-gated: any pending comment belonged to the last
         # task and would otherwise stall the first tool call of this one.
         self._pending_comment_response = False
+        # Whether this task already recorded that a `local:` request could not
+        # be brought under its budget (#415) — once per task, or a stuck task
+        # writes one on every model call.
+        self._over_budget_recorded = False
         self._stop_gate_armed_call = 0
         self._stop_gate_comment = ""
         self._stop_gate_refusals = 0
@@ -4298,11 +4344,11 @@ class Agent:
         index = skills.knowledge_index(
             self.cwd, self.lessons_path, on_index=index_record.update
         )
-        self.messages[0]["content"] = compose_system_content(
+        self._set_system_content(compose_system_content(
             self.base_context, self.cwd, self.lessons_path, index, scratch_dir=self.scratch_dir,
             scratch_in_reminder=True,
             identity=identity_context(self.model, self.provider),
-        )
+        ))
         earlier_reminders = [
             str(m.get("content", ""))
             for m in self.messages[1:]
@@ -4338,8 +4384,9 @@ class Agent:
         task_start = len(self.messages)
         # A continuation's pictures belong to the question it continues, so
         # only those delivered BEFORE the question are expired.
-        self._expire_delivered_images(task_start if question is None else question)
-        self._trim_history_to_budget()
+        this_task = task_start if question is None else question
+        self._expire_delivered_images(this_task)
+        self._trim_history_to_budget(protect_from=this_task)
 
         # Task text is owner-authored (a typed message or the trigger prompt),
         # so its hosts enter egress provenance (#178 P0-2). A continuation's
@@ -4508,7 +4555,7 @@ class Agent:
             # leave the #81 gates and the loop-detection counters untouched.
             self._apply_pending_cwd()
             self._inject_pending_messages()
-            self._enforce_budget(task_start)
+            self._enforce_budget(task_start, protect_from=this_task)
             turn_start = time.perf_counter()
             # A live "Thinking…" row on the trace timeline; it finalizes to
             # "Thought for Xs" when the turn produced tools, or is dropped when
@@ -4911,6 +4958,7 @@ class Agent:
         menu = tools.TOOL_SCHEMAS + self._plugin_defs
         self._model_call += 1
         self._call_fill = None
+        self._call_estimate = None
         self._record_brief(menu)
         kwargs = dict(
             model=self.model,
@@ -4948,6 +4996,9 @@ class Agent:
         while True:
             attempt += 1
             observed.clear()
+            if self._token_budgeted():
+                # Per attempt: an overflow retry sends a different request.
+                self._call_estimate = self._prompt_estimate(menu)
             try:
                 # The governor's cancel and status wiring, for the span of one
                 # call. It cannot ride on the arguments: every backend is
@@ -4991,7 +5042,7 @@ class Agent:
                         last, attempt, 0.0, False, waited=waited, budget=budget
                     )
                     self._trim_history_to_budget(
-                        int(self._total_chars() * OVERFLOW_TRIM_FRACTION),
+                        int(self._history_size() * OVERFLOW_TRIM_FRACTION),
                         policy="overflow_oldest_first",
                         cap_source=f"constant:OVERFLOW_TRIM_FRACTION:{OVERFLOW_TRIM_FRACTION}",
                     )
@@ -5201,6 +5252,10 @@ class Agent:
         for key in ("stop", "blocks", "malformed", "usage"):
             if meta.get(key):
                 record[key] = meta[key]
+        if self._call_estimate is not None:
+            # What aish estimated this request at, beside `tokens[0]` — what
+            # the server counted — so the drift is read, never guessed (#415).
+            record["prompt_estimate"] = self._call_estimate
         if meta.get("synthesized"):
             # The content is aish's sentence, not the model's.
             record["synthesized"] = True
@@ -5358,7 +5413,34 @@ class Agent:
             ],
         }
         self._measure_fill(usage, detail, kwargs)
+        self._anchor_prompt_size(usage, detail, kwargs)
         return content, [self._normalize_call(c) for c in raw_calls], usage, raw_blocks, thinking
+
+    def _anchor_prompt_size(
+        self, usage: tuple[int, int], detail: dict | None, kwargs: dict
+    ) -> None:
+        """Keep the size the server COUNTED for this request, and learn the
+        model's chars-per-token from it (#415).
+
+        Only where the reported input is the whole prompt (mlx-lm reports its
+        cached tokens as a subset of `prompt_tokens`) and only for a count the
+        server actually sent: a cut-off stream raises before it gets here. The
+        characters are measured off `kwargs` as they stand now, which is the
+        request of the attempt that succeeded — an overflow retry trims between
+        attempts, so a figure taken at the first send would be of a request
+        the model never received.
+        """
+        semantics = (detail or {}).get("semantics")
+        if not self._token_budgeted() or semantics != backends.INPUT_INCLUDES_CACHE:
+            return
+        if usage[0] <= 0:
+            return
+        key = f"{self.provider}:{self.model}"
+        chars = backends.request_chars(
+            self.provider, kwargs.get("messages") or [], kwargs.get("tools") or []
+        )
+        self._token_anchor = (key, chars, usage[0])
+        token_ratio.observe(key, chars, usage[0])
 
     def _measure_fill(self, usage: tuple[int, int], detail: dict | None, kwargs: dict) -> None:
         """How much of the context window this call's request occupied.
@@ -5377,10 +5459,10 @@ class Agent:
         if not window or not semantics:
             return
         if semantics == backends.INPUT_EXCLUDES_KV_REUSE:
-            request_chars = len(json.dumps(kwargs.get("messages") or [], default=str)) + len(
-                json.dumps(kwargs.get("tools") or [], default=str)
+            sent = backends.request_chars(
+                self.provider, kwargs.get("messages") or [], kwargs.get("tools") or []
             )
-            used, basis = max(usage[0], request_chars // CHARS_PER_TOKEN_BUDGET), "estimated"
+            used, basis = max(usage[0], sent // CHARS_PER_TOKEN_BUDGET), "estimated"
         else:
             used, basis = usage[0], "reported"
         if used > 0:
@@ -5508,7 +5590,6 @@ class Agent:
         demand is the difference between a bounded context and a lossy one."""
         if not self._trimmable(message):
             return None
-        content = message["content"]
         # Cache BEFORE overwriting. An unwritable store returns "" and the stub
         # degrades to the old dead end, which must never be an exception in the
         # middle of preparing a turn.
@@ -5534,19 +5615,47 @@ class Agent:
             if tool_name
             else None
         )
+        return self._stub_in_place(message, source, TRIMMED_RECOVERABLE, TRIMMED_NOTE)
+
+    def _stub_in_place(
+        self,
+        message: dict,
+        source: "tool_plugins.ContinuationSource | None",
+        recoverable: str,
+        plain: str,
+    ) -> str:
+        """Cache a message's text, cut it to a stub carrying the key back, and
+        return the key ("" when the store could not take it)."""
+        content = message["content"]
         key = (
             tool_plugins.store_continuation(content, self.tool_output_dir, source=source)
             if self.tool_output_dir
             else ""
         )
-        note = TRIMMED_RECOVERABLE.format(key=key) if key else TRIMMED_NOTE
+        note = recoverable.format(key=key) if key else plain
         message["content"] = content[:TRIM_KEEP_CHARS] + note
         # Carried on the message so the `sent` record can say the model was
         # handed a stub rather than re-deriving that from the text (#352). A
         # private key: `_serialize` never logs it, the converters build fresh
-        # dicts, and the ollama library ignores unknown fields.
+        # dicts, and the ollama library ignores unknown fields. It is also what
+        # keeps a stub from being stubbed again (`_trimmable`).
         message["_stub"] = True
+        self._history_rewritten()
         return key
+
+    def _stub_turn_message(self, message: dict) -> str | None:
+        """The second `local:` lever (#415): cut an earlier turn's own words
+        to a stub, cached like a tool output. None when there is nothing to
+        cut. Index-stable — the message stays, only its text shrinks — so
+        every position recorded elsewhere (`task_start`, a stub's `at`) holds.
+        """
+        if message.get("role") not in ("user", "assistant") or message.get("_stub"):
+            return None
+        # Against the RECOVERABLE note, the one normally written: a message
+        # barely over the plain note's bound would grow when stubbed.
+        if len(message.get("content") or "") <= TRIM_KEEP_CHARS + len(TURN_TRIMMED_RECOVERABLE):
+            return None
+        return self._stub_in_place(message, None, TURN_TRIMMED_RECOVERABLE, TURN_TRIMMED_NOTE)
 
     def _expire_delivered_images(self, task_start: int) -> None:
         """Drop pictures aish delivered in EARLIER tasks, unconditionally.
@@ -5574,6 +5683,7 @@ class Agent:
             del message["images"]
             message["content"] = TOOL_MEDIA_EXPIRED
             message["_stub"] = True  # see _trim_tool_message
+            self._history_rewritten()
             dropped.append(self._stub_ref(i))
         self._record_trim("delivered_images", before, budget=None, stubbed=dropped)
 
@@ -5587,8 +5697,13 @@ class Agent:
         next request will actually be smaller. Asking the trimmer's own
         condition rather than restating it is what keeps the two in step.
         """
+        # Never a stub again: a stub with its key is longer than the bound
+        # below, and re-stubbing one cached the stub, handed out a key to that
+        # 200-character fragment in place of the real one, and rewrote history
+        # on every step for nothing (#415, measured in the log that filed it).
         return (
             message.get("role") == "tool"
+            and not message.get("_stub")
             and len(message.get("content") or "") > TRIM_KEEP_CHARS + len(TRIMMED_NOTE)
         )
 
@@ -5603,6 +5718,7 @@ class Agent:
         *,
         policy: str = "budget_oldest_first",
         cap_source: str = "",
+        protect_from: int | None = None,
     ) -> None:
         """Shrink old tool outputs oldest-first, only as far as the budget
         actually demands — the ONE history policy, at every task boundary.
@@ -5629,18 +5745,89 @@ class Agent:
         rewritten message onward — the growing conversation prefix is cached on
         purpose (`backends.py`, `cache_control`), so trimming rarely is a cost
         SAVING, not a cost risk.
+
+        On `local:` (#415) the sizes are estimated tokens of the whole request,
+        a trim that fires cuts to the low-water mark rather than just under the
+        budget, and when every tool output is already a stub, earlier turns'
+        own words are cut too — oldest first, never at or after
+        `protect_from` (the task being prepared), never a system message.
         """
         if budget is None:
             budget, _ = self._history_budget()
-        before = self._total_chars()
+            target = self._low_water(budget)
+        else:
+            target = budget
+        if self._history_size() <= budget:
+            return
+        before, estimate_before = self._total_chars(), self._estimate_for_record()
         stubbed: list[dict] = []
         for i in range(1, len(self.messages)):
-            if self._total_chars() <= budget:
+            if self._history_size() <= target:
                 break
             key = self._trim_tool_message(self.messages[i])
             if key is not None:
                 stubbed.append(self._stub_ref(i, key))
-        self._record_trim(policy, before, budget=budget, stubbed=stubbed, cap_source=cap_source)
+        self._record_trim(
+            policy, before, budget=budget, stubbed=stubbed, cap_source=cap_source,
+            estimate_before=estimate_before, low_water=target,
+        )
+        if protect_from is not None:
+            self._trim_turns(target, budget, protect_from, policy="turns_oldest_first")
+
+    def _trim_turns(self, target: int, budget: int, protect_from: int, *, policy: str) -> None:
+        """Cut earlier turns' own words, oldest first, down to `target` — the
+        `local:` lever that runs once tool outputs are exhausted (#415).
+        `policy` says where it ran: `turns_oldest_first` preparing a task,
+        `mid_task_turns` between two model calls (explain's MID_TURN_TRIM)."""
+        if not self._token_budgeted() or self._history_size() <= target:
+            return
+        before, estimate_before = self._total_chars(), self._estimate_for_record()
+        stubbed: list[dict] = []
+        for i in range(1, protect_from):
+            if self._history_size() <= target:
+                break
+            key = self._stub_turn_message(self.messages[i])
+            if key is not None:
+                stubbed.append(self._stub_ref(i, key))
+        self._record_trim(
+            policy, before, budget=budget, stubbed=stubbed,
+            estimate_before=estimate_before, low_water=target,
+        )
+
+    def _estimate_for_record(self) -> int | None:
+        return self._history_size() if self._token_budgeted() else None
+
+    def _record_over_budget(self, budget: int) -> None:
+        """Every lever is spent and the `local:` request about to go out is
+        still over its budget: what is left — the system prompt, the tool
+        menu, the task in hand and its two newest results — is estimated above
+        what the budget allows. The call goes out anyway, since the one thing
+        left to cut is the task itself, and the record says so, once per task
+        (#415). Only from `_enforce_budget`, which runs right before a call."""
+        if not self._token_budgeted() or self._over_budget_recorded:
+            return
+        estimate = self._history_size()
+        if estimate <= budget:
+            return
+        self._over_budget_recorded = True
+        _, cap_source = self._history_budget()
+        self._emit_step(
+            kind="trim",
+            policy="over_budget",
+            affected=0,
+            stubbed=[],
+            stubbed_truncated=0,
+            bytes_before=self._total_chars(),
+            bytes_after=self._total_chars(),
+            keep_chars=TRIM_KEEP_CHARS,
+            budget=budget,
+            cap_source=cap_source,
+            oldest_first=False,
+            unit="tokens",
+            estimate_before=estimate,
+            estimate_after=estimate,
+            fits=False,
+        )
 
     def _stub_ref(self, index: int, key: str = "") -> dict:
         """Which message was stubbed, in terms a reader can act on: its position
@@ -5666,6 +5853,8 @@ class Agent:
         budget: int | None,
         stubbed: list[dict],
         cap_source: str = "",
+        estimate_before: int | None = None,
+        low_water: int | None = None,
     ) -> None:
         """The `trim` record (contract §3.5). Renderless — it edits history
         rather than describing a call, so it cannot ride the `tool` step.
@@ -5698,15 +5887,36 @@ class Agent:
             cap_source=("constant:TRIM_KEEP_CHARS" if budget is None else cap_source),
             # The two `*_oldest_first` policies run the SAME loop over the whole
             # history, so the flag follows the name rather than a second list
-            # that could drift from it. (`mid_task_budget` also walks oldest-
+            # that could drift from it. `mid_task_turns` is the turn lever's
+            # own oldest-first loop. (`mid_task_budget` also walks oldest-
             # first and records false here — pre-existing, and its own loop.)
-            oldest_first=policy.endswith("oldest_first"),
+            oldest_first=policy.endswith("oldest_first") or policy == "mid_task_turns",
+            **self._token_trim_fields(budget, estimate_before, low_water),
         )
+
+    def _token_trim_fields(
+        self, budget: int | None, estimate_before: int | None, low_water: int | None
+    ) -> dict:
+        """On `local:` a trim's budget is in estimated tokens of the whole
+        request (#415); `bytes_*` stay characters of message content, so the
+        unit is stated rather than left to be inferred from the size."""
+        if budget is None or estimate_before is None:
+            return {}
+        estimate_after = self._history_size()
+        fields: dict = {
+            "unit": "tokens",
+            "estimate_before": estimate_before,
+            "estimate_after": estimate_after,
+            "fits": estimate_after <= budget,
+        }
+        if low_water is not None:
+            fields["low_water"] = low_water
+        return fields
 
     def _total_chars(self) -> int:
         return sum(len(message.get("content") or "") for message in self.messages)
 
-    def _enforce_budget(self, task_start: int) -> None:
+    def _enforce_budget(self, task_start: int, protect_from: int | None = None) -> None:
         """Trim this task's oldest tool outputs (never the 2 most recent)
         until the conversation fits the character budget.
 
@@ -5717,22 +5927,42 @@ class Agent:
         omission: the log still holds the full text, so it positively suggests
         the model had something it did not."""
         budget, _ = self._history_budget()
-        if self._total_chars() <= budget:
+        if self._history_size() <= budget:
             return
-        before = self._total_chars()
+        target = self._low_water(budget)
+        before, estimate_before = self._total_chars(), self._estimate_for_record()
         tool_indices = [
             i
             for i in range(task_start, len(self.messages))
             if self.messages[i].get("role") == "tool"
         ]
+        candidates = tool_indices[:-2]
+        if self._token_budgeted():
+            # A bound, not a target (#415): earlier tasks' outputs the boundary
+            # trim left whole are fair game too, oldest first.
+            newest = set(tool_indices[-2:])
+            candidates = [
+                i for i in range(1, len(self.messages))
+                if self.messages[i].get("role") == "tool" and i not in newest
+            ]
         stubbed: list[dict] = []
-        for i in tool_indices[:-2]:
+        for i in candidates:
             key = self._trim_tool_message(self.messages[i])
             if key is not None:
                 stubbed.append(self._stub_ref(i, key))
-                if self._total_chars() <= budget:
+                if self._history_size() <= target:
                     break
-        self._record_trim("mid_task_budget", before, budget=budget, stubbed=stubbed)
+        self._record_trim(
+            "mid_task_budget", before, budget=budget, stubbed=stubbed,
+            estimate_before=estimate_before, low_water=target,
+        )
+        # A continuation's question sits before `task_start`, and it is the
+        # one earlier message the task in hand cannot do without.
+        self._trim_turns(
+            target, budget, task_start if protect_from is None else protect_from,
+            policy="mid_task_turns",
+        )
+        self._record_over_budget(budget)
 
     def expand_alias(self, command: str) -> str:
         """Rewrite the first word via the aish alias map, BEFORE approval sees
@@ -7155,7 +7385,9 @@ class Agent:
         )
 
     def _history_budget(self) -> tuple[int, str]:
-        """(chars of history to keep, provenance).
+        """(how much history to keep, provenance), in `_history_size`'s unit:
+        estimated TOKENS of the whole request on `local:` (#415), characters
+        of message content everywhere else.
 
         Sized from the window ACTUALLY in force, capped by the ceiling. Every
         history budget used to be `num_ctx * CHARS_PER_TOKEN_BUDGET`, and
@@ -7170,6 +7402,8 @@ class Agent:
         local path's behaviour is preserved by construction rather than by a
         carve-out that could drift.
         """
+        if self._token_budgeted():
+            return self._local_prompt_budget()
         window, source = backends.context_window(self.provider, self.num_ctx)
         capped = min(window, HISTORY_TOKEN_CEILING)
         if capped < window:
@@ -7182,6 +7416,75 @@ class Agent:
             # from the number alone.
             capped, source = spend, spend_source
         return capped * CHARS_PER_TOKEN_BUDGET, source
+
+    def _token_budgeted(self) -> bool:
+        """Is this session's history sized in tokens of the whole request?
+
+        Only `local:` (#415): its server reports the whole prompt it read
+        (`INPUT_INCLUDES_CACHE`), which is what an exact anchor needs, and its
+        window is the owner's memory, which an overrun crashes. Ollama's count
+        skips reused KV, and the cloud windows are not what #415 is about.
+        """
+        return self.provider == backends.LOCAL
+
+    def _local_prompt_budget(self) -> tuple[int, str]:
+        """(tokens the whole `local:` prompt may hold, provenance).
+
+        `AISH_LOCAL_CTX` is the whole request, answer included — mlx-lm's KV
+        cache holds the generated tokens too — so `max_tokens` is reserved out
+        of it, and a safety share of the rest is kept back
+        (`LOCAL_PROMPT_SAFETY`). The system prompt and the tool menu are inside
+        the estimate this is compared with, so nothing else is subtracted.
+        """
+        window = backends.local_context_window()
+        max_tokens = backends.local_max_tokens()
+        budget = int((window - max_tokens) * LOCAL_PROMPT_SAFETY)
+        return budget, (
+            f"backend:local:{window}-max_tokens:{max_tokens}"
+            f"*LOCAL_PROMPT_SAFETY:{LOCAL_PROMPT_SAFETY}"
+        )
+
+    def _low_water(self, budget: int) -> int:
+        """Where a triggered trim stops: well under the budget on `local:`
+        (`LOCAL_LOW_WATER`), exactly at it everywhere else, as before."""
+        return int(budget * LOCAL_LOW_WATER) if self._token_budgeted() else budget
+
+    def _history_size(self) -> int:
+        """What `_history_budget` is compared with, in its unit."""
+        if self._token_budgeted():
+            return self._prompt_estimate()["tokens"]
+        return self._total_chars()
+
+    def _prompt_estimate(self, menu: list | None = None) -> dict:
+        """The next `local:` request's size in tokens, and how it was reached.
+
+        `anchored`: the tokens the server counted for the last request, plus
+        this request's growth since, converted at the model's learned ratio.
+        `ratio`: the whole request converted at that ratio — on the first call,
+        after a model switch (another tokenizer's count does not carry over),
+        and after anything rewrote history, because a removal subtracted at an
+        average ratio could under-count what is left, and under-counting is the
+        crash (#415).
+        """
+        if menu is None:
+            menu = tools.TOOL_SCHEMAS + self._plugin_defs
+        chars = backends.request_chars(self.provider, self.messages, menu)
+        key = f"{self.provider}:{self.model}"
+        ratio = token_ratio.ratio(key)
+        anchor = self._token_anchor
+        if anchor is not None and (anchor[0] != key or chars < anchor[1]):
+            self._token_anchor = anchor = None
+        if anchor is None:
+            tokens, basis = ratio.tokens(chars), "ratio"
+        else:
+            tokens, basis = anchor[2] + ratio.tokens(chars - anchor[1]), "anchored"
+        return {
+            "tokens": tokens,
+            "basis": basis,
+            "chars": chars,
+            "chars_per_token": round(ratio.chars_per_token, 3),
+            "ratio_source": ratio.source,
+        }
 
     def _spend_budget(self) -> tuple[int | None, str]:
         """(tokens of history the rate limit affords, provenance), or (None, "")

@@ -3222,11 +3222,20 @@ function traceStep(step) {
       : recoverable
         ? `${recoverable} of them can be read back on demand`
         : "the model cannot get them back";
-    const ref = traceRow(
-      t, traceSvg("thinking", "var(--dim)"),
-      `Shortened ${n} earlier result${n === 1 ? "" : "s"} for the model`,
-      tail
-    );
+    // The local window's second lever cuts earlier MESSAGES, not results, and
+    // its over-budget record cut nothing at all (#415) — each says what it did.
+    const turns = ["turns_oldest_first", "mid_task_turns"].includes(step.policy);
+    const ref = step.policy === "over_budget"
+      ? traceRow(
+        t, traceSvg("thinking", "var(--dim)"),
+        "Sent a request larger than the local window allows",
+        `estimated ${step.estimate_after} tokens, budget ${step.budget}; nothing left to shorten`
+      )
+      : traceRow(
+        t, traceSvg("thinking", "var(--dim)"),
+        `Shortened ${n} earlier ${turns ? "message" : "result"}${n === 1 ? "" : "s"} for the model`,
+        tail
+      );
     // Which trim: a mid-task one is a step of the record, a seed one is part
     // of what the first model call started from ([TRACE-CLOSE]'s inspector).
     ref.row.classList.add("step-trim");
@@ -4467,7 +4476,8 @@ function inspectKeys(rows) {
       // call started from, which is where the dossier files it. A trim that
       // fired BETWEEN calls is its own step — the same split explain.py makes
       // with MID_TURN_TRIM, and the list has to agree with that one.
-      ids[i] = ["mid_task_budget", "overflow_oldest_first"].includes(d.policy)
+      ids[i] = ["mid_task_budget", "overflow_oldest_first", "mid_task_turns", "over_budget"]
+        .includes(d.policy)
         ? `t${next("t")}`
         : "m1";
       return;
