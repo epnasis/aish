@@ -324,8 +324,10 @@ reported for the previous request and estimates only what was added since,
 at a characters-per-token ratio it learns per model and remembers across
 restarts. When the conversation outgrows that, old tool results are shortened
 first and then old messages, oldest first, down to three quarters of the
-budget, so it happens rarely. Everything shortened can be read back. Set it to
-what the server can actually hold. `max_tokens` is always sent because
+budget, so it happens rarely. What is shortened is cached, and the model is
+told how to read it back. If even the system prompt, the tool list and the
+current task do not fit, the request is sent anyway and the chat says so. Set
+it to what the server can actually hold. `max_tokens` is always sent because
 mlx-lm stops at 512 tokens when a request leaves it out. `--think` turns the
 model's thinking on through the chat template (`enable_thinking`). The OpenAI
 variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) are never read for `local:`,

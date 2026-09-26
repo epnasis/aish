@@ -1906,7 +1906,8 @@ runs on the user's own OpenAI-compatible server (e.g. mlx-lm) \
 at AISH_LOCAL_URL, with AISH_LOCAL_CTX (tokens one whole request may use \
 on that server, answer included, default 98304 — aish keeps the prompt under \
 it minus the answer cap, counting in tokens, and shortens old tool results and \
-then old messages when it would not fit) and AISH_LOCAL_MAX_TOKENS (answer \
+then old messages when it would not fit; if the current task alone does not \
+fit, it is sent anyway and the chat says so) and AISH_LOCAL_MAX_TOKENS (answer \
 cap, default 16384); adding --save \
 persists the choice as the startup default in the config file, and \
 /model --save alone persists the current model; /jobs lists \

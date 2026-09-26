@@ -3277,6 +3277,7 @@ class Agent:
         self._token_anchor: tuple[str, int, int] | None = None
         # THIS call's estimate, for its `reasoning` record beside the count.
         self._call_estimate: dict | None = None
+        self._over_budget_recorded = False  # per task; see _reset_task_state
         self.rule_compiler = rule_compiler_ask
         self.current_session = current_session
         # Embedding-based preflight selection (issue #43); opt-in from the
@@ -3546,6 +3547,18 @@ class Agent:
         """Drop the conversation, keep the system prompt."""
         del self.messages[1:]
         self.context_fill = None
+        self._history_rewritten()
+
+    def _history_rewritten(self) -> None:
+        """Something already sent was changed or removed, so the server's
+        count for the last request no longer describes a prefix of the next
+        one: the next `local:` estimate converts the whole request (#415)."""
+        self._token_anchor = None
+
+    def _set_system_content(self, content: str) -> None:
+        if self.messages[0].get("content") != content:
+            self.messages[0]["content"] = content
+            self._history_rewritten()
 
     def load_history(self, messages: list[dict]) -> None:
         """Adopt messages from a previous session (already logged — appended
@@ -3671,6 +3684,7 @@ class Agent:
         ):
             cut -= 1
         del self.messages[cut:]
+        self._history_rewritten()
         return text if isinstance(text, str) else None
 
     def _question_index(self) -> int | None:
@@ -3772,6 +3786,7 @@ class Agent:
                 len(self.messages),
             )
             del self.messages[cut:end]
+            self._history_rewritten()
             return True
         return False
 
@@ -4000,11 +4015,11 @@ class Agent:
         result = self.rebase(target, announce=False)
         if result.startswith("ERROR"):
             return  # a vanished/invalid dir: rebase already reported it
-        self.messages[0]["content"] = compose_system_content(
+        self._set_system_content(compose_system_content(
             self.base_context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir,
             scratch_in_reminder=True,
             identity=identity_context(self.model, self.provider),
-        )
+        ))
 
     def _inject_pending_messages(self) -> None:
         """Fold in text the user typed while this task runs (issue #95): instead
@@ -4329,11 +4344,11 @@ class Agent:
         index = skills.knowledge_index(
             self.cwd, self.lessons_path, on_index=index_record.update
         )
-        self.messages[0]["content"] = compose_system_content(
+        self._set_system_content(compose_system_content(
             self.base_context, self.cwd, self.lessons_path, index, scratch_dir=self.scratch_dir,
             scratch_in_reminder=True,
             identity=identity_context(self.model, self.provider),
-        )
+        ))
         earlier_reminders = [
             str(m.get("content", ""))
             for m in self.messages[1:]
@@ -4540,7 +4555,7 @@ class Agent:
             # leave the #81 gates and the loop-detection counters untouched.
             self._apply_pending_cwd()
             self._inject_pending_messages()
-            self._enforce_budget(task_start)
+            self._enforce_budget(task_start, protect_from=this_task)
             turn_start = time.perf_counter()
             # A live "Thinking…" row on the trace timeline; it finalizes to
             # "Thought for Xs" when the turn produced tools, or is dropped when
@@ -5625,9 +5640,7 @@ class Agent:
         # dicts, and the ollama library ignores unknown fields. It is also what
         # keeps a stub from being stubbed again (`_trimmable`).
         message["_stub"] = True
-        # History was rewritten, so the server's count for the last request no
-        # longer describes a prefix of the next one (#415).
-        self._token_anchor = None
+        self._history_rewritten()
         return key
 
     def _stub_turn_message(self, message: dict) -> str | None:
@@ -5638,7 +5651,9 @@ class Agent:
         """
         if message.get("role") not in ("user", "assistant") or message.get("_stub"):
             return None
-        if len(message.get("content") or "") <= TRIM_KEEP_CHARS + len(TURN_TRIMMED_NOTE):
+        # Against the RECOVERABLE note, the one normally written: a message
+        # barely over the plain note's bound would grow when stubbed.
+        if len(message.get("content") or "") <= TRIM_KEEP_CHARS + len(TURN_TRIMMED_RECOVERABLE):
             return None
         return self._stub_in_place(message, None, TURN_TRIMMED_RECOVERABLE, TURN_TRIMMED_NOTE)
 
@@ -5668,7 +5683,7 @@ class Agent:
             del message["images"]
             message["content"] = TOOL_MEDIA_EXPIRED
             message["_stub"] = True  # see _trim_tool_message
-            self._token_anchor = None
+            self._history_rewritten()
             dropped.append(self._stub_ref(i))
         self._record_trim("delivered_images", before, budget=None, stubbed=dropped)
 
@@ -5872,9 +5887,10 @@ class Agent:
             cap_source=("constant:TRIM_KEEP_CHARS" if budget is None else cap_source),
             # The two `*_oldest_first` policies run the SAME loop over the whole
             # history, so the flag follows the name rather than a second list
-            # that could drift from it. (`mid_task_budget` also walks oldest-
+            # that could drift from it. `mid_task_turns` is the turn lever's
+            # own oldest-first loop. (`mid_task_budget` also walks oldest-
             # first and records false here — pre-existing, and its own loop.)
-            oldest_first=policy.endswith("oldest_first"),
+            oldest_first=policy.endswith("oldest_first") or policy == "mid_task_turns",
             **self._token_trim_fields(budget, estimate_before, low_water),
         )
 
@@ -5900,7 +5916,7 @@ class Agent:
     def _total_chars(self) -> int:
         return sum(len(message.get("content") or "") for message in self.messages)
 
-    def _enforce_budget(self, task_start: int) -> None:
+    def _enforce_budget(self, task_start: int, protect_from: int | None = None) -> None:
         """Trim this task's oldest tool outputs (never the 2 most recent)
         until the conversation fits the character budget.
 
@@ -5940,7 +5956,12 @@ class Agent:
             "mid_task_budget", before, budget=budget, stubbed=stubbed,
             estimate_before=estimate_before, low_water=target,
         )
-        self._trim_turns(target, budget, task_start, policy="mid_task_turns")
+        # A continuation's question sits before `task_start`, and it is the
+        # one earlier message the task in hand cannot do without.
+        self._trim_turns(
+            target, budget, task_start if protect_from is None else protect_from,
+            policy="mid_task_turns",
+        )
         self._record_over_budget(budget)
 
     def expand_alias(self, command: str) -> str:

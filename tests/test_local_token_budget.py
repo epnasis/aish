@@ -258,6 +258,58 @@ class TestTheAnchor:
         assert agent._prompt_estimate()["basis"] == "ratio"
 
 
+    @pytest.mark.parametrize("rewrite", ["reset", "rewind", "redact", "system_prompt_changed"])
+    def test_every_rewrite_of_what_was_sent_drops_the_anchor(
+        self, monkeypatch, tmp_path, rewrite
+    ):
+        """A removal followed by growth would otherwise keep the removed
+        text's tokens inside the anchor while subtracting its characters at
+        the learned ratio — an under-count whenever it was denser (#415)."""
+        server = CountingServer([("one", None)])
+        agent = _agent(monkeypatch, tmp_path, server, ctx=10**6, max_tokens=1_000, steps=[])
+        agent.run_task("first question")
+        assert agent._token_anchor is not None
+        if rewrite == "reset":
+            agent.reset()
+        elif rewrite == "rewind":
+            assert agent.rewind_last_task() == "first question"
+        elif rewrite == "redact":
+            assert agent.redact_turn("first question")
+        else:
+            agent._set_system_content(agent.messages[0]["content"] + " changed")
+        assert agent._token_anchor is None
+
+    def test_an_identical_system_prompt_keeps_the_anchor(self, monkeypatch, tmp_path):
+        """Rebuilt every task; only a CHANGED text is a rewrite."""
+        server = CountingServer([("one", None)])
+        agent = _agent(monkeypatch, tmp_path, server, ctx=10**6, max_tokens=1_000, steps=[])
+        agent.run_task("first")
+        agent._set_system_content(agent.messages[0]["content"])
+        assert agent._token_anchor is not None
+
+
+class TestAContinuationKeepsItsQuestion:
+    def test_the_mid_task_turn_lever_stops_before_the_question(self, monkeypatch, tmp_path):
+        """A continuation's question sits before `task_start` (#387); cutting
+        it mid-task would leave the model executing a request it can no
+        longer read."""
+        steps: list[dict] = []
+        agent = _agent(monkeypatch, tmp_path, CountingServer([]), ctx=6_000, max_tokens=1_000,
+                       steps=steps)
+        agent.messages.append({"role": "user", "content": "old talk " + "o" * 20_000})
+        question = len(agent.messages)
+        agent.messages.append({"role": "user", "content": "the question " + "q" * 20_000})
+        agent.messages.append({"role": "assistant", "content": "partial " + "p" * 20_000})
+        task_start = len(agent.messages)
+        agent.messages.append({"role": "user", "content": "[aish: continue]"})
+
+        agent._enforce_budget(task_start, protect_from=question)
+
+        assert agent.messages[1].get("_stub") is True, "older talk is fair game"
+        assert not agent.messages[question].get("_stub")
+        assert not agent.messages[question + 1].get("_stub")
+
+
 class TestAStubIsNeverStubbedAgain:
     def test_a_stub_with_its_key_is_not_trimmable(self, tmp_path):
         """A stub (200 chars + the recoverable note) is longer than the bound
