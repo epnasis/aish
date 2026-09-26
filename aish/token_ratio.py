@@ -60,6 +60,19 @@ DEFAULT_CHARS_PER_TOKEN = 2.0
 # last is the unchanged behaviour, and what stands against it is the 5%
 # `LOCAL_PROMPT_SAFETY` margin, not this.
 SPARSE_FLOOR = 0.80
+# How many of a chat's recorded calls a cold ledger is seeded with. They are
+# correlated (one chat, often one task), so they count as FEW samples under
+# the taper however many there were: 5 hands out the densest of them times
+# 0.842, below the 0.939 that the previous 3 to 15 calls' minimum reached
+# against the next call, in call order, on the 387 measured. The densest is
+# always among them, because the newest calls need not hold it: in
+# `session-20260925-204008-294943` the newest 20 bottom out at 3.826 and an
+# older call at 3.615, 5.5% denser, more than the 5% LOCAL_PROMPT_SAFETY.
+SEEDED_SAMPLES = 5
+# The most recorded calls rebuilt to find that densest one. Cost, not
+# evidence: 90 calls of ~190k characters took 0.4 s on this machine, so the
+# first estimate of a very long chat waits about a second at most.
+SEED_REBUILD_CAP = 200
 # A reported count outside these bounds is not a tokenizer, it is a broken
 # report, and one of them would pin the minimum for SAMPLES_KEPT calls.
 PLAUSIBLE_CHARS_PER_TOKEN = (1.0, 8.0)
@@ -145,14 +158,24 @@ def has_samples(key: str) -> bool:
 
 
 def seed(key: str, samples: list[tuple[int, int]]) -> int:
-    """Adopt recorded (chars, tokens) pairs for a model with none yet, oldest
-    first; how many were kept. A model that has samples keeps its own."""
-    kept = [[chars, tokens] for chars, tokens in samples if _plausible(chars, tokens)]
+    """Adopt recorded (chars, tokens) pairs, oldest first, for a model with
+    none yet; how many were kept. A model that has samples keeps its own.
+
+    At most `SEEDED_SAMPLES` are kept: the DENSEST of all of them, so the
+    floor is the chat's whole history and not just its latest calls, and the
+    newest others. Kept few on purpose, so they stand as sparse evidence under
+    the taper until live calls join them (see `SEEDED_SAMPLES`)."""
+    kept = [(chars, tokens) for chars, tokens in samples if _plausible(chars, tokens)]
+    if not kept:
+        return 0
+    densest = min(range(len(kept)), key=lambda i: kept[i][0] / kept[i][1])
+    newest = [i for i in range(len(kept)) if i != densest][-(SEEDED_SAMPLES - 1):]
+    chosen = [list(kept[i]) for i in sorted([densest, *newest])]
     with _lock:
         _load()
-        if _samples.get(key) or not kept:
+        if _samples.get(key):
             return 0
-        _samples[key] = kept[-SAMPLES_KEPT:]
+        _samples[key] = chosen
         snapshot = json.dumps(_samples, indent=1)
         count = len(_samples[key])
     try:
@@ -164,12 +187,12 @@ def seed(key: str, samples: list[tuple[int, int]]) -> int:
 
 def recorded_samples(
     log: Path, state_dir: os.PathLike | str, provider: str, model: str,
-    limit: int = SAMPLES_KEPT,
+    limit: int = SEED_REBUILD_CAP,
 ) -> list[tuple[int, int]]:
     """(request chars, reported prompt tokens) for the newest `limit` calls in
     one chat log to `provider:model` whose whole request is still in the
-    chat's store, in the order they were made. Only those are rebuilt: the
-    ledger keeps no more, and each rebuild reads and re-hashes every message.
+    chat's store, in the order they were made. The cap is on cost only: each
+    rebuild reads and re-hashes every message of that request.
 
     The characters are rebuilt from the `sent` record — the messages exactly
     as the adapter handed them to the client, and the tool menu — and measured

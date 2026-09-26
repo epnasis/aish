@@ -525,6 +525,31 @@ class TestTheColdStartSeed:
         rebuilt = token_ratio.recorded_samples(log, tmp_path / "state", "local", REPO)
         assert [list(s) for s in rebuilt] == live[2:]
 
+    def test_a_seed_is_the_densest_call_and_the_newest_few(self):
+        """One chat's calls are correlated evidence: few of them are kept, so
+        the taper still applies, and the densest is always one of them."""
+        older_denser = (36_000, 10_000)  # 3.6, the incident's older, denser call
+        newer = [(38_000 + i, 10_000) for i in range(30)]
+        kept = token_ratio.seed(KEY, [older_denser, *newer])
+        assert kept == token_ratio.SEEDED_SAMPLES
+        ledger = json.loads(token_ratio._path().read_text())[KEY]
+        assert ledger == [list(older_denser), *[list(s) for s in newer[-(kept - 1):]]]
+        ratio = token_ratio.ratio(KEY)
+        assert ratio.chars_per_token == pytest.approx(3.6 * token_ratio.sparse_trust(kept))
+        assert "SPARSE_FLOOR_taper" in ratio.source
+
+    def test_a_reset_looks_for_evidence_again(self, monkeypatch, tmp_path):
+        """/new and /resume reset and then switch the session log."""
+        reads = []
+        monkeypatch.setattr(
+            token_ratio, "recorded_samples", lambda *a: reads.append(a) or []
+        )
+        agent = _logged_agent(monkeypatch, tmp_path, CountingServer([]), tmp_path / "s.jsonl")
+        agent._prompt_estimate()
+        agent.reset()
+        agent._prompt_estimate()
+        assert len(reads) == 2
+
     def test_an_unreadable_log_is_no_evidence(self, tmp_path):
         missing = tmp_path / "gone.jsonl"
         assert token_ratio.recorded_samples(missing, tmp_path, "local", REPO) == []

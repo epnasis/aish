@@ -3551,6 +3551,9 @@ class Agent:
         """Drop the conversation, keep the system prompt."""
         del self.messages[1:]
         self.context_fill = None
+        # The terminal's /new and /resume reset and then switch the session
+        # log, so the next estimate may look for evidence in a different chat.
+        self._ratio_seed_tried.clear()
         self._history_rewritten()
 
     def _history_rewritten(self) -> None:
