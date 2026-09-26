@@ -47,6 +47,7 @@ from . import (
     provenance,
     ratelimit,
     recordings,
+    repetition,
     roles,
     rule_compiler,
     rules,
@@ -506,6 +507,18 @@ ASKED_AGAIN_FACT = "asked once more, it again gave no answer text"
 # empty reply is exactly the unexplained case. No reason is not "none sent" —
 # a stream cut mid-way looks the same — so absence adds nothing.
 FINISH_REASON_FACT = 'the provider reported finish reason "{stop}"'
+# A reply aish stopped because its tail had become one passage repeated
+# (#417, `repetition.py`). Each sentence states what the watch measured and
+# what aish did; none says why the model repeated itself, which nothing checks.
+_REPETITION_MEASURED = (
+    "after {chars:,} characters, when its last {span_chars:,} characters were one "
+    "{period_chars:,}-character passage repeated {repeats:,} times"
+)
+REPETITION_FACT = "aish stopped {which} " + _REPETITION_MEASURED
+REPLY_WAS_REPEATING = (
+    "aish stopped your last reply " + _REPETITION_MEASURED
+    + "; it had no answer text and no tool call"
+)
 
 
 def empty_answer(*facts: str) -> str:
@@ -563,6 +576,11 @@ class ModelUnavailable(RuntimeError):
 # history (~120k tokens each in the incident that named it) instead of the
 # eight it used to be; that provider has not been met. `docs/rate-limits.md`.
 MODEL_CALL_ATTEMPT_CAP = 120
+
+# On a provider in `backends.RESEND_ONCE_AFTER_LOST_CONNECTION`, the sends of
+# one model call that may lose their connection before the turn ends (#419):
+# the original, one identical re-send, and one after the history was shrunk.
+LOST_CONNECTION_SENDS = 3
 
 # How much of a provider's error text a `model_error` record keeps. A quota
 # error carries a documentation URL and a details array; the sentence that says
@@ -2911,18 +2929,31 @@ def _model_error_line(
     delay: float,
     final: bool,
     bound: str = "",
+    *,
+    shrinking: bool = False,
+    lost: int = 0,
+    timeout: str = "",
 ) -> str:
     """The terminal's one line about a failed call. Says what kind of failure it
     was and what happens next, because "model call failed" answered neither."""
     what = failure.kind.replace("_", " ")
+    if timeout:
+        what = f"{what}: {timeout}"
     if not final:
         if failure.kind == ratelimit.CONTEXT_OVERFLOW:
             # No wait to report: what changes before the next attempt is the
             # request, not the clock (#388).
             return f"✕ {what} (attempt {attempt}) — shortening the conversation and retrying"
+        if shrinking:
+            return (
+                f"✕ {what} (attempt {attempt}) — the connection was lost on {lost} sends of "
+                f"this call; shortening the conversation and retrying in {delay:.0f}s"
+            )
         return f"✕ {what} (attempt {attempt}) — retrying in {delay:.0f}s"
     if bound == "trim_exhausted":
         return f"✕ {what} — aish could not make the request any smaller, not retrying"
+    if bound == "lost_connection":
+        return f"✕ {what} — the connection was lost on {lost} sends of this call, not retrying"
     if failure.exhausted:
         # "Spent" only where the provider NAMED a long-window quota; a bare
         # long retry hint proves the wait, not whose budget is empty.
@@ -2936,6 +2967,49 @@ def _model_error_line(
         # like a count was reached, and the count was not the bound (#337).
         return f"✕ {what} — waited as long as this turn may, gave up after {attempt} attempts"
     return f"✕ {what} — gave up after {attempt} attempts"
+
+
+def _timeout_phrase(seconds: object) -> str:
+    """A timeout said as what it is: aish's clock, not a drop anyone saw."""
+    if isinstance(seconds, (int, float)):
+        return f"aish's read timeout of {seconds:g} s expired"
+    return "aish's read timeout expired"
+
+
+#: How much of what each lost send ended with is quoted in the turn's ending.
+LOST_SEEN_CHARS = 200
+
+
+def _lost_connection_text(lost: list[dict]) -> str:
+    """What the owner is told when a call's connection kept being lost (#419):
+    each send's size, how long it ran and what it ended with, and what aish did
+    next. The cause is not named, because nothing here observed one."""
+    sends = []
+    for number, send in enumerate(lost, 1):
+        what = (
+            "after the history was shortened, "
+            if send["after_shrink"]
+            else "the same request, " if number > 1 else ""
+        )
+        seen = " ".join(str(send["seen"]).split())[:LOST_SEEN_CHARS]
+        sends.append(
+            f"lost send {number} (attempt {send['attempt']}): {what}{send['chars']:,} "
+            f"characters of conversation, lost after {send['secs']:.1f}s ({seen})"
+        )
+    if len(lost) < LOST_CONNECTION_SENDS and lost[-1]["after_shrink"]:
+        next_step = (
+            "The conversation had already been shortened once on this call, so aish did "
+            "not send it again."
+        )
+    elif len(lost) < LOST_CONNECTION_SENDS:
+        next_step = "There was nothing left to shorten, so aish did not send it again."
+    else:
+        next_step = "aish did not send it again."
+    return (
+        f"the connection to the model's server was lost on {len(lost)} sends of the same "
+        f"model call — {'; '.join(sends)}. {next_step} "
+        "aish does not know why the connection was lost."
+    )
 
 
 def _unavailable_text(failure: ratelimit.CallFailure | None, attempts: int = 1) -> str:
@@ -4600,6 +4674,12 @@ class Agent:
             tokens_in += usage[0]
             tokens_out += usage[1]
             empty_facts: list[str] = []
+            # Set when aish stopped this reply for repeating itself (#417). An
+            # empty one then takes the ordinary re-ask below, and that is
+            # enough: the re-ask carries a note the looping request did not,
+            # so even greedy decoding is not handed the same request twice,
+            # and a second empty reply ends the turn — never a third call.
+            repeated = (self._response_meta or {}).get("repetition")
             if not tool_calls and not content.strip():
                 if empty_reply_asked is None:
                     # Kept out of the history and the log: an empty assistant
@@ -4610,8 +4690,14 @@ class Agent:
                         if reasoning_only
                         else EMPTY_REPLY_FACT
                     )
+                    said_first = REPLY_WAS_REASONING_ONLY if reasoning_only else REPLY_WAS_EMPTY
+                    if repeated:
+                        empty_reply_asked += "; " + REPETITION_FACT.format(
+                            which="it", **repeated
+                        )
+                        said_first = REPLY_WAS_REPEATING.format(**repeated)
                     note = (
-                        (REPLY_WAS_REASONING_ONLY if reasoning_only else REPLY_WAS_EMPTY)
+                        said_first
                         + USER_SAW_NOTHING
                         + (
                             REPLY_NOW_IN_TEXT
@@ -4626,6 +4712,8 @@ class Agent:
                     self._append({"role": "user", "content": AISH_NOTE + note + "]"})
                     continue
                 empty_facts = [empty_reply_asked, ASKED_AGAIN_FACT]
+                if repeated:
+                    empty_facts.append(REPETITION_FACT.format(which="that reply too", **repeated))
                 if finish_reason := (self._response_meta or {}).get("stop"):
                     empty_facts.append(FINISH_REASON_FACT.format(stop=finish_reason))
             else:
@@ -5011,6 +5099,11 @@ class Agent:
         # Whether this call has already spent its one shrink-and-retry (#388).
         # Per call, not per task: each model call is rejected on its own size.
         shrunk = False
+        # The sends of this call that lost their connection after the request
+        # went out, on a provider where that is counted (#419): one identical
+        # re-send, then one smaller, then the turn ends saying what was seen.
+        lost: list[dict] = []
+        bound = ""
         # What the adapter reports it is about to send, per attempt (#352).
         # Cleared before each try so a retry can only ever record the request
         # the model actually received on the attempt that succeeded.
@@ -5021,6 +5114,7 @@ class Agent:
             if self._token_budgeted():
                 # Per attempt: an overflow retry sends a different request.
                 self._call_estimate = self._prompt_estimate(menu)
+            sent_at = time.perf_counter()
             try:
                 # The governor's cancel and status wiring, for the span of one
                 # call. It cannot ride on the arguments: every backend is
@@ -5044,6 +5138,32 @@ class Agent:
                 budget = self._retry_wait_budget(last)
                 waited = waited_by_kind.get(last.kind, 0.0)
                 overflow = last.kind == ratelimit.CONTEXT_OVERFLOW
+                # Observed, and recorded on every failure: how long this send
+                # ran before it failed, which is half of what a lost connection
+                # can be read by (#419).
+                elapsed = round(time.perf_counter() - sent_at, 3)
+                observed_fields: dict[str, Any] = {"elapsed_s": elapsed}
+                if last.kind == ratelimit.TRANSPORT:
+                    # What the lost-connection count below is a function of:
+                    # a connection never made and one lost after sending look
+                    # alike in the SDK's "Connection error." and differ here.
+                    observed_fields["exception_chain"] = ratelimit.exception_chain(exc)
+                    if ratelimit.timed_out(exc):
+                        # aish's own clock, not an observed drop: said as such,
+                        # and never counted as a lost connection.
+                        observed_fields["timed_out"] = True
+                        if (limit := ratelimit.read_timeout_s(exc)) is not None:
+                            observed_fields["read_timeout_s"] = limit
+                this_lost = self._counts_lost_connection(last, exc)
+                if this_lost:
+                    lost.append({
+                        "chars": self._total_chars(),
+                        "secs": elapsed,
+                        "after_shrink": shrunk,
+                        "attempt": attempt,
+                        "seen": ratelimit.describe_chain(exc),
+                    })
+                    observed_fields["lost_connection"] = len(lost)
                 if overflow and not shrunk and self._can_trim_history():
                     # The one 4xx aish can answer: the request was refused for
                     # its SIZE, so the next move is a SMALLER request, not a
@@ -5061,7 +5181,8 @@ class Agent:
                     # fraction at a time against a window nothing here knows.
                     shrunk = True
                     self._record_model_error(
-                        last, attempt, 0.0, False, waited=waited, budget=budget
+                        last, attempt, 0.0, False, waited=waited, budget=budget,
+                        observed=observed_fields,
                     )
                     self._trim_history_to_budget(
                         int(self._history_size() * OVERFLOW_TRIM_FRACTION),
@@ -5078,12 +5199,23 @@ class Agent:
                 # applies to the three bounds on a page.
                 delay = ratelimit.backoff_delay(last, attempt) if last.retryable else 0.0
                 bound = ""
+                # A second lost connection sends a SMALLER request, never the
+                # same one a third time: if the request is what brings the
+                # server down, re-sending it is a crash loop (#419). A third
+                # loss — or a second with nothing left to shrink, or with the
+                # call's one shrink already spent — ends the turn.
+                shrink_after_loss = this_lost and len(lost) == 2
                 if overflow:
                     # Recognised, and out of room: either nothing was left to
                     # trim, or the one shrink this call allows itself was
                     # already spent. `not_retryable` would be true of the
                     # class and say nothing about what actually ended it.
                     bound = "trim_exhausted"
+                elif this_lost and (
+                    len(lost) >= LOST_CONNECTION_SENDS
+                    or (shrink_after_loss and (shrunk or not self._can_trim_history()))
+                ):
+                    bound = "lost_connection"
                 elif not last.retryable:
                     bound = "not_retryable"
                 elif waited + delay > budget:
@@ -5094,10 +5226,21 @@ class Agent:
                 if final:
                     delay = 0.0
                 self._record_model_error(
-                    last, attempt, delay, final, waited=waited, budget=budget, bound=bound
+                    last, attempt, delay, final, waited=waited, budget=budget, bound=bound,
+                    observed=observed_fields, shrinking=shrink_after_loss and not final,
                 )
                 if final:
                     break
+                if shrink_after_loss:
+                    # After the record, so the log reads in the order the two
+                    # happened; promised only because the bound above already
+                    # established there was something to shrink.
+                    shrunk = True
+                    self._trim_history_to_budget(
+                        int(self._history_size() * OVERFLOW_TRIM_FRACTION),
+                        policy="lost_connection_oldest_first",
+                        cap_source=f"constant:OVERFLOW_TRIM_FRACTION:{OVERFLOW_TRIM_FRACTION}",
+                    )
                 waited_by_kind[last.kind] = waited + delay
                 if ratelimit.wait(
                     delay, self._cancel, self.status.note, what=ratelimit.wait_caption(last)
@@ -5122,7 +5265,29 @@ class Agent:
                 # as completely as what went out, new content types included.
                 self._record_received(turn)
                 return turn
-        raise ModelUnavailable(_unavailable_text(last, attempt))
+        if bound == "lost_connection":
+            raise ModelUnavailable(_lost_connection_text(lost))
+        text = _unavailable_text(last, attempt)
+        if observed_fields.get("timed_out"):
+            text += " (" + _timeout_phrase(observed_fields.get("read_timeout_s")) + ")"
+        raise ModelUnavailable(text)
+
+    def _counts_lost_connection(self, failure: ratelimit.CallFailure, exc: BaseException) -> bool:
+        """Whether this failure is a send that lost its connection AFTER the
+        request went out, on a provider where those are counted (#419).
+
+        A connection that was never made is not one: the server never saw the
+        request, so it cannot be the request that brought it down — and during
+        the seconds a supervised server takes to restart, every attempt is
+        refused exactly so. Those keep the ordinary transient retry."""
+        return (
+            self.provider in backends.RESEND_ONCE_AFTER_LOST_CONNECTION
+            and failure.kind == ratelimit.TRANSPORT
+            and not ratelimit.never_connected(exc)
+            # A timeout is aish's own clock expiring, not a drop anyone saw;
+            # it stays bounded by the wait budget and the attempt cap.
+            and not ratelimit.timed_out(exc)
+        )
 
     def _retry_wait_budget(self, failure: ratelimit.CallFailure | None = None) -> float:
         """Seconds of waiting one model call may spend across its retries (#337).
@@ -5173,8 +5338,14 @@ class Agent:
         waited: float = 0.0,
         budget: float = 0.0,
         bound: str = "",
+        observed: dict | None = None,
+        shrinking: bool = False,
     ) -> None:
         """A failed model call, as evidence (#261).
+
+        `observed` carries what was measured on this send (#419): `elapsed_s`,
+        and on a provider that counts them, `lost_connection` — how many sends
+        of this call have now lost their connection after going out.
 
         RENDERED, not log-only, and that is the whole point. This was
         `self.echo(...)` — a live-transport event that reached viewers and the
@@ -5220,6 +5391,7 @@ class Agent:
             "sent_chars": self._total_chars(),
             "sent_messages": len(self.messages),
             **failure.record(),
+            **(observed or {}),
         }
         if delay:
             step["waited_s"] = round(delay, 3)
@@ -5233,7 +5405,14 @@ class Agent:
         self._emit_step(**step)
         # The terminal has no trace timeline to draw the row on, so it gets the
         # sentence instead — `_note` is silent wherever `on_step` renders.
-        self._note(_model_error_line(failure, attempt, delay, final, bound))
+        self._note(_model_error_line(
+            failure, attempt, delay, final, bound, shrinking=shrinking,
+            lost=int((observed or {}).get("lost_connection", 0)),
+            timeout=(
+                _timeout_phrase((observed or {}).get("read_timeout_s"))
+                if (observed or {}).get("timed_out") else ""
+            ),
+        ))
 
     def _record_reasoning(self, turn: tuple) -> None:
         """Everything the model produced on one call, in full (#240).
@@ -5271,7 +5450,7 @@ class Agent:
             record["said"] = said_text
             if said_dropped:
                 record["said_truncated"] = said_dropped
-        for key in ("stop", "blocks", "malformed", "usage"):
+        for key in ("stop", "blocks", "malformed", "usage", "repetition", "close_error"):
             if meta.get(key):
                 record[key] = meta[key]
         if self._call_estimate is not None:
@@ -5353,6 +5532,12 @@ class Agent:
         # both, or every local-model turn records nothing and the absence reads
         # as "the provider did not say" when in fact nobody looked.
         stop = ""
+        # What was observed when a repeating reply was stopped (#417); None
+        # when it was not. The non-streaming path receives the reply whole, so
+        # there is nothing left there to stop.
+        stopped: dict | None = None
+        # What closing the stream raised, when nothing else was in flight.
+        close_error = ""
         if self.on_token is None:
             response = self.chat(**kwargs)
             message = response.message
@@ -5370,50 +5555,93 @@ class Agent:
             raw_calls = []
             usage = (0, 0)
             detail = None
-            for chunk in self.chat(stream=True, **kwargs):
-                if self._cancel.is_set():
-                    # Abandoning the iterator closes the connection, which
-                    # stops generation server-side — the fastest stop there is.
-                    raise TaskCancelled
-                # Ollama streams ~one chunk per generated token, so chunk
-                # count drives the live "↓ N tokens" readout on the ticker.
-                self.status.add_tokens(1)
-                message = chunk.message
-                if tchunk := getattr(message, "thinking", "") or "":
-                    thinking_parts.append(tchunk)
-                    # Live "Thinking: <gist>" on the web header: forward the
-                    # opening of the reasoning while it streams. Only the head
-                    # matters (the snippet is one line), so stop appending —
-                    # and stop emitting — once it's long enough.
-                    if len(thinking_head) < STATUS_SNIPPET_CHARS * 2:
-                        thinking_head += tchunk
-                        if snippet := _status_snippet(thinking_head):
-                            self.status.note(snippet)
-                if message.content:
-                    if not parts:
-                        self.status.stop()  # erase the live timer line first
+            # A reply whose tail has become one passage repeated is stopped
+            # rather than left to run to the output cap (#417). Observed only:
+            # the record says what the tail was, never why.
+            watch = repetition.RepetitionWatch()
+            repeated: repetition.Repetition | None = None
+            chunks_received = 0
+            started = time.perf_counter()
+            stream = self.chat(stream=True, **kwargs)
+            # False while anything could still be in flight: set only once
+            # the loop is left normally (finished, or stopped for repeating).
+            read_to_the_end = False
+            try:
+                for chunk in stream:
+                    if self._cancel.is_set():
+                        # Raising leaves through the `finally` below, which
+                        # closes the connection — and a closed connection stops
+                        # generation server-side, the fastest stop there is.
+                        raise TaskCancelled
+                    chunks_received += 1
+                    # Ollama streams ~one chunk per generated token, so chunk
+                    # count drives the live "↓ N tokens" readout on the ticker.
+                    self.status.add_tokens(1)
+                    message = chunk.message
+                    if tchunk := getattr(message, "thinking", "") or "":
+                        thinking_parts.append(tchunk)
+                        # Live "Thinking: <gist>" on the web header: forward the
+                        # opening of the reasoning while it streams. Only the
+                        # head matters (the snippet is one line), so stop
+                        # appending — and stop emitting — once it's long enough.
+                        if len(thinking_head) < STATUS_SNIPPET_CHARS * 2:
+                            thinking_head += tchunk
+                            if snippet := _status_snippet(thinking_head):
+                                self.status.note(snippet)
+                    if message.content:
+                        if not parts:
+                            self.status.stop()  # erase the live timer line first
+                            if self._held_answer is None:
+                                self.on_token("\n")
+                        parts.append(message.content)
                         if self._held_answer is None:
-                            self.on_token("\n")
-                    parts.append(message.content)
-                    if self._held_answer is None:
-                        self.on_token(message.content)
-                    else:
-                        # A bound turn's answer is a proposal until Verify has
-                        # seen it; streaming it would break the promise that a
-                        # rule is checked before the owner reads the answer.
-                        self._held_answer.append(message.content)
-                if message.tool_calls:
-                    raw_calls.extend(message.tool_calls)
-                if getattr(message, "raw_blocks", None):
-                    raw_blocks = message.raw_blocks
-                if _usage(chunk) != (0, 0):  # counts arrive on the final chunk
-                    usage = _usage(chunk)
-                    detail = _usage_detail(chunk)
-                # Last non-empty wins: like usage, the reason arrives on the
-                # final chunk, and an earlier chunk must not blank it.
-                stop = _stop_reason(message, chunk) or stop
+                            self.on_token(message.content)
+                        else:
+                            # A bound turn's answer is a proposal until Verify
+                            # has seen it; streaming it would break the promise
+                            # that a rule is checked before the owner reads it.
+                            self._held_answer.append(message.content)
+                    if message.tool_calls:
+                        raw_calls.extend(message.tool_calls)
+                    if getattr(message, "raw_blocks", None):
+                        raw_blocks = message.raw_blocks
+                    if _usage(chunk) != (0, 0):  # counts arrive on the final chunk
+                        usage = _usage(chunk)
+                        detail = _usage_detail(chunk)
+                    # Last non-empty wins: like usage, the reason arrives on the
+                    # final chunk, and an earlier chunk must not blank it.
+                    stop = _stop_reason(message, chunk) or stop
+                    # Reasoning only (#417). Every loop recorded was in the
+                    # reasoning, which nobody watches; an answer streams to
+                    # the owner, who has Stop — and an answer may legitimately
+                    # repeat itself (identical rows, a zero matrix, a rule).
+                    repeated = watch.feed(tchunk)
+                    if repeated is not None:
+                        break
+                read_to_the_end = True
+            finally:
+                # Closed explicitly, on every way out. Dropping the iterator
+                # leaves the close to the garbage collector, and the openai
+                # SDK's Stream holds itself in a reference cycle, so the HTTP
+                # response — and the server's generation — could outlive the
+                # call by an unbounded time. A failing close must never replace
+                # what is already in flight (a Stop, a failed call): that would
+                # turn the owner's Stop into a model error. With nothing in
+                # flight it is recorded on the call instead of raised.
+                if (close := getattr(stream, "close", None)) is not None:
+                    try:
+                        close()
+                    except Exception as exc:  # noqa: BLE001 — recorded, never raised
+                        if read_to_the_end:
+                            close_error = ratelimit.describe_chain(exc)
             content = "".join(parts)
             thinking = "".join(thinking_parts)
+            if repeated is not None:
+                stopped = {
+                    **repeated.record(),
+                    "chunks": chunks_received,
+                    "secs": round(time.perf_counter() - started, 3),
+                }
             if content and self._held_answer is None:
                 self.on_token("\n")
         self._response_meta = {
@@ -5434,6 +5662,10 @@ class Agent:
                 if getattr(getattr(c, "function", None), "malformed", False)
             ],
         }
+        if stopped:
+            self._response_meta["repetition"] = stopped
+        if close_error:
+            self._response_meta["close_error"] = close_error
         self._measure_fill(usage, detail, kwargs)
         self._anchor_prompt_size(usage, detail, kwargs)
         return content, [self._normalize_call(c) for c in raw_calls], usage, raw_blocks, thinking

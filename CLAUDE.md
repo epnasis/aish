@@ -62,7 +62,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 
 | Touching… | Read first |
 |---|---|
-| `agent.py`, `claude_max.py`, `approval.py`, `tools.py`, `files.py`, `web.py`, `backends.py`, `provenance.py`, `vouches.py`, `recipients.py`, `vault_writes.py` | `docs/agent-core.md` |
+| `agent.py`, `claude_max.py`, `approval.py`, `tools.py`, `files.py`, `web.py`, `backends.py`, `provenance.py`, `vouches.py`, `recipients.py`, `vault_writes.py`, `repetition.py` | `docs/agent-core.md` |
 | `browser.py`, `browse.py`, `signin.py`, `_browser_read`, `_login_gate`, `_browse_gate`, anything that renders or drives a page in Chrome | `docs/browser.md` |
 | `cli.py`, `prompt.py`, `aliases.py`, `dir_ignore.py`, `notify.py` | `docs/cli.md` |
 | `media.py`, `show_image`, anything that renders an image | `docs/media-and-images.md` |

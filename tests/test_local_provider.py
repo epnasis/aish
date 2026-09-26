@@ -176,15 +176,18 @@ class TestLocalWhatIsSent:
         assert sent["model"] == REPO
         # mlx-lm caps an unstated max_tokens at 512.
         assert sent["max_tokens"] == backends.DEFAULT_LOCAL_MAX_TOKENS == 16_384
-        assert sent["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+        assert sent["extra_body"] == {
+            "chat_template_kwargs": {"enable_thinking": True},
+            **backends.DEFAULT_LOCAL_SAMPLING,
+        }
         assert sent["tools"] == schemas
         assert "options" not in sent and "think" not in sent
 
     def test_think_off_says_so_rather_than_leaving_the_template_default(self):
         client = FakeClient()
         self._chat(client)(model=REPO, messages=[{"role": "user", "content": "x"}], think=False)
-        assert client.calls[0]["extra_body"] == {
-            "chat_template_kwargs": {"enable_thinking": False}
+        assert client.calls[0]["extra_body"]["chat_template_kwargs"] == {
+            "enable_thinking": False
         }
 
     def test_the_streaming_path_sends_the_same(self):

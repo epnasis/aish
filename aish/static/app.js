@@ -3309,8 +3309,17 @@ function traceStep(step) {
     let tail;
     if (step.action === "retry") {
       const secs = Math.round(step.waited_s || 0);
-      tail = secs ? `attempt ${step.attempt} — retrying in ${secs}s`
-                  : `attempt ${step.attempt} — retrying`;
+      // A second lost connection on local: sends a SMALLER request (#419);
+      // the trim row that follows says what was cut.
+      const how = step.lost_connection >= 2
+        ? `connection lost on ${step.lost_connection} sends — shortening the conversation, retrying`
+        : "retrying";
+      tail = secs ? `attempt ${step.attempt} — ${how} in ${secs}s`
+                  : `attempt ${step.attempt} — ${how}`;
+    } else if (step.bound === "lost_connection") {
+      // Ended by the count of lost connections, not by time or attempts: a
+      // request that may be what brings the server down is not sent again.
+      tail = `connection lost on ${step.lost_connection} sends of this call — not sent again`;
     } else if (step.scope === "long") {
       // The distinction the whole record exists for: a spent quota is not a
       // busy one, and telling the two apart is what stops a pointless Retry.
@@ -3325,6 +3334,11 @@ function traceStep(step) {
       tail = `waited ${waited}s, as long as this turn may — gave up after ${step.attempt} attempts`;
     } else {
       tail = `gave up after ${step.attempt} of ${step.attempts} attempts`;
+    }
+    if (step.timed_out) {
+      // aish's own clock expired (#419) — not a connection anyone saw drop.
+      const limit = typeof step.read_timeout_s === "number" ? ` of ${step.read_timeout_s} s` : "";
+      tail = `aish's read timeout${limit} expired · ${tail}`;
     }
     const into = t.thinkingRow ? stepUnder(t.thinkingRow) : null;
     traceRow(t, traceSvg("denied", "var(--red)"), `Model call failed — ${what}${status}`, tail, into)
@@ -4476,7 +4490,8 @@ function inspectKeys(rows) {
       // call started from, which is where the dossier files it. A trim that
       // fired BETWEEN calls is its own step — the same split explain.py makes
       // with MID_TURN_TRIM, and the list has to agree with that one.
-      ids[i] = ["mid_task_budget", "overflow_oldest_first", "mid_task_turns", "over_budget"]
+      ids[i] = ["mid_task_budget", "overflow_oldest_first", "lost_connection_oldest_first",
+                "mid_task_turns", "over_budget"]
         .includes(d.policy)
         ? `t${next("t")}`
         : "m1";

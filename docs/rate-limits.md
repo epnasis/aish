@@ -89,6 +89,14 @@ A `local:` reply stream that ends without a finish reason raises `StreamCutOff`.
 `transport` with `matched: stream_cut_off`, so a server that dies mid-reply is retried like one
 that refused the connection, never read as an empty answer (`docs/agent-core.md`, Backends).
 `TestLocalStreamCutOff`.
+On `local:` those two are no longer retried alike for two minutes (#419): a connection lost
+AFTER the request went out is re-sent unchanged once, then once with the history shrunk, and a
+third loss ends the turn (`bound: lost_connection`); a connection never made — `ConnectError`
+anywhere in the exception chain — delivered nothing and keeps the ordinary retry, and so does a
+timeout (`APITimeoutError` / `ReadTimeout`), which is aish's own clock expiring, not an observed
+drop, and is recorded as `timed_out` with `read_timeout_s`. The rule and
+its evidence are in `docs/agent-core.md` (Backends); here it is one more way a retry ends.
+`TestLocalLostConnection`.
 
 `UNKNOWN` is retryable **on purpose**. The old behaviour retried everything once; a
 classifier that silently stopped retrying a case it failed to recognise would be a
@@ -139,6 +147,10 @@ owner is reading.
 | `retry_after_s` + `retry_after_source` | The wait, and who said so. |
 | `scope` | Whether a Retry could ever work. |
 | `attempt` / `attempts` / `action` | `action` is **passed in, never re-derived from `waited_s`** — a provider may legitimately answer `Retry-After: 0`, and the last attempt of a retryable failure also waits zero. Both would record the opposite of what happened. |
+| `elapsed_s` | How long the failed send ran before it failed (#419) — aish's own clock. A connection lost at 0.2 s and one lost at 300 s are different events, and the record is the only place the difference survives. |
+| `exception_chain` | Transport failures only: the class names down the cause chain, outermost first (`["APIConnectionError", "RemoteProtocolError"]`). The SDK's text is "Connection error." whether the connection was never made or was lost mid-request, and on `local:` those route differently (#419), so the record carries what the verdict was a function of — the same reason `matched` exists. |
+| `timed_out`, `read_timeout_s` | Transport failures whose chain shows aish's own timeout expired (#419), and the read timeout the request carried when httpx stamped it. Said as "aish's read timeout of N s expired", never as a lost connection. |
+| `lost_connection` | On `local:`, how many sends of this model call have now lost their connection after the request went out (1, 2, 3). Absent where nothing is counted — another provider, or a connection never made. |
 | `sent_chars`, `sent_messages` | Chars, not an estimated token count: chars are a measured fact, and a token estimate here would wear the same unit as the provider's own number and invite a false comparison (#262). |
 | `text` + `truncated` + `cap_source` | Capped at `MODEL_ERROR_CHARS`, saying which cap cut it (contract §8.5). |
 
@@ -221,7 +233,9 @@ its minute was busy, with nobody there to press Retry.
 `test_an_unattended_session_waits_out_a_busy_quota_like_a_user`, `test_one_ceiling_for_every_origin`.
 
 `bound` on the record names which limit ended the retry — `wait_budget`, `attempt_cap`,
-`not_retryable` or, since #388, `trim_exhausted` (§7) — alongside `wait_budget_s` and
+`not_retryable`, since #388 `trim_exhausted` (§7), or since #419 `lost_connection` (a `local:`
+call whose connection was lost on its third send, or on its second with nothing left to
+shrink) — alongside `wait_budget_s` and
 `waited_total_s`. Without it a reader sees
 *"gave up on attempt 5 of 8"* and cannot tell a spent budget from a bug that stopped early;
 the same provenance discipline §6 applies to the three bounds on a page. `attempts` still

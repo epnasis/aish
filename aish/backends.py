@@ -20,6 +20,7 @@ import base64
 import copy
 import functools
 import json
+import math
 import mimetypes
 import os
 import threading
@@ -279,11 +280,68 @@ DEFAULT_LOCAL_CTX = 98_304
 # mlx-lm answers a request that names no `max_tokens` with at most 512 tokens,
 # which cuts a tool call or an answer off mid-sentence; aish always says.
 DEFAULT_LOCAL_MAX_TOKENS = 16_384
+LOCAL_SAMPLING_ENV = "AISH_LOCAL_SAMPLING"
+# Sampling sent on every `local:` request (#417), because the server's own
+# default is greedy: mlx-lm 0.31.3 takes `temperature` from the request, else
+# its `--temp`, which defaults to 0.0 (server.py ~1174), and it does not read
+# the model's generation_config.json. temperature/top_p/top_k are what that
+# file says for Qwen3.6-35B-A3B on mi (1.0 / 0.95 / 20). presence_penalty has
+# no server flag at all (server.py ~1182 reads it from the body, default 0.0),
+# so only a request can set it.
+#
+# Measured 2026-09-26 on mi, replaying the exact request of the call that
+# filed #417 (46,954 prompt tokens): greedy looped on 2 of 2 runs; the
+# generation_config sampling on 1 of 3; the same plus presence_penalty 1.5 on
+# 0 of 4, each answering in 3-73 s. Small samples — 2, 3 and 4 runs — so this
+# is the best-measured choice, not a proven one.
+DEFAULT_LOCAL_SAMPLING: dict[str, float | int] = {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20,
+    "presence_penalty": 1.5,
+}
+# The request-body sampling fields mlx-lm 0.31.3 reads (server.py ~1174-1195),
+# and which of them it insists are whole numbers (`validate_model_parameters`).
+# A key outside this list is refused at startup: the server would ignore a
+# misspelt one silently, and the owner would be tuning nothing.
+# Each maps to the (min, max) its `_validate` call allows, None where it sets
+# no bound — mlx-lm would answer anything outside with an HTTP error on every
+# request, so it is refused once, at startup, instead.
+LOCAL_SAMPLING_RANGES: dict[str, tuple[float | None, float | None]] = {
+    "temperature": (0, None),
+    "top_p": (0, 1),
+    "top_k": (0, None),
+    "min_p": (0, 1),
+    "presence_penalty": (None, None),
+    "presence_context_size": (0, None),
+    "frequency_penalty": (None, None),
+    "frequency_context_size": (0, None),
+    "repetition_penalty": (0, None),
+    "repetition_context_size": (0, None),
+    "xtc_probability": (0, 1),
+    "xtc_threshold": (0, 1),
+    "seed": (None, None),
+}
+LOCAL_SAMPLING_KEYS = frozenset(LOCAL_SAMPLING_RANGES)
+LOCAL_SAMPLING_INT_KEYS = frozenset({
+    "top_k", "presence_context_size", "frequency_context_size", "repetition_context_size",
+    "seed",
+})
+# mlx-lm validates these as `float` alone, so a JSON `0` would be refused.
+LOCAL_SAMPLING_FLOAT_KEYS = frozenset({"xtc_probability", "xtc_threshold"})
 # Providers whose streams always end with a finish_reason, checked in the
 # server's source (mlx-lm 0.31.3 `handle_completion` writes one on every path
 # that finishes, then `[DONE]`). A stream from these that ends without one was
 # cut off, not answered. Cloud providers are not listed: unverified.
 FINISH_REASON_ALWAYS_SENT = frozenset({LOCAL})
+# Providers on which a request that lost its connection AFTER it was sent is
+# re-sent unchanged at most once per model call, then shrunk once, then given
+# up on (#419, `Agent._chat_turn`). On the owner's own server one request holds
+# the whole machine, and mi's logs show it dying under a request (Metal out of
+# memory, 2026-09-26) and restarting in ~2 s: re-sending that request for two
+# minutes kills it again on every attempt. A cloud provider's connection drop
+# says nothing observed about the request, so cloud keeps the plain retry.
+RESEND_ONCE_AFTER_LOST_CONNECTION = frozenset({LOCAL})
 # The openai SDK refuses to build a client without some key; a local server
 # without auth ignores whatever arrives.
 LOCAL_API_KEY_PLACEHOLDER = "aish-local-no-key"
@@ -408,6 +466,54 @@ def local_max_tokens() -> int:
     return _positive_int_env(LOCAL_MAX_TOKENS_ENV, DEFAULT_LOCAL_MAX_TOKENS)
 
 
+def local_sampling() -> dict[str, float | int]:
+    """The sampling fields every `local:` request carries (#417).
+
+    `AISH_LOCAL_SAMPLING` is a JSON object that REPLACES the defaults whole, so
+    a field can be dropped as well as changed (`{}` sends none, and the server
+    falls back to its own flags). Anything it cannot mean is a `BackendError`
+    here, never a silent default: not an object, a key mlx-lm does not read,
+    a value that is not a finite number, a fraction where mlx-lm wants a whole
+    one (or a whole one where it wants a decimal), or a value outside the range
+    mlx-lm's `validate_model_parameters` accepts.
+    """
+    raw = os.environ.get(LOCAL_SAMPLING_ENV, "").strip()
+    if not raw:
+        return dict(DEFAULT_LOCAL_SAMPLING)
+    example = f"e.g. `export {LOCAL_SAMPLING_ENV}='{json.dumps(DEFAULT_LOCAL_SAMPLING)}'`"
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        raise BackendError(f"{LOCAL_SAMPLING_ENV}={raw!r} is not a JSON object — {example}")
+    for key, number in value.items():
+        if key not in LOCAL_SAMPLING_KEYS:
+            raise BackendError(
+                f"{LOCAL_SAMPLING_ENV}: {key!r} is not a sampling field the server reads "
+                f"(known: {', '.join(sorted(LOCAL_SAMPLING_KEYS))})"
+            )
+        whole = isinstance(number, int) and not isinstance(number, bool)
+        if key in LOCAL_SAMPLING_INT_KEYS and not whole:
+            raise BackendError(
+                f"{LOCAL_SAMPLING_ENV}: {key} must be a whole number, not {number!r}"
+            )
+        if not whole and not isinstance(number, float):
+            raise BackendError(f"{LOCAL_SAMPLING_ENV}: {key} must be a number, not {number!r}")
+        if key in LOCAL_SAMPLING_FLOAT_KEYS and not isinstance(number, float):
+            raise BackendError(
+                f"{LOCAL_SAMPLING_ENV}: {key} must be written as a decimal (e.g. 0.0), "
+                f"not {number!r}"
+            )
+        if not math.isfinite(number):
+            raise BackendError(f"{LOCAL_SAMPLING_ENV}: {key} must be finite, not {number!r}")
+        low, high = LOCAL_SAMPLING_RANGES[key]
+        if (low is not None and number < low) or (high is not None and number > high):
+            bounds = f"at least {low}" if high is None else f"between {low} and {high}"
+            raise BackendError(f"{LOCAL_SAMPLING_ENV}: {key} must be {bounds}, not {number!r}")
+    return value
+
+
 # How each provider carries aish's SECOND system message — the per-task
 # reminder holding the knowledge index, the preloaded skills and the rule prose.
 # "first_only" means it reaches the model relabelled as a USER message.
@@ -506,9 +612,12 @@ def make_chat(model_arg: str, client=None) -> tuple[Callable, str, str]:
                 f"{LOCAL_CTX_ENV}={window}: the window holds the whole request, answer "
                 f"included, so it must be larger than the answer cap"
             )
+        sampling = local_sampling()  # a bad AISH_LOCAL_SAMPLING fails here too
         if client is None:
             client = _local_client()
-        backend = OpenAICompatBackend(client, provider_name, max_tokens=max_tokens)
+        backend = OpenAICompatBackend(
+            client, provider_name, max_tokens=max_tokens, sampling=sampling
+        )
         return governed(backend, provider_name), provider_name, model_name
     if client is None:
         api_key = os.environ.get(provider.env_key, "").strip()
@@ -578,7 +687,27 @@ def _governed_stream(chunks, key: str, ticket):
     except Exception as exc:  # noqa: BLE001 — observed, then re-raised as-is
         _settle_failure(key, ticket, exc)
         raise
+    finally:
+        # A consumer that stops early closes THIS generator; the close must
+        # reach the adapter's stream too, or its connection stays open.
+        _close(chunks)
     ticket.settle(getattr(last, "prompt_eval_count", 0) or 0)
+
+
+def _close(stream: object) -> None:
+    """Close a stream if it can be closed. Every consumer that stops reading
+    early relies on this reaching the HTTP response: a server keeps generating
+    for a connection that is still open (mlx-lm 0.31.3 stops only when a write
+    to the client fails, `handle_completion`).
+
+    Never raises: it runs in `finally` on every way out, and a failing close
+    must not replace what is in flight — a Stop, a cut-off stream — with an
+    error about a connection that was being given up anyway."""
+    if (close := getattr(stream, "close", None)) is not None:
+        try:
+            close()
+        except Exception:  # noqa: BLE001, S110 — see the docstring
+            pass
 
 
 def _settle_failure(key: str, ticket, exc: BaseException) -> None:
@@ -758,10 +887,18 @@ class OpenAICompatBackend:
     """Chat-completions backend for any OpenAI-compatible API (OpenAI, Gemini,
     a `local:` server)."""
 
-    def __init__(self, client, provider_name: str, max_tokens: int | None = None):
+    def __init__(
+        self,
+        client,
+        provider_name: str,
+        max_tokens: int | None = None,
+        sampling: dict[str, float | int] | None = None,
+    ):
         self.client = client
         self.provider = provider_name
         self.max_tokens = max_tokens
+        # Request-body sampling fields, sent verbatim (`local_sampling`, #417).
+        self.sampling = dict(sampling or {})
 
     def __call__(
         self,
@@ -782,7 +919,10 @@ class OpenAICompatBackend:
         if self.provider == LOCAL:
             # Thinking on a self-hosted Qwen-style model is a chat-template
             # switch; mlx-lm reads `chat_template_kwargs` per request.
-            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": bool(think)}}
+            kwargs["extra_body"] = {
+                "chat_template_kwargs": {"enable_thinking": bool(think)},
+                **self.sampling,
+            }
         if self.provider == "gemini":
             # Surface thought summaries so the trace can show what the model
             # is thinking; the tagged text is split out of content below and
@@ -824,6 +964,16 @@ class OpenAICompatBackend:
             if not _rejects_stream_options(exc):
                 raise
             chunks = self.client.chat.completions.create(stream=True, **kwargs)
+        try:
+            yield from self._read_stream(chunks)
+        finally:
+            # The openai SDK's Stream holds itself in a reference cycle (its
+            # iterator's frame refers back to it), so a consumer that stops
+            # early would leave the response open until the garbage collector
+            # got round to it — and the server generating into it (#417).
+            _close(chunks)
+
+    def _read_stream(self, chunks):
         # Tool-call fragments must be accumulated across chunks; only text
         # deltas are useful to the caller incrementally. OpenAI numbers
         # concurrent calls with an integer index; Gemini's compat layer sends
