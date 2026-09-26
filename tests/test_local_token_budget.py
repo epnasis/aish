@@ -20,7 +20,7 @@ from aish.backends import BackendError, make_chat
 
 REPO = "mlx-community/Qwen3.6-35B-A3B-8bit"
 KEY = f"local:{REPO}"
-# The fake tokenizer's density, inside the 3.30-4.05 measured on mi.
+# The fake tokenizer's density, inside the 3.416-4.169 measured on mi (#416).
 CHARS_PER_TOKEN = 3.5
 
 
@@ -125,7 +125,7 @@ class TestTheWindowIsTheWholeRequest:
         assert first["prompt_estimate"]["ratio_source"].startswith("constant:")
         # The first count anchored the second estimate: exact plus the growth.
         assert second["prompt_estimate"]["basis"] == "anchored"
-        assert second["prompt_estimate"]["ratio_source"] == "learned:min_of_1"
+        assert second["prompt_estimate"]["ratio_source"].startswith("learned:min_of_1*")
         assert second["tokens"][0] <= second["prompt_estimate"]["tokens"]
 
     def test_the_answer_cap_must_fit_inside_the_window(self, monkeypatch):
@@ -339,8 +339,10 @@ class TestTheRatioLedger:
         token_ratio.observe(KEY, 40_000, 10_000)  # 4.0
         token_ratio.observe(KEY, 33_000, 10_000)  # 3.3
         token_ratio.observe(KEY, 38_000, 10_000)  # 3.8
-        assert token_ratio.ratio(KEY).chars_per_token == pytest.approx(3.3)
-        assert token_ratio.ratio(KEY).source == "learned:min_of_3"
+        assert token_ratio.ratio(KEY).chars_per_token == pytest.approx(
+            3.3 * token_ratio.sparse_trust(3)
+        )
+        assert token_ratio.ratio(KEY).source.startswith("learned:min_of_3*SPARSE_FLOOR")
 
     def test_it_is_per_model(self):
         token_ratio.observe(KEY, 40_000, 10_000)
@@ -349,10 +351,11 @@ class TestTheRatioLedger:
     def test_it_survives_a_restart_and_seeds_a_new_chat(self, monkeypatch, tmp_path):
         token_ratio.observe(KEY, 36_000, 10_000)
         token_ratio.reset()  # a new process
-        assert token_ratio.ratio(KEY).chars_per_token == pytest.approx(3.6)
+        one = 3.6 * token_ratio.SPARSE_FLOOR
+        assert token_ratio.ratio(KEY).chars_per_token == pytest.approx(one)
         agent = Agent(model=REPO, approve=lambda _c: True, client_chat=lambda **_: None)
         agent.provider = "local"
-        assert agent._prompt_estimate()["chars_per_token"] == pytest.approx(3.6)
+        assert agent._prompt_estimate()["chars_per_token"] == pytest.approx(one, abs=1e-3)
 
     def test_only_the_recent_samples_are_kept(self):
         token_ratio.observe(KEY, 20_000, 10_000)  # 2.0, the oldest
@@ -377,7 +380,9 @@ class TestTheRatioLedger:
         assert token_ratio.ratio("local:x").source.startswith("constant:")
         token_ratio.observe("local:x", 35_000, 10_000)  # and writing still works
         token_ratio.reset()
-        assert token_ratio.ratio("local:x").chars_per_token == pytest.approx(3.5)
+        assert token_ratio.ratio("local:x").chars_per_token == pytest.approx(
+            3.5 * token_ratio.SPARSE_FLOOR
+        )
 
     def test_an_unwritable_ledger_never_raises(self, monkeypatch, tmp_path):
         blocker = tmp_path / "a-file"
@@ -385,7 +390,9 @@ class TestTheRatioLedger:
         monkeypatch.setenv("AISH_STATE_DIR", str(blocker / "state"))
         token_ratio.reset()
         token_ratio.observe(KEY, 35_000, 10_000)
-        assert token_ratio.ratio(KEY).chars_per_token == pytest.approx(3.5)
+        assert token_ratio.ratio(KEY).chars_per_token == pytest.approx(
+            3.5 * token_ratio.SPARSE_FLOOR
+        )
 
 
 class TestOtherProvidersAreUnchanged:
@@ -400,3 +407,186 @@ class TestOtherProvidersAreUnchanged:
 
     def test_the_default_window_is_the_whole_request(self):
         assert backends.context_window("local") == (98_304, "backend:local:98304")
+
+
+class TestTheSparseLedger:
+    """#416: one sample is not the minimum. The ledger held ONE ratio, 4.04,
+    and handed it out as the floor for a model measured at 3.416-4.169."""
+
+    def test_one_sample_at_the_top_of_the_measured_range_is_below_its_bottom(self):
+        token_ratio.observe(KEY, 416_900, 100_000)  # 4.169, the highest measured
+        assert token_ratio.ratio(KEY).chars_per_token < 3.416  # the lowest measured
+
+    def test_the_discount_shrinks_to_none_at_a_full_ledger(self):
+        trust = [token_ratio.sparse_trust(n) for n in range(1, token_ratio.SAMPLES_KEPT + 1)]
+        assert trust[0] == pytest.approx(token_ratio.SPARSE_FLOOR)
+        assert trust == sorted(trust)
+        assert trust[-1] == 1.0
+        for _ in range(token_ratio.SAMPLES_KEPT):
+            token_ratio.observe(KEY, 40_000, 10_000)
+        ratio = token_ratio.ratio(KEY)
+        assert ratio.chars_per_token == pytest.approx(4.0), "min-of-recent, as before"
+        assert ratio.source == f"learned:min_of_{token_ratio.SAMPLES_KEPT}"
+
+
+def _logged_agent(monkeypatch, tmp_path, server, log, *, model=REPO):
+    """A `local:` agent whose trace records land in a session log the way
+    aish-web writes them, with the `sent` bytes in the chat's store."""
+    monkeypatch.setenv("AISH_LOCAL_URL", "http://mi.lan:8080/v1")
+    monkeypatch.setenv("AISH_LOCAL_CTX", str(10**6))
+    monkeypatch.setenv("AISH_LOCAL_MAX_TOKENS", "1000")
+    chat, _, _ = make_chat(f"local:{model}", client=server)
+
+    def write(step):
+        with log.open("a") as f:
+            f.write(json.dumps({"kind": "trace", "step": step}) + "\n")
+
+    agent = Agent(
+        model=model, approve=lambda _c: True, client_chat=chat, cwd=str(tmp_path),
+        state_dir=str(tmp_path / "state"), step_log=write, current_session=lambda: log,
+    )
+    agent.provider = "local"
+    return agent
+
+
+class TestTheColdStartSeed:
+    """#416: the first call after #415 shipped estimated at 2.0 while its own
+    chat log held 90 earlier calls to the same model, every request stored."""
+
+    def _chat_with_calls(self, monkeypatch, tmp_path, calls=3):
+        log = tmp_path / "session-20260926-000000-000000.jsonl"
+        server = CountingServer([("done", None)] * calls)
+        agent = _logged_agent(monkeypatch, tmp_path, server, log)
+        for i in range(calls):
+            agent.run_task(f"question {i} " + "x" * (500 * i))
+        live = json.loads(token_ratio._path().read_text())[KEY]
+        return log, live
+
+    def _forget_the_ledger(self):
+        token_ratio._path().unlink()
+        token_ratio.reset()
+
+    def test_the_log_rebuilds_the_same_measure_the_ledger_learned_live(
+        self, monkeypatch, tmp_path
+    ):
+        log, live = self._chat_with_calls(monkeypatch, tmp_path)
+        rebuilt = token_ratio.recorded_samples(log, tmp_path / "state", "local", REPO)
+        assert [list(s) for s in rebuilt] == live
+        newest = token_ratio.recorded_samples(log, tmp_path / "state", "local", REPO, limit=1)
+        assert [list(s) for s in newest] == live[-1:]
+
+    def test_an_empty_ledger_is_seeded_from_the_chats_own_calls(self, monkeypatch, tmp_path):
+        log, live = self._chat_with_calls(monkeypatch, tmp_path)
+        self._forget_the_ledger()  # a lost ledger, or calls made before #415
+        restarted = _logged_agent(monkeypatch, tmp_path, CountingServer([]), log)
+        estimate = restarted._prompt_estimate()
+        assert estimate["ratio_source"].startswith(f"learned:min_of_{len(live)}")
+        lowest = min(chars / tokens for chars, tokens in live)
+        assert estimate["chars_per_token"] == pytest.approx(
+            lowest * token_ratio.sparse_trust(len(live)), abs=1e-3
+        )
+        assert json.loads(token_ratio._path().read_text())[KEY] == live, "kept"
+
+    def test_a_model_the_chat_never_called_keeps_the_cautious_default(
+        self, monkeypatch, tmp_path
+    ):
+        log, _ = self._chat_with_calls(monkeypatch, tmp_path)
+        self._forget_the_ledger()
+        other = _logged_agent(monkeypatch, tmp_path, CountingServer([]), log, model="other/m")
+        assert other._prompt_estimate()["ratio_source"].startswith("constant:")
+
+    def test_a_ledger_that_has_samples_keeps_its_own(self, monkeypatch, tmp_path):
+        log, _ = self._chat_with_calls(monkeypatch, tmp_path)
+        self._forget_the_ledger()
+        token_ratio.observe(KEY, 30_000, 10_000)
+        restarted = _logged_agent(monkeypatch, tmp_path, CountingServer([]), log)
+        assert restarted._prompt_estimate()["ratio_source"].startswith("learned:min_of_1*")
+
+    def test_the_log_is_read_once_per_model(self, monkeypatch, tmp_path):
+        log = tmp_path / "session-empty.jsonl"
+        reads = []
+        monkeypatch.setattr(
+            token_ratio, "recorded_samples", lambda *a: reads.append(a) or []
+        )
+        agent = _logged_agent(monkeypatch, tmp_path, CountingServer([]), log)
+        agent._prompt_estimate()
+        agent._prompt_estimate()
+        assert len(reads) == 1
+
+    def test_what_was_not_sent_as_stored_is_no_evidence(self, monkeypatch, tmp_path):
+        """A scrubbed secret or stripped media makes the stored bytes differ
+        from the sent ones; a purged blob is gone. Each call is skipped alone."""
+        log, live = self._chat_with_calls(monkeypatch, tmp_path)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        sent = [r["step"] for r in records if r["step"]["kind"] == "sent"]
+        sent[0]["messages"][0]["scrubbed"] = 1
+        sent[1]["messages"][-1]["digest"] = "0" * 64
+        log.write_text("".join(json.dumps(r) + "\n" for r in records) + "{torn line\n")
+        rebuilt = token_ratio.recorded_samples(log, tmp_path / "state", "local", REPO)
+        assert [list(s) for s in rebuilt] == live[2:]
+
+    def test_a_seed_is_the_densest_call_and_the_newest_few(self):
+        """One chat's calls are correlated evidence: few of them are kept, so
+        the taper still applies, and the densest is always one of them."""
+        older_denser = (36_000, 10_000)  # 3.6, the incident's older, denser call
+        newer = [(38_000 + i, 10_000) for i in range(30)]
+        kept = token_ratio.seed(KEY, [older_denser, *newer])
+        assert kept == token_ratio.SEEDED_SAMPLES
+        ledger = json.loads(token_ratio._path().read_text())[KEY]
+        assert ledger == [list(older_denser), *[list(s) for s in newer[-(kept - 1):]]]
+        ratio = token_ratio.ratio(KEY)
+        assert ratio.chars_per_token == pytest.approx(3.6 * token_ratio.sparse_trust(kept))
+        assert "SPARSE_FLOOR_taper" in ratio.source
+
+    def test_a_reset_looks_for_evidence_again(self, monkeypatch, tmp_path):
+        """/new and /resume reset and then switch the session log."""
+        reads = []
+        monkeypatch.setattr(
+            token_ratio, "recorded_samples", lambda *a: reads.append(a) or []
+        )
+        agent = _logged_agent(monkeypatch, tmp_path, CountingServer([]), tmp_path / "s.jsonl")
+        agent._prompt_estimate()
+        agent.reset()
+        agent._prompt_estimate()
+        assert len(reads) == 2
+
+    def test_an_unreadable_log_is_no_evidence(self, tmp_path):
+        missing = tmp_path / "gone.jsonl"
+        assert token_ratio.recorded_samples(missing, tmp_path, "local", REPO) == []
+
+
+class TestThePluginMenuIsInTheFirstEstimate:
+    def test_the_boundary_trim_counts_the_menu_the_call_will_carry(
+        self, monkeypatch, tmp_path, project_scope
+    ):
+        """#416: a fresh agent scanned its plugin tools only at its first
+        model call, after the boundary trim had fitted a request without
+        them, so `_enforce_budget` found the call over budget again."""
+        tool = tmp_path / ".aish" / "tools" / "big_tool"
+        tool.mkdir(parents=True)
+        (tool / "TOOL.md").write_text(
+            "---\nname: big_tool\ndescription: " + "d " * 20_000 + "\nexec: ./run.sh\n"
+            "mutating: no\nreturns: text\n"
+            'schema: {"text": {"type": "string", "required": true}}\n---\nbody\n'
+        )
+        (tool / "run.sh").write_text("#!/bin/sh\necho hi\n")
+        (tool / "run.sh").chmod(0o755)
+        prefix = _fixed_prefix_tokens(monkeypatch, tmp_path / "probe-dir")
+        max_tokens = 2_000
+        # The plugin schema alone is ~20k tokens at the first call's 2.0
+        # chars/token: more than the quarter of the budget between the low
+        # water a trim cuts to and the budget itself.
+        ctx = prefix + max_tokens + 30_000
+        steps: list[dict] = []
+        agent = _agent(monkeypatch, tmp_path, CountingServer([("done", None)]), ctx=ctx,
+                       max_tokens=max_tokens, steps=steps)
+        for i in range(30):
+            agent.messages.append({"role": "user", "content": f"and page {i}?"})
+            agent.messages.append({"role": "tool", "tool_name": "read_docs",
+                                   "content": f"{i}: " + "lorem ipsum " * 700})
+        agent.run_task("summarise")
+
+        assert "big_tool" in agent._plugin_tools, "not vacuous: the menu carried it"
+        acted = [s["policy"] for s in steps
+                 if s["kind"] == "trim" and (s["affected"] or s.get("fits") is False)]
+        assert acted == ["budget_oldest_first"], "one trim, fitted to what was sent"

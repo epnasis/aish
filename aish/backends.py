@@ -1026,6 +1026,15 @@ def request_chars(provider_name: str, messages: list, tools: list) -> int:
     """
     if provider_name == LOCAL:
         messages = convert_messages(messages)
+    return payload_chars(messages, tools)
+
+
+def payload_chars(messages: list, tools: list) -> int:
+    """`request_chars` of messages already in the shape the provider receives.
+
+    The one definition of the measure, so a request rebuilt from the `sent`
+    record's stored messages (#416) is measured exactly as a live one is.
+    """
     return len(json.dumps(messages, default=str)) + len(json.dumps(tools, default=str))
 
 

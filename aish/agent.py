@@ -3069,12 +3069,27 @@ def _serialize(message: dict) -> dict:
 
 
 def _canonical(value: Any) -> str:
-    """The one serialisation the `sent` record's digests are taken over (#352):
-    sorted keys, no whitespace, unescaped non-ASCII. Two writers that agree
-    on the bytes agree on the digest; `default=str` keeps a value no JSON
-    encoder knows from raising inside a model call, at the cost that such a
-    value is recorded as its `str()`."""
+    """The serialisation the `received` record's digest is taken over (#355),
+    and the one `sent` used before #420: sorted keys, no whitespace,
+    unescaped non-ASCII. Two writers that agree on the bytes agree on the
+    digest; `default=str` keeps a value no JSON encoder knows from raising
+    inside a model call, at the cost that such a value is recorded as its
+    `str()`. A REQUEST is stored with `_as_sent` instead, because sorting
+    changes what the model was given."""
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _as_sent(value: Any) -> str:
+    """The serialisation the `sent` record stores a request in (#420): the
+    `_canonical` form WITHOUT sorting, so every object's keys stay in the
+    order the adapter handed them to the client library — which is the
+    wire's order on the OpenAI SDK, and not on ollama, whose library rebuilds
+    the request in its own field order (docs/trace-contract.md, the #420
+    note). Key order is part of the
+    prompt wherever a server's chat template renders the request as JSON text
+    (Qwen's renders the tool schemas): the sorted form of one real request was
+    164 tokens shorter than what was sent and replayed to a different reply."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def _scrub_tree(value: Any) -> tuple[Any, int]:
@@ -3340,6 +3355,10 @@ class Agent:
         # reported for it. The next request is sized from it plus an estimate
         # of what was added since; any rewrite of history drops it.
         self._token_anchor: tuple[str, int, int] | None = None
+        # The `provider:model` keys this agent has already looked for in its
+        # own chat log to seed an empty ratio ledger with (#416): once each,
+        # so a chat with no recorded calls is not re-read on every estimate.
+        self._ratio_seed_tried: set[str] = set()
         # THIS call's estimate, for its `reasoning` record beside the count.
         self._call_estimate: dict | None = None
         self._over_budget_recorded = False  # per task; see _reset_task_state
@@ -3612,6 +3631,9 @@ class Agent:
         """Drop the conversation, keep the system prompt."""
         del self.messages[1:]
         self.context_fill = None
+        # The terminal's /new and /resume reset and then switch the session
+        # log, so the next estimate may look for evidence in a different chat.
+        self._ratio_seed_tried.clear()
         self._history_rewritten()
 
     def _history_rewritten(self) -> None:
@@ -5949,6 +5971,7 @@ class Agent:
         own words are cut too — oldest first, never at or after
         `protect_from` (the task being prepared), never a system message.
         """
+        self._menu_for_estimate()
         if budget is None:
             budget, _ = self._history_budget()
             target = self._low_water(budget)
@@ -5991,6 +6014,22 @@ class Agent:
             estimate_before=estimate_before, low_water=target,
         )
 
+    def _menu_for_estimate(self) -> None:
+        """Scan the plugin tools before a `local:` size is taken, because the
+        estimate counts the menu the next call will send (#416).
+
+        A fresh agent holds no plugin tools until something scans them, and
+        the first scan used to come AFTER the boundary trim (the rule seeding
+        and the call itself do it): in `session-20260925-204008-294943`, turn
+        22, the boundary trim's `estimate_after` (69,432 tokens at 2.0) is
+        exactly the stored request that went out less its reminder, its
+        question and its 33 plugin schemas (44,684 characters), so the menu
+        the call carried was never in what the trim fitted, and the call went
+        out marked `over_budget`. Other providers do not count the menu, so
+        they are left alone."""
+        if self._token_budgeted():
+            self._refresh_plugin_tools()
+
     def _estimate_for_record(self) -> int | None:
         return self._history_size() if self._token_budgeted() else None
 
@@ -6000,7 +6039,18 @@ class Agent:
         menu, the task in hand and its two newest results — is estimated above
         what the budget allows. The call goes out anyway, since the one thing
         left to cut is the task itself, and the record says so, once per task
-        (#415). Only from `_enforce_budget`, which runs right before a call."""
+        (#415). Only from `_enforce_budget`, which runs right before a call.
+
+        Nothing downstream bounds that send (#416). mlx-lm 0.31.3, the only
+        `local:` server checked, has no context-length check: its request
+        handler's only 400s are a bad Content-Length, bad JSON and a body that
+        is not an object (`mlx_lm/server.py` 1129/1140/1153 on mi), so the
+        #388 shrink-and-retry, which needs a provider refusal, never fires
+        here. The server prefills whatever arrives. Whether that fits is
+        decided by its memory, and a stream it drops is retried as-is
+        (`StreamCutOff`). `fits: false` is an estimate, and so it can be
+        wrong in either direction: in #416 it was a 2.0 constant's
+        over-count of a request the server read as 46,954 tokens."""
         if not self._token_budgeted() or self._over_budget_recorded:
             return
         estimate = self._history_size()
@@ -6123,6 +6173,7 @@ class Agent:
         by step 7 with no trace of when or why. That is worse than an unrecorded
         omission: the log still holds the full text, so it positively suggests
         the model had something it did not."""
+        self._menu_for_estimate()
         budget, _ = self._history_budget()
         if self._history_size() <= budget:
             return
@@ -7199,13 +7250,16 @@ class Agent:
 
         The bytes go to the per-chat store (`turns.py`): one entry per provider
         message, the tools payload and, where the provider carries one, the
-        system parameter, each as its canonical JSON serialisation. The record
+        system parameter, each as its compact JSON serialisation with keys in
+        the order the adapter handed them over (`_as_sent`, #420). The record
         holds the digests, the sizes, where each message came from on the aish
         side (`origin`, a list where several were merged), whether that message
-        was a trimmer's stub, and a `request` digest of the whole canonical
-        payload — so a reassembly from the manifest can be checked
-        byte-for-byte against what the adapter sent. Base64 media is replaced
-        by a placeholder naming the file and its size before storing; the
+        was a trimmer's stub, the top-level key `order`, and a `request`
+        digest of the whole payload in that order — so a reassembly from the
+        manifest can be checked byte-for-byte against the payload the adapter
+        reported (not against wire bytes: the client library may reorder).
+        Base64 media is replaced by a placeholder naming the file and its
+        size before storing; the
         manifest carries the same, and the reader states that as *never
         stored*.
 
@@ -7230,7 +7284,7 @@ class Agent:
             entries = request.media[at] if at < len(request.media) else []
             stored = backends.without_media(message, entries) if entries else message
             stored, scrubbed = _scrub_tree(stored)
-            blob = _canonical(stored)
+            blob = _as_sent(stored)
             item: dict[str, Any] = {
                 "at": at,
                 "role": message.get("role"),
@@ -7260,11 +7314,11 @@ class Agent:
             manifest.append(item)
             stored_messages.append(stored)
         # Everything else the client was handed, round-tripped through the
-        # canonical form so a value no JSON encoder knows cannot raise inside
-        # the log writer.
+        # stored form so a value no JSON encoder knows cannot raise inside
+        # the log writer — in the order it was handed, never sorted (#420).
         own = {k: v for k, v in payload.items() if k not in ("messages", "tools", "system")}
-        options = json.loads(_canonical(own))
-        stored_payload: dict[str, Any] = {**options, "messages": stored_messages}
+        options = json.loads(_as_sent(own))
+        stored_parts: dict[str, Any] = {**options, "messages": stored_messages}
         record: dict[str, Any] = {
             "provider": request.provider,
             "model": payload.get("model"),
@@ -7272,7 +7326,7 @@ class Agent:
         }
         if "tools" in payload:
             tools_stored, scrubbed = _scrub_tree(payload["tools"])
-            blob = _canonical(tools_stored)
+            blob = _as_sent(tools_stored)
             record["tools"] = {
                 "digest": turns.put(blob, self.state_dir, session),
                 "chars": len(blob),
@@ -7280,7 +7334,7 @@ class Agent:
             }
             if scrubbed:
                 record["tools"]["scrubbed"] = scrubbed
-            stored_payload["tools"] = tools_stored
+            stored_parts["tools"] = tools_stored
         if "system" in payload:
             # Anthropic: the hoisted system text, a plain string parameter.
             system_text, scrubbed = _scrub_tree(str(payload["system"]))
@@ -7292,11 +7346,18 @@ class Agent:
                 record["system"]["origin"] = list(request.system_origins)
             if scrubbed:
                 record["system"]["scrubbed"] = scrubbed
-            stored_payload["system"] = system_text
+            stored_parts["system"] = system_text
         record["options"] = options
-        canonical = _canonical(stored_payload)
-        record["request"] = turns.digest_of(canonical)
-        record["chars"] = len(canonical)
+        # The top-level keys in the order the client received them. `options`
+        # alone cannot say where `messages` sat among them, and the whole
+        # request is serialised in THIS order, so a reassembly needs it; its
+        # presence is also what marks a record as stored in sent order —
+        # a record without it predates #420 and its blobs are sorted.
+        record["order"] = list(payload)
+        stored_payload = {key: stored_parts[key] for key in payload}
+        whole = _as_sent(stored_payload)
+        record["request"] = turns.digest_of(whole)
+        record["chars"] = len(whole)
         self._emit_record(kind="sent", model_call=self._model_call, **record)
 
     def _browse_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
@@ -7667,6 +7728,7 @@ class Agent:
             menu = tools.TOOL_SCHEMAS + self._plugin_defs
         chars = backends.request_chars(self.provider, self.messages, menu)
         key = f"{self.provider}:{self.model}"
+        self._seed_ratio(key)
         ratio = token_ratio.ratio(key)
         anchor = self._token_anchor
         if anchor is not None and (anchor[0] != key or chars < anchor[1]):
@@ -7682,6 +7744,27 @@ class Agent:
             "chars_per_token": round(ratio.chars_per_token, 3),
             "ratio_source": ratio.source,
         }
+
+    def _seed_ratio(self, key: str) -> None:
+        """A model the ledger has no sample for, in a chat that has already
+        called it: learn from those calls before estimating at the constant
+        (#416). The first `local:` call after #415 shipped estimated a
+        47k-token request at 95k and cut 18 whole turns for it, while its own
+        log held 90 earlier calls to the same model, every request stored."""
+        if key in self._ratio_seed_tried:
+            return
+        self._ratio_seed_tried.add(key)
+        if token_ratio.has_samples(key) or self.state_dir is None:
+            return
+        if self.current_session is None:
+            return
+        try:
+            log = self.current_session()
+        except OSError:
+            return
+        token_ratio.seed(
+            key, token_ratio.recorded_samples(log, self.state_dir, self.provider, self.model)
+        )
 
     def _spend_budget(self) -> tuple[int | None, str]:
         """(tokens of history the rate limit affords, provenance), or (None, "")
