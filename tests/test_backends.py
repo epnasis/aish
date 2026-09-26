@@ -720,9 +720,12 @@ class TestSentAtTheSeam:
 
     @staticmethod
     def _canonical(value):
-        from aish.agent import _canonical
+        # The `sent` record's own serialisation — unsorted, so an adapter
+        # reporting keys in another order fails here instead of being hidden
+        # by a sort (#420).
+        from aish.agent import _as_sent
 
-        return _canonical(value)
+        return _as_sent(value)
 
     @staticmethod
     def _sent(client_kwargs):

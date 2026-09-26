@@ -2842,7 +2842,7 @@ class TestSentRecord:
         import copy
 
         from aish import turns
-        from aish.agent import _canonical
+        from aish.agent import _as_sent
 
         class Snapshotting(FakeChat):
             """`messages` is the agent's own list and keeps mutating after the
@@ -2875,14 +2875,15 @@ class TestSentRecord:
             tools_blob = turns.get(record["tools"]["digest"], tmp_path, log.path)
             assert tools_blob is not None
             assert record["tools"]["count"] == len(json.loads(tools_blob))
-            rebuilt = {**record["options"], "messages": messages, "tools": json.loads(tools_blob)}
-            assert turns.digest_of(_canonical(rebuilt)) == record["request"]
-            assert record["chars"] == len(_canonical(rebuilt))
+            parts = {**record["options"], "messages": messages, "tools": json.loads(tools_blob)}
+            rebuilt = {key: parts[key] for key in record["order"]}
+            assert turns.digest_of(_as_sent(rebuilt)) == record["request"]
+            assert record["chars"] == len(_as_sent(rebuilt))
             sent = {k: v for k, v in kwargs.items() if k != "stream"}
             sent["messages"] = [
                 {k: v for k, v in m.items() if not k.startswith("_")} for m in sent["messages"]
             ]
-            assert _canonical(rebuilt) == _canonical(sent)
+            assert _as_sent(rebuilt) == _as_sent(sent)
         # And the bytes are in the CHAT's directory, once each. The `received`
         # records (#355) store the response blobs in the same directory, so the
         # expected set is the request blobs AND the response blobs.
@@ -2891,6 +2892,68 @@ class TestSentRecord:
         digests |= {s["tools"]["digest"] for s in steps(log.path, "sent")}
         digests |= {s["digest"] for s in steps(log.path, "received") if s.get("digest")}
         assert {p.name for p in stored} == digests
+
+    def test_the_stored_request_keeps_the_key_order_it_was_sent_in(self, tmp_path):
+        """#420: key order is part of the prompt wherever a chat template
+        renders the request as JSON text (Qwen's renders the tool schemas), so
+        a stored-then-loaded request must re-serialise to the adapter's bytes
+        EXACTLY — with a tool schema, a message and the options deliberately
+        out of sorted order, and `messages` sitting between other keywords."""
+        from aish import backends, turns
+        from aish.agent import _as_sent
+
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "zeta",
+                "parameters": {
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {"path": {"type": "string", "description": "where"}},
+                },
+                "description": "a schema whose keys are not in sorted order",
+            },
+        }
+        kwargs = dict(
+            model="fake",
+            messages=[
+                {"role": "system", "content": "base"},
+                {"role": "user", "content": "go", "images": []},
+            ],
+            tools=[tool],
+            options={"temperature": 0, "num_ctx": 8},
+            think=False,
+            stream=True,
+        )
+        request = backends.passthrough_request("ollama", kwargs)
+        reported = _as_sent(request.payload)
+        sorted_form = json.dumps(
+            request.payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        )
+        assert reported != sorted_form, "the fixture must be out of sorted order to test this"
+
+        agent, _, log = self._agent([model_says("done")], tmp_path)
+        agent._model_call = 1
+        agent._record_sent(request, kwargs)
+        (record,) = steps(log.path, "sent")
+
+        def load(digest):
+            blob = turns.get(digest, tmp_path, log.path)
+            assert blob is not None
+            return blob
+
+        tools_blob = load(record["tools"]["digest"])
+        assert tools_blob == _as_sent(request.payload["tools"])  # the blob IS the bytes sent
+        parts = {
+            **record["options"],
+            "messages": [json.loads(load(e["digest"])) for e in record["messages"]],
+            "tools": json.loads(tools_blob),
+        }
+        assert record["order"] == ["model", "messages", "tools", "options", "think"]
+        rebuilt = _as_sent({key: parts[key] for key in record["order"]})
+        assert rebuilt == reported
+        assert turns.digest_of(rebuilt) == record["request"]
+        assert record["chars"] == len(reported)
 
     def test_origin_and_tool_name_point_back_at_the_aish_side(self, tmp_path):
         agent, _, log = self._agent(
