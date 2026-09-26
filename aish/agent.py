@@ -3017,7 +3017,10 @@ def _canonical(value: Any) -> str:
 def _as_sent(value: Any) -> str:
     """The serialisation the `sent` record stores a request in (#420): the
     `_canonical` form WITHOUT sorting, so every object's keys stay in the
-    order the adapter handed them to the client. Key order is part of the
+    order the adapter handed them to the client library — which is the
+    wire's order on the OpenAI SDK, and not on ollama, whose library rebuilds
+    the request in its own field order (docs/trace-contract.md, the #420
+    note). Key order is part of the
     prompt wherever a server's chat template renders the request as JSON text
     (Qwen's renders the tool schemas): the sorted form of one real request was
     164 tokens shorter than what was sent and replayed to a different reply."""
@@ -7020,7 +7023,8 @@ class Agent:
         side (`origin`, a list where several were merged), whether that message
         was a trimmer's stub, the top-level key `order`, and a `request`
         digest of the whole payload in that order — so a reassembly from the
-        manifest can be checked byte-for-byte against what the adapter sent.
+        manifest can be checked byte-for-byte against the payload the adapter
+        reported (not against wire bytes: the client library may reorder).
         Base64 media is replaced by a placeholder naming the file and its
         size before storing; the
         manifest carries the same, and the reader states that as *never

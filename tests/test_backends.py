@@ -783,6 +783,53 @@ class TestSentAtTheSeam:
         (request,) = seen
         assert self._canonical(request.payload) == self._canonical(self._sent(client.calls[0]))
 
+    def test_local_blobs_equal_the_wire_body(self):
+        """#420: on the OpenAI SDK the stored `messages` and `tools` are the
+        wire's own, key order included — captured off a mock HTTP transport,
+        not off the fake client, so the SDK's serialisation is in the loop.
+        The top-level order is NOT the wire's (the SDK flattens extra_body)."""
+        import httpx
+        import openai
+
+        from aish.agent import _as_sent
+
+        captured = {}
+
+        def handler(request):
+            captured["body"] = request.content
+            return httpx.Response(200, json={
+                "id": "x", "object": "chat.completion", "created": 0, "model": "m",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "hi"}}],
+            })
+
+        client = openai.OpenAI(
+            api_key="x", base_url="http://127.0.0.1:1/v1",
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        tool = {"type": "function", "function": {
+            "name": "zeta",
+            "parameters": {"type": "object", "required": ["p"],
+                           "properties": {"p": {"type": "string"}}},
+            "description": "keys deliberately not sorted — ż",
+        }}
+        history = [
+            {"role": "system", "content": "sys ż"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "zeta", "arguments": {"p": "a", "b": 1}}}]},
+            {"role": "tool", "content": "out", "tool_name": "zeta"},
+        ]
+        seen = []
+        backend = OpenAICompatBackend(client, backends.LOCAL, max_tokens=100)
+        with backends.observe_sent(seen.append):
+            backend(model="qwen", messages=history, tools=[tool], think=False)
+        (request,) = seen
+        wire = json.loads(captured["body"])
+        for key in ("messages", "tools"):
+            on_wire = json.dumps(wire[key], ensure_ascii=False, separators=(",", ":"))
+            assert _as_sent(request.payload[key]) == on_wire
+
     def test_anthropic_reports_the_hoisted_system_and_the_merged_results(self):
         seen = []
         client = FakeAnthropicClient(
