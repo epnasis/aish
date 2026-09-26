@@ -368,6 +368,10 @@ def classify(exc: BaseException, now: float | None = None) -> CallFailure:
             retry_after_source="governor" if exc.retry_after_s else "none",
             sent=False, text=str(exc),
         )
+    if isinstance(exc, StreamCutOff):
+        # The server is gone or restarting; a re-issue is exactly what helps.
+        return CallFailure(kind=TRANSPORT, retryable=True, matched="stream_cut_off",
+                           text=str(exc))
     text = str(exc)
     status = _status_of(exc)
     body_text = repr(getattr(exc, "body", "")) if getattr(exc, "body", None) else ""
@@ -586,6 +590,18 @@ class Cancelled(RuntimeError):
     """The user stopped while the call was queued for headroom. Never a provider
     failure and never retryable — the caller translates it to its own cancel
     path so a Stop is not reported as the backend being unavailable."""
+
+
+class StreamCutOff(RuntimeError):
+    """The reply stream ended before the server said the reply was finished.
+
+    Raised only where the server is known to always send a finish reason, so
+    its absence is an observation about the stream, not about the model: a
+    server that dies mid-reply closes the connection cleanly, and the SDK ends
+    the iteration as if the reply were complete (2026-09-26, mi's mlx-lm ran
+    out of GPU memory mid-prefill and aish filed the cut-off as an empty
+    answer, then ended the turn on it).
+    """
 
 
 class RateLimited(RuntimeError):

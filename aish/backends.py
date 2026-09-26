@@ -273,6 +273,11 @@ DEFAULT_LOCAL_CTX = 32_768
 # mlx-lm answers a request that names no `max_tokens` with at most 512 tokens,
 # which cuts a tool call or an answer off mid-sentence; aish always says.
 DEFAULT_LOCAL_MAX_TOKENS = 16_384
+# Providers whose streams always end with a finish_reason, checked in the
+# server's source (mlx-lm 0.31.3 `handle_completion` writes one on every path
+# that finishes, then `[DONE]`). A stream from these that ends without one was
+# cut off, not answered. Cloud providers are not listed: unverified.
+FINISH_REASON_ALWAYS_SENT = frozenset({LOCAL})
 # The openai SDK refuses to build a client without some key; a local server
 # without auth ignores whatever arrives.
 LOCAL_API_KEY_PLACEHOLDER = "aish-local-no-key"
@@ -820,7 +825,9 @@ class OpenAICompatBackend:
         # session-20260923-212625, zero output tokens and no reason kept).
         # Last non-empty wins; absent stays "" and is never filled in.
         stop = ""
+        received = 0
         for chunk in chunks:
+            received += 1
             if getattr(chunk, "usage", None):
                 usage = (chunk.usage.prompt_tokens or 0, chunk.usage.completion_tokens or 0)
                 detail = _openai_usage(chunk.usage)
@@ -854,6 +861,11 @@ class OpenAICompatBackend:
                     slot["name"] += frag.function.name or ""
                     slot["arguments"] += frag.function.arguments or ""
                 slot["extra"] = _extra_content(frag) or slot["extra"]
+        if not stop and self.provider in FINISH_REASON_ALWAYS_SENT:
+            raise ratelimit.StreamCutOff(
+                f"the {self.provider} server's reply stream ended with no finish_reason "
+                f"after {received} chunks"
+            )
         # Insertion order is arrival order, which is the call order for
         # every provider; mixed key types make sorting impossible anyway.
         tool_calls = [
