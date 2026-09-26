@@ -3004,12 +3004,27 @@ def _serialize(message: dict) -> dict:
 
 
 def _canonical(value: Any) -> str:
-    """The one serialisation the `sent` record's digests are taken over (#352):
-    sorted keys, no whitespace, unescaped non-ASCII. Two writers that agree
-    on the bytes agree on the digest; `default=str` keeps a value no JSON
-    encoder knows from raising inside a model call, at the cost that such a
-    value is recorded as its `str()`."""
+    """The serialisation the `received` record's digest is taken over (#355),
+    and the one `sent` used before #420: sorted keys, no whitespace,
+    unescaped non-ASCII. Two writers that agree on the bytes agree on the
+    digest; `default=str` keeps a value no JSON encoder knows from raising
+    inside a model call, at the cost that such a value is recorded as its
+    `str()`. A REQUEST is stored with `_as_sent` instead, because sorting
+    changes what the model was given."""
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _as_sent(value: Any) -> str:
+    """The serialisation the `sent` record stores a request in (#420): the
+    `_canonical` form WITHOUT sorting, so every object's keys stay in the
+    order the adapter handed them to the client library — which is the
+    wire's order on the OpenAI SDK, and not on ollama, whose library rebuilds
+    the request in its own field order (docs/trace-contract.md, the #420
+    note). Key order is part of the
+    prompt wherever a server's chat template renders the request as JSON text
+    (Qwen's renders the tool schemas): the sorted form of one real request was
+    164 tokens shorter than what was sent and replayed to a different reply."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def _scrub_tree(value: Any) -> tuple[Any, int]:
@@ -7002,13 +7017,16 @@ class Agent:
 
         The bytes go to the per-chat store (`turns.py`): one entry per provider
         message, the tools payload and, where the provider carries one, the
-        system parameter, each as its canonical JSON serialisation. The record
+        system parameter, each as its compact JSON serialisation with keys in
+        the order the adapter handed them over (`_as_sent`, #420). The record
         holds the digests, the sizes, where each message came from on the aish
         side (`origin`, a list where several were merged), whether that message
-        was a trimmer's stub, and a `request` digest of the whole canonical
-        payload — so a reassembly from the manifest can be checked
-        byte-for-byte against what the adapter sent. Base64 media is replaced
-        by a placeholder naming the file and its size before storing; the
+        was a trimmer's stub, the top-level key `order`, and a `request`
+        digest of the whole payload in that order — so a reassembly from the
+        manifest can be checked byte-for-byte against the payload the adapter
+        reported (not against wire bytes: the client library may reorder).
+        Base64 media is replaced by a placeholder naming the file and its
+        size before storing; the
         manifest carries the same, and the reader states that as *never
         stored*.
 
@@ -7033,7 +7051,7 @@ class Agent:
             entries = request.media[at] if at < len(request.media) else []
             stored = backends.without_media(message, entries) if entries else message
             stored, scrubbed = _scrub_tree(stored)
-            blob = _canonical(stored)
+            blob = _as_sent(stored)
             item: dict[str, Any] = {
                 "at": at,
                 "role": message.get("role"),
@@ -7063,11 +7081,11 @@ class Agent:
             manifest.append(item)
             stored_messages.append(stored)
         # Everything else the client was handed, round-tripped through the
-        # canonical form so a value no JSON encoder knows cannot raise inside
-        # the log writer.
+        # stored form so a value no JSON encoder knows cannot raise inside
+        # the log writer — in the order it was handed, never sorted (#420).
         own = {k: v for k, v in payload.items() if k not in ("messages", "tools", "system")}
-        options = json.loads(_canonical(own))
-        stored_payload: dict[str, Any] = {**options, "messages": stored_messages}
+        options = json.loads(_as_sent(own))
+        stored_parts: dict[str, Any] = {**options, "messages": stored_messages}
         record: dict[str, Any] = {
             "provider": request.provider,
             "model": payload.get("model"),
@@ -7075,7 +7093,7 @@ class Agent:
         }
         if "tools" in payload:
             tools_stored, scrubbed = _scrub_tree(payload["tools"])
-            blob = _canonical(tools_stored)
+            blob = _as_sent(tools_stored)
             record["tools"] = {
                 "digest": turns.put(blob, self.state_dir, session),
                 "chars": len(blob),
@@ -7083,7 +7101,7 @@ class Agent:
             }
             if scrubbed:
                 record["tools"]["scrubbed"] = scrubbed
-            stored_payload["tools"] = tools_stored
+            stored_parts["tools"] = tools_stored
         if "system" in payload:
             # Anthropic: the hoisted system text, a plain string parameter.
             system_text, scrubbed = _scrub_tree(str(payload["system"]))
@@ -7095,11 +7113,18 @@ class Agent:
                 record["system"]["origin"] = list(request.system_origins)
             if scrubbed:
                 record["system"]["scrubbed"] = scrubbed
-            stored_payload["system"] = system_text
+            stored_parts["system"] = system_text
         record["options"] = options
-        canonical = _canonical(stored_payload)
-        record["request"] = turns.digest_of(canonical)
-        record["chars"] = len(canonical)
+        # The top-level keys in the order the client received them. `options`
+        # alone cannot say where `messages` sat among them, and the whole
+        # request is serialised in THIS order, so a reassembly needs it; its
+        # presence is also what marks a record as stored in sent order —
+        # a record without it predates #420 and its blobs are sorted.
+        record["order"] = list(payload)
+        stored_payload = {key: stored_parts[key] for key in payload}
+        whole = _as_sent(stored_payload)
+        record["request"] = turns.digest_of(whole)
+        record["chars"] = len(whole)
         self._emit_record(kind="sent", model_call=self._model_call, **record)
 
     def _browse_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
