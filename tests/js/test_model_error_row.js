@@ -228,6 +228,27 @@ check("a spent wait budget says so instead of an unexplained early stop", () => 
   assert(!subOf(row).includes("of 8"), subOf(row));
 });
 
+check("a second lost connection says the next request is smaller (#419)", () => {
+  const s = makeSandbox();
+  const row = errorRow(s, {
+    kind: "model_error", class: "transport", attempt: 2, attempts: 120,
+    action: "retry", waited_s: 2, lost_connection: 2,
+  });
+  assert(subOf(row).includes("connection lost on 2 sends"), subOf(row));
+  assert(subOf(row).includes("shortening the conversation"), subOf(row));
+  assert(subOf(row).includes("in 2s"), subOf(row));
+});
+
+check("a call ended by lost connections says so, not an attempt count (#419)", () => {
+  const s = makeSandbox();
+  const row = errorRow(s, {
+    kind: "model_error", class: "transport", attempt: 3, attempts: 120,
+    action: "give_up", retryable: true, bound: "lost_connection", lost_connection: 3,
+  });
+  assert(subOf(row).includes("connection lost on 3 sends"), subOf(row));
+  assert(!subOf(row).includes("of 120"), subOf(row));
+});
+
 check("a retry with no stated wait does not claim one", () => {
   // "Retry-After: 0" is legal. Rendering "retrying in 0s" would be noise
   // dressed as a fact.

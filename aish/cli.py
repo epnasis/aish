@@ -1907,8 +1907,14 @@ at AISH_LOCAL_URL, with AISH_LOCAL_CTX (tokens one whole request may use \
 on that server, answer included, default 98304 — aish keeps the prompt under \
 it minus the answer cap, counting in tokens, and shortens old tool results and \
 then old messages when it would not fit; if the current task alone does not \
-fit, it is sent anyway and the chat says so) and AISH_LOCAL_MAX_TOKENS (answer \
-cap, default 16384); adding --save \
+fit, it is sent anyway and the chat says so), AISH_LOCAL_MAX_TOKENS (answer \
+cap, default 16384) and AISH_LOCAL_SAMPLING (a JSON object of sampling fields \
+sent on every request, replacing the default temperature 1.0, top_p 0.95, \
+top_k 20, presence_penalty 1.5; the server is greedy without them); a local: \
+request whose connection is lost after sending is re-sent once, then once \
+with a shortened conversation, then the turn ends saying what was seen; any \
+streamed reply that has become one passage repeated many times is stopped \
+early; adding --save \
 persists the choice as the startup default in the config file, and \
 /model --save alone persists the current model; /jobs lists \
 background jobs; /chat shows this chat's log file (its older name /session \

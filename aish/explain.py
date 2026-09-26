@@ -286,8 +286,13 @@ def _refused(gate: dict) -> bool:
 #: as mid-turn as a trim gets.
 #: `mid_task_turns` and `over_budget` (#415) are `_enforce_budget`'s too: the
 #: `local:` window's second lever, and its record that nothing was left to cut.
+#: `lost_connection_oldest_first` (#419) is the shrink after a `local:` call
+#: lost its connection twice — as mid-turn as the overflow one.
 MID_TURN_TRIM = frozenset(
-    {"mid_task_budget", "overflow_oldest_first", "mid_task_turns", "over_budget"}
+    {
+        "mid_task_budget", "overflow_oldest_first", "lost_connection_oldest_first",
+        "mid_task_turns", "over_budget",
+    }
 )
 #: Trims that cut earlier turns' own words rather than tool results (#415).
 TURN_TRIM = frozenset({"turns_oldest_first", "mid_task_turns"})
@@ -341,6 +346,7 @@ CHECKS: tuple[tuple[str, str], ...] = (
     ("reminder_demoted", "the per-task reminder reached the model as a user message"),
     ("brief_changed", "what the model was handed changed mid-turn"),
     ("stop_unusual", "the model stopped for an unusual reason"),
+    ("reply_repeating", "aish stopped a reply that repeated one passage"),
     ("context_full", "the prompt nearly filled the context window"),
     ("context_fixed_cost", "most of the context was aish's own fixed overhead"),
     ("context_unattributed", "a trim removed text it did not say which results came from"),
@@ -739,6 +745,8 @@ def _thought(turn: Turn, log: Log) -> dict:
                 # failed to parse".
                 "malformed": list(record.get("malformed") or []),
                 "synthesized": bool(record.get("synthesized")),
+                # aish stopped this call's stream for repeating itself (#417).
+                "repetition": record.get("repetition") or {},
             }
             for index, record in enumerate(records)
         ],
@@ -2417,6 +2425,7 @@ NOTE_PANES = {
     "reasoning_truncated": PANE_RESPONSE,
     "args_malformed": PANE_RESPONSE,
     "stop_unusual": PANE_RESPONSE,
+    "reply_repeating": PANE_RESPONSE,
     "context_full": PANE_CONTEXT,
     "context_fixed_cost": PANE_CONTEXT,
     "context_unattributed": PANE_CONTEXT,
@@ -2607,6 +2616,13 @@ def notes(doc: dict) -> dict:
         if call["stop"] and call["stop"] not in ORDINARY_STOPS:
             _note(rows, "stop_unusual",
                   f"the model stopped with reason {call['stop']!r}",
+                  section="flow", model_call=call["model_call"])
+        if seen := call.get("repetition"):
+            _note(rows, "reply_repeating",
+                  f"aish stopped this reply after {seen.get('chars', 0):,} characters: its "
+                  f"last {seen.get('span_chars', 0):,} were one "
+                  f"{seen.get('period_chars', 0):,}-character passage repeated "
+                  f"{seen.get('repeats', 0):,} times",
                   section="flow", model_call=call["model_call"])
 
     # Read off the FLOW, not the raw records, so each row can name the round it

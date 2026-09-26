@@ -425,6 +425,46 @@ def classify(exc: BaseException, now: float | None = None) -> CallFailure:
     return CallFailure(kind=UNKNOWN, retryable=True, status=status, text=text)
 
 
+# The exception types that mean a connection was never ESTABLISHED, so no byte
+# of the request reached the server (#419). Matched by class name anywhere in
+# the chain, so no SDK is imported: httpx's `ConnectError` / `ConnectTimeout`
+# (which the openai SDK wraps as `APIConnectionError(...) from err`, 2.46.0
+# `_base_client.py`) and the OS's own refusal underneath them. Everything
+# else in the transport class — a reset, a server that closed mid-response, a
+# stream cut off — happened after the request was sent.
+_NEVER_CONNECTED = frozenset({"ConnectError", "ConnectTimeout", "ConnectionRefusedError"})
+
+
+def _chain(exc: BaseException) -> list[BaseException]:
+    links: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and all(current is not link for link in links) and len(links) < 8:
+        links.append(current)
+        current = current.__cause__ or current.__context__
+    return links
+
+
+def exception_chain(exc: BaseException) -> list[str]:
+    """The class names down an exception's cause chain, outermost first — what
+    was observed, in the order it was wrapped."""
+    return [type(link).__name__ for link in _chain(exc)]
+
+
+def describe_chain(exc: BaseException) -> str:
+    """Each link of the chain as `Name: message`, outermost first. The SDK's
+    own words ("Connection error.") say least; the link beneath usually says
+    what the transport actually saw."""
+    return " <- ".join(
+        f"{type(link).__name__}: {link}".rstrip(": ") for link in _chain(exc)
+    )
+
+
+def never_connected(exc: BaseException) -> bool:
+    """Whether the chain shows the connection was never made — the one
+    transport failure that says the server never saw the request."""
+    return any(name in _NEVER_CONNECTED for name in exception_chain(exc))
+
+
 def _overflow_phrase(haystack: str) -> str:
     """The phrase that identified an over-window rejection, or "".
 
