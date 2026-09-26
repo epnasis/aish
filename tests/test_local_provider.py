@@ -34,19 +34,35 @@ def _completion(content="ok", tool_calls=None, reasoning=None, usage_=None):
     )
 
 
+def _delta(finish_reason=None, **fields):
+    delta = SimpleNamespace(**{"content": None, "tool_calls": None, **fields})
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=delta, finish_reason=finish_reason)], usage=None
+    )
+
+
+def _finish(reason="stop"):
+    """The chunk mlx-lm writes when a reply finishes (0.31.3 `handle_completion`)."""
+    return _delta(finish_reason=reason)
+
+
 class FakeClient:
     """Stands in for openai.OpenAI: records kwargs, answers from a script."""
 
-    def __init__(self, responses=None, stream_chunks=None):
+    def __init__(self, responses=None, stream_chunks=None, streams=None):
         self.calls: list[dict] = []
         self.responses = list(responses or [])
+        # `streams`: one chunk list per streaming call, in order.
+        self.streams = list(streams or [])
         outer = self
 
         class _Completions:
             def create(self, **kwargs):
                 outer.calls.append(json.loads(json.dumps(kwargs)))
                 if kwargs.get("stream"):
-                    return iter(stream_chunks or [])
+                    if outer.streams:
+                        return iter(outer.streams.pop(0))
+                    return iter(stream_chunks if stream_chunks is not None else [_finish()])
                 return outer.responses.pop(0) if outer.responses else _completion()
 
         self.chat = SimpleNamespace(completions=_Completions())
@@ -172,7 +188,7 @@ class TestLocalWhatIsSent:
         }
 
     def test_the_streaming_path_sends_the_same(self):
-        client = FakeClient(stream_chunks=[])
+        client = FakeClient(stream_chunks=[_finish()])
         list(self._chat(client)(
             model=REPO, messages=[{"role": "user", "content": "x"}], think=True, stream=True
         ))
@@ -235,16 +251,11 @@ class TestLocalReasoning:
         assert backends._from_completion(response).message.thinking == "why"
 
     def test_streaming_reasoning_deltas(self):
-        def delta(**kw):
-            fields = {"content": None, "tool_calls": None, **kw}
-            return SimpleNamespace(
-                choices=[SimpleNamespace(delta=SimpleNamespace(**fields))], usage=None
-            )
-
         chunks = [
-            delta(reasoning="step one, "),
-            delta(reasoning="step two"),
-            delta(content="answer"),
+            _delta(reasoning="step one, "),
+            _delta(reasoning="step two"),
+            _delta(content="answer"),
+            _finish(),
             SimpleNamespace(
                 choices=[],
                 usage=SimpleNamespace(prompt_tokens=11, completion_tokens=5),
@@ -317,6 +328,60 @@ class TestLocalFailures:
         assert failure.retryable
         assert failure.status is None
         assert failure.matched.lower() == "connection"
+
+
+class TestLocalStreamCutOff:
+    """A server that dies mid-reply closes the connection cleanly, so the SDK
+    ends the stream as if the reply were complete. mlx-lm always ends a reply
+    with a finish_reason; one that never came is a failed call, not an empty
+    answer (2026-09-26: mi ran out of GPU memory mid-prefill twice, and aish
+    ended the owner's turn with "the model's reply contained no text")."""
+
+    CUT = [_delta(content="partial ")]  # what arrived before the server died
+
+    def test_a_stream_that_ends_without_a_finish_reason_raises(self, local_env):
+        chat, _, _ = make_chat(f"local:{REPO}", client=FakeClient(stream_chunks=self.CUT))
+        with pytest.raises(ratelimit.StreamCutOff, match="no finish_reason after 1 chunks"):
+            list(chat(model=REPO, messages=[{"role": "user", "content": "x"}], stream=True))
+
+    def test_it_is_a_retryable_transport_failure_that_says_what_it_saw(self):
+        failure = ratelimit.classify(ratelimit.StreamCutOff("ended with no finish_reason"))
+        assert failure.kind == ratelimit.TRANSPORT
+        assert failure.retryable
+        assert failure.matched == "stream_cut_off"
+        assert failure.status is None
+
+    def test_a_finished_stream_is_untouched(self, local_env):
+        chunks = [_delta(content="whole answer"), _finish()]
+        chat, _, _ = make_chat(f"local:{REPO}", client=FakeClient(stream_chunks=chunks))
+        out = list(chat(model=REPO, messages=[{"role": "user", "content": "x"}], stream=True))
+        assert "".join(c.message.content for c in out) == "whole answer"
+        assert out[-1].message.stop == "stop"
+
+    def test_cloud_providers_are_not_judged_by_it(self):
+        """Unverified that every cloud stream carries a finish_reason, so a
+        cloud stream without one is still read as it always was."""
+        backend = backends.OpenAICompatBackend(FakeClient(stream_chunks=self.CUT), "openai")
+        out = list(backend(model="gpt", messages=[{"role": "user", "content": "x"}], stream=True))
+        assert "".join(c.message.content for c in out) == "partial "
+
+    def test_the_turn_is_retried_and_answers_instead_of_ending_empty(self, local_env):
+        """The whole path: cut stream -> retry -> the restarted server answers."""
+        client = FakeClient(streams=[self.CUT, [_delta(content="recovered"), _finish()]])
+        chat, _, _ = make_chat(f"local:{REPO}", client=client)
+        steps = []
+        agent = Agent(
+            model=REPO, approve=lambda _c: True, client_chat=chat, on_token=lambda _t: None,
+            on_step=steps.append,
+        )
+        agent.provider = "local"
+        assert agent.run_task("hi") == "recovered"
+        assert len(client.calls) == 2
+        errors = [s for s in steps if s.get("kind") == "model_error"]
+        assert [(e["class"], e["matched"], e["action"]) for e in errors] == [
+            ("transport", "stream_cut_off", "retry")
+        ]
+        assert not any("contained no text" in str(m.get("content")) for m in agent.messages)
 
 
 class TestLocalWindow:

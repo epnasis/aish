@@ -85,6 +85,10 @@ It lands in `transport` (retryable, `TRANSIENT_WAIT_BUDGET_S`) with `matched: Co
 the record says which words it saw, not why the connection failed. The `local:` provider shares the
 governor like any other (key `local:<model>`); it has no quota, so nothing is learned
 unless the server itself answers 429. `TestLocalFailures` (`tests/test_local_provider.py`).
+A `local:` reply stream that ends without a finish reason raises `StreamCutOff`. It lands in
+`transport` with `matched: stream_cut_off`, so a server that dies mid-reply is retried like one
+that refused the connection, never read as an empty answer (`docs/agent-core.md`, Backends).
+`TestLocalStreamCutOff`.
 
 `UNKNOWN` is retryable **on purpose**. The old behaviour retried everything once; a
 classifier that silently stopped retrying a case it failed to recognise would be a

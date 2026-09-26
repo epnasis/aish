@@ -200,8 +200,10 @@ def test_stream_keeps_the_finish_reason_the_provider_sent():
 
 
 def test_stream_with_no_finish_reason_records_none():
+    # A provider not known to always send one. On `local:` the same stream is
+    # a cut-off and raises instead (TestLocalStreamCutOff).
     chunks = [_delta_chunk(content="hi")]
-    backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "local")
+    backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "openai")
     out = list(backend(model="m", messages=[], stream=True))
     assert out[-1].message.stop == ""
 
