@@ -287,6 +287,7 @@ function hostileWorld({ visible = false, width = 1100, globals = {} } = {}) {
     // trace steps all set it, so most blocks reach it incidentally;
     // test_ctx_meter.js drives the real thing.
     setCtxFill() {},
+    showModelName() {},
     ctxFill: null,
   };
   sandbox.window = sandbox;

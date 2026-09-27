@@ -15,7 +15,7 @@ const { ok, report } = checks();
 function world() {
   const els = { "ctx-meter": fakeElement("span"), "model-chip": fakeElement("button"),
     "model-name": fakeElement("span") };
-  els["model-name"].textContent = "claude:claude-sonnet-5";
+  els["model-name"].dataset.model = "claude:claude-sonnet-5";
   els["ctx-meter"].hidden = true;
   const sandbox = { $: (id) => els[id] };
   vm.createContext(sandbox);

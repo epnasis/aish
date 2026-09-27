@@ -2233,7 +2233,7 @@ function onHello(event) {
   // plain reconnect it is already open and we just re-attach (tmux redraws).
   if (consoleOpen) send({ type: "console_open" });
   else if (location.hash === "#console") openConsole();
-  $("model-name").textContent = event.model;
+  showModelName(event.model);
   // A warm paint may have set the meter before this chat's model was named,
   // and the replay that follows can land noop — so re-judge it here.
   setCtxFill(ctxFill);
@@ -4572,6 +4572,30 @@ function fmtSecs(s) {
   if (s < 60) return `${Math.round(s)}s`;
   return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
+
+// [MODEL-LABEL-START]
+// The chip names the model the way a person would; the full spec
+// stays the chip's identity (`dataset.model`, hover title) and is what the
+// picker lists and searches. The publisher path is dropped for every spec;
+// `local:` becomes a "(local)" suffix that drops out whole when it does not fit.
+function modelChipLabel(spec) {
+  const local = spec.startsWith("local:");
+  const model = local ? spec.slice("local:".length) : spec;
+  // Keep a provider prefix (`openai:`), drop everything up to the last slash.
+  const name = model.replace(/^([^/:]*:)?.*\//, "$1");
+  return { name, suffix: local ? "(local)" : "" };
+}
+
+function showModelName(spec) {
+  const el = $("model-name");
+  const { name, suffix } = modelChipLabel(spec);
+  el.dataset.model = spec;
+  el.title = spec;
+  $("model-label").textContent = name;
+  $("model-suffix").textContent = suffix;
+}
+// [MODEL-LABEL-END]
+
 function fmtTokens(n) {
   return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
@@ -4603,7 +4627,7 @@ function setCtxFill(fill) {
   const el = $("ctx-meter");
   // A figure measured on another model (the chat was switched since) is not
   // one for the model the chip names. Logs from before the stamp carry none.
-  const current = !ctxFill || !ctxFill.model || ctxFill.model === $("model-name").textContent;
+  const current = !ctxFill || !ctxFill.model || ctxFill.model === $("model-name").dataset.model;
   const meter = current ? ctxMeter(ctxFill) : null;
   el.hidden = !meter;
   el.textContent = meter ? meter.text : "";
@@ -18571,7 +18595,7 @@ function renderModels(event) {
 }
 
 function onModelChanged(event) {
-  $("model-name").textContent = event.model;
+  showModelName(event.model);
   setCtxFill(null); // the last figure was against the previous model's window
   closeSheets();
   showToast(event.saved ? `model: ${event.model} (saved as default)` : `model: ${event.model}`);

@@ -312,7 +312,12 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 @media (prefers-reduced-motion: reduce) {
   .model-dot.working::after { animation: none; opacity: 1; transform: scale(0.9); }
 }
-#model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
+/* The suffix wraps onto a second, clipped line when it does not fit, so it
+   drops out whole rather than squeezing the name ([MODEL-LABEL]). */
+#model-name { display: flex; flex-wrap: wrap; column-gap: 0.3em; height: 1.25em; line-height: 1.25em; overflow: hidden; max-width: 50vw; }
+#model-label { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#model-suffix { white-space: nowrap; }
+#model-suffix:empty { display: none; }
 #model-chip .caret { width: 12px; height: 12px; }
 #ctx-meter { font-size: 12.7px; font-weight: 500; color: var(--dim); font-variant-numeric: tabular-nums; }
 
