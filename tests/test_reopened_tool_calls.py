@@ -221,6 +221,19 @@ class TestAnOldLogIsRepairedOnlyWhereItCanSay:
         assert calls_of(SessionLog._parse(path).messages) == [[("read_file", {"path": "new"})]]
 
 
+    def test_a_malformed_record_costs_the_repair_and_never_the_reader(self, tmp_path):
+        # The chat list parses every log; one hand-edited record must not
+        # take it down (the reader-of-many-files rule).
+        path = tmp_path / "s.jsonl"
+        nameless = {"kind": "trace", "step": {"kind": "call", "call": 1, "args": {},
+                                              "model_call": 1}}
+        untagged = {"kind": "message", "role": "tool", "content": "ok", "model_call": 1}
+        numeric = call(1, 5, 2)
+        write_log(path, [USER, assistant(1), nameless, untagged,
+                         assistant(1), numeric, result(1, "5")])
+        assert calls_of(SessionLog._parse(path).messages) == []
+
+
 class TestALoggedCallIsKeptOnlyBesideItsResult:
     def test_logged_calls_come_back(self, tmp_path):
         path = tmp_path / "s.jsonl"
@@ -237,3 +250,20 @@ class TestALoggedCallIsKeptOnlyBesideItsResult:
         messages = SessionLog._parse(path).messages
         assert calls_of(messages) == []
         backends.convert_messages(messages)  # and nothing dangles for a converter
+
+    def test_a_held_wrap_up_logged_after_its_results_fails_safe(self, tmp_path):
+        # `_finish_stopped` on the held path logs the placeholders first and
+        # releases the entry after them: neither message may pair with the
+        # wrong results.
+        path = tmp_path / "s.jsonl"
+        earlier = [{"function": {"name": "read_file", "arguments": {"path": "a"}}}]
+        wrap_up = [{"function": {"name": "run_command", "arguments": {"command": "ls"}}}]
+        write_log(path, [
+            USER,
+            assistant(1, tool_calls=earlier), result(1, "read_file"),
+            result(2, "run_command", "NOT EXECUTED"),
+            assistant(2, "stopped", tool_calls=wrap_up),
+        ])
+        messages = SessionLog._parse(path).messages
+        assert calls_of(messages) == []
+        backends.convert_messages(messages)

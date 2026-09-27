@@ -881,12 +881,17 @@ def _rebuilt_calls(
         return None
     if any(step.get("truncated") or not isinstance(step.get("args"), dict) for step in calls):
         return None
-    wanted = [result.get("tool_name") for result in results]
-    names = [step.get("name") for step in calls]
+    # A log is read by the chat list too, so a hand-edited record must cost
+    # this one repair and never the reader (a name that is not a string).
+    raw = [result.get("tool_name") for result in results] + [step.get("name") for step in calls]
+    if not all(isinstance(name, str) and name for name in raw):
+        return None
+    wanted = [str(name) for name in raw[: len(results)]]
+    names = [str(name) for name in raw[len(results):]]
     if names != wanted:
-        if sorted(map(str, names)) != sorted(map(str, wanted)) or len(set(wanted)) != len(wanted):
+        if sorted(names) != sorted(wanted) or len(set(wanted)) != len(wanted):
             return None
-        by_name = {step.get("name"): step for step in calls}
+        by_name = {step["name"]: step for step in calls}
         calls = [by_name[name] for name in wanted]
     return [{"function": {"name": step["name"], "arguments": step["args"]}} for step in calls]
 
