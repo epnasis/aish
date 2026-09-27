@@ -4,6 +4,7 @@ No network and no model — the store is pure filesystem, and the fetching half 
 tested through the agent with web.fetch_binary stubbed (tests/test_agent.py).
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -191,3 +192,55 @@ def test_store_formats_match_every_renderer():
     assert suffixes == set(server.IMAGE_TYPES) - {".jpeg"}
     assert suffixes <= set(backends.IMAGE_SUFFIXES)
     assert Path("x.svg").suffix not in suffixes
+
+
+class TestImageEmbeds:
+    """#430: the pictures an answer asks the web renderer to show, read the way
+    the renderer reads them."""
+
+    def test_plain_pictures_and_video_cards(self):
+        text = "a ![one](/m/1.png) b [![two](/m/2.jpg)](https://youtube.com/watch?v=x)"
+        embeds = media.image_embeds(text)
+        assert [(e.alt, e.target, e.link) for e in embeds] == [
+            ("one", "/m/1.png", ""),
+            ("two", "/m/2.jpg", "https://youtube.com/watch?v=x"),
+        ]
+        assert text[embeds[1].start:embeds[1].end].startswith("[![two]")
+
+    def test_code_is_not_rendered_so_is_not_a_picture(self):
+        text = "`![a](/x.png)`\n```\n![b](/y.png)\n```\n~~~md\n![c](/z.png)\n~~~\n![d](/w.png)"
+        assert [e.target for e in media.image_embeds(text)] == ["/w.png"]
+
+    def test_an_unclosed_fence_hides_the_rest_as_the_renderer_does(self):
+        assert media.image_embeds("```\n![a](/x.png)") == []
+
+    def test_offsets_survive_masking(self):
+        text = "`code` then ![p](/a.png)"
+        [embed] = media.image_embeds(text)
+        assert text[embed.start:embed.end] == "![p](/a.png)"
+
+
+class TestRendererLockstep:
+    """The Python copy of the renderer's picture grammar must be the renderer's
+    grammar: read the patterns out of app.js and compare."""
+
+    APP_JS = (Path(media.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+
+    def _js_regex(self, pattern: str) -> str:
+        return re.search(pattern, self.APP_JS).group(1)
+
+    def test_the_video_card(self):
+        js = self._js_regex(r"const IMAGE_LINK_RE = /(.+)/;")
+        assert js.replace("\\/", "/") == media.IMAGE_CARD_RE.pattern
+
+    def test_the_plain_picture(self):
+        js = self._js_regex(r'\n  "\|(!\\\\\[[^"]+)" \+')
+        assert js.replace("\\\\", "\\") == media.IMAGE_RE.pattern
+
+    def test_the_fence(self):
+        js = self._js_regex(r"const FENCE_RE = /(.+)/;")
+        assert js == media.FENCE_RE.pattern
+
+    def test_the_code_span(self):
+        assert '"(`[^`]+`)"' in self.APP_JS
+        assert media.CODE_SPAN_RE.pattern == "`[^`]+`"

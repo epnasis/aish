@@ -6,6 +6,7 @@ approval gate with no model, no network, and full determinism.
 """
 
 import datetime
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -3237,7 +3238,7 @@ class TestActivityTraceSteps:
             [model_says("first try"), model_says("second try")], on_step=steps.append
         )
         verdicts = iter(["the price is missing", None])
-        agent._verify_answer = lambda _result, ask=True: next(verdicts)
+        agent._verify_answer = lambda _result, ask=True, delivering=True: next(verdicts)
         assert agent.run_task("go") == "second try"
         cancels = [s for s in steps if s["kind"] == "thinking_cancel"]
         assert [c["answered"] for c in cancels] == [False, True]
@@ -8634,13 +8635,17 @@ then:
             Path(__file__).resolve().parent.parent
             / "examples" / "rules" / "always-use-show-image.md"
         )
+        stored = tmp_path / "media" / "0123abcd-map.png"
+        stored.parent.mkdir()
+        stored.write_bytes(PNG_BYTES)
         agent, _ = rules_agent(
             tmp_path,
             [
                 model_says("here it is: ![map](https://tiles.example/x.png)"),
-                model_says("here it is: ![map](/tmp/aish-media/x.png)"),
+                model_says(f"here it is: ![map]({stored})"),
             ],
             rule_texts=(example.read_text(encoding="utf-8"),),
+            state_dir=tmp_path,
         )
         answer = agent.run_task("show me the map")
         # Asked, reworked, delivered clean — no note, because the rule was met.
@@ -15792,3 +15797,218 @@ class TestIdentityFollowsTheModel:
         one.run_task("hello")
         two.run_task("hello")
         assert chat_one.snapshots[0][0]["content"] == chat_two.snapshots[0][0]["content"]
+
+
+class TestImageCheck:
+    """#430: an answer's pictures are checked before the owner sees them. The
+    exhibit is session-20260925-204008-294943: a model with no vision called
+    show_image once and pasted three picture paths in the same shape — the name
+    starts with a hash of the bytes, so none of them existed — and the only
+    feedback was the owner writing "the pictures didn't show" on the next turn."""
+
+    @staticmethod
+    def _agent(tmp_path, monkeypatch, responses, bound=True, **kwargs):
+        monkeypatch.setattr(
+            agent_module.web, "fetch_binary", lambda url, max_bytes: (PNG_BYTES, "image/png")
+        )
+        rule_texts = (RULE_VERIFY_SATISFIED,) if bound else ()
+        return rules_agent(
+            tmp_path, responses, rule_texts=rule_texts, state_dir=tmp_path, **kwargs
+        )
+
+    @staticmethod
+    def _show(caption="chart"):
+        return model_says(
+            tool_calls=[tool_call("show_image", source="https://ex.com/c.png", caption=caption)]
+        )
+
+    @staticmethod
+    def _stored(tmp_path):
+        return next((tmp_path / "media").iterdir())
+
+    @staticmethod
+    def _asks(agent):
+        return [
+            m["content"] for m in agent.messages
+            if m.get("role") == "user"
+            and "did not come from show_image" in str(m.get("content", ""))
+        ]
+
+    def test_the_incident_one_real_picture_two_invented_is_sent_back(self, tmp_path, monkeypatch):
+        """The replay. The model is told which paths do not exist and handed
+        the line show_image actually returned; the reworked answer ships."""
+        # Content-addressed, so the path show_image will hand back is known.
+        real = tmp_path / "media" / (hashlib.sha256(PNG_BYTES).hexdigest()[:12] + "-chart.png")
+        invented = [tmp_path / "media" / f"{h}-temp.png" for h in ("26c2d3948514", "f16097c375b6")]
+        steps: list = []
+        agent, _ = self._agent(tmp_path, monkeypatch, [
+            self._show(),
+            model_says("\n".join(f"![p]({p})" for p in [real, *invented])),
+            model_says(f"![chart]({real})"),
+        ], step_log=steps.append)
+        answer = agent.run_task("chart it")
+        [ask] = self._asks(agent)
+        for path in invented:
+            assert f"{path} — no such file" in ask
+        assert f"![chart]({real})" in ask  # the line show_image returned
+        assert "26c2d3948514" not in answer and str(real) in answer
+        image_gates = [s for s in records(steps, "gate") if s.get("gate") == "image.verify"]
+        assert [g["verdict"] for g in image_gates] == ["refused", "allowed"]
+
+    def test_past_the_cap_only_what_would_not_display_is_removed_and_said(
+        self, tmp_path, monkeypatch
+    ):
+        """Bounded like a rule, and never a wedged turn. What the owner is
+        streamed, what is returned and what is logged are the same text."""
+        scratch_pic = tmp_path / "scratch-chart.png"
+        scratch_pic.write_bytes(PNG_BYTES)
+        missing = tmp_path / "media" / "abc123abc123-rain.png"
+        text = f"see ![rain]({missing}) and ![temp]({scratch_pic})"
+        streamed: list[str] = []
+        logged: list[dict] = []
+        agent, _ = self._agent(
+            tmp_path, monkeypatch, [model_says(text)] * 3,
+            on_token=streamed.append, on_message=logged.append, cwd=str(tmp_path),
+        )
+        answer = agent.run_task("chart it")
+        assert len(self._asks(agent)) == agent_module.IMAGE_MAX_ASKS
+        assert str(missing) not in answer.split("[aish]")[0]
+        assert "*rain*" in answer
+        assert f"![temp]({scratch_pic})" in answer  # displays, so it stays
+        assert "1 picture(s) removed" in answer and "no such file" in answer
+        # The same words; the stream spaces a note as rule notes are spaced.
+        assert "".join(streamed).split() == answer.split()
+        assert logged[-1]["content"] == answer
+
+    def test_a_removal_from_a_draft_a_rule_then_rejects_is_never_said(
+        self, tmp_path, monkeypatch
+    ):
+        """Found in delivery review: the strip ran, a rule then sent the draft
+        back, and the removal note streamed live about an answer the owner
+        never saw — and was never logged. Said only by the pass that delivers."""
+        missing = tmp_path / "media" / "abc123abc123-rain.png"
+        streamed: list[str] = []
+        logged: list[dict] = []
+        agent, chat = self._agent(
+            tmp_path, monkeypatch,
+            [
+                model_says(f"![rain]({missing})"),
+                model_says(f"![rain]({missing})"),
+                model_says(f"as an AI ![rain]({missing})"),  # images spent; the rule asks
+                model_says(f"here ![rain]({missing})"),
+            ],
+            on_token=streamed.append, on_message=logged.append,
+        )
+        answer = agent.run_task("chart it")
+        assert chat.responses == []  # the rule's rework was asked for
+        assert "".join(streamed).count("picture(s) removed") == 1
+        assert "".join(streamed).split() == answer.split()
+        assert logged[-1]["content"] == answer and answer.startswith("here *rain*")
+
+    def test_a_malformed_address_is_a_picture_that_will_not_display_not_a_crash(
+        self, tmp_path, monkeypatch
+    ):
+        """Found in delivery review: urlsplit raised out of run_task and the
+        answer was lost. The renderer's URL() refuses it, so it does not display."""
+        agent, _ = self._agent(
+            tmp_path, monkeypatch, [model_says("see ![x](http://[::1oops/x.png)")] * 3
+        )
+        answer = agent.run_task("chart it")
+        assert "a web address the app does not load pictures from" in answer
+
+    def test_a_denial_is_not_goaded_past_but_broken_pictures_still_go(self, tmp_path, monkeypatch):
+        """#81 outranks the image check exactly as it outranks the rules."""
+        missing = tmp_path / "media" / "abc123abc123-rain.png"
+        agent, _ = self._agent(
+            tmp_path, monkeypatch,
+            [
+                model_says(tool_calls=[tool_call("run_command", command="curl shop")]),
+                model_says(f"ok, stopping ![rain]({missing})"),
+            ],
+            approve=lambda _c: agent_module.Denied("no"),
+        )
+        answer = agent.run_task("chart it")
+        assert self._asks(agent) == []
+        assert str(missing) not in answer.split("[aish]")[0]
+        assert "removed" in answer
+
+    def test_an_answer_that_already_streamed_is_left_alone_and_the_model_told(
+        self, tmp_path, monkeypatch
+    ):
+        """No rule holds the turn, so the text went out as it was written:
+        editing it now would make the live chat and the log disagree."""
+        missing = tmp_path / "media" / "abc123abc123-rain.png"
+        text = f"![rain]({missing})"
+        agent, _ = self._agent(tmp_path, monkeypatch, [model_says(text)], bound=False)
+        assert agent.run_task("chart it") == text
+        note = agent.messages[-1]
+        assert note["role"] == "user" and note["content"].startswith("[aish: ")
+        assert f"{missing} (no such file)" in note["content"]
+
+    def test_the_rules_and_the_pictures_ask_in_one_message(self, tmp_path, monkeypatch):
+        """One rework answers both; two sequential asks would cost a model turn each."""
+        example = (
+            Path(__file__).resolve().parent.parent
+            / "examples" / "rules" / "always-use-show-image.md"
+        )
+        stored = tmp_path / "media" / "0123abcd-map.png"
+        stored.parent.mkdir()
+        stored.write_bytes(PNG_BYTES)
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("![map](https://tiles.example/x.png)"),
+                model_says(f"![map]({stored})"),
+            ],
+            rule_texts=(example.read_text(encoding="utf-8"),),
+            state_dir=tmp_path,
+        )
+        agent.run_task("show me the map")
+        [ask] = self._asks(agent)
+        assert "a web address the app does not load pictures from" in ask
+        assert "The rule 'always-use-show-image' forbids" in ask
+
+    def test_a_picture_in_code_is_not_a_picture(self, tmp_path, monkeypatch):
+        agent, _ = self._agent(
+            tmp_path, monkeypatch, [model_says("write `![x](/nope.png)` like this")]
+        )
+        agent.run_task("how do I embed")
+        assert self._asks(agent) == []
+
+    def test_claude_max_is_told_nothing_it_cannot_act_on_but_the_owner_is(self, tmp_path):
+        agent, _ = make_agent([], state_dir=tmp_path)
+        missing = tmp_path / "media" / "abc123abc123-rain.png"
+        stamped = agent.verify_final(f"![rain]({missing})")
+        assert "1 picture(s) in this answer will not display" in stamped
+
+    def test_the_hosts_match_what_the_renderer_and_the_csp_load(self):
+        from aish import server
+
+        csp = {h.removeprefix("https://") for h in server.CSP_IMG_HOSTS.split()}
+        source = (Path(agent_module.__file__).parent / "static" / "app.js").read_text()
+        app = set(re.findall(r'"([^"]+)"', re.search(
+            r"const IMG_FETCH_HOSTS = \[([^\]]*)\]", source
+        ).group(1)))
+        assert agent_module.RENDERED_IMAGE_HOSTS == csp == app
+
+
+class TestNoVisionNote:
+    """#430: the note to a model that cannot see said "say so", and the model
+    read it as "you cannot show pictures" and left the line out."""
+
+    def test_show_image_is_still_pasted(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            agent_module.web, "fetch_binary", lambda url, max_bytes: (PNG_BYTES, "image/png")
+        )
+        agent, _ = make_agent([
+            model_says(tool_calls=[tool_call("show_image", source="https://ex.com/a.png")]),
+            model_says("done"),
+        ], state_dir=tmp_path)
+        agent.provider = "no-vision-backend"
+        agent.run_task("show me")
+        [note] = [m for m in agent.messages if "cannot see images" in str(m.get("content"))]
+        assert "You MUST still paste the line show_image returned" in note["content"]
+
+    def test_other_producers_are_not_told_to_paste_a_line_they_never_gave(self):
+        note = agent_module.TOOL_MEDIA_UNDELIVERABLE.format(tools="read_pdf", count=1, paste="")
+        assert "paste" not in note
