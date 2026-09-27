@@ -61,6 +61,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from aish import backends, objective, roles, turns  # noqa: E402
 
 DEFAULT_OUT = Path.home() / ".cache" / "aish-objective-424"
+# A cloud reference answering 503 "high demand" is retried this many times,
+# waiting BUSY_WAIT_S × the attempt number; the retries are counted per row.
+BUSY_RETRIES = 6
+BUSY_WAIT_S = 20
 
 PROBE_QUESTION = (
     "Before you do anything else: state, in a few lines, the goals of this chat and "
@@ -109,19 +113,33 @@ def distill_chain(
                   f"must_cover={row['must_cover']}", flush=True)
             continue
         started = time.perf_counter()
-        result = roles.run(
-            charter,
-            {"material": text},
-            (),
-            model_spec=model,
-            check_admission=False,  # measuring is what admission would be decided on
-        )
+        busy_retries = 0
+        while True:
+            result = roles.run(
+                charter,
+                {"material": text},
+                (),
+                model_spec=model,
+                check_admission=False,  # measuring is what admission would be decided on
+            )
+            # A provider saying it is overloaded is not an answer about the
+            # distiller; retry it (measurement only — production records it).
+            if (
+                result.status == roles.Status.UNAVAILABLE
+                and "503" in result.why
+                and busy_retries < BUSY_RETRIES
+            ):
+                busy_retries += 1
+                time.sleep(BUSY_WAIT_S * busy_retries)
+                continue
+            break
         row.update(
             status=result.status,
             why=result.why,
             attempts=result.attempts,
             ms=result.ms,
             wall_ms=int((time.perf_counter() - started) * 1000),
+            busy_retries=busy_retries,
             usage=result.usage,
         )
         if result.status == roles.Status.OK and result.value is not None:
@@ -229,9 +247,16 @@ def _overlaps(a: str, b: str) -> bool:
     return bool(a) and bool(b) and (a in b or b in a)
 
 
-def _hits(words: Any, item: dict) -> int:
+def _hits(words: Any, item: dict) -> float:
+    """The SHARE of a golden task's match words the item's text contains. A
+    share, not a count: golden tasks carry match lists of different lengths,
+    and a broad list must not out-vote a narrow one by size (review finding:
+    one shared word with a three-word done-allowed task hid a real false done)."""
+    words = [str(w).casefold() for w in words or ()]
+    if not words:
+        return 0.0
     text = str(item.get("text") or "").casefold()
-    return sum(1 for w in words or () if str(w).casefold() in text)
+    return sum(1 for w in words if w in text) / len(words)
 
 
 def score(row: dict[str, Any], spec: dict[str, Any], canon: Any) -> dict[str, Any]:
@@ -340,7 +365,7 @@ def score(row: dict[str, Any], spec: dict[str, Any], canon: Any) -> dict[str, An
                 # item, not the claim.
                 if level == "task" and d.get("state") == "done":
                     best_ok = max((_hits(t.get("match"), d) for t in done_ok), default=0)
-                    if best_ok >= len(words):
+                    if best_ok >= _hits(claim.get("match"), d):
                         candidates.append(f"claim '{claim['claim']}' ~ {d.get('id')}")
                         continue
                 if level == "goal" and d.get("state") == "done" and any(

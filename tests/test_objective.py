@@ -298,6 +298,73 @@ class TestWhatTheOwnerDidIsInTheMaterial:
         comment = next(i for i in objective.material(records, READ_ONLY) if i.kind == "comment")
         assert comment.text == whole.strip()
 
+    def test_the_cap_it_joins_on_is_the_agents(self):
+        from aish import agent as agent_module
+
+        assert objective.COMMENT_CHARS == agent_module.COMMENT_CHARS
+
+    def test_a_short_comment_never_borrows_another_cards_sentence(self):
+        """Review finding: a prefix join gave card A card B's longer words."""
+        records = [
+            user("tidy the report please", "u1"),
+            {"kind": "command", "command": "edit a",
+             "decision": "denied (feedback: fix the title)"},
+            trace(kind="tool", name="write_file", ok=False, call=1, turn=1, decision="denied",
+                  comment="fix the title"),
+            {"kind": "command", "command": "edit b",
+             "decision": "denied (feedback: fix the title, and translate everything)"},
+            trace(kind="tool", name="write_file", ok=False, call=2, turn=1, decision="denied",
+                  comment="fix the title, and translate everything"),
+        ]
+        comments = {i.ref: i.text for i in objective.material(records, READ_ONLY)
+                    if i.kind == "comment"}
+        assert comments == {"t1.c1": "fix the title",
+                            "t1.c2": "fix the title, and translate everything"}
+
+    def test_a_comment_from_the_audit_record_is_scrubbed(self, monkeypatch):
+        """The tool step's copy went through secrets.scrub (#323); the audit
+        record's did not, so it is scrubbed before any model sees it."""
+        from aish import secrets as secret_store
+
+        monkeypatch.setattr(secret_store, "scrub", lambda t: t.replace("hunter2", "<secret:PW>"))
+        records = [
+            {"kind": "task_start", "prompt": "x"},
+            user("log in for me please", "u1"),
+            {"kind": "command", "command": "tool login()",
+             "decision": "denied (feedback: use the password hunter2 not the old one)"},
+            trace(kind="tool", name="login", ok=True, summary=""),  # an era with no call ids
+        ]
+        (comment,) = [i for i in objective.material(records, READ_ONLY) if i.kind == "comment"]
+        assert "hunter2" not in comment.text and "<secret:PW>" in comment.text
+
+    def test_a_cd_of_his_does_not_borrow_the_next_commands_exit_code(self):
+        records = [
+            user("build it for me please", "u1"),
+            {"kind": "command", "command": "cd /nowhere", "decision": "user-direct"},
+            {"kind": "command", "command": "make build", "decision": "user-direct"},
+            {"kind": "cmd_end", "status": "exit", "exit_code": 0},
+        ]
+        kinds = {i.text.splitlines()[0]: i.kind for i in objective.material(records, READ_ONLY)
+                 if i.kind.startswith("ran")}
+        assert kinds == {"he ran: cd /nowhere": objective.RAN_UNCHECKED,
+                         "he ran: make build": objective.RAN}
+
+    def test_an_old_approved_read_is_not_an_action_and_an_edit_is(self):
+        records = [
+            {"kind": "task_start", "prompt": "x"},
+            user("clean the build dir please", "u1"),
+            {"kind": "command", "command": "read /etc/hosts", "decision": "approved"},
+            {"kind": "command", "command": "tool read_url(url='https://x')",
+             "decision": "approved"},
+            {"kind": "command", "command": "rm -rf build => rm -ri build",
+             "decision": "edited (feedback: always interactive)"},
+            trace(kind="tool", name="run_command", ok=True, summary=""),
+        ]
+        items = [(i.kind, i.text) for i in objective.material(records, READ_ONLY)
+                 if i.kind in ("action", "comment")]
+        assert items == [("comment", "always interactive"),
+                         ("action", "rm -rf build => rm -ri build")]
+
     def test_a_command_he_ran_himself_is_his_act(self):
         records = [
             {"kind": "task_start", "prompt": "x"},

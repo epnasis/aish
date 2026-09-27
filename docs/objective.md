@@ -31,21 +31,28 @@ the task's contract-§2 turn:
 | kind | from | ref |
 |---|---|---|
 | `owner` | a typed user message — anything starting `[` is aish's own note (L4) and is not | `m:<id>`, or `m#<digest>` for a message with no id |
-| `comment` | the sentence he typed on a card he denied or held — WHOLE, from the audit `command` record (`<verdict> (feedback: …)`), where the tool step keeps only `COMMENT_CHARS` (400) of it | `t<N>.c<M>` |
+| `comment` | the sentence he typed on a card he denied or held. When the tool step's copy is exactly `COMMENT_CHARS` (400) long — cut — and exactly one audit `command` record of the task (`<verdict> (feedback: …)`) begins with it, that whole sentence, **scrubbed** (the audit copy never went through `secrets.scrub`) | `t<N>.c<M>` |
 | `denial` | a denied or held action with no sentence | `t<N>.c<M>` |
 | `answer` | the task's final, non-interim assistant message, cut at 8000 chars | `m:<id>` |
 | `cancel` | a final answer that is `STOPPED_ANSWER` | `m:<id>` |
 | `action` | a `tool` step with `ok: true` for a tool that changes something — not in `READ_ONLY_TOOLS` and not a plugin whose manifest says it is read-only — with its `call` record's arguments (600 chars; a skill's 6000, so whether it is self-contained can be judged) | `t<N>.c<M>` |
-| `ran` / `ran_unchecked` | a `!` command HE ran (audit `decision: user-direct`), with its output; `ran` only when a `cmd_end` recorded exit code 0 | `c#<digest>` |
+| `ran` / `ran_unchecked` | a `!` command HE ran (audit `decision: user-direct`), with its output; `ran` only when a `cmd_end` BEFORE the next command record recorded exit code 0 (`!cd` writes none, and must not borrow the next command's) | `c#<digest>` |
 | `failed` | a `task_end` that recorded a failure | `t<N>.end` |
 
 **Logs from before contract §2** carry tool steps with no `call` id, so no tool step can be
-joined to anything. There the audit `command` record is the source: a denial, a held or
-denied card's comment, and an approved gated action (never an auto-approved read-only
-command). Ungated writes of that era — a scratch `write_file` — leave no audit record
+joined to anything. There the audit `command` record is the source: a denial, a held,
+denied or edited card's comment (scrubbed), and an action that ran — an approval with
+no comment, or an EDITED approval (`old => new`, the owner's rewrite is what ran). Never
+an auto-approved command, and never an approved gated READ (`read <path>`, or a
+read-only tool behind an egress card). Ungated writes of that era — a scratch `write_file` — leave no audit record
 and are not in the material. `m#` and `c#` refs are digests of what the record says and
-when, so a Retry or a redaction rewriting the file cannot move them the way a line
-position would. `TestWhatTheOwnerDidIsInTheMaterial`.
+when, so a Retry or a redaction rewriting OTHER records cannot move them the way a line
+position would (a record whose own text is redacted gets a new ref; two identical
+records in the same second share one). `TestWhatTheOwnerDidIsInTheMaterial`.
+
+Read-only plugins are classified by the plugins installed NOW, from the process's
+working directory: a plugin uninstalled since, or reclassified, is judged by today's
+manifest. Plugin discovery runs once per distill.
 
 These five were found by the author of the benchmark goldens reading the material
 against the raw logs; each was confirmed in a real log before it was changed.

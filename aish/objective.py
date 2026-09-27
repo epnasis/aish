@@ -238,8 +238,10 @@ def material(records: Iterable[dict], read_only: frozenset[str] | None = None) -
 
 def _content_ref(prefix: str, *parts: Any) -> str:
     """A ref for a record with no id of its own: a digest of what it says and
-    when. Stable across a Retry or a redaction rewriting the file, unlike a
-    line position."""
+    when. Unlike a line position it does not move when a Retry or a redaction
+    rewrites OTHER records of the file; a record whose own text a redaction
+    rewrites gets a new ref, and two identical records in the same second share
+    one (timestamps are to the second)."""
     blob = "\x1f".join(str(p) for p in parts)
     return f"{prefix}#{hashlib.sha256(blob.encode()).hexdigest()[:12]}"
 
@@ -264,14 +266,40 @@ def _feedback(decision: str) -> tuple[str, str]:
     return verdict, rest[:-1] if rest.endswith(")") else rest
 
 
+# The cap the agent puts on a card comment as it enters a tool step
+# (`agent.COMMENT_CHARS`). Spelled here, like STOPPED_ANSWER, and pinned equal
+# by a test: only a comment exactly this long can have been cut.
+COMMENT_CHARS = 400
+
+
+def _scrubbed(text: str) -> str:
+    """Audit `command` records carry the card comment as typed — the tool step's
+    copy went through `secrets.scrub` (#323) and this one did not. Anything
+    taken from the audit record is scrubbed the same way before a model sees it."""
+    from . import secrets as secret_store
+
+    try:
+        return secret_store.scrub(text)
+    except Exception:  # noqa: BLE001 — cannot scrub: do not pass it on at all
+        return ""
+
+
 def _whole_comment(comment: str, feedbacks: list[str]) -> str:
-    """The owner's full sentence, when the tool step holds a capped copy and an
-    audit record of the same task holds it whole."""
+    """The owner's full sentence, when the tool step holds a CUT copy and an
+    audit record of the same task holds it whole.
+
+    Joined only when the step's comment is exactly `COMMENT_CHARS` long — the
+    one case in which it can have been cut — and exactly one audit comment in
+    the task begins with it. A shorter comment is already whole, and joining it
+    by prefix attached another card's longer sentence to it (review finding)."""
+    if len(comment) != COMMENT_CHARS:
+        return comment
     head = _squash(comment)
-    for text in feedbacks:
-        if head and _squash(text).startswith(head) and len(text) > len(comment):
-            return text
-    return comment
+    matches = [
+        whole for whole in (_scrubbed(text) for text in feedbacks)
+        if head and _squash(whole).startswith(head) and len(whole) > len(comment)
+    ]
+    return matches[0] if len(matches) == 1 else comment
 
 
 def _args_text(name: str, args: Any) -> str:
@@ -319,7 +347,7 @@ def _task_items(task: list[tuple[int, dict]], turn: int, read_only: frozenset[st
             items.append(Item(f"t{turn}.end", FAILED, turn, _cut(error, ACT_CHARS)))
             continue
         if kind == "command":
-            items.extend(_command_items(task[position:], record, turn, has_calls))
+            items.extend(_command_items(task[position:], record, turn, has_calls, read_only))
             continue
         step = _step(record)
         if step.get("kind") != "tool" or not isinstance(step.get("call"), int):
@@ -347,8 +375,32 @@ def _task_items(task: list[tuple[int, dict]], turn: int, read_only: frozenset[st
     return items
 
 
+def _following(rest: list[tuple[int, dict]]) -> list[dict]:
+    """The records after a `command` record, up to the next one — so a
+    `cmd_end` or an `[I ran …]` message is joined to THIS command only. `!cd`
+    writes no `cmd_end`, and the next command's must not be taken for its."""
+    out = []
+    for _, r in rest[1:]:
+        if r.get("kind") == "command":
+            break
+        out.append(r)
+    return out
+
+
+def _gated_read(command: str, read_only: frozenset[str]) -> bool:
+    """An audit record of a card that approved a READ: a sensitive file
+    (`read <path>`) or a read-only tool behind an egress card
+    (`tool read_url(…)`). Approved, and still changes nothing."""
+    if command.startswith("read "):
+        return True
+    if command.startswith("tool "):
+        return command[len("tool "):].partition("(")[0].strip() in read_only
+    return False
+
+
 def _command_items(
-    rest: list[tuple[int, dict]], record: dict, turn: int, has_calls: bool
+    rest: list[tuple[int, dict]], record: dict, turn: int, has_calls: bool,
+    read_only: frozenset[str] = frozenset(),
 ) -> list[Item]:
     """What an audit `command` record says about the owner — the one record
     every era of the log has.
@@ -367,15 +419,14 @@ def _command_items(
     decision = str(record.get("decision") or "")
     ref = _content_ref("c", record.get("ts"), command, decision)
     if decision == "user-direct":
-        exit_code = next(
-            (r.get("exit_code") for _, r in rest[1:] if r.get("kind") == "cmd_end"), None
-        )
+        after = _following(rest)
+        exit_code = next((r.get("exit_code") for r in after if r.get("kind") == "cmd_end"), None)
         output = next(
             (
                 str(r.get("content") or "").partition("\n")[2]
-                for _, r in rest[1:]
+                for r in after
                 if r.get("kind") == "message" and r.get("role") == "user"
-                and str(r.get("content") or "").startswith("[I ran `")
+                and str(r.get("content") or "").startswith(f"[I ran `{command}`")
             ),
             "",
         )
@@ -385,13 +436,21 @@ def _command_items(
     if has_calls:
         return []
     verdict, comment = _feedback(decision)
-    if comment and (verdict.startswith("denied") or verdict.startswith("approved")):
-        return [Item(ref, COMMENT, turn, _cut(comment, OWNER_CHARS))]
+    comment = _scrubbed(comment) if comment else ""
+    out: list[Item] = []
+    if comment and verdict.startswith(("denied", "approved", "edited")):
+        out.append(Item(ref, COMMENT, turn, _cut(comment, OWNER_CHARS)))
     if verdict.startswith("denied"):
-        return [Item(ref, DENIAL, turn, _cut(f"denied — {command}", ACT_CHARS))]
-    if verdict.startswith("approved"):
-        return [Item(ref, ACTION, turn, _cut(command, ACTION_ARGS_CHARS))]
-    return []
+        if not comment:
+            out.append(Item(ref, DENIAL, turn, _cut(f"denied — {command}", ACT_CHARS)))
+        return out
+    # An EDITED approval ran the owner's rewrite (`old => new`); an approval
+    # with a comment was held, not run. A gated read changed nothing.
+    ran_it = verdict.startswith("edited") or (verdict.startswith("approved") and not comment)
+    if ran_it and not _gated_read(command, read_only):
+        out.append(Item(_content_ref("c", record.get("ts"), command, decision, "ran"),
+                        ACTION, turn, _cut(command, ACTION_ARGS_CHARS)))
+    return out
 
 
 # ---------------------------------------------------------------- the floor
