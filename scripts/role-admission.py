@@ -62,9 +62,11 @@ def rows_of(charter: roles.Charter, case: roles.Case) -> tuple[int, ...]:
 
 
 def run_case(charter, case, model, verbose):
-    rows = rows_of(charter, case)
-    if not rows:
-        return False, ["the case's input parses to no rows at all"], None
+    rows: tuple[int, ...] = ()
+    if charter.output.kind == "rows":
+        rows = rows_of(charter, case)
+        if not rows:
+            return False, ["the case's input parses to no rows at all"], None
     result = roles.run(
         charter,
         case.inputs,
@@ -117,7 +119,12 @@ def main(argv: list[str]) -> int:
         )
         if dry_run:
             for case in shipped + private:
-                print(f"  · {case.source:7} {case.name}  ({len(rows_of(charter, case))} rows)")
+                shape = (
+                    f"{len(rows_of(charter, case))} rows"
+                    if charter.output.kind == "rows"
+                    else charter.output.kind
+                )
+                print(f"  · {case.source:7} {case.name}  ({shape})")
             continue
 
         tally = {"charter": [0, 0], "owner": [0, 0]}

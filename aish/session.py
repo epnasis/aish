@@ -630,6 +630,11 @@ RENDERLESS_STEPS = frozenset(
         # per-chat store beside the request. Same pair as `sent`: log-only,
         # skipped on replay, read by `aish explain` and the step screen.
         "received",  # #355
+        # #424. A revision of the chat's Objective, written after the answer by
+        # the distiller or the extractive floor. Recorded only in this slice —
+        # the owner sees it through #425's strip, never as a trace row — so it
+        # renders nowhere live, is skipped on replay, and is not activity.
+        "objective",  # #424
     }
 )
 

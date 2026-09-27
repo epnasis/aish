@@ -176,6 +176,18 @@ def no_real_notifications(monkeypatch, no_inherited_aish_env):
 
 
 @pytest.fixture(autouse=True)
+def no_background_objective(monkeypatch, no_inherited_aish_env):
+    """No Objective distill runs after a task unless the test asks for one (#424).
+
+    The distill is a background writer: it appends a `role` and an `objective`
+    record to a chat's log at a moment no test controls, after `done` — into
+    logs that hundreds of tests read back and assert on. Tests of the distill
+    itself clear the variable and wait for the thread; see test_objective.py.
+    """
+    monkeypatch.setenv("AISH_OBJECTIVE", "0")
+
+
+@pytest.fixture(autouse=True)
 def no_real_secrets(tmp_path_factory, monkeypatch):
     """Never read the developer's real login Keychain.
 

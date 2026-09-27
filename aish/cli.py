@@ -19,7 +19,9 @@ from . import (
     aliases,
     backends,
     browser,
+    objective,
     recipients,
+    roles,
     skills,
     term_image,
     tools,
@@ -2020,6 +2022,43 @@ def _purge_trash_at_launch(state_dir) -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+def distill_in_background(agent, logref: LogRef, state_dir) -> threading.Thread | None:
+    """The chat's next Objective revision (#424), on a daemon thread after the
+    answer has printed — the CLI's counterpart of the web's post-turn epilogue.
+
+    The boundary (the log's size and the turn) is taken HERE, synchronously,
+    and the log object is bound now, so a /resume into another chat while it
+    runs cannot redirect the write. It prints nothing and never raises; a
+    one-shot `aish "task"` exits before it would finish, and records nothing.
+    """
+    if objective.disabled():
+        return None
+    log = logref.log
+    try:
+        path = log.path
+        upto = path.stat().st_size
+    except (AttributeError, OSError):
+        return None
+    inner = getattr(agent, "inner", agent)
+    boundary = objective.Boundary(
+        path=path,
+        upto=upto,
+        turn=int(getattr(inner, "_turn", 0) or 0),
+        model_spec=roles.session_model_spec(
+            str(getattr(agent, "provider", "") or ""), str(getattr(agent, "model", "") or "")
+        ),
+        state_dir=str(state_dir),
+    )
+    thread = threading.Thread(
+        target=objective.distill_at_boundary,
+        args=(boundary, log.step),
+        name="aish-objective",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def _sweep_turns(state_dir) -> None:
     """The evidence store's budget sweep (#352), after a turn. Never raises:
     a store that cannot be swept is a line on stderr, not a failed turn."""
@@ -2895,6 +2934,7 @@ def main() -> int:
                 # After a turn ends, the evidence store is swept to its budget
                 # (#352) — here as in the web server, never inside a tool call.
                 _sweep_turns(state_dir)
+                distill_in_background(agent, logref, state_dir)
                 if chip_stream is not None:
                     chip_stream.close()
                 clean, pending_chips = parse_reply_chips(result)

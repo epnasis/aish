@@ -59,9 +59,10 @@ from . import atomic_write, evidence, paths, ratelimit, skills
 
 CHARTERS_DIR = Path(__file__).resolve().parent / "charters"
 
-# The one role v1 ships. Named here rather than spelled at the call site so the
-# wiring, the charter file and the caller cannot drift into three spellings.
+# Named here rather than spelled at the call site so the wiring, the charter
+# file and the caller cannot drift into three spellings.
 SNIPPET_READER = "snippet-reader"
+DISTILLER = "distiller"  # #424, the Objective — the first role with a live caller
 
 # Where the owner's own material lives: full-fidelity mined exam cases, one
 # directory per charter. ADDITIVE — absent is the normal case, and a fresh
@@ -136,12 +137,19 @@ UNSURE_VALUES = frozenset({"unclear", "unknown", "cant_tell", "cannot_tell", "un
 
 @dataclass(frozen=True)
 class Shape:
-    """The output a charter declares. `rows` is the only shape v1 has a
-    customer for; a second one waits for a second customer."""
+    """The output a charter declares.
+
+    Two shapes, each with a customer. `rows` is the snippet reader's: one typed
+    record per input row. `objective` is the distiller's (#424): a nested ledger
+    of goals and tasks whose rules — cites that resolve, evidence for `done`,
+    verbatim constraints, legal transitions — are checked by `objective.py`
+    against the input the role was given. Its frontmatter declares only caps.
+    """
 
     kind: str
     fields: tuple[Field, ...]
     max_rows: int = 0
+    caps: dict[str, int] = field(default_factory=dict)
 
     def field(self, name: str) -> Field | None:
         return next((f for f in self.fields if f.name == name), None)
@@ -238,12 +246,25 @@ def _parse_field(raw: Any) -> Field:
     raise CharterError(f"unknown output field type {kind!r} (row | text | enum)")
 
 
+# The caps an `objective` output must declare. Every text the ledger carries is
+# bounded by one of them; there is no uncapped string here either.
+OBJECTIVE_CAPS = ("max_goals", "max_tasks", "max_chars", "max_constraint_chars", "max_cites")
+
+
 def _parse_shape(raw: Any) -> Shape:
     if not isinstance(raw, dict):
         raise CharterError("output: must be a mapping")
     kind = str(raw.get("shape") or "")
+    if kind == "objective":
+        caps = {}
+        for name in OBJECTIVE_CAPS:
+            value = raw.get(name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise CharterError(f"an objective output must declare a positive {name}")
+            caps[name] = value
+        return Shape(kind, (), 0, caps)
     if kind != "rows":
-        raise CharterError(f"unknown output shape {kind!r} (rows)")
+        raise CharterError(f"unknown output shape {kind!r} (rows | objective)")
     fields = tuple(_parse_field(f) for f in (raw.get("fields") or ()))
     if not fields:
         raise CharterError("output: declares no fields")
@@ -263,7 +284,9 @@ KINDS = frozenset({"reader", "judge", "worker", "owner"})
 # One class, because one customer. A class table invented against a single
 # caller is a guess (#297 D5's reasoning, applied one level down); the second
 # entry arrives with the second role that needs a different model.
-MODEL_CLASSES = frozenset({"cloud-fast"})
+# `session` (#424): the session's OWN backend, whatever it is, so the owner's
+# text never rides to a different provider than the one he chose for the chat.
+MODEL_CLASSES = frozenset({"cloud-fast", "session"})
 
 
 class Degradation:
@@ -455,11 +478,12 @@ def _case(raw: Any, input_names: set[str], shape: Shape, source: str) -> Case:
     expect = raw.get("expect")
     if not isinstance(expect, dict) or not expect:
         raise CharterError(f"golden pair {name!r} declares nothing to check")
+    table = _assertions_for(shape)
     for key in expect:
-        if key not in _ASSERTIONS:
+        if key not in table:
             raise CharterError(
                 f"golden pair {name!r} uses unknown assertion {key!r} "
-                f"({', '.join(sorted(_ASSERTIONS))})"
+                f"({', '.join(sorted(table))})"
             )
     named = list(expect.get("field_values") or ()) + list(expect.get("distinct") or ())
     for fname in named:
@@ -661,8 +685,13 @@ def capped(value: str, cap: int) -> str:
     return " ".join(flat.split())[:cap]
 
 
-def validate(shape: Shape, payload: Any, rows: tuple[int, ...]) -> Rows:
+def validate(
+    shape: Shape, payload: Any, rows: tuple[int, ...], inputs: dict[str, str] | None = None
+) -> Any:
     """The typed value, or `ValueError` with a message the model can act on.
+
+    An `objective` answer is validated by `objective.validate_answer`, against
+    the input the role was given — its cites must name items that input holds.
 
     Every message here is written to be fed straight back on the one retry, so
     it says what was wrong in terms of the contract rather than in terms of the
@@ -672,6 +701,10 @@ def validate(shape: Shape, payload: Any, rows: tuple[int, ...]) -> Rows:
     the owner's 4201 recorded result sets number their rows with a gap, so a
     1..N assumption would reject a correct answer on real traffic.
     """
+    if shape.kind == "objective":
+        from . import objective
+
+        return objective.validate_answer(shape, payload, inputs or {})
     if not isinstance(payload, dict):
         raise ValueError("the reply must be a JSON object")
     raw = payload.get("rows")
@@ -902,7 +935,8 @@ class Result:
     version: str
     status: str
     model: str = ""
-    value: Rows | None = None
+    # `Rows` for a `rows` charter, `objective.Revision` for an `objective` one.
+    value: Any = None
     why: str = ""
     attempts: int = 0
     ms: int = 0
@@ -933,6 +967,10 @@ def contract_text(shape: Shape, rows: tuple[int, ...]) -> str:
     for a field the validator does not know is the overclaim pattern in
     miniature.
     """
+    if shape.kind == "objective":
+        from . import objective
+
+        return objective.contract_text(shape)
     lines = [
         "Reply with ONE JSON object and nothing else. No prose before or after "
         "it, no code fence.",
@@ -1005,6 +1043,26 @@ def make_caller(
 
     chat, provider, name = backends.make_chat(model_spec, client=client)
     return chat, provider, name
+
+
+def session_model_spec(provider: str, model: str) -> str:
+    """The model spec that reaches THIS session's own backend through the
+    stateless seam, or "" when there is none.
+
+    The answer for a charter of class `session`. claude-max has no seam — the
+    SDK owns its loop — so it answers "", the declared degradation. Ollama's
+    spec is the bare model name, because that is how `backends.parse_model`
+    reads one.
+    """
+    from . import backends
+
+    if not model or provider == "claude-max":
+        return ""
+    if provider == "ollama":
+        return model
+    if provider in backends.PROVIDERS:
+        return f"{provider}:{model}"
+    return ""
 
 
 def _usage_of(response: Any) -> dict[str, Any]:
@@ -1122,7 +1180,9 @@ def run(
             )
         usage = _usage_of(response) or usage
         try:
-            value = validate(charter.output, _json_payload(_content(response)), rows)
+            value = validate(
+                charter.output, _json_payload(_content(response)), rows, inputs
+            )
         except (ValueError, TypeError) as exc:
             error = f"{exc}"
             if attempt < ROLE_ATTEMPTS:
@@ -1157,7 +1217,7 @@ def run(
 # ---------------------------------------------------------------- the exam
 
 
-def check_case(case: Case, value: Rows) -> list[str]:
+def check_case(case: Case, value: Any) -> list[str]:
     """The assertions this case makes that the answer did not meet.
 
     Every assertion is a property of the TYPED value, never a comparison
@@ -1165,10 +1225,13 @@ def check_case(case: Case, value: Rows) -> list[str]:
     model chooses, so a literal expectation would be unmeetable and the exam
     would be measuring formatting.
     """
+    table: dict[str, Callable[[Any, Any], list[str]]] = (
+        dict(_ASSERTIONS) if isinstance(value, Rows) else _objective_assertions()
+    )
     return [
         problem
         for key, expected in case.expect.items()
-        for problem in _ASSERTIONS[key](expected, value)
+        for problem in table[key](expected, value)
     ]
 
 
@@ -1245,6 +1308,18 @@ _ASSERTIONS: dict[str, Callable[[Any, Rows], list[str]]] = {
 }
 
 
+def _objective_assertions() -> dict[str, Callable[[Any, Any], list[str]]]:
+    from . import objective
+
+    return dict(objective.ASSERTIONS)
+
+
+def _assertions_for(shape: Shape) -> dict[str, Any]:
+    """The assertion kinds a case may use, by output shape. A rows assertion
+    means nothing to a ledger and the reverse, so each shape has its own."""
+    return _objective_assertions() if shape.kind == "objective" else dict(_ASSERTIONS)
+
+
 # ---------------------------------------------------------------- counters
 
 
@@ -1303,11 +1378,16 @@ def scan_counters(records) -> dict[str, Counters]:
     return out
 
 
-def tally_flags(shape: Shape, value: Rows) -> dict[str, dict[str, int]]:
+def tally_flags(shape: Shape, value: Any) -> dict[str, dict[str, int]]:
     """Per-call enum counts, for the record. Counted at write time because the
     output itself is not kept in full in every reader's reach — and because a
     counter derived later from prose is a counter derived from the thing this
-    framework exists to stop forwarding."""
+    framework exists to stop forwarding. For a ledger, the goal and task states
+    are the closed vocabularies counted."""
+    if shape.kind == "objective":
+        from . import objective
+
+        return objective.tally(value)
     out: dict[str, dict[str, int]] = {}
     for declared in shape.fields:
         if declared.type != "enum":

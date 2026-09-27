@@ -67,7 +67,9 @@ from . import (
     export,
     files,
     notify,
+    objective,
     recipients,
+    roles,
     tools,
     turns,
     vault_writes,
@@ -3635,6 +3637,7 @@ class WebServer:
         # What the post-answer work needs, taken while the turn still owns the
         # session (#397); None until the answer has landed.
         finished: tuple[str, TitleRequest | None] | None = None
+        boundary: objective.Boundary | None = None
         try:
             if resume and isinstance(session.agent, Agent):
                 # Keep the interrupted task's own tool output verbatim (#164):
@@ -3706,9 +3709,59 @@ class WebServer:
                 session.logref.task_end("failed", failure)
             else:
                 session.logref.task_end()
+            # The Objective's boundary (#424), captured NOW — the log's size and
+            # the turn — because the next turn may start writing the moment
+            # busy clears, and the distill must read the chat as it stood here.
+            boundary = self._objective_boundary(session)
             await self._finish_turn(session)
         if finished is not None:
             self._after_turn(session, *finished)
+        if boundary is not None:
+            self._distill_after_turn(session, boundary)
+
+    def _objective_boundary(self, session: Session) -> objective.Boundary | None:
+        """Where this turn ended, for the distiller — or None when emission is
+        off or there is no log to read. Synchronous and cheap: one stat."""
+        if objective.disabled():
+            return None
+        agent = session.agent
+        try:
+            path = session.logref.log.path
+            upto = path.stat().st_size
+        except (AttributeError, OSError):
+            return None
+        return objective.Boundary(
+            path=path,
+            upto=upto,
+            turn=int(getattr(getattr(agent, "inner", agent), "_turn", 0) or 0),
+            model_spec=roles.session_model_spec(
+                str(getattr(agent, "provider", "") or ""), str(getattr(agent, "model", "") or "")
+            ),
+            state_dir=str(self.state_dir),
+        )
+
+    def _distill_after_turn(self, session: Session, boundary: objective.Boundary) -> None:
+        """Write the chat's next Objective revision, off the turn (#424).
+
+        After the answer and after busy has cleared, on a worker thread, so it
+        can never delay what the owner is waiting for; `distill_at_boundary`
+        never raises, and a failure records itself and leaves the previous
+        revision standing. Held in `_epilogues` like the titler, so shutdown
+        does not wait on it."""
+
+        # The log object, bound now: whatever this session's logref points at
+        # by the time the distill finishes, the revision belongs to this log.
+        write = session.logref.log.step
+
+        async def run() -> None:
+            try:
+                await asyncio.to_thread(objective.distill_at_boundary, boundary, write)
+            except Exception:  # noqa: BLE001 — an Objective is never worth a crash
+                log.exception("objective distill failed")
+
+        task = asyncio.ensure_future(run())
+        self._epilogues.add(task)
+        task.add_done_callback(self._epilogues.discard)
 
     def _after_turn(
         self, session: Session, result: str, titling: TitleRequest | None

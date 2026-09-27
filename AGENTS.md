@@ -77,6 +77,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `skills.py`, `embeddings.py`, `curate.py`, `skill_import.py` | `docs/knowledge-layer.md` |
 | `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
 | `roles.py`, `aish/charters/`, `web_search`'s rendering, anything a role reads or a charter declares | `docs/roles.md` |
+| `objective.py`, the distiller charter, the `objective` record, anything that reads or writes what a chat is FOR | `docs/objective.md` |
 | `tool_plugins.py`, `secrets.py` | `docs/tools-layer.md` |
 | `explain.py`, `evidence.py`, `turns.py`, `tooluse.py`, the `brief` and `sent` records | `docs/diagnostics.md` |
 | `ratelimit.py`, `_chat_turn`'s retry loop, anything that retries a model call | `docs/rate-limits.md` |
@@ -139,11 +140,16 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`roles.py`** — cheaply appointed, isolated, narrow-duty helpers (#297): a charter, its
   declared inputs, and a code-validated typed answer. Isolation is structural — a role
   composes its own two messages and calls the backend seam, so no `Agent` exists for
-  history or tools to leak from. **Nothing calls a role today:** its one customer
-  read search snippets, a controlled experiment showed the snippets were better simply not
-  collected, and the wiring went while the framework stayed. Admission is bound to the
+  history or tools to leak from. **One role is called — the distiller, at task end
+  (#424) — and its output reaches only the log.** The snippet reader was measured and its
+  wiring removed while the framework stayed. Admission is bound to the
   charter's CONTENT DIGEST, which is what keeps the model out of its own oversight; the
   command fence is early refusal and is known-incomplete. → `docs/roles.md`
+- **`objective.py`** — what a chat is FOR (#424): a ledger of goals and tasks, one
+  renderless `objective` revision per task end, written off the interactive path by the
+  distiller role or the verbatim extractive floor. Every state cites the log and code
+  checks it; `covers_to_turn` is computed, never claimed. Recorded only — nothing reads
+  it back into the model or the screen yet. → `docs/objective.md`
 - **`rule_compiler.py`** — the owner's plain language → rule field values (#205). Isolated because it is more accurate; safe because code validates it and the owner approves it. The acting model never learns the grammar. → `docs/rules-engine.md`
 - **`tool_plugins.py`** — droppable `TOOL.md` plugin tools, indistinguishable from native ones to the model and gated by the same `_dispatch`. → `docs/tools-layer.md`
 - **`secrets.py`** — local secret store backed by the macOS login Keychain; structurally un-committable. → `docs/tools-layer.md`

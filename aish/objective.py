@@ -1,0 +1,1100 @@
+"""The Objective — what a chat is FOR, as a ledger of goals and tasks (#423, #424).
+
+aish protects only the latest task prompt. The goal of a long chat is spread over
+many owner messages, in his language, and is never stated as one thing — so
+anchoring on the first message loses it and anchoring on the latest loses it too.
+This module keeps a separate record of it: goals with states, tasks under them,
+every state a claim that cites the log.
+
+Three parts, and only the second involves a model:
+
+- **The material.** The owner's own texts, final answers, and the records of what
+  ran, was denied, was stopped or failed — read from the session log and given a
+  stable ref each. Never tool outputs, never reminders (`material`).
+- **The distiller.** An isolated role (`docs/roles.md`, charter
+  `aish/charters/distiller.md`) that turns the previous revision plus the new
+  material into the next revision. Its answer is validated HERE, in code, before
+  anything records it (`validate_answer`): cites resolve, `done` has evidence,
+  constraints are verbatim, transitions are legal, owner-set fields are untouched.
+- **The extractive floor.** No model: the owner's uncovered texts, verbatim,
+  filtered by length, the synthetic-note prefix and exact duplicates only
+  (`floor`). It is what stands when the distiller cannot.
+
+`covers_to_turn` is computed here and never taken from the model: it is the last
+turn up to which every owner text the floor would keep is cited by the revision.
+
+Written at task end, off the interactive path (`distill_at_boundary`), as a
+renderless `objective` record. Recorded only in this slice: nothing reads it back
+into the model or the screen yet. `docs/objective.md`, contract §3.14.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import threading
+import time
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from . import roles
+
+DISTILLER = "distiller"
+
+GOAL_STATES = ("active", "parked", "done", "dropped", "unknown")
+TASK_STATES = ("pending", "in_progress", "done", "stopped", "superseded", "unknown")
+CHANGES = ("new", "unchanged", "refined", "expanded", "pivoted", "unknown")
+
+ORIGIN_DISTILLER = "distiller"
+ORIGIN_EXTRACTIVE = "extractive"
+ORIGIN_OWNER = "owner"
+# Revisions that ACCOUNT for owner texts. An extractive revision copies them and
+# accounts for nothing, so the distiller is never handed one as its base.
+BASE_ORIGINS = frozenset({ORIGIN_DISTILLER, ORIGIN_OWNER})
+
+# Material kinds.
+OWNER = "owner"  # a message he typed
+COMMENT = "comment"  # the sentence he typed on an approval card he denied or held
+DENIAL = "denial"  # an action he denied or held, with no sentence
+ANSWER = "answer"  # a final answer
+ACTION = "action"  # a state-changing tool call that ran and succeeded
+CANCEL = "cancel"  # a task he stopped
+FAILED = "failed"  # a task that ended in failure
+
+OWNER_WORDS = frozenset({OWNER, COMMENT})  # text the owner authored himself
+EVIDENCE = frozenset({ANSWER, ACTION})  # what `done` may cite
+OWNER_ACTS = frozenset({OWNER, COMMENT, DENIAL, CANCEL})  # what `stopped`/`dropped` may cite
+ASKED = frozenset({OWNER, COMMENT, ANSWER})  # where a task was asked for or planned
+
+# The floor's mechanical filter. A length threshold, the synthetic-note prefix
+# and exact duplicates — and deliberately NO word list: which short replies are
+# "noise" is a judgement, and a list of them is a vocabulary nobody measured.
+# 12 keeps "Check Tomorrow.io" (17) and drops "try again" (9) and "Continue" (8)
+# in the #422 chat.
+FLOOR_MIN_CHARS = 12
+SYNTHETIC_PREFIX = "["
+
+# What the distiller is SHOWN of each item. The owner's words travel nearly
+# whole, since a constraint must be quoted from them; an answer is cut, since it
+# is cited as evidence and never quoted.
+OWNER_CHARS = 4000
+ANSWER_CHARS = 1200
+ACT_CHARS = 200
+EARLIER_CHARS = 200
+
+# `session.STOPPED_ANSWER`, spelled here rather than imported so this module
+# stays importable without the session layer (a pinned test holds them equal).
+STOPPED_ANSWER = "(task stopped by user — any partial work is above)"
+
+_ID = re.compile(r"[A-Za-z0-9_.-]{1,24}")
+
+
+# ---------------------------------------------------------------- the material
+
+
+@dataclass(frozen=True)
+class Item:
+    """One citable thing. `text` is what the distiller is shown; for owner
+    texts it is also what a constraint is checked against."""
+
+    ref: str
+    kind: str
+    turn: int
+    text: str
+
+    def as_json(self) -> dict[str, Any]:
+        return {"ref": self.ref, "kind": self.kind, "turn": self.turn, "text": self.text}
+
+
+def _cut(text: str, cap: int) -> str:
+    text = text.strip()
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f" [… cut here; {len(text)} chars in all]"
+
+
+def read_records(path: Path, upto: int | None = None) -> list[dict]:
+    """The log's parseable records, in file order, up to byte `upto`.
+
+    `upto` is the size the file had when the task ended, so a distill that runs
+    late — while the NEXT task is writing — reads exactly the chat as it stood
+    at its own boundary. A torn line is skipped, as every reader of the log does.
+    """
+    with path.open("rb") as handle:
+        raw = handle.read() if upto is None else handle.read(upto)
+    out: list[dict] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            out.append(record)
+    return out
+
+
+def _step(record: dict) -> dict:
+    step = record.get("step") if record.get("kind") == "trace" else None
+    return step if isinstance(step, dict) else {}
+
+
+def _read_only_tools() -> frozenset[str]:
+    # Imported lazily and only here: the tool classification has exactly one
+    # definition, and it lives beside the loop that dispatches.
+    from .agent import READ_ONLY_TOOLS
+
+    return READ_ONLY_TOOLS
+
+
+_OWN_KINDS = frozenset({"objective", "role"})
+
+
+def _opens_task(record: dict, bracketed: bool) -> bool:
+    if bracketed:
+        return record.get("kind") == "task_start"
+    # A log with no task brackets (the CLI writes none): a typed owner message
+    # that is a model call's first input opens the task.
+    return (
+        record.get("kind") == "message"
+        and record.get("role") == "user"
+        and record.get("model_call", 0) == 0
+        and not str(record.get("content") or "").lstrip().startswith(SYNTHETIC_PREFIX)
+    )
+
+
+def material(records: Iterable[dict], read_only: frozenset[str] | None = None) -> list[Item]:
+    """Every citable item in the log's LIVE records, each stamped with its task's
+    turn (contract §2).
+
+    A task's turn is the first integer `turn` stamped on a trace record inside
+    it — the join key every governance record already uses — and one more than
+    the previous task's where nothing inside it was stamped. Superseded records
+    are skipped (L7): a discarded Retry attempt is not something the owner's
+    goal can cite.
+    """
+    read_only = _read_only_tools() if read_only is None else read_only
+    live = [(i, r) for i, r in enumerate(records) if not r.get("superseded")]
+    bracketed = any(r.get("kind") == "task_start" for _, r in live)
+
+    tasks: list[list[tuple[int, dict]]] = []
+    for index, record in live:
+        if _opens_task(record, bracketed) or not tasks:
+            tasks.append([])
+        tasks[-1].append((index, record))
+
+    items: list[Item] = []
+    previous = 0
+    for task in tasks:
+        stamped = [
+            stamp
+            for _, r in task
+            # A distill's own records are stamped with the turn it DISTILLED,
+            # and a slow one lands inside the next task — so they say nothing
+            # about which turn the task they sit in is.
+            if _step(r).get("kind") not in _OWN_KINDS
+            and isinstance(stamp := _step(r).get("turn"), int)
+            and not isinstance(stamp, bool)
+        ]
+        turn = stamped[0] if stamped else previous + 1
+        previous = turn
+        items.extend(_task_items(task, turn, read_only))
+    return items
+
+
+def _message_ref(index: int, record: dict) -> str:
+    ident = str(record.get("turn") or "")
+    return f"m:{ident}" if ident else f"m@{index}"
+
+
+def _task_items(task: list[tuple[int, dict]], turn: int, read_only: frozenset[str]) -> list[Item]:
+    items: list[Item] = []
+    answer: tuple[int, dict] | None = None
+    for index, record in task:
+        kind = record.get("kind")
+        if kind == "message":
+            role = record.get("role")
+            content = str(record.get("content") or "")
+            if role == "user" and content.strip():
+                # L4: a synthetic turn is classified lexically. aish's own
+                # notes and reminders are never the owner's words.
+                if content.lstrip().startswith(SYNTHETIC_PREFIX):
+                    continue
+                items.append(
+                    Item(_message_ref(index, record), OWNER, turn, _cut(content, OWNER_CHARS))
+                )
+            elif role == "assistant" and not record.get("interim") and content.strip():
+                answer = (index, record)
+            continue
+        if kind == "task_end" and record.get("status") not in (None, "ok"):
+            error = str(record.get("error") or record.get("status") or "")
+            items.append(Item(f"t{turn}.end", FAILED, turn, _cut(error, ACT_CHARS)))
+            continue
+        step = _step(record)
+        if step.get("kind") != "tool" or not isinstance(step.get("call"), int):
+            continue
+        ref = f"t{step.get('turn', turn)}.c{step['call']}"
+        name = str(step.get("name") or "")
+        what = f"{name}: {step.get('command') or step.get('summary') or ''}".strip()
+        decision = step.get("decision")
+        if decision in ("denied", "held"):
+            comment = str(step.get("comment") or "").strip()
+            if comment:
+                items.append(Item(ref, COMMENT, turn, _cut(comment, OWNER_CHARS)))
+            else:
+                items.append(Item(ref, DENIAL, turn, _cut(f"{decision} — {what}", ACT_CHARS)))
+        elif step.get("ok") is True and name not in read_only:
+            items.append(Item(ref, ACTION, turn, _cut(what, ACT_CHARS)))
+    if answer is not None:
+        index, record = answer
+        content = str(record.get("content") or "").strip()
+        kind = CANCEL if content == STOPPED_ANSWER else ANSWER
+        items.append(Item(_message_ref(index, record), kind, turn, _cut(content, ANSWER_CHARS)))
+    return items
+
+
+# ---------------------------------------------------------------- the floor
+
+
+def floor_keeps(item: Item) -> bool:
+    """Would the extractive floor copy this item? Mechanical only."""
+    if item.kind not in OWNER_WORDS:
+        return False
+    text = item.text.strip()
+    return len(text) >= FLOOR_MIN_CHARS and not text.startswith(SYNTHETIC_PREFIX)
+
+
+def floor(items: Iterable[Item], after_turn: int, upto_turn: int) -> list[Item]:
+    """The owner's texts in (`after_turn`, `upto_turn`], verbatim, minus the
+    short ones, the synthetic notes and exact duplicates of an earlier one."""
+    kept: list[Item] = []
+    seen: set[str] = set()
+    for item in items:
+        if not (after_turn < item.turn <= upto_turn) or not floor_keeps(item):
+            continue
+        text = item.text.strip()
+        if text in seen:
+            continue
+        seen.add(text)
+        kept.append(item)
+    return kept
+
+
+# ---------------------------------------------------------------- revisions
+
+
+@dataclass
+class Revision:
+    """A validated Objective: the value a distiller call returns, and the body
+    of an `objective` record."""
+
+    goals: list[dict[str, Any]]
+    change: str = "unknown"
+    covers_to_turn: int = 0
+    uncited: list[str] = field(default_factory=list)
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "change": self.change,
+            "goals": self.goals,
+            "covers_to_turn": self.covers_to_turn,
+            "uncited": list(self.uncited),
+        }
+
+
+def objective_records(records: Iterable[dict]) -> list[dict]:
+    """Every `objective` step in the log, superseded ones included."""
+    return [_step(r) for r in records if _step(r).get("kind") == "objective"]
+
+
+def current(records: Iterable[dict], origins: frozenset[str] | None = None) -> dict | None:
+    """The newest LIVE revision — of the given origins, when given (L7)."""
+    found = None
+    for record in records:
+        step = _step(record)
+        if step.get("kind") != "objective" or record.get("superseded"):
+            continue
+        if origins is None or step.get("origin") in origins:
+            found = step
+    return found
+
+
+def next_revision(records: Iterable[dict]) -> int:
+    """1 + the highest revision in the file. Superseded ones count: an id that
+    was handed out is never reissued (the `last_turn` rule)."""
+    numbers = [int(s.get("revision") or 0) for s in objective_records(records)]
+    return max(numbers, default=0) + 1
+
+
+def _bare_ref(cite: Any) -> str:
+    return str(cite.get("ref") or "") if isinstance(cite, dict) else str(cite or "")
+
+
+def _owner_set(item: dict) -> list[str]:
+    return [f for f in ("state", "text") if item.get(f"{f}_by") == ORIGIN_OWNER]
+
+
+def _model_view(goals: list[dict]) -> list[dict]:
+    """A revision as the distiller is shown it: cites as bare refs, and who set
+    each field, so it knows which ones it may not touch."""
+    out = []
+    for goal in goals:
+        out.append(
+            {
+                "id": goal.get("id"),
+                "text": goal.get("text"),
+                "state": goal.get("state"),
+                "owner_set": _owner_set(goal),
+                "cites": [_bare_ref(c) for c in goal.get("cites") or ()],
+                "constraints": [
+                    {"text": c.get("text"), "cites": [_bare_ref(x) for x in c.get("cites") or ()]}
+                    for c in goal.get("constraints") or ()
+                ],
+                "tasks": [
+                    {
+                        "id": t.get("id"),
+                        "text": t.get("text"),
+                        "state": t.get("state"),
+                        "owner_set": _owner_set(t),
+                        "cites": [_bare_ref(c) for c in t.get("cites") or ()],
+                        **({"replaced_by": t["replaced_by"]} if t.get("replaced_by") else {}),
+                    }
+                    for t in goal.get("tasks") or ()
+                ],
+            }
+        )
+    return out
+
+
+# ---------------------------------------------------------------- the input
+
+
+def compose_input(
+    chat: str, boundary: int, items: list[Item], base: dict | None
+) -> str:
+    """The distiller's ONE input: the previous revision, and the material since.
+
+    JSON, because the validator reads it back: the ledger a cite is checked
+    against is exactly what the model was shown, in production and in the exam
+    alike (`parse_input`). `earlier` holds the items the previous revision cites
+    that are older than the delta, so a carried cite still resolves.
+    """
+    covered = int(base.get("covers_to_turn") or 0) if base else 0
+    new = [i for i in items if covered < i.turn <= boundary]
+    cited = {
+        _bare_ref(c)
+        for goal in (base.get("goals") or () if base else ())
+        for c in [
+            *(goal.get("cites") or ()),
+            *(x for con in goal.get("constraints") or () for x in con.get("cites") or ()),
+            *(x for t in goal.get("tasks") or () for x in t.get("cites") or ()),
+        ]
+    }
+    earlier = [
+        Item(
+            i.ref,
+            i.kind,
+            i.turn,
+            i.text if i.kind in OWNER_WORDS else _cut(i.text, EARLIER_CHARS),
+        )
+        for i in items
+        if i.turn <= covered and i.ref in cited
+    ]
+    payload = {
+        "chat": chat,
+        "boundary_turn": boundary,
+        "previous": (
+            {
+                "revision": base.get("revision"),
+                "covers_to_turn": covered,
+                "goals": _model_view(base.get("goals") or []),
+            }
+            if base
+            else None
+        ),
+        "earlier": [i.as_json() for i in earlier],
+        "new": [i.as_json() for i in new],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=1)
+
+
+@dataclass
+class Context:
+    """What a distiller answer is validated against — read back from its input."""
+
+    chat: str
+    boundary: int
+    covered: int
+    previous: list[dict]
+    ledger: dict[str, Item]
+    new: list[Item]
+
+
+def parse_input(text: str) -> Context:
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"the distiller's input is not JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("the distiller's input is not a JSON object")
+    previous = raw.get("previous") or {}
+
+    def item(entry: dict) -> Item:
+        return Item(
+            str(entry.get("ref") or ""),
+            str(entry.get("kind") or ""),
+            int(entry.get("turn") or 0),
+            str(entry.get("text") or ""),
+        )
+
+    earlier = [item(e) for e in raw.get("earlier") or () if isinstance(e, dict)]
+    new = [item(e) for e in raw.get("new") or () if isinstance(e, dict)]
+    return Context(
+        chat=str(raw.get("chat") or ""),
+        boundary=int(raw.get("boundary_turn") or 0),
+        covered=int(previous.get("covers_to_turn") or 0),
+        previous=[_from_model_view(g) for g in previous.get("goals") or ()],
+        ledger={i.ref: i for i in [*earlier, *new]},
+        new=new,
+    )
+
+
+def _from_model_view(goal: dict) -> dict:
+    """The model view back into record form, for the transition checks. Who set
+    each field survives as `owner_set`, which is all the checks need."""
+
+    def by(item: dict) -> dict:
+        owned = set(item.get("owner_set") or ())
+        return {
+            f"{f}_by": ORIGIN_OWNER if f in owned else ORIGIN_DISTILLER for f in ("state", "text")
+        }
+
+    return {
+        **goal,
+        **by(goal),
+        "tasks": [{**t, **by(t)} for t in goal.get("tasks") or ()],
+    }
+
+
+# ---------------------------------------------------------------- validation
+
+
+def _squash(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _cites(raw: Any, where: str, ctx: Context, cap: int) -> list[Item]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"{where}: cites must be a list of refs")
+    if len(raw) > cap:
+        raise ValueError(f"{where}: at most {cap} cites")
+    out = []
+    for cite in raw:
+        ref = _bare_ref(cite).strip()
+        found = ctx.ledger.get(ref)
+        if found is None:
+            raise ValueError(
+                f"{where}: cite {ref!r} names nothing in the material you were given — "
+                "cite only refs that appear under \"new\" or \"earlier\""
+            )
+        out.append(found)
+    return out
+
+
+def _require(cited: list[Item], kinds: frozenset[str], where: str, what: str) -> None:
+    if not any(c.kind in kinds for c in cited):
+        raise ValueError(f"{where}: {what} (kinds {', '.join(sorted(kinds))})")
+
+
+# Transitions a distiller may make without an owner cite, from the base's state.
+# Everything may become `unknown`; reopening a closed item needs his word.
+_GOAL_REOPEN = {"done", "dropped"}
+_TASK_REOPEN = {"done", "stopped"}
+_TASK_TERMINAL = {"superseded"}
+
+
+def _check_transition(
+    before: dict | None, after: dict, where: str, cited: list[Item], closed: set[str],
+    terminal: set[str], fresh: set[str],
+) -> None:
+    """Legal moves from the base revision's state. Reopening a closed item must
+    rest on something the owner did SINCE the base — a cite of the message he
+    asked in, which the base already had, justifies nothing new."""
+    if before is None:
+        return
+    old, new = before.get("state"), after.get("state")
+    for field_name, by in (("state", "state_by"), ("text", "text_by")):
+        if before.get(by) == ORIGIN_OWNER and before.get(field_name) != after.get(field_name):
+            raise ValueError(
+                f"{where}: {field_name} was set by the owner and may not be changed "
+                f"(it is {before.get(field_name)!r})"
+            )
+    if old == new or new == "unknown" or old == "unknown":
+        return
+    if old in terminal:
+        raise ValueError(f"{where}: a {old} item may only become unknown")
+    if old in closed:
+        _require(
+            [c for c in cited if c.ref in fresh],
+            OWNER_ACTS,
+            where,
+            f"reopening a {old} item needs an owner cite from the new material",
+        )
+
+
+def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) -> Revision:
+    """A distiller answer as a `Revision`, or `ValueError` with a message the
+    model can act on (it is fed back on the one corrective retry)."""
+    ctx = parse_input(inputs.get("material", ""))
+    caps = shape.caps
+    text_cap = caps.get("max_chars", 200)
+    cite_cap = caps.get("max_cites", 8)
+    if not isinstance(payload, dict):
+        raise ValueError("the reply must be a JSON object")
+    change = str(payload.get("change") or "").strip().lower()
+    if change not in CHANGES:
+        raise ValueError(f"change must be one of {', '.join(CHANGES)} (got {change!r})")
+    raw_goals = payload.get("goals")
+    if not isinstance(raw_goals, list):
+        raise ValueError("the reply must have a 'goals' array")
+    if len(raw_goals) > caps.get("max_goals", 12):
+        raise ValueError(f"at most {caps.get('max_goals', 12)} goals")
+
+    prev_goals = {str(g.get("id")): g for g in ctx.previous}
+    prev_tasks = {
+        str(t.get("id")): t for g in ctx.previous for t in g.get("tasks") or ()
+    }
+    fresh = {i.ref for i in ctx.new}
+    goal_ids: set[str] = set()
+    task_ids: set[str] = set()
+    goals: list[dict[str, Any]] = []
+    cited_refs: set[str] = set()
+
+    def wrap(items: list[Item]) -> list[dict[str, str]]:
+        cited_refs.update(i.ref for i in items)
+        return [{"session": ctx.chat, "ref": i.ref} for i in items]
+
+    for n, raw in enumerate(raw_goals, 1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"goal {n} must be an object")
+        gid = str(raw.get("id") or "").strip()
+        where = f"goal {gid or n}"
+        if not _ID.fullmatch(gid):
+            raise ValueError(f"{where}: id must be 1-24 letters, digits, '.', '_' or '-'")
+        if gid in goal_ids:
+            raise ValueError(f"{where}: two goals share the id {gid!r}")
+        goal_ids.add(gid)
+        text = roles.capped(str(raw.get("text") or ""), text_cap)
+        if not text:
+            raise ValueError(f"{where}: text is required")
+        state = str(raw.get("state") or "").strip().lower()
+        if state not in GOAL_STATES:
+            raise ValueError(f"{where}: state must be one of {', '.join(GOAL_STATES)}")
+        cited = _cites(raw.get("cites"), where, ctx, cite_cap)
+        if state != "unknown":
+            _require(cited, OWNER_WORDS, where, "a goal must cite where the owner asked for it")
+        if state == "done":
+            _require(cited, EVIDENCE, where, "done needs evidence: a final answer or an action")
+        before = prev_goals.get(gid)
+        if state == "dropped" and (before is None or before.get("state") != "dropped"):
+            _check_dropped(cited, where, fresh)
+        record: dict[str, Any] = {"id": gid, "text": text, "state": state}
+        _check_transition(before, record, where, cited, _GOAL_REOPEN, set(), fresh)
+        record["state_by"] = _by(before, "state", state)
+        record["text_by"] = _by(before, "text", text)
+        record["cites"] = wrap(cited)
+        record["constraints"] = _constraints(raw.get("constraints"), where, ctx, before, wrap, caps)
+        record["tasks"] = _tasks(
+            raw.get("tasks"), where, ctx, prev_tasks, task_ids, wrap, caps, fresh
+        )
+        goals.append(record)
+
+    # Anything the base had and the answer left out is carried forward whole —
+    # a pivot never overwrites (D3). Code does it, so a model that forgets a
+    # parked goal cannot delete it.
+    for gid, before in prev_goals.items():
+        if gid not in goal_ids:
+            goals.append(_restore(before, ctx))
+            goal_ids.add(gid)
+    for goal in goals:
+        prev_goal = prev_goals.get(str(goal["id"]))
+        for task in (prev_goal or {}).get("tasks") or ():
+            tid = str(task.get("id"))
+            if tid not in task_ids:
+                goal["tasks"].append(_restore_task(task, ctx))
+                task_ids.add(tid)
+    for goal in goals:
+        for task in goal["tasks"]:
+            if task["state"] == "superseded" and task.get("replaced_by") not in task_ids:
+                raise ValueError(
+                    f"task {task['id']}: replaced_by must name another task of this revision"
+                )
+    if sum(1 for g in goals if g["state"] == "active") > 1:
+        raise ValueError("at most one goal may be active; park the others")
+
+    covers, uncited = _coverage(ctx, cited_refs)
+    return Revision(goals=goals, change=change, covers_to_turn=covers, uncited=uncited)
+
+
+def _check_dropped(cited: list[Item], where: str, fresh: set[str]) -> None:
+    """A goal becomes `dropped` only on the owner's own word or act, given
+    SINCE the base and AFTER he asked for it — never by inference, and never
+    on the strength of the message that created the goal."""
+    asked = [c.turn for c in cited if c.kind in OWNER_WORDS]
+    if not any(
+        c.kind in OWNER_ACTS and c.ref in fresh and asked and c.turn > min(asked)
+        for c in cited
+    ):
+        raise ValueError(
+            f"{where}: dropped needs the owner's own word or act, in the new material "
+            "and after he asked for the goal — cite it, or use parked or unknown"
+        )
+
+
+def _by(before: dict | None, field_name: str, value: Any) -> str:
+    if before is not None and before.get(field_name) == value:
+        return str(before.get(f"{field_name}_by") or ORIGIN_DISTILLER)
+    return ORIGIN_DISTILLER
+
+
+def _restore(goal: dict, ctx: Context) -> dict:
+    return {
+        "id": goal.get("id"),
+        "text": goal.get("text"),
+        "state": goal.get("state"),
+        "state_by": goal.get("state_by") or ORIGIN_DISTILLER,
+        "text_by": goal.get("text_by") or ORIGIN_DISTILLER,
+        "cites": [{"session": ctx.chat, "ref": _bare_ref(c)} for c in goal.get("cites") or ()],
+        "constraints": [
+            {
+                "text": c.get("text"),
+                "cites": [{"session": ctx.chat, "ref": _bare_ref(x)} for x in c.get("cites") or ()],
+            }
+            for c in goal.get("constraints") or ()
+        ],
+        # Filled by the carry-forward pass, which knows which tasks the answer
+        # moved under another goal.
+        "tasks": [],
+    }
+
+
+def _restore_task(task: dict, ctx: Context) -> dict:
+    out = {
+        "id": task.get("id"),
+        "text": task.get("text"),
+        "state": task.get("state"),
+        "state_by": task.get("state_by") or ORIGIN_DISTILLER,
+        "text_by": task.get("text_by") or ORIGIN_DISTILLER,
+        "cites": [{"session": ctx.chat, "ref": _bare_ref(c)} for c in task.get("cites") or ()],
+    }
+    if task.get("replaced_by"):
+        out["replaced_by"] = task["replaced_by"]
+    return out
+
+
+def _ref_key(cites: Any) -> tuple[str, ...]:
+    return tuple(sorted(_bare_ref(x) for x in cites or ()))
+
+
+def _constraints(raw: Any, where: str, ctx: Context, before: dict | None, wrap, caps) -> list:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"{where}: constraints must be a list")
+    known = {
+        (_squash(str(c.get("text") or "")), _ref_key(c.get("cites")))
+        for c in (before or {}).get("constraints") or ()
+    }
+    out = []
+    for n, entry in enumerate(raw, 1):
+        at = f"{where}, constraint {n}"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{at}: must be an object with text and cites")
+        text = roles.capped(str(entry.get("text") or ""), caps.get("max_constraint_chars", 300))
+        if not text:
+            raise ValueError(f"{at}: text is required")
+        cited = _cites(entry.get("cites"), at, ctx, caps.get("max_cites", 8))
+        carried = (_squash(text), _ref_key([i.ref for i in cited])) in known
+        if not carried and not any(
+            c.kind in OWNER_WORDS and _squash(text) in _squash(c.text) for c in cited
+        ):
+            raise ValueError(
+                f"{at}: {text!r} is not a verbatim quote from the owner text it cites — "
+                "copy the words exactly as he wrote them, in his language"
+            )
+        out.append({"text": text, "cites": wrap(cited)})
+    return out
+
+
+def _tasks(
+    raw: Any, where: str, ctx: Context, prev_tasks: dict, task_ids: set, wrap, caps, fresh
+):
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"{where}: tasks must be a list")
+    if len(raw) > caps.get("max_tasks", 30):
+        raise ValueError(f"{where}: at most {caps.get('max_tasks', 30)} tasks")
+    out = []
+    for n, entry in enumerate(raw, 1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{where}, task {n}: must be an object")
+        tid = str(entry.get("id") or "").strip()
+        at = f"task {tid or n}"
+        if not _ID.fullmatch(tid):
+            raise ValueError(f"{at}: id must be 1-24 letters, digits, '.', '_' or '-'")
+        if tid in task_ids:
+            raise ValueError(f"{at}: two tasks share the id {tid!r}")
+        task_ids.add(tid)
+        text = roles.capped(str(entry.get("text") or ""), caps.get("max_chars", 200))
+        if not text:
+            raise ValueError(f"{at}: text is required")
+        state = str(entry.get("state") or "").strip().lower()
+        if state not in TASK_STATES:
+            raise ValueError(f"{at}: state must be one of {', '.join(TASK_STATES)}")
+        cited = _cites(entry.get("cites"), at, ctx, caps.get("max_cites", 8))
+        if state in ("pending", "in_progress"):
+            _require(cited, ASKED, at, f"{state} must cite where it was asked or planned")
+        elif state == "done":
+            _require(cited, EVIDENCE, at, "done needs evidence: a final answer or an action")
+        elif state == "stopped":
+            _require(cited, OWNER_ACTS, at, "stopped needs the owner's own act")
+        record: dict[str, Any] = {"id": tid, "text": text, "state": state}
+        before = prev_tasks.get(tid)
+        _check_transition(before, record, at, cited, _TASK_REOPEN, _TASK_TERMINAL, fresh)
+        record["state_by"] = _by(before, "state", state)
+        record["text_by"] = _by(before, "text", text)
+        record["cites"] = wrap(cited)
+        if state == "superseded":
+            replaced_by = str(entry.get("replaced_by") or "").strip()
+            if not replaced_by or replaced_by == tid:
+                raise ValueError(f"{at}: superseded needs replaced_by naming another task")
+            record["replaced_by"] = replaced_by
+        out.append(record)
+    return out
+
+
+def _coverage(ctx: Context, cited: set[str]) -> tuple[int, list[str]]:
+    """`covers_to_turn`, computed: the last turn up to which every owner text
+    the floor would keep is cited. The model never gets to claim it."""
+    kept = floor(ctx.new, ctx.covered, ctx.boundary)
+    uncited = [i for i in kept if i.ref not in cited]
+    if not uncited:
+        return ctx.boundary, []
+    first_gap = min(i.turn for i in uncited)
+    return max(ctx.covered, first_gap - 1), [i.ref for i in uncited]
+
+
+def contract_text(shape: roles.Shape) -> str:
+    """The output contract, generated from the declared caps and this module's
+    vocabularies, so the words the model is given and the rules code enforces
+    cannot drift apart."""
+    caps = shape.caps
+    return "\n".join(
+        [
+            "Reply with ONE JSON object and nothing else. No prose before or after it, "
+            "no code fence.",
+            "",
+            "{",
+            f'  "change": one of {", ".join(json.dumps(c) for c in CHANGES)},',
+            '  "goals": [',
+            "    {",
+            '      "id": a short id, e.g. "g1" — keep the id of a goal you were given,',
+            f'      "text": at most {caps.get("max_chars", 200)} characters,',
+            f'      "state": one of {", ".join(json.dumps(s) for s in GOAL_STATES)},',
+            '      "cites": ["<ref>", ...],',
+            '      "constraints": [{"text": "<an exact quote of the owner>", '
+            '"cites": ["<ref>"]}],',
+            '      "tasks": [',
+            '        {"id": a short id, unique across ALL goals, e.g. "t1",',
+            f'         "text": at most {caps.get("max_chars", 200)} characters,',
+            f'         "state": one of {", ".join(json.dumps(s) for s in TASK_STATES)},',
+            '         "cites": ["<ref>", ...],',
+            '         "replaced_by": "<task id>" — only when state is "superseded"}',
+            "      ]",
+            "    }",
+            "  ]",
+            "}",
+            "",
+            f"At most {caps.get('max_goals', 12)} goals, {caps.get('max_tasks', 30)} tasks per "
+            f"goal, {caps.get('max_cites', 8)} cites per item. A ref is copied exactly from "
+            'the "ref" of an item under "new" or "earlier".',
+            "An answer that breaks a rule is rejected and you are asked once more.",
+        ]
+    )
+
+
+def tally(value: Revision) -> dict[str, dict[str, int]]:
+    """Per-call state counts, for the role record's `flags` (the counters)."""
+    goals: dict[str, int] = {}
+    tasks: dict[str, int] = {}
+    for goal in value.goals:
+        goals[goal["state"]] = goals.get(goal["state"], 0) + 1
+        for task in goal.get("tasks") or ():
+            tasks[task["state"]] = tasks.get(task["state"], 0) + 1
+    return {"goal_state": goals, "task_state": tasks}
+
+
+# ---------------------------------------------------------------- exam assertions
+
+
+def _all_states(value: Revision) -> list[str]:
+    return [g["state"] for g in value.goals] + [
+        t["state"] for g in value.goals for t in g.get("tasks") or ()
+    ]
+
+
+def _texts(value: Revision) -> str:
+    return " ".join(
+        [g["text"] for g in value.goals]
+        + [c["text"] for g in value.goals for c in g.get("constraints") or ()]
+        + [t["text"] for g in value.goals for t in g.get("tasks") or ()]
+    ).casefold()
+
+
+def _expect_never(expected: Any, value: Revision) -> list[str]:
+    """None of these states anywhere — the golden file's "never `done` where
+    the owner says otherwise" rule."""
+    states = _all_states(value)
+    return [f"the answer uses state {s!r}" for s in expected or () if s in states]
+
+
+def _expect_goals_at_least(expected: Any, value: Revision) -> list[str]:
+    if len(value.goals) < int(expected):
+        return [f"expected at least {expected} goals, got {len(value.goals)}"]
+    return []
+
+
+def _expect_mentions_any(expected: Any, value: Revision) -> list[str]:
+    """Each group: at least one of these substrings appears in some goal, task
+    or constraint text. Groups, because the model may answer in either of the
+    owner's languages."""
+    blob = _texts(value)
+    return [
+        f"no goal, task or constraint mentions any of {group}"
+        for group in expected or ()
+        if not any(str(word).casefold() in blob for word in group)
+    ]
+
+
+def _expect_absent(expected: Any, value: Revision) -> list[str]:
+    blob = json.dumps(value.as_json(), ensure_ascii=False).casefold()
+    return [
+        f"the output still carries {needle!r}"
+        for needle in expected or ()
+        if str(needle).casefold() in blob
+    ]
+
+
+def _expect_active_goal(expected: Any, value: Revision) -> list[str]:
+    active = [g for g in value.goals if g["state"] == "active"]
+    if bool(expected) and not active:
+        return ["expected an active goal, got none"]
+    return []
+
+
+ASSERTIONS: dict[str, Callable[[Any, Revision], list[str]]] = {
+    "never_state": _expect_never,
+    "goals_at_least": _expect_goals_at_least,
+    "mentions_any": _expect_mentions_any,
+    "absent": _expect_absent,
+    "has_active_goal": _expect_active_goal,
+}
+
+
+# ---------------------------------------------------------------- emission
+
+
+@dataclass(frozen=True)
+class Boundary:
+    """A task end, captured synchronously when it happened: the log, how many
+    bytes it held, and the task's turn. Everything else is read later, off the
+    interactive path."""
+
+    path: Path
+    upto: int
+    turn: int
+    model_spec: str
+    state_dir: str | None
+
+
+def disabled() -> bool:
+    """`AISH_OBJECTIVE=0` turns emission off. The suite sets it (conftest), for
+    the reason `AISH_NOTIFY=0` exists: a background writer appending to logs
+    that tests assert on, at a moment no test controls."""
+    return os.environ.get("AISH_OBJECTIVE", "").strip() == "0"
+
+
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(str(path), threading.Lock())
+
+
+def distill(
+    boundary: Boundary,
+    *,
+    chat_fn: Callable[..., Any] | None = None,
+    model_name: str = "",
+    check_admission: bool = True,
+    charter: roles.Charter | None = None,
+    records: list[dict] | None = None,
+) -> list[dict]:
+    """The records one task end produces, in the order they are written.
+
+    Always a `role` record (the D7 record, whatever the outcome — "unexamined"
+    is a fact in the log, never an absence). Then an `objective` record: the
+    distiller's revision when it validated, else the extractive floor when any
+    owner text is uncovered, else nothing — and the previous revision stands.
+    """
+    if records is None:
+        records = read_records(boundary.path, boundary.upto)
+    chat = boundary.path.stem
+    items = material(records)
+    base = current(records, BASE_ORIGINS)
+    revision = next_revision(records)
+    out: list[dict] = []
+
+    try:
+        charter = charter or roles.load_charters()[DISTILLER]
+    except (roles.CharterError, KeyError) as exc:
+        out.append(_skip_record(boundary.turn, f"the distiller charter does not load: {exc}"))
+        charter = None
+
+    result: roles.Result | None = None
+    if charter is not None:
+        text = compose_input(chat, boundary.turn, items, base)
+        result = roles.run(
+            charter,
+            {"material": text},
+            (),
+            model_spec=boundary.model_spec,
+            chat=chat_fn,
+            model_name=model_name,
+            state_dir=boundary.state_dir,
+            check_admission=check_admission,
+        )
+        out.append(role_record(charter, result, boundary.turn))
+
+    if result is not None and result.status == roles.Status.OK and result.value is not None:
+        value: Revision = result.value
+        out.append(
+            {
+                "kind": "objective",
+                "turn": boundary.turn,
+                "revision": revision,
+                "origin": ORIGIN_DISTILLER,
+                "chat": chat,
+                "covers_to_turn": value.covers_to_turn,
+                "confirmed": False,
+                "change": value.change,
+                "base": base.get("revision") if base else None,
+                "charter": charter.name if charter else DISTILLER,
+                "version": charter.version if charter else "",
+                "model": result.model,
+                "goals": value.goals,
+                "uncited": value.uncited,
+            }
+        )
+        return out
+
+    covered = int(base.get("covers_to_turn") or 0) if base else 0
+    extract = floor(items, covered, boundary.turn)
+    if extract:
+        out.append(
+            {
+                "kind": "objective",
+                "turn": boundary.turn,
+                "revision": revision,
+                "origin": ORIGIN_EXTRACTIVE,
+                "chat": chat,
+                "covers_to_turn": boundary.turn,
+                "confirmed": False,
+                "base": base.get("revision") if base else None,
+                "goals": list(base.get("goals") or []) if base else [],
+                "extract": [{"ref": i.ref, "turn": i.turn, "text": i.text} for i in extract],
+            }
+        )
+    return out
+
+
+def role_record(charter: roles.Charter, result: roles.Result, turn: int) -> dict:
+    """The §D7 `role` record, in the shape `Agent._record_role` writes."""
+    record: dict[str, Any] = {
+        "kind": "role",
+        "turn": turn,
+        "charter": charter.name,
+        "version": charter.version,
+        "role_kind": charter.kind,
+        "status": result.status,
+        "model": result.model,
+        "attempts": result.attempts,
+        "ms": result.ms,
+        "degradation": charter.degradation,
+        "input": {
+            "name": result.input_name,
+            "trust": result.input_trust,
+            "chars": result.input_chars,
+            "digest": result.input_digest,
+        },
+    }
+    if result.why:
+        record["why"] = result.why
+    if result.usage:
+        record["usage"] = result.usage
+    if result.value is not None:
+        record["flags"] = roles.tally_flags(charter.output, result.value)
+    return record
+
+
+def _skip_record(turn: int, why: str) -> dict:
+    return {
+        "kind": "role",
+        "turn": turn,
+        "charter": DISTILLER,
+        "version": "",
+        "status": roles.Status.UNAVAILABLE,
+        "why": why,
+        "model": "",
+        "attempts": 0,
+        "ms": 0,
+    }
+
+
+def distill_at_boundary(boundary: Boundary, write: Callable[[dict], None]) -> list[dict]:
+    """Distill and write. NEVER raises: this runs after the answer, and nothing
+    it does may reach the task. One distill per chat at a time, so two task ends
+    in quick succession write their revisions in order.
+    """
+    if disabled():
+        return []
+    written: list[dict] = []
+    try:
+        with _lock_for(boundary.path):
+            started = time.perf_counter()
+            try:
+                records = distill(boundary)
+            except Exception as exc:  # noqa: BLE001 — a bug here must not reach the task
+                records = [
+                    _skip_record(
+                        boundary.turn,
+                        f"the distill raised {type(exc).__name__}: {exc}"[:300],
+                    )
+                ]
+                records[0]["ms"] = int((time.perf_counter() - started) * 1000)
+            for record in records:
+                write(record)
+                written.append(record)
+    except Exception:  # noqa: BLE001 — a write refused (a trashed chat) ends it quietly
+        pass
+    return written
