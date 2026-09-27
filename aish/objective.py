@@ -30,6 +30,7 @@ into the model or the screen yet. `docs/objective.md`, contract §3.14.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -63,10 +64,13 @@ ANSWER = "answer"  # a final answer
 ACTION = "action"  # a state-changing tool call that ran and succeeded
 CANCEL = "cancel"  # a task he stopped
 FAILED = "failed"  # a task that ended in failure
+RAN = "ran"  # a `!` command he ran himself, recorded exit code 0
+RAN_UNCHECKED = "ran_unchecked"  # one he ran whose exit code is not 0 or not recorded
 
 OWNER_WORDS = frozenset({OWNER, COMMENT})  # text the owner authored himself
-EVIDENCE = frozenset({ANSWER, ACTION})  # what `done` may cite
-OWNER_ACTS = frozenset({OWNER, COMMENT, DENIAL, CANCEL})  # what `stopped`/`dropped` may cite
+EVIDENCE = frozenset({ANSWER, ACTION, RAN})  # what `done` may cite
+# What `stopped`/`dropped` may cite: his words, and his acts.
+OWNER_ACTS = frozenset({OWNER, COMMENT, DENIAL, CANCEL, RAN, RAN_UNCHECKED})
 ASKED = frozenset({OWNER, COMMENT, ANSWER})  # where a task was asked for or planned
 
 # The floor's mechanical filter. A length threshold, the synthetic-note prefix
@@ -85,6 +89,12 @@ OWNER_CHARS = 4000
 # whole chat (owner decision, #424); the cap only bounds a runaway answer.
 ANSWER_CHARS = 8000
 ACT_CHARS = 200
+# An action's arguments, from its `call` record: enough to see what a command or
+# a write was. Tools whose body IS the deliverable — a skill — get far more, so
+# whether it is self-contained can be judged at all.
+ACTION_ARGS_CHARS = 600
+SKILL_ARGS_CHARS = 6000
+WHOLE_ARGS_TOOLS = frozenset({"create_skill", "create_tool"})
 
 # `session.STOPPED_ANSWER`, spelled here rather than imported so this module
 # stays importable without the session layer (a pinned test holds them equal).
@@ -146,11 +156,25 @@ def _step(record: dict) -> dict:
 
 
 def _read_only_tools() -> frozenset[str]:
-    # Imported lazily and only here: the tool classification has exactly one
-    # definition, and it lives beside the loop that dispatches.
+    """Tools whose success changes nothing — never done-evidence.
+
+    The native set has exactly one definition, beside the loop that dispatches
+    (imported lazily, and only here). Plugin tools declare it in their own
+    manifest (`mutating`), and a read-only plugin — a mail search — must not
+    count as an action either; they are read from the installed plugins, which
+    is the set the agent itself classifies by (`Agent._is_readonly_plugin`).
+    """
     from .agent import READ_ONLY_TOOLS
 
-    return READ_ONLY_TOOLS
+    names = set(READ_ONLY_TOOLS)
+    try:
+        from . import tool_plugins
+
+        found, _problems = tool_plugins.discover(os.getcwd())
+        names |= {t.name for t in found if not t.mutating}
+    except Exception:  # noqa: BLE001 — no plugins readable: the native set stands
+        pass
+    return frozenset(names)
 
 
 _OWN_KINDS = frozenset({"objective", "role"})
@@ -175,7 +199,11 @@ def material(records: Iterable[dict], read_only: frozenset[str] | None = None) -
 
     A task's turn is the first integer `turn` stamped on a trace record inside
     it — the join key every governance record already uses — and one more than
-    the previous task's where nothing inside it was stamped. Superseded records
+    the previous task's where nothing inside it was stamped. In a log with no
+    stamps, records before the first task (a `model` line) form a group of
+    their own, so its first task is turn 2 — kept, because the benchmark
+    goldens are numbered that way and a turn number is only a join key.
+    Superseded records
     are skipped (L7): a discarded Retry attempt is not something the owner's
     goal can cite.
     """
@@ -208,15 +236,69 @@ def material(records: Iterable[dict], read_only: frozenset[str] | None = None) -
     return items
 
 
+def _content_ref(prefix: str, *parts: Any) -> str:
+    """A ref for a record with no id of its own: a digest of what it says and
+    when. Stable across a Retry or a redaction rewriting the file, unlike a
+    line position."""
+    blob = "\x1f".join(str(p) for p in parts)
+    return f"{prefix}#{hashlib.sha256(blob.encode()).hexdigest()[:12]}"
+
+
 def _message_ref(index: int, record: dict) -> str:
     ident = str(record.get("turn") or "")
-    return f"m:{ident}" if ident else f"m@{index}"
+    if ident:
+        return f"m:{ident}"
+    return _content_ref("m", record.get("ts"), record.get("role"), record.get("content"))
+
+
+FEEDBACK = " (feedback: "
+
+
+def _feedback(decision: str) -> tuple[str, str]:
+    """An audit `command` record's decision split into the verdict and the
+    owner's card comment — written whole there as `<verdict> (feedback: …)`
+    by the server, where the tool step keeps only `COMMENT_CHARS` of it."""
+    verdict, sep, rest = decision.partition(FEEDBACK)
+    if not sep:
+        return decision, ""
+    return verdict, rest[:-1] if rest.endswith(")") else rest
+
+
+def _whole_comment(comment: str, feedbacks: list[str]) -> str:
+    """The owner's full sentence, when the tool step holds a capped copy and an
+    audit record of the same task holds it whole."""
+    head = _squash(comment)
+    for text in feedbacks:
+        if head and _squash(text).startswith(head) and len(text) > len(comment):
+            return text
+    return comment
+
+
+def _args_text(name: str, args: Any) -> str:
+    if not isinstance(args, dict) or not args:
+        return ""
+    cap = SKILL_ARGS_CHARS if name in WHOLE_ARGS_TOOLS else ACTION_ARGS_CHARS
+    return _cut(json.dumps(args, ensure_ascii=False), cap)
 
 
 def _task_items(task: list[tuple[int, dict]], turn: int, read_only: frozenset[str]) -> list[Item]:
     items: list[Item] = []
     answer: tuple[int, dict] | None = None
-    for index, record in task:
+    records = [r for _, r in task]
+    has_calls = any(
+        _step(r).get("kind") == "tool" and isinstance(_step(r).get("call"), int) for r in records
+    )
+    feedbacks = [
+        _feedback(str(r.get("decision") or ""))[1]
+        for r in records
+        if r.get("kind") == "command"
+    ]
+    calls = {
+        (_step(r).get("turn"), _step(r).get("call")): _step(r).get("args")
+        for r in records
+        if _step(r).get("kind") == "call"
+    }
+    for position, (index, record) in enumerate(task):
         kind = record.get("kind")
         if kind == "message":
             role = record.get("role")
@@ -236,6 +318,9 @@ def _task_items(task: list[tuple[int, dict]], turn: int, read_only: frozenset[st
             error = str(record.get("error") or record.get("status") or "")
             items.append(Item(f"t{turn}.end", FAILED, turn, _cut(error, ACT_CHARS)))
             continue
+        if kind == "command":
+            items.extend(_command_items(task[position:], record, turn, has_calls))
+            continue
         step = _step(record)
         if step.get("kind") != "tool" or not isinstance(step.get("call"), int):
             continue
@@ -246,17 +331,67 @@ def _task_items(task: list[tuple[int, dict]], turn: int, read_only: frozenset[st
         if decision in ("denied", "held"):
             comment = str(step.get("comment") or "").strip()
             if comment:
-                items.append(Item(ref, COMMENT, turn, _cut(comment, OWNER_CHARS)))
+                whole = _whole_comment(comment, feedbacks)
+                items.append(Item(ref, COMMENT, turn, _cut(whole, OWNER_CHARS)))
             else:
                 items.append(Item(ref, DENIAL, turn, _cut(f"{decision} — {what}", ACT_CHARS)))
         elif step.get("ok") is True and name not in read_only:
-            items.append(Item(ref, ACTION, turn, _cut(what, ACT_CHARS)))
+            args = _args_text(name, calls.get((step.get("turn", turn), step["call"])))
+            text = _cut(what, ACT_CHARS) + (f"\nargs: {args}" if args else "")
+            items.append(Item(ref, ACTION, turn, text))
     if answer is not None:
         index, record = answer
         content = str(record.get("content") or "").strip()
         kind = CANCEL if content == STOPPED_ANSWER else ANSWER
         items.append(Item(_message_ref(index, record), kind, turn, _cut(content, ANSWER_CHARS)))
     return items
+
+
+def _command_items(
+    rest: list[tuple[int, dict]], record: dict, turn: int, has_calls: bool
+) -> list[Item]:
+    """What an audit `command` record says about the owner — the one record
+    every era of the log has.
+
+    - `user-direct`: a `!` command HE ran. Its exit code comes from the next
+      `cmd_end`; it is evidence only when that code is recorded and 0.
+    - a denial or a held approval, with or without his comment: taken from here
+      only in a task whose tool steps carry no call id (logs from before
+      contract §2), where no tool step can be joined to it. Where they can, the
+      tool step is the item and this record only lends it the whole comment.
+    - an approved gated action: likewise only in such a task, where it is the
+      one record that says an action was allowed to run. Auto-approved
+      read-only commands are not actions.
+    """
+    command = str(record.get("command") or "")
+    decision = str(record.get("decision") or "")
+    ref = _content_ref("c", record.get("ts"), command, decision)
+    if decision == "user-direct":
+        exit_code = next(
+            (r.get("exit_code") for _, r in rest[1:] if r.get("kind") == "cmd_end"), None
+        )
+        output = next(
+            (
+                str(r.get("content") or "").partition("\n")[2]
+                for _, r in rest[1:]
+                if r.get("kind") == "message" and r.get("role") == "user"
+                and str(r.get("content") or "").startswith("[I ran `")
+            ),
+            "",
+        )
+        kind = RAN if exit_code == 0 else RAN_UNCHECKED
+        text = f"he ran: {command}" + (f"\n{output.strip()}" if output.strip() else "")
+        return [Item(ref, kind, turn, _cut(text, ACT_CHARS * 2))]
+    if has_calls:
+        return []
+    verdict, comment = _feedback(decision)
+    if comment and (verdict.startswith("denied") or verdict.startswith("approved")):
+        return [Item(ref, COMMENT, turn, _cut(comment, OWNER_CHARS))]
+    if verdict.startswith("denied"):
+        return [Item(ref, DENIAL, turn, _cut(f"denied — {command}", ACT_CHARS))]
+    if verdict.startswith("approved"):
+        return [Item(ref, ACTION, turn, _cut(command, ACTION_ARGS_CHARS))]
+    return []
 
 
 # ---------------------------------------------------------------- the floor
@@ -606,28 +741,44 @@ def _quote(raw: Any, where: str, ctx: Context, cap: int, cite_cap: int) -> tuple
     return {"text": text, "cites": [c.ref for c in cited]}, cited
 
 
-def _check_purpose(before: dict | None, why: Any, cited: list[Item], where: str, ctx: Context):
-    """Once a purpose has been quoted, only the owner may remove or replace it:
-    a different `why` must cite something he wrote AFTER the one it replaces."""
-    old = (before or {}).get("why")
+def _check_sticky(
+    before: dict | None, field_name: str, quote: Any, cited: list[Item], where: str,
+    ctx: Context,
+) -> None:
+    """Once his purpose (`why`) or finish line (`done_when`) has been quoted,
+    only the owner may remove or replace it: the new text must be QUOTED FROM
+    something he wrote after the words it replaces — a later message merely
+    sitting among the cites does not count, or padding the cites would launder
+    any replacement.
+
+    The old quote's turn is its cites' latest turn in the material; a cite the
+    material no longer holds (its message was discarded by a Retry) counts as
+    the previous revision's own turn, so the rule never falls back to "any
+    turn at all"."""
+    old = (before or {}).get(field_name)
     if not isinstance(old, dict):
         return
-    if why == UNSTATED:
+    if quote == UNSTATED:
         raise ValueError(
-            f"{where}: why was quoted before ({old.get('text')!r}); keep it — only the "
-            "owner can take a purpose back"
+            f"{where}: {field_name} was quoted before ({old.get('text')!r}); keep it — "
+            "only the owner can take it back"
         )
-    if _squash(str(why["text"])) == _squash(str(old.get("text") or "")):
+    if _squash(str(quote["text"])) == _squash(str(old.get("text") or "")):
         return
+    refs = [_bare_ref(c) for c in old.get("cites") or ()]
     old_turn = max(
-        (ctx.ledger[r].turn for r in (_bare_ref(c) for c in old.get("cites") or ())
-         if r in ctx.ledger),
-        default=0,
+        (ctx.ledger[r].turn if r in ctx.ledger else ctx.previous_turn for r in refs),
+        default=ctx.previous_turn,
     )
-    if not any(c.kind in OWNER_WORDS and c.turn > old_turn for c in cited):
+    sources = [
+        c for c in cited
+        if c.kind in OWNER_WORDS and _squash(str(quote["text"])) in _squash(c.text)
+    ]
+    if not any(c.turn > old_turn for c in sources):
         raise ValueError(
-            f"{where}: why replaces {old.get('text')!r}; that needs his words from a later "
-            "turn than the ones it quoted — otherwise keep the earlier why"
+            f"{where}: {field_name} replaces {old.get('text')!r}; the new words must be "
+            "quoted from something he wrote at a later turn than those — otherwise keep "
+            f"the earlier {field_name}"
         )
 
 
@@ -690,17 +841,18 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
         cited = _cites(raw.get("cites"), where, ctx, cite_cap)
         if state != "unknown":
             _require(cited, OWNER_WORDS, where, "a goal must cite where the owner asked for it")
-        if state == "done" and not _has(cited, EVIDENCE):
+        before = prev_goals.get(gid)
+        if state == "done" and not _has(cited, EVIDENCE) and not _owner_held(before, state):
             state = "unknown"
             downgrades.append({"goal": gid, "from": "done", "why": "no answer or action cited"})
-        before = prev_goals.get(gid)
         if state == "dropped" and (before is None or before.get("state") != "dropped"):
             _check_dropped(cited, where, fresh)
         why, why_cited = _quote(raw.get("why"), f"{where}, why", ctx, quote_cap, cite_cap)
-        _check_purpose(before, why, why_cited, where, ctx)
+        _check_sticky(before, "why", why, why_cited, where, ctx)
         done_when, when_cited = _quote(
             raw.get("done_when"), f"{where}, done_when", ctx, quote_cap, cite_cap
         )
+        _check_sticky(before, "done_when", done_when, when_cited, where, ctx)
         record: dict[str, Any] = {"id": gid, "text": text, "state": state}
         _check_transition(before, record, where, cited, _GOAL_REOPEN, set(), fresh)
         _stamp_was(record, before)
@@ -731,6 +883,15 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
             if tid not in task_ids and _owner_set(task):
                 goal["tasks"].append(_restore_task(task, ctx))
                 task_ids.add(tid)
+                # …and the task that replaced it, which the model had no
+                # reason to keep: a carried `replaced_by` must resolve, or the
+                # answer is rejected over state it never emitted.
+                replacement = str(task.get("replaced_by") or "")
+                while replacement and replacement not in task_ids and replacement in prev_tasks:
+                    carried = prev_tasks[replacement]
+                    goal["tasks"].append(_restore_task(carried, ctx))
+                    task_ids.add(replacement)
+                    replacement = str(carried.get("replaced_by") or "")
     for goal in goals:
         for task in goal["tasks"]:
             if task["state"] == "superseded" and task.get("replaced_by") not in task_ids:
@@ -740,7 +901,10 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
     if sum(1 for g in goals if g["state"] == "active") > 1:
         raise ValueError("at most one goal may be active; park the others")
 
-    not_goal_bearing = _not_goal_bearing(payload.get("not_goal_bearing"), ctx)
+    not_goal_bearing = [
+        r for r in dict.fromkeys(_not_goal_bearing(payload.get("not_goal_bearing"), ctx))
+        if r not in cited_refs  # cited is the stronger claim; it wins
+    ]
     _coverage(ctx, cited_refs, set(not_goal_bearing))
     return Revision(
         goals=goals,
@@ -748,6 +912,14 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
         covers_to_turn=ctx.boundary,
         not_goal_bearing=not_goal_bearing,
         downgrades=downgrades,
+    )
+
+
+def _owner_held(before: dict | None, state: str) -> bool:
+    """The owner set this item's state to exactly this — his claim, not the
+    model's, so code never downgrades it."""
+    return before is not None and before.get("state_by") == ORIGIN_OWNER and (
+        before.get("state") == state
     )
 
 
@@ -921,7 +1093,11 @@ def _tasks(
         cited = _cites(entry.get("cites"), at, ctx, caps.get("max_cites", 8))
         if state in ("pending", "in_progress"):
             _require(cited, ASKED, at, f"{state} must cite where it was asked or planned")
-        elif state == "done" and not _has(cited, EVIDENCE):
+        elif (
+            state == "done"
+            and not _has(cited, EVIDENCE)
+            and not _owner_held(prev_tasks.get(tid), state)
+        ):
             state = "unknown"
             downgrades.append({"task": tid, "from": "done", "why": "no answer or action cited"})
         elif state == "stopped":
@@ -1001,6 +1177,11 @@ def tally(value: Revision) -> dict[str, dict[str, int]]:
         "goal_state": goals,
         "task_state": tasks,
         "downgraded": {"done": len(value.downgrades)},
+        # How much of what he said the model set aside rather than cited — the
+        # one number that shows a distiller dismissing everything to pass.
+        "coverage": {
+            "not_goal_bearing": len(value.not_goal_bearing),
+        },
         "quotes": {
             "stated": sum(1 for g in value.goals for k in ("why", "done_when")
                           if isinstance(g.get(k), dict)),

@@ -278,6 +278,104 @@ class TestMaterial:
         assert len(cut.text) < 8100 and "20000 chars in all" in cut.text
 
 
+class TestWhatTheOwnerDidIsInTheMaterial:
+    """Input gaps a golden author found (#424), each verified in a real log
+    before it was fixed."""
+
+    def test_the_whole_card_comment_comes_from_the_audit_record(self):
+        """The tool step keeps COMMENT_CHARS (400); the server's audit
+        `command` record keeps his sentence whole."""
+        whole = "keep it about tomorrow's rain, not about comparing services. " * 12
+        records = [
+            {"kind": "task_start", "prompt": "save it"},
+            user("save the skill please", "u1"),
+            {"kind": "command", "command": "edit skill.md",
+             "decision": f"approved (feedback: {whole.strip()})"},
+            trace(kind="tool", name="create_skill", ok=False, call=1, turn=1,
+                  decision="held", comment=whole.strip()[:400]),
+            assistant("OK", "a1"),
+        ]
+        comment = next(i for i in objective.material(records, READ_ONLY) if i.kind == "comment")
+        assert comment.text == whole.strip()
+
+    def test_a_command_he_ran_himself_is_his_act(self):
+        records = [
+            {"kind": "task_start", "prompt": "x"},
+            user("set up the key for me", "u1"),
+            assistant("Run `aish secret set K`.", "a1"),
+            {"kind": "task_end", "status": "ok"},
+            {"kind": "command", "command": "aish secret set K", "decision": "user-direct"},
+            {"kind": "cmd_end", "status": "exit", "exit_code": 0},
+            user("[I ran `aish secret set K` myself; output:]\nsaved\n[exit code: 0]", "n1",
+                 call=1),
+        ]
+        ran = [i for i in objective.material(records, READ_ONLY) if i.kind.startswith("ran")]
+        assert len(ran) == 1 and ran[0].kind == objective.RAN
+        assert "aish secret set K" in ran[0].text and "saved" in ran[0].text
+        assert ran[0].ref.startswith("c#")
+
+    def test_a_failed_command_of_his_is_not_evidence(self):
+        records = [
+            user("set up the key for me", "u1"),
+            {"kind": "command", "command": "aish secret set K", "decision": "user-direct"},
+            {"kind": "cmd_end", "status": "exit", "exit_code": 1},
+        ]
+        (ran,) = [i for i in objective.material(records, READ_ONLY) if i.kind.startswith("ran")]
+        assert ran.kind == objective.RAN_UNCHECKED
+        assert ran.kind not in objective.EVIDENCE and ran.kind in objective.OWNER_ACTS
+
+    def test_a_read_only_plugin_is_not_an_action(self, monkeypatch):
+        from aish import tool_plugins
+
+        mutating = type("T", (), {"name": "mail_send", "mutating": True})()
+        reading = type("T", (), {"name": "mail_search", "mutating": False})()
+        monkeypatch.setattr(tool_plugins, "discover", lambda _cwd: ([mutating, reading], []))
+        records = [
+            user("find the invoice mail", "u1"),
+            trace(kind="tool", name="mail_search", ok=True, call=1, turn=1, summary="invoice"),
+            trace(kind="tool", name="mail_send", ok=True, call=2, turn=1, summary="to me"),
+        ]
+        actions = [i.ref for i in objective.material(records) if i.kind == "action"]
+        assert actions == ["t1.c2"]
+
+    def test_an_action_shows_its_arguments_and_a_skill_its_body(self):
+        body = "# Skill\n" + "step. " * 500
+        records = [
+            user("make it a skill", "u1"),
+            trace(kind="call", call=1, turn=1, name="create_skill",
+                  args={"name": "s", "content": body}),
+            trace(kind="tool", name="create_skill", ok=True, call=1, turn=1, summary="s"),
+        ]
+        (action,) = [i for i in objective.material(records, READ_ONLY) if i.kind == "action"]
+        assert "step. step." in action.text and len(action.text) > 2500
+
+    def test_a_log_from_before_call_ids_still_yields_his_acts(self):
+        """Before contract §2 a tool step had no call id; the audit record is
+        the one that says what he allowed or refused, and with what words."""
+        records = [
+            {"kind": "model", "model": "gemini:x"},
+            {"kind": "task_start", "prompt": "open an issue"},
+            user("open an issue about the swipe order", "u1"),
+            {"kind": "command", "command": "tool gh_issue_create(title='x')",
+             "decision": "denied (feedback: agree the plan with me first - always)"},
+            trace(kind="tool", name="gh_issue_create", ok=True, summary=""),
+            assistant("Understood.", "a1"),
+            {"kind": "task_end"},
+        ]
+        items = objective.material(records, READ_ONLY)
+        assert [(i.kind, i.turn) for i in items] == [
+            ("owner", 2), ("comment", 2), ("answer", 2)]  # the `model` line is group 1
+        assert items[1].text == "agree the plan with me first - always"
+
+    def test_a_message_with_no_id_gets_a_ref_a_rewrite_cannot_move(self):
+        first = [{"kind": "message", "role": "user", "content": "an old question here",
+                  "ts": "2026-07-01T10:00:00"}]
+        shifted = [{"kind": "title", "title": "x"}, *first]
+        (a,) = objective.material(first, READ_ONLY)
+        (b,) = objective.material(shifted, READ_ONLY)
+        assert a.ref == b.ref and a.ref.startswith("m#")
+
+
 class TestTheFloor:
     def items(self, *texts, kind="owner"):
         return [objective.Item(f"m:{n}", kind, n, t) for n, t in enumerate(texts, 1)]
@@ -550,7 +648,7 @@ class TestTransitions:
         text = later(item("m:b1", "owner", 3, "teraz chodzi mi o to, żeby wymieniać taniej"),
                      previous=prev)
         dropped = {"change": "refined", "goals": [goal(cites=("m:a1", "m:b1"))]}
-        rejects(shape, dropped, "only the owner can take a purpose back", text)
+        rejects(shape, dropped, "only the owner can take it back", text)
         from_the_old_message = {"change": "refined", "goals": [goal(
             cites=("m:a1", "m:b1"),
             why={"text": "kurs EUR/PLN", "cites": ["m:a1"]})]}
@@ -563,6 +661,56 @@ class TestTransitions:
         kept = {"change": "refined", "goals": [goal(
             cites=("m:a1", "m:b1"), why={"text": "codziennie  rano", "cites": ["m:a1"]})]}
         check(shape, kept, text)
+
+    def test_padding_the_cites_with_a_later_message_launders_nothing(self, shape):
+        """Review finding (#424): the new words must be QUOTED FROM the later
+        message, not merely sit beside one in the cites."""
+        prev = previous_revision()
+        prev["goals"][0]["why"] = {"text": "codziennie rano", "cites": ["m:a1"]}
+        text = later(item("m:b1", "owner", 3, "dodaj też kurs USD/PLN proszę"), previous=prev)
+        padded = {"change": "refined", "goals": [goal(
+            cites=("m:a1", "m:b1"),
+            why={"text": "kurs EUR/PLN", "cites": ["m:a1", "m:b1"]})]}
+        rejects(shape, padded, "quoted from something he wrote at a later turn", text)
+
+    def test_a_quoted_finish_line_is_held_like_the_purpose(self, shape):
+        prev = previous_revision()
+        prev["goals"][0]["done_when"] = {"text": "codziennie rano", "cites": ["m:a1"]}
+        text = later(item("m:b1", "owner", 3, "dodaj też kurs USD/PLN proszę"), previous=prev)
+        dropped = {"change": "refined", "goals": [goal(cites=("m:a1", "m:b1"))]}
+        rejects(shape, dropped, "done_when was quoted before", text)
+
+    def test_a_quote_whose_source_was_discarded_is_held_from_the_previous_turn(self, shape):
+        prev = previous_revision()
+        prev["goals"][0]["why"] = {"text": "coś, czego już nie ma", "cites": ["m:gone"]}
+        text = later(item("m:b1", "owner", 3, "dodaj też kurs USD/PLN proszę"), previous=prev)
+        from_before = {"change": "refined", "goals": [goal(
+            cites=("m:a1", "m:b1"), why={"text": "kurs EUR/PLN", "cites": ["m:a1"]})]}
+        rejects(shape, from_before, "later turn", text)
+        from_after = {"change": "refined", "goals": [goal(
+            cites=("m:a1", "m:b1"), why={"text": "kurs USD/PLN", "cites": ["m:b1"]})]}
+        check(shape, from_after, text)
+
+    def test_an_owner_set_done_is_never_downgraded(self, shape):
+        prev = previous_revision()
+        prev["goals"][0]["tasks"][0]["owner_set"] = ["state"]
+        text = later(item("m:b1", "owner", 3, "dodaj też kurs USD/PLN proszę"), previous=prev)
+        answer = {"change": "refined", "goals": [goal(
+            cites=("m:a1", "m:b1"), tasks=[task(state="done", cites=("m:a1",))])]}
+        value = check(shape, answer, text)
+        assert value.goals[0]["tasks"][0]["state"] == "done" and value.downgrades == []
+
+    def test_a_carried_superseded_task_brings_its_replacement(self, shape):
+        prev = previous_revision()
+        prev["goals"][0]["tasks"] = [
+            {"id": "t1", "text": "a", "state": "superseded", "owner_set": ["state"],
+             "cites": [], "replaced_by": "t2"},
+            {"id": "t2", "text": "b", "state": "pending", "owner_set": [], "cites": ["m:a1"]}]
+        text = later(item("m:b1", "owner", 3, "dodaj też kurs USD/PLN proszę"), previous=prev)
+        answer = {"change": "refined", "goals": [goal(cites=("m:a1", "m:b1"))]}
+        value = check(shape, answer, text)
+        g1 = next(g for g in value.goals if g["id"] == "g1")
+        assert [t["id"] for t in g1["tasks"]] == ["t1", "t2"]
 
     def test_why_and_done_when_are_verbatim_quotes_or_unstated(self, shape):
         paraphrase = good_answer(goals=[goal(
@@ -597,6 +745,13 @@ class TestCoverage:
         value = check(shape, {"change": "new", "goals": [goal(cites=("m:a1", "m:a3"))],
                               "not_goal_bearing": ["m:a4"]}, text)
         assert value.covers_to_turn == 4 and value.not_goal_bearing == ["m:a4"]
+
+    def test_a_ref_cited_and_dismissed_counts_as_cited(self, shape):
+        text = material_text(new=self.NEW, boundary=4)
+        value = check(shape, {"change": "new", "goals": [goal(cites=("m:a1", "m:a3"))],
+                              "not_goal_bearing": ["m:a4", "m:a4", "m:a3"]}, text)
+        assert value.not_goal_bearing == ["m:a4"]
+        assert objective.tally(value)["coverage"] == {"not_goal_bearing": 1}
 
     def test_only_a_must_cover_ref_may_be_dismissed(self, shape):
         text = material_text(new=self.NEW, boundary=4)
@@ -753,6 +908,7 @@ class TestDistill:
         assert role["charter"] == "distiller" and role["usage"] == {"input": 900, "output": 120}
         assert role["flags"] == {"goal_state": {"active": 1}, "task_state": {"done": 1},
                                  "downgraded": {"done": 0},
+                                 "coverage": {"not_goal_bearing": 0},
                                  "quotes": {"stated": 0, "unstated": 2}}
         assert revision["downgrades"] == [] and revision["not_goal_bearing"] == []
         assert revision["kind"] == "objective" and revision["origin"] == "distiller"

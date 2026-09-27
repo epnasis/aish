@@ -30,13 +30,25 @@ the task's contract-§2 turn:
 
 | kind | from | ref |
 |---|---|---|
-| `owner` | a typed user message — anything starting `[` is aish's own note (L4) and is not | `m:<id>` |
-| `comment` | the sentence he typed on a card he denied or held | `t<N>.c<M>` |
+| `owner` | a typed user message — anything starting `[` is aish's own note (L4) and is not | `m:<id>`, or `m#<digest>` for a message with no id |
+| `comment` | the sentence he typed on a card he denied or held — WHOLE, from the audit `command` record (`<verdict> (feedback: …)`), where the tool step keeps only `COMMENT_CHARS` (400) of it | `t<N>.c<M>` |
 | `denial` | a denied or held action with no sentence | `t<N>.c<M>` |
-| `answer` | the task's final, non-interim assistant message, cut at 1 200 chars | `m:<id>` |
+| `answer` | the task's final, non-interim assistant message, cut at 8000 chars | `m:<id>` |
 | `cancel` | a final answer that is `STOPPED_ANSWER` | `m:<id>` |
-| `action` | a `tool` step with `ok: true` for a tool outside `READ_ONLY_TOOLS` | `t<N>.c<M>` |
+| `action` | a `tool` step with `ok: true` for a tool that changes something — not in `READ_ONLY_TOOLS` and not a plugin whose manifest says it is read-only — with its `call` record's arguments (600 chars; a skill's 6000, so whether it is self-contained can be judged) | `t<N>.c<M>` |
+| `ran` / `ran_unchecked` | a `!` command HE ran (audit `decision: user-direct`), with its output; `ran` only when a `cmd_end` recorded exit code 0 | `c#<digest>` |
 | `failed` | a `task_end` that recorded a failure | `t<N>.end` |
+
+**Logs from before contract §2** carry tool steps with no `call` id, so no tool step can be
+joined to anything. There the audit `command` record is the source: a denial, a held or
+denied card's comment, and an approved gated action (never an auto-approved read-only
+command). Ungated writes of that era — a scratch `write_file` — leave no audit record
+and are not in the material. `m#` and `c#` refs are digests of what the record says and
+when, so a Retry or a redaction rewriting the file cannot move them the way a line
+position would. `TestWhatTheOwnerDidIsInTheMaterial`.
+
+These five were found by the author of the benchmark goldens reading the material
+against the raw logs; each was confirmed in a real log before it was changed.
 
 **Never tool outputs, never reminders.** A card comment is included although the epic
 lists "owner messages": it is his own words, and in the #422 chat the clearest restatement
@@ -90,25 +102,33 @@ The decisions worth their reasons:
   Each may instead be `"unstated"`: a field that must be a quote and cannot say "he never
   said" makes quoting something beside the point the cheapest answer (roles R4). That
   abstention is a deviation the owner has to confirm; it is counted on every record
-  (`flags.quotes`) and in the measurement. **Once a `why` has been quoted, only the owner
-  can take it back**: a later revision must keep it, or replace it with his words from a
-  LATER turn than the ones it quoted; `"unstated"` in its place is refused.
+  (`flags.quotes`) and in the measurement. **Once a `why` or a `done_when` has been
+  quoted, only the owner can take it back**: a later revision must keep it, or replace it
+  with words QUOTED FROM something he wrote at a later turn than the old quote's source —
+  a later message merely listed among the cites does not count (review finding: cite
+  padding laundered any replacement). `"unstated"` in its place is refused. A source the
+  material no longer holds (discarded by a Retry) counts as the previous revision's turn.
 - **Coverage is required, not measured.** Every owner text in `must_cover` must be cited
   or listed under `not_goal_bearing`; anything else goes back on the corrective retry,
-  naming the refs (owner decision — it replaced lowering `covers_to_turn`). A valid
+  naming the refs (owner decision — it replaced lowering `covers_to_turn`). **Nothing in
+  code stops a model dismissing everything** — `goals: []` with every ref listed
+  validates — so the count is on every record (`flags.coverage.not_goal_bearing`) and the
+  measurement scores the purpose and tasks it would then lack. A ref both cited and
+  dismissed counts as cited. A valid
   distiller revision therefore always covers its boundary, and `covers_to_turn` is set by
   code, never claimed. #426's trimmer will stub owner turns up to this number.
 - **An unsupported `done` is downgraded, not rejected** (owner decision). A goal or task
   marked `done` with no answer or action cited becomes `unknown` (with `was`), and the
-  revision records it in `downgrades` and `flags.downgraded`. Every other rule still
-  rejects the whole answer.
+  revision records it in `downgrades` and `flags.downgraded`. A `done` the OWNER set is
+  never downgraded. Every other rule still rejects the whole answer.
 - **`change` is `new` exactly when there is no previous revision** — code sets it, as
   with `covers_to_turn`, because the local model was measured answering `refined` with
   nothing to refine; `new` with a previous revision is refused.
 - **A goal the answer leaves out is carried forward by code**, with its tasks. A pivot
   never overwrites (D3), and a quoted purpose is never lost by omission. Tasks are
   otherwise REBUILT — all the material is in front of the model — except a task whose
-  state or text the owner set, which is his and is carried.
+  state or text the owner set, which is his and is carried, together with the task its
+  `replaced_by` names.
 - **Reopening and dropping must rest on something NEW.** `done`→`in_progress` and
   `stopped`→`pending` need an owner cite from after the previous revision's turn, and a
   goal becomes `dropped` only on an owner word or act from after it that also comes after
@@ -123,7 +143,9 @@ boundary: the whole material is in the input. `TestValidation`, `TestTransitions
 
 **What a rebuild does NOT hold across revisions**, stated: a distiller task given a new
 id escapes the transition checks its old id would have met (the old one is simply not in
-the new ledger); only goals, owner-set tasks and quoted purposes are held by code.
+the new ledger); only goals, owner-set tasks and quoted purposes are held by code. A GOAL
+re-emitted under a new id leaves the old one carried forward beside it — a duplicate,
+never a loss.
 
 **What is NOT checked**, stated so the words do not outrun the code: that a goal's TEXT
 says what its cites say; that `done` evidence actually delivers the task (an answer ref

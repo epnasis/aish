@@ -710,11 +710,11 @@ One record per **revision**. The current Objective is the newest **live** `objec
 | `state_by` / `text_by` | Who last SET that field: `distiller` \| `owner`. A distiller revision may not change a field whose previous value was set by the owner. |
 | `cites[]` | `{session, ref}`. `session` is the chat the ref resolves in (always this chat in slice 1; a compacted chat's refs resolve in its original, #427). |
 | `constraints[]` | Owner requirements, each **a verbatim substring** (whitespace runs collapsed on both sides, nothing else) of the owner text of one of its cites. |
-| `goals[].why` / `done_when` | His purpose and his finish line: `{text, cites}` checked like a constraint, or `"unstated"`. A `why` once quoted may be replaced only by his words from a later turn, never by `"unstated"`. |
+| `goals[].why` / `done_when` | His purpose and his finish line: `{text, cites}` checked like a constraint, or `"unstated"`. Once quoted, either may be replaced only by words quoted FROM a message of his at a later turn than the old quote's source, never by `"unstated"`. |
 | `extract[]` | Extractive only: `{ref, turn, text}` — the owner's texts in (`base.covers_to_turn`, `turn`] that pass the floor filter, verbatim. `goals` on an extractive revision are the base's, carried unchanged. |
 | `charter` / `version` / `model` | Distiller only: what wrote it. The `role` record (§ roles D7) written immediately before, with the same `turn`, carries attempts, latency, usage and the input bytes' digest. |
 
-**Refs.** `m:<id>` — a `message` record's minted `turn` id (an owner message, a final answer, a stopped task's answer). `t<N>.c<M>` — the `tool` step with §2 turn N and call M (an action that ran, or one the owner denied or held). `t<N>.end` — a `task_end` that recorded a failure. A message with no id (a log from before ids) is `m@<line>`. Every ref a revision carries is one the distiller was shown, so it resolves in the log by construction.
+**Refs.** `m:<id>` — a `message` record's minted `turn` id (an owner message, a final answer, a stopped task's answer). `t<N>.c<M>` — the `tool` step with §2 turn N and call M (an action that ran, or one the owner denied or held). `t<N>.end` — a `task_end` that recorded a failure. `c#<digest>` — an audit `command` record: a `!` command he ran, or, in a log from before call ids, a denial, a card comment or an approved action. A message with no id (a log from before ids) is `m#<digest>`. Both digests are of what the record says and when, so a rewrite of the file cannot move them. Every ref a revision carries is one the distiller was shown, so it resolves in the log by construction.
 
 **What each state must cite**, checked in code (`objective.validate_answer`) — every one is a claim (L8):
 
@@ -722,8 +722,8 @@ One record per **revision**. The current Objective is the newest **live** `objec
 |---|---|
 | goal, any but `unknown` | at least one owner text (a message, or a card comment) — a goal nobody asked for is invented |
 | task `pending` / `in_progress` | where it was asked or planned: an owner text or an answer |
-| `done` (goal or task) | evidence: a final answer, or an action that ran (`t<N>.c<M>` with `ok: true`). Without it the item is DOWNGRADED to `unknown` and listed in `downgrades` — the revision stands |
-| task `stopped` | the owner's own act: a denial, a stopped task, or his message |
+| `done` (goal or task) | evidence: a final answer, an action that ran (`t<N>.c<M>` with `ok: true`), or a command he ran himself that recorded exit code 0. Without it the item is DOWNGRADED to `unknown` and listed in `downgrades` — the revision stands |
+| task `stopped` | the owner's own act: a denial, a stopped task, a command he ran himself, or his message |
 | goal `dropped` | an owner cite — a denial or his message; never inferred |
 | task `superseded` | `replaced_by` |
 | `unknown` | nothing: always legal |

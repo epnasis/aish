@@ -23,31 +23,20 @@ previous boundary as `previous`, exactly as live emission would.
 repository: revisions and goldens carry the owner's own words, and this
 repository is public.
 
-**Goldens.** `--goldens DIR` holds one JSON file per chat, written independently
-of this script and of the distiller. The file whose `"chat"` equals the log's
-name is used. Per boundary (a string key, the turn):
-
-    {"chat": "session-…",
-     "boundaries": {"6": {
-        "key_facts": [{"id": "rain", "any": ["deszcz", "rain", "opad"]}, …],
-        "forbidden": [{"id": "reality-done", "any": ["…"]}, …],
-        "not_done":  [{"id": "vs-reality", "any": ["rzeczywist", "reality"]}, …]}}}
-
-A bare string in any list is read as `{"id": s, "any": [s]}`. Scoring is by
-case-folded substring over the revision's own words — goal texts, `why`,
-`done_when`, constraints and task texts:
-
-- **key facts present** — an entry is present when any of its strings appears;
-- **forbidden claims** — an entry is hit when any of its strings appears;
-- **false done** — a goal or task in state `done` whose text contains any string
-  of a `not_done` entry;
-- **downgrades** — the unsupported `done`s code turned into `unknown`;
-- **coverage reached** — the revision validated (so every must-cover owner text
-  was cited or listed as not goal-bearing) and `covers_to_turn` is the boundary;
-- tokens and latency, from the role result (summed over attempts).
-
-Substring scoring is a proxy a person must be able to check, so every hit and
-miss is printed with the entry id. It decides nothing about the product.
+**Goldens.** `--goldens DIR` holds `golden-<chat>.json` files (schema
+`aish-objective-golden/v2`, documented in that directory's README), written
+independently of this script and of the distiller; `*.v1.json` copies are
+superseded and never read. `--at golden` runs at the golden's own boundaries.
+Per boundary the score reports: key facts hit, each golden purpose found (a
+distilled `why` quoted from one of the same messages, or overlapping it — the
+README's accept-equivalent rule), each still-open task found not done, each
+golden constraint carried, false claims fired (`review_only` ones apart),
+false `done`s over open tasks, downgrades, coverage, tokens and latency. The
+BAR — the owner's — is: coverage reached, every purpose, every open task and
+every golden constraint present, and zero false `done`. Golden cites written
+as `m@N` (a record index, from an earlier material) are mapped onto today's
+refs before matching. Every rule is a substring or a cite match a person can
+check, and hits and misses are listed by id; it decides nothing in the product.
 
 **The seed probe** (#424 exit 3). Task N's stored request (its first model call,
 from the per-chat `sent` store) with a probe question appended — "state the goals
@@ -193,19 +182,11 @@ def _summary(row: dict[str, Any]) -> str:
 # ---------------------------------------------------------------- scoring
 
 
-def _entries(raw: Any) -> list[dict[str, Any]]:
-    out = []
-    for entry in raw or ():
-        if isinstance(entry, str):
-            out.append({"id": entry, "any": [entry]})
-        elif isinstance(entry, dict):
-            words = entry.get("any") or entry.get("match") or []
-            out.append({"id": str(entry.get("id") or words[:1]), "any": [str(w) for w in words]})
-    return out
+def _norm(text: str) -> str:
+    return " ".join(str(text).split()).casefold()
 
 
-def revision_words(goals: list[dict]) -> str:
-    """Everything the revision says in its own words, case-folded."""
+def _goal_texts(goals: list[dict]) -> list[str]:
     parts: list[str] = []
     for g in goals:
         parts.append(str(g.get("text") or ""))
@@ -214,80 +195,242 @@ def revision_words(goals: list[dict]) -> str:
                 parts.append(str(g[key].get("text") or ""))
         parts += [str(c.get("text") or "") for c in g.get("constraints") or ()]
         parts += [str(t.get("text") or "") for t in g.get("tasks") or ()]
-    return "\n".join(parts).casefold()
+    return parts
 
 
-def _hit(entry: dict[str, Any], blob: str) -> bool:
-    return any(w.casefold() in blob for w in entry["any"])
+def revision_words(goals: list[dict]) -> str:
+    """Everything the revision says in its own words, case-folded."""
+    return "\n".join(_goal_texts(goals)).casefold()
 
 
-def score(row: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+def ref_mapper(records: list[dict]) -> Any:
+    """Golden cites were produced by an earlier `material()`, whose refs for a
+    message with no id were its record index (`m@N`). Map those onto what the
+    material produces now, so a cite names the same message either way."""
+
+    def canon(ref: str) -> str:
+        if ref.startswith("m@"):
+            try:
+                index = int(ref[2:])
+                return objective._message_ref(index, records[index])
+            except (ValueError, IndexError):
+                return ref
+        return ref
+
+    return canon
+
+
+def _refs(cites: Any, canon: Any) -> set[str]:
+    return {canon(objective._bare_ref(c)) for c in cites or ()}
+
+
+def _overlaps(a: str, b: str) -> bool:
+    a, b = _norm(a), _norm(b)
+    return bool(a) and bool(b) and (a in b or b in a)
+
+
+def _hits(words: Any, item: dict) -> int:
+    text = str(item.get("text") or "").casefold()
+    return sum(1 for w in words or () if str(w).casefold() in text)
+
+
+def score(row: dict[str, Any], spec: dict[str, Any], canon: Any) -> dict[str, Any]:
+    """One distilled revision against one golden boundary (schema v2, README in
+    the goldens directory). Every rule is a case-folded substring or a cite
+    match a person can check; hits and misses are listed by id."""
     goals = row.get("goals") or []
     blob = revision_words(goals)
-    facts = _entries(spec.get("key_facts"))
-    forbidden = _entries(spec.get("forbidden"))
-    not_done = _entries(spec.get("not_done"))
-    done_texts = [
-        str(item.get("text") or "").casefold()
-        for g in goals
-        for item in [g, *(g.get("tasks") or ())]
-        if item.get("state") == "done"
+    items = [item for g in goals for item in [g, *(g.get("tasks") or ())]]
+    tasks = [t for g in goals for t in g.get("tasks") or ()]
+
+    facts = spec.get("key_facts") or []
+    fact_hits = [f["fact"] for f in facts if any(w.casefold() in blob for w in f["any_of"])]
+    fact_miss = [f["fact"] for f in facts if f["fact"] not in fact_hits]
+
+    # Purpose: a golden goal with a quoted why is found when a distilled why is
+    # quoted from one of the same messages (accept-equivalent: any span of his
+    # words there), or when the two quotes overlap.
+    purposes, purpose_miss = 0, []
+    for g in spec.get("goals") or ():
+        wanted = [q for q in (g.get("why"), g.get("alternative_accepted")) if isinstance(q, dict)]
+        if not wanted:
+            continue
+        purposes += 1
+        found = any(
+            isinstance(d.get("why"), dict)
+            and (
+                _refs(d["why"].get("cites"), canon) & _refs(w.get("cites"), canon)
+                or _overlaps(d["why"].get("text") or "", w.get("text") or "")
+            )
+            for d in goals
+            for w in wanted
+        )
+        if not found:
+            purpose_miss.append(g["id"])
+
+    # Pending tasks: a golden task the owner is still waiting on ("open") is
+    # found when some distilled task hits its match words and is not done.
+    open_tasks = [t for t in spec.get("tasks") or () if t.get("state") == "open"]
+    pending_miss = [
+        t["id"] for t in open_tasks
+        if not any(
+            any(w.casefold() in str(d.get("text") or "").casefold() for w in t.get("match") or ())
+            and d.get("state") != "done"
+            for d in tasks
+        )
     ]
+    # False done, disambiguated: match words overlap between golden tasks (a
+    # finished "save the learnings" and an open "fix the memory bug" both say
+    # "memory"), so a distilled `done` is charged to an open golden task only
+    # when that task matches it STRICTLY better than every golden task whose
+    # `accept` includes done. A tie is a candidate for a person, not a count.
+    golden_tasks = spec.get("tasks") or []
+    done_ok = [t for t in golden_tasks if "done" in (t.get("accept") or [t.get("expected")])]
+    false_done, candidates = [], []
+    for d in tasks:
+        if d.get("state") != "done":
+            continue
+        best_ok = max((_hits(t.get("match"), d) for t in done_ok), default=0)
+        for t in open_tasks:
+            hits = _hits(t.get("match"), d)
+            if hits and hits > best_ok:
+                false_done.append(f"{t['id']} <- {d.get('id')}")
+            elif hits:
+                candidates.append(f"{t['id']} ~ {d.get('id')}")
+
+    # Constraints: every golden constraint is found as an overlapping quote in
+    # a distilled constraint, why or done_when (extras are never penalised).
+    carried = [
+        str(q.get("text") or "")
+        for g in goals
+        for q in [*(g.get("constraints") or ()), g.get("why"), g.get("done_when")]
+        if isinstance(q, dict)
+    ]
+    wanted_constraints = [
+        c for g in spec.get("goals") or () for c in g.get("constraints") or ()
+    ]
+    constraint_miss = [
+        c["text"] for c in wanted_constraints
+        if not any(_overlaps(c["text"], have) for have in carried)
+    ]
+
+    claims, review = [], []
+    ok_goals = [
+        g for g in spec.get("goals") or () if "done" in (g.get("accept") or [g.get("expected")])
+    ]
+    for claim in spec.get("false_claims") or ():
+        level = claim.get("level")
+        fired = False
+        if level in ("task", "goal"):
+            pool = tasks if level == "task" else goals
+            for d in pool:
+                text = str(d.get("text") or "").casefold()
+                words = [w for w in claim.get("match") or () if w.casefold() in text]
+                if not (
+                    d.get("state") in (claim.get("forbidden_states") or ())
+                    and words
+                    and (
+                        not claim.get("require_any")
+                        or any(w.casefold() in text for w in claim["require_any"])
+                    )
+                ):
+                    continue
+                # The same disambiguation as false done: an item that matches a
+                # golden item allowed in this state at least as well is that
+                # item, not the claim.
+                if level == "task" and d.get("state") == "done":
+                    best_ok = max((_hits(t.get("match"), d) for t in done_ok), default=0)
+                    if best_ok >= len(words):
+                        candidates.append(f"claim '{claim['claim']}' ~ {d.get('id')}")
+                        continue
+                if level == "goal" and d.get("state") == "done" and any(
+                    all(w.casefold() in str(g.get("text") or "").casefold() for w in words)
+                    for g in ok_goals
+                ):
+                    candidates.append(f"claim '{claim['claim']}' ~ {d.get('id')}")
+                    continue
+                fired = True
+        elif level == "text":
+            fired = any(w.casefold() in blob for w in claim.get("absent") or ())
+        if fired:
+            (review if claim.get("review_only") else claims).append(claim["claim"])
+
+    valid = row.get("status") == roles.Status.OK
+    coverage = valid and row.get("covers_to_turn") == row["boundary"]
     usage = row.get("usage") or {}
+    passed = (
+        coverage
+        and not purpose_miss
+        and not pending_miss
+        and not constraint_miss
+        and not false_done
+    )
     return {
         "model": row["model"],
         "boundary": row["boundary"],
-        "valid": row.get("status") == roles.Status.OK,
-        "facts_present": [e["id"] for e in facts if _hit(e, blob)],
-        "facts_missing": [e["id"] for e in facts if not _hit(e, blob)],
+        "valid": valid,
+        "why_invalid": "" if valid else str(row.get("why") or row.get("status"))[:200],
+        "facts_hit": fact_hits,
+        "facts_missing": fact_miss,
         "facts_total": len(facts),
-        "forbidden_hits": [e["id"] for e in forbidden if _hit(e, blob)],
-        "false_done": [e["id"] for e in not_done if any(_hit(e, t) for t in done_texts)],
+        "purposes_total": purposes,
+        "purposes_missing": purpose_miss,
+        "pending_total": len(open_tasks),
+        "pending_missing": pending_miss,
+        "constraints_total": len(wanted_constraints),
+        "constraints_missing": constraint_miss,
+        "false_claims": claims,
+        "review_claims": review,
+        "false_done": false_done,
+        "candidates": candidates,
         "downgrades": len(row.get("downgrades") or ()),
-        "coverage_reached": row.get("status") == roles.Status.OK
-        and row.get("covers_to_turn") == row["boundary"],
+        "coverage_reached": coverage,
         "not_goal_bearing": len(row.get("not_goal_bearing") or ()),
         "unstated": sum(
             1 for g in goals for k in ("why", "done_when") if g.get(k) == objective.UNSTATED
         ),
+        "items": len(items),
         "attempts": row.get("attempts"),
         "ms": row.get("ms"),
         "tokens_in": usage.get("input"),
         "tokens_out": usage.get("output"),
         "input_chars": row.get("input_chars"),
+        "passes_bar": passed,
     }
 
 
 def load_golden(directory: Path, chat: str) -> dict[str, Any] | None:
-    for path in sorted(directory.glob("*.json")):
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, ValueError):
-            continue
-        if isinstance(data, dict) and data.get("chat") == chat:
-            return data
-    return None
+    """The chat's golden: `golden-<chat>.json`, never a superseded `*.v1.json`."""
+    path = directory / f"golden-{chat}.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("chat") == chat else None
 
 
 def score_table(scores: list[dict[str, Any]]) -> str:
     lines = [
-        "model | turn | valid | facts | forbidden | false_done | downgrades | coverage | "
-        "unstated | attempts | ms | tokens in/out"
+        "model | turn | valid | facts | purpose | pending | constraints | false_claims | "
+        "false_done | downgrades | coverage | ngb | unstated | attempts | ms | tokens in/out | BAR"
     ]
     for s in scores:
         lines.append(
             f"{s['model']} | {s['boundary']} | {s['valid']} | "
-            f"{len(s['facts_present'])}/{s['facts_total']} | {len(s['forbidden_hits'])} | "
-            f"{len(s['false_done'])} | {s['downgrades']} | {s['coverage_reached']} | "
-            f"{s['unstated']} | {s['attempts']} | {s['ms']} | "
-            f"{s['tokens_in']}/{s['tokens_out']}"
+            f"{len(s['facts_hit'])}/{s['facts_total']} | "
+            f"{s['purposes_total'] - len(s['purposes_missing'])}/{s['purposes_total']} | "
+            f"{s['pending_total'] - len(s['pending_missing'])}/{s['pending_total']} | "
+            f"{s['constraints_total'] - len(s['constraints_missing'])}/{s['constraints_total']} | "
+            f"{len(s['false_claims'])} | {len(s['false_done'])} | {s['downgrades']} | "
+            f"{s['coverage_reached']} | {s['not_goal_bearing']} | {s['unstated']} | "
+            f"{s['attempts']} | {s['ms']} | {s['tokens_in']}/{s['tokens_out']} | "
+            f"{'PASS' if s['passes_bar'] else 'fail'}"
         )
-        if s["facts_missing"]:
-            lines.append(f"    missing facts: {s['facts_missing']}")
-        if s["forbidden_hits"]:
-            lines.append(f"    forbidden: {s['forbidden_hits']}")
-        if s["false_done"]:
-            lines.append(f"    false done: {s['false_done']}")
+        for key in ("why_invalid", "facts_missing", "purposes_missing", "pending_missing",
+                    "constraints_missing", "false_claims", "review_claims", "false_done",
+                    "candidates"):
+            if s.get(key):
+                lines.append(f"    {key}: {s[key]}")
     return "\n".join(lines)
 
 
@@ -352,9 +495,11 @@ def probe(
     client = backends._local_client()
     out: dict[str, Any] = {"turn": turn, "runs": runs, "checks": PROBE_CHECKS, "arms": {},
                            "max_tokens": max_tokens, "thinking": False}
-    for arm, base in arms.items():
-        results = []
-        for n in range(runs):
+    out["arms"] = {arm: [] for arm in arms}
+    for n in range(runs):
+        # Interleaved, so neither arm runs on a warmer server than the other.
+        for arm, base in arms.items():
+            results = out["arms"][arm]
             request = base + [{"role": "user", "content": PROBE_QUESTION}]
             started = time.perf_counter()
             usage: dict[str, Any] = {}
@@ -376,7 +521,6 @@ def probe(
                             "error": error, "usage": usage, "reply": text})
             print(f"  probe {arm:<7} #{n:<2} score={sum(hits.values())} ms={ms} "
                   f"{'ERR ' + error if error else ''}", flush=True)
-        out["arms"][arm] = results
     return out
 
 
@@ -399,7 +543,8 @@ def probe_table(result: dict[str, Any]) -> str:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("log", type=Path)
-    parser.add_argument("--at", default="last", help="comma-separated turns, or 'last'")
+    parser.add_argument("--at", default="last",
+                        help="comma-separated turns, 'last', or 'golden' (its boundaries)")
     parser.add_argument("--model", action="append", default=[],
                         help="repeatable; the first is the one probed")
     parser.add_argument("--goldens", type=Path)
@@ -415,7 +560,13 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     charter = roles.load_charters()[objective.DISTILLER]
-    if args.at == "last":
+    if args.at == "golden":
+        golden_spec = load_golden(args.goldens, args.log.stem) if args.goldens else None
+        if golden_spec is None:
+            print("--at golden needs --goldens holding this chat's golden")
+            return 2
+        boundaries = sorted(int(k) for k in golden_spec.get("boundaries") or {})
+    elif args.at == "last":
         items = objective.material(objective.read_records(args.log))
         boundaries = [max((i.turn for i in items), default=0)]
     else:
@@ -448,8 +599,9 @@ def main(argv: list[str]) -> int:
             print(f"\nno golden for {args.log.stem} in {args.goldens}")
         else:
             specs = golden.get("boundaries") or {}
+            canon = ref_mapper(objective.read_records(args.log))
             report["scores"] = [
-                score(row, specs[str(row["boundary"])])
+                score(row, specs[str(row["boundary"])], canon)
                 for row in rows
                 if str(row["boundary"]) in specs
             ]
