@@ -3074,7 +3074,35 @@ def _menu_names(menu: list[dict]) -> list[str]:
 
 def _serialize(message: dict) -> dict:
     keys = ("role", "content", "tool_name", "images", "documents", "interim")
-    return {k: message[k] for k in keys if k in message}
+    record = {k: message[k] for k in keys if k in message}
+    if message.get("tool_calls"):
+        record["tool_calls"] = _logged_tool_calls(message["tool_calls"])
+    return record
+
+
+def _logged_tool_calls(tool_calls: list[dict]) -> list[dict]:
+    """The calls an assistant message made, as the log keeps them (#422).
+
+    Without them a reopened chat — every chat, after every restart of
+    aish-web — held each earlier result with no call before it, and the
+    converters relabel such a result as a `user` message: the model was shown
+    turn after turn of itself announcing work that then happened on its own,
+    and on the replayed turn that stalled it announced and stopped in 14 of 24
+    samples, against 0 of 10 with the calls put back.
+
+    Name and arguments only, uncapped, because this is the conversation and not
+    a trace copy — a cut `edit_file` argument restored as the model's own
+    emission would hand it a file it never wrote. Provider blobs (a Gemini
+    signature, Anthropic `raw_blocks`) stay out, as they always have: they
+    belong to the live request, and every converter rebuilds a call from its
+    name and arguments. Scrubbed of stored secrets like the `sent` bytes."""
+    logged = []
+    for call in tool_calls:
+        function = call.get("function") or {}
+        entry = {"name": function.get("name", ""), "arguments": function.get("arguments") or {}}
+        scrubbed, _ = _scrub_tree(entry)
+        logged.append({"function": scrubbed})
+    return logged
 
 
 def _canonical(value: Any) -> str:
@@ -4243,9 +4271,9 @@ class Agent:
         results and nothing else after the call — which is also the only shape
         in which the missing results can be told apart by position.
 
-        Hot only: a reopened chat's messages carry no `tool_calls`
-        (`SessionLog._parse`), so cold there is nothing to pair. The note's
-        in-flight list names the cut-off calls on both paths."""
+        Hot only: a reopened chat gets a call back only beside its result
+        (`SessionLog._parse`, #422), so cold there is nothing to pair. The
+        note's in-flight list names the cut-off calls on both paths."""
         for i in range(len(self.messages) - 1, 0, -1):
             message = self.messages[i]
             role = message.get("role")
