@@ -401,7 +401,11 @@ Rules:
    it costs an approval prompt). To find one: web_search the subject, read_url
    a promising page, then pass an image URL from it to show_image. If
    show_image reports a problem, try another source — do not paste the URL
-   into your answer anyway.
+   into your answer anyway. A chart or file you made yourself goes through
+   show_image too, ONE call per picture: NEVER type a picture path by
+   pattern — its name starts with a hash of the picture's bytes, so a typed
+   one names a file that does not exist. aish checks every picture in
+   your answer and tells you about any that did not come from show_image.
 7ba. SEEING A PICTURE: show_image also ATTACHES what it fetched to the
    conversation, so you can see it. When the question is about what is IN a
    picture you only have a link to — who is in a photo, what a chart says,
@@ -1695,7 +1699,15 @@ TOOL_MEDIA_CAPPED = (
 TOOL_MEDIA_UNDELIVERABLE = (
     "[aish: {tools} produced {count} picture(s), but this model cannot see "
     "images, so they were NOT delivered and you have not looked at them. Say so "
-    "rather than describing what you cannot see.]"
+    "rather than describing what you cannot see.{paste}]"
+)
+# Only when show_image is among the producers: read_media frames and read_pdf
+# scan pages have no display line, and telling the model to paste one would
+# have it type a path the image check then fails (#430). Without this the
+# note above read as "you cannot show pictures" and the line was left out.
+TOOL_MEDIA_PASTE_ANYWAY = (
+    " You MUST still paste the line show_image returned, exactly as written, "
+    "so the user sees the picture — just do not describe what is in it."
 )
 TOOL_MEDIA_EXPIRED = (
     "[aish: picture(s) from an earlier task were dropped from view to save "
@@ -1713,6 +1725,36 @@ FRAMES_ATTACHED = (
     "what you SEE. Each is labelled with the time it ACTUALLY came from (a seek "
     "lands on the nearest frame the video allows); cite that time, not the one "
     "you asked for."
+)
+
+# The image check (#430). A picture in an answer is displayed from aish's own
+# store, and the only thing that puts one there is show_image — whose file name
+# starts with a hash of the picture's bytes, so a model typing a path by
+# pattern names a file that does not exist. Observed: one show_image call,
+# three pasted paths, none on disk.
+IMAGE_MAX_ASKS = 2
+# The remote hosts the web renderer loads pictures from: app.js IMG_FETCH_HOSTS
+# and server.CSP_IMG_HOSTS, held equal by tests/test_agent.py.
+RENDERED_IMAGE_HOSTS = frozenset({"img.youtube.com", "i.ytimg.com", "maps.googleapis.com"})
+IMAGE_ASK = (
+    "Pictures in your answer that did not come from show_image:\n{items}\n"
+    "Lines show_image returned this task: {shown}\n"
+    "For each picture, call show_image on its file or URL and paste the EXACT "
+    "line it returns. Never type a picture path yourself — its name starts with "
+    "a hash of the picture's bytes, which you cannot know."
+)
+IMAGE_EARLIER = " (in a message the user already saw)"
+IMAGES_REMOVED_NOTE = (
+    "[aish] {count} picture(s) removed from this answer — they would not "
+    "display: {items}"
+)
+IMAGES_BROKEN_NOTE = (
+    "[aish] {count} picture(s) in this answer will not display: {items}"
+)
+IMAGES_UNCHECKED_NOTE = (
+    "[aish: pictures in your last answer will not display for the user: "
+    "{items}. Call show_image and paste the EXACT line it returns — never type "
+    "a picture path yourself.]"
 )
 
 SHOW_IMAGE_NO_CURL = (
@@ -3509,6 +3551,11 @@ class Agent:
         # Harness-written lines for rules that could not be satisfied — appended
         # to the answer at delivery so a failure is never silent.
         self._not_followed: list[str] = []
+        # The display lines show_image handed back this task, and how many
+        # times an answer was sent back for its pictures (#430).
+        self._shown_images: list[str] = []
+        self._image_asks = 0
+        self._image_removal: tuple[str, list, int] | None = None
         # Rules already reported as broken. A rule file does not fix itself
         # between turns, so warning every turn is nagging, not information —
         # and a warning that is always there is one nobody reads. Session-
@@ -4205,6 +4252,9 @@ class Agent:
         self._held_entry = None
         self._last_rejected = None
         self._not_followed = []
+        self._shown_images = []
+        self._image_asks = 0
+        self._image_removal = None
         # Skill-read gates belong to the task that armed them; run_task re-arms
         # from its own preflight right after this reset.
         self._pending_skill_reads = {}
@@ -4838,8 +4888,22 @@ class Agent:
                 # rules still get their say: the checks run, nothing is asked,
                 # and an unmet rule is still SAID, so a denial cannot silence a
                 # disclosure either.
-                unmet = self._verify_answer(checked, ask=may_ask)
+                # The pictures (#430), in the same pass as the rules so one
+                # rework answers both. On delivery the removal comes BEFORE the
+                # rules, so they grade the text the owner reads; when only the
+                # pictures send it back, the rules write no delivering-pass
+                # verdicts for an answer that was not delivered. `checked` is
+                # always the tail of `result`.
+                stripped, image_ask = self._check_images(checked, may_ask=may_ask)
+                result = result[: len(result) - len(checked)] + stripped
+                checked = stripped
+                asks = [
+                    image_ask,
+                    self._verify_answer(checked, ask=may_ask, delivering=image_ask is None),
+                ]
+                unmet = "\n\n".join(a for a in asks if a) or None
                 if unmet is not None:
+                    self._image_removal = None  # this draft is not delivered
                     # Not delivered. The model is told what is missing and the
                     # turn goes on — the ask provokes the work, the work lands
                     # in the trace, and the trace is what the next check reads.
@@ -4868,6 +4932,7 @@ class Agent:
                     ask = unmet + ("\n" + ANSWER_WITHHELD if withheld else "")
                     self._append({"role": "user", "content": AISH_NOTE + ask + "]"})
                     continue
+                self._commit_image_removal()
                 was_held = self._held_answer is not None
                 result = self._release_held(text=result)
                 self._log_held_entry(result)
@@ -5047,7 +5112,11 @@ class Agent:
             # answer a rule held back earlier in the turn is not thrown away.
             checked = self._last_rejected
             content = REJECTED_DRAFT_DELIVERED + "\n\n" + checked
+        stripped, _ = self._check_images(checked, may_ask=False)
+        content = content[: len(content) - len(checked)] + stripped
+        checked = stripped
         self._verify_answer(checked, ask=False)
+        self._commit_image_removal()
         # Every exit releases the hold, or a bound turn that ends at the loop
         # detector, the stall cap or the ceiling delivers NOTHING: the wrap-up
         # text sits in the buffer and the client shows a dead turn. The note
@@ -5837,7 +5906,8 @@ class Agent:
                 {
                     "role": "user",
                     "content": TOOL_MEDIA_UNDELIVERABLE.format(
-                        tools=tools_named, count=len(paths)
+                        tools=tools_named, count=len(paths),
+                        paste=TOOL_MEDIA_PASTE_ANYWAY if "show_image" in names else "",
                     ),
                 }
             )
@@ -8072,16 +8142,24 @@ class Agent:
                 "the picture AND the player in ONE card: include it in your answer "
                 "EXACTLY as written (do not alter the path or the link), and do NOT "
                 "write a separate link to the same video anywhere in the answer:\n\n"
-                f"[![{alt or 'video'}]({path})](https://www.youtube.com/watch?v={video})",
+                + self._remember_shown(
+                    f"[![{alt or 'video'}]({path})](https://www.youtube.com/watch?v={video})"
+                ),
                 images=(str(path),),
             )
         return tools.ToolOutcome(
             "Image ready — it is attached to this turn, so look at it and make "
             "sure it really shows what the user asked for. Include this line in "
             "your answer EXACTLY as written (do not alter the path):\n\n"
-            f"![{alt or 'image'}]({path})",
+            + self._remember_shown(f"![{alt or 'image'}]({path})"),
             images=(str(path),),
         )
+
+    def _remember_shown(self, line: str) -> str:
+        """Keep a display line show_image handed over, for the image check to
+        quote back when an answer typed its own (#430)."""
+        self._shown_images.append(line)
+        return line
 
     # ------------------------------------------------- video and audio (#216)
 
@@ -11145,7 +11223,138 @@ class Agent:
         for binding in self._bindings:
             binding.note_tool_result(name, status)
 
-    def _verify_answer(self, answer: str, ask: bool = True) -> str | None:
+    def _image_findings(self, text: str) -> list[tuple["media.ImageEmbed", str, bool]]:
+        """Each picture in `text` that is not a file in aish's picture store:
+        the embed, the checked fact that disqualifies it, and whether it will
+        display anyway (#430).
+
+        Every reason is a test made on the line that states it — never a guess
+        at how the path came to be written. "Will display" mirrors the web
+        renderer (app.js `imageSrc`) and `/file`: a whitelisted remote host, or
+        an absolute path to a picture file inside the workspace boundary."""
+        findings = []
+        for embed in media.image_embeds(text):
+            target = embed.target
+            # Case-sensitive, as app.js imageSrc's scheme test is.
+            if target.startswith(("http://", "https://")):
+                try:
+                    host = (urllib.parse.urlsplit(target).hostname or "").lower()
+                except ValueError:  # the renderer's URL() refuses it too
+                    host = ""
+                if host in RENDERED_IMAGE_HOSTS:
+                    findings.append((embed, "a web address", True))
+                else:
+                    findings.append(
+                        (embed, "a web address the app does not load pictures from", False)
+                    )
+            elif not target.startswith("/"):
+                findings.append((embed, "not an absolute path", False))
+            elif Path(target).suffix.lower() not in backends.IMAGE_SUFFIXES:
+                findings.append((embed, "not a picture type the app displays", False))
+            elif not files.within_roots(self.workspace_roots(), target):
+                findings.append((embed, "outside the folders the app may show", False))
+            elif not Path(target).is_file():
+                findings.append((embed, "no such file", False))
+            elif not files.contains(self.media_dir, target):
+                findings.append((embed, "a file outside aish's picture store", True))
+        return findings
+
+    def _check_images(self, answer: str, *, may_ask: bool) -> tuple[str, str | None]:
+        """The image check at delivery (#430): (answer to deliver, ask or None).
+
+        Asks while the answer is still held and may be reworked — about every
+        picture that did not come from show_image, which is what the owner asked
+        for; past IMAGE_MAX_ASKS, or when asking is not allowed (a denial's stop
+        gate, a silent model), it removes only the pictures that WOULD NOT
+        display and says so, so nothing working is taken away. An answer that
+        already streamed cannot be changed without live and log disagreeing, so
+        there the model is told on its next turn instead.
+        """
+        final = self._image_findings(answer)
+        # Pictures in narration the owner already saw cannot be taken back, but
+        # the answer can still carry them properly — asked about once, or an
+        # answer that complied would be sent back for them until the cap.
+        earlier = [] if self._image_asks else [
+            finding for text in self._delivered for finding in self._image_findings(text)
+        ]
+        if not final and not earlier:
+            if media.image_embeds(answer):
+                self._record_image_verify("allowed", [])
+            return answer, None
+        held = self._held_answer is not None
+        if held and may_ask and self._image_asks < IMAGE_MAX_ASKS:
+            self._image_asks += 1
+            listed = [
+                f"- {embed.target} — {reason}" for embed, reason, _ in final
+            ] + [
+                f"- {embed.target} — {reason}{IMAGE_EARLIER}" for embed, reason, _ in earlier
+            ]
+            shown = "\n" + "\n".join(self._shown_images) if self._shown_images else "none"
+            ask = IMAGE_ASK.format(items="\n".join(listed), shown=shown)
+            self._record_image_verify("refused", final + earlier, message=ask)
+            self._note("⚖ pictures: answer held for rework")
+            return answer, ask
+        broken = [(embed, reason) for embed, reason, renders in final if not renders]
+        if not broken:
+            # Everything left displays, so it ships as written.
+            self._record_image_verify("allowed", final)
+            return answer, None
+        items = ", ".join(f"{embed.target} ({reason})" for embed, reason in broken)
+        if not held:
+            self.add_system_note(IMAGES_UNCHECKED_NOTE.format(items=items))
+            self._record_image_verify("advised", final)
+            return answer, None
+        kept, cursor = [], 0
+        for embed, _ in broken:
+            kept.append(answer[cursor:embed.start])
+            alt = embed.alt.strip() or "picture"
+            kept.append(f"[{alt}]({embed.link})" if embed.link else f"*{alt}*")
+            cursor = embed.end
+        kept.append(answer[cursor:])
+        # Pending, not applied: a rule may still send this draft back, and a
+        # note about a draft the owner never saw would stream with nothing to
+        # attach to and never be logged. `_commit_image_removal` applies it on
+        # the pass that delivers.
+        self._image_removal = (
+            IMAGES_REMOVED_NOTE.format(count=len(broken), items=items), final, len(broken)
+        )
+        return "".join(kept), None
+
+    def _commit_image_removal(self) -> None:
+        """The delivering pass: say what the image check removed, and record it."""
+        if self._image_removal is None:
+            return
+        note, findings, removed = self._image_removal
+        self._image_removal = None
+        self._not_followed.append(note)
+        # The held buffer is what _release_held streams, and it still holds
+        # the model's own tokens: emptied so the edited text is what leaves.
+        if self._held_answer is not None:
+            self._held_answer = []
+        self._record_image_verify("advised", findings, removed=removed)
+
+    def _record_image_verify(
+        self, verdict: str, findings: list, *, message: str = "", removed: int = 0
+    ) -> None:
+        """A `gate` record at the verify point. Logged only when ARMED — the
+        answer carries a picture (trace contract §3.3)."""
+        self._emit_record(
+            kind="gate", call=0, at="verify", gate="image.verify", binding=None,
+            rule=None, tool="", action={}, verdict=verdict, tier=0,
+            evidence={
+                "pictures": [
+                    {"target": embed.target[:300], "reason": reason, "displays": renders}
+                    for embed, reason, renders in findings
+                ],
+                **({"removed": removed} if removed else {}),
+            },
+            round=self._image_asks, max_rounds=IMAGE_MAX_ASKS, escalated=False,
+            **({"message": message[: rules.GATE_MESSAGE_CHARS]} if message else {}),
+        )
+
+    def _verify_answer(
+        self, answer: str, ask: bool = True, delivering: bool = True
+    ) -> str | None:
         """None when the answer may be delivered, else what to ask the model.
 
         Bounded: RULE_MAX_ASKS per binding. Past that the answer IS delivered —
@@ -11154,6 +11363,10 @@ class Agent:
         line is not requested of the model, so it cannot be skipped, and it
         reads the same attended or not: a rule that was tried and failed must
         be visible to the owner, not only to automation.
+
+        `delivering=False` when another check has already sent the answer back
+        (#430): the rules may still ask, but a pass with nothing to ask records
+        nothing, since no answer was delivered for its verdicts to describe.
         """
         if not self._bindings:
             return None
@@ -11201,6 +11414,10 @@ class Agent:
             # with an unaskable one did it on every round.
             for failure in asks:
                 self._record_verify(failure, "asked")
+        elif not delivering:
+            # Another check sent this answer back: nothing to ask, and nothing
+            # delivered yet for a verdict to be about.
+            return None
         else:
             # The delivering pass. Every verdict for this turn is written here,
             # exactly once — including the abstentions, so a satisfied rule and
@@ -11224,7 +11441,7 @@ class Agent:
                     continue
                 seen.add(failure.binding.id)
                 notes.append(self._note_for(failure))
-            self._not_followed = notes
+            self._not_followed += notes  # after any the image check wrote
             return None
         self._note("⚖ " + asks[0].binding.name + ": answer held for rework")
         return "\n\n".join(f.ask for f in asks)
@@ -11247,6 +11464,18 @@ class Agent:
         and the gate on both paths). So the checks run, the verdicts are
         recorded, and every unmet rule is SAID.
         """
+        broken = [
+            (embed, reason) for embed, reason, displays in self._image_findings(answer)
+            if not displays
+        ]
+        if broken:
+            # Streamed already and the conversation is the SDK's, so neither a
+            # rework nor a next-turn note is possible: the owner is told.
+            self._record_image_verify("advised", self._image_findings(answer))
+            answer = (answer + "\n\n" + IMAGES_BROKEN_NOTE.format(
+                count=len(broken),
+                items=", ".join(f"{embed.target} ({reason})" for embed, reason in broken),
+            )).strip()
         if not self._bindings:
             return answer
         self._verify_answer(answer, ask=False)

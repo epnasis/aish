@@ -853,6 +853,10 @@ Not yet built. It must ship **with** its records from day one — it is the firs
 
 ---
 
+### 6.15 · Image check at delivery (#430) — `_check_images` · ✓ *(new)*
+
+Checks the pictures in a finished answer before the owner reads it; see `docs/media-and-images.md`. Writes `gate{gate:"image.verify", at:"verify", tier:0, round, max_rounds: IMAGE_MAX_ASKS, evidence:{pictures:[{target, reason, displays}], removed?}}` with verdict `refused` (the answer was sent back), `advised` (pictures removed on the delivering pass, the model told on its next turn, or — on claude-max — the owner told on the answer) or `allowed` (checked; everything displays). Armed when the answer carries a picture, or when narration already shown this turn did and the answer is being asked about. Not armed, no record.
+
 ## 7 · Ledger counters
 
 #197's real ask is *evidence of improvement over time*, and #190 decision 8 makes counters the admission price for any non-structural verdict. These are computed by a `scan_*` pass over the logs in the shape `curate.scan_ledger` already uses — pure code, zero model calls, reading only the records above.

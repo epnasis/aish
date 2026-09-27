@@ -679,7 +679,12 @@ this UI. Highlights:
   Fetching server-side is what makes arbitrary image sources work while the page
   itself still loads nothing remote: the browser only ever sees same-origin
   bytes, so the zero-click exfiltration channel a remote `<img>` would open
-  stays closed. When something *does* fail to render, the browser says so and
+  stays closed. Every picture in an answer is checked: one that did not come
+  from `show_image` — a typed path, a web address, a file outside aish's
+  picture store — is caught. When a rule already holds the answer for
+  checking, it goes back to the model to redo (twice at most) and a picture
+  that still would not display is removed with a note saying so; when the
+  answer has already streamed, the model is told on its next turn. When something *does* fail to render, the browser says so and
   the model is told — so it tries another source instead of leaving you looking
   at a broken picture.
 - **Tap an attachment to look at it.** A picture opens full-screen with the

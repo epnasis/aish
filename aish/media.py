@@ -35,6 +35,7 @@ the security property and it belongs to the caller, not here.
 
 import hashlib
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 # Exactly the formats the web UI serves (server.IMAGE_TYPES) and the terminal
@@ -172,3 +173,64 @@ def prune(
         total -= size
         removed.append(path)
     return removed
+
+
+# The picture syntax the web renderer reads, copied from app.js so an answer is
+# checked for exactly the images the owner will be shown (#430). IMAGE_CARD_RE
+# is its IMAGE_LINK_RE (a picture that is also a link — the video card) and
+# IMAGE_RE is INLINE_RE's image branch; FENCE_RE and CODE_SPAN_RE are what keeps
+# a picture quoted in code from rendering. `tests/test_media.py` holds the two
+# sides in lockstep: a disagreement fails text the renderer never shows as a
+# picture, or passes one it does.
+IMAGE_CARD_RE = re.compile(r"\[!\[([^\]\n]*)\]\(([^)\s]+)\)\]\((https?://[^)\s]+)\)")
+IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]\(([^)\s]+)\)")
+FENCE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})([\w-]*)\s*$")
+CODE_SPAN_RE = re.compile(r"`[^`]+`")
+
+
+@dataclass(frozen=True)
+class ImageEmbed:
+    """One picture an answer asks the renderer to show, and where it sits."""
+
+    alt: str
+    target: str
+    link: str  # the URL a card links to; "" for a plain picture
+    start: int
+    end: int
+
+
+def _mask_code(text: str) -> str:
+    """`text` with fenced blocks and code spans blanked, offsets preserved."""
+    lines = text.split("\n")
+    fence: tuple[str, int] | None = None
+    for i, line in enumerate(lines):
+        match = FENCE_RE.match(line)
+        if fence is None:
+            if match:
+                fence = (match.group(2)[0], len(match.group(2)))
+                lines[i] = " " * len(line)
+            continue
+        closes = (
+            match is not None
+            and match.group(3) == ""
+            and match.group(2)[0] == fence[0]
+            and len(match.group(2)) >= fence[1]
+        )
+        lines[i] = " " * len(line)
+        if closes:
+            fence = None
+    masked = "\n".join(lines)
+    return CODE_SPAN_RE.sub(lambda m: " " * len(m.group(0)), masked)
+
+
+def image_embeds(text: str) -> list[ImageEmbed]:
+    """Every picture in `text`, in order. Mechanics only: what may display is
+    the caller's policy, as the store's location is (#318)."""
+    masked = _mask_code(text)
+    found = []
+    for match in IMAGE_CARD_RE.finditer(masked):
+        found.append(ImageEmbed(match[1], match[2], match[3], match.start(), match.end()))
+        masked = masked[: match.start()] + " " * len(match[0]) + masked[match.end():]
+    for match in IMAGE_RE.finditer(masked):
+        found.append(ImageEmbed(match[1], match[2], "", match.start(), match.end()))
+    return sorted(found, key=lambda embed: embed.start)

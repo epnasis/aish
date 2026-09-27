@@ -84,6 +84,30 @@ The CLI's half of the same capability: `supports_images()` detects an inline-ima
 
 ---
 
+## The image check at delivery (#430)
+
+**The render-error channel told the model a turn too late.** In `session-20260925-204008-294943` a model with no vision built charts with a script, called `show_image` ONCE, and pasted three picture paths in the shape it had just seen — `media/<12 hex>-<slug>.png`. The twelve characters are a hash of the picture's bytes, so no model can predict them; `ls` of the store found none of the three. The only feedback was the browser's report, delivered on the NEXT turn, after the owner had already looked at broken pictures — and after the last of those turns no report was recorded at all, for a reason still not known.
+
+So the answer's pictures are checked **before delivery**, in the same pass as the rules' Verify (`Agent._check_images`), and one rework answers both. The parser is `media.image_embeds`: a copy of the renderer's own picture grammar (`IMAGE_LINK_RE`, `INLINE_RE`'s image branch, the fence and code-span rules) held equal to app.js by `TestRendererLockstep` — a homegrown reading would fail text the renderer never shows as a picture, or pass one it does. What may DISPLAY is the agent's policy, not the store's (the same split as the store's location, #318): `_image_findings` mirrors `imageSrc` and `/file` — a whitelisted remote host (`RENDERED_IMAGE_HOSTS`, held equal to `IMG_FETCH_HOSTS` and the CSP), or an absolute path to a picture file inside `workspace_roots()`.
+
+**Two thresholds, on purpose.** The model is ASKED about every picture that is not a file in the media store — web addresses and scratch files included, because the owner asked for everything to go through `show_image`, and a scratch chart dies with its chat (#258). But only a picture that WOULD NOT DISPLAY is ever REMOVED: past `IMAGE_MAX_ASKS`, or when asking is not allowed, a working picture is never taken away. Every reason is a test made on the line that states it (`no such file`, `outside the folders the app may show`, …) and the removal note says *would not display*, not *show_image did not produce* — an LRU-evicted `show_image` file is the case where those differ.
+
+**Where it can and cannot rework.**
+- **A removal is said only by the pass that delivers** (`_commit_image_removal`): a rule may still send the stripped draft back, and a note about a draft the owner never saw would stream with nothing to attach to and never be logged — found in delivery review, `test_a_removal_from_a_draft_a_rule_then_rejects_is_never_said`.
+- **A held answer** (a verify rule binds the turn — for this owner, every turn): asked up to twice, with the failing targets, their reasons and the lines `show_image` actually returned this task (`_shown_images`). Past that, the broken embeds become their alt text (a card keeps its link) and an `[aish]` note says how many went and why. The hold buffer is emptied before release, because `_release_held` streams the BUFFER — the model's own tokens — and live and log would otherwise disagree.
+- **A denial's stop gate or a silent model**: never asked (#81 outranks every Verify ask), still stripped.
+- **An answer that already streamed** (no hold): left exactly as written — editing it would split the live chat from the log — and the model is told on its next turn by a system note.
+- **claude-max** (`verify_final`): the conversation is the SDK's, so there is no next turn to tell; the owner gets the note on the answer.
+- **Narration** already shown cannot be edited. Its failing pictures ride the FIRST ask, so the answer can carry them properly; asking about them again would send back an answer that had complied.
+
+**Only the pictures send it back → the rules write nothing.** `_verify_answer(delivering=False)` still lets a rule ask in the same message, but a pass with nothing to ask records no delivering-pass verdicts, since no answer was delivered for them to describe.
+
+**The note to a model that cannot see** used to end "Say so rather than describing what you cannot see", and the model read it as *you cannot show pictures* and left the line out. It now adds `TOOL_MEDIA_PASTE_ANYWAY` — but only when `show_image` is among the producers: `read_media` frames and `read_pdf` scans have no display line, and telling the model to paste one would have it type a path this very check fails.
+
+Trace: `gate{at:"verify", gate:"image.verify"}` (`docs/trace-contract.md` §6.15), logged only when armed (the answer carries a picture, or shown narration did and is being asked about), verdict `refused` (asked) / `advised` (removed, or the model told afterwards) / `allowed`. `TestImageCheck`, `TestNoVisionNote`, `TestImageEmbeds`, `TestRendererLockstep`.
+
+---
+
 ## When it fails to render
 
 The browser is the only place that knows an image did not appear, and telling the model is a separate mechanism with its own live-only rule — `[RENDERERR]` in `docs/web-frontend.md`, the record side in `docs/trace-records.md`.
