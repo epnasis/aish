@@ -265,15 +265,15 @@ class TestTheFloor:
         items = self.items(
             "tak",  # too short
             "[I ran `aish secret set` myself]",  # synthetic
-            "use aish secrets for API keys",
-            "use aish secrets for API keys",  # exact duplicate
-            "Use aish secrets for API keys",  # not exact: kept
+            "keep the token in the keychain",
+            "keep the token in the keychain",  # exact duplicate
+            "Keep the token in the keychain",  # not exact: kept
         )
         kept = [i.ref for i in objective.floor(items, 0, 99)]
         assert kept == ["m:3", "m:5"]
 
     def test_it_keeps_the_words_verbatim(self):
-        text = "  Potrzebuję   info o deszczu na dzień przed  "
+        text = "  Sprawdź   kurs walut przed wyjazdem  "
         (kept,) = objective.floor(self.items(text), 0, 9)
         assert kept.text == text
 
@@ -847,6 +847,33 @@ class TestRetryAndOrder:
         assert [r["kind"] for r in written] == ["role"]
         assert written[0]["why"] == objective.REWRITTEN
         assert steps(path, "objective") == [] and chat.calls == []
+
+    def test_an_append_racing_the_boundary_capture_is_not_a_rewrite(
+        self, tmp_path, monkeypatch
+    ):
+        path = web_log(tmp_path)
+        size = path.stat().st_size
+        real_open = Path.open
+
+        def append_after_the_stat(self, *args, **kwargs):
+            handle = real_open(self, *args, **kwargs)
+            real_read = handle.read
+
+            def read(*read_args):
+                with real_open(path, "ab") as late:  # the previous distill lands now
+                    late.write(b'{"kind": "trace", "step": {"kind": "title"}}\n')
+                return real_read(*read_args)
+
+            handle.read = read
+            return handle
+
+        monkeypatch.setattr(Path, "open", append_after_the_stat)
+        edge = boundary(path)
+        monkeypatch.setattr(Path, "open", real_open)
+        assert edge.upto == size
+        distill_with(monkeypatch, FakeRoleChat([FIRST]))
+        written = objective.distill_at_boundary(edge, SessionLog(path))
+        assert [r["kind"] for r in written] == ["role", "objective"]
 
     def test_a_retry_while_the_model_thinks_keeps_the_cost_and_drops_the_revision(
         self, tmp_path, monkeypatch

@@ -989,8 +989,12 @@ def boundary_of(
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             upto = handle.tell()
-            handle.seek(max(0, upto - TAIL_BYTES - 1))
-            chunk = handle.read()
+            start = max(0, upto - TAIL_BYTES - 1)
+            handle.seek(start)
+            # Bounded at `upto`: an append landing after the stat (a previous
+            # task's distill finishing now) must not become this boundary's tail,
+            # or an unrewritten chat is recorded as rewritten.
+            chunk = handle.read(upto - start)
     except OSError:
         return None
     body = chunk[:-1] if chunk.endswith(b"\n") else chunk
