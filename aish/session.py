@@ -3593,6 +3593,32 @@ class SessionLog:
             self._record_locked("title", title=title.strip(), auto=auto)
             return True
 
+    def snapshot(self) -> bytes:
+        """The file's bytes, read under the write lock (#424) — so never in the
+        middle of a rewrite (Retry, redaction), which replace the file in place
+        under the same lock. Empty when there is no file."""
+        with self._write_lock:
+            return self.snapshot_locked()
+
+    def snapshot_locked(self) -> bytes:
+        """`snapshot`'s body. Caller must hold _write_lock."""
+        try:
+            return self.path.read_bytes()
+        except OSError:
+            return b""
+
+    def append_steps_if(self, steps: list[dict], still_wanted: Callable[[], bool]) -> bool:
+        """Append trace steps, but only if `still_wanted()` holds UNDER the write
+        lock — `set_title_if`'s shape, for records decided off the turn (#424:
+        the Objective's distill). `still_wanted` runs with the lock held, so it
+        must use `snapshot_locked`, never `snapshot`. Returns whether it wrote."""
+        with self._write_lock:
+            if not still_wanted():
+                return False
+            for step in steps:
+                self._record_locked("trace", step=step)
+            return True
+
     def origin(self, origin: str) -> None:
         """Record who started this session (schedule | email | webhook — never
         for the default "user", which needs no record). Append-only metadata,

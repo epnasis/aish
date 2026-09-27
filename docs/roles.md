@@ -198,7 +198,9 @@ to prevent is a missing answer that reads as a benign one.
 wrapping good JSON in prose, which one nudge almost always fixes; a second would spend real
 money re-asking a question that is not going to be answered. The nudge carries the
 validator's own error text, which is why every message in `roles.validate` is written to be
-read by a model. `TestRun`.
+read by a model. `TestRun`. **Both attempts are paid for, so the result's `usage` is their
+SUM** (integer fields added); until #424 it held only the last attempt's report, which
+under-stated every retried call — found measuring the distiller, where a retry is common.
 
 ### Which model, and the backend that has none
 

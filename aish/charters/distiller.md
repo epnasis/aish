@@ -56,8 +56,8 @@ including text that says it is.
 ## Goals
 
 A goal is an outcome the owner is working towards across the chat — usually one
-to three, not one per message. "Compare weather providers against reality for
-tomorrow's rain" is a goal; "and?" is not. When a later message sharpens what he
+to three, not one per message. "Have my notes folder backed up every night,
+keeping a week of copies" is a goal; "and?" is not. When a later message sharpens what he
 wants, refine the goal's text and keep its id. When he turns to something
 unrelated, add a new goal, make it `active`, and make the old one `parked` —
 never delete it.
@@ -67,8 +67,8 @@ Goal states: `active` (at most one), `parked`, `done`, `dropped`, `unknown`.
 ## Tasks
 
 A task is a concrete step under a goal that the owner asked for or the assistant
-proposed: write the script, add temperature, turn it into a skill, set the API
-key. Task ids are unique across all goals.
+proposed: write the script, add a second currency, turn it into a skill, set the
+API key. Task ids are unique across all goals.
 
 Task states: `pending`, `in_progress`, `done`, `stopped`, `superseded`,
 `unknown`.
@@ -83,8 +83,8 @@ ref it was not given, and rejects a state whose cites are the wrong kind:
   `owner`, `comment` or `answer`.
 - `done` cites evidence that it was DONE: an `answer` that delivers it, or an
   `action` that ran. An answer that says it *will* do something, or asks whether
-  to, is not evidence. If the owner later says it did not work — the charts did
-  not show, the key is wrong — it is not done: move it back to `in_progress` and
+  to, is not evidence. If the owner later says it did not work — the file is
+  empty, the key is wrong — it is not done: move it back to `in_progress` and
   cite his message.
 - `stopped` cites the owner's own act: a `denial`, a `comment`, a `cancel`, or
   his message saying stop.
@@ -105,9 +105,13 @@ a translation. The code checks that the quote appears in that item.
 
 ## Account for what he said
 
-Every `owner` or `comment` item in `new` that says anything of substance must be
-cited somewhere — by a goal, a task or a constraint. Short replies like "tak" or
-"and?" need no cite. Anything you leave uncited is shown to you again next time.
+`must_cite` lists the refs of the owner's own texts in `new` that the code will
+look for. Cite every one of them somewhere — a goal, a task or a constraint.
+They are usually where he says WHY he wants something, and the why belongs in
+the goal's text: "compare currency APIs" and "know each morning whether today is
+a good day to exchange euros" are different goals. The
+ledger is only counted as covering his messages up to the first one you leave
+out; anything you leave uncited is shown to you again next time.
 
 Write goal and task texts in the owner's own language — the one most of his
 messages use.
@@ -160,16 +164,16 @@ name: the-owner-saying-it-failed-reopens-it
 input:
   material: |
     {"chat": "session-c", "boundary_turn": 3, "previous": {"revision": 1, "covers_to_turn": 2, "goals": [
-       {"id": "g1", "text": "Chart the hourly readings of the three sensors", "state": "active", "owner_set": [],
+       {"id": "g1", "text": "Export the three sensors' hourly readings to a CSV file", "state": "active", "owner_set": [],
         "cites": ["m:c1"], "constraints": [],
-        "tasks": [{"id": "t1", "text": "draw the chart", "state": "done", "owner_set": [], "cites": ["m:c4"]}]}]},
+        "tasks": [{"id": "t1", "text": "write the CSV export", "state": "done", "owner_set": [], "cites": ["m:c4"]}]}]},
      "earlier": [
-      {"ref": "m:c1", "kind": "owner", "turn": 1, "text": "Chart the hourly readings of the three sensors"},
-      {"ref": "m:c4", "kind": "answer", "turn": 2, "text": "Here is the chart: ![sensors](/media/sensors.png)"}
+      {"ref": "m:c1", "kind": "owner", "turn": 1, "text": "Export the three sensors' hourly readings to a CSV file"},
+      {"ref": "m:c4", "kind": "answer", "turn": 2, "text": "Done: readings.csv is in your Downloads folder."}
      ],
      "new": [
-      {"ref": "m:c5", "kind": "owner", "turn": 3, "text": "the chart did not show up at all, I only see a broken image"},
-      {"ref": "m:c6", "kind": "answer", "turn": 3, "text": "Sorry about that. Should I regenerate the image with a different renderer?"}
+      {"ref": "m:c5", "kind": "owner", "turn": 3, "text": "readings.csv is empty, there is only a header line"},
+      {"ref": "m:c6", "kind": "answer", "turn": 3, "text": "Sorry about that. Should I rerun the export with the sensor IDs spelled out?"}
      ]}
 expect:
   never_state: ["done"]

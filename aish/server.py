@@ -3725,14 +3725,11 @@ class WebServer:
         if objective.disabled():
             return None
         agent = session.agent
-        try:
-            path = session.logref.log.path
-            upto = path.stat().st_size
-        except (AttributeError, OSError):
+        path = getattr(session.logref.log, "path", None)
+        if path is None:
             return None
-        return objective.Boundary(
-            path=path,
-            upto=upto,
+        return objective.boundary_of(
+            path,
             turn=int(getattr(getattr(agent, "inner", agent), "_turn", 0) or 0),
             model_spec=roles.session_model_spec(
                 str(getattr(agent, "provider", "") or ""), str(getattr(agent, "model", "") or "")
@@ -3750,12 +3747,13 @@ class WebServer:
         does not wait on it."""
 
         # The log object, bound now: whatever this session's logref points at
-        # by the time the distill finishes, the revision belongs to this log.
-        write = session.logref.log.step
+        # by the time the distill finishes, the revision belongs to this log —
+        # and its write lock is the one every rewrite of the file holds.
+        chat_log = session.logref.log
 
         async def run() -> None:
             try:
-                await asyncio.to_thread(objective.distill_at_boundary, boundary, write)
+                await asyncio.to_thread(objective.distill_at_boundary, boundary, chat_log)
             except Exception:  # noqa: BLE001 — an Objective is never worth a crash
                 log.exception("objective distill failed")
 

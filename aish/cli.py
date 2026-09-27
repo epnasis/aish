@@ -2034,24 +2034,20 @@ def distill_in_background(agent, logref: LogRef, state_dir) -> threading.Thread 
     if objective.disabled():
         return None
     log = logref.log
-    try:
-        path = log.path
-        upto = path.stat().st_size
-    except (AttributeError, OSError):
-        return None
     inner = getattr(agent, "inner", agent)
-    boundary = objective.Boundary(
-        path=path,
-        upto=upto,
+    boundary = objective.boundary_of(
+        log.path,
         turn=int(getattr(inner, "_turn", 0) or 0),
         model_spec=roles.session_model_spec(
             str(getattr(agent, "provider", "") or ""), str(getattr(agent, "model", "") or "")
         ),
         state_dir=str(state_dir),
     )
+    if boundary is None:
+        return None
     thread = threading.Thread(
         target=objective.distill_at_boundary,
-        args=(boundary, log.step),
+        args=(boundary, log),
         name="aish-objective",
         daemon=True,
     )

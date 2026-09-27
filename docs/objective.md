@@ -39,9 +39,9 @@ the task's contract-§2 turn:
 | `failed` | a `task_end` that recorded a failure | `t<N>.end` |
 
 **Never tool outputs, never reminders.** A card comment is included although the epic
-lists "owner messages": it is his own words, and in the #422 chat the clearest statement
-of the goal is one — *"The goal is not to compare the weather, but to check for the rain
-in 24 hours…"*, typed on a held `create_skill` card at turn 25.
+lists "owner messages": it is his own words, and in the #422 chat the clearest restatement
+of the goal is one — typed on a held `create_skill` card at turn 25. (His words are not
+quoted here: this repository is public.)
 
 A task's turn is the first integer `turn` stamped inside its bracket, excluding the
 distill's own `role`/`objective` records: a slow distill of turn N lands inside task
@@ -51,8 +51,11 @@ none) is grouped by typed messages that are a model call's first input. `TestMat
 **The distiller** (`aish/charters/distiller.md`). The first role with a live caller — see
 `docs/roles.md`. It is handed ONE JSON input: the previous revision in a model-facing
 form (cites as bare refs, `owner_set` naming the fields he set), `earlier` (the items the
-previous revision cites, so a carried cite still resolves), and `new` (everything since).
-It answers the whole ledger; `objective.validate_answer` checks it against that same
+previous revision cites, so a carried cite still resolves), `new` (everything since), and
+`must_cite` — the refs `covers_to_turn` will be computed from, named outright. That last
+one is a measured addition: asked only in prose to "account for what he said", the local
+model left the owner's stated purpose uncited at every boundary of the #422 chat, and
+`covers_to_turn` never left turn 1. It answers the whole ledger; `objective.validate_answer` checks it against that same
 input — which is what makes an exam case and a production call one code path.
 
 **The extractive floor** (`objective.floor`). No model: the owner's texts in the uncovered
@@ -60,20 +63,23 @@ range, verbatim, minus three things decided mechanically — shorter than
 `FLOOR_MIN_CHARS` (12), starting with `[`, an exact duplicate of an earlier one. **No word
 list.** Which short replies are noise is a judgement; a list of them is a vocabulary
 nobody measured (`docs/vocabularies.md`). The consequence is visible and accepted: in the
-#422 chat the floor keeps "what's the answer?" and "Czemu nie skoczyłeś?" and drops
-"tak" and "Do it". `TestTheFloor`.
+#422 chat the floor drops the one-word replies the epic names, and keeps an 18-character
+"where is the answer?"-style nudge that says nothing about the goal. `TestTheFloor`.
 
 ## What code checks, and what it computes
 
 Every rule in contract §3.14's table has its enforcing line in `validate_answer`, and a
 failing answer gets the validator's own sentence back on the role's one corrective retry.
-Three decisions worth their reasons:
+Four decisions worth their reasons:
 
 - **`covers_to_turn` is computed, never claimed.** It is the last turn up to which every
   owner text the floor would keep is cited somewhere in the revision. The model is never
   asked for it and could not set it. A skipped message is listed in `uncited` and shown
   again next time instead of being certified as represented — which matters because
   #426's trimmer will stub owner turns up to this number.
+- **`change` is `new` exactly when there is no previous revision** — code sets it, as
+  with `covers_to_turn`, because the local model was measured answering `refined` with
+  nothing to refine; `new` with a previous revision is refused.
 - **A goal or task the answer leaves out is carried forward by code.** A pivot never
   overwrites (D3), and a model that forgets a parked goal cannot delete it by omission.
 - **Reopening and dropping must rest on something NEW.** `done`→`in_progress` and
@@ -89,8 +95,14 @@ text may have been cut in `earlier`. `TestValidation`, `TestTransitions`, `TestC
 
 **What is NOT checked**, stated so the words do not outrun the code: that a goal's TEXT
 says what its cites say; that `done` evidence actually delivers the task (an answer ref
-is accepted as evidence of the kind, not of the content); that `change` is truthful.
-Those are the distiller's judgements, and the golden file is where they are measured.
+is accepted as evidence of the kind, not of the content — a `write_file` action makes
+"write the comparison script" done whether or not the comparison ever ran); that
+`change` is truthful past the first revision. Those are the distiller's judgements, and
+the golden file is where they are measured.
+
+**Usage is summed over attempts.** `roles.run` used to record only the last attempt's
+usage report, so a role that needed its corrective retry under-stated what it cost; found
+measuring the distiller, where a retry is common, and fixed in `roles.run` for every role.
 
 ## Emission — at task end, off the interactive path
 
@@ -102,9 +114,22 @@ Those are the distiller's judgements, and the golden file is where they are meas
 - **CLI:** `cli.distill_in_background`, a daemon thread after each REPL task that
   returned. A one-shot `aish "task"` exits first and records nothing; a task interrupted
   by Ctrl-C or a model error records nothing either.
-- **The boundary is bytes, not "now".** The distill reads the file only up to the size it
-  had at `task_end`, so a late distill cannot read the next task's half-written records.
-- **One at a time per chat** (a per-path lock), so revisions land in order.
+- **The boundary is bytes, not "now" — and it is checked.** `objective.boundary_of`
+  records the file's size at `task_end` and the bytes of its last line. The material is
+  read only up to that size, so a late distill cannot read the next task's half-written
+  records; and because a Retry or a redaction rewrites the file in place and shifts every
+  offset after the first line it touches, the distill reads (`SessionLog.snapshot`) and
+  writes (`SessionLog.append_steps_if`) under the log's own write lock and only while the
+  file still ends there with that line. A rewrite before the read distills nothing; one
+  during the model call keeps the `role` record (with `discarded`) and drops the revision.
+  Found by adversarial review, reproduced, fixed: `TestRetryAndOrder`.
+- **The base and the revision number come from the file as it is NOW**, not from the
+  bounded prefix: two task ends in quick succession capture two boundaries before the
+  first distill writes, and reading the base from the prefix reissued revision 1 and lost
+  the base. The material still comes from the prefix.
+- **One at a time per chat** (a per-path lock). The lock is not a queue: if a later
+  boundary is distilled first, the earlier one is skipped with a `role` record saying
+  so — the later revision already covers it.
 - **It never raises.** A raising distill writes a `role` record saying so; a refused
   write (a trashed chat) ends it quietly. `AISH_OBJECTIVE=0` turns emission off, and the
   suite sets it (`tests/conftest.py`) for the reason `AISH_NOTIFY=0` exists: a background
@@ -132,17 +157,22 @@ yields to a starting turn yet.
 
 ## Retry, forks, redaction
 
-The current revision is the newest LIVE `objective` record. A revision lands after its
-task's `task_end`, so Retry of that task supersedes it with the task. A revision that
-lands late — inside the next task's bracket — is superseded if the owner retries THAT
-task, and the previous revision stands; the next distill re-covers the gap. Revision
-numbers are never reissued (1 + the highest in the file, superseded included).
+The current revision is the newest LIVE `objective` record. A revision that is already on
+disk when its task is retried is superseded with the task. One whose distill is still
+running when the Retry lands is never written (above). A revision that lands late —
+inside the next task's bracket — is superseded if the owner retries THAT task, and the
+previous revision stands; the next distill re-covers the gap. Revision numbers are never
+reissued (1 + the highest in the file, superseded included).
+
+`unknown` cannot launder a transition: an item entering it records the state it left in
+`was`, and leaving `unknown` is judged from there (`TestTransitions`).
 
 ## Measurement
 
 `scripts/measure_objective.py` runs the distiller over a recorded log at given task
 boundaries, chained (each boundary's base is the previous boundary's revision), calling
-the backend directly — never through a chat, never through aish-web. Results for the
-#422 chat are in the #424 hand-off; the golden file
-(`scripts/fixtures-424/golden-session-20260925-204008-294943.json`) is **a DRAFT for the
-owner's review**, derived from the log and citing its records.
+the backend directly — never through a chat, never through aish-web. Its results and
+the golden file live in `~/.cache/aish-objective-424/`, **never in this repository**: both
+carry the owner's own words and the repository is public. The golden file for the #422
+chat is **a DRAFT for the owner's review**, derived from the log and citing its records;
+the numbers are in the #424 hand-off.

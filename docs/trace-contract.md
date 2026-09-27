@@ -673,17 +673,17 @@ One record per **revision**. The current Objective is the newest **live** `objec
 
 ```json
 {"kind": "objective", "turn": 12, "revision": 3, "origin": "distiller",
- "chat": "session-20260925-204008-294943", "covers_to_turn": 12, "confirmed": false,
+ "chat": "session-20260101-090000-000000", "covers_to_turn": 12, "confirmed": false,
  "change": "refined", "base": 2, "charter": "distiller", "version": "1",
  "model": "local:mlx-community/Qwen3.6-35B-A3B-8bit",
  "goals": [
-   {"id": "g1", "text": "a reusable skill comparing forecast providers against reality",
+   {"id": "g1", "text": "Kurs EUR/PLN każdego ranka, żeby zdecydować o wymianie",
     "state": "active", "state_by": "distiller", "text_by": "distiller",
-    "cites": [{"session": "session-20260925-204008-294943", "ref": "m:2ed6af824c79"}],
-    "constraints": [{"text": "use aish secrets for API keys",
-                     "cites": [{"session": "…", "ref": "m:49512ea3d30b"}]}],
+    "cites": [{"session": "session-20260101-090000-000000", "ref": "m:a1b2c3d4e5f6"}],
+    "constraints": [{"text": "klucze trzymaj w aish secrets",
+                     "cites": [{"session": "…", "ref": "m:0a1b2c3d4e5f"}]}],
     "tasks": [
-      {"id": "t4", "text": "turn the scratch script into a skill", "state": "done",
+      {"id": "t4", "text": "zapisać skrypt jako skill", "state": "done",
        "state_by": "distiller", "text_by": "distiller",
        "cites": [{"session": "…", "ref": "t11.c3"}]}]}],
  "uncited": []}
@@ -701,6 +701,7 @@ One record per **revision**. The current Objective is the newest **live** `objec
 | `change` | The distiller's word: `new` \| `unchanged` \| `refined` \| `expanded` \| `pivoted` \| `unknown`. Recorded, acted on by nothing yet (the pivot question is #425). Absent on `extractive`. |
 | `goals[]` | Self-contained (§0 corollary 1): the whole ledger, not a diff. `state` ∈ `active` \| `parked` \| `done` \| `dropped` \| `unknown`; at most one `active`. |
 | `goals[].tasks[]` | `state` ∈ `pending` \| `in_progress` \| `done` \| `stopped` \| `superseded` \| `unknown`; `superseded` carries `replaced_by` naming another task of the revision. |
+| `was` | On a goal or task whose `state` is `unknown`: the last state it had that was not. Set by code, so leaving `unknown` is judged from there — without it, done → unknown → in_progress would reopen in two revisions what one may not. |
 | `state_by` / `text_by` | Who last SET that field: `distiller` \| `owner`. A distiller revision may not change a field whose previous value was set by the owner. |
 | `cites[]` | `{session, ref}`. `session` is the chat the ref resolves in (always this chat in slice 1; a compacted chat's refs resolve in its original, #427). |
 | `constraints[]` | Owner requirements, each **a verbatim substring** (whitespace runs collapsed on both sides, nothing else) of the owner text of one of its cites. |
@@ -723,9 +724,11 @@ One record per **revision**. The current Objective is the newest **live** `objec
 
 **There is no "dropped silently" state.** An open task that no revision advances is a derived REPORT for a reader (#428), worded as the observation — never a state a writer can set.
 
-**Transitions** against the base revision: `done` and `stopped` may reopen only with an owner cite; `superseded` and `dropped` may only move to `unknown` or, for `dropped`, back with an owner cite; everything may become `unknown`. A goal or task the model leaves out is **carried forward unchanged by code** — a pivot never overwrites.
+**Transitions** against the base revision: `done` and `stopped` may reopen only with an owner cite from the new material; `superseded` may only move to `unknown`, and `dropped` back only with such a cite; anything the distiller set may become `unknown` (a field the owner set may not be changed at all), and leaving `unknown` is judged from `was`. A goal or task the model leaves out is **carried forward unchanged by code** — a pivot never overwrites.
 
 **Failure.** A distill that does not validate, cannot run (claude-max has no seam; an unadmitted charter), or raises writes its `role` record with the status and `why`, leaves the previous revision standing, and writes an `extractive` revision if any owner text is uncovered. It never raises into the task.
+
+**A rewritten chat.** The boundary is the file's size at `task_end` plus the bytes of its last line. The distill reads and writes under the log's write lock (the lock every rewrite holds) and only while the file still ends, at that size, with that line. A Retry or redaction that lands first yields one `role` record with `why` saying the boundary no longer exists; one that lands while the model is thinking yields the `role` record — the call was made and paid for — carrying `discarded`, and no revision. A revision distilled from an attempt the owner discarded is never written.
 
 ---
 

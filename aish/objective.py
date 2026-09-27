@@ -72,8 +72,8 @@ ASKED = frozenset({OWNER, COMMENT, ANSWER})  # where a task was asked for or pla
 # The floor's mechanical filter. A length threshold, the synthetic-note prefix
 # and exact duplicates — and deliberately NO word list: which short replies are
 # "noise" is a judgement, and a list of them is a vocabulary nobody measured.
-# 12 keeps "Check Tomorrow.io" (17) and drops "try again" (9) and "Continue" (8)
-# in the #422 chat.
+# 12 keeps a two-word request naming a provider (17 chars in the #422 chat) and
+# drops the one-word replies ("tak", "Continue") the epic names.
 FLOOR_MIN_CHARS = 12
 SYNTHETIC_PREFIX = "["
 
@@ -349,6 +349,7 @@ def _model_view(goals: list[dict]) -> list[dict]:
                 "id": goal.get("id"),
                 "text": goal.get("text"),
                 "state": goal.get("state"),
+                **({"was": goal["was"]} if goal.get("was") else {}),
                 "owner_set": _owner_set(goal),
                 "cites": [_bare_ref(c) for c in goal.get("cites") or ()],
                 "constraints": [
@@ -360,6 +361,7 @@ def _model_view(goals: list[dict]) -> list[dict]:
                         "id": t.get("id"),
                         "text": t.get("text"),
                         "state": t.get("state"),
+                        **({"was": t["was"]} if t.get("was") else {}),
                         "owner_set": _owner_set(t),
                         "cites": [_bare_ref(c) for c in t.get("cites") or ()],
                         **({"replaced_by": t["replaced_by"]} if t.get("replaced_by") else {}),
@@ -419,6 +421,10 @@ def compose_input(
         ),
         "earlier": [i.as_json() for i in earlier],
         "new": [i.as_json() for i in new],
+        # The refs `covers_to_turn` is computed from, named outright. Measured:
+        # asked in prose to "account for what he said", the local model left
+        # the owner's stated purpose uncited at every boundary of the #422 chat.
+        "must_cite": [i.ref for i in floor(new, covered, boundary)],
     }
     return json.dumps(payload, ensure_ascii=False, indent=1)
 
@@ -433,6 +439,7 @@ class Context:
     previous: list[dict]
     ledger: dict[str, Item]
     new: list[Item]
+    first: bool = False  # no previous revision at all
 
 
 def parse_input(text: str) -> Context:
@@ -461,6 +468,7 @@ def parse_input(text: str) -> Context:
         previous=[_from_model_view(g) for g in previous.get("goals") or ()],
         ledger={i.ref: i for i in [*earlier, *new]},
         new=new,
+        first=raw.get("previous") is None,
     )
 
 
@@ -520,23 +528,38 @@ _TASK_REOPEN = {"done", "stopped"}
 _TASK_TERMINAL = {"superseded"}
 
 
+def _last_known(before: dict | None) -> str | None:
+    """The state an item last had that was not `unknown` — its own, or the one
+    it carried in `was` when it became unknown."""
+    if before is None:
+        return None
+    state = before.get("state")
+    if state != "unknown":
+        return state
+    return str(before.get("was") or "") or None
+
+
 def _check_transition(
     before: dict | None, after: dict, where: str, cited: list[Item], closed: set[str],
     terminal: set[str], fresh: set[str],
 ) -> None:
     """Legal moves from the base revision's state. Reopening a closed item must
     rest on something the owner did SINCE the base — a cite of the message he
-    asked in, which the base already had, justifies nothing new."""
+    asked in, which the base already had, justifies nothing new.
+
+    `unknown` is always legal to ENTER, and leaving it is judged from the state
+    before it (`was`): otherwise done → unknown → in_progress, two revisions,
+    would reopen what one revision may not."""
     if before is None:
         return
-    old, new = before.get("state"), after.get("state")
+    old, new = _last_known(before), after.get("state")
     for field_name, by in (("state", "state_by"), ("text", "text_by")):
         if before.get(by) == ORIGIN_OWNER and before.get(field_name) != after.get(field_name):
             raise ValueError(
                 f"{where}: {field_name} was set by the owner and may not be changed "
                 f"(it is {before.get(field_name)!r})"
             )
-    if old == new or new == "unknown" or old == "unknown":
+    if old is None or old == new or new == "unknown":
         return
     if old in terminal:
         raise ValueError(f"{where}: a {old} item may only become unknown")
@@ -561,6 +584,12 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
     change = str(payload.get("change") or "").strip().lower()
     if change not in CHANGES:
         raise ValueError(f"change must be one of {', '.join(CHANGES)} (got {change!r})")
+    if ctx.first:
+        # Not the model's to say: with no previous revision the change IS new,
+        # and code knows it — the same reason covers_to_turn is computed.
+        change = "new"
+    elif change == "new":
+        raise ValueError('change is "new" only for the first revision; there is a previous one')
     raw_goals = payload.get("goals")
     if not isinstance(raw_goals, list):
         raise ValueError("the reply must have a 'goals' array")
@@ -607,6 +636,7 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
             _check_dropped(cited, where, fresh)
         record: dict[str, Any] = {"id": gid, "text": text, "state": state}
         _check_transition(before, record, where, cited, _GOAL_REOPEN, set(), fresh)
+        _stamp_was(record, before)
         record["state_by"] = _by(before, "state", state)
         record["text_by"] = _by(before, "text", text)
         record["cites"] = wrap(cited)
@@ -658,6 +688,13 @@ def _check_dropped(cited: list[Item], where: str, fresh: set[str]) -> None:
         )
 
 
+def _stamp_was(record: dict, before: dict | None) -> None:
+    """An item that becomes `unknown` remembers the state it left, so the next
+    revision's transition is judged from there."""
+    if record["state"] == "unknown" and (was := _last_known(before)):
+        record["was"] = was
+
+
 def _by(before: dict | None, field_name: str, value: Any) -> str:
     if before is not None and before.get(field_name) == value:
         return str(before.get(f"{field_name}_by") or ORIGIN_DISTILLER)
@@ -669,6 +706,7 @@ def _restore(goal: dict, ctx: Context) -> dict:
         "id": goal.get("id"),
         "text": goal.get("text"),
         "state": goal.get("state"),
+        **({"was": goal["was"]} if goal.get("was") else {}),
         "state_by": goal.get("state_by") or ORIGIN_DISTILLER,
         "text_by": goal.get("text_by") or ORIGIN_DISTILLER,
         "cites": [{"session": ctx.chat, "ref": _bare_ref(c)} for c in goal.get("cites") or ()],
@@ -690,6 +728,7 @@ def _restore_task(task: dict, ctx: Context) -> dict:
         "id": task.get("id"),
         "text": task.get("text"),
         "state": task.get("state"),
+        **({"was": task["was"]} if task.get("was") else {}),
         "state_by": task.get("state_by") or ORIGIN_DISTILLER,
         "text_by": task.get("text_by") or ORIGIN_DISTILLER,
         "cites": [{"session": ctx.chat, "ref": _bare_ref(c)} for c in task.get("cites") or ()],
@@ -769,6 +808,7 @@ def _tasks(
         record: dict[str, Any] = {"id": tid, "text": text, "state": state}
         before = prev_tasks.get(tid)
         _check_transition(before, record, at, cited, _TASK_REOPEN, _TASK_TERMINAL, fresh)
+        _stamp_was(record, before)
         record["state_by"] = _by(before, "state", state)
         record["text_by"] = _by(before, "text", text)
         record["cites"] = wrap(cited)
@@ -915,14 +955,53 @@ ASSERTIONS: dict[str, Callable[[Any, Revision], list[str]]] = {
 @dataclass(frozen=True)
 class Boundary:
     """A task end, captured synchronously when it happened: the log, how many
-    bytes it held, and the task's turn. Everything else is read later, off the
-    interactive path."""
+    bytes it held, the bytes of its LAST line, and the task's turn. Everything
+    else is read later, off the interactive path.
+
+    `tail` is what makes the byte offset trustworthy. A Retry or a redaction
+    rewrites the file in place, shifting every offset after the first line it
+    touches; a distill that trusted `upto` alone would read a torn prefix that
+    is neither the chat before the rewrite nor after it. So the distill reads
+    only if the file still ends, at `upto`, with exactly this line — and writes
+    only if it still does when the write lands.
+    """
 
     path: Path
     upto: int
     turn: int
     model_spec: str
     state_dir: str | None
+    tail: bytes = b""
+
+
+# The most of the last line kept for the check. A task_end line is ~60 bytes;
+# a CLI log's last line may be a whole answer, and a suffix this long is still
+# a content address in practice.
+TAIL_BYTES = 4096
+
+
+def boundary_of(
+    path: Path, turn: int, model_spec: str, state_dir: str | None
+) -> Boundary | None:
+    """The boundary as the file stands NOW — one stat and one small read at the
+    end of the file. None when there is no log to read."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            upto = handle.tell()
+            handle.seek(max(0, upto - TAIL_BYTES - 1))
+            chunk = handle.read()
+    except OSError:
+        return None
+    body = chunk[:-1] if chunk.endswith(b"\n") else chunk
+    cut = body.rfind(b"\n")
+    tail = chunk[cut + 1 :] if cut >= 0 else chunk[-TAIL_BYTES:]
+    return Boundary(path, upto, turn, model_spec, state_dir, tail[-TAIL_BYTES:])
+
+
+def still_there(data: bytes, boundary: Boundary) -> bool:
+    """Does the file still end, at the boundary's offset, with its last line?"""
+    return len(data) >= boundary.upto and data[: boundary.upto].endswith(boundary.tail)
 
 
 def disabled() -> bool:
@@ -941,6 +1020,21 @@ def _lock_for(path: Path) -> threading.Lock:
         return _LOCKS.setdefault(str(path), threading.Lock())
 
 
+def _parse_bytes(data: bytes) -> list[dict]:
+    out: list[dict] = []
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            out.append(record)
+    return out
+
+
 def distill(
     boundary: Boundary,
     *,
@@ -949,8 +1043,15 @@ def distill(
     check_admission: bool = True,
     charter: roles.Charter | None = None,
     records: list[dict] | None = None,
+    history: list[dict] | None = None,
 ) -> list[dict]:
     """The records one task end produces, in the order they are written.
+
+    `records` is the chat as it stood at the boundary — the material comes from
+    it. `history` is the whole file as it stands now, which is where the base
+    and the next revision number come from: a previous distill may have
+    written its revision AFTER this boundary was captured, and reading those
+    from the bounded prefix would reissue a revision number and lose the base.
 
     Always a `role` record (the D7 record, whatever the outcome — "unexamined"
     is a fact in the log, never an absence). Then an `objective` record: the
@@ -959,10 +1060,21 @@ def distill(
     """
     if records is None:
         records = read_records(boundary.path, boundary.upto)
+    if history is None:
+        history = records
     chat = boundary.path.stem
+    base = current(history, BASE_ORIGINS)
+    if base is not None and int(base.get("turn") or 0) >= boundary.turn:
+        # Distills are serialised per chat but not queued in order: a later
+        # boundary can be distilled first, and it already covers this one.
+        return [
+            _skip_record(
+                boundary.turn,
+                f"a later boundary (turn {base.get('turn')}) was already distilled",
+            )
+        ]
     items = material(records)
-    base = current(records, BASE_ORIGINS)
-    revision = next_revision(records)
+    revision = next_revision(history)
     out: list[dict] = []
 
     try:
@@ -1071,10 +1183,26 @@ def _skip_record(turn: int, why: str) -> dict:
     }
 
 
-def distill_at_boundary(boundary: Boundary, write: Callable[[dict], None]) -> list[dict]:
+REWRITTEN = (
+    "the chat was rewritten after this task ended (a Retry or a redaction), so the "
+    "boundary it was taken at no longer exists"
+)
+
+
+def distill_at_boundary(boundary: Boundary, log: Any) -> list[dict]:
     """Distill and write. NEVER raises: this runs after the answer, and nothing
-    it does may reach the task. One distill per chat at a time, so two task ends
-    in quick succession write their revisions in order.
+    it does may reach the task.
+
+    `log` is the chat's `SessionLog`. Both the read and the write go through
+    its write lock, which is the lock every rewrite of the file holds: the read
+    is `log.snapshot()`, and the write is `log.append_steps_if`, which appends
+    only if the boundary's last line is still where it was. So a Retry pressed
+    before the read produces no revision, and one pressed while the model was
+    thinking produces the `role` record (the call was made and paid for) with
+    `discarded` set, and no revision — never a live revision distilled from an
+    attempt the owner discarded.
+
+    One distill per chat at a time (a per-path lock).
     """
     if disabled():
         return []
@@ -1082,19 +1210,36 @@ def distill_at_boundary(boundary: Boundary, write: Callable[[dict], None]) -> li
     try:
         with _lock_for(boundary.path):
             started = time.perf_counter()
-            try:
-                records = distill(boundary)
-            except Exception as exc:  # noqa: BLE001 — a bug here must not reach the task
-                records = [
-                    _skip_record(
-                        boundary.turn,
-                        f"the distill raised {type(exc).__name__}: {exc}"[:300],
+            data = log.snapshot()
+            if not still_there(data, boundary):
+                out = [_skip_record(boundary.turn, REWRITTEN)]
+            else:
+                try:
+                    out = distill(
+                        boundary,
+                        records=_parse_bytes(data[: boundary.upto]),
+                        history=_parse_bytes(data),
                     )
+                except Exception as exc:  # noqa: BLE001 — a bug must not reach the task
+                    out = [
+                        _skip_record(
+                            boundary.turn,
+                            f"the distill raised {type(exc).__name__}: {exc}"[:300],
+                        )
+                    ]
+                    out[0]["ms"] = int((time.perf_counter() - started) * 1000)
+
+            def unchanged() -> bool:
+                return still_there(log.snapshot_locked(), boundary)
+
+            if log.append_steps_if(out, unchanged):
+                written.extend(out)
+            else:
+                roles_only = [
+                    {**r, "discarded": REWRITTEN} for r in out if r.get("kind") == "role"
                 ]
-                records[0]["ms"] = int((time.perf_counter() - started) * 1000)
-            for record in records:
-                write(record)
-                written.append(record)
+                log.append_steps_if(roles_only, lambda: True)
+                written.extend(roles_only)
     except Exception:  # noqa: BLE001 — a write refused (a trashed chat) ends it quietly
         pass
     return written

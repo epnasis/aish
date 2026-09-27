@@ -386,6 +386,16 @@ class TestValidation:
     def test_the_change_word_is_a_closed_vocabulary(self, shape):
         rejects(shape, good_answer(change="rewritten"), "change must be one of")
 
+    def test_the_first_revision_is_new_whatever_the_model_says(self, shape):
+        """Measured: the local model answered `refined` with nothing to refine.
+        With no previous revision code knows the answer, as with covers_to_turn."""
+        assert check(shape, good_answer(change="refined")).change == "new"
+
+    def test_new_is_refused_when_there_is_a_previous_revision(self, shape):
+        text = later(item("m:b1", "owner", 3, "teraz dodaj też kurs USD/PLN proszę"))
+        answer = {"change": "new", "goals": [goal(cites=("m:a1", "m:b1"))]}
+        rejects(shape, answer, '"new" only for the first revision', text)
+
 
 def previous_revision(**over):
     body = {
@@ -466,6 +476,25 @@ class TestTransitions:
         unknown = {"change": "refined", "goals": [goal(cites=("m:a1", "m:b1"), tasks=[
             task(state="unknown", cites=()), task(tid="t2", state="pending", cites=("m:a1",))])]}
         check(shape, unknown, text)
+
+    def test_unknown_cannot_launder_a_reopen(self, shape):
+        """done → unknown → in_progress, two revisions, must meet the rule one
+        revision would: the item remembers the state it left in `was`."""
+        text = later(item("m:b1", "answer", 3, "Sprawdzę to."))
+        to_unknown = {"change": "refined", "goals": [goal(
+            tasks=[task(state="unknown", cites=())])]}
+        value = check(shape, to_unknown, text)
+        parked = value.goals[0]["tasks"][0]
+        assert parked["was"] == "done"
+        prev = previous_revision(goals=[{
+            "id": "g1", "text": "Kurs EUR/PLN każdego ranka", "state": "active",
+            "owner_set": [], "cites": ["m:a1"], "constraints": [],
+            "tasks": [{"id": "t1", "text": "napisać skrypt", "state": "unknown",
+                       "was": "done", "owner_set": [], "cites": []}]}])
+        text2 = later(item("m:b2", "answer", 4, "Poprawię skrypt."), previous=prev)
+        reopen = {"change": "refined", "goals": [goal(
+            tasks=[task(state="in_progress", cites=("m:b2",))])]}
+        rejects(shape, reopen, "reopening a done item", text2)
 
     def test_an_unchanged_constraint_is_carried_without_requoting(self, shape):
         prev = previous_revision()
@@ -609,8 +638,9 @@ def web_log(tmp_path) -> Path:
 
 
 def boundary(path: Path, turn=1, spec="fake:m", state_dir=None) -> objective.Boundary:
-    return objective.Boundary(path, path.stat().st_size, turn, spec,
-                              str(state_dir) if state_dir else None)
+    edge = objective.boundary_of(path, turn, spec, str(state_dir) if state_dir else None)
+    assert edge is not None
+    return edge
 
 
 FIRST = {"change": "new", "goals": [goal(
@@ -671,6 +701,8 @@ class TestDistill:
                                 check_admission=False)
         assert out[1]["origin"] == "distiller" and out[0]["attempts"] == 2
         assert "done needs evidence" in chat.calls[1]["messages"][-1]["content"]
+        # Both attempts were paid for, so both are in the record.
+        assert out[0]["usage"] == {"input": 1800, "output": 240}
 
     def test_unadmitted_is_recorded_and_no_model_is_called(self, tmp_path):
         path = web_log(tmp_path)
@@ -763,25 +795,110 @@ class TestItNeverReachesTheTask:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(objective, "distill", explode)
-        written: list[dict] = []
-        objective.distill_at_boundary(boundary(path), written.append)
+        written = objective.distill_at_boundary(boundary(path), SessionLog(path))
         assert written[0]["kind"] == "role" and written[0]["status"] == "unavailable"
         assert "RuntimeError: boom" in written[0]["why"]
+        assert steps(path, "role")[-1]["why"] == written[0]["why"]
 
     def test_a_refused_write_ends_it_quietly(self, tmp_path, monkeypatch):
         monkeypatch.delenv("AISH_OBJECTIVE", raising=False)
         path = web_log(tmp_path)
 
-        def refuse(_record):
-            raise session_module.SessionLogMoved(path)
+        class Refusing(SessionLog):
+            def append_steps_if(self, steps, still_wanted):
+                raise session_module.SessionLogMoved(self.path)
 
-        assert objective.distill_at_boundary(boundary(path, spec=""), refuse) == []
+        assert objective.distill_at_boundary(boundary(path, spec=""), Refusing(path)) == []
 
     def test_the_switch_turns_it_off(self, tmp_path, monkeypatch):
         monkeypatch.setenv("AISH_OBJECTIVE", "0")
-        written: list[dict] = []
-        objective.distill_at_boundary(boundary(web_log(tmp_path)), written.append)
-        assert written == []
+        path = web_log(tmp_path)
+        assert objective.distill_at_boundary(boundary(path), SessionLog(path)) == []
+        assert steps(path, "role") == []
+
+
+def distill_with(monkeypatch, chat, **kw):
+    """`distill` with a scripted model and no admission check, as the live
+    emission path would call it once admitted."""
+    real = objective.distill
+
+    def scripted(edge, **given):
+        return real(edge, chat_fn=chat, model_name="m", check_admission=False, **given, **kw)
+
+    monkeypatch.setattr(objective, "distill", scripted)
+
+
+class TestRetryAndOrder:
+    """The races an adversarial review found (#424): a rewrite of the file under
+    a pending distill, and two task ends before either distill wrote."""
+
+    @pytest.fixture(autouse=True)
+    def emitting(self, monkeypatch):
+        monkeypatch.delenv("AISH_OBJECTIVE", raising=False)
+
+    def test_a_retry_before_the_read_distills_nothing(self, tmp_path, monkeypatch):
+        path = web_log(tmp_path)
+        edge = boundary(path)
+        log = SessionLog(path)
+        assert log.supersede_last_turn("owner") is not None
+        chat = FakeRoleChat([FIRST])
+        distill_with(monkeypatch, chat)
+        written = objective.distill_at_boundary(edge, log)
+        assert [r["kind"] for r in written] == ["role"]
+        assert written[0]["why"] == objective.REWRITTEN
+        assert steps(path, "objective") == [] and chat.calls == []
+
+    def test_a_retry_while_the_model_thinks_keeps_the_cost_and_drops_the_revision(
+        self, tmp_path, monkeypatch
+    ):
+        path = web_log(tmp_path)
+        edge = boundary(path)
+        log = SessionLog(path)
+
+        class RetryMidCall(FakeRoleChat):
+            def __call__(self, **kwargs):
+                log.supersede_last_turn("owner")  # the owner presses Retry now
+                return super().__call__(**kwargs)
+
+        distill_with(monkeypatch, RetryMidCall([FIRST]))
+        written = objective.distill_at_boundary(edge, log)
+        assert [r["kind"] for r in written] == ["role"]
+        assert written[0]["status"] == "ok" and written[0]["discarded"] == objective.REWRITTEN
+        assert written[0]["usage"] == {"input": 900, "output": 120}
+        assert steps(path, "objective") == []
+
+    def test_two_task_ends_before_either_distill_number_in_order(self, tmp_path, monkeypatch):
+        path = web_log(tmp_path)
+        first = boundary(path)
+        log = SessionLog(path)
+        log.task_start("dodaj USD")
+        log.message({"role": "user", "content": "dodaj też kurs USD/PLN", "turn": "b1",
+                     "model_call": 0})
+        log.step({"kind": "reasoning", "turn": 2})
+        log.message({"role": "assistant", "content": "Dodam USD.", "turn": "b2"})
+        log.task_end()
+        second = boundary(path, turn=2)  # captured before distill 1 wrote anything
+        later = {"change": "expanded", "goals": [goal(
+            text="Kurs EUR/PLN rano", cites=("m:a1", "m:b1"),
+            tasks=[task(tid="t2", text="USD", state="pending", cites=("m:b1",))])]}
+        distill_with(monkeypatch, FakeRoleChat([FIRST, later]))
+        objective.distill_at_boundary(first, log)
+        objective.distill_at_boundary(second, log)
+        revisions = steps(path, "objective")
+        assert [r["revision"] for r in revisions] == [1, 2]
+        assert revisions[1]["base"] == 1
+        assert {t["id"] for t in revisions[1]["goals"][0]["tasks"]} == {"t1", "t2"}
+
+    def test_an_earlier_boundary_after_a_later_one_is_skipped(self, tmp_path, monkeypatch):
+        path = web_log(tmp_path)
+        first = boundary(path)
+        log = SessionLog(path)
+        log.step({"kind": "objective", "turn": 5, "revision": 1, "origin": "distiller",
+                  "covers_to_turn": 5, "goals": []})
+        distill_with(monkeypatch, FakeRoleChat([]))
+        written = objective.distill_at_boundary(first, log)
+        assert [r["kind"] for r in written] == ["role"]
+        assert "later boundary (turn 5)" in written[0]["why"]
 
 
 # --------------------------------------------------------------- emission

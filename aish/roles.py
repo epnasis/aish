@@ -1082,6 +1082,19 @@ def _usage_of(response: Any) -> dict[str, Any]:
     return {"input": int(prompt), "output": int(completion)}
 
 
+def _add_usage(total: dict[str, Any], more: dict[str, Any]) -> dict[str, Any]:
+    """Two usage reports added: integer fields sum, anything else keeps the
+    latest value (a unit label is not a quantity)."""
+    out = dict(total)
+    for key, value in more.items():
+        if isinstance(value, int) and not isinstance(value, bool):
+            prior = out.get(key)
+            out[key] = (prior if isinstance(prior, int) else 0) + value
+        else:
+            out[key] = value
+    return out
+
+
 def _content(response: Any) -> str:
     message = getattr(response, "message", None)
     if message is None and isinstance(response, dict):
@@ -1178,7 +1191,10 @@ def run(
                 ms=int((time.perf_counter() - started) * 1000),
                 usage=usage,
             )
-        usage = _usage_of(response) or usage
+        # SUMMED over attempts: the corrective retry is spent too, and a record
+        # carrying only the last attempt's report under-states what the role
+        # cost — found measuring the distiller (#424), where a retry is common.
+        usage = _add_usage(usage, _usage_of(response))
         try:
             value = validate(
                 charter.output, _json_payload(_content(response)), rows, inputs
