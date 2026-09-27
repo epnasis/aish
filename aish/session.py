@@ -825,6 +825,77 @@ def _step_kind(record: dict) -> str:
     return str(step.get("kind") or "") if isinstance(step, dict) else ""
 
 
+def _pair_tool_calls(
+    messages: list[dict], issued_by: list[object], calls_after: dict[int, list[dict]]
+) -> None:
+    """Give every assistant message in a reopened chat the tool calls it made,
+    where the log can say which, and none where it cannot (#422).
+
+    A result with no call before it is relabelled a `user` message by every
+    converter, so a chat reopened without its calls showed the model a history
+    of itself announcing work that then happened on its own. Logs written
+    since #422 carry the calls on the assistant record. Older ones are rebuilt
+    from the `call` records logged between the message and its results — the
+    model's own arguments, in the order it made them.
+
+    Each rule below fails toward the relabelled result, never toward a guess:
+
+    - A call is kept only beside its result. The results follow the message
+      directly, one per call; a count that differs is a crash mid-batch, or a
+      cancel whose results no `call` record precedes, and an unanswered
+      `tool_use` is a request the Anthropic API rejects.
+    - A rebuilt call's result names the same tool. File order is not call
+      order when a batch is split between the parallel path and the gated
+      one, so a mismatch is put right by name only when no name repeats — two
+      `read_url` calls could otherwise swap addresses.
+    - Nothing is rebuilt from an argument the record cut (`truncated`): a cut
+      `edit_file` put back as the model's own emission is a file it never
+      wrote. Nor across model calls, and claude-max stamps none."""
+    for i, message in enumerate(messages):
+        if message.get("role") != "assistant":
+            continue
+        end = i + 1
+        while end < len(messages) and messages[end].get("role") == "tool":
+            end += 1
+        results = messages[i + 1:end]
+        logged = message.get("tool_calls")
+        if logged is not None:
+            if len(logged) != len(results):
+                del message["tool_calls"]
+            continue
+        rebuilt = _rebuilt_calls(
+            issued_by[i], calls_after.get(i) or [], results, issued_by[i + 1:end]
+        )
+        if rebuilt:
+            message["tool_calls"] = rebuilt
+
+
+def _rebuilt_calls(
+    issued: object, calls: list[dict], results: list[dict], results_issued: list[object]
+) -> list[dict] | None:
+    if not results or len(calls) != len(results) or not issued:
+        return None
+    if any(step.get("model_call") != issued for step in calls):
+        return None
+    if any(stamp != issued for stamp in results_issued):
+        return None
+    if any(step.get("truncated") or not isinstance(step.get("args"), dict) for step in calls):
+        return None
+    # A log is read by the chat list too, so a hand-edited record must cost
+    # this one repair and never the reader (a name that is not a string).
+    raw = [result.get("tool_name") for result in results] + [step.get("name") for step in calls]
+    if not all(isinstance(name, str) and name for name in raw):
+        return None
+    wanted = [str(name) for name in raw[: len(results)]]
+    names = [str(name) for name in raw[len(results):]]
+    if names != wanted:
+        if sorted(names) != sorted(wanted) or len(set(wanted)) != len(wanted):
+            return None
+        by_name = {step["name"]: step for step in calls}
+        calls = [by_name[name] for name in wanted]
+    return [{"function": {"name": step["name"], "arguments": step["args"]}} for step in calls]
+
+
 def _is_superseded(record: dict) -> bool:
     """Is this record part of a DISCARDED Retry attempt (#339)?
 
@@ -1187,6 +1258,11 @@ class SessionLog:
         activity_ts: int | None = None
         output_ts: int | None = None
         pending_cmd: str | None = None  # a user ! command awaiting its exit status
+        # Beside `messages` rather than in them: the model call a message was
+        # in front of, and the `call` records logged after each message. Both
+        # exist only to put a chat's tool calls back (`_pair_tool_calls`).
+        issued_by: list[object] = []
+        calls_after: dict[int, list[dict]] = {}
         for line in path.read_text(encoding="utf-8").splitlines():
             record = _record_or_none(line)
             if record is None or _is_superseded(record):
@@ -1237,8 +1313,14 @@ class SessionLog:
                     user_cmds.append(pending_cmd)
                 pending_cmd = None
             elif kind == "message" and record.get("role") != "system":
-                keys = ("role", "content", "tool_name", "images", "documents")
+                keys = ("role", "content", "tool_name", "images", "documents", "tool_calls")
                 messages.append({k: v for k, v in record.items() if k in keys})
+                issued_by.append(record.get("model_call"))
+            elif kind == "trace" and messages:
+                step = record.get("step")
+                if isinstance(step, dict) and step.get("kind") == "call":
+                    calls_after.setdefault(len(messages) - 1, []).append(step)
+        _pair_tool_calls(messages, issued_by, calls_after)
         return ParsedLog(
             messages, model, custom_title, origin, cwd, title_auto, user_cmds,
             activity_ts, output_ts, tuple(models),

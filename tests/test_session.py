@@ -2295,9 +2295,11 @@ class TestEveryCutWalksBackToTaskStart:
     # Name-independent on purpose: the previous defect would have survived any
     # check spelled as a list of function names to keep an eye on.
     ALLOWED: dict[str, str] = {
-        # Empty today, and that is the finding, not an omission: all three
-        # cutters walk back. An entry here must say why a cut CANNOT strand a
-        # start — "deletes the whole file", not "looked fine when I read it".
+        # All three cutters walk back, and that is the finding. An entry here
+        # must say why a cut CANNOT strand a start — "deletes the whole file",
+        # not "looked fine when I read it".
+        "_pair_tool_calls": "slices the PARSED conversation to read one "
+        "message's results; it never writes the log, so it cuts nothing (#422)",
     }
 
     def _cutters(self, sources=None) -> dict[str, set[str]]:
