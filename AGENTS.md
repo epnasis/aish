@@ -28,6 +28,8 @@ make ship-check    # the preflight alone: what would ship, and whether it may
 
 **Never run `uv tool install` by hand.** It builds the wheel from the **WORKING TREE, not from HEAD**, so anything uncommitted — including another session's half-finished work in a checkout you did not inspect — ships silently. `make ship` refuses on a dirty tree for exactly this; `--dirty` overrides it when you mean it. On 2026-08-11 a bare install came within one command of shipping 129 uncommitted frontend lines that were also failing two doc-gate tests, and nothing about the command would have said so. `scripts/ship.sh`, `tests/test_ship_guard.py`.
 
+**After every push to main, check CI for that exact commit, and a red run is the next work item.** Run `gh run list --repo epnasis/aish --commit <sha>` and wait for it to finish. If it fails, read `gh run view <id> --log-failed` and fix it before merging anything else. Local gates run on macOS; CI runs on Linux, and the two differ. From 2026-09-24 to 2026-09-27, main was red on 15 consecutive pushes, all from one BSD-only `mktemp` call in `ship.sh` that passed every local run, because nobody looked (#421). A "passes locally" claim is not a CI result.
+
 The remote equivalent is `scripts/deploy-web.sh <host>`, which ships the working tree ON PURPOSE (that is the remote dev loop) but asks first when the tree is dirty — and, with no tty to ask on, refuses rather than assuming consent.
 
 ## Workflow: always work in a worktree

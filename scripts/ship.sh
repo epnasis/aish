@@ -266,7 +266,9 @@ else
 fi
 
 echo "→ installing"
-install_log="$(mktemp -t aish-ship-install)"
+# An explicit XXXXXX template: BSD mktemp accepts a bare `-t prefix`, GNU (the
+# Linux CI runner) refuses it with "too few X's" (#421).
+install_log="$(mktemp "${TMPDIR:-/tmp}/aish-ship-install.XXXXXX")"
 if ! uv tool install --force --reinstall --no-cache "$PROJECT" >"$install_log" 2>&1; then
     echo "✗ uv tool install failed:" >&2
     tail -n 20 "$install_log" | sed 's/^/    /' >&2
