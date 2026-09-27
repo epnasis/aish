@@ -113,6 +113,7 @@ prose below is the task, addressed to the model.
 | `tools` | must be `[]` in v1; a declared tool **refuses to load** |
 | `degradation` | `skip` (advisory) \| `hold` (load-bearing) |
 | `inputs` | each with a **required** `trust: trusted \| untrusted` |
+| `think` | optional, `true`/`false` (default false): whether the call asks the model to think first. Per charter (#424, the distiller), so it moves no other role's cost |
 | `output` | the shape — see below |
 
 `TestCharterLoading` pins one refusal per rule. Each of them is a refusal rather than a
@@ -881,7 +882,11 @@ the step — which would wedge browsing on a flaky connection.
    out of its own oversight*.
 
 A model change retires the pass, because a model upgrade can silently change what a role
-does. A recorded **failure** is written too and keeps the role out: the useful artifact is
+does. **Passes are kept per charter PER MODEL** (#424): `admission.json` holds
+`{charter: {"models": {spec: pass}}}`, so the distiller can be admitted for the local
+production model and a cloud reference at once, each on its own exam. A file written
+before that holds one pass per charter directly and reads as that model's; the next write
+converts it without losing it. `tests/test_objective.py::TestAdmissionPerModel`. A recorded **failure** is written too and keeps the role out: the useful artifact is
 that the exam ran, not that it passed. A failing case in the owner's half fails the whole
 admission — the automation only ever exercises the public half, so a recorded private
 failure is the one signal that a charter is green where the machine looks and wrong where he

@@ -81,9 +81,10 @@ SYNTHETIC_PREFIX = "["
 # whole, since a constraint must be quoted from them; an answer is cut, since it
 # is cited as evidence and never quoted.
 OWNER_CHARS = 4000
-ANSWER_CHARS = 1200
+# Answers travel nearly whole since the distiller was given thinking and the
+# whole chat (owner decision, #424); the cap only bounds a runaway answer.
+ANSWER_CHARS = 8000
 ACT_CHARS = 200
-EARLIER_CHARS = 200
 
 # `session.STOPPED_ANSWER`, spelled here rather than imported so this module
 # stays importable without the session layer (a pinned test holds them equal).
@@ -296,14 +297,18 @@ class Revision:
     goals: list[dict[str, Any]]
     change: str = "unknown"
     covers_to_turn: int = 0
-    uncited: list[str] = field(default_factory=list)
+    not_goal_bearing: list[str] = field(default_factory=list)
+    # Every `done` the model claimed without evidence, turned into `unknown`
+    # by code rather than rejecting the whole revision (owner decision, #424).
+    downgrades: list[dict[str, str]] = field(default_factory=list)
 
     def as_json(self) -> dict[str, Any]:
         return {
             "change": self.change,
             "goals": self.goals,
             "covers_to_turn": self.covers_to_turn,
-            "uncited": list(self.uncited),
+            "not_goal_bearing": list(self.not_goal_bearing),
+            "downgrades": list(self.downgrades),
         }
 
 
@@ -339,6 +344,13 @@ def _owner_set(item: dict) -> list[str]:
     return [f for f in ("state", "text") if item.get(f"{f}_by") == ORIGIN_OWNER]
 
 
+def _quote_view(quote: Any) -> Any:
+    if isinstance(quote, dict):
+        cites = [_bare_ref(c) for c in quote.get("cites") or ()]
+        return {"text": quote.get("text"), "cites": cites}
+    return UNSTATED
+
+
 def _model_view(goals: list[dict]) -> list[dict]:
     """A revision as the distiller is shown it: cites as bare refs, and who set
     each field, so it knows which ones it may not touch."""
@@ -351,6 +363,8 @@ def _model_view(goals: list[dict]) -> list[dict]:
                 "state": goal.get("state"),
                 **({"was": goal["was"]} if goal.get("was") else {}),
                 "owner_set": _owner_set(goal),
+                "why": _quote_view(goal.get("why")),
+                "done_when": _quote_view(goal.get("done_when")),
                 "cites": [_bare_ref(c) for c in goal.get("cites") or ()],
                 "constraints": [
                     {"text": c.get("text"), "cites": [_bare_ref(x) for x in c.get("cites") or ()]}
@@ -379,52 +393,37 @@ def _model_view(goals: list[dict]) -> list[dict]:
 def compose_input(
     chat: str, boundary: int, items: list[Item], base: dict | None
 ) -> str:
-    """The distiller's ONE input: the previous revision, and the material since.
+    """The distiller's ONE input: ALL of the chat's material up to the boundary,
+    and the previous revision.
 
-    JSON, because the validator reads it back: the ledger a cite is checked
-    against is exactly what the model was shown, in production and in the exam
-    alike (`parse_input`). `earlier` holds the items the previous revision cites
-    that are older than the delta, so a carried cite still resolves.
+    Rebuilt from everything at every boundary (owner decision, #424) rather
+    than previous revision + delta: a ledger built from deltas inherits every
+    omission of every earlier revision, and the measured one never recovered
+    the purpose it missed at the first boundary. The previous revision is here
+    only so the model keeps ids and can say how this one differs; code uses it
+    for `change`, owner-set fields, `was` and quoted purposes.
+
+    JSON, because the validator reads it back: what a cite is checked against
+    is exactly what the model was shown, in production and in the exam alike.
     """
-    covered = int(base.get("covers_to_turn") or 0) if base else 0
-    new = [i for i in items if covered < i.turn <= boundary]
-    cited = {
-        _bare_ref(c)
-        for goal in (base.get("goals") or () if base else ())
-        for c in [
-            *(goal.get("cites") or ()),
-            *(x for con in goal.get("constraints") or () for x in con.get("cites") or ()),
-            *(x for t in goal.get("tasks") or () for x in t.get("cites") or ()),
-        ]
-    }
-    earlier = [
-        Item(
-            i.ref,
-            i.kind,
-            i.turn,
-            i.text if i.kind in OWNER_WORDS else _cut(i.text, EARLIER_CHARS),
-        )
-        for i in items
-        if i.turn <= covered and i.ref in cited
-    ]
+    material_items = [i for i in items if i.turn <= boundary]
     payload = {
         "chat": chat,
         "boundary_turn": boundary,
         "previous": (
             {
                 "revision": base.get("revision"),
-                "covers_to_turn": covered,
+                "turn": int(base.get("turn") or base.get("covers_to_turn") or 0),
                 "goals": _model_view(base.get("goals") or []),
             }
             if base
             else None
         ),
-        "earlier": [i.as_json() for i in earlier],
-        "new": [i.as_json() for i in new],
-        # The refs `covers_to_turn` is computed from, named outright. Measured:
-        # asked in prose to "account for what he said", the local model left
-        # the owner's stated purpose uncited at every boundary of the #422 chat.
-        "must_cite": [i.ref for i in floor(new, covered, boundary)],
+        "material": [i.as_json() for i in material_items],
+        # The owner's texts the answer must account for: cite each, or list it
+        # under `not_goal_bearing`. Named outright because, asked only in prose,
+        # the local model left his stated purpose uncited (measured, #424).
+        "must_cover": [i.ref for i in floor(material_items, 0, boundary)],
     }
     return json.dumps(payload, ensure_ascii=False, indent=1)
 
@@ -435,11 +434,15 @@ class Context:
 
     chat: str
     boundary: int
-    covered: int
+    previous_turn: int
     previous: list[dict]
     ledger: dict[str, Item]
-    new: list[Item]
+    must_cover: list[str]
     first: bool = False  # no previous revision at all
+
+    def fresh(self) -> set[str]:
+        """Refs of what happened after the previous revision was taken."""
+        return {ref for ref, i in self.ledger.items() if i.turn > self.previous_turn}
 
 
 def parse_input(text: str) -> Context:
@@ -459,15 +462,14 @@ def parse_input(text: str) -> Context:
             str(entry.get("text") or ""),
         )
 
-    earlier = [item(e) for e in raw.get("earlier") or () if isinstance(e, dict)]
-    new = [item(e) for e in raw.get("new") or () if isinstance(e, dict)]
+    material_items = [item(e) for e in raw.get("material") or () if isinstance(e, dict)]
     return Context(
         chat=str(raw.get("chat") or ""),
         boundary=int(raw.get("boundary_turn") or 0),
-        covered=int(previous.get("covers_to_turn") or 0),
+        previous_turn=int(previous.get("turn") or 0),
         previous=[_from_model_view(g) for g in previous.get("goals") or ()],
-        ledger={i.ref: i for i in [*earlier, *new]},
-        new=new,
+        ledger={i.ref: i for i in material_items},
+        must_cover=[str(r) for r in raw.get("must_cover") or ()],
         first=raw.get("previous") is None,
     )
 
@@ -492,6 +494,13 @@ def _from_model_view(goal: dict) -> dict:
 # ---------------------------------------------------------------- validation
 
 
+# A goal's `why` or `done_when` the owner never stated. The one abstention the
+# quote fields have (R4): a field that must be a quote and cannot say "he never
+# said" makes quoting something beside the point the cheapest answer. Counted
+# on the record, and scored by the measurement.
+UNSTATED = "unstated"
+
+
 def _squash(text: str) -> str:
     return " ".join(text.split())
 
@@ -510,14 +519,18 @@ def _cites(raw: Any, where: str, ctx: Context, cap: int) -> list[Item]:
         if found is None:
             raise ValueError(
                 f"{where}: cite {ref!r} names nothing in the material you were given — "
-                "cite only refs that appear under \"new\" or \"earlier\""
+                "copy a \"ref\" exactly from an item under \"material\""
             )
         out.append(found)
     return out
 
 
+def _has(cited: list[Item], kinds: frozenset[str]) -> bool:
+    return any(c.kind in kinds for c in cited)
+
+
 def _require(cited: list[Item], kinds: frozenset[str], where: str, what: str) -> None:
-    if not any(c.kind in kinds for c in cited):
+    if not _has(cited, kinds):
         raise ValueError(f"{where}: {what} (kinds {', '.join(sorted(kinds))})")
 
 
@@ -543,9 +556,9 @@ def _check_transition(
     before: dict | None, after: dict, where: str, cited: list[Item], closed: set[str],
     terminal: set[str], fresh: set[str],
 ) -> None:
-    """Legal moves from the base revision's state. Reopening a closed item must
-    rest on something the owner did SINCE the base — a cite of the message he
-    asked in, which the base already had, justifies nothing new.
+    """Legal moves from the previous revision's state. Reopening a closed item
+    must rest on something the owner did SINCE that revision — a cite of the
+    message he asked in, which it already had, justifies nothing new.
 
     `unknown` is always legal to ENTER, and leaving it is judged from the state
     before it (`was`): otherwise done → unknown → in_progress, two revisions,
@@ -568,7 +581,53 @@ def _check_transition(
             [c for c in cited if c.ref in fresh],
             OWNER_ACTS,
             where,
-            f"reopening a {old} item needs an owner cite from the new material",
+            f"reopening a {old} item needs an owner cite from after the previous revision",
+        )
+
+
+def _quote(raw: Any, where: str, ctx: Context, cap: int, cite_cap: int) -> tuple[Any, list[Item]]:
+    """A `why` / `done_when`: `"unstated"`, or `{text, cites}` whose text is a
+    verbatim quote of an owner text it cites."""
+    if isinstance(raw, str) and raw.strip().lower() == UNSTATED:
+        return UNSTATED, []
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f'{where}: must be {{"text": <his exact words>, "cites": [<ref>]}} or "{UNSTATED}"'
+        )
+    text = roles.capped(str(raw.get("text") or ""), cap)
+    if not text:
+        raise ValueError(f"{where}: text is required, or say \"{UNSTATED}\"")
+    cited = _cites(raw.get("cites"), where, ctx, cite_cap)
+    if not any(c.kind in OWNER_WORDS and _squash(text) in _squash(c.text) for c in cited):
+        raise ValueError(
+            f"{where}: {text!r} is not a verbatim quote from the owner text it cites — "
+            "copy the words exactly as he wrote them, in his language"
+        )
+    return {"text": text, "cites": [c.ref for c in cited]}, cited
+
+
+def _check_purpose(before: dict | None, why: Any, cited: list[Item], where: str, ctx: Context):
+    """Once a purpose has been quoted, only the owner may remove or replace it:
+    a different `why` must cite something he wrote AFTER the one it replaces."""
+    old = (before or {}).get("why")
+    if not isinstance(old, dict):
+        return
+    if why == UNSTATED:
+        raise ValueError(
+            f"{where}: why was quoted before ({old.get('text')!r}); keep it — only the "
+            "owner can take a purpose back"
+        )
+    if _squash(str(why["text"])) == _squash(str(old.get("text") or "")):
+        return
+    old_turn = max(
+        (ctx.ledger[r].turn for r in (_bare_ref(c) for c in old.get("cites") or ())
+         if r in ctx.ledger),
+        default=0,
+    )
+    if not any(c.kind in OWNER_WORDS and c.turn > old_turn for c in cited):
+        raise ValueError(
+            f"{where}: why replaces {old.get('text')!r}; that needs his words from a later "
+            "turn than the ones it quoted — otherwise keep the earlier why"
         )
 
 
@@ -578,6 +637,7 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
     ctx = parse_input(inputs.get("material", ""))
     caps = shape.caps
     text_cap = caps.get("max_chars", 200)
+    quote_cap = caps.get("max_constraint_chars", 300)
     cite_cap = caps.get("max_cites", 8)
     if not isinstance(payload, dict):
         raise ValueError("the reply must be a JSON object")
@@ -600,11 +660,12 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
     prev_tasks = {
         str(t.get("id")): t for g in ctx.previous for t in g.get("tasks") or ()
     }
-    fresh = {i.ref for i in ctx.new}
+    fresh = ctx.fresh()
     goal_ids: set[str] = set()
     task_ids: set[str] = set()
     goals: list[dict[str, Any]] = []
     cited_refs: set[str] = set()
+    downgrades: list[dict[str, str]] = []
 
     def wrap(items: list[Item]) -> list[dict[str, str]]:
         cited_refs.update(i.ref for i in items)
@@ -629,35 +690,45 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
         cited = _cites(raw.get("cites"), where, ctx, cite_cap)
         if state != "unknown":
             _require(cited, OWNER_WORDS, where, "a goal must cite where the owner asked for it")
-        if state == "done":
-            _require(cited, EVIDENCE, where, "done needs evidence: a final answer or an action")
+        if state == "done" and not _has(cited, EVIDENCE):
+            state = "unknown"
+            downgrades.append({"goal": gid, "from": "done", "why": "no answer or action cited"})
         before = prev_goals.get(gid)
         if state == "dropped" and (before is None or before.get("state") != "dropped"):
             _check_dropped(cited, where, fresh)
+        why, why_cited = _quote(raw.get("why"), f"{where}, why", ctx, quote_cap, cite_cap)
+        _check_purpose(before, why, why_cited, where, ctx)
+        done_when, when_cited = _quote(
+            raw.get("done_when"), f"{where}, done_when", ctx, quote_cap, cite_cap
+        )
         record: dict[str, Any] = {"id": gid, "text": text, "state": state}
         _check_transition(before, record, where, cited, _GOAL_REOPEN, set(), fresh)
         _stamp_was(record, before)
         record["state_by"] = _by(before, "state", state)
         record["text_by"] = _by(before, "text", text)
         record["cites"] = wrap(cited)
+        record["why"] = _wrap_quote(why, why_cited, wrap)
+        record["done_when"] = _wrap_quote(done_when, when_cited, wrap)
         record["constraints"] = _constraints(raw.get("constraints"), where, ctx, before, wrap, caps)
         record["tasks"] = _tasks(
-            raw.get("tasks"), where, ctx, prev_tasks, task_ids, wrap, caps, fresh
+            raw.get("tasks"), where, ctx, prev_tasks, task_ids, wrap, caps, fresh, downgrades
         )
         goals.append(record)
 
-    # Anything the base had and the answer left out is carried forward whole —
-    # a pivot never overwrites (D3). Code does it, so a model that forgets a
-    # parked goal cannot delete it.
+    # A goal the previous revision had and the answer left out is carried
+    # forward whole — a pivot never overwrites (D3), and a quoted purpose is
+    # never lost by omission. Code does it, so a model that forgets a parked
+    # goal cannot delete it. Tasks are REBUILT (all the material is in front of
+    # the model), except the ones the owner set, which are his.
     for gid, before in prev_goals.items():
         if gid not in goal_ids:
-            goals.append(_restore(before, ctx))
+            goals.append(_restore(before, ctx, task_ids))
             goal_ids.add(gid)
     for goal in goals:
         prev_goal = prev_goals.get(str(goal["id"]))
         for task in (prev_goal or {}).get("tasks") or ():
             tid = str(task.get("id"))
-            if tid not in task_ids:
+            if tid not in task_ids and _owner_set(task):
                 goal["tasks"].append(_restore_task(task, ctx))
                 task_ids.add(tid)
     for goal in goals:
@@ -669,22 +740,66 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
     if sum(1 for g in goals if g["state"] == "active") > 1:
         raise ValueError("at most one goal may be active; park the others")
 
-    covers, uncited = _coverage(ctx, cited_refs)
-    return Revision(goals=goals, change=change, covers_to_turn=covers, uncited=uncited)
+    not_goal_bearing = _not_goal_bearing(payload.get("not_goal_bearing"), ctx)
+    _coverage(ctx, cited_refs, set(not_goal_bearing))
+    return Revision(
+        goals=goals,
+        change=change,
+        covers_to_turn=ctx.boundary,
+        not_goal_bearing=not_goal_bearing,
+        downgrades=downgrades,
+    )
+
+
+def _wrap_quote(quote: Any, cited: list[Item], wrap) -> Any:
+    if quote == UNSTATED:
+        return UNSTATED
+    return {"text": quote["text"], "cites": wrap(cited)}
+
+
+def _not_goal_bearing(raw: Any, ctx: Context) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("not_goal_bearing must be a list of refs")
+    allowed = set(ctx.must_cover)
+    out = []
+    for entry in raw:
+        ref = _bare_ref(entry).strip()
+        if ref not in allowed:
+            raise ValueError(
+                f"not_goal_bearing: {ref!r} is not one of the refs under \"must_cover\""
+            )
+        out.append(ref)
+    return out
+
+
+def _coverage(ctx: Context, cited: set[str], dismissed: set[str]) -> None:
+    """Every owner text the floor keeps must be cited or explicitly listed as
+    not goal-bearing (owner decision, #424). Anything else is sent back on the
+    corrective retry, naming the refs — `covers_to_turn` is then the boundary,
+    and it is code that knows it."""
+    missing = [r for r in ctx.must_cover if r not in cited and r not in dismissed]
+    if missing:
+        raise ValueError(
+            "these owner texts are neither cited nor listed under not_goal_bearing: "
+            + ", ".join(missing)
+            + " — cite each where it belongs, or list it under not_goal_bearing"
+        )
 
 
 def _check_dropped(cited: list[Item], where: str, fresh: set[str]) -> None:
     """A goal becomes `dropped` only on the owner's own word or act, given
-    SINCE the base and AFTER he asked for it — never by inference, and never
-    on the strength of the message that created the goal."""
+    SINCE the previous revision and AFTER he asked for it — never by inference,
+    and never on the strength of the message that created the goal."""
     asked = [c.turn for c in cited if c.kind in OWNER_WORDS]
     if not any(
         c.kind in OWNER_ACTS and c.ref in fresh and asked and c.turn > min(asked)
         for c in cited
     ):
         raise ValueError(
-            f"{where}: dropped needs the owner's own word or act, in the new material "
-            "and after he asked for the goal — cite it, or use parked or unknown"
+            f"{where}: dropped needs the owner's own word or act, after the previous "
+            "revision and after he asked for the goal — cite it, or use parked or unknown"
         )
 
 
@@ -701,7 +816,22 @@ def _by(before: dict | None, field_name: str, value: Any) -> str:
     return ORIGIN_DISTILLER
 
 
-def _restore(goal: dict, ctx: Context) -> dict:
+def _restore_quote(quote: Any, ctx: Context) -> Any:
+    if not isinstance(quote, dict):
+        return UNSTATED
+    return {
+        "text": quote.get("text"),
+        "cites": [{"session": ctx.chat, "ref": _bare_ref(c)} for c in quote.get("cites") or ()],
+    }
+
+
+def _restore(goal: dict, ctx: Context, task_ids: set[str]) -> dict:
+    tasks = []
+    for task in goal.get("tasks") or ():
+        tid = str(task.get("id"))
+        if tid not in task_ids:
+            tasks.append(_restore_task(task, ctx))
+            task_ids.add(tid)
     return {
         "id": goal.get("id"),
         "text": goal.get("text"),
@@ -710,6 +840,8 @@ def _restore(goal: dict, ctx: Context) -> dict:
         "state_by": goal.get("state_by") or ORIGIN_DISTILLER,
         "text_by": goal.get("text_by") or ORIGIN_DISTILLER,
         "cites": [{"session": ctx.chat, "ref": _bare_ref(c)} for c in goal.get("cites") or ()],
+        "why": _restore_quote(goal.get("why"), ctx),
+        "done_when": _restore_quote(goal.get("done_when"), ctx),
         "constraints": [
             {
                 "text": c.get("text"),
@@ -717,9 +849,7 @@ def _restore(goal: dict, ctx: Context) -> dict:
             }
             for c in goal.get("constraints") or ()
         ],
-        # Filled by the carry-forward pass, which knows which tasks the answer
-        # moved under another goal.
-        "tasks": [],
+        "tasks": tasks,
     }
 
 
@@ -738,19 +868,11 @@ def _restore_task(task: dict, ctx: Context) -> dict:
     return out
 
 
-def _ref_key(cites: Any) -> tuple[str, ...]:
-    return tuple(sorted(_bare_ref(x) for x in cites or ()))
-
-
 def _constraints(raw: Any, where: str, ctx: Context, before: dict | None, wrap, caps) -> list:
     if raw is None:
         return []
     if not isinstance(raw, list):
         raise ValueError(f"{where}: constraints must be a list")
-    known = {
-        (_squash(str(c.get("text") or "")), _ref_key(c.get("cites")))
-        for c in (before or {}).get("constraints") or ()
-    }
     out = []
     for n, entry in enumerate(raw, 1):
         at = f"{where}, constraint {n}"
@@ -760,10 +882,7 @@ def _constraints(raw: Any, where: str, ctx: Context, before: dict | None, wrap, 
         if not text:
             raise ValueError(f"{at}: text is required")
         cited = _cites(entry.get("cites"), at, ctx, caps.get("max_cites", 8))
-        carried = (_squash(text), _ref_key([i.ref for i in cited])) in known
-        if not carried and not any(
-            c.kind in OWNER_WORDS and _squash(text) in _squash(c.text) for c in cited
-        ):
+        if not any(c.kind in OWNER_WORDS and _squash(text) in _squash(c.text) for c in cited):
             raise ValueError(
                 f"{at}: {text!r} is not a verbatim quote from the owner text it cites — "
                 "copy the words exactly as he wrote them, in his language"
@@ -773,7 +892,8 @@ def _constraints(raw: Any, where: str, ctx: Context, before: dict | None, wrap, 
 
 
 def _tasks(
-    raw: Any, where: str, ctx: Context, prev_tasks: dict, task_ids: set, wrap, caps, fresh
+    raw: Any, where: str, ctx: Context, prev_tasks: dict, task_ids: set, wrap, caps, fresh,
+    downgrades: list[dict[str, str]],
 ):
     if raw is None:
         return []
@@ -801,8 +921,9 @@ def _tasks(
         cited = _cites(entry.get("cites"), at, ctx, caps.get("max_cites", 8))
         if state in ("pending", "in_progress"):
             _require(cited, ASKED, at, f"{state} must cite where it was asked or planned")
-        elif state == "done":
-            _require(cited, EVIDENCE, at, "done needs evidence: a final answer or an action")
+        elif state == "done" and not _has(cited, EVIDENCE):
+            state = "unknown"
+            downgrades.append({"task": tid, "from": "done", "why": "no answer or action cited"})
         elif state == "stopped":
             _require(cited, OWNER_ACTS, at, "stopped needs the owner's own act")
         record: dict[str, Any] = {"id": tid, "text": text, "state": state}
@@ -821,22 +942,15 @@ def _tasks(
     return out
 
 
-def _coverage(ctx: Context, cited: set[str]) -> tuple[int, list[str]]:
-    """`covers_to_turn`, computed: the last turn up to which every owner text
-    the floor would keep is cited. The model never gets to claim it."""
-    kept = floor(ctx.new, ctx.covered, ctx.boundary)
-    uncited = [i for i in kept if i.ref not in cited]
-    if not uncited:
-        return ctx.boundary, []
-    first_gap = min(i.turn for i in uncited)
-    return max(ctx.covered, first_gap - 1), [i.ref for i in uncited]
-
-
 def contract_text(shape: roles.Shape) -> str:
     """The output contract, generated from the declared caps and this module's
     vocabularies, so the words the model is given and the rules code enforces
     cannot drift apart."""
     caps = shape.caps
+    quote = (
+        f'{{"text": "<his exact words, at most {caps.get("max_constraint_chars", 300)} '
+        f'characters>", "cites": ["<ref>"]}} or "{UNSTATED}"'
+    )
     return "\n".join(
         [
             "Reply with ONE JSON object and nothing else. No prose before or after it, "
@@ -850,6 +964,8 @@ def contract_text(shape: roles.Shape) -> str:
             f'      "text": at most {caps.get("max_chars", 200)} characters,',
             f'      "state": one of {", ".join(json.dumps(s) for s in GOAL_STATES)},',
             '      "cites": ["<ref>", ...],',
+            f'      "why": {quote},',
+            f'      "done_when": {quote},',
             '      "constraints": [{"text": "<an exact quote of the owner>", '
             '"cites": ["<ref>"]}],',
             '      "tasks": [',
@@ -860,12 +976,14 @@ def contract_text(shape: roles.Shape) -> str:
             '         "replaced_by": "<task id>" — only when state is "superseded"}',
             "      ]",
             "    }",
-            "  ]",
+            "  ],",
+            '  "not_goal_bearing": ["<ref>", ...] — refs from "must_cover" you did not cite',
             "}",
             "",
             f"At most {caps.get('max_goals', 12)} goals, {caps.get('max_tasks', 30)} tasks per "
             f"goal, {caps.get('max_cites', 8)} cites per item. A ref is copied exactly from "
-            'the "ref" of an item under "new" or "earlier".',
+            'the "ref" of an item under "material".',
+            'Every ref in "must_cover" must be cited somewhere or listed in "not_goal_bearing".',
             "An answer that breaks a rule is rejected and you are asked once more.",
         ]
     )
@@ -879,7 +997,17 @@ def tally(value: Revision) -> dict[str, dict[str, int]]:
         goals[goal["state"]] = goals.get(goal["state"], 0) + 1
         for task in goal.get("tasks") or ():
             tasks[task["state"]] = tasks.get(task["state"], 0) + 1
-    return {"goal_state": goals, "task_state": tasks}
+    return {
+        "goal_state": goals,
+        "task_state": tasks,
+        "downgraded": {"done": len(value.downgrades)},
+        "quotes": {
+            "stated": sum(1 for g in value.goals for k in ("why", "done_when")
+                          if isinstance(g.get(k), dict)),
+            UNSTATED: sum(1 for g in value.goals for k in ("why", "done_when")
+                          if g.get(k) == UNSTATED),
+        },
+    }
 
 
 # ---------------------------------------------------------------- exam assertions
@@ -924,6 +1052,19 @@ def _expect_mentions_any(expected: Any, value: Revision) -> list[str]:
     ]
 
 
+def _expect_why_mentions_any(expected: Any, value: Revision) -> list[str]:
+    """Each group: some goal's quoted `why` contains one of these substrings —
+    the purpose was found, not only the topic."""
+    blob = " ".join(
+        str(g["why"].get("text") or "") for g in value.goals if isinstance(g.get("why"), dict)
+    ).casefold()
+    return [
+        f"no goal's why mentions any of {group}"
+        for group in expected or ()
+        if not any(str(word).casefold() in blob for word in group)
+    ]
+
+
 def _expect_absent(expected: Any, value: Revision) -> list[str]:
     blob = json.dumps(value.as_json(), ensure_ascii=False).casefold()
     return [
@@ -946,6 +1087,7 @@ ASSERTIONS: dict[str, Callable[[Any, Revision], list[str]]] = {
     "mentions_any": _expect_mentions_any,
     "absent": _expect_absent,
     "has_active_goal": _expect_active_goal,
+    "why_mentions_any": _expect_why_mentions_any,
 }
 
 
@@ -1114,12 +1256,13 @@ def distill(
                 "covers_to_turn": value.covers_to_turn,
                 "confirmed": False,
                 "change": value.change,
+                "not_goal_bearing": value.not_goal_bearing,
+                "downgrades": value.downgrades,
                 "base": base.get("revision") if base else None,
                 "charter": charter.name if charter else DISTILLER,
                 "version": charter.version if charter else "",
                 "model": result.model,
                 "goals": value.goals,
-                "uncited": value.uncited,
             }
         )
         return out

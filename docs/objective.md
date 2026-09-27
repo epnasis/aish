@@ -48,15 +48,28 @@ distill's own `role`/`objective` records: a slow distill of turn N lands inside 
 N+1, stamped N, and must not make task N+1 turn N. A log with no brackets (the CLI writes
 none) is grouped by typed messages that are a model call's first input. `TestMaterial`.
 
-**The distiller** (`aish/charters/distiller.md`). The first role with a live caller — see
-`docs/roles.md`. It is handed ONE JSON input: the previous revision in a model-facing
-form (cites as bare refs, `owner_set` naming the fields he set), `earlier` (the items the
-previous revision cites, so a carried cite still resolves), `new` (everything since), and
-`must_cite` — the refs `covers_to_turn` will be computed from, named outright. That last
-one is a measured addition: asked only in prose to "account for what he said", the local
-model left the owner's stated purpose uncited at every boundary of the #422 chat, and
-`covers_to_turn` never left turn 1. It answers the whole ledger; `objective.validate_answer` checks it against that same
-input — which is what makes an exam case and a production call one code path.
+**The distiller** (`aish/charters/distiller.md`, v2). The first role with a live caller —
+see `docs/roles.md`. **It rebuilds from ALL of the chat's material at every boundary**
+(owner decision, 2026-09-27), never previous revision + delta: a ledger built from deltas
+inherits every omission of every earlier revision, and the measured v1 never recovered
+the purpose it missed at the first boundary. Its ONE JSON input is `material` (every item
+up to the boundary), `must_cover` (the owner texts the floor keeps, which it must
+account for), and `previous` — the last revision in a model-facing form (cites as bare
+refs, `owner_set` naming the fields he set), there only so it keeps ids and can say how
+this one differs. Code uses the previous revision for `change`, owner-set fields, `was`,
+the quoted purposes and nothing else. It answers the whole ledger;
+`objective.validate_answer` checks it against that same input — which is what makes an
+exam case and a production call one code path.
+
+It runs with **thinking on**, as a charter setting (`think: true`, `roles.run` passes
+`charter.think`), so no other role's cost moves. Answers travel nearly whole
+(`ANSWER_CHARS` = 8000, a runaway bound): across the six logs measured, no answer was
+cut. Input sizes this produces, `compose_input` with no previous revision:
+
+| log | at turn | input chars |
+|---|---|---|
+| the #422 chat | 6 / 12 / 18 / 34 / 40 | 18 511 / 28 164 / 30 320 / 47 460 / 58 717 |
+| five other recent chats, at their last turn | 7–14 | 6 350 – 47 736 |
 
 **The extractive floor** (`objective.floor`). No model: the owner's texts in the uncovered
 range, verbatim, minus three things decided mechanically — shorter than
@@ -70,28 +83,47 @@ nobody measured (`docs/vocabularies.md`). The consequence is visible and accepte
 
 Every rule in contract §3.14's table has its enforcing line in `validate_answer`, and a
 failing answer gets the validator's own sentence back on the role's one corrective retry.
-Four decisions worth their reasons:
+The decisions worth their reasons:
 
-- **`covers_to_turn` is computed, never claimed.** It is the last turn up to which every
-  owner text the floor would keep is cited somewhere in the revision. The model is never
-  asked for it and could not set it. A skipped message is listed in `uncited` and shown
-  again next time instead of being certified as represented — which matters because
-  #426's trimmer will stub owner turns up to this number.
+- **Every goal carries `why` and `done_when`** — his purpose and his finish line, each a
+  verbatim quote of his words with its cite, checked like a constraint (owner decision).
+  Each may instead be `"unstated"`: a field that must be a quote and cannot say "he never
+  said" makes quoting something beside the point the cheapest answer (roles R4). That
+  abstention is a deviation the owner has to confirm; it is counted on every record
+  (`flags.quotes`) and in the measurement. **Once a `why` has been quoted, only the owner
+  can take it back**: a later revision must keep it, or replace it with his words from a
+  LATER turn than the ones it quoted; `"unstated"` in its place is refused.
+- **Coverage is required, not measured.** Every owner text in `must_cover` must be cited
+  or listed under `not_goal_bearing`; anything else goes back on the corrective retry,
+  naming the refs (owner decision — it replaced lowering `covers_to_turn`). A valid
+  distiller revision therefore always covers its boundary, and `covers_to_turn` is set by
+  code, never claimed. #426's trimmer will stub owner turns up to this number.
+- **An unsupported `done` is downgraded, not rejected** (owner decision). A goal or task
+  marked `done` with no answer or action cited becomes `unknown` (with `was`), and the
+  revision records it in `downgrades` and `flags.downgraded`. Every other rule still
+  rejects the whole answer.
 - **`change` is `new` exactly when there is no previous revision** — code sets it, as
   with `covers_to_turn`, because the local model was measured answering `refined` with
   nothing to refine; `new` with a previous revision is refused.
-- **A goal or task the answer leaves out is carried forward by code.** A pivot never
-  overwrites (D3), and a model that forgets a parked goal cannot delete it by omission.
+- **A goal the answer leaves out is carried forward by code**, with its tasks. A pivot
+  never overwrites (D3), and a quoted purpose is never lost by omission. Tasks are
+  otherwise REBUILT — all the material is in front of the model — except a task whose
+  state or text the owner set, which is his and is carried.
 - **Reopening and dropping must rest on something NEW.** `done`→`in_progress` and
-  `stopped`→`pending` need an owner cite from the delta, and a goal becomes `dropped` only
-  on an owner word or act in the delta that comes after he asked for the goal. Citing the
+  `stopped`→`pending` need an owner cite from after the previous revision's turn, and a
+  goal becomes `dropped` only on an owner word or act from after it that also comes after
+  he asked for the goal. Citing the
   message that created the goal — which the base already had — justifies nothing, and
   without this rule every "owner cite" requirement is satisfied by the goal's own origin.
 
 A constraint is checked as a substring with whitespace runs collapsed on both sides and
-nothing else — no case folding, no translation. Carrying an unchanged constraint (same
-text, same cites) is not re-verified: it was verified when it was written, and its cited
-text may have been cut in `earlier`. `TestValidation`, `TestTransitions`, `TestCoverage`.
+nothing else — no case folding, no translation. Every constraint is re-verified at every
+boundary: the whole material is in the input. `TestValidation`, `TestTransitions`,
+`TestCoverage`.
+
+**What a rebuild does NOT hold across revisions**, stated: a distiller task given a new
+id escapes the transition checks its old id would have met (the old one is simply not in
+the new ledger); only goals, owner-set tasks and quoted purposes are held by code.
 
 **What is NOT checked**, stated so the words do not outrun the code: that a goal's TEXT
 says what its cites say; that `done` evidence actually delivers the task (an answer ref
@@ -147,7 +179,8 @@ including a local one, so his text never rides to a different provider than he c
 **N/A**: the `role` record says `unavailable`, and the floor is written. And the charter
 must be **admitted** — `scripts/role-admission.py --model <spec> distiller` — for the
 exact model spec the session runs; until then every task end records `unadmitted` and
-writes the floor. On a fresh install nothing is admitted. `TestWhichModel`,
+writes the floor. Admission is per charter PER MODEL (owner decision): the local
+production model and a cloud reference can both hold a pass. On a fresh install nothing is admitted. `TestWhichModel`,
 `TestTheCharter`, `TestExamAssertions`.
 
 **Contention, not measured away.** On a single local model server the distill competes

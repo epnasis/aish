@@ -67,19 +67,38 @@ BASIC_NEW = [
 
 
 def material_text(new=BASIC_NEW, previous=None, earlier=(), boundary=2, chat=CHAT) -> str:
-    return json.dumps(
-        {
-            "chat": chat,
-            "boundary_turn": boundary,
-            "previous": previous,
-            "earlier": list(earlier),
-            "new": list(new),
-        }
-    )
+    """The distiller's input, built by the real composer from the items given:
+    ALL of them are the material, and `must_cover` is what the floor keeps."""
+    items = [objective.Item(i["ref"], i["kind"], i["turn"], i["text"])
+             for i in [*earlier, *new]]
+    base = None
+    if previous is not None:
+        base = {**previous, "turn": previous.get("turn", previous.get("covers_to_turn"))}
+        base["goals"] = [_as_record(g) for g in previous.get("goals") or ()]
+    return objective.compose_input(chat, boundary, items, base)
+
+
+def _as_record(view: dict) -> dict:
+    """A previous goal written in the model's view (bare refs, owner_set) back
+    into record form, which is what `compose_input` takes."""
+    def by(item):
+        owned = set(item.get("owner_set") or ())
+        return {f"{f}_by": "owner" if f in owned else "distiller" for f in ("state", "text")}
+
+    return {
+        **{k: v for k, v in view.items() if k != "owner_set"},
+        **by(view),
+        "why": view.get("why", "unstated"),
+        "done_when": view.get("done_when", "unstated"),
+        "tasks": [{**{k: v for k, v in t.items() if k != "owner_set"}, **by(t)}
+                  for t in view.get("tasks") or ()],
+    }
 
 
 def goal(gid="g1", text="Kurs EUR/PLN każdego ranka", state="active", cites=("m:a1",), **kw):
-    return {"id": gid, "text": text, "state": state, "cites": list(cites), **kw}
+    body = {"id": gid, "text": text, "state": state, "cites": list(cites),
+            "why": "unstated", "done_when": "unstated"}
+    return {**body, **kw}
 
 
 def task(tid="t1", text="napisać skrypt", state="done", cites=("m:a3", "t2.c1"), **kw):
@@ -251,10 +270,12 @@ class TestMaterial:
         got = [(i.ref, i.turn) for i in objective.material(records, READ_ONLY)]
         assert got == [("m:u1", 1), ("m:a1", 1), ("m:u2", 2), ("m:a2", 2)]
 
-    def test_a_long_answer_is_cut_and_says_so(self):
-        records = [user("q" * 20, "u1"), assistant("x" * 5000, "a1")]
-        answer = objective.material(records, READ_ONLY)[-1]
-        assert len(answer.text) < 1300 and "5000 chars in all" in answer.text
+    def test_an_answer_travels_nearly_whole_and_a_runaway_one_says_it_was_cut(self):
+        records = [user("q" * 20, "u1"), assistant("x" * 5000, "a1"),
+                   user("r" * 20, "u2"), assistant("y" * 20000, "a2")]
+        whole, cut = [i for i in objective.material(records, READ_ONLY) if i.kind == "answer"]
+        assert whole.text == "x" * 5000
+        assert len(cut.text) < 8100 and "20000 chars in all" in cut.text
 
 
 class TestTheFloor:
@@ -303,14 +324,25 @@ class TestValidation:
         assert g["cites"] == [{"session": CHAT, "ref": "m:a1"}, {"session": CHAT, "ref": "m:a3"}]
         assert g["state_by"] == g["text_by"] == "distiller"
         assert g["tasks"][0]["state"] == "done"
-        assert value.covers_to_turn == 2 and value.uncited == []
+        assert value.covers_to_turn == 2 and value.downgrades == []
 
     def test_a_cite_to_nothing_in_the_material_is_refused(self, shape):
         rejects(shape, good_answer(goals=[goal(cites=("m:zz",))]), "names nothing")
 
-    def test_done_without_evidence_is_refused(self, shape):
+    def test_done_without_evidence_is_downgraded_and_counted_not_refused(self, shape):
+        """Owner decision (#424): the revision stands, the claim does not."""
         answer = good_answer(goals=[goal(cites=("m:a1", "m:a3"), tasks=[task(cites=("m:a3",))])])
-        rejects(shape, answer, "done needs evidence")
+        value = check(shape, answer)
+        t = value.goals[0]["tasks"][0]
+        assert t["state"] == "unknown"
+        assert value.downgrades == [{"task": "t1", "from": "done",
+                                     "why": "no answer or action cited"}]
+        assert objective.tally(value)["downgraded"] == {"done": 1}
+
+    def test_a_goal_done_without_evidence_is_downgraded_too(self, shape):
+        value = check(shape, good_answer(goals=[goal(state="done", cites=("m:a1", "m:a3"))]))
+        assert value.goals[0]["state"] == "unknown"
+        assert value.downgrades[0]["goal"] == "g1"
 
     def test_done_on_an_answer_or_an_action_is_accepted(self, shape):
         for cites in (("m:a4",), ("t2.c1",)):
@@ -322,7 +354,8 @@ class TestValidation:
 
     def test_unknown_is_always_legal(self, shape):
         answer = good_answer(
-            goals=[goal(state="unknown", cites=(), tasks=[task(state="unknown", cites=())])]
+            goals=[goal(state="unknown", cites=(), tasks=[task(state="unknown", cites=())])],
+            not_goal_bearing=["m:a1", "m:a3"],
         )
         check(shape, answer)
 
@@ -339,7 +372,8 @@ class TestValidation:
             *BASIC_NEW,
             item("m:a5", "owner", 2, "zapomnij o kursie, nie jest mi potrzebny"),
         ])
-        check(shape, good_answer(goals=[goal(state="dropped", cites=("m:a1", "m:a5"))]), text)
+        check(shape, good_answer(goals=[goal(state="dropped", cites=("m:a1", "m:a5"))],
+                                 not_goal_bearing=["m:a3"]), text)
 
     def test_a_drop_cannot_rest_on_what_the_base_already_had(self, shape):
         prev = previous_revision()
@@ -435,9 +469,21 @@ class TestTransitions:
         ids = {g["id"]: g for g in value.goals}
         assert set(ids) == {"g1", "g0"}
         assert ids["g0"]["state"] == "parked" and ids["g0"]["state_by"] == "owner"
-        # …and the task the answer left out is carried under its goal.
-        assert [t["id"] for t in ids["g1"]["tasks"]] == ["t2", "t1"]
-        assert ids["g1"]["tasks"][1]["cites"] == [{"session": CHAT, "ref": "t2.c1"}]
+
+    def test_tasks_are_rebuilt_except_the_ones_he_set(self, shape):
+        """The whole chat is in front of the model, so a distiller task it left
+        out is gone; a task whose state the OWNER set is his, and stays."""
+        prev = previous_revision()
+        prev["goals"][0]["tasks"].append({"id": "t9", "text": "jego zadanie", "state": "pending",
+                                          "owner_set": ["state"], "cites": ["m:a1"]})
+        text = later(item("m:b1", "owner", 3, "teraz dodaj też kurs USD/PLN proszę"),
+                     previous=prev)
+        answer = {"change": "expanded", "goals": [
+            goal(cites=("m:a1", "m:b1"), tasks=[task(tid="t2", state="pending", cites=("m:b1",))]),
+        ]}
+        value = check(shape, answer, text)
+        g1 = next(g for g in value.goals if g["id"] == "g1")
+        assert [t["id"] for t in g1["tasks"]] == ["t2", "t9"]
 
     def test_an_owner_set_field_may_not_be_changed(self, shape):
         text = later(item("m:b1", "owner", 3, "wróćmy do porównania API"))
@@ -491,38 +537,81 @@ class TestTransitions:
             "owner_set": [], "cites": ["m:a1"], "constraints": [],
             "tasks": [{"id": "t1", "text": "napisać skrypt", "state": "unknown",
                        "was": "done", "owner_set": [], "cites": []}]}])
-        text2 = later(item("m:b2", "answer", 4, "Poprawię skrypt."), previous=prev)
+        text2 = material_text(new=[item("m:b2", "answer", 4, "Poprawię skrypt.")],
+                              previous={**prev, "covers_to_turn": 3}, earlier=EARLIER,
+                              boundary=4)
         reopen = {"change": "refined", "goals": [goal(
             tasks=[task(state="in_progress", cites=("m:b2",))])]}
         rejects(shape, reopen, "reopening a done item", text2)
 
-    def test_an_unchanged_constraint_is_carried_without_requoting(self, shape):
+    def test_a_quoted_purpose_is_kept_unless_he_replaces_it(self, shape):
         prev = previous_revision()
-        prev["goals"][0]["constraints"] = [{"text": "codziennie rano", "cites": ["m:a1"]}]
-        text = later(item("m:b1", "owner", 3, "dodaj też wykres z tygodnia"), previous=prev)
-        answer = {"change": "expanded", "goals": [goal(
+        prev["goals"][0]["why"] = {"text": "codziennie rano", "cites": ["m:a1"]}
+        text = later(item("m:b1", "owner", 3, "teraz chodzi mi o to, żeby wymieniać taniej"),
+                     previous=prev)
+        dropped = {"change": "refined", "goals": [goal(cites=("m:a1", "m:b1"))]}
+        rejects(shape, dropped, "only the owner can take a purpose back", text)
+        from_the_old_message = {"change": "refined", "goals": [goal(
             cites=("m:a1", "m:b1"),
-            constraints=[{"text": "codziennie rano", "cites": ["m:a1"]}])]}
-        check(shape, answer, text)
+            why={"text": "kurs EUR/PLN", "cites": ["m:a1"]})]}
+        rejects(shape, from_the_old_message, "later turn", text)
+        replaced = {"change": "refined", "goals": [goal(
+            cites=("m:a1", "m:b1"),
+            why={"text": "żeby wymieniać taniej", "cites": ["m:b1"]})]}
+        value = check(shape, replaced, text)
+        assert value.goals[0]["why"]["text"] == "żeby wymieniać taniej"
+        kept = {"change": "refined", "goals": [goal(
+            cites=("m:a1", "m:b1"), why={"text": "codziennie  rano", "cites": ["m:a1"]})]}
+        check(shape, kept, text)
+
+    def test_why_and_done_when_are_verbatim_quotes_or_unstated(self, shape):
+        paraphrase = good_answer(goals=[goal(
+            cites=("m:a1", "m:a3"), why={"text": "to know the rate", "cites": ["m:a1"]})])
+        rejects(shape, paraphrase, "not a verbatim quote")
+        quoted = good_answer(goals=[goal(
+            cites=("m:a1", "m:a3"),
+            why={"text": "codziennie rano kurs EUR/PLN", "cites": ["m:a1"]},
+            done_when="unstated")])
+        value = check(shape, quoted)
+        assert value.goals[0]["why"]["cites"] == [{"session": CHAT, "ref": "m:a1"}]
+        assert value.goals[0]["done_when"] == "unstated"
+        rejects(shape, good_answer(goals=[goal(cites=("m:a1", "m:a3"), why=None)]),
+                "unstated")
 
 
 class TestCoverage:
-    def test_covers_to_turn_is_computed_never_claimed(self, shape):
-        """The owner's texts the floor would keep must be cited; the revision
-        covers up to the turn before the first one that is not."""
-        new = [
-            item("m:a1", "owner", 1, "Potrzebuję codziennie rano kurs EUR/PLN"),
-            item("m:a2", "owner", 2, "tak"),  # too short to need a cite
-            item("m:a3", "owner", 3, "a potem dodaj wykres tygodniowy"),
-            item("m:a4", "owner", 4, "i wyślij mi to mailem"),
-        ]
-        text = material_text(new=new, boundary=4)
-        value = check(shape, {"change": "new", "goals": [goal(cites=("m:a1", "m:a4"))]}, text)
-        assert value.covers_to_turn == 2
-        assert value.uncited == ["m:a3"]
-        assert "covers_to_turn" not in json.dumps(
-            {"change": "new", "goals": [goal()]}
-        )  # the model's reply never carries it
+    NEW = [
+        item("m:a1", "owner", 1, "Potrzebuję codziennie rano kurs EUR/PLN"),
+        item("m:a2", "owner", 2, "tak"),  # too short to need accounting for
+        item("m:a3", "owner", 3, "a potem dodaj wykres tygodniowy"),
+        item("m:a4", "owner", 4, "czy już jest odpowiedź?"),
+    ]
+
+    def test_an_owner_text_left_unaccounted_for_is_sent_back_by_name(self, shape):
+        text = material_text(new=self.NEW, boundary=4)
+        rejects(shape, {"change": "new", "goals": [goal(cites=("m:a1", "m:a4"))]},
+                "neither cited nor listed under not_goal_bearing: m:a3", text)
+
+    def test_cited_or_dismissed_covers_the_boundary(self, shape):
+        text = material_text(new=self.NEW, boundary=4)
+        value = check(shape, {"change": "new", "goals": [goal(cites=("m:a1", "m:a3"))],
+                              "not_goal_bearing": ["m:a4"]}, text)
+        assert value.covers_to_turn == 4 and value.not_goal_bearing == ["m:a4"]
+
+    def test_only_a_must_cover_ref_may_be_dismissed(self, shape):
+        text = material_text(new=self.NEW, boundary=4)
+        rejects(shape, {"change": "new", "goals": [goal(cites=("m:a1", "m:a3"))],
+                        "not_goal_bearing": ["m:a4", "m:a2"]}, "must_cover", text)
+
+    def test_the_input_is_all_the_material_every_time(self):
+        """Rebuilt from everything (owner decision, #424), never previous +
+        delta: the turn-1 message is in the input at turn 4 whatever the
+        previous revision covered."""
+        text = material_text(new=self.NEW, boundary=4,
+                             previous={"revision": 1, "covers_to_turn": 3, "goals": []})
+        sent = json.loads(text)
+        assert [i["ref"] for i in sent["material"]] == ["m:a1", "m:a2", "m:a3", "m:a4"]
+        assert sent["must_cover"] == ["m:a1", "m:a3", "m:a4"]
 
     def test_everything_cited_covers_the_boundary(self, shape):
         value = check(shape, good_answer())
@@ -662,7 +751,10 @@ class TestDistill:
         role, revision = out
         assert role["kind"] == "role" and role["status"] == "ok" and role["turn"] == 1
         assert role["charter"] == "distiller" and role["usage"] == {"input": 900, "output": 120}
-        assert role["flags"] == {"goal_state": {"active": 1}, "task_state": {"done": 1}}
+        assert role["flags"] == {"goal_state": {"active": 1}, "task_state": {"done": 1},
+                                 "downgraded": {"done": 0},
+                                 "quotes": {"stated": 0, "unstated": 2}}
+        assert revision["downgrades"] == [] and revision["not_goal_bearing"] == []
         assert revision["kind"] == "objective" and revision["origin"] == "distiller"
         assert revision["revision"] == 1 and revision["base"] is None
         assert revision["covers_to_turn"] == 1 and revision["confirmed"] is False
@@ -676,7 +768,16 @@ class TestDistill:
         sent = json.loads(chat.calls[0]["messages"][1]["content"].split(">>>\n", 1)[1]
                           .rsplit("\n<<<END", 1)[0])
         assert sent["previous"] is None and sent["boundary_turn"] == 1
-        assert [n["ref"] for n in sent["new"]] == ["m:a1", "t1.c1", "m:a2"]
+        assert [n["ref"] for n in sent["material"]] == ["m:a1", "t1.c1", "m:a2"]
+        assert sent["must_cover"] == ["m:a1"]
+
+    def test_the_distiller_is_asked_to_think_and_other_roles_are_not(self, tmp_path):
+        """A charter setting (#424), so no other role's cost moves with it."""
+        path = web_log(tmp_path)
+        chat = FakeRoleChat([FIRST])
+        objective.distill(boundary(path), chat_fn=chat, model_name="m", check_admission=False)
+        assert chat.calls[0]["think"] is True
+        assert roles.load_charters()[roles.SNIPPET_READER].think is False
 
     def test_an_invalid_answer_leaves_the_previous_revision_and_writes_the_floor(self, tmp_path):
         path = web_log(tmp_path)
@@ -694,13 +795,13 @@ class TestDistill:
 
     def test_the_corrective_retry_carries_the_validators_words(self, tmp_path):
         path = web_log(tmp_path)
-        bad = {"change": "new", "goals": [goal(cites=("m:a1",), tasks=[
-            task(cites=("m:a1",))])]}
+        bad = {"change": "new", "goals": [goal(cites=("m:a1",), constraints=[
+            {"text": "every morning", "cites": ["m:a1"]}])]}
         chat = FakeRoleChat([bad, FIRST])
         out = objective.distill(boundary(path), chat_fn=chat, model_name="m",
                                 check_admission=False)
         assert out[1]["origin"] == "distiller" and out[0]["attempts"] == 2
-        assert "done needs evidence" in chat.calls[1]["messages"][-1]["content"]
+        assert "not a verbatim quote" in chat.calls[1]["messages"][-1]["content"]
         # Both attempts were paid for, so both are in the record.
         assert out[0]["usage"] == {"input": 1800, "output": 240}
 
@@ -740,10 +841,11 @@ class TestDistill:
                                 check_admission=False)
         revision = out[1]
         assert revision["revision"] == 2 and revision["base"] == 1
-        assert [t["id"] for t in revision["goals"][0]["tasks"]] == ["t2", "t1"]
-        sent = chat.calls[0]["messages"][1]["content"]
-        assert '"ref": "m:b1"' in sent and "Skrypt eur.py" not in sent  # delta only
-        assert '"ref": "t1.c1"' in sent  # …but a carried cite still resolves
+        assert [t["id"] for t in revision["goals"][0]["tasks"]] == ["t2"]  # rebuilt
+        sent = json.loads(chat.calls[0]["messages"][1]["content"].split(">>>\n", 1)[1]
+                          .rsplit("\n<<<END", 1)[0])
+        assert [i["ref"] for i in sent["material"]] == ["m:a1", "t1.c1", "m:a2", "m:b1", "m:b2"]
+        assert sent["previous"]["revision"] == 1 and sent["previous"]["turn"] == 1
 
     def test_a_floor_is_never_the_base(self, tmp_path):
         path = web_log(tmp_path)
@@ -914,7 +1016,7 @@ class TestRetryAndOrder:
         revisions = steps(path, "objective")
         assert [r["revision"] for r in revisions] == [1, 2]
         assert revisions[1]["base"] == 1
-        assert {t["id"] for t in revisions[1]["goals"][0]["tasks"]} == {"t1", "t2"}
+        assert {t["id"] for t in revisions[1]["goals"][0]["tasks"]} == {"t2"}
 
     def test_an_earlier_boundary_after_a_later_one_is_skipped(self, tmp_path, monkeypatch):
         path = web_log(tmp_path)
@@ -988,3 +1090,39 @@ class TestEmission:
         thread.join(10)
         assert steps(path, "role")[-1]["status"] == "unavailable"
         assert steps(path, "objective")[-1]["origin"] == "extractive"
+
+
+class TestAdmissionPerModel:
+    """Owner decision (#424): one charter admitted for the local production
+    model AND a cloud reference at once, each its own recorded exam."""
+
+    def admit(self, state_dir, charter, model):
+        roles.write_admission(state_dir, roles.Admission(
+            charter=charter.name, version=charter.version, model=model, at="t",
+            passed=7, total=7, charter_digest=charter.digest,
+            cases_digest=roles.owner_cases_digest(charter)))
+
+    def test_two_models_admitted_side_by_side(self, charter, tmp_path):
+        self.admit(tmp_path, charter, "local:q")
+        self.admit(tmp_path, charter, "gemini:g")
+        assert roles.admitted(charter, "local:q", tmp_path) is None
+        assert roles.admitted(charter, "gemini:g", tmp_path) is None
+        why = roles.admitted(charter, "openai:o", tmp_path)
+        assert why == "admitted against gemini:g, local:q, this session runs openai:o"
+
+    def test_a_file_from_before_reads_as_its_one_model(self, charter, tmp_path):
+        path = roles.admission_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({charter.name: {
+            "version": charter.version, "model": "local:q", "at": "t", "passed": 7,
+            "total": 7, "charter_digest": charter.digest,
+            "cases_digest": roles.owner_cases_digest(charter)}}))
+        assert roles.admitted(charter, "local:q", tmp_path) is None
+        self.admit(tmp_path, charter, "gemini:g")  # rewriting keeps the old one
+        assert roles.admitted(charter, "local:q", tmp_path) is None
+        assert roles.admitted(charter, "gemini:g", tmp_path) is None
+
+    def test_think_must_be_a_boolean(self, charter):
+        text = charter.path.read_text().replace("think: true", 'think: "yes"')
+        with pytest.raises(roles.CharterError, match="think"):
+            roles.parse_charter(text)

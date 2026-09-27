@@ -674,19 +674,23 @@ One record per **revision**. The current Objective is the newest **live** `objec
 ```json
 {"kind": "objective", "turn": 12, "revision": 3, "origin": "distiller",
  "chat": "session-20260101-090000-000000", "covers_to_turn": 12, "confirmed": false,
- "change": "refined", "base": 2, "charter": "distiller", "version": "1",
+ "change": "refined", "base": 2, "charter": "distiller", "version": "2",
  "model": "local:mlx-community/Qwen3.6-35B-A3B-8bit",
  "goals": [
    {"id": "g1", "text": "Kurs EUR/PLN każdego ranka, żeby zdecydować o wymianie",
     "state": "active", "state_by": "distiller", "text_by": "distiller",
     "cites": [{"session": "session-20260101-090000-000000", "ref": "m:a1b2c3d4e5f6"}],
+    "why": {"text": "żeby zdecydować czy wymieniać",
+            "cites": [{"session": "…", "ref": "m:a1b2c3d4e5f6"}]},
+    "done_when": "unstated",
     "constraints": [{"text": "klucze trzymaj w aish secrets",
                      "cites": [{"session": "…", "ref": "m:0a1b2c3d4e5f"}]}],
     "tasks": [
       {"id": "t4", "text": "zapisać skrypt jako skill", "state": "done",
        "state_by": "distiller", "text_by": "distiller",
        "cites": [{"session": "…", "ref": "t11.c3"}]}]}],
- "uncited": []}
+ "not_goal_bearing": ["m:9f8e7d6c5b4a"],
+ "downgrades": [{"task": "t5", "from": "done", "why": "no answer or action cited"}]}
 ```
 
 | field | why |
@@ -694,9 +698,10 @@ One record per **revision**. The current Objective is the newest **live** `objec
 | `turn` | The task boundary this revision was taken at — the §2 turn of the task whose end triggered it, never the turn running when the write landed. A slow local distill lands while the NEXT task runs; stamping the running turn would attribute it to a task it never read. |
 | `revision` | 1 + the highest revision in the file, superseded ones included — an id handed out is never reissued (the `last_turn` rule). |
 | `origin` | `distiller` (the isolated role, `docs/roles.md`), `extractive` (the floor, no model), `owner` (an edit, D7 — no writer yet; #425). |
-| `covers_to_turn` | **Computed by code, never claimed by the model.** Every owner text the floor would keep (below) in a turn ≤ this is cited somewhere in the revision. On a distiller revision it is the last turn up to which that holds, so a turn the model skipped is re-presented next time instead of being certified. On an extractive one it is the boundary, because the floor copies every such text verbatim. |
-| `uncited` | Distiller only: the refs of owner texts after `covers_to_turn` that the revision did not cite. The evidence behind a `covers_to_turn` short of `turn`. |
-| `base` | The revision the distiller was handed as "previous" — the newest live `distiller` or `owner` revision; `null` for the first. An `extractive` revision is never a base: it copies text, it does not account for it. |
+| `covers_to_turn` | **Set by code, never claimed by the model.** Every owner text the floor would keep (below) in a turn ≤ this is accounted for. On a distiller revision it is always the boundary: a revision that leaves one uncited and unlisted does not validate. On an extractive one it is the boundary, because the floor copies every such text verbatim. |
+| `not_goal_bearing` | Distiller only: owner texts the distiller declared carry nothing about what he wants, instead of citing them. The other half of the coverage rule. |
+| `downgrades` | Distiller only: `[{goal\|task: id, from: "done", why}]` — each `done` the model claimed without an answer or action cited, which code turned into `unknown`. |
+| `base` | The revision the distiller was handed as "previous" — the newest live `distiller` or `owner` revision; `null` for the first. An `extractive` revision is never a base: it copies text, it does not account for it. The distiller rebuilds from ALL the material up to `turn`; the base only lends ids, `change`, owner-set fields, `was` and quoted purposes. |
 | `confirmed` | Always `false` here. Only the owner confirms (#425). |
 | `change` | The distiller's word: `new` \| `unchanged` \| `refined` \| `expanded` \| `pivoted` \| `unknown`. Recorded, acted on by nothing yet (the pivot question is #425). Absent on `extractive`. |
 | `goals[]` | Self-contained (§0 corollary 1): the whole ledger, not a diff. `state` ∈ `active` \| `parked` \| `done` \| `dropped` \| `unknown`; at most one `active`. |
@@ -705,6 +710,7 @@ One record per **revision**. The current Objective is the newest **live** `objec
 | `state_by` / `text_by` | Who last SET that field: `distiller` \| `owner`. A distiller revision may not change a field whose previous value was set by the owner. |
 | `cites[]` | `{session, ref}`. `session` is the chat the ref resolves in (always this chat in slice 1; a compacted chat's refs resolve in its original, #427). |
 | `constraints[]` | Owner requirements, each **a verbatim substring** (whitespace runs collapsed on both sides, nothing else) of the owner text of one of its cites. |
+| `goals[].why` / `done_when` | His purpose and his finish line: `{text, cites}` checked like a constraint, or `"unstated"`. A `why` once quoted may be replaced only by his words from a later turn, never by `"unstated"`. |
 | `extract[]` | Extractive only: `{ref, turn, text}` — the owner's texts in (`base.covers_to_turn`, `turn`] that pass the floor filter, verbatim. `goals` on an extractive revision are the base's, carried unchanged. |
 | `charter` / `version` / `model` | Distiller only: what wrote it. The `role` record (§ roles D7) written immediately before, with the same `turn`, carries attempts, latency, usage and the input bytes' digest. |
 
@@ -716,7 +722,7 @@ One record per **revision**. The current Objective is the newest **live** `objec
 |---|---|
 | goal, any but `unknown` | at least one owner text (a message, or a card comment) — a goal nobody asked for is invented |
 | task `pending` / `in_progress` | where it was asked or planned: an owner text or an answer |
-| `done` (goal or task) | evidence: a final answer, or an action that ran (`t<N>.c<M>` with `ok: true`) |
+| `done` (goal or task) | evidence: a final answer, or an action that ran (`t<N>.c<M>` with `ok: true`). Without it the item is DOWNGRADED to `unknown` and listed in `downgrades` — the revision stands |
 | task `stopped` | the owner's own act: a denial, a stopped task, or his message |
 | goal `dropped` | an owner cite — a denial or his message; never inferred |
 | task `superseded` | `replaced_by` |

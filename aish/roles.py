@@ -336,6 +336,10 @@ class Charter:
     task: str
     cases: tuple[Case, ...]
     path: Path | None = None
+    # Whether the call asks the model to think before answering. A CHARTER
+    # setting (#424: the distiller reads a whole chat and must weigh it), so
+    # turning it on for one role changes no other role's cost or latency.
+    think: bool = False
     # The content address of the file this was parsed from. It is what
     # admission binds to, so that a charter rewritten in place — through any
     # door, named or not — stops being admitted. See `admitted`.
@@ -423,6 +427,10 @@ def parse_charter(text: str, path: Path | None = None) -> Charter:
             "what a role does when it cannot answer is declared, never improvised"
         )
 
+    think = head.get("think", False)
+    if not isinstance(think, bool):
+        raise CharterError("think must be true or false")
+
     output = _parse_shape(head.get("output"))
     cases = _parse_cases(body, {i.name for i in inputs}, output)
     if not cases:
@@ -449,6 +457,7 @@ def parse_charter(text: str, path: Path | None = None) -> Charter:
         task=task,
         cases=cases,
         path=path,
+        think=think,
         digest=content_digest(text),
     )
 
@@ -805,33 +814,53 @@ def admission_path(state_dir: os.PathLike | str) -> Path:
     return roles_state_dir(state_dir) / "admission.json"
 
 
-def read_admissions(state_dir: os.PathLike | str | None) -> dict[str, Admission]:
+def _admission_entries(entry: dict) -> list[dict]:
+    """One charter's recorded passes. Since #424 a charter keeps one per MODEL
+    (`{"models": {spec: entry}}`), so it can be admitted for the local model and
+    a cloud reference at once; a file written before that holds one entry
+    directly, and reads as that single model's."""
+    models = entry.get("models")
+    if isinstance(models, dict):
+        return [e for e in models.values() if isinstance(e, dict)]
+    return [entry]
+
+
+def read_admissions(
+    state_dir: os.PathLike | str | None,
+) -> dict[str, dict[str, Admission]]:
+    """Every recorded pass, by charter and then by model spec."""
     if state_dir is None:
         return {}
     try:
         raw = json.loads(admission_path(state_dir).read_text())
     except (OSError, ValueError):
         return {}
-    out: dict[str, Admission] = {}
-    for name, entry in (raw or {}).items():
-        if not isinstance(entry, dict):
+    out: dict[str, dict[str, Admission]] = {}
+    for name, charter_entry in (raw or {}).items() if isinstance(raw, dict) else ():
+        if not isinstance(charter_entry, dict):
             continue
-        try:
-            out[str(name)] = Admission(
-                charter=str(name),
-                version=str(entry.get("version") or ""),
-                model=str(entry.get("model") or ""),
-                at=str(entry.get("at") or ""),
-                passed=int(entry.get("passed") or 0),
-                total=int(entry.get("total") or 0),
-                owner_passed=int(entry.get("owner_passed") or 0),
-                owner_total=int(entry.get("owner_total") or 0),
-                charter_digest=str(entry.get("charter_digest") or ""),
-                cases_digest=str(entry.get("cases_digest") or ""),
-            )
-        except (TypeError, ValueError):
-            continue
+        for entry in _admission_entries(charter_entry):
+            try:
+                admission = _admission_of(str(name), entry)
+            except (TypeError, ValueError):
+                continue
+            out.setdefault(str(name), {})[admission.model] = admission
     return out
+
+
+def _admission_of(name: str, entry: dict) -> Admission:
+    return Admission(
+        charter=str(name),
+        version=str(entry.get("version") or ""),
+        model=str(entry.get("model") or ""),
+        at=str(entry.get("at") or ""),
+        passed=int(entry.get("passed") or 0),
+        total=int(entry.get("total") or 0),
+        owner_passed=int(entry.get("owner_passed") or 0),
+        owner_total=int(entry.get("owner_total") or 0),
+        charter_digest=str(entry.get("charter_digest") or ""),
+        cases_digest=str(entry.get("cases_digest") or ""),
+    )
 
 
 def write_admission(state_dir: os.PathLike | str, admission: Admission) -> Path:
@@ -843,7 +872,13 @@ def write_admission(state_dir: os.PathLike | str, admission: Admission) -> Path:
             current = {}
     except (OSError, ValueError):
         current = {}
-    current[admission.charter] = {
+    existing = current.get(admission.charter)
+    models: dict[str, Any] = {}
+    if isinstance(existing, dict):
+        models = {
+            str(e.get("model") or ""): e for e in _admission_entries(existing)
+        }
+    models[admission.model] = {
         "version": admission.version,
         "model": admission.model,
         "at": admission.at,
@@ -854,6 +889,7 @@ def write_admission(state_dir: os.PathLike | str, admission: Admission) -> Path:
         "charter_digest": admission.charter_digest,
         "cases_digest": admission.cases_digest,
     }
+    current[admission.charter] = {"models": models}
     atomic_write.publish(path, json.dumps(current, indent=1, sort_keys=True))
     return path
 
@@ -885,9 +921,12 @@ def admitted(charter: Charter, model: str, state_dir: os.PathLike | str | None) 
     here, and a vocabulary that made this name one of them would be the failure
     `CLAUDE.md`'s *No evidence, no claim* exists to stop.
     """
-    found = read_admissions(state_dir).get(charter.name)
-    if found is None:
+    per_model = read_admissions(state_dir).get(charter.name)
+    if not per_model:
         return "no admission recorded"
+    found = per_model.get(model)
+    if found is None:
+        return f"admitted against {', '.join(sorted(per_model))}, this session runs {model}"
     if not found.ok:
         return f"the recorded exam did not pass ({found.passed}/{found.total})"
     # Version first, only because it is the more specific way to say the same
@@ -906,8 +945,6 @@ def admitted(charter: Charter, model: str, state_dir: os.PathLike | str | None) 
         # In BOTH directions. A case added is exam material nothing has run; a
         # case removed is exam material that no longer exists.
         return "the exam cases have changed since they were examined"
-    if found.model != model:
-        return f"admitted against {found.model}, this session runs {model}"
     return None
 
 
@@ -1180,7 +1217,7 @@ def run(
                     messages=messages,
                     tools=[],
                     options={"num_ctx": charter.num_ctx},
-                    think=False,
+                    think=charter.think,
                 )
         except Exception as exc:  # noqa: BLE001 — every failure is a degradation
             return outcome(
