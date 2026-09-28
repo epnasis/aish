@@ -602,7 +602,9 @@ tool schemas and the images, none of which a history trim can reach — and
 comparing them against aish's char measure would dress a ratio in the provider's
 unit (§4, #262). So `OVERFLOW_TRIM_FRACTION` gives back **half of what is
 measurably held**, the trim runs through the **existing** oldest-first machinery
-(`_trim_history_to_budget`, one extra parameter, not a second trimmer), and the
+(the same pass as the budget's, `_trim_pass` via `_shrink_pass`, not a second
+trimmer; since #429 that includes the argument and turn levers on `local:` and the
+yield floor, `docs/agent-core.md` *Context*), and the
 record carries `policy: overflow_oldest_first` with
 `cap_source: constant:OVERFLOW_TRIM_FRACTION` — the provenance of the number that
 actually governed it, never the history budget it deliberately ignored. Half,
@@ -619,9 +621,15 @@ there would put it in the dossier's *given* section, above the failure it answer
 
 `model_error` is written **before** the trim, so the log reads in the order the
 two happened; a trim above the failure would read as preparation rather than a
-response. Promising a retry before doing the work is only honest because
-`_can_trim_history` has already established the next request will be smaller —
-with nothing left to give back, no retry is promised and none is made.
+response. Promising a retry before doing the work is only honest because the
+same pass, planned with `dry_run`, has already established the next request will
+be smaller — with nothing left to give back, no retry is promised and none is made.
+Since #429 "smaller" is checked with the key the stub will really carry: in
+#422's chat the overflow trim stubbed two `show_image` results whose stubs were
+LONGER than the text (146,175 → 146,240 characters), so a retry was promised,
+the identical-or-bigger request went out, and the turn ended `trim_exhausted`.
+On `local:` a pass that frees under `MIN_TRIM_YIELD_TOKENS` and leaves the
+request over its target is not a smaller request either, and promises nothing.
 
 The retry is spent **once per model call**. A second overflow ends the turn with
 `bound: trim_exhausted`, the fourth value of that closed field: *aish could not

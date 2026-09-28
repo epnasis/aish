@@ -214,6 +214,13 @@ _SOURCE_SUFFIX = ".src"
 _KEY_RE = re.compile(r"([0-9a-f]{4,32})(?:s([0-9]{1,9}))?")
 
 
+def continuation_key(text: str) -> str:
+    """The key `store_continuation` returns for `text` with nothing shown,
+    computed without touching the store: a trim plans its stubs with it and
+    writes only the ones it applies (#429)."""
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def store_continuation(
     text: str, store_dir, shown: int | None = None, source: ContinuationSource | None = None
 ) -> str:
@@ -237,7 +244,7 @@ def store_continuation(
     try:
         store = Path(store_dir)
         store.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+        digest = continuation_key(text)
         path = store / f"{digest}.txt"
         if path.exists():
             path.touch()  # refresh recency; the bytes are already right

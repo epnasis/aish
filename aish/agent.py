@@ -26,7 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import weakref
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -2640,6 +2640,31 @@ TURN_TRIMMED_RECOVERABLE = (
     "\n[earlier turn shortened to fit the local context window. The rest is CACHED:"
     ' call read_tool_output(continuation="{key}", page=1) to read it back.]'
 )
+# The third `local:` lever (#429): an earlier call's own arguments, once its
+# results are spent. In #422's chat the last stored request before the failure
+# held 20,800 characters of aish's reply text and 58,701 of tool-call arguments,
+# and nothing shortened arguments. A value up to ARG_KEEP_CHARS stays whole, so a call still
+# says which file or address it was about; a longer one keeps that many
+# characters and the first cut in a message carries the key to all of them.
+ARG_KEEP_CHARS = 80
+ARG_TRIMMED_MARK = "…[trimmed]"
+ARGS_TRIMMED_NOTE = "…[arguments trimmed to save context; the full call is in the chat log]"
+ARGS_TRIMMED_RECOVERABLE = (
+    "…[arguments trimmed to save context. The full call is CACHED:"
+    ' read_tool_output(continuation="{key}", page=1)]'
+)
+# The least a `local:` trim pass that still leaves the request over its budget
+# must free, in estimated tokens, to be worth rewriting history (#429). Every
+# rewrite drops the server-counted anchor and, on Qwen3.6, costs a full re-read
+# of the prompt. Set from #422's chat: over its 81 pairs of consecutive local
+# calls with no trim between them the counted prompt grew by a median 457
+# tokens a call, 1,419 at the 95th percentile;
+# each of the nine trims in task 39 freed between -65 and 703 characters and
+# none brought the request under its budget. A pass
+# freeing less than one call's growth is gone by the next call and bought
+# nothing but the re-read. A pass that brings the request under the budget
+# always runs, whatever it frees.
+MIN_TRIM_YIELD_TOKENS = 1_500
 # `local:` (#415): the share of AISH_LOCAL_CTX − max_tokens a prompt may fill.
 # The rest is margin for what a per-model ratio cannot see: the ratio is an
 # average over whole requests, and one dense tool output (hex, base64,
@@ -3114,6 +3139,66 @@ def _menu_names(menu: list[dict]) -> list[str]:
     return names
 
 
+def _oldest_first(policy: str) -> bool:
+    # The `*_oldest_first` policies run the SAME loop over the whole history,
+    # so the flag follows the name rather than a second list that could drift
+    # from it. `mid_task_args` and `mid_task_turns` are their levers' own
+    # oldest-first loops. (`mid_task_budget` also walks oldest-first and
+    # records false here — pre-existing, and its own loop.)
+    return policy.endswith("oldest_first") or policy in ("mid_task_args", "mid_task_turns")
+
+
+@dataclasses.dataclass
+class _PlannedStub:
+    """One message a trim pass would rewrite, planned without touching the
+    message or the continuation store (#429). `fields` replace the message's
+    own and carry the planned key; `build` makes them for another key ("" =
+    the store could not take the text). The deltas are exact: characters of
+    message content, and characters of the request as JSON (`payload_chars`)."""
+
+    fields: dict
+    build: Callable[[str], dict]
+    key: str
+    cached: str
+    source: "tool_plugins.ContinuationSource | None"
+    content_delta: int
+    payload_delta: int
+
+    @property
+    def shrinks(self) -> bool:
+        if "content" in self.fields:
+            return self.content_delta < 0 and self.payload_delta < 0
+        return self.payload_delta < 0
+
+
+def _json_len(value: Any) -> int:
+    """A value's length inside the request as `backends.payload_chars`
+    measures it (ASCII-escaped JSON)."""
+    return len(json.dumps(value, default=str))
+
+
+def _arg_text_len(value: Any) -> int:
+    return len(value) if isinstance(value, str) else len(json.dumps(value, ensure_ascii=False))
+
+
+def _args_json_len(tool_calls: list[dict]) -> int:
+    """The calls' arguments as the OpenAI-shape converter carries them: each
+    one JSON text, itself a string inside the request's JSON."""
+    return sum(
+        _json_len(json.dumps((call.get("function") or {}).get("arguments") or {}))
+        for call in tool_calls
+    )
+
+
+def _stub_shrinks(message: dict, fields: dict) -> bool:
+    """Is the stub, as it will actually be written, shorter than what it
+    replaces — in characters and in the request? (#429)"""
+    if "content" in fields:
+        old, new = message.get("content") or "", fields["content"]
+        return len(new) < len(old) and _json_len(new) < _json_len(old)
+    return _args_json_len(fields["tool_calls"]) < _args_json_len(message.get("tool_calls") or [])
+
+
 def _serialize(message: dict) -> dict:
     keys = ("role", "content", "tool_name", "images", "documents", "interim")
     record = {k: message[k] for k in keys if k in message}
@@ -3441,6 +3526,10 @@ class Agent:
         # THIS call's estimate, for its `reasoning` record beside the count.
         self._call_estimate: dict | None = None
         self._over_budget_recorded = False  # per task; see _reset_task_state
+        self._futile_trims_recorded: set[str] = set()  # per task; see _reset_task_state
+        # Where the task in hand starts, for a shrink that fires inside a model
+        # call: the argument and turn levers stop before it (#429).
+        self._trim_protect_from: int | None = None
         self.rule_compiler = rule_compiler_ask
         self.current_session = current_session
         # Embedding-based preflight selection (issue #43); opt-in from the
@@ -4265,6 +4354,9 @@ class Agent:
         # be brought under its budget (#415) — once per task, or a stuck task
         # writes one on every model call.
         self._over_budget_recorded = False
+        # Likewise a pass planned and not applied for freeing too little (#429).
+        self._futile_trims_recorded = set()
+        self._trim_protect_from = None
         self._stop_gate_armed_call = 0
         self._stop_gate_comment = ""
         self._stop_gate_refusals = 0
@@ -4559,6 +4651,7 @@ class Agent:
         # A continuation's pictures belong to the question it continues, so
         # only those delivered BEFORE the question are expired.
         this_task = task_start if question is None else question
+        self._trim_protect_from = this_task
         self._expire_delivered_images(this_task)
         self._trim_history_to_budget(protect_from=this_task)
 
@@ -5261,7 +5354,9 @@ class Agent:
                         "seen": ratelimit.describe_chain(exc),
                     })
                     observed_fields["lost_connection"] = len(lost)
-                if overflow and not shrunk and self._can_trim_history():
+                if overflow and not shrunk and self._shrink_pass(
+                    "overflow_oldest_first", dry_run=True
+                ):
                     # The one 4xx aish can answer: the request was refused for
                     # its SIZE, so the next move is a SMALLER request, not a
                     # later one. No wait is taken — nothing about the provider
@@ -5270,8 +5365,8 @@ class Agent:
                     #
                     # The failure is recorded BEFORE the trim so the log reads
                     # in the order the two happened, and the retry is promised
-                    # only because `_can_trim_history` already said the next
-                    # request will be smaller.
+                    # only because the same pass, planned dry, already said
+                    # the next request will be smaller.
                     #
                     # Once per call. A second overflow ends the turn (`bound:
                     # trim_exhausted`) rather than eating the conversation a
@@ -5281,11 +5376,7 @@ class Agent:
                         last, attempt, 0.0, False, waited=waited, budget=budget,
                         observed=observed_fields,
                     )
-                    self._trim_history_to_budget(
-                        int(self._history_size() * OVERFLOW_TRIM_FRACTION),
-                        policy="overflow_oldest_first",
-                        cap_source=f"constant:OVERFLOW_TRIM_FRACTION:{OVERFLOW_TRIM_FRACTION}",
-                    )
+                    self._shrink_pass("overflow_oldest_first")
                     continue
                 # The next wait is priced BEFORE the decision, because the
                 # decision is about affording it. Which bound ended the retry is
@@ -5310,7 +5401,13 @@ class Agent:
                     bound = "trim_exhausted"
                 elif this_lost and (
                     len(lost) >= LOST_CONNECTION_SENDS
-                    or (shrink_after_loss and (shrunk or not self._can_trim_history()))
+                    or (
+                        shrink_after_loss
+                        and (
+                            shrunk
+                            or not self._shrink_pass("lost_connection_oldest_first", dry_run=True)
+                        )
+                    )
                 ):
                     bound = "lost_connection"
                 elif not last.retryable:
@@ -5333,11 +5430,7 @@ class Agent:
                     # happened; promised only because the bound above already
                     # established there was something to shrink.
                     shrunk = True
-                    self._trim_history_to_budget(
-                        int(self._history_size() * OVERFLOW_TRIM_FRACTION),
-                        policy="lost_connection_oldest_first",
-                        cap_source=f"constant:OVERFLOW_TRIM_FRACTION:{OVERFLOW_TRIM_FRACTION}",
-                    )
+                    self._shrink_pass("lost_connection_oldest_first")
                 waited_by_kind[last.kind] = waited + delay
                 if ratelimit.wait(
                     delay, self._cancel, self.status.note, what=ratelimit.wait_caption(last)
@@ -5919,8 +6012,10 @@ class Agent:
         self._append({"role": "user", "content": note, "images": shown})
 
     def _trim_tool_message(self, message: dict) -> str | None:
-        """Shorten one message; returns the continuation key, "" when the text
-        could not be cached, or None when nothing was trimmed.
+        """Shorten one tool result on its own; returns the continuation key, ""
+        when the text could not be cached, or None when nothing was trimmed.
+        The trim passes plan and apply through the same two steps
+        (`_plan_output_stub`, `_apply_stub`).
 
         Trimming used to be a ONE-WAY DOOR. `read_tool_output` can page a large
         result back out of a content-addressed store without re-running the
@@ -5940,11 +6035,18 @@ class Agent:
         This matters most exactly where the trim hurts most: a small local model
         can never hold a long history, so being able to fetch a page back on
         demand is the difference between a bounded context and a lossy one."""
-        if not self._trimmable(message):
+        planned = self._plan_output_stub(message)
+        if planned is None or not planned.shrinks:
             return None
-        # Cache BEFORE overwriting. An unwritable store returns "" and the stub
-        # degrades to the old dead end, which must never be an exception in the
-        # middle of preparing a turn.
+        key = self._apply_stub(planned, message)
+        if key is not None:
+            self._history_rewritten()
+        return key
+
+    def _plan_output_stub(self, message: dict) -> "_PlannedStub | None":
+        """The stub a tool result would get, planned without touching it."""
+        if message.get("role") != "tool" or message.get("_stub"):
+            return None
         # The cached text is the message as the model HAD it, banner and all,
         # so its attribution is inline and the reader partitions it as ever
         # (`offers=None`). What is not in the string is where the bytes came
@@ -5967,47 +6069,143 @@ class Agent:
             if tool_name
             else None
         )
-        return self._stub_in_place(message, source, TRIMMED_RECOVERABLE, TRIMMED_NOTE)
+        return self._plan_content_stub(message, source, TRIMMED_RECOVERABLE, TRIMMED_NOTE)
 
-    def _stub_in_place(
+    def _plan_turn_stub(self, message: dict) -> "_PlannedStub | None":
+        """The second `local:` lever (#415): an earlier turn's own words cut
+        to a stub, cached like a tool output. Index-stable — the message
+        stays, only its text shrinks — so every position recorded elsewhere
+        (`task_start`, a stub's `at`) holds."""
+        if message.get("role") not in ("user", "assistant") or message.get("_stub"):
+            return None
+        return self._plan_content_stub(
+            message, None, TURN_TRIMMED_RECOVERABLE, TURN_TRIMMED_NOTE
+        )
+
+    def _plan_content_stub(
         self,
         message: dict,
         source: "tool_plugins.ContinuationSource | None",
         recoverable: str,
         plain: str,
-    ) -> str:
-        """Cache a message's text, cut it to a stub carrying the key back, and
-        return the key ("" when the store could not take it)."""
-        content = message["content"]
+    ) -> "_PlannedStub | None":
+        """A message's text cut to TRIM_KEEP_CHARS plus the note carrying the
+        key back. None when the text is no longer than what a stub keeps.
+
+        Measured with the key it will really carry (#429). The bound this
+        replaced counted the plain note, about 150 characters short of the
+        recoverable one, so any text in between GREW when stubbed: two
+        `show_image` results in #422's chat took the history from 136,449 to
+        136,513 characters. A plan that would not shrink comes back with
+        `shrinks` false, so the pass can count it rather than write it."""
+        content = message.get("content")
+        if not isinstance(content, str) or len(content) <= TRIM_KEEP_CHARS:
+            return None
+
+        def build(key: str) -> dict:
+            note = recoverable.format(key=key) if key else plain
+            return {"content": content[:TRIM_KEEP_CHARS] + note, "_stub": True}
+
+        key = self._planned_key(content)
+        fields = build(key)
+        return _PlannedStub(
+            fields=fields,
+            build=build,
+            key=key,
+            cached=content,
+            source=source,
+            content_delta=len(fields["content"]) - len(content),
+            payload_delta=_json_len(fields["content"]) - _json_len(content),
+        )
+
+    def _plan_args_stub(self, message: dict, results: list[dict]) -> "_PlannedStub | None":
+        """The third `local:` lever (#429): an earlier call's own arguments,
+        each value over ARG_KEEP_CHARS cut to that many characters.
+
+        Only once the call's results are spent — every one of them a stub
+        already, or too short to become one (`results` as the pass has planned
+        them) — so the arguments are never cut while what they produced is
+        still whole beside them. Everything but the argument values stays: the
+        call's id, its name, any provider field on it, and its place, so the
+        pairing with its results is untouched. The full calls are cached, and
+        the first cut value carries the key; without a store it names the
+        log's `call` records instead."""
+        if message.get("role") != "assistant" or message.get("_args_stub"):
+            return None
+        calls = message.get("tool_calls") or []
+        raw = [(call.get("function") or {}).get("arguments") for call in calls]
+        arguments = [args for args in raw if isinstance(args, dict)]
+        if not calls or len(arguments) != len(calls):
+            return None
+        if any(self._plan_output_stub(result) is not None for result in results):
+            return None
+        if not any(
+            _arg_text_len(value) > ARG_KEEP_CHARS for args in arguments for value in args.values()
+        ):
+            return None
+        cached = json.dumps(
+            [
+                {"name": (call.get("function") or {}).get("name", ""), "arguments": args}
+                for call, args in zip(calls, arguments, strict=True)
+            ],
+            ensure_ascii=False,
+            indent=1,
+        )
+
+        def build(key: str) -> dict:
+            note = ARGS_TRIMMED_RECOVERABLE.format(key=key) if key else ARGS_TRIMMED_NOTE
+            first = True
+            shortened_calls = []
+            for call, args in zip(calls, arguments, strict=True):
+                shortened: dict = {}
+                for name, value in args.items():
+                    if _arg_text_len(value) <= ARG_KEEP_CHARS:
+                        shortened[name] = value
+                        continue
+                    kept = value[:ARG_KEEP_CHARS] if isinstance(value, str) else ""
+                    shortened[name] = kept + (note if first else ARG_TRIMMED_MARK)
+                    first = False
+                function = {**(call.get("function") or {}), "arguments": shortened}
+                shortened_calls.append({**call, "function": function})
+            return {"tool_calls": shortened_calls, "_args_stub": True}
+
+        key = self._planned_key(cached)
+        fields = build(key)
+        return _PlannedStub(
+            fields=fields,
+            build=build,
+            key=key,
+            cached=cached,
+            source=None,
+            content_delta=0,
+            payload_delta=_args_json_len(fields["tool_calls"]) - _args_json_len(calls),
+        )
+
+    def _planned_key(self, text: str) -> str:
+        return tool_plugins.continuation_key(text) if self.tool_output_dir else ""
+
+    def _apply_stub(self, planned: "_PlannedStub", message: dict) -> str | None:
+        """Cache what the stub drops and write the stub in place; the key, ""
+        when the store could not take it, or None when the stub written with
+        the key actually minted would not be shorter (#429). The caller drops
+        the anchor (`_history_rewritten`)."""
         key = (
-            tool_plugins.store_continuation(content, self.tool_output_dir, source=source)
+            tool_plugins.store_continuation(
+                planned.cached, self.tool_output_dir, source=planned.source
+            )
             if self.tool_output_dir
             else ""
         )
-        note = recoverable.format(key=key) if key else plain
-        message["content"] = content[:TRIM_KEEP_CHARS] + note
-        # Carried on the message so the `sent` record can say the model was
-        # handed a stub rather than re-deriving that from the text (#352). A
-        # private key: `_serialize` never logs it, the converters build fresh
-        # dicts, and the ollama library ignores unknown fields. It is also what
-        # keeps a stub from being stubbed again (`_trimmable`).
-        message["_stub"] = True
-        self._history_rewritten()
+        fields = planned.fields if key == planned.key else planned.build(key)
+        if not _stub_shrinks(message, fields):
+            return None
+        # `_stub` / `_args_stub` ride on the message so the `sent` record can
+        # say the model was handed a stub rather than re-deriving that from
+        # the text (#352). Private keys: `_serialize` never logs them, the
+        # converters build fresh dicts, and the ollama library ignores unknown
+        # fields. They are also what keeps a stub from being stubbed again.
+        message.update(fields)
         return key
-
-    def _stub_turn_message(self, message: dict) -> str | None:
-        """The second `local:` lever (#415): cut an earlier turn's own words
-        to a stub, cached like a tool output. None when there is nothing to
-        cut. Index-stable — the message stays, only its text shrinks — so
-        every position recorded elsewhere (`task_start`, a stub's `at`) holds.
-        """
-        if message.get("role") not in ("user", "assistant") or message.get("_stub"):
-            return None
-        # Against the RECOVERABLE note, the one normally written: a message
-        # barely over the plain note's bound would grow when stubbed.
-        if len(message.get("content") or "") <= TRIM_KEEP_CHARS + len(TURN_TRIMMED_RECOVERABLE):
-            return None
-        return self._stub_in_place(message, None, TURN_TRIMMED_RECOVERABLE, TURN_TRIMMED_NOTE)
 
     def _expire_delivered_images(self, task_start: int) -> None:
         """Drop pictures aish delivered in EARLIER tasks, unconditionally.
@@ -6038,31 +6236,6 @@ class Agent:
             self._history_rewritten()
             dropped.append(self._stub_ref(i))
         self._record_trim("delivered_images", before, budget=None, stubbed=dropped)
-
-    def _trimmable(self, message: dict) -> bool:
-        """Would `_trim_tool_message` shorten this one?
-
-        Split out so the overflow path can ask BEFORE it trims (#388). It has
-        to: the `model_error` record saying a retry is coming is written first,
-        so the failure does not land in the log underneath the trim it caused,
-        and the only honest way to say "retrying" ahead of time is to know the
-        next request will actually be smaller. Asking the trimmer's own
-        condition rather than restating it is what keeps the two in step.
-        """
-        # Never a stub again: a stub with its key is longer than the bound
-        # below, and re-stubbing one cached the stub, handed out a key to that
-        # 200-character fragment in place of the real one, and rewrote history
-        # on every step for nothing (#415, measured in the log that filed it).
-        return (
-            message.get("role") == "tool"
-            and not message.get("_stub")
-            and len(message.get("content") or "") > TRIM_KEEP_CHARS + len(TRIMMED_NOTE)
-        )
-
-    def _can_trim_history(self) -> bool:
-        """Is there anything left for a trim to shorten? Over the same slice
-        `_trim_history_to_budget` walks — never the system message at 0."""
-        return any(self._trimmable(message) for message in self.messages[1:])
 
     def _trim_history_to_budget(
         self,
@@ -6100,9 +6273,10 @@ class Agent:
 
         On `local:` (#415) the sizes are estimated tokens of the whole request,
         a trim that fires cuts to the low-water mark rather than just under the
-        budget, and when every tool output is already a stub, earlier turns'
-        own words are cut too — oldest first, never at or after
-        `protect_from` (the task being prepared), never a system message.
+        budget, and when every tool output is already a stub, earlier calls'
+        arguments (#429) and then earlier turns' own words are cut too —
+        oldest first, never at or after `protect_from` (the task being
+        prepared), never a system message.
         """
         self._menu_for_estimate()
         if budget is None:
@@ -6112,39 +6286,188 @@ class Agent:
             target = budget
         if self._history_size() <= budget:
             return
-        before, estimate_before = self._total_chars(), self._estimate_for_record()
-        stubbed: list[dict] = []
-        for i in range(1, len(self.messages)):
-            if self._history_size() <= target:
-                break
-            key = self._trim_tool_message(self.messages[i])
-            if key is not None:
-                stubbed.append(self._stub_ref(i, key))
-        self._record_trim(
-            policy, before, budget=budget, stubbed=stubbed, cap_source=cap_source,
-            estimate_before=estimate_before, low_water=target,
+        self._trim_pass(
+            budget, target,
+            self._levers(policy, range(1, len(self.messages)), protect_from, boundary=True),
+            cap_source=cap_source,
         )
-        if protect_from is not None:
-            self._trim_turns(target, budget, protect_from, policy="turns_oldest_first")
 
-    def _trim_turns(self, target: int, budget: int, protect_from: int, *, policy: str) -> None:
-        """Cut earlier turns' own words, oldest first, down to `target` — the
-        `local:` lever that runs once tool outputs are exhausted (#415).
-        `policy` says where it ran: `turns_oldest_first` preparing a task,
-        `mid_task_turns` between two model calls (explain's MID_TURN_TRIM)."""
-        if not self._token_budgeted() or self._history_size() <= target:
+    def _levers(
+        self, policy: str, outputs: "Iterable[int]", protect_from: int | None, *, boundary: bool
+    ) -> list[tuple[str, str, list[int]]]:
+        """What a pass may shorten, in the order it tries: tool results first
+        (`policy` names that lever and the pass), then — on `local:`, and only
+        before `protect_from` — earlier calls' arguments, then earlier turns'
+        own words. `mid_task_*` policies say the pass ran between two model
+        calls (explain's MID_TURN_TRIM)."""
+        levers = [("outputs", policy, list(outputs))]
+        if self._token_budgeted() and protect_from is not None:
+            earlier = list(range(1, min(protect_from, len(self.messages))))
+            args, turns = (
+                ("args_oldest_first", "turns_oldest_first")
+                if boundary
+                else ("mid_task_args", "mid_task_turns")
+            )
+            levers.append(("args", args, earlier))
+            levers.append(("turns", turns, earlier))
+        return levers
+
+    def _trim_pass(
+        self,
+        budget: int,
+        target: int,
+        levers: list[tuple[str, str, list[int]]],
+        *,
+        cap_source: str = "",
+        dry_run: bool = False,
+    ) -> bool:
+        """Plan every lever down to `target`, then apply the plan or not at
+        all. True when it rewrote history (or, `dry_run`, would have).
+
+        Planned first because a pass is only worth its cost when it frees
+        something (#429). In #422's chat nine trims in task 39 freed between
+        -65 and 703 characters each and left the request over its budget
+        every time, and each one still dropped the server-counted anchor and,
+        on Qwen3.6, cost a full re-read of the prompt. So on `local:` a pass
+        that would leave the request over the budget AND free under
+        MIN_TRIM_YIELD_TOKENS rewrites nothing; it says so once per task
+        (`could_free`). A pass that brings the request under the budget always
+        runs. Other providers keep the character budget and no floor: the
+        data behind the constant is `local:` data."""
+        token_budgeted = self._token_budgeted()
+        size = self._history_size()
+        if token_budgeted:
+            estimate = self._prompt_estimate()
+            base_chars = estimate["chars"]
+            ratio = token_ratio.ratio(f"{self.provider}:{self.model}")
+        base_total = self._total_chars()
+        work = list(self.messages)
+        payload_delta = content_delta = 0
+        projected = size
+        plans: list[tuple[str, str, list[tuple[int, _PlannedStub]], int]] = []
+        for lever, policy, indices in levers:
+            chosen: list[tuple[int, _PlannedStub]] = []
+            longer = 0
+            for i in indices:
+                if projected <= target:
+                    break
+                planned = self._plan_lever(lever, work, i)
+                if planned is None:
+                    continue
+                if not planned.shrinks:
+                    longer += 1
+                    continue
+                work[i] = {**work[i], **planned.fields}
+                payload_delta += planned.payload_delta
+                content_delta += planned.content_delta
+                # After a rewrite the anchor is gone and the whole request is
+                # converted at the ratio, so that is what the plan projects.
+                projected = (
+                    ratio.tokens(base_chars + payload_delta)
+                    if token_budgeted
+                    else base_total + content_delta
+                )
+                chosen.append((i, planned))
+            plans.append((lever, policy, chosen, longer))
+        if not any(chosen for _, _, chosen, _ in plans):
+            return False
+        if token_budgeted and projected > budget:
+            could_free = ratio.tokens(base_chars) - ratio.tokens(base_chars + payload_delta)
+            if could_free < MIN_TRIM_YIELD_TOKENS:
+                if not dry_run:
+                    self._record_futile_trim(
+                        plans[0][1], budget, target, size, could_free, cap_source,
+                        sum(longer for _, _, _, longer in plans),
+                    )
+                return False
+        if dry_run:
+            return True
+        self._futile_trims_recorded.clear()
+        for lever, policy, chosen, longer in plans:
+            if not chosen:
+                continue
+            before, estimate_before = self._total_chars(), self._estimate_for_record()
+            args_before = self._arg_chars() if lever == "args" else 0
+            stubbed: list[dict] = []
+            for i, planned in chosen:
+                key = self._apply_stub(planned, self.messages[i])
+                if key is not None:
+                    stubbed.append(self._stub_ref(i, key))
+            if stubbed:
+                self._history_rewritten()
+            extra: dict = {"skipped_longer": longer} if longer else {}
+            if lever == "args":
+                extra.update(arg_chars_before=args_before, arg_chars_after=self._arg_chars())
+            self._record_trim(
+                policy, before, budget=budget, stubbed=stubbed, cap_source=cap_source,
+                estimate_before=estimate_before, low_water=target, extra=extra,
+            )
+        return True
+
+    def _plan_lever(self, lever: str, work: list[dict], index: int) -> "_PlannedStub | None":
+        message = work[index]
+        if lever == "outputs":
+            return self._plan_output_stub(message)
+        if lever == "turns":
+            return self._plan_turn_stub(message)
+        end = index + 1
+        while end < len(work) and work[end].get("role") == "tool":
+            end += 1
+        return self._plan_args_stub(message, work[index + 1:end])
+
+    def _arg_chars(self) -> int:
+        """Tool-call arguments as the request carries them (JSON text inside
+        JSON), for the argument lever's record: `bytes_*` count content only,
+        which that lever never changes."""
+        return sum(
+            _args_json_len(message["tool_calls"])
+            for message in self.messages
+            if message.get("tool_calls")
+        )
+
+    def _record_futile_trim(
+        self,
+        policy: str,
+        budget: int,
+        target: int,
+        estimate: int,
+        could_free: int,
+        cap_source: str,
+        skipped_longer: int,
+    ) -> None:
+        """A `local:` pass that was planned and not applied: it would have
+        freed `could_free` estimated tokens, under MIN_TRIM_YIELD_TOKENS, and
+        left the request over its budget (#429). Once per task per pass, and
+        again after any pass that did rewrite — a stuck task would otherwise
+        write one before every model call. `affected: 0` and the estimate
+        unchanged, because nothing was."""
+        if policy in self._futile_trims_recorded:
             return
-        before, estimate_before = self._total_chars(), self._estimate_for_record()
-        stubbed: list[dict] = []
-        for i in range(1, protect_from):
-            if self._history_size() <= target:
-                break
-            key = self._stub_turn_message(self.messages[i])
-            if key is not None:
-                stubbed.append(self._stub_ref(i, key))
-        self._record_trim(
-            policy, before, budget=budget, stubbed=stubbed,
-            estimate_before=estimate_before, low_water=target,
+        self._futile_trims_recorded.add(policy)
+        if not cap_source:
+            _, cap_source = self._history_budget()
+        chars = self._total_chars()
+        fields: dict = {"skipped_longer": skipped_longer} if skipped_longer else {}
+        self._emit_step(
+            kind="trim",
+            policy=policy,
+            affected=0,
+            stubbed=[],
+            stubbed_truncated=0,
+            bytes_before=chars,
+            bytes_after=chars,
+            keep_chars=TRIM_KEEP_CHARS,
+            budget=budget,
+            cap_source=cap_source,
+            oldest_first=_oldest_first(policy),
+            unit="tokens",
+            estimate_before=estimate,
+            estimate_after=estimate,
+            low_water=target,
+            fits=False,
+            could_free=could_free,
+            min_yield=MIN_TRIM_YIELD_TOKENS,
+            **fields,
         )
 
     def _menu_for_estimate(self) -> None:
@@ -6235,6 +6558,7 @@ class Agent:
         cap_source: str = "",
         estimate_before: int | None = None,
         low_water: int | None = None,
+        extra: dict | None = None,
     ) -> None:
         """The `trim` record (contract §3.5). Renderless — it edits history
         rather than describing a call, so it cannot ride the `tool` step.
@@ -6265,13 +6589,9 @@ class Agent:
             keep_chars=TRIM_KEEP_CHARS,
             budget=budget,
             cap_source=("constant:TRIM_KEEP_CHARS" if budget is None else cap_source),
-            # The two `*_oldest_first` policies run the SAME loop over the whole
-            # history, so the flag follows the name rather than a second list
-            # that could drift from it. `mid_task_turns` is the turn lever's
-            # own oldest-first loop. (`mid_task_budget` also walks oldest-
-            # first and records false here — pre-existing, and its own loop.)
-            oldest_first=policy.endswith("oldest_first") or policy == "mid_task_turns",
+            oldest_first=_oldest_first(policy),
             **self._token_trim_fields(budget, estimate_before, low_water),
+            **(extra or {}),
         )
 
     def _token_trim_fields(
@@ -6310,8 +6630,6 @@ class Agent:
         budget, _ = self._history_budget()
         if self._history_size() <= budget:
             return
-        target = self._low_water(budget)
-        before, estimate_before = self._total_chars(), self._estimate_for_record()
         tool_indices = [
             i
             for i in range(task_start, len(self.messages))
@@ -6326,24 +6644,34 @@ class Agent:
                 i for i in range(1, len(self.messages))
                 if self.messages[i].get("role") == "tool" and i not in newest
             ]
-        stubbed: list[dict] = []
-        for i in candidates:
-            key = self._trim_tool_message(self.messages[i])
-            if key is not None:
-                stubbed.append(self._stub_ref(i, key))
-                if self._history_size() <= target:
-                    break
-        self._record_trim(
-            "mid_task_budget", before, budget=budget, stubbed=stubbed,
-            estimate_before=estimate_before, low_water=target,
-        )
         # A continuation's question sits before `task_start`, and it is the
         # one earlier message the task in hand cannot do without.
-        self._trim_turns(
-            target, budget, task_start if protect_from is None else protect_from,
-            policy="mid_task_turns",
+        self._trim_pass(
+            budget, self._low_water(budget),
+            self._levers(
+                "mid_task_budget", candidates,
+                task_start if protect_from is None else protect_from, boundary=False,
+            ),
         )
         self._record_over_budget(budget)
+
+    def _shrink_pass(self, policy: str, *, dry_run: bool = False) -> bool:
+        """Cut what aish holds to OVERFLOW_TRIM_FRACTION of its measured size,
+        after the provider refused the request for its size (#388) or a
+        `local:` call lost its connection twice (#419). The same pass as the
+        budget's, so the same levers and the same yield floor apply; asked
+        with `dry_run` first, because the record promising a retry is written
+        before the trim, and a retry may be promised only if the next request
+        will really be smaller."""
+        target = int(self._history_size() * OVERFLOW_TRIM_FRACTION)
+        return self._trim_pass(
+            target, target,
+            self._levers(
+                policy, range(1, len(self.messages)), self._trim_protect_from, boundary=False
+            ),
+            cap_source=f"constant:OVERFLOW_TRIM_FRACTION:{OVERFLOW_TRIM_FRACTION}",
+            dry_run=dry_run,
+        )
 
     def expand_alias(self, command: str) -> str:
         """Rewrite the first word via the aish alias map, BEFORE approval sees
@@ -7438,7 +7766,7 @@ class Agent:
                     item["tool_name"] = names[0]
                 elif names:
                     item["tool_names"] = names
-                if any(m.get("_stub") for m in sources):
+                if any(m.get("_stub") or m.get("_args_stub") for m in sources):
                     item["stub"] = True
             if entries:
                 item["media"] = [{"path": path, "bytes": size} for path, size in entries]
