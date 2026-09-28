@@ -280,6 +280,21 @@ class TestTheArgumentLever:
             planned = agent._plan_args_stub(agent.messages[i], [agent.messages[i + 1]])
             assert planned is None
 
+    def test_a_result_that_can_never_be_stubbed_does_not_hold_its_arguments(
+        self, monkeypatch, tmp_path
+    ):
+        """A 227-character `edit_file` result, as in #422's chat: longer than
+        a stub keeps, shorter than a stub. It will never be cut, so it must
+        not keep its call's 2,972 characters of arguments whole forever."""
+        steps: list[dict] = []
+        agent = _local(monkeypatch, tmp_path, steps)
+        call = {"role": "assistant", "content": "", "tool_calls": [{"function": {
+            "name": "edit_file", "arguments": {"path": "/x.py", "new": "n" * 2_972}}}]}
+        result = {"role": "tool", "tool_name": "edit_file", "content": "e" * 227}
+        assert not agent._plan_output_stub(result).shrinks
+        planned = agent._plan_args_stub(call, [result])
+        assert planned is not None and planned.shrinks
+
     def test_a_stubbed_call_is_never_stubbed_again(self, monkeypatch, tmp_path):
         steps: list[dict] = []
         agent, calls, protect, _ = self._history(monkeypatch, tmp_path, steps)

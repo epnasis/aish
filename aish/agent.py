@@ -6014,7 +6014,8 @@ class Agent:
     def _trim_tool_message(self, message: dict) -> str | None:
         """Shorten one tool result on its own; returns the continuation key, ""
         when the text could not be cached, or None when nothing was trimmed.
-        The trim passes plan and apply through the same two steps
+        No trim site calls it any more — every one goes through `_trim_pass` —
+        but it is the one-message form of the same two steps
         (`_plan_output_stub`, `_apply_stub`).
 
         Trimming used to be a ONE-WAY DOOR. `read_tool_output` can page a large
@@ -6137,7 +6138,12 @@ class Agent:
         arguments = [args for args in raw if isinstance(args, dict)]
         if not calls or len(arguments) != len(calls):
             return None
-        if any(self._plan_output_stub(result) is not None for result in results):
+        # Spent = no result could still be stubbed. One whose stub would be
+        # longer than its text can never be, so it holds nothing back.
+        if any(
+            (planned := self._plan_output_stub(result)) is not None and planned.shrinks
+            for result in results
+        ):
             return None
         if not any(
             _arg_text_len(value) > ARG_KEEP_CHARS for args in arguments for value in args.values()
