@@ -6503,15 +6503,15 @@ class Agent:
         left to cut is the task itself, and the record says so, once per task
         (#415). Only from `_enforce_budget`, which runs right before a call.
 
-        Nothing downstream bounds that send (#416). mlx-lm 0.31.3, the only
-        `local:` server checked, has no context-length check: its request
-        handler's only 400s are a bad Content-Length, bad JSON and a body that
-        is not an object (`mlx_lm/server.py` 1129/1140/1153 on mi), so the
-        #388 shrink-and-retry, which needs a provider refusal, never fires
-        here. The server prefills whatever arrives. Whether that fits is
-        decided by its memory, and a stream it drops is retried as-is
-        (`StreamCutOff`). `fits: false` is an estimate, and so it can be
-        wrong in either direction: in #416 it was a 2.0 constant's
+        Stock mlx-lm 0.31.3 has no context-length check (`mlx_lm/server.py`
+        1129/1140/1153 on mi, #416). mi's server does refuse: #422's chat got
+        HTTP 404 "prompt of 83861 tokens + max_tokens 16384 exceeds the
+        context length 100000 this server admits (MLX_ADMIT_TOKENS)", which
+        the #388 shrink-and-retry answers. A `local:` server without such a
+        guard prefills whatever arrives; whether that fits is decided by its
+        memory, and a stream it drops is retried as-is (`StreamCutOff`).
+        `fits: false` is an estimate, and so it can be wrong in either
+        direction: in #416 it was a 2.0 constant's
         over-count of a request the server read as 46,954 tokens."""
         if not self._token_budgeted() or self._over_budget_recorded:
             return
