@@ -14,6 +14,7 @@
 **#355 (2026-09-04) added `received` as §3.13** — the COMPLETE response of every successful model call, stored whole in the per-chat store beside the request, so what came back is captured as completely as what went out (the point is completeness and forward-compatibility, not a curated summary: `raw_blocks` carries provider content types verbatim, so a new one is kept whole rather than reduced to its name). Renderless, symmetric with `sent`; the reader states it and the step screen shows it beside the curated reasoning/said view.
 
 **#420 (2026-09-26) changed how `sent` (§3.12) serialises, and added `order`.** The blobs and the `request` digest were taken over SORTED keys (`agent._canonical`), so the stored request was not the one the model received wherever a chat template renders the request as JSON text — Qwen's renders the tool schemas. Measured on mi for session-20260925-204008-294943 turn 22 call 1: the request rebuilt from the record was 46,790 prompt tokens, the same request with the tool schemas' original key order 46,954 (exactly the original call), and greedy decoding of the sorted form produced a different reply. From #420 every blob, `options`, and the whole request are serialised in the order the adapter handed them to the client LIBRARY (`agent._as_sent`), and `order` lists the top-level keys in that order. **That is the adapter's order, which is not always the wire's.** On the OpenAI SDK (`local:` included) the stored `messages` and `tools` blobs equal the wire body's `messages` and `tools` serialised compactly with non-ASCII unescaped — pinned by a wire capture in the suite (`TestSentAtTheSeam.test_local_blobs_equal_the_wire_body`); the #420 review reported the same by wire capture on the Anthropic SDK, which the suite does not pin. On ollama the library rebuilds each message and tool through its own pydantic models before sending, so the wire carries ITS field order (a tool goes out `type` before `function`, `name`/`description`/`parameters` inside it), and the stored blob holds the arguments aish handed the library (`backends.passthrough_request`). The top-level order differs from the wire on every SDK: the OpenAI SDK flattens `extra_body` into the body and puts `messages` first, and the Anthropic and ollama libraries build their own body. **A record without `order` predates #420: its blobs hold the same values with keys sorted, and its `request` digest is over `_canonical({**options, messages, tools?, system?})`.** A reader that only resolves blobs by digest handles both unchanged; one that replays or re-hashes must branch on `order`.
+**#424 (2026-09-27) added `objective` as §3.14** — what the chat is FOR, as a ledger of goals and tasks, one revision per task end, written off the interactive path by the distiller role or the extractive floor. Renderless, and recorded only: nothing hands it to the model or the screen yet (#425, #426).
 **#352 slice 1 (2026-09-03) stamped `model_call` on the rendered `tool_start` and `tool` steps** — the second amendment to §2's fork 1(b), beside the `brief` one (`docs/diagnostics.md`). Additive; omitted rather than zeroed where no recorded model call issued the call (claude-max), matching the renderless `call` record it mirrors. The browser is built from rendered steps alone, so without it the trace card could fold its timeline into rounds only by counting rows. `thinking` is still untouched.
 **#339 (2026-08-30) added `retry` as §3.11, and with it the `superseded` KEY** — the first record in this document about the log being rewritten rather than about a decision inside a turn. It exists because Retry deleted what it discarded, so a §0-corollary-2 absence could be created *after the fact*, which no record shape here anticipated. Rendered, and the one record whose PLACEMENT is a reader rule.
 **#396 (2026-09-20) added `reminder` to §3.8** — the digest of the per-task system message the recalled items were injected AS, under the same content address the `brief` gives its system parts, so a reader joins the two records exactly instead of by position. Additive key on the existing `knowledge` step; absent on every log written before it, and a reader serves those by the positional join #386 shipped with. A stamp the brief has no part for is its own reader state (`not_on_brief`) and never a fallback to position: the writer named the message, and a part it did not name shown as "what the model was handed" is the confident-false-conclusion class §0 exists to prevent.
@@ -663,6 +664,79 @@ Every other record answers what the model **did**, what **governed** it, what it
 **`stop` changed meaning on the OpenAI-compatible streaming path (gemini, local) on 2026-09-23.** Before that, the stream never read `finish_reason`, so an absent `stop` on those records means *nobody looked*; from then on it means *no chunk carried one*. The two are different facts and a reader must not treat an old record's absence as the provider sending none. Non-streaming and Anthropic records were unaffected. `test_stream_keeps_the_finish_reason_the_provider_sent`.
 
 **`repetition` on a `reasoning` record (#417)** says aish stopped that call's stream because its tail had become one passage repeated: `{period_chars, repeats, span_chars, chars, chunks, secs, passage}` — the passage's length, the whole copies at the end, the characters they cover, the characters and chunks received when it was stopped, the seconds since the stream opened, and the passage itself cut to `repetition.PASSAGE_SAMPLE_CHARS`. Counts and aish's own clock only; it names no cause. On such a record `stop` is absent (no finish reason was received) and `tokens` is `[0, 0]` (a stream stopped early carries no usage) — both are absences with this one reading, never *the provider said nothing*. Absent on every call that was not stopped. Reasoning only: the answer text is never watched. `close_error` beside it is what closing the stream raised when the stream had been read to its end — never recorded, and never raised, while a Stop or a failure is in flight. `TestARepeatingReplyIsStopped`.
+
+---
+
+### 3.14 · `objective` — what the chat is FOR, one revision at a time (#423, #424)
+
+**BUILT (#424, slice 1: recorded only).** Written at the END of a task, off the interactive path, by `objective.distill_at_boundary` through the server-side writer (`session.logref.step`, §1.1) — the web's `_after_turn` epilogue and the CLI REPL's post-task thread. Renderless: in `RENDERLESS_STEPS`, never handed to `on_step`, so it opens no card live or cold and is not activity (`docs/session-log.md` L3). Nothing reads it back into the model or the screen yet — that is #425 and #426. Rationale: `docs/objective.md`.
+
+One record per **revision**. The current Objective is the newest **live** `objective` record (L7: a superseded one is skipped), so Retry and forks inherit the existing rules instead of growing their own.
+
+```json
+{"kind": "objective", "turn": 12, "revision": 3, "origin": "distiller",
+ "chat": "session-20260101-090000-000000", "covers_to_turn": 12, "confirmed": false,
+ "change": "refined", "base": 2, "charter": "distiller", "version": "2",
+ "model": "local:mlx-community/Qwen3.6-35B-A3B-8bit",
+ "goals": [
+   {"id": "g1", "text": "Kurs EUR/PLN każdego ranka, żeby zdecydować o wymianie",
+    "state": "active", "state_by": "distiller", "text_by": "distiller",
+    "cites": [{"session": "session-20260101-090000-000000", "ref": "m:a1b2c3d4e5f6"}],
+    "why": {"text": "żeby zdecydować czy wymieniać",
+            "cites": [{"session": "…", "ref": "m:a1b2c3d4e5f6"}]},
+    "done_when": "unstated",
+    "constraints": [{"text": "klucze trzymaj w aish secrets",
+                     "cites": [{"session": "…", "ref": "m:0a1b2c3d4e5f"}]}],
+    "tasks": [
+      {"id": "t4", "text": "zapisać skrypt jako skill", "state": "done",
+       "state_by": "distiller", "text_by": "distiller",
+       "cites": [{"session": "…", "ref": "t11.c3"}]}]}],
+ "not_goal_bearing": ["m:9f8e7d6c5b4a"],
+ "downgrades": [{"task": "t5", "from": "done", "why": "no answer or action cited"}]}
+```
+
+| field | why |
+|---|---|
+| `turn` | The task boundary this revision was taken at — the §2 turn of the task whose end triggered it, never the turn running when the write landed. A slow local distill lands while the NEXT task runs; stamping the running turn would attribute it to a task it never read. |
+| `revision` | 1 + the highest revision in the file, superseded ones included — an id handed out is never reissued (the `last_turn` rule). |
+| `origin` | `distiller` (the isolated role, `docs/roles.md`), `extractive` (the floor, no model), `owner` (an edit, D7 — no writer yet; #425). |
+| `covers_to_turn` | **Set by code, never claimed by the model.** Every owner text the floor would keep (below) in a turn ≤ this is accounted for. On a distiller revision it is always the boundary: a revision that leaves one uncited and unlisted does not validate. On an extractive one it is the boundary, because the floor copies every such text verbatim. |
+| `not_goal_bearing` | Distiller only: owner texts the distiller declared carry nothing about what he wants, instead of citing them. The other half of the coverage rule. |
+| `downgrades` | Distiller only: `[{goal\|task: id, from: "done", why}]` — each `done` the model claimed without an answer or action cited, which code turned into `unknown`. |
+| `base` | The revision the distiller was handed as "previous" — the newest live `distiller` or `owner` revision; `null` for the first. An `extractive` revision is never a base: it copies text, it does not account for it. The distiller rebuilds from ALL the material up to `turn`; the base only lends ids, `change`, owner-set fields, `was` and quoted purposes. |
+| `confirmed` | Always `false` here. Only the owner confirms (#425). |
+| `change` | The distiller's word: `new` \| `unchanged` \| `refined` \| `expanded` \| `pivoted` \| `unknown`. Recorded, acted on by nothing yet (the pivot question is #425). Absent on `extractive`. |
+| `goals[]` | Self-contained (§0 corollary 1): the whole ledger, not a diff. `state` ∈ `active` \| `parked` \| `done` \| `dropped` \| `unknown`; at most one `active`. |
+| `goals[].tasks[]` | `state` ∈ `pending` \| `in_progress` \| `done` \| `stopped` \| `superseded` \| `unknown`; `superseded` carries `replaced_by` naming another task of the revision. |
+| `was` | On a goal or task whose `state` is `unknown`: the last state it had that was not. Set by code, so leaving `unknown` is judged from there — without it, done → unknown → in_progress would reopen in two revisions what one may not. |
+| `state_by` / `text_by` | Who last SET that field: `distiller` \| `owner`. A distiller revision may not change a field whose previous value was set by the owner. |
+| `cites[]` | `{session, ref}`. `session` is the chat the ref resolves in (always this chat in slice 1; a compacted chat's refs resolve in its original, #427). |
+| `constraints[]` | Owner requirements, each **a verbatim substring** (whitespace runs collapsed on both sides, nothing else) of the owner text of one of its cites. |
+| `goals[].why` / `done_when` | His purpose and his finish line: `{text, cites}` checked like a constraint, or `"unstated"`. Once quoted, either may be replaced only by words quoted FROM a message of his at a later turn than the old quote's source, never by `"unstated"`. |
+| `extract[]` | Extractive only: `{ref, turn, text}` — the owner's texts in (`base.covers_to_turn`, `turn`] that pass the floor filter, verbatim. `goals` on an extractive revision are the base's, carried unchanged. |
+| `charter` / `version` / `model` | Distiller only: what wrote it. The `role` record (§ roles D7) written immediately before, with the same `turn`, carries attempts, latency, usage and the input bytes' digest. |
+
+**Refs.** `m:<id>` — a `message` record's minted `turn` id (an owner message, a final answer, a stopped task's answer). `t<N>.c<M>` — the `tool` step with §2 turn N and call M (an action that ran, or one the owner denied or held). `t<N>.end` — a `task_end` that recorded a failure. `c#<digest>` — an audit `command` record: a `!` command he ran, or, in a log from before call ids, a denial, a card comment or an approved action. A message with no id (a log from before ids) is `m#<digest>`. Both digests are of what the record says and when, so a rewrite of the file cannot move them. Every ref a revision carries is one the distiller was shown, so it resolves in the log by construction.
+
+**What each state must cite**, checked in code (`objective.validate_answer`) — every one is a claim (L8):
+
+| state | must cite |
+|---|---|
+| goal, any but `unknown` | at least one owner text (a message, or a card comment) — a goal nobody asked for is invented |
+| task `pending` / `in_progress` | where it was asked or planned: an owner text or an answer |
+| `done` (goal or task) | evidence: a final answer, an action that ran (`t<N>.c<M>` with `ok: true`), or a command he ran himself that recorded exit code 0. Without it the item is DOWNGRADED to `unknown` and listed in `downgrades` — the revision stands |
+| task `stopped` | the owner's own act: a denial, a stopped task, a command he ran himself, or his message |
+| goal `dropped` | an owner cite — a denial or his message; never inferred |
+| task `superseded` | `replaced_by` |
+| `unknown` | nothing: always legal |
+
+**There is no "dropped silently" state.** An open task that no revision advances is a derived REPORT for a reader (#428), worded as the observation — never a state a writer can set.
+
+**Transitions** against the base revision: `done` and `stopped` may reopen only with an owner cite from the new material; `superseded` may only move to `unknown`, and `dropped` back only with such a cite; anything the distiller set may become `unknown` (a field the owner set may not be changed at all), and leaving `unknown` is judged from `was`. A goal or task the model leaves out is **carried forward unchanged by code** — a pivot never overwrites.
+
+**Failure.** A distill that does not validate, cannot run (claude-max has no seam; an unadmitted charter), or raises writes its `role` record with the status and `why`, leaves the previous revision standing, and writes an `extractive` revision if any owner text is uncovered. It never raises into the task.
+
+**A rewritten chat.** The boundary is the file's size at `task_end` plus the bytes of its last line. The distill reads and writes under the log's write lock (the lock every rewrite holds) and only while the file still ends, at that size, with that line. A Retry or redaction that lands first yields one `role` record with `why` saying the boundary no longer exists; one that lands while the model is thinking yields the `role` record — the call was made and paid for — carrying `discarded`, and no revision. A revision distilled from an attempt the owner discarded is never written.
 
 ---
 

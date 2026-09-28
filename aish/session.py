@@ -630,6 +630,11 @@ RENDERLESS_STEPS = frozenset(
         # per-chat store beside the request. Same pair as `sent`: log-only,
         # skipped on replay, read by `aish explain` and the step screen.
         "received",  # #355
+        # #424. A revision of the chat's Objective, written after the answer by
+        # the distiller or the extractive floor. Recorded only in this slice —
+        # the owner sees it through #425's strip, never as a trace row — so it
+        # renders nowhere live, is skipped on replay, and is not activity.
+        "objective",  # #424
     }
 )
 
@@ -3668,6 +3673,32 @@ class SessionLog:
             if not still_wanted():
                 return False
             self._record_locked("title", title=title.strip(), auto=auto)
+            return True
+
+    def snapshot(self) -> bytes:
+        """The file's bytes, read under the write lock (#424) — so never in the
+        middle of a rewrite (Retry, redaction), which replace the file in place
+        under the same lock. Empty when there is no file."""
+        with self._write_lock:
+            return self.snapshot_locked()
+
+    def snapshot_locked(self) -> bytes:
+        """`snapshot`'s body. Caller must hold _write_lock."""
+        try:
+            return self.path.read_bytes()
+        except OSError:
+            return b""
+
+    def append_steps_if(self, steps: list[dict], still_wanted: Callable[[], bool]) -> bool:
+        """Append trace steps, but only if `still_wanted()` holds UNDER the write
+        lock — `set_title_if`'s shape, for records decided off the turn (#424:
+        the Objective's distill). `still_wanted` runs with the lock held, so it
+        must use `snapshot_locked`, never `snapshot`. Returns whether it wrote."""
+        with self._write_lock:
+            if not still_wanted():
+                return False
+            for step in steps:
+                self._record_locked("trace", step=step)
             return True
 
     def origin(self, origin: str) -> None:

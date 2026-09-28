@@ -2046,7 +2046,7 @@ def test_suite_never_inherits_aish_env():
     import os
 
     visible = {name for name in os.environ if name.startswith("AISH_")}
-    assert visible == {"AISH_CONFIG_HOME", "AISH_STATE_DIR", "AISH_NOTIFY"}
+    assert visible == {"AISH_CONFIG_HOME", "AISH_STATE_DIR", "AISH_NOTIFY", "AISH_OBJECTIVE"}
 
 
 # --- The gate says why (#252) ---------------------------------------------

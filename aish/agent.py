@@ -7882,7 +7882,7 @@ class Agent:
 
     # ------------------------------------------------------- roles (#297)
 
-    def _role_model(self) -> str:
+    def _role_model(self, model_class: str = "cloud-fast") -> str:
         """The model spec a role runs on in THIS session, or "" when it has none.
 
         Three answers, in order, and the last one is a real outcome rather than
@@ -7901,7 +7901,15 @@ class Agent:
            declaration mean nothing.
 
         Case 3 is the declared degradation, never a crash and never a guess.
+
+        A charter of class `session` (the distiller, #424) asks a different
+        question: THIS session's own backend, whatever it is — a local model
+        included, so the owner's text never rides to a provider other than the
+        one he chose for the chat. `AISH_ROLE_MODEL` does not apply to it for
+        the same reason. claude-max still has no seam, and answers "".
         """
+        if model_class == "session":
+            return roles.session_model_spec(self.provider, self.model)
         override = os.environ.get("AISH_ROLE_MODEL", "").strip()
         if override:
             return override
