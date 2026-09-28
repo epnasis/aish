@@ -3225,17 +3225,27 @@ function traceStep(step) {
     // The local window's second lever cuts earlier MESSAGES, not results, and
     // its over-budget record cut nothing at all (#415) — each says what it did.
     const turns = ["turns_oldest_first", "mid_task_turns"].includes(step.policy);
+    // The argument lever (#429) shortens what earlier CALLS were given, and a
+    // pass planned and not made (`could_free`) shortened nothing at all.
+    const args = ["args_oldest_first", "mid_task_args"].includes(step.policy);
+    const what = turns ? "message" : args ? "tool call" : "result";
     const ref = step.policy === "over_budget"
       ? traceRow(
         t, traceSvg("thinking", "var(--dim)"),
         "Sent a request larger than the local window allows",
         `estimated ${step.estimate_after} tokens, budget ${step.budget}; nothing left to shorten`
       )
-      : traceRow(
-        t, traceSvg("thinking", "var(--dim)"),
-        `Shortened ${n} earlier ${turns ? "message" : "result"}${n === 1 ? "" : "s"} for the model`,
-        tail
-      );
+      : step.could_free !== undefined
+        ? traceRow(
+          t, traceSvg("thinking", "var(--dim)"),
+          "Left the earlier conversation as it was",
+          `shortening it would free only ${step.could_free} tokens (under ${step.min_yield})`
+        )
+        : traceRow(
+          t, traceSvg("thinking", "var(--dim)"),
+          `Shortened ${n} earlier ${what}${n === 1 ? "" : "s"}${args ? (n === 1 ? "'s arguments" : "' arguments") : ""} for the model`,
+          tail
+        );
     // Which trim: a mid-task one is a step of the record, a seed one is part
     // of what the first model call started from ([TRACE-CLOSE]'s inspector).
     ref.row.classList.add("step-trim");
@@ -4491,7 +4501,7 @@ function inspectKeys(rows) {
       // fired BETWEEN calls is its own step — the same split explain.py makes
       // with MID_TURN_TRIM, and the list has to agree with that one.
       ids[i] = ["mid_task_budget", "overflow_oldest_first", "lost_connection_oldest_first",
-                "mid_task_turns", "over_budget"]
+                "mid_task_turns", "mid_task_args", "over_budget"]
         .includes(d.policy)
         ? `t${next("t")}`
         : "m1";

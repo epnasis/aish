@@ -174,5 +174,30 @@ check("one result reads as one, not as '1 results'", () => {
   assert(titleOf(row).includes("1 earlier result "), titleOf(row));
 });
 
+check("the argument lever names what it shortened (#429)", () => {
+  const s = makeSandbox();
+  s.traceStep({ kind: "trim", policy: "mid_task_args", affected: 2,
+                stubbed: [{ at: 4, tool: "assistant", continuation: "abc" },
+                          { at: 6, tool: "assistant", continuation: "def" }] });
+  const row = rows(s).find((r) => titleOf(r).startsWith("Shortened"));
+  assert(titleOf(row).includes("2 earlier tool calls' arguments"), titleOf(row));
+  const one = makeSandbox();
+  one.traceStep({ kind: "trim", policy: "args_oldest_first", affected: 1,
+                  stubbed: [{ at: 4, tool: "assistant" }] });
+  const single = rows(one).find((r) => titleOf(r).startsWith("Shortened"));
+  assert(titleOf(single).includes("1 earlier tool call's arguments"), titleOf(single));
+});
+
+check("a trim planned and not made does not claim it shortened anything (#429)", () => {
+  const s = makeSandbox();
+  s.traceStep({ kind: "trim", policy: "mid_task_budget", affected: 0, stubbed: [],
+                fits: false, could_free: 120, min_yield: 1500,
+                estimate_after: 81000, budget: 77824 });
+  assert(!rows(s).some((r) => titleOf(r).startsWith("Shortened")), "claims a shortening");
+  const row = rows(s).find((r) => titleOf(r).startsWith("Left"));
+  assert(row, "no row for the skipped trim");
+  assert(subOf(row).includes("120 tokens"), subOf(row));
+});
+
 if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }
 console.log("trim row: all checks passed");

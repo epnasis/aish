@@ -288,14 +288,17 @@ def _refused(gate: dict) -> bool:
 #: `local:` window's second lever, and its record that nothing was left to cut.
 #: `lost_connection_oldest_first` (#419) is the shrink after a `local:` call
 #: lost its connection twice — as mid-turn as the overflow one.
+#: `mid_task_args` (#429) is the argument lever's, from the same passes.
 MID_TURN_TRIM = frozenset(
     {
         "mid_task_budget", "overflow_oldest_first", "lost_connection_oldest_first",
-        "mid_task_turns", "over_budget",
+        "mid_task_turns", "mid_task_args", "over_budget",
     }
 )
 #: Trims that cut earlier turns' own words rather than tool results (#415).
 TURN_TRIM = frozenset({"turns_oldest_first", "mid_task_turns"})
+#: Trims that cut earlier calls' arguments (#429).
+ARGS_TRIM = frozenset({"args_oldest_first", "mid_task_args"})
 
 RECORDED = "recorded"
 MISSING = "not_recorded"
@@ -342,6 +345,7 @@ CHECKS: tuple[tuple[str, str], ...] = (
     ("reasoning_truncated", "reasoning was cut by a cap"),
     ("result_stubbed", "a result was stubbed after the model had read it"),
     ("over_budget", "a request went out estimated over the local window's budget"),
+    ("trim_skipped", "a trim was planned and not made because it would free too little"),
     ("steering", "text was typed while the task ran"),
     ("reminder_demoted", "the per-task reminder reached the model as a user message"),
     ("brief_changed", "what the model was handed changed mid-turn"),
@@ -2314,6 +2318,14 @@ def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
                     STEP_BRIEF_CHANGED, {"model_call": number}, facts, id=event_id("b"),
                     title="what the model was handed changed", before=number,
                 ))
+        elif kind == "trim" and step.get("policy") in MID_TURN_TRIM and "could_free" in step:
+            facts = [{"k": "would have freed", "v": f"{_fmt_n(step.get('could_free'))} tokens"},
+                     {"k": "floor", "v": f"{_fmt_n(step.get('min_yield'))} tokens"},
+                     {"k": "estimate", "v": f"{_fmt_n(step.get('estimate_after'))} "
+                                            f"of {_fmt_n(step.get('budget'))}"}]
+            steps.append(_event_step(STEP_TRIM, dict(step), facts, id=event_id("t"),
+                                     title="a trim was planned and not made",
+                                     before=before(index)))
         elif kind == "trim" and step.get("policy") in MID_TURN_TRIM:
             stubbed = step.get("stubbed")
             facts = [{"k": "results stubbed", "v": _fmt_n(step.get("affected"))},
@@ -2495,7 +2507,11 @@ def _event_note(
         when = "at some point in this turn"
     if event["kind"] == "trim":
         record = event["record"]
-        what = "message(s)" if record.get("policy") in TURN_TRIM else "result(s)"
+        what = (
+            "message(s)" if record.get("policy") in TURN_TRIM
+            else "call(s)' arguments" if record.get("policy") in ARGS_TRIM
+            else "result(s)"
+        )
         if stubbed := record.get("stubbed"):
             listed = ", ".join(f"{x.get('tool')} (#{x.get('at')})" for x in stubbed)
             rows.append({"check": "result_stubbed", "where": where,
@@ -2505,6 +2521,12 @@ def _event_note(
             rows.append({"check": "result_stubbed", "where": where,
                          "text": f"{record.get('affected')} earlier {what} were stubbed "
                                  f"{when}; which ones was not recorded"})
+        elif "could_free" in record:
+            rows.append({"check": "trim_skipped", "where": where,
+                         "text": f"a trim {when} would have freed {record.get('could_free')} "
+                                 f"tokens, under the {record.get('min_yield')} a rewrite of "
+                                 f"history must free, and left the request over its budget "
+                                 f"of {record.get('budget')}; history was left as it was"})
         elif record.get("policy") == "over_budget":
             rows.append({"check": "over_budget", "where": where,
                          "text": f"the request was estimated at {record.get('estimate_after')} "
@@ -2891,6 +2913,11 @@ def _given_lines(given: dict, show_tools: bool, show_context: bool, out: list[st
             f"{record.get('bytes_before')} → {record.get('bytes_after')} bytes "
             f"(keep {record.get('keep_chars')}, cap from {record.get('cap_source')})"
         )
+        if "could_free" in record:
+            out.append(
+                f"  {'':<10} not made: it would have freed {record.get('could_free')} "
+                f"tokens, under the {record.get('min_yield')} floor"
+            )
         if stubbed := record.get("stubbed"):
             listed = ", ".join(f"#{x.get('at')} {x.get('tool')}" for x in stubbed)
             out.append(f"  {'':<10} {BOLD}stubbed for the model{RESET}: {listed}")
@@ -3478,6 +3505,11 @@ def _event_lines(event: dict, placed: bool) -> list[str]:
     where = "before this call" if placed else "at some point in this turn"
     if event["kind"] == "trim":
         record = event["record"]
+        if "could_free" in record:
+            return [
+                f"  {BOLD}⚠ {where}{RESET} a trim that would have freed "
+                f"{record.get('could_free')} tokens was not made"
+            ]
         stubbed = ", ".join(
             f"#{x.get('at')} {x.get('tool')}" for x in record.get("stubbed") or []
         )
