@@ -6776,9 +6776,14 @@ class Agent:
         on Qwen3.6, cost a full re-read of the prompt. So on `local:` a pass
         that would leave the request over the budget AND free under
         MIN_TRIM_YIELD_TOKENS rewrites nothing; it says so once per task
-        (`could_free`). A pass that brings the request under the budget always
-        runs. Other providers keep the character budget and no floor: the
-        data behind the constant is `local:` data."""
+        (`could_free`). The yield is the estimate now — anchored when the
+        server's count stands — minus the whole request at the ratio after
+        the pass, because that is the drop the rewrite really buys: measured
+        ratio-to-ratio, #439's chat ran four passes that each "freed" over
+        1,500 and dropped the estimate by 750-1,811. A pass that brings the
+        request under the budget always runs. Other providers keep the
+        character budget and no floor: the data behind the constant is
+        `local:` data."""
         token_budgeted = self._token_budgeted()
         size = self._history_size()
         if token_budgeted:
@@ -6817,7 +6822,10 @@ class Agent:
         if not any(chosen for _, _, chosen, _ in plans):
             return False
         if token_budgeted and projected > budget:
-            could_free = ratio.tokens(base_chars) - ratio.tokens(base_chars + payload_delta)
+            # Against the estimate the record reports as `estimate_before`,
+            # which is usually ANCHORED: the anchor is lost by the rewrite, so
+            # the ratio's over-count of what stays is part of the price (#439).
+            could_free = size - projected
             if could_free < MIN_TRIM_YIELD_TOKENS:
                 if not dry_run:
                     self._record_futile_trim(

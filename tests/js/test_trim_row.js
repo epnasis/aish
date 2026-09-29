@@ -199,5 +199,16 @@ check("a trim planned and not made does not claim it shortened anything (#429)",
   assert(subOf(row).includes("120 tokens"), subOf(row));
 });
 
+check("a skipped trim that would have raised the estimate says so (#439)", () => {
+  const s = makeSandbox();
+  s.traceStep({ kind: "trim", policy: "mid_task_budget", affected: 0, stubbed: [],
+                fits: false, could_free: -812, min_yield: 1500,
+                estimate_after: 81000, budget: 77824 });
+  const row = rows(s).find((r) => titleOf(r).startsWith("Left"));
+  assert(row, "no row for the skipped trim");
+  assert(subOf(row).includes("rise by 812 tokens"), subOf(row));
+  assert(!subOf(row).includes("-812"), subOf(row));
+});
+
 if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }
 console.log("trim row: all checks passed");

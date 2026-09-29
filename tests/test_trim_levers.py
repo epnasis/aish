@@ -143,7 +143,10 @@ class TestAFutilePassRewritesNothing:
         assert agent._token_anchor == anchor is not None, "the server's count was dropped"
         (skipped,) = [t for t in _trims(steps) if "could_free" in t]
         assert skipped["affected"] == 0 and skipped["fits"] is False
-        assert 0 < skipped["could_free"] < agent_module.MIN_TRIM_YIELD_TOKENS
+        # Measured against the anchored estimate (#439): at the fake server's
+        # density the ratio over-counts what stays, so the rewrite would RAISE
+        # the estimate, and `could_free` says so by going negative.
+        assert skipped["could_free"] < agent_module.MIN_TRIM_YIELD_TOKENS
         assert skipped["min_yield"] == agent_module.MIN_TRIM_YIELD_TOKENS
         assert skipped["estimate_after"] == skipped["estimate_before"]
 
@@ -203,6 +206,76 @@ class TestAFutilePassRewritesNothing:
         assert len(sent) == 1, "the same or a larger request was sent again"
         assert errors[-1]["bound"] == "trim_exhausted"
         assert not [t for t in _trims(steps) if t["affected"]]
+
+
+class TestTheYieldIsMeasuredAgainstTheAnchor:
+    """#439: the yield of a mid-task pass is the ANCHORED estimate now minus the
+    whole request at the ratio after it, because the rewrite drops the anchor.
+    In `session-20260929-214924-097047` four passes each freed 1,619-4,155
+    ratio-to-ratio and dropped the recorded estimate by only 750-1,811."""
+
+    RATIO = 2.0
+    OUTPUT_CHARS = 4_000  # ~1,800 tokens freed at the ratio: over the floor
+
+    def _anchored(self, monkeypatch, tmp_path, steps, overcount: int):
+        """A task over its budget whose one cuttable output frees over the
+        floor at the ratio, anchored at a server count `overcount` tokens
+        under the whole request at the ratio."""
+        ratio = agent_module.token_ratio.Ratio(self.RATIO, "test:fixed")
+        monkeypatch.setattr(agent_module.token_ratio, "ratio", lambda _key: ratio)
+        agent = _local(monkeypatch, tmp_path, steps)
+        agent.messages.append({"role": "system", "content": "bulk " + "r" * 60_000})
+        task_start = len(agent.messages)
+        agent.messages.append({"role": "user", "content": "the task"})
+        for body in ("o" * self.OUTPUT_CHARS, "n" * 900, "m" * 900):
+            _earlier_call(agent, "ls", body, stub=False)
+        agent._menu_for_estimate()
+        chars = agent._prompt_estimate()["chars"]
+        agent._token_anchor = (f"local:{REPO}", chars, ratio.tokens(chars) - overcount)
+        estimate = agent._prompt_estimate()
+        assert estimate["basis"] == "anchored"
+        output = agent.messages[task_start + 2]
+        planned = agent._plan_output_stub(output)
+        at_ratio = ratio.tokens(chars) - ratio.tokens(chars + planned.payload_delta)
+        assert at_ratio >= agent_module.MIN_TRIM_YIELD_TOKENS, "the old measure would run it"
+        _budget_at(monkeypatch, estimate["tokens"] - 100)
+        return agent, task_start, estimate["tokens"], at_ratio
+
+    def test_a_pass_the_anchor_loss_eats_is_not_applied(self, monkeypatch, tmp_path):
+        steps: list[dict] = []
+        agent, task_start, anchored, at_ratio = self._anchored(
+            monkeypatch, tmp_path, steps, overcount=2_500
+        )
+        before = json.dumps(agent.messages)
+        anchor = agent._token_anchor
+
+        agent._enforce_budget(task_start)
+
+        assert json.dumps(agent.messages) == before, "history was rewritten"
+        assert agent._token_anchor == anchor, "the server's count was dropped"
+        (skipped,) = [t for t in _trims(steps) if "could_free" in t]
+        assert not [t for t in _trims(steps) if t["affected"]]
+        assert skipped["policy"] == "mid_task_budget"
+        assert skipped["affected"] == 0 and skipped["fits"] is False
+        assert skipped["estimate_before"] == anchored
+        assert skipped["could_free"] == at_ratio - 2_500
+        assert skipped["min_yield"] == agent_module.MIN_TRIM_YIELD_TOKENS
+
+    def test_a_pass_that_clears_the_floor_net_of_the_anchor_runs(self, monkeypatch, tmp_path):
+        steps: list[dict] = []
+        agent, task_start, anchored, at_ratio = self._anchored(
+            monkeypatch, tmp_path, steps, overcount=100
+        )
+        assert at_ratio - 100 >= agent_module.MIN_TRIM_YIELD_TOKENS
+
+        agent._enforce_budget(task_start)
+
+        applied = [t for t in _trims(steps) if t["affected"]]
+        assert [t["policy"] for t in applied] == ["mid_task_budget"]
+        assert applied[0]["estimate_before"] == anchored
+        assert anchored - applied[0]["estimate_after"] == at_ratio - 100
+        assert not [t for t in _trims(steps) if "could_free" in t]
+        assert agent._token_anchor is None
 
 
 class TestTheArgumentLever:
@@ -387,3 +460,13 @@ class TestAReopenedChatTrimsTheSameWay:
         assert any(policy == "args_oldest_first" for policy, _ in live_trims), live_trims
         assert reopened_after == live_after
         assert reopened_trims == live_trims
+
+
+def test_explain_never_reports_a_negative_yield_as_freed():
+    """`could_free` goes negative when the rewrite would raise the anchored
+    estimate (#439); readers say that rather than "freed -812 tokens"."""
+    from aish.explain import _would_free
+
+    assert _would_free(1_234) == "freed 1,234 tokens"
+    assert _would_free(0) == "freed nothing"
+    assert _would_free(-812) == "freed nothing: the estimate would have risen by 812 tokens"

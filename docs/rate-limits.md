@@ -629,7 +629,8 @@ Since #429 "smaller" is checked with the key the stub will really carry: in
 LONGER than the text (146,175 → 146,240 characters), so a retry was promised,
 the identical-or-bigger request went out, and the turn ended `trim_exhausted`.
 On `local:` a pass that frees under `MIN_TRIM_YIELD_TOKENS` and leaves the
-request over its target is not a smaller request either, and promises nothing.
+request over its target is not a smaller request either, and promises nothing;
+the yield is measured against the anchored estimate, as for every pass (#439).
 
 The retry is spent **once per model call**. A second overflow ends the turn with
 `bound: trim_exhausted`, the fourth value of that closed field: *aish could not
