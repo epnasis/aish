@@ -184,7 +184,17 @@ there, and its backend has no stateless seam, so the tracker records `unavailabl
 ## Cost, and contention
 
 Measured over the five benchmark chats (`~/.cache/aish-432/objectives.md`, *Cost per
-call*): MEASUREMENT_PENDING
+call*, 2026-09-29, charter v1, 95 task ends per model, every call validated on its first
+attempt):
+
+| model | median | p90 | max | mean tokens in / out |
+|---|---|---|---|---|
+| `local:mlx-community/Qwen3.6-35B-A3B-8bit` (thinking) | 9.4 s | 34.3 s | 112.9 s | 1 179 / 875 |
+| `gemini:gemini-3.5-flash` | 3.8 s | 7.1 s | 14.7 s | 1 175 / 32 |
+
+The output figure is what each backend REPORTED as usage; whether gemini's count includes
+its thinking tokens was not checked. Whether the statements read his goal right is his
+judgement, in the same file; nothing here scores them.
 
 **On a single local model server the tracker competes with the owner's next turn.** It
 cannot delay the answer it follows, but a long thinking call can delay the next turn if
