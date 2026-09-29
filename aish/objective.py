@@ -458,8 +458,18 @@ def owner_messages(records: Iterable[dict]) -> list[Item]:
     reader of the chat uses. A card comment is his words too, but it is a hint
     about the action in hand (owner decision, 2026-09-29): it never enters the
     objective, and this filter is the one place that makes it so.
+
+    In a TRIGGERED chat (a schedule, an e-mail, a webhook) the opening message
+    is the trigger's prompt, which aish composed, with no marker to classify it
+    by; position and provenance identify it, exactly as replay does
+    (`SessionLog.reconstruct_events`), so it is not his either.
     """
-    return [i for i in material(records, read_only=frozenset()) if i.kind == OWNER]
+    records = list(records)
+    origin = next(
+        (str(r.get("origin") or "") for r in records if r.get("kind") == "origin"), "user"
+    )
+    owned = [i for i in material(records, read_only=frozenset()) if i.kind == OWNER]
+    return owned[1:] if origin not in ("", "user") else owned
 
 
 # ---------------------------------------------------------------- revisions

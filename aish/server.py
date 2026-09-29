@@ -3821,6 +3821,10 @@ class WebServer:
             await asyncio.to_thread(objective.owner_edit, session.logref.log, statement)
         except ValueError as exc:
             await self._refuse(client, str(exc), name=name)
+            # The receipt still goes out (a refusal is an answer), so the
+            # client's optimistic paint is never rolled back by a missing one:
+            # the strip is repainted from the log, which holds no edit.
+            await self._announce_objective(session)
             return
         await self._announce_objective(session)
 

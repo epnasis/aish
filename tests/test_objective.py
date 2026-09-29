@@ -416,6 +416,23 @@ class TestOnlyHisTypedMessagesFeedIt:
         for text in ("Tomorrow: rain", "write_file", "a rule applies", "secret set K"):
             assert text not in blob
 
+    def test_a_trigger_prompt_is_not_his_words(self):
+        """A triggered chat opens on the prompt aish composed (an e-mail, a
+        schedule); what he types afterwards is his."""
+        records = [
+            {"kind": "origin", "origin": "email"},
+            {"kind": "task_start", "prompt": "A new email arrived"},
+            user("A new email arrived. You are running as an AUTOMATED trigger…", "t1"),
+            assistant("Replied.", "a1"),
+            {"kind": "task_end", "status": "ok"},
+            {"kind": "task_start", "prompt": "thanks, also book it"},
+            user("thanks, also book the table for four", "u2"),
+            assistant("Booked.", "a2"),
+            {"kind": "task_end", "status": "ok"},
+        ]
+        assert [i.ref for i in objective.owner_messages(records)] == ["m:u2"]
+        assert [i.ref for i in objective.owner_messages(records[1:])] == ["m:t1", "m:u2"]
+
     def test_the_input_the_model_gets_has_no_comment(self, tmp_path):
         path = write_log(tmp_path, a_chat())
         chat = FakeRoleChat([{"verdict": "unchanged"}])
@@ -1186,6 +1203,28 @@ class TestEmission:
         users = [r for r in objective.read_records(path)
                  if r.get("kind") == "message" and r.get("role") == "user"]
         assert [u["content"] for u in users] == ["help me plan the trip"]
+
+    def test_a_refused_edit_repaints_the_strip_from_the_log(self, tmp_path, monkeypatch):
+        from tests.test_server import connected, make_client, model_says, recv_until
+
+        env = server_env(tmp_path)
+        client, _ = make_client(env, [model_says("ok")])
+
+        def keeps_changing(_log, _statement):
+            raise ValueError("the chat kept changing while the objective was being saved")
+
+        monkeypatch.setattr(objective, "owner_edit", keeps_changing)
+        with connected(client) as (ws, hello, _replay):
+            recv_until(ws, "objective")
+            ws.send_json({"type": "set_objective", "name": hello["session"],
+                          "statement": "never written"})
+            got: dict[str, dict] = {}
+            while len(got) < 2:
+                event = ws.receive_json()
+                if event["type"] in ("objective", "error"):
+                    got[event["type"]] = event
+            assert got["error"]["code"] == "refused"
+            assert got["objective"]["objective"] is None
 
     def test_the_web_agent_is_shown_the_objective(self, tmp_path):
         from tests.test_server import connected, make_client, model_says, recv_until

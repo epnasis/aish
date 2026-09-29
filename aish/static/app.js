@@ -17139,6 +17139,10 @@ function objectiveCopy(state) {
   let whose;
   if (!tracker) {
     whose = "aish has not read this chat for one yet. It does after each task.";
+  } else if (tracker.discarded) {
+    // Its answer was computed and then thrown away (a Retry, or an edit saved
+    // meanwhile) — say that, never what the answer would have meant.
+    whose = `After turn ${tracker.turn}, aish's reading was discarded: ${tracker.discarded}.`;
   } else if (tracker.status === "ok" && tracker.verdict === "unknown") {
     whose = `After turn ${tracker.turn}, aish read your messages and could not tell what you are after.`;
   } else if (tracker.status === "ok") {

@@ -58,6 +58,14 @@ function world(globals = {}) {
     /did not produce one \(unadmitted: no admission recorded\)/.test(blocked.whose));
 }
 
+{
+  const w = world();
+  const dropped = w.objectiveCopy({ tracker: { turn: 5, status: "ok", verdict: "revised",
+    discarded: "the chat was rewritten after this task ended" } });
+  ok("a discarded reading says it was discarded, never 'found none'",
+    /reading was discarded: the chat was rewritten/.test(dropped.whose) && !/found no/.test(dropped.whose));
+}
+
 // ---- 3. the trail -----------------------------------------------------------
 {
   const w = world();

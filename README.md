@@ -636,7 +636,7 @@ this UI. Highlights:
   aish's reading; tap it for the messages it rests on and how it evolved, or
   tap the pencil to rewrite it in your own words, which aish then changes only
   on something you say later. The model is shown it at the start of every
-  task. `/objective` and `/objective edit` do the same in the terminal. It runs
+  task (not on claude-max, whose loop has no per-task reminder). `/objective` and `/objective edit` do the same in the terminal. It runs
   only where its role is admitted for the chat's model
   (`scripts/role-admission.py --model <spec> tracker`); elsewhere the strip
   says there is none yet and why.

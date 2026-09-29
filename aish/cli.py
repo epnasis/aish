@@ -2047,6 +2047,9 @@ def objective_lines(view: dict) -> list[str]:
         if not tracker:
             lines.append(f"{DIM}  aish has not read this chat for one yet (it does so "
                          f"after each task){RESET}")
+        elif tracker.get("discarded"):
+            lines.append(f"{DIM}  after turn {tracker.get('turn')}, aish's reading was "
+                         f"discarded: {tracker['discarded']}{RESET}")
         elif tracker.get("status") == "ok":
             said = TRACKER_SAID.get(str(tracker.get("verdict") or ""), "it answered")
             lines.append(f"{DIM}  after turn {tracker.get('turn')}, {said}{RESET}")
