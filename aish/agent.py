@@ -208,7 +208,7 @@ Rules:
 2g. YOUR PLAN. For work that needs several steps, keep your own checklist with
    the plan tool; the user sees it under the objective and can drop a task or
    ask you to revise it (/plan in the terminal). The plan is yours, never a
-   request from them. A reminder restates it; a task they dropped is final.
+   request from them. A task they dropped is final.
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. A COMMENT
    the user attaches to a decision changes what you do next, and approve vs
@@ -4422,8 +4422,10 @@ class Agent:
             )
         except checklist.PlanError as exc:
             return f"ERROR: plan not recorded — {exc}. Send the whole list again."
+        # `_plan_seen_revision` is NOT advanced here: a plan result shows the
+        # tasks, never his replan request, and his write can land between this
+        # call's read and its write with the same number (review finding).
         self._emit_record(**record)
-        self._plan_seen_revision = max(self._plan_seen_revision, int(record["revision"]))
         candidates = checklist.citable(records) if record.get("downgraded") else None
         if self.on_plan is not None:
             try:
@@ -6446,6 +6448,13 @@ class Agent:
         """The stub a tool result would get, planned without touching it."""
         if message.get("role") != "tool" or message.get("_stub"):
             return None
+        if (
+            message.get("tool_name") == checklist.PLAN_TOOL
+            and message is self._newest_plan_result()
+        ):
+            # The newest recorded plan stays whole (#433): a reminder that says
+            # PLAN_UNCHANGED points at it, and its downgrade notes live nowhere else.
+            return None
         # The cached text is the message as the model HAD it, banner and all,
         # so its attribution is inline and the reader partitions it as ever
         # (`offers=None`). What is not in the string is where the bytes came
@@ -6594,6 +6603,18 @@ class Agent:
             content_delta=0,
             payload_delta=_args_json_len(fields["tool_calls"]) - _args_json_len(calls),
         )
+
+    def _newest_plan_result(self) -> dict | None:
+        """The newest plan tool result that recorded a revision."""
+        recorded = checklist.PLAN_RECORDED.split("{", 1)[0]
+        for candidate in reversed(self.messages):
+            if (
+                candidate.get("role") == "tool"
+                and candidate.get("tool_name") == checklist.PLAN_TOOL
+                and str(candidate.get("content") or "").startswith(recorded)
+            ):
+                return candidate
+        return None
 
     def _newest_plan_call(self, message: dict) -> dict | None:
         """The newest plan call in history, when it sits in `message`."""
@@ -12971,8 +12992,10 @@ class Agent:
         turns, and the step budget bounds a model that never replies."""
         if not self._pending_comment_response:
             return None
-        if name == checklist.PLAN_TOOL:
-            # The plan executes nothing — it records the model's checklist,
+        if name == checklist.PLAN_TOOL and name in NATIVE_TOOL_NAMES:
+            # Native only: a plugin may carry the name, and under AISH_PLAN=0
+            # there is no native plan to exempt. The plan executes nothing — it
+            # records the model's checklist,
             # which the owner then sees — and a denial with a comment is the
             # moment the owner's model most wants it revised (#433). Deny still
             # means stop: every tool that acts stays refused, and only a

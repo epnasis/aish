@@ -722,3 +722,37 @@ class TestTheWeb:
         reminder = [m["content"] for m in fake.calls[-1]["messages"] if m["role"] == "system"][-1]
         assert "dropped by the owner" in reminder
         assert agent_module.PLAN_REPLAN_ASKED in reminder
+
+
+class TestReviewFindings:
+    """The Fable 5.0 review of #433: a race and two seams, each pinned."""
+
+    def test_a_replan_request_that_ties_a_model_revision_still_stands(self):
+        """His write can land between the model's read and its write, so both
+        carry the same number; the model's never saw his request."""
+        base = revise(None, [{"id": "1", "title": "A", "state": "pending"}])
+        records = [trace(**base),
+                   trace(**{**base, "origin": "owner", "action": "replan", "revision": 2}),
+                   trace(**{**base, "revision": 2})]
+        assert plan.replan_pending(records) == 2
+        records.append(trace(**{**base, "revision": 3}))
+        assert plan.replan_pending(records) is None
+
+    def test_the_stop_gate_exempts_only_the_native_plan(self, monkeypatch):
+        agent, _ = make_agent([])
+        agent._pending_comment_response = True
+        assert agent._stop_gate("plan", {}) is None
+        monkeypatch.setattr(agent_module, "NATIVE_TOOL_NAMES",
+                            agent_module.NATIVE_TOOL_NAMES - {"plan"})
+        assert agent._stop_gate("plan", {}) is not None, "a plugin named plan is refused"
+
+    def test_the_newest_recorded_plan_result_is_never_stubbed(self, monkeypatch, tmp_path):
+        from tests.test_trim_levers import _local
+
+        agent = _local(monkeypatch, tmp_path, [])
+        body = "Plan recorded as revision {} (0 of 1 done).\n[1] pending — " + "t" * 600
+        older = {"role": "tool", "tool_name": "plan", "content": body.format(1)}
+        newest = {"role": "tool", "tool_name": "plan", "content": body.format(2)}
+        agent.messages.extend([older, newest])
+        assert agent._plan_output_stub(older) is not None
+        assert agent._plan_output_stub(newest) is None

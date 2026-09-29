@@ -175,7 +175,9 @@ def replan_pending(records: Iterable[dict]) -> int | None:
             last_model = max(last_model, number)
         elif step.get("action") == ACTION_REPLAN:
             request = max(request, number)
-    return request if request > last_model else None
+    # A tie means the model's write raced his: its read predates his record,
+    # so it did not answer him (review finding) — his request stands.
+    return request if request >= last_model and request else None
 
 
 def open_tasks(plan: dict | None) -> list[dict]:

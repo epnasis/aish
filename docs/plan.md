@@ -106,7 +106,12 @@ covers both kinds), like his objective edits. `TestTheOwner`.
   characters. Older plan calls are trimmable like any. A message holding both the
   newest plan call and another long call has only the other call cut, and is then
   marked stubbed, so its plan call stays whole even after a newer one exists — the
-  conservative direction. `TestTheReminder`, `TestTheArgumentLever`.
+  conservative direction. **The newest recorded plan RESULT is exempt from the output
+  lever too** (`Agent._newest_plan_result`): a reminder saying `PLAN_UNCHANGED` points at
+  it, and its downgrade notes live nowhere else (review finding: without it a mid-task
+  trim could leave the model only its own pre-validation arguments, including a done
+  that code had downgraded). `TestTheReminder`, `TestTheArgumentLever`,
+  `TestReviewFindings`.
 
 ## Replan triggers — one line each, never a forced call
 
@@ -115,7 +120,7 @@ is noise; each appends ONE line and the model decides. `AISH_PLAN=tool` turns th
 
 | trigger | where the line goes |
 |---|---|
-| a denial with a comment | appended to the denial's own result (`_call_result`, off the recorded decision). The plan tool is **exempt from the stop gate** that denial arms: it executes nothing, and this is the moment the owner's model most wants it revised. Deny still means stop — every tool that acts stays refused, and only a text-only turn ends the task |
+| a denial with a comment | appended to the denial's own result (`_call_result`, off the recorded decision). The NATIVE plan tool is **exempt from the stop gate** (a plugin that takes the name is not) that denial arms: it executes nothing, and this is the moment the owner's model most wants it revised. Deny still means stop — every tool that acts stays refused, and only a text-only turn ends the task |
 | a stall | an `[aish: …]` note after `STALL_REPLAN_AT` (4) no-progress steps, once per task; the stall cap (8) leaves room to act on it |
 | a failed task end | one reminder segment on the next task, when the previous one raised or ended at the stall cap, the step ceiling or the loop detector (`_task_unfinished`, kept on the agent: a restart of aish-web between the two tasks loses it) |
 
@@ -152,6 +157,15 @@ agent's thread (`announce_objective_threadsafe`).
 - **That a resolved evidence step proves its task** — see *Done needs evidence*.
 - **claude-max** gets the tool (the SDK routes it through `_locked_dispatch`) but no
   reminder, so the plan reaches that model only through the tool's results.
+- **Evidence can be laundered within the letter of the rule**: any successful call's
+  arguments are quotable, so a model could run a harmless call carrying the words it
+  wants to cite. Resolution proves the call happened, never that it proves the task.
+- **A title he dropped stays dropped for the whole chat**: the overlay applies to any
+  later task with the same title, by design.
+- **Two announcement races self-heal on the next event**: `objective_version` is
+  bumped on the agent's thread as well as the loop's, and a drop landing between the
+  reminder's read and its write is neither in that reminder nor noted mid-task (the
+  overlay still enforces it; the next reminder shows it).
 - **A redacted message can survive in a task title** written after it, as the
   objective's statements can (`docs/objective.md`).
 
