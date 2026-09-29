@@ -445,6 +445,69 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .rename-btn.primary { background: var(--blue); color: #fff; }
 .rename-btn:active { opacity: 0.8; }
 
+/* ---- the objective (#432) ---- */
+/* A third row of the top bar, under the context bar and ruled like it: one
+   line, ellipsised, the whole line a tap target that opens the sheet, and the
+   pencil a separate 44px target at the end (L6). */
+#objective-strip {
+  display: flex;
+  align-items: stretch;
+  border-top: 0.5px solid var(--sep);
+}
+#objective-strip[hidden] { display: none; }
+#objective-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  padding: 6px 4px 6px 14px;
+  min-height: 40px;
+  text-align: left;
+  color: var(--fg);
+}
+#objective-open:active { opacity: 0.6; }
+#objective-open .obj-ico { width: 17px; height: 17px; flex: none; color: var(--blue); }
+.obj-line {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14.5px;
+}
+/* WHOSE words these are is part of the statement, not decoration (L8): the
+   label is always present and never smaller than legible. */
+.obj-label { color: var(--dim); }
+#objective-strip.empty .obj-text { color: var(--dim); font-style: italic; }
+#objective-edit { padding: 8px 12px; min-width: 44px; }
+#objective-edit svg { width: 19px; height: 19px; }
+#objective-input {
+  width: 100%;
+  min-width: min(340px, calc(100vw - 48px));
+  background: var(--bg);
+  color: var(--fg);
+  border: 0.5px solid var(--sep);
+  border-radius: 11px;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 18.4px; /* prevents iOS focus zoom */
+  resize: vertical;
+}
+#objective-input:focus { outline: none; border-color: var(--blue); }
+#objective-form { display: flex; flex-direction: column; gap: 12px; }
+.obj-whose { color: var(--dim); font-size: 13.8px; padding: 8px 6px 2px; margin: 0; }
+.obj-statement { font-size: 17.3px; padding: 4px 6px 10px; margin: 0; }
+.obj-section { color: var(--dim); font-size: 13.8px; padding: 12px 6px 4px; margin: 0; }
+.obj-source, .obj-trail-row {
+  padding: 8px 6px;
+  border-bottom: 0.5px solid var(--sep);
+  font-size: 15px;
+}
+.obj-trail-row .meta, .obj-source .meta { display: block; color: var(--dim); font-size: 13.8px; margin-bottom: 2px; }
+
 /* ---- messages ---- */
 /* Wraps the transcript so the empty-chat welcome (#123) can overlay exactly the
    messages region — it shrinks with the keyboard and never covers the headers. */

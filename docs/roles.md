@@ -3,24 +3,22 @@
 `roles.py`, `aish/charters/`, `scripts/role-admission.py`, `scripts/role-mine-cases.py`.
 Issue #297, stage 1 of the epic in #295.
 
-> ## The first live caller: the distiller (#424)
+> ## The live caller: the tracker (#432)
 >
-> Since #424 one role IS called: `distiller`, at the end of every task, off the
-> interactive path, to write the chat's Objective (`docs/objective.md`). What that does
-> and does not mean, precisely:
+> One role IS called: `tracker`, at the end of every task, off the interactive path, to
+> keep the chat's objective (`docs/objective.md`). It replaced #424's `distiller`, whose
+> goals/tasks ledger the owner retired on 2026-09-29. What that does and does not mean:
 >
-> - **It is called; it rarely runs a model.** It runs only when admitted for the exact
->   model spec the session uses, and on a fresh install nothing is admitted — so every
->   task end records `status: unadmitted` and the extractive floor stands in. Admission is
->   `scripts/role-admission.py --model <spec> distiller`.
-> - **Its output reaches no acting context and no screen.** It is written to the log as
->   an `objective` record and read back by nothing yet, so `roles.WIRINGS` stays empty: a
->   wiring is an edge into a context, and this slice has none. #425/#426 add the edges,
->   and the wiring law must be applied to them then.
-> - **It extended the framework in three places**, each with its customer: a second
->   output shape (`objective`), a second model class (`session`), and a caller that is
->   not the Agent (`objective.distill`, writing through the server-side sink). Each is
->   below where the thing it extends is described.
+> - **It runs a model only when admitted** for the exact model spec the session uses. On
+>   a fresh install nothing is admitted, so every task end records `status: unadmitted`
+>   and the strip says so. Admission is `scripts/role-admission.py --model <spec> tracker`,
+>   per model.
+> - **Its output reaches an acting context**, the per-task reminder, so it is the one
+>   entry in `roles.WIRINGS`: it carries the declared, capped `statement` field, and the
+>   law runs over it at catalogue load. It also reaches the owner's screen (the strip).
+> - **It extended the framework in three places** (#424, kept): a second output shape
+>   (`objective`), a second model class (`session`), and a caller that is not the Agent
+>   (`objective.track`, writing through the server-side sink).
 >
 > The rest of this banner — the snippet reader, uncalled — is unchanged.
 
@@ -113,7 +111,7 @@ prose below is the task, addressed to the model.
 | `tools` | must be `[]` in v1; a declared tool **refuses to load** |
 | `degradation` | `skip` (advisory) \| `hold` (load-bearing) |
 | `inputs` | each with a **required** `trust: trusted \| untrusted` |
-| `think` | optional, `true`/`false` (default false): whether the call asks the model to think first. Per charter (#424, the distiller), so it moves no other role's cost |
+| `think` | optional, `true`/`false` (default false): whether the call asks the model to think first. Per charter (#424; the tracker has it on, #432), so it moves no other role's cost |
 | `output` | the shape — see below |
 
 `TestCharterLoading` pins one refusal per rule. Each of them is a refusal rather than a
@@ -153,18 +151,19 @@ the shipped charter — a type table grown against hypotheticals is what D5 refu
   genuinely cannot read is answered honestly rather than filled in.
 - **`enum`** — a closed vocabulary, subject to R4.
 
-**`shape: objective`** (#424, the distiller) is the second shape, and it declares no
-fields: a nested ledger of goals and tasks does not fit rows, and its rules — cites that
-resolve in the input, evidence for `done`, constraints that are verbatim quotes, legal
-transitions from the previous revision — are about the INPUT as much as the output. So
-the frontmatter declares only caps (`max_goals`, `max_tasks`, `max_chars`,
-`max_constraint_chars`, `max_cites`, each required and positive — there is no uncapped
-string here either), `roles.validate` hands the answer and the role's inputs to
-`objective.validate_answer`, and `roles.contract_text` asks `objective.contract_text` for
-the output contract. The exam assertions are per shape: a rows assertion names nothing a
-ledger has, so an objective case may use only `never_state`, `goals_at_least`,
-`mentions_any`, `absent` and `has_active_goal` (`objective.ASSERTIONS`), and a charter
-mixing them does not load. `tests/test_objective.py::TestTheCharter`.
+**`shape: objective`** (#424; reshaped by #432 for the tracker) is the second shape. Its
+answer does not fit rows — a verdict and, when it revised, one statement with its cites —
+and its rules are about the INPUT as much as the output: every cite must name a message
+the tracker was shown. So the frontmatter declares only caps (`max_chars` for the
+statement, `max_cites`, each required and positive — there is no uncapped string here
+either), the shape declares the one text field that can leave the role (`statement`,
+bounded by `max_chars`) so the wiring law can see it, `roles.validate` hands the answer
+and the role's inputs to `objective.validate_answer`, and `roles.contract_text` asks
+`objective.contract_text` for the output contract. The exam assertions are per shape: a
+rows assertion names nothing a statement has, so an objective case may use only
+`verdict_in`, `change_in`, `cites_any`, `mentions_any` and `absent`
+(`objective.ASSERTIONS`), and a charter mixing them does not load.
+`tests/test_objective.py::TestTheCharter`.
 
 `roles.capped` is the enforcement: control characters are flattened first (a field that
 can carry a newline can carry a fake banner into whatever renders it), then the cap is
@@ -224,7 +223,7 @@ declaration mean nothing. `TestDegradation`.
 routing is the caller's answer. **The second class arrived with the second customer:**
 `session` (#424), the session's OWN backend whatever it is, a local model included —
 `roles.session_model_spec`, reached from `Agent._role_model("session")` and from the
-server and CLI boundary capture. The distiller reads the owner's text, and a class that
+server and CLI boundary capture. The tracker reads the owner's text, and a class that
 could route it to a cloud provider he did not choose for this chat would be a leak the
 declaration hid. `AISH_ROLE_MODEL` does not apply to it for that reason. claude-max still
 answers "" — **N/A there**, recorded as `unavailable`.
@@ -251,11 +250,15 @@ sitting on a worker. `TestRun` pins that the hooks arrive.
 walks `roles.WIRINGS` and refuses any edge that carries an **unbounded** field from a
 charter with an untrusted input into an `ACTING` context. `TestWiringLaw`.
 
-`roles.WIRINGS` is **empty**. An empty tuple rather than an edge naming a function
-that no longer exists: a wiring is a claim that a path is live, and this file has already
-found what a claim wider than its code costs. The law still runs at catalogue load, over
-nothing, which is exactly the state D5 argued for — it exists *before* the wirings that
-need it. Wirings ship as **code**, not a data format, because a node/edge format designed
+`roles.WIRINGS` holds **one edge: the tracker's `statement` into the per-task reminder**
+(#432). The snippet reader's edge was removed rather than left naming a function that no
+longer exists: a wiring is a claim that a path is live, and this file has already found
+what a claim wider than its code costs. The law ran over nothing for a month, which is
+the state D5 argued for — it existed *before* the wiring that needed it. The tracker's
+input is declared `trusted`, and that is a statement about provenance, not a waiver: it
+is the owner's own typed messages, which the acting model already holds verbatim as his
+turns, so the edge opens no channel the context did not already have; the field it
+carries is capped all the same. Wirings ship as **code**, not a data format, because a node/edge format designed
 against a single wiring would be designed entirely against hypotheticals.
 
 **It is a typo guard, not a regression guard, and #328 is that correction.** This file
@@ -293,7 +296,7 @@ summary text into the row. What survived the reversal, and what did not, is belo
 end through a real search dispatch; `tests/test_web.py` covers the collection half.
 
 Nothing about the **snippet reader** changed here: it stayed retired and stays retired,
-`roles.WIRINGS` is still empty, and the measurement that retired it is still good. The
+no wiring names it, and the measurement that retired it is still good. The
 reversal is only of what shipped in its place.
 
 ### What the change claimed, and why both claims were wrong
@@ -663,7 +666,8 @@ Renderless (in `session.RENDERLESS_STEPS`), emitted through `Agent._emit_record`
 reaches no renderer and is skipped on replay. Both halves, because either alone is the
 empty-live-card bug that registry exists to prevent.
 
-**No role call happens today, so no record is written today.** The shape, the evidence-store
+**The snippet reader writes no record today, because it is not called.** The tracker's
+calls write one each (`objective.role_record`, `docs/objective.md`). The shape, the evidence-store
 input capture and the two writers stay exactly as they were — they are proven, and they were
 never what the measurement retired. `TestTheRoleRecordWithNoWiring` drives them directly,
 at `Agent._record_role`, because there is no search to drive them through.
@@ -883,7 +887,7 @@ the step — which would wedge browsing on a flaky connection.
 
 A model change retires the pass, because a model upgrade can silently change what a role
 does. **Passes are kept per charter PER MODEL** (#424): `admission.json` holds
-`{charter: {"models": {spec: pass}}}`, so the distiller can be admitted for the local
+`{charter: {"models": {spec: pass}}}`, so the tracker can be admitted for the local
 production model and a cloud reference at once, each on its own exam. A file written
 before that holds one pass per charter directly and reads as that model's; the next write
 converts it without losing it. `tests/test_objective.py::TestAdmissionPerModel`. A recorded **failure** is written too and keeps the role out: the useful artifact is
@@ -1073,9 +1077,9 @@ and an edit made by hand retires the admission until the exam is re-run. Both ar
 
 ## Cost and latency — and the measurement that ended the wiring
 
-**The snippet reader costs nothing today**: it is not called. The distiller (#424) is,
-at every task end, and costs a model call only when admitted — its measured tokens and
-latency on the local model are in the #424 hand-off and `docs/objective.md`. What follows
+**The snippet reader costs nothing today**: it is not called. The tracker (#432) is, at
+every task end with a new owner message, and costs a model call only when admitted — its
+measured tokens and latency are in `docs/objective.md`. What follows
 is what the snippet reader cost while its wiring existed, kept because
 it is the evidence for the decision and because it is the shape of the bill the next role
 will present.
@@ -1134,9 +1138,9 @@ text would be a second place for a stale answer to live.
 
 Read this list before assuming a capability.
 
-- **One role is called, and its output goes nowhere but the log.** The distiller (#424)
-  is called at every task end and runs a model only when admitted; `roles.WIRINGS` is
-  still empty because nothing reads its output into a context yet (`docs/objective.md`).
+- **One role is called.** The tracker (#432) is called at every task end with a new
+  owner message and runs a model only when admitted; its capped statement reaches the
+  acting model's reminder, the one entry in `roles.WIRINGS` (`docs/objective.md`).
   Its `role` record is written by `objective.role_record` through the server-side sink,
   in `Agent._record_role`'s shape but with no `call` — it belongs to the task, not to a
   tool call.

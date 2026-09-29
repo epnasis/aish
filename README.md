@@ -629,6 +629,17 @@ this UI. Highlights:
   *deny + comment* means "stop and explain". The
   explanation that follows a deny has to mark anything aish inferred but never
   got to verify, and name the step it was stopped from taking.
+- **The chat's objective, pinned.** After each task aish rereads what you have
+  said since and keeps one short statement of why you are here — its *reading*
+  of your goal, in its own words, citing the messages it rests on (never your
+  comments on approval cards). A strip under the header shows it, labelled as
+  aish's reading; tap it for the messages it rests on and how it evolved, or
+  tap the pencil to rewrite it in your own words, which aish then changes only
+  on something you say later. The model is shown it at the start of every
+  task (not on claude-max, whose loop has no per-task reminder). `/objective` and `/objective edit` do the same in the terminal. It runs
+  only where its role is admitted for the chat's model
+  (`scripts/role-admission.py --model <spec> tracker`); elsewhere the strip
+  says there is none yet and why.
 - **Nothing lost on a locked phone.** Reconnecting replays the transcript,
   including any approval still waiting. Survives server restarts too. Every turn
   carries the time it happened — including chats from long before the feature
@@ -884,7 +895,7 @@ scripts in `scripts/`, and reach it from your phone anytime.
 **While a command runs:** Ctrl-C cancels it (not aish itself); **Ctrl-B**
 detaches it into a background job that survives aish exiting (`/jobs` lists them).
 
-**Slash commands** (Tab completes): `/resume`, `/delete`, `/rename`, `/new` (or
+**Slash commands** (Tab completes): `/resume`, `/delete`, `/rename`, `/objective [edit <text>]`, `/new` (or
 `/clear`), `/model [name]` (`--save` to persist), `/learn [hint]`,
 `/feedback [text]` (files a GitHub issue), `/fork` (branch the conversation),
 `/cd`, `/add-dir`, `/aliases`, `/jobs`, `/chat` (this chat's log file — the

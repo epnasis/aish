@@ -2012,6 +2012,10 @@ class Session:
         # the under-lock check in `SessionLog.set_title_if` reads it from a
         # thread, which for an int is one atomic load.
         self.title_gen = 0
+        # Bumped as each announcement of the objective starts (#432), so an
+        # attach whose read of it overlapped one can tell its own copy may be
+        # the older, and leave the announcement to say it. Loop-owned (L2).
+        self.objective_version = 0
         # last-actor-drives (#102): whoever last performed a session-affecting
         # action. Observers viewing this session see a "another tab is active"
         # hint; acting claims control. Never persisted — replay re-derives it.
@@ -2747,6 +2751,15 @@ class WebServer:
         # (#92) — a pending cd applies before any waiting message.
         if session.pending_cwd:
             await client.ws.send_json({"type": "cwd_queued", "path": session.pending_cwd})
+        # The objective strip (#432) is live state too, re-read from the log on
+        # every attach rather than replayed. Through the OUTBOX, so it queues
+        # in order with live events: an announcement that started while this
+        # read ran is already on its way with state at least as new, and this
+        # copy — possibly the older — is dropped.
+        version = session.objective_version
+        state = await self._objective_event(session)
+        if session.objective_version == version and client.viewing is session:
+            client.outbox.put_nowait(state)
         client.sender = asyncio.ensure_future(self._send_loop(client))
         # A viewer joined: announce role ONLY when someone is already driving,
         # so the fresh tab learns it's an observer. With no controller yet
@@ -2876,6 +2889,11 @@ class WebServer:
             self._claim(client)
             await self._rename_session(
                 client, str(message.get("name", "")), str(message.get("title", ""))
+            )
+        elif kind == "set_objective":
+            self._claim(client)
+            await self._set_objective(
+                client, str(message.get("name", "")), str(message.get("statement", ""))
             )
         elif kind == "models":
             await self._send_models(client, str(message.get("query", "")))
@@ -3260,6 +3278,11 @@ class WebServer:
         )
         session.busy = True
         session.runner = asyncio.ensure_future(self._run_task(session, prompt))
+        # Superseding the turn may have taken the current objective revision
+        # with it (L7), so the strip is re-read now rather than at the next
+        # task end. AFTER the rerun owns the chat: nothing may start a turn
+        # here between the decision and the act, and this awaits.
+        await self._announce_objective(session)
 
     @staticmethod
     def _rollback_transcript_to_last_user(session: Session) -> None:
@@ -3445,6 +3468,10 @@ class WebServer:
                 record=False,
             )
         await self._send_sessions(client, "")
+        # The removed turn's records may have held the current objective
+        # revision; the strip is re-read from the rewritten log. Last, after
+        # every synchronous repair above.
+        await self._announce_objective(session)
 
     def _dequeue(self, client: Client, text: str) -> None:
         """Drop the first still-waiting message matching `text` (the client's
@@ -3709,18 +3736,19 @@ class WebServer:
                 session.logref.task_end("failed", failure)
             else:
                 session.logref.task_end()
-            # The Objective's boundary (#424), captured NOW — the log's size and
-            # the turn — because the next turn may start writing the moment
-            # busy clears, and the distill must read the chat as it stood here.
+            # The objective's boundary (#424, #432), captured NOW — the log's
+            # size and the turn — because the next turn may start writing the
+            # moment busy clears, and the tracker must read the chat as it
+            # stood here.
             boundary = self._objective_boundary(session)
             await self._finish_turn(session)
         if finished is not None:
             self._after_turn(session, *finished)
         if boundary is not None:
-            self._distill_after_turn(session, boundary)
+            self._track_after_turn(session, boundary)
 
     def _objective_boundary(self, session: Session) -> objective.Boundary | None:
-        """Where this turn ended, for the distiller — or None when emission is
+        """Where this turn ended, for the tracker — or None when emission is
         off or there is no log to read. Synchronous and cheap: one stat."""
         if objective.disabled():
             return None
@@ -3737,29 +3765,68 @@ class WebServer:
             state_dir=str(self.state_dir),
         )
 
-    def _distill_after_turn(self, session: Session, boundary: objective.Boundary) -> None:
-        """Write the chat's next Objective revision, off the turn (#424).
+    def _track_after_turn(self, session: Session, boundary: objective.Boundary) -> None:
+        """Read the owner's new messages into the chat's objective, off the
+        turn (#432).
 
         After the answer and after busy has cleared, on a worker thread, so it
-        can never delay what the owner is waiting for; `distill_at_boundary`
-        never raises, and a failure records itself and leaves the previous
-        revision standing. Held in `_epilogues` like the titler, so shutdown
-        does not wait on it."""
+        can never delay what the owner is waiting for; `track_at_boundary`
+        never raises, and a failure records itself and leaves the current
+        statement standing. Anything it wrote is announced to the chat's
+        viewers, so the strip follows without a reload. Held in `_epilogues`
+        like the titler, so shutdown does not wait on it."""
 
         # The log object, bound now: whatever this session's logref points at
-        # by the time the distill finishes, the revision belongs to this log —
+        # by the time the tracker finishes, the revision belongs to this log —
         # and its write lock is the one every rewrite of the file holds.
         chat_log = session.logref.log
 
         async def run() -> None:
             try:
-                await asyncio.to_thread(objective.distill_at_boundary, boundary, chat_log)
-            except Exception:  # noqa: BLE001 — an Objective is never worth a crash
-                log.exception("objective distill failed")
+                written = await asyncio.to_thread(
+                    objective.track_at_boundary, boundary, chat_log
+                )
+                if written and session.logref.log is chat_log:
+                    await self._announce_objective(session)
+            except Exception:  # noqa: BLE001 — an objective is never worth a crash
+                log.exception("objective tracking failed")
 
         task = asyncio.ensure_future(run())
         self._epilogues.add(task)
         task.add_done_callback(self._epilogues.discard)
+
+    async def _objective_event(self, session: Session) -> dict:
+        """The strip's state for one chat, read from its log (#432): the
+        current revision, or none and what the tracker last did."""
+        path = getattr(session.logref.log, "path", None)
+        view = await asyncio.to_thread(objective.read_view, path)
+        return {"type": "objective", "name": session.name, "session": session.name, **view}
+
+    async def _announce_objective(self, session: Session) -> None:
+        """Tell every viewer of this chat what its objective is now. Live
+        state, never transcript (L4): re-derived from the log on attach."""
+        session.objective_version += 1
+        session.bridge.emit(await self._objective_event(session), record=False)
+
+    async def _set_objective(self, client: Client, name: str, statement: str) -> None:
+        """The owner's own objective for the chat he is viewing (#432): an
+        `origin: owner` revision, never a user message. It outranks any
+        tracker call in flight — that call's revision is dropped when it
+        lands (`objective.track_at_boundary`)."""
+        session = client.viewing
+        if session is None or session.name != name:
+            await self._refuse(client, "that chat is not the one on screen", name=name)
+            return
+        try:
+            await asyncio.to_thread(objective.owner_edit, session.logref.log, statement)
+        except ValueError as exc:
+            await self._refuse(client, str(exc), name=name)
+            # The receipt still goes out (a refusal is an answer), so the
+            # client's optimistic paint is never rolled back by a missing one:
+            # the strip is repainted from the log, which holds no edit.
+            await self._announce_objective(session)
+            return
+        await self._announce_objective(session)
 
     def _after_turn(
         self, session: Session, result: str, titling: TitleRequest | None
@@ -7011,6 +7078,12 @@ def create_app(
             # hoists the session to the top of every recency-ordered list.
             # Opening a session must not count as activity in it.
             logref.origin(origin)
+        # The objective reaches the model through the per-task reminder
+        # (#432). Read through `logref`, so a chat whose log moves (a fork, a
+        # restore) is read where it lives now.
+        agent.objective_source = lambda: objective.read_current(
+            getattr(logref.log, "path", None)
+        )
         session = Session(agent, logref, bridge, origin=origin, trigger_meta=trigger_meta)
         session.custom_title = custom_title  # a renamed chat keeps its name hot
         session.title_auto = title_auto  # …and a HAND-typed one is never overwritten (#175)

@@ -734,6 +734,9 @@ function enterSession(name, { source = "hello", title, stash = false } = {}) {
   if (name !== currentSession) setBusy(false);
   // So is the context meter ([CTX-METER]): the incoming chat's replay sets it.
   if (name !== currentSession) setCtxFill(null);
+  // …and so is its objective ([OBJECTIVE-STRIP]): the incoming chat's own
+  // `objective` event repaints the strip.
+  if (name !== currentSession) clearObjective();
   currentSession = name;
   // Only the mirror paints a truncated copy, and only an unstashable view may
   // come from one — so provenance is a property of the SOURCE, not a flag each
@@ -1553,6 +1556,7 @@ function handle(event) {
     // full list, so a claim on the phone clears the chip on the laptop too.
     case "shared": renderShares(event.items || []); break;
     case "cwd_queued": addCwdChip(event.path); break;
+    case "objective": onObjective(event); break;
     case "cwd_dequeued": removeCwdChip(); break;
     case "token": onToken(event.text); break;
     case "delivery": onDelivery(event); break;
@@ -1890,7 +1894,7 @@ const VIEW_SAFE_EVENTS = new Set([
   "session_renamed", "session_deleted", "session_restored", "trash_list",
   "cmd_history", "jobs", "files", "dirs",
   "console_started", "console_out", "console_exit", "console_error",
-  "console_shared", "peek",
+  "console_shared", "peek", "objective",
 ]);
 
 function replayFp(event) {
@@ -9193,6 +9197,8 @@ const SLASH_COMMANDS = [
   ["/chat", "show this chat's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
   ["/explain", "a turn's record, step by step — what each call was given, did and returned"],
+  ["/objective", "this chat's objective — aish's reading of your goal, its sources and history"],
+  ["/objective edit", "set the objective in your own words"],
   ["/help", "about aish web"],
 ];
 
@@ -9653,6 +9659,11 @@ function handleSlash(text) {
     // paint is not on screen to tap. Bare form opens the LAST turn; an
     // argument is a turn id or, for a log written before ids, an ordinal.
     case "/explain": openExplain(arg || ""); return true;
+    // The strip's two doors, typed: the sheet, or the editor straight away.
+    case "/objective":
+      if (arg.trim().toLowerCase() === "edit") openObjectiveEditor();
+      else openObjectiveSheet();
+      return true;
     case "/help": openSheet("workspace-sheet"); return true;
     case "/quit": case "/exit": showToast("just close the tab — chats persist"); return true;
     case "/debug": reportViewport("manual"); showToast("viewport state sent to server log"); return true;
@@ -17089,6 +17100,198 @@ $("rename-form").addEventListener("submit", (e) => {
   closeSheets();
 });
 $("rename-cancel").onclick = () => closeSheets();
+
+// [OBJECTIVE-STRIP-START]
+// The chat's objective (#432): why the owner is here, as a model READ it from
+// his messages. Live state, never transcript — the server sends it on attach
+// and whenever it changes (`objective` events), and nothing replays it.
+//
+// Two rules hold here. Whose words these are is part of the statement (L8):
+// the tracker's statement is always labelled as aish's reading, and only his
+// own edit is shown as his. And "no objective yet" is a real answer the strip
+// can give, including WHY there is none, as observed — the tracker had not run,
+// it ran and found none, or it could not run and said why.
+let objectiveState = null; // {name, objective, tracker} for currentSession, or null
+
+const OBJECTIVE_LEFT = {
+  evolved: "then evolved",
+  pivoted: "then pivoted",
+  unknown: "then changed — how is unknown",
+  edited: "then you rewrote it",
+};
+
+// What the strip and the sheet say, from one state. Pure: tests/js/test_objective_strip.js.
+function objectiveCopy(state) {
+  const revision = state && state.objective;
+  if (revision && revision.statement) {
+    const own = revision.origin === "owner";
+    return {
+      empty: false,
+      label: own ? "Your objective:" : "aish reads your goal as:",
+      text: revision.statement,
+      whose: own
+        ? "In your own words. aish changes it only on something you say later."
+        : "aish's reading of your goal, written from your messages — not your words. " +
+          "If it is wrong, edit it.",
+    };
+  }
+  const tracker = state && state.tracker;
+  let whose;
+  if (!tracker) {
+    whose = "aish has not read this chat for one yet. It does after each task.";
+  } else if (tracker.discarded) {
+    // Its answer was computed and then thrown away (a Retry, or an edit saved
+    // meanwhile) — say that, never what the answer would have meant.
+    whose = `After turn ${tracker.turn}, aish's reading was discarded: ${tracker.discarded}.`;
+  } else if (tracker.status === "ok" && tracker.verdict === "unknown") {
+    whose = `After turn ${tracker.turn}, aish read your messages and could not tell what you are after.`;
+  } else if (tracker.status === "ok") {
+    whose = `After turn ${tracker.turn}, aish read your messages and found no objective stated yet.`;
+  } else {
+    const why = tracker.why ? `: ${tracker.why}` : "";
+    whose = `After turn ${tracker.turn}, aish did not produce one (${tracker.status}${why}).`;
+  }
+  return { empty: true, label: "Objective:", text: "none yet", whose };
+}
+
+// The earlier statements, newest first, each with what became of it.
+function objectiveTrail(revision) {
+  const trail = (revision && Array.isArray(revision.trail)) ? revision.trail : [];
+  return trail.slice().reverse().map((entry) => ({
+    meta: `turn ${entry.turn} · ${entry.origin === "owner" ? "you" : "aish"} · ` +
+      (OBJECTIVE_LEFT[entry.left] || "then changed"),
+    text: String(entry.statement || ""),
+  }));
+}
+
+// Hidden only while there is nothing to say: no objective, the tracker has
+// never looked, and the chat holds no turn yet (a fresh chat keeps its welcome).
+function objectiveStripHidden(state, emptyChat) {
+  if (!state) return true;
+  return !state.objective && !state.tracker && emptyChat;
+}
+
+function renderObjective(state) {
+  const strip = $("objective-strip");
+  if (objectiveStripHidden(state, transcriptIsEmpty())) { strip.hidden = true; return; }
+  const copy = objectiveCopy(state);
+  strip.hidden = false;
+  strip.classList.toggle("empty", copy.empty);
+  $("objective-label").textContent = copy.label;
+  $("objective-text").textContent = copy.text;
+  $("objective-open").setAttribute("aria-label", `${copy.label} ${copy.text} — sources and history`);
+  if (!$("objective-sheet").hidden) renderObjectiveSheet(state);
+}
+
+function renderObjectiveSheet(state) {
+  const copy = objectiveCopy(state);
+  const revision = state && state.objective;
+  $("objective-whose").textContent = copy.whose;
+  $("objective-statement").textContent = copy.empty ? "No objective yet." : copy.text;
+  const sources = $("objective-sources");
+  sources.replaceChildren();
+  const cited = (revision && revision.sources) || [];
+  if (cited.length) {
+    const head = document.createElement("p");
+    head.className = "obj-section";
+    head.textContent = "Read from your messages";
+    sources.appendChild(head);
+    for (const source of cited) {
+      const row = document.createElement("div");
+      row.className = "obj-source";
+      row.textContent = source.text || "(this message's text is not shown here)";
+      sources.appendChild(row);
+    }
+  }
+  const trail = $("objective-trail");
+  trail.replaceChildren();
+  const rows = objectiveTrail(revision);
+  if (rows.length) {
+    const head = document.createElement("p");
+    head.className = "obj-section";
+    head.textContent = "Earlier, newest first";
+    trail.appendChild(head);
+    for (const item of rows) {
+      const row = document.createElement("div");
+      row.className = "obj-trail-row";
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = item.meta;
+      row.append(meta, document.createTextNode(item.text));
+      trail.appendChild(row);
+    }
+  }
+}
+
+// An `objective` event names its chat; one for any other chat is dropped (a
+// late tracker answer landing after a switch must not paint over this one).
+function onObjective(event) {
+  if (!event || event.name !== currentSession) return;
+  objectiveState = { name: event.name, objective: event.objective || null, tracker: event.tracker || null };
+  renderObjective(objectiveState);
+}
+
+// The strip belongs to the chat on screen: leaving a chat clears it, and the
+// incoming chat's own event repaints it.
+function clearObjective() {
+  objectiveState = null;
+  renderObjective(null);
+}
+
+function openObjectiveSheet() {
+  renderObjectiveSheet(objectiveState);
+  openSheet("objective-sheet");
+}
+
+// The same popover as the rename: anchored under the strip, keeps the backdrop.
+function openObjectiveEditor() {
+  closeSheets();
+  const box = $("objective-box");
+  const input = $("objective-input");
+  const revision = objectiveState && objectiveState.objective;
+  input.value = (revision && revision.statement) || "";
+  box.style.visibility = "hidden";
+  box.hidden = false;
+  const anchor = $("objective-strip").hidden
+    ? $("topbar").getBoundingClientRect()
+    : $("objective-strip").getBoundingClientRect();
+  const width = box.offsetWidth;
+  const left = Math.max(12, Math.min(window.innerWidth - width - 12, anchor.left + anchor.width / 2 - width / 2));
+  box.style.left = `${left}px`;
+  box.style.top = `${anchor.bottom + 6}px`;
+  box.style.visibility = "";
+  $("backdrop").hidden = false;
+  input.focus();
+}
+
+$("objective-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const statement = $("objective-input").value.trim();
+  if (!statement) { $("objective-input").focus(); return; }
+  const previous = objectiveState;
+  const name = currentSession;
+  if (name) {
+    // The strip takes his words at once (L7), and gives them back if the edit
+    // never lands; the server's `objective` event is the authoritative repaint.
+    act({ type: "set_objective", name, statement }, {
+      label: "the objective",
+      lost: () => { if (currentSession === name) { objectiveState = previous; renderObjective(previous); } },
+    });
+    const before = (previous && previous.objective) || {};
+    objectiveState = {
+      name,
+      objective: { ...before, statement, origin: "owner", change: "edited", sources: [] },
+      tracker: previous ? previous.tracker : null,
+    };
+    renderObjective(objectiveState);
+  }
+  closeSheets();
+});
+$("objective-cancel").onclick = () => closeSheets();
+$("objective-open").onclick = () => openObjectiveSheet();
+$("objective-edit").onclick = () => openObjectiveEditor();
+$("objective-sheet-edit").onclick = () => openObjectiveEditor();
+// [OBJECTIVE-STRIP-END]
 
 $("session-menu").addEventListener("click", (e) => {
   const item = e.target.closest(".menu-item");

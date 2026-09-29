@@ -99,6 +99,18 @@
       <span class="role-text">another tab is active</span>
     </span>
   </div>
+  <!-- The chat's objective (#432): aish's READING of why you are here, written
+       from your messages — never shown as your words unless you wrote it. The
+       line opens its sources and history; the pencil edits it. -->
+  <div id="objective-strip" hidden>
+    <button id="objective-open" type="button">
+      <svg class="obj-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg>
+      <span class="obj-line"><span id="objective-label" class="obj-label"></span> <span id="objective-text" class="obj-text"></span></span>
+    </button>
+    <button id="objective-edit" class="bar-btn icon" type="button" title="edit the objective" aria-label="edit the objective">
+      <svg viewBox="0 0 24 24"><path d="M4 20h4l10.5-10.5a2 2 0 0 0 0-2.8l-1.2-1.2a2 2 0 0 0-2.8 0L4 16z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+    </button>
+  </div>
 </header>
 
 <!-- chat title menu (settings for the current chat) -->
@@ -170,6 +182,18 @@
     <div class="rename-actions">
       <button type="button" id="rename-cancel" class="rename-btn">Cancel</button>
       <button type="submit" id="rename-save" class="rename-btn primary">Save</button>
+    </div>
+  </form>
+</div>
+
+<!-- the objective, in your own words: the same popover as the rename -->
+<div id="objective-box" class="popover-menu rename-box" hidden>
+  <form id="objective-form">
+    <textarea id="objective-input" rows="3" maxlength="400" placeholder="Why you are here, in your words"
+              autocapitalize="sentences"></textarea>
+    <div class="rename-actions">
+      <button type="button" id="objective-cancel" class="rename-btn">Cancel</button>
+      <button type="submit" id="objective-save" class="rename-btn primary">Save</button>
     </div>
   </form>
 </div>
@@ -555,6 +579,25 @@
       Delete permanently
       <span class="meta">Asks first — this one cannot be undone</span>
     </button>
+  </div>
+</div>
+
+<!-- the objective's sources and history (#432) -->
+<div id="objective-sheet" class="sheet" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <strong class="grow">Objective</strong>
+    <button class="close" aria-label="close" data-close="objective-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
+  </div>
+  <div class="sheet-list">
+    <p id="objective-whose" class="obj-whose"></p>
+    <p id="objective-statement" class="obj-statement"></p>
+    <div id="objective-sources"></div>
+    <button type="button" id="objective-sheet-edit" class="row">
+      Edit in your own words
+      <span class="meta">aish then changes it only on something you say later</span>
+    </button>
+    <div id="objective-trail"></div>
   </div>
 </div>
 
