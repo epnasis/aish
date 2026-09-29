@@ -15,6 +15,7 @@
 
 **#420 (2026-09-26) changed how `sent` (§3.12) serialises, and added `order`.** The blobs and the `request` digest were taken over SORTED keys (`agent._canonical`), so the stored request was not the one the model received wherever a chat template renders the request as JSON text — Qwen's renders the tool schemas. Measured on mi for session-20260925-204008-294943 turn 22 call 1: the request rebuilt from the record was 46,790 prompt tokens, the same request with the tool schemas' original key order 46,954 (exactly the original call), and greedy decoding of the sorted form produced a different reply. From #420 every blob, `options`, and the whole request are serialised in the order the adapter handed them to the client LIBRARY (`agent._as_sent`), and `order` lists the top-level keys in that order. **That is the adapter's order, which is not always the wire's.** On the OpenAI SDK (`local:` included) the stored `messages` and `tools` blobs equal the wire body's `messages` and `tools` serialised compactly with non-ASCII unescaped — pinned by a wire capture in the suite (`TestSentAtTheSeam.test_local_blobs_equal_the_wire_body`); the #420 review reported the same by wire capture on the Anthropic SDK, which the suite does not pin. On ollama the library rebuilds each message and tool through its own pydantic models before sending, so the wire carries ITS field order (a tool goes out `type` before `function`, `name`/`description`/`parameters` inside it), and the stored blob holds the arguments aish handed the library (`backends.passthrough_request`). The top-level order differs from the wire on every SDK: the OpenAI SDK flattens `extra_body` into the body and puts `messages` first, and the Anthropic and ollama libraries build their own body. **A record without `order` predates #420: its blobs hold the same values with keys sorted, and its `request` digest is over `_canonical({**options, messages, tools?, system?})`.** A reader that only resolves blobs by digest handles both unchanged; one that replays or re-hashes must branch on `order`.
 **#424 (2026-09-27) added `objective` as §3.14** — what the chat is FOR, as a ledger of goals and tasks, one revision per task end, written off the interactive path by the distiller role or the extractive floor. **#432 (2026-09-29) reshaped it** under the owner's three-level decision: one model-written statement of his objective with cites, a trail of earlier statements, and owner edits. The ledger and the floor are retired. It now reaches the model through the per-task reminder and the screen through a pinned strip.
+**#433 (2026-09-29) added `plan` as §3.15** — level two of the owner's model: aish's own checklist for the objective, written only by the acting model through a `plan` tool, with `done` accepted only on evidence that resolves to the chat's own records, and dropped or replanned by the owner through intercepted actions. Renderless; shown on the objective strip.
 **#352 slice 1 (2026-09-03) stamped `model_call` on the rendered `tool_start` and `tool` steps** — the second amendment to §2's fork 1(b), beside the `brief` one (`docs/diagnostics.md`). Additive; omitted rather than zeroed where no recorded model call issued the call (claude-max), matching the renderless `call` record it mirrors. The browser is built from rendered steps alone, so without it the trace card could fold its timeline into rounds only by counting rows. `thinking` is still untouched.
 **#339 (2026-08-30) added `retry` as §3.11, and with it the `superseded` KEY** — the first record in this document about the log being rewritten rather than about a decision inside a turn. It exists because Retry deleted what it discarded, so a §0-corollary-2 absence could be created *after the fact*, which no record shape here anticipated. Rendered, and the one record whose PLACEMENT is a reader rule.
 **#396 (2026-09-20) added `reminder` to §3.8** — the digest of the per-task system message the recalled items were injected AS, under the same content address the `brief` gives its system parts, so a reader joins the two records exactly instead of by position. Additive key on the existing `knowledge` step; absent on every log written before it, and a reader serves those by the positional join #386 shipped with. A stamp the brief has no part for is its own reader state (`not_on_brief`) and never a fallback to position: the writer named the message, and a part it did not name shown as "what the model was handed" is the confident-false-conclusion class §0 exists to prevent.
@@ -736,6 +737,88 @@ Both points are read from live records only, so a Retry that discards a task als
 **A rewritten chat.** Unchanged from #424. The boundary is the file's size at `task_end` plus the bytes of its last line. The tracker reads and writes under the log's write lock, and only while the file still ends, at that size, with that line. A Retry or a redaction that lands first yields a `role` record whose `why` says the boundary no longer exists. One that lands while the model is thinking yields the `role` record carrying `discarded`, and no revision.
 
 **Where it reaches the model.** Only through the per-task reminder, as a delta (`agent.objective_delta`, `docs/agent-core.md`). The statement is shown in full when it differs from the one in force in the reminders already in history, confirmed as unchanged when it does not, and withdrawn when there was one and there is none now. It is always introduced as aish's reading of his goal, or as his own words when he edited it. `messages[0]` never carries it, so the prompt prefix stays byte-stable. The `context` record (§3.10) gains `objective: {revision, origin, shown}`, where `shown` is `full`, `unchanged` or `none`. It is absent when the chat has no objective and none was ever shown.
+
+---
+
+### 3.15 · `plan` — aish's own checklist for the objective, one revision at a time (#423, #433)
+
+**Specified for #433, slice 2 of the three-level model.** The objective (§3.14) is why the owner is here; the **plan** is how aish gets there: a checklist of tasks that aish writes for itself, **only when it plans**, and never from his messages. Hints (his card comments) are neither. Rationale: `docs/plan.md`.
+
+**Who writes it.** Two writers, never anything else:
+
+- **the acting model**, through the `plan` tool. The call goes through `Agent._dispatch` like every tool (L1) and executes nothing: code validates the list and writes one record through the agent's log-only sink (`_emit_record`, §1.2), and the tool result tells the model what was recorded. The tool is on the menu for every backend with a native loop; `AISH_PLAN=0` takes it off (the measurement's no-plan arm).
+- **the owner**, through two intercepted actions: `drop` (one task) and `replan` (ask aish to revise). The web's `plan_action` message and the CLI's `/plan drop <id>` and `/plan replan`. Written server-side through `SessionLog.append_steps_if`, conditional on the log not having changed since it was read, exactly like `objective.owner_edit`. **Neither is a user message**, so neither reaches the model as something he said.
+
+**Renderless.** In `RENDERLESS_STEPS`, never handed to `on_step`. The screen shows it through live state on the objective strip (`docs/web-server.md`, *Live state, not transcript*). The `plan` tool call itself is an ordinary `tool_start`/`tool` step and renders as a trace row like any call.
+
+One record per **revision**. The current plan is the newest **live** `plan` record (L7), with the owner-drop overlay below applied.
+
+```json
+{"kind": "plan", "turn": 5, "revision": 3, "origin": "model", "action": "revise",
+ "chat": "session-20260101-090000-000000", "base": 2, "call": 4,
+ "tasks": [
+   {"id": "1", "title": "Test weather service A", "state": "done",
+    "evidence": {"ref": "t5.c2", "kind": "tool", "tool": "run_command",
+                 "quote": "curl -s http://127.0.0.1:9101/health"}},
+   {"id": "2", "title": "Test weather service B", "state": "pending",
+    "downgraded": {"from": "done", "quote": "checked B",
+                   "why": "the evidence matches no successful call in this chat"}},
+   {"id": "3", "title": "Compare the three", "state": "dropped_replan", "dropped": "vanished"},
+   {"id": "4", "title": "Test weather service D", "state": "dropped_by_owner"}],
+ "counts": {"pending": 1, "doing": 0, "done": 1, "dropped_replan": 1, "dropped_by_owner": 1},
+ "downgraded": 1,
+ "refused": [{"id": "4", "why": "dropped by the owner; the model cannot change it"}]}
+```
+
+| field | why |
+|---|---|
+| `turn` | The §2 turn the revision was written in. An owner revision carries the latest turn the log holds when he acted. |
+| `revision` | 1 + the highest `plan` revision in the file, superseded ones included (the `last_turn` rule, as §3.14). |
+| `origin` | `model` (the plan tool) or `owner` (his action). |
+| `action` | `revise` (a model call), `drop` or `replan` (owner). An owner revision names the task in `task` for `drop`. |
+| `base` | The revision the writer computed against (`null` for none). |
+| `call` / `model_call` | Model revisions only: the plan tool call that wrote it, joining the record to its `tool` step (§2). |
+| `tasks[]` | The whole list after this revision. `id` is a short string (the model's, or assigned by code when it gave none or one already taken); `title` at most `plan.TITLE_CHARS` (160), **the model's words**, never the owner's. `state` is one of the five below. `evidence` on a `done` task; `downgraded` on a task the model called done without evidence that resolves; `dropped` (`explicit` \| `vanished`) on a `dropped_replan` task. |
+| `counts` | Tasks per state, so a reader needs no pass over `tasks[]`. |
+| `downgraded` | How many of the model's `done`s in THIS call were recorded as `pending`. Absent when none. |
+| `refused` | The model's changes code did not apply, each `{id, why}`: an owner-dropped task it tried to change. Absent when none. |
+
+**States.** `pending`, `doing`, `done`, `dropped_replan` (the model dropped it, or it vanished from the model's list), `dropped_by_owner`. The model sends `pending`, `doing`, `done` or `dropped`; code writes `dropped` as `dropped_replan`.
+
+**What a model revision must satisfy**, checked in code (`plan.revise`); a list that breaks the first three writes nothing and the tool returns an error the model can act on:
+
+| rule | enforced by |
+|---|---|
+| `tasks` is a list of at most `plan.MAX_TASKS` (20) objects, each with a non-empty `title` and a `state` from the model's vocabulary | refusal, nothing written |
+| no two tasks carry the same `id`, and no two open tasks the same title | refusal, nothing written |
+| **matching**: an incoming task is the current task with the same `id`; failing that, the one with the same title (whitespace squashed, case folded); failing that, a new task | code |
+| **replan keeps what it replaces**: a current task the new list does not match stays in the record — `pending`/`doing` become `dropped_replan` with `dropped: "vanished"`; `done`, `dropped_replan` and `dropped_by_owner` keep their state. **Nothing is ever deleted.** | code |
+| **done needs evidence**: a `done` task's `evidence` must resolve (below). If it does not, and the task was not already `done` with resolved evidence, it is recorded as `pending` with `downgraded` saying what was cited and why it did not resolve. A task already `done` keeps its recorded evidence when the model repeats `done` without any. | code; `downgraded` on the task and the record |
+| **an owner-dropped task is immutable to the model**: a matched `dropped_by_owner` task keeps its state and title whatever the model sent; a change it asked for is listed in `refused` | code |
+
+**Evidence resolution.** Against the chat's LIVE records at the moment of the call (L7: a Retry-discarded step is not evidence), `plan.resolve_evidence` accepts, in this order:
+
+1. a **ref** `t<turn>.c<call>` naming a `tool` step with `ok: true` that is not itself a `plan` call — `kind: "tool"`;
+2. a **quote**, at least `plan.QUOTE_MIN_CHARS` (6) characters after squashing, contained (whitespace squashed, case folded) in the newest such step's `command`, `summary`, or one of the string values of its `call` record's `args` — `kind: "tool"`;
+3. a quote contained in a `!` command the owner ran with a recorded exit code 0 (§3.14's `ran` material) — `kind: "ran"`;
+4. a quote contained in an earlier final answer (§3.14's `answer` material) — `kind: "answer"`.
+
+The resolved `ref` is always the record's own ref (`t5.c2`, a `c#…` digest for a `ran`, an `m:<id>` for an answer), whatever form the model cited. **What resolution establishes is that the cited call happened and succeeded, and nothing more**: that it proves the task is the model's judgement, never checked by code (L8). The measurement reads a sample blind for exactly that.
+
+**The owner-drop overlay.** A model revision is written through the agent's sink, not conditionally, so one computed from a base read just before his drop landed could omit it. So every reader applies the overlay: for each LIVE `origin: owner` record with `action: drop`, a task in the current revision with the same title (squashed, folded) is `dropped_by_owner`, whatever that revision says. The model's writer applies the same overlay to its base. His drop therefore survives any interleaving with a model call.
+
+**A replan request is pending** while the newest live owner `replan` revision is newer than the newest live model revision. It is answered by the next model revision, whatever it changes.
+
+**Retry and redaction.** A Retry supersedes the model revisions written in the discarded attempt (L7), and the plan in force reverts to the one before it. **The owner's own plan records survive a Retry and a redaction of the turn they sit in**, on the same terms as his objective edits (§3.14): they are his decisions, not part of the attempt.
+
+**Where it reaches the model.**
+
+- **The tool result**, after every call: the recorded list, one line per task with its id and state, what was downgraded and why, what was refused, and — when something was downgraded — up to `plan.CITABLE_SHOWN` (8) recent successful calls with their refs, so the next call can cite one.
+- **The per-task reminder, as a delta**, next to the objective (`agent.plan_delta`): the plan in full when its rendering is not already the newest plan rendering in history (a reminder segment or a `plan` tool result), `PLAN_UNCHANGED` when it is, `PLAN_NONE` when one was shown and there is none now. **Never `messages[0]`.** A pending replan request rides inside the full rendering. The `context` record (§3.10) gains `plan: {revision, shown}`, absent when the chat has no plan and none was shown.
+- **The newest plan call's arguments are exempt from the #429 argument lever**, so the model's own latest list is never cut to 80 characters; older plan calls' arguments are trimmable like any.
+- **Replan triggers** (`AISH_PLAN` not `tool`): each appends ONE line and never forces a call. They fire only while the plan has an open task. A **denial with a comment** appends the line to the denial's own result; the `plan` tool is exempt from the stop gate it arms, because it executes nothing. A **stall** of `agent.STALL_REPLAN_AT` (4) no-progress steps appends one `[aish: …]` note, once per task. A **failed task end** — the previous task raised, or ended at the stall cap, the step ceiling or the loop detector — adds one reminder segment to the next task. His **drop or replan** while a task runs appends one `[aish: …]` note before the next model call; while idle, the next reminder carries it in the plan's rendering.
+
+**What is NOT checked**, so the words do not outrun the code: that a task is above single-command level (the tool description tells the model; nothing counts calls per task), that a resolved evidence step proves its task, and that the titles say what the model then does.
 
 ---
 
