@@ -171,5 +171,45 @@ agent's thread (`announce_objective_threadsafe`).
 
 ## Measurement
 
-Not yet run at the time this page was first written; see the section below once
-filled.
+Run 2026-09-29 on the isolated harness, local Qwen3.6-35B-A3B-8bit on mi, `think`
+on, AISH_OBJECTIVE=0, code at 7521c94 (before the review and measurement fixes
+below). Scripts, pass bar (written before the scored runs), every chat log and the
+scores: `~/.cache/aish-433/`.
+
+**Scenario.** One task per fresh chat: get Warsaw's 24 h rain from six local stub
+services, each with its own protocol documented only in ~5 KB of noisy docs
+(token-then-data, a 12 KB region list, an API-key header, always-503, three pages to
+sum, coordinates), then a table. A first scenario (health + version of six services)
+was piloted once and dropped before scoring: the model did it in one shell loop, so
+it is not multi-step and it correctly wrote no plan.
+
+| arm | n | all 6 attempted | completed /6 | answer correct /6 | plan used | dones (all with evidence) | downgrades | median s |
+|---|---|---|---|---|---|---|---|---|
+| A no plan tool | 20 | 20/20 | 5.95 | 5.70 | — | — | — | 90 |
+| B plan tool | 20 | 20/20 | 5.95 | 5.65 | 2/20 | 7 | 23 | 96 |
+| C plan + triggers | 20 | 20/20 | 6.00 | 5.85 | 0/20 | 0 | 0 | 90 |
+
+**Pass bar not met, and not measurable here**: the bar (C's all-attempted rate at
+least 15 points over A's, void if A ≥ 90%) is void — the baseline attempted all six
+services in every run, so this scenario leaves no room for the plan to help. No
+trigger fired in C (no stall, no denial, no failed end). No run errored; 141 cards
+were approved by the driver; 1.6 h of runs in all.
+
+**What it did show:**
+- **The model rarely plans on this task**: 2 of 40 runs with the tool on. Why is not
+  established.
+- **Evidence resolution, observed in one run (B19)**: 23 downgrades before 7 dones
+  landed. The model cited OUTPUT values (`rain_mm=3.2`), then the command text without
+  the shell quotes the call ran with, then a ref (`t1.c6`) to a failed call; each was
+  refused correctly by the rule as written. Two fixes followed, unmeasured live:
+  shell quotes are ignored when matching (`TestMeasurementFindings`), and a task done
+  on resolved evidence stays done when a later citation fails to resolve (it had
+  flipped back to pending twice in that run). The NOT DONE line now says "never its
+  output".
+- **Blind reading of all 7 recorded dones** (Fable 5.0, arm hidden): 6 supported,
+  1 partial — bravo's cited call shows a 24 h rain value for region `pl-maz-0419` but
+  not that the region is Warsaw (that link was in an earlier, uncited call). No done
+  was unsupported. Seven dones from one run is not a sample of the arm.
+
+**Not established**: whether the plan helps completion on a task where the baseline
+forgets subtasks — that needs a scenario whose baseline fails, which this one did not.

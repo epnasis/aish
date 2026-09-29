@@ -724,6 +724,27 @@ class TestTheWeb:
         assert agent_module.PLAN_REPLAN_ASKED in reminder
 
 
+class TestMeasurementFindings:
+    """What the #433 live runs on local Qwen showed (docs/plan.md, Measurement)."""
+
+    def test_shell_quoting_does_not_decide_whether_a_call_is_cited(self):
+        records = [ok_step(1, 27, command='curl -s "http://127.0.0.1:9431/bravo/rain/pl-maz-0419"')]
+        record = revise(None, [{"title": "Bravo", "state": "done",
+                                "evidence": "curl -s http://127.0.0.1:9431/bravo/rain/pl-maz-0419"}],
+                        records)
+        assert record["tasks"][0]["evidence"]["ref"] == "t1.c27"
+
+    def test_a_failed_recitation_does_not_undo_a_done(self):
+        records = [ok_step(1, 1, command="curl -s http://x.example/alpha/rain")]
+        first = revise(None, [{"id": "1", "title": "Alpha", "state": "done",
+                               "evidence": "x.example/alpha/rain"}], records)
+        again = revise(first, [{"id": "1", "title": "Alpha", "state": "done",
+                                "evidence": "rain_mm=3.2"}], records, 2)
+        assert again["tasks"][0]["state"] == "done"
+        assert again["tasks"][0]["evidence"]["ref"] == "t1.c1"
+        assert "downgraded" not in again
+
+
 class TestReviewFindings:
     """The Fable 5.0 review of #433: a race and two seams, each pinned."""
 

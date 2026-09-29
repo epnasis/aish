@@ -85,8 +85,14 @@ def title_key(title: str) -> str:
     return " ".join(str(title).split()).casefold()
 
 
+# Shell quoting is not part of what a call DID: the owner's measurement (#433)
+# saw a model cite `curl -s http://…/rain/pl-maz-0419` for a call that ran as
+# `curl -s "http://…/rain/pl-maz-0419"`, and every such done was downgraded.
+_QUOTES = str.maketrans("", "", "'\"`")
+
+
 def _squash(text: str) -> str:
-    return " ".join(str(text).split()).casefold()
+    return " ".join(str(text).translate(_QUOTES).split()).casefold()
 
 
 def is_revision(step: dict) -> bool:
@@ -416,9 +422,12 @@ def revise(
                 resolve_evidence(entry.evidence, candidates) if entry.evidence
                 else (None, "no evidence was cited")
             )
+            # A task already done on resolved evidence keeps it: a later citation
+            # that does not resolve adds nothing, and must not undo the done
+            # (measurement finding, #433).
             carried = (
                 found.get("evidence")
-                if found is not None and found.get("state") == DONE and not entry.evidence
+                if found is not None and found.get("state") == DONE
                 else None
             )
             if evidence is not None or carried:
@@ -497,7 +506,7 @@ def tool_result(record: dict, candidates: list[Citable] | None = None) -> str:
             lines.append(
                 f"NOT DONE: [{task.get('id')}] was recorded as pending — {down.get('why')}. "
                 "Cite the successful call that proved it: its ref, or an exact part of its "
-                "command or arguments."
+                "command or arguments — never its output."
             )
     for refusal in record.get("refused") or ():
         lines.append(f"REFUSED: [{refusal.get('id')}] {refusal.get('why')}.")
