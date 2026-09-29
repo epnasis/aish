@@ -17127,7 +17127,9 @@ function objectiveCopy(state) {
     const own = revision.origin === "owner";
     return {
       empty: false,
-      label: own ? "Your objective:" : "aish reads your goal as:",
+      // The strip shows the statement bare (owner, 2026-09-29); whose words
+      // it is stays in the sheet's `whose` line.
+      label: "",
       text: revision.statement,
       whose: own
         ? "In your own words. aish changes it only on something you say later."
@@ -17151,7 +17153,7 @@ function objectiveCopy(state) {
     const why = tracker.why ? `: ${tracker.why}` : "";
     whose = `After turn ${tracker.turn}, aish did not produce one (${tracker.status}${why}).`;
   }
-  return { empty: true, label: "Objective:", text: "none yet", whose };
+  return { empty: true, label: "", text: "No objective yet", whose };
 }
 
 // The earlier statements, newest first, each with what became of it.
@@ -17178,8 +17180,9 @@ function renderObjective(state) {
   strip.hidden = false;
   strip.classList.toggle("empty", copy.empty);
   $("objective-label").textContent = copy.label;
+  $("objective-label").hidden = !copy.label;
   $("objective-text").textContent = copy.text;
-  $("objective-open").setAttribute("aria-label", `${copy.label} ${copy.text} — sources and history`);
+  $("objective-open").setAttribute("aria-label", `Objective: ${copy.text} — sources and history`);
   if (!$("objective-sheet").hidden) renderObjectiveSheet(state);
 }
 

@@ -36,18 +36,18 @@ function world(globals = {}) {
 {
   const w = world();
   const read = w.objectiveCopy({ objective: { statement: "Know if it rains tomorrow", origin: "tracker" } });
-  ok("a tracker statement is labelled as aish's reading", read.label === "aish reads your goal as:");
+  ok("the strip shows a tracker statement bare; whose it is lives in the sheet", read.label === "" && /not your words/i.test(read.whose));
   ok("…and the sheet says it is not his words", /not your words/.test(read.whose));
   ok("the statement itself is shown", read.text === "Know if it rains tomorrow" && !read.empty);
   const own = w.objectiveCopy({ objective: { statement: "Mine", origin: "owner" } });
-  ok("only his own edit is shown as his", own.label === "Your objective:" && /your own words/i.test(own.whose));
+  ok("his own edit is bare on the strip too, and the sheet says it is his", own.label === "" && /your own words/i.test(own.whose));
 }
 
 // ---- 2. none yet, and what was observed ------------------------------------
 {
   const w = world();
   const never = w.objectiveCopy({ objective: null, tracker: null });
-  ok("none yet is a statement the strip can make", never.empty && never.text === "none yet");
+  ok("no objective yet is a statement the strip can make", never.empty && never.text === "No objective yet");
   ok("…and says aish has not looked yet", /has not read this chat/.test(never.whose));
   const none = w.objectiveCopy({ tracker: { turn: 3, status: "ok", verdict: "unchanged" } });
   ok("it looked and found none", /After turn 3/.test(none.whose) && /found no objective/.test(none.whose));

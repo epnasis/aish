@@ -178,8 +178,8 @@ there, and its backend has no stateless seam, so the tracker records `unavailabl
 ## Where it reaches the owner
 
 - **Web:** a strip pinned under the header (`[OBJECTIVE-STRIP]`, `docs/web-frontend.md`)
-  — "aish reads your goal as: …", or "Your objective: …" for his edit, or "Objective:
-  none yet". The line opens a sheet with the messages it rests on, the trail newest
+  — the statement alone, with no prefix (owner, 2026-09-29), or "No objective yet".
+  Whose words it is (aish's reading, or his own edit) is said in the sheet. The line opens a sheet with the messages it rests on, the trail newest
   first, and the edit button; the pencil on the strip edits in one tap, in the same
   popover the rename uses. `/objective` and `/objective edit` open the same two.
 - **CLI:** `/objective` prints the statement, whose it is, the messages it rests on and
