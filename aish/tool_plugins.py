@@ -61,7 +61,9 @@ GLOBAL_TOOLS_DIR = config_home() / "tools"
 # context window (epic #178 item 14: 18 plugin tools ≈ 6.9k tokens/turn on a
 # 32k local window). The budget changes NOTHING — no tool is hidden — it only
 # produces a one-line consolidation nudge via budget_warning().
-TOOL_BUDGET = 25
+# Raised from 25 to 26 by #433, which added the native `plan` tool: the native
+# menu alone must never trip it.
+TOOL_BUDGET = 26
 NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")

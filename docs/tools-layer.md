@@ -78,7 +78,7 @@ This is the tool layer's **plan/commit gap**, mirroring `files.py`'s diff: it fi
 
 ## Budgets, drift, and results
 
-**Soft tool budget (#178 item 14).** When the TOTAL exposed count (native + plugin) exceeds `TOOL_BUDGET` (25), `budget_warning()` emits a one-line consolidation nudge naming the largest `<prefix>_*` family — the per-subcommand explosion the doctrine forbids — through the same once-per-rescan warning channel as shadow warnings. **No tool is ever hidden**: every schema is resent every turn, so the budget guards the context window, not capability. `TestToolBudget`, `TestBudgetWiring`.
+**Soft tool budget (#178 item 14).** When the TOTAL exposed count (native + plugin) exceeds `TOOL_BUDGET` (26; 25 until #433 added the native `plan` tool, so the native menu alone never trips it), `budget_warning()` emits a one-line consolidation nudge naming the largest `<prefix>_*` family — the per-subcommand explosion the doctrine forbids — through the same once-per-rescan warning channel as shadow warnings. **No tool is ever hidden**: every schema is resent every turn, so the budget guards the context window, not capability. `TestToolBudget`, `TestBudgetWiring`.
 
 **Drift nudge (#140).** A manifest may declare `prefer_over:` — raw command prefixes this tool should be used INSTEAD OF, alternatives included, not only the commands it wraps. The agent builds `_tool_prefer` from EXPOSED tools and, when the model runs a matching raw `run_command`, appends an advisory note steering it to the tool next time. The command still runs: it is a learning nudge, not a block.
 

@@ -636,6 +636,11 @@ RENDERLESS_STEPS = frozenset(
         # row — so it renders nowhere live, is skipped on replay, and is not
         # activity.
         "objective",  # #424
+        # #433. A revision of aish's own plan for the objective, written by the
+        # plan tool or by the owner's drop/replan. Shown on the objective strip
+        # as live state, never as a trace row; the plan tool CALL is an
+        # ordinary tool step and renders like any.
+        "plan",  # #433
     }
 )
 
@@ -867,10 +872,11 @@ def _forget_in_objectives(
 
 
 def _is_owner_objective(record: dict) -> bool:
-    """An objective the OWNER wrote (#432) — his own words, which a Retry or a
-    redaction of the turn it sits in must not take back."""
+    """An objective the OWNER wrote (#432), or his drop or replan request on
+    the plan (#433) — his own decisions, which a Retry or a redaction of the
+    turn they sit in must not take back."""
     step = record.get("step")
-    return _step_kind(record) == "objective" and isinstance(step, dict) and (
+    return _step_kind(record) in ("objective", "plan") and isinstance(step, dict) and (
         step.get("origin") == "owner"
     )
 

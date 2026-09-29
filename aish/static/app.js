@@ -9199,6 +9199,7 @@ const SLASH_COMMANDS = [
   ["/explain", "a turn's record, step by step — what each call was given, did and returned"],
   ["/objective", "this chat's objective — aish's reading of your goal, its sources and history"],
   ["/objective edit", "set the objective in your own words"],
+  ["/plan", "aish's own plan for the objective — drop a task or ask for a replan"],
   ["/help", "about aish web"],
 ];
 
@@ -9664,6 +9665,7 @@ function handleSlash(text) {
       if (arg.trim().toLowerCase() === "edit") openObjectiveEditor();
       else openObjectiveSheet();
       return true;
+    case "/plan": openPlanSheet(); return true;
     case "/help": openSheet("workspace-sheet"); return true;
     case "/quit": case "/exit": showToast("just close the tab — chats persist"); return true;
     case "/debug": reportViewport("manual"); showToast("viewport state sent to server log"); return true;
@@ -17111,7 +17113,7 @@ $("rename-cancel").onclick = () => closeSheets();
 // own edit is shown as his. And "no objective yet" is a real answer the strip
 // can give, including WHY there is none, as observed — the tracker had not run,
 // it ran and found none, or it could not run and said why.
-let objectiveState = null; // {name, objective, tracker} for currentSession, or null
+let objectiveState = null; // {name, objective, tracker, plan} for currentSession, or null
 
 const OBJECTIVE_LEFT = {
   evolved: "then evolved",
@@ -17170,7 +17172,139 @@ function objectiveTrail(revision) {
 // never looked, and the chat holds no turn yet (a fresh chat keeps its welcome).
 function objectiveStripHidden(state, emptyChat) {
   if (!state) return true;
-  return !state.objective && !state.tracker && emptyChat;
+  return !state.objective && !state.tracker && !state.plan && emptyChat;
+}
+
+// aish's own plan (#433): what the strip and the sheet say about it, from the
+// `plan` the server sends beside the objective. Pure: tests/js/test_plan_strip.js.
+// The strip lists the open tasks — the one being worked on first — and folds
+// the rest into a count once there are more than PLAN_OPEN_SHOWN.
+const PLAN_OPEN_SHOWN = 3;
+const PLAN_STATE_WORDS = {
+  pending: "pending",
+  doing: "doing",
+  done: "done",
+  dropped_replan: "dropped when aish replanned",
+  dropped_by_owner: "dropped by you",
+};
+
+function planCopy(plan) {
+  if (!plan || !Array.isArray(plan.tasks)) return null;
+  const tasks = plan.tasks.map((task) => ({
+    id: String(task.id),
+    title: String(task.title || ""),
+    state: String(task.state || ""),
+    word: PLAN_STATE_WORDS[task.state] || String(task.state || ""),
+    open: task.state === "pending" || task.state === "doing",
+    evidence: task.evidence && task.evidence.ref
+      ? `rests on ${task.evidence.ref}: ${task.evidence.quote || ""}`
+      : "",
+  }));
+  const counts = plan.counts || {};
+  const done = counts.done || 0;
+  const active = done + (counts.doing || 0) + (counts.pending || 0);
+  const dropped = (counts.dropped_replan || 0) + (counts.dropped_by_owner || 0);
+  const parts = [`${done} of ${active} done`];
+  if (dropped) parts.push(`${dropped} dropped`);
+  if (plan.replan_requested) parts.push("replan asked");
+  const open = tasks.filter((t) => t.state === "doing").concat(tasks.filter((t) => t.state === "pending"));
+  return {
+    summary: `Plan · ${parts.join(" · ")}`,
+    tasks,
+    open: open.slice(0, PLAN_OPEN_SHOWN),
+    moreOpen: Math.max(0, open.length - PLAN_OPEN_SHOWN),
+    requested: Boolean(plan.replan_requested),
+  };
+}
+
+function renderPlanStrip(state) {
+  const copy = planCopy(state && state.plan);
+  const block = $("plan-open");
+  if (!copy) { block.hidden = true; return; }
+  block.hidden = false;
+  $("plan-summary").textContent = copy.summary;
+  const rows = $("plan-rows");
+  rows.replaceChildren();
+  for (const task of copy.open) {
+    const row = document.createElement("span");
+    row.className = `plan-row ${task.state}`;
+    row.textContent = task.title;
+    rows.appendChild(row);
+  }
+  if (copy.moreOpen) {
+    const more = document.createElement("span");
+    more.className = "plan-more";
+    more.textContent = `+${copy.moreOpen} more open`;
+    rows.appendChild(more);
+  }
+  block.setAttribute("aria-label", `${copy.summary} — the whole plan`);
+}
+
+function renderPlanSheet(state) {
+  const copy = planCopy(state && state.plan);
+  $("plan-section").hidden = !copy;
+  if (!copy) return;
+  const list = $("plan-list");
+  list.replaceChildren();
+  for (const task of copy.tasks) {
+    const row = document.createElement("div");
+    row.className = "plan-task" + (task.open ? "" : " closed") +
+      (task.state.startsWith("dropped") ? " dropped" : "");
+    const body = document.createElement("span");
+    body.className = "plan-body";
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = task.word;
+    const title = document.createElement("span");
+    title.className = "plan-title";
+    title.textContent = task.title;
+    body.append(meta, title);
+    if (task.evidence) {
+      const evidence = document.createElement("span");
+      evidence.className = "plan-evidence";
+      evidence.textContent = task.evidence;
+      body.appendChild(evidence);
+    }
+    row.appendChild(body);
+    if (task.open) {
+      const drop = document.createElement("button");
+      drop.type = "button";
+      drop.className = "plan-drop";
+      drop.title = "Drop this task";
+      drop.setAttribute("aria-label", `Drop ${task.title}`);
+      drop.innerHTML =
+        '<svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+      drop.onclick = () => askDropTask(task);
+      row.appendChild(drop);
+    }
+    list.appendChild(row);
+  }
+  $("plan-replan-meta").textContent = copy.requested
+    ? "Asked — aish has not revised it yet"
+    : "aish is told at its next step";
+}
+
+// Dropping is final for aish — it cannot bring the task back — so it is asked
+// in the shared modal, which says so (never a bare verb on a red button).
+// The chat is captured when the question is ASKED, like every other modal.
+function askDropTask(task) {
+  const name = currentSession;
+  askConfirm({
+    title: "Drop this task?",
+    body: `aish stops working on “${task.title}” and cannot bring it back. ` +
+      "It stays on the plan, marked as dropped by you.",
+    verb: "Drop",
+    action: () => {
+      if (currentSession !== name) return;
+      act({ type: "plan_action", name, action: "drop", task: task.id }, { label: "dropping that task" });
+    },
+  });
+}
+
+function askReplan() {
+  const name = currentSession;
+  if (!name) return;
+  act({ type: "plan_action", name, action: "replan" }, { label: "the replan request" });
 }
 
 function renderObjective(state) {
@@ -17183,6 +17317,7 @@ function renderObjective(state) {
   $("objective-label").hidden = !copy.label;
   $("objective-text").textContent = copy.text;
   $("objective-open").setAttribute("aria-label", `Objective: ${copy.text} — sources and history`);
+  renderPlanStrip(state);
   if (!$("objective-sheet").hidden) renderObjectiveSheet(state);
 }
 
@@ -17224,13 +17359,19 @@ function renderObjectiveSheet(state) {
       trail.appendChild(row);
     }
   }
+  renderPlanSheet(state);
 }
 
 // An `objective` event names its chat; one for any other chat is dropped (a
 // late tracker answer landing after a switch must not paint over this one).
 function onObjective(event) {
   if (!event || event.name !== currentSession) return;
-  objectiveState = { name: event.name, objective: event.objective || null, tracker: event.tracker || null };
+  objectiveState = {
+    name: event.name,
+    objective: event.objective || null,
+    tracker: event.tracker || null,
+    plan: event.plan || null,
+  };
   renderObjective(objectiveState);
 }
 
@@ -17244,6 +17385,17 @@ function clearObjective() {
 function openObjectiveSheet() {
   renderObjectiveSheet(objectiveState);
   openSheet("objective-sheet");
+}
+
+// `/plan` and a tap on the plan under the strip: the same sheet, scrolled to
+// the plan. With no plan the sheet still opens, and says there is none.
+function openPlanSheet() {
+  openObjectiveSheet();
+  if (!(objectiveState && objectiveState.plan)) {
+    showToast("no plan yet — aish writes one for itself when work needs several steps");
+    return;
+  }
+  $("plan-section").scrollIntoView({ block: "start" });
 }
 
 // The same popover as the rename: anchored under the strip, keeps the backdrop.
@@ -17285,6 +17437,7 @@ $("objective-form").addEventListener("submit", (e) => {
       name,
       objective: { ...before, statement, origin: "owner", change: "edited", sources: [] },
       tracker: previous ? previous.tracker : null,
+      plan: previous ? previous.plan : null,
     };
     renderObjective(objectiveState);
   }
@@ -17294,6 +17447,8 @@ $("objective-cancel").onclick = () => closeSheets();
 $("objective-open").onclick = () => openObjectiveSheet();
 $("objective-edit").onclick = () => openObjectiveEditor();
 $("objective-sheet-edit").onclick = () => openObjectiveEditor();
+$("plan-open").onclick = () => openPlanSheet();
+$("plan-replan").onclick = () => askReplan();
 // [OBJECTIVE-STRIP-END]
 
 $("session-menu").addEventListener("click", (e) => {

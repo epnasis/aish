@@ -62,6 +62,7 @@ from . import (
     vouches,
     web,
 )
+from . import plan as checklist
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import (
     NOTE_MARKER,
@@ -204,6 +205,10 @@ Rules:
    wins. It is never a request of its own. If they ask what you think they are
    after, answer from it and say it is aish's reading; they can see its sources
    and rewrite it in the strip at the top of the web UI or with /objective.
+2g. YOUR PLAN. For work that needs several steps, keep your own checklist with
+   the plan tool; the user sees it under the objective and can drop a task or
+   ask you to revise it (/plan in the terminal). The plan is yours, never a
+   request from them. A task they dropped is final.
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. A COMMENT
    the user attaches to a decision changes what you do next, and approve vs
@@ -1299,8 +1304,9 @@ RULES_NONE = (
 )
 SUPERSEDES_EARLIER = (
     "<system-reminder>This reminder supersedes the earlier <system-reminder> "
-    "blocks in this conversation: their time no longer holds, and their rules "
-    "and the owner's objective apply only as this one restates or confirms them. "
+    "blocks in this conversation: their time no longer holds, and their rules, "
+    "the owner's objective and your plan apply only as this one restates or "
+    "confirms them. "
     "Saved knowledge shown in them remains valid.</system-reminder>"
 )
 KNOWLEDGE_SHOWN_EARLIER = (
@@ -1425,6 +1431,108 @@ def objective_delta(earlier: list[str], segment: str) -> tuple[str, str]:
     return "", ""
 
 
+# aish's own plan for the objective (#433, contract §3.15), riding the same
+# per-task reminder beside the objective, as a DELTA: in full when the list is
+# not the newest one already in history — a plan tool result or an earlier
+# reminder — confirmed when it is, withdrawn when a plan was shown and there is
+# none now (a Retry that discarded it). Never in messages[0].
+PLAN_PREFIX = "YOUR PLAN IN THIS CHAT"
+PLAN_FULL = (
+    PLAN_PREFIX + " (your own checklist, written with the plan tool — the owner sees "
+    "it; revision {revision}):\n{body}"
+)
+PLAN_UNCHANGED = (
+    PLAN_PREFIX + ": unchanged — as last shown to you, in a plan tool result or an "
+    "earlier reminder."
+)
+PLAN_NONE = PLAN_PREFIX + ": none now. A plan shown earlier no longer applies."
+PLAN_REPLAN_ASKED = (
+    "The owner asked you to revise this plan: call plan with the revised whole list "
+    "before you continue."
+)
+# Replan triggers (#433): ONE line each, and never a forced call. Each fires only
+# while the plan has an open task — a nudge to a plan that is finished is noise.
+PLAN_TRIGGER_DENIAL = (
+    "\n[aish: your plan has open tasks. If the owner's comment changes them, revise "
+    "the plan with the plan tool before you reply.]"
+)
+PLAN_TRIGGER_STALL = (
+    "No new progress for {steps} steps while your plan has open tasks. Revisit the "
+    "plan: change it with the plan tool if its open tasks cannot be done as planned."
+)
+PLAN_TRIGGER_FAILED = (
+    "THE PREVIOUS TASK ENDED WITHOUT FINISHING ({how}) while your plan had open "
+    "tasks. Revisit the plan: change it with the plan tool if the steps must change."
+)
+PLAN_OWNER_DROPPED = "the owner dropped [{id}] {title} from your plan — never work on it"
+PLAN_OWNER_REPLAN = (
+    "the owner asked you to revise your plan — call plan with the revised whole list "
+    "before you continue"
+)
+# How many consecutive no-progress steps before the stall trigger (the stall
+# CAP, MAX_STALL_STEPS, is twice this: the nudge must leave room to act on it).
+STALL_REPLAN_AT = 4
+
+
+def plan_segment(current: dict | None, replan_pending: bool = False) -> str:
+    """The full reminder segment for the plan in force, "" for none."""
+    if not current:
+        return ""
+    lines = [checklist.render(current)]
+    if checklist.open_tasks(current):
+        lines.append(checklist.OPEN_RULE)
+    if replan_pending:
+        lines.append(PLAN_REPLAN_ASKED)
+    body = provenance.disarm_markers("\n".join(lines))
+    return PLAN_FULL.format(revision=current.get("revision"), body=body)
+
+
+def _task_lines(text: str) -> str:
+    """The plan's task lines inside a result or a segment — every line of a
+    rendering starts with `[<id>]`, and nothing around one does."""
+    return "\n".join(line for line in text.splitlines() if line.startswith("["))
+
+
+def _plan_in_force(messages: list[dict]) -> str | None:
+    """The newest plan rendering in history: a recorded plan tool result or a
+    reminder segment. "" when the newest word was PLAN_NONE, None when the
+    model was never shown a plan."""
+    for message in reversed(messages):
+        content = str(message.get("content") or "")
+        role = message.get("role")
+        if role == "tool" and message.get("tool_name") == checklist.PLAN_TOOL:
+            if content.startswith(checklist.PLAN_RECORDED.split("{", 1)[0]):
+                return content
+            continue
+        if role == "system" and content.startswith(TASK_REMINDER_MARK):
+            for segment in reversed(_REMINDER_SEGMENT.findall(content)):
+                if segment == PLAN_NONE:
+                    return ""
+                if segment == PLAN_UNCHANGED:
+                    continue
+                if segment.startswith(PLAN_PREFIX):
+                    return segment
+    return None
+
+
+def plan_delta(
+    messages: list[dict], current: dict | None, replan_pending: bool = False
+) -> tuple[str, str]:
+    """(text, shown) for the plan in a new reminder: the full segment,
+    PLAN_UNCHANGED, PLAN_NONE, or "" when there is nothing to say. `shown` is
+    what the `context` record says the model was told."""
+    in_force = _plan_in_force(messages)
+    if current is None:
+        return (PLAN_NONE, "none") if in_force else ("", "")
+    if (
+        in_force
+        and _task_lines(in_force) == provenance.disarm_markers(checklist.render(current))
+        and (not replan_pending or PLAN_REPLAN_ASKED in in_force)
+    ):
+        return PLAN_UNCHANGED, "unchanged"
+    return plan_segment(current, replan_pending), "full"
+
+
 def task_reminder(
     index: str,
     preload_text: str = "",
@@ -1432,6 +1540,8 @@ def task_reminder(
     scratch_dir: os.PathLike | str | None = None,
     supersedes: bool = False,
     objective_text: str = "",
+    plan_text: str = "",
+    trigger_text: str = "",
 ) -> str:
     """The per-task system reminder: always the current local time (issue #36
     — it lives here, not in the system prompt, so messages[0] stays
@@ -1451,6 +1561,10 @@ def task_reminder(
         time_note += "\n" + RULES_REMINDER.format(rules=rules_text)
     if objective_text:
         time_note += "\n" + OBJECTIVE_REMINDER.format(objective=objective_text)
+    if plan_text:
+        time_note += "\n" + OBJECTIVE_REMINDER.format(objective=plan_text)
+    if trigger_text:
+        time_note += "\n" + OBJECTIVE_REMINDER.format(objective=trigger_text)
     if preload_text:
         return f"{time_note}\n{PRELOAD_REMINDER.format(knowledge=preload_text)}"
     return f"{time_note}\n{TASK_REMINDER}" if index else time_note
@@ -3638,6 +3752,25 @@ class Agent:
         # (#432): set by the entry point that owns the session log, None when
         # there is none. It returns the current `objective` revision or None.
         self.objective_source: Callable[[], dict | None] | None = None
+        # The chat's records, for the plan (#433): the plan in force, his drops
+        # and replan requests, and the successful calls a done may cite. Set by
+        # the entry point that owns the session log; None means this agent's
+        # own records are all there is (`_own_records`).
+        self.plan_records: Callable[[], list[dict]] | None = None
+        # Told after every recorded plan revision, so a screen can repaint.
+        self.on_plan: Callable[[dict], None] | None = None
+        self._own_records: list[dict] = []
+        # Set from another thread when the owner drops a task or asks for a
+        # replan mid-task; the loop reads the log once, before its next call.
+        self.plan_owner_changed = threading.Event()
+        self._plan_seen_revision = 0
+        # Replan triggers (#433), off for the measurement's plan-only arm.
+        self.plan_triggers = os.environ.get("AISH_PLAN", "").strip() != "tool"
+        # How the previous task ended when it did not finish, for the failed-
+        # task-end trigger; "" when it answered or was cancelled by the owner.
+        self._task_unfinished = ""
+        self._previous_unfinished = ""
+        self._stall_nudged = False
         # Persistence sink for the terminal-block framing events, so a
         # cold-loaded session reconstructs the SAME command_start/command_end
         # event stream a live one emits — byte-identical panel, not a fallback.
@@ -4185,8 +4318,32 @@ class Agent:
             self._turn_stamp(step)
         if self.step_log is not None:
             self.step_log(step)
+        self._keep_own(step)
         if self.on_step is not None:
             self.on_step(step)
+
+    # The kinds the plan reads (`plan.citable`, `plan.current`), mirrored in
+    # memory only when no log is wired — so the plan tool still resolves
+    # evidence and keeps its revisions in an agent built without one.
+    _OWN_KINDS = frozenset({"tool", "call", "plan"})
+    _OWN_CAP = 2000
+
+    def _keep_own(self, step: dict) -> None:
+        if self.plan_records is None and step.get("kind") in self._OWN_KINDS:
+            self._own_records.append({"kind": "trace", "step": dict(step)})
+            del self._own_records[: -self._OWN_CAP]
+
+    def _plan_records(self) -> list[dict]:
+        """The chat's records for the plan. Never raises: an unreadable log is
+        a chat with nothing recorded."""
+        source = self.plan_records
+        if source is None:
+            return list(self._own_records)
+        try:
+            records = source()
+        except Exception:  # noqa: BLE001 — the plan is never worth a task
+            return []
+        return records if isinstance(records, list) else []
 
     def _emit_command_start(self, command: str, user: bool = False) -> None:
         # `user` marks a command the user typed directly (! prefix): the web UI
@@ -4238,6 +4395,75 @@ class Agent:
         self._turn_stamp(fields)
         if self.step_log is not None:
             self.step_log(fields)
+        self._keep_own(fields)
+
+    def _plan_call(self, args: dict) -> str:
+        """The `plan` tool (#433): validate the model's whole list against the
+        plan in force and record one revision. Executes nothing — the record
+        and this result are its only effects (contract §3.15)."""
+        records = self._plan_records()
+        base = checklist.current(records)
+        chat = ""
+        if self.current_session is not None:
+            try:
+                chat = Path(self.current_session()).stem
+            except Exception:  # noqa: BLE001 — a name is a label, never worth a call
+                chat = ""
+        try:
+            record = checklist.revise(
+                base,
+                args,
+                records,
+                turn=self._turn,
+                revision=checklist.next_revision(records),
+                chat=chat,
+                call=self._current_call(),
+                model_call=self._model_call,
+            )
+        except checklist.PlanError as exc:
+            return f"ERROR: plan not recorded — {exc}. Send the whole list again."
+        # `_plan_seen_revision` is NOT advanced here: a plan result shows the
+        # tasks, never his replan request, and his write can land between this
+        # call's read and its write with the same number (review finding).
+        self._emit_record(**record)
+        candidates = checklist.citable(records) if record.get("downgraded") else None
+        if self.on_plan is not None:
+            try:
+                self.on_plan(record)
+            except Exception:  # noqa: BLE001 — a screen's repaint is never worth a call
+                pass
+        return checklist.tool_result(record, candidates)
+
+    def _plan_has_open(self) -> bool:
+        return bool(checklist.open_tasks(checklist.current(self._plan_records())))
+
+    def _plan_owner_note(self) -> str:
+        """One `[aish: …]` line for what the owner did to the plan since the
+        model last saw it, "" when nothing. Advances what it has seen."""
+        records = self._plan_records()
+        lines: list[str] = []
+        newest = self._plan_seen_revision
+        for record in records:
+            step = record.get("step") if record.get("kind") == "trace" else None
+            if (
+                not isinstance(step, dict)
+                or record.get("superseded")
+                or not checklist.is_revision(step)
+                or step.get("origin") != checklist.ORIGIN_OWNER
+            ):
+                continue
+            number = int(step.get("revision") or 0)
+            if number <= self._plan_seen_revision:
+                continue
+            newest = max(newest, number)
+            if step.get("action") == checklist.ACTION_DROP:
+                lines.append(PLAN_OWNER_DROPPED.format(
+                    id=step.get("task"), title=provenance.disarm_markers(str(step.get("title")))
+                ))
+            elif step.get("action") == checklist.ACTION_REPLAN:
+                lines.append(PLAN_OWNER_REPLAN)
+        self._plan_seen_revision = newest
+        return "; ".join(lines)
 
     def _flush_vocab(self) -> None:
         """Drain this task's word-list consultations onto the log (#322).
@@ -4430,6 +4656,7 @@ class Agent:
         self._binding_seq = itertools.count(1)
         self._turn_calls = []
         self._said_something = False
+        self._stall_nudged = False
         self._delivered = []
         self._intent = ""
         self._held_answer = None
@@ -4669,10 +4896,16 @@ class Agent:
         # it is not, it is his words and never aish's: only aish may wear
         # aish's markers (see `provenance.disarm_markers`).
         task = provenance.disarm_markers(task)
+        # How the previous task ended, for the plan's failed-task-end trigger
+        # (#433); this task's own ending is written as it happens.
+        self._previous_unfinished, self._task_unfinished = self._task_unfinished, ""
         try:
             return self._run_task(
                 task, images, documents, keep_history=keep_history, continuing=continuing
             )
+        except Exception as exc:
+            self._task_unfinished = f"it failed: {type(exc).__name__}"
+            raise
         finally:
             self._flush_vocab()
 
@@ -4825,10 +5058,31 @@ class Agent:
         objective_text, objective_shown = objective_delta(
             earlier_reminders, objective_statement(objective_revision)
         )
+        # The plan beside it (#433): in full, confirmed or withdrawn against
+        # the newest rendering already in history — a plan tool result counts,
+        # not only a reminder, since the model wrote most of what it holds.
+        plan_records = self._plan_records()
+        plan_now = checklist.current(plan_records)
+        plan_text, plan_shown = plan_delta(
+            self.messages[1:], plan_now, checklist.replan_pending(plan_records) is not None
+        )
+        # Whatever the owner did before this reminder, it is in the rendering
+        # above, so the mid-task note must not say it again.
+        self._plan_seen_revision = max(
+            self._plan_seen_revision, checklist.next_revision(plan_records) - 1
+        )
+        self.plan_owner_changed.clear()
+        trigger_text = (
+            PLAN_TRIGGER_FAILED.format(how=self._previous_unfinished)
+            if self.plan_triggers and self._previous_unfinished and checklist.open_tasks(plan_now)
+            else ""
+        )
         reminder = task_reminder(
             index, knowledge_text, rules_prose, self.scratch_dir,
             supersedes=bool(earlier_reminders),
             objective_text=objective_text,
+            plan_text=plan_text,
+            trigger_text=trigger_text,
         )
         self.messages.append({"role": "system", "content": reminder})
         if rules_text:
@@ -4859,6 +5113,15 @@ class Agent:
                     "shown": objective_shown,
                 }}
                 if objective_shown
+                else {}
+            ),
+            **(
+                {"plan": {
+                    "revision": (plan_now or {}).get("revision"),
+                    "shown": plan_shown,
+                    **({"trigger": "failed_task_end"} if trigger_text else {}),
+                }}
+                if plan_shown or trigger_text
                 else {}
             ),
             index=index_record,
@@ -4931,6 +5194,13 @@ class Agent:
             # leave the #81 gates and the loop-detection counters untouched.
             self._apply_pending_cwd()
             self._inject_pending_messages()
+            if self.plan_owner_changed.is_set():
+                # The owner dropped a task or asked for a replan while this
+                # task runs (#433): one note, before the next call.
+                self.plan_owner_changed.clear()
+                owner_note = self._plan_owner_note()
+                if owner_note:
+                    self._append({"role": "user", "content": AISH_NOTE + owner_note + "]"})
             self._enforce_budget(task_start, protect_from=this_task)
             turn_start = time.perf_counter()
             # A live "Thinking…" row on the trace timeline; it finalizes to
@@ -5214,7 +5484,11 @@ class Agent:
                 key = self._call_key(call, result)
                 if key not in seen:
                     seen.add(key)
-                    progressed = True  # a never-seen (tool,args,result) is progress (#108)
+                    # A never-seen (tool,args,result) is progress (#108) — except
+                    # a plan call, which learns nothing about the world: a model
+                    # re-planning in a circle must still reach the stall cap.
+                    if call["function"]["name"] != checklist.PLAN_TOOL:
+                        progressed = True
                 run[key] = count = run.get(key, 0) + 1
                 if count >= LOOP_STOP_REPEATS:
                     stuck = True
@@ -5232,6 +5506,18 @@ class Agent:
                 self.echo("✕ loop detected: identical call, identical output — stopping")
                 return self._finish_stopped(LOOP_STOP_NOTE, STOPPED_LOOP)
             stall += 1
+            if (
+                stall == STALL_REPLAN_AT
+                and self.plan_triggers
+                and not self._stall_nudged
+                and self._plan_has_open()
+            ):
+                # The stall trigger (#433): one note, once per task, never a call.
+                self._stall_nudged = True
+                self._append({
+                    "role": "user",
+                    "content": AISH_NOTE + PLAN_TRIGGER_STALL.format(steps=stall) + "]",
+                })
             if stall >= MAX_STALL_STEPS:
                 self.echo("⚠ no new progress for several steps — asking the model to wrap up")
                 return self._finish_stopped(STALL_NOTE, STOPPED_STALL)
@@ -5253,6 +5539,11 @@ class Agent:
         remains, why it's stuck) instead of the task cutting off with a bare
         error line. The step budget is never silently exceeded — continuing
         is the user's call."""
+        self._task_unfinished = {
+            STOPPED_LOOP: "stopped by the loop detector",
+            STOPPED_STALL: "stopped at the stall cap",
+            STOPPED_LIMIT: "stopped at the step ceiling",
+        }.get(headline, "stopped")
         self._append({"role": "user", "content": note})
         if self._held_answer is not None:
             # Per turn, like the loop's own reset — which this exit skips. The
@@ -6157,6 +6448,13 @@ class Agent:
         """The stub a tool result would get, planned without touching it."""
         if message.get("role") != "tool" or message.get("_stub"):
             return None
+        if (
+            message.get("tool_name") == checklist.PLAN_TOOL
+            and message is self._newest_plan_result()
+        ):
+            # The newest recorded plan stays whole (#433): a reminder that says
+            # PLAN_UNCHANGED points at it, and its downgrade notes live nowhere else.
+            return None
         # The cached text is the message as the model HAD it, banner and all,
         # so its attribution is inline and the reader partitions it as ever
         # (`offers=None`). What is not in the string is where the bytes came
@@ -6247,6 +6545,10 @@ class Agent:
         arguments = [args for args in raw if isinstance(args, dict)]
         if not calls or len(arguments) != len(calls):
             return None
+        # The newest plan call keeps its arguments whole (#433): they are the
+        # model's own latest checklist, and the reminder only confirms it as
+        # "unchanged" when that list is still in front of the model.
+        exempt = self._newest_plan_call(message)
         # Spent = no result could still be stubbed. One whose stub would be
         # longer than its text can never be, so it holds nothing back.
         if any(
@@ -6255,7 +6557,10 @@ class Agent:
         ):
             return None
         if not any(
-            _arg_text_len(value) > ARG_KEEP_CHARS for args in arguments for value in args.values()
+            _arg_text_len(value) > ARG_KEEP_CHARS
+            for call, args in zip(calls, arguments, strict=True)
+            if call is not exempt
+            for value in args.values()
         ):
             return None
         cached = json.dumps(
@@ -6272,6 +6577,9 @@ class Agent:
             first = True
             shortened_calls = []
             for call, args in zip(calls, arguments, strict=True):
+                if call is exempt:
+                    shortened_calls.append(call)
+                    continue
                 shortened: dict = {}
                 for name, value in args.items():
                     if _arg_text_len(value) <= ARG_KEEP_CHARS:
@@ -6295,6 +6603,28 @@ class Agent:
             content_delta=0,
             payload_delta=_args_json_len(fields["tool_calls"]) - _args_json_len(calls),
         )
+
+    def _newest_plan_result(self) -> dict | None:
+        """The newest plan tool result that recorded a revision."""
+        recorded = checklist.PLAN_RECORDED.split("{", 1)[0]
+        for candidate in reversed(self.messages):
+            if (
+                candidate.get("role") == "tool"
+                and candidate.get("tool_name") == checklist.PLAN_TOOL
+                and str(candidate.get("content") or "").startswith(recorded)
+            ):
+                return candidate
+        return None
+
+    def _newest_plan_call(self, message: dict) -> dict | None:
+        """The newest plan call in history, when it sits in `message`."""
+        for candidate in reversed(self.messages):
+            if candidate.get("role") != "assistant":
+                continue
+            for call in reversed(candidate.get("tool_calls") or []):
+                if (call.get("function") or {}).get("name") == checklist.PLAN_TOOL:
+                    return call if candidate is message else None
+        return None
 
     def _planned_key(self, text: str) -> str:
         return tool_plugins.continuation_key(text) if self.tool_output_dir else ""
@@ -7584,7 +7914,21 @@ class Agent:
             # it afterwards saw nothing at all.
             self._observe_for_rules(name, result)
             self._note_turn_call(name, args, result)
-            self._emit_tool_step(name, args, result, elapsed, call_no, model_call)
+            step = self._emit_tool_step(name, args, result, elapsed, call_no, model_call)
+            # The denial trigger (#433): his comment is a hint about the action
+            # in hand, never a task — but it may change the plan, so ONE line
+            # asks the model to look. Applied here, the one funnel every
+            # refusal path passes, off the recorded decision.
+            if (
+                self.plan_triggers
+                and step is not None
+                and step.get("decision") == "denied"
+                and step.get("comment")
+                and self._plan_has_open()
+            ):
+                meta = getattr(result, "meta", None)
+                text = str(result) + PLAN_TRIGGER_DENIAL
+                result = tools.ToolOutcome(text, **meta) if meta is not None else text
             return result
         finally:
             # The single seam BOTH loops pass through (#311). Recorded here
@@ -7603,9 +7947,10 @@ class Agent:
         secs: float,
         call_no: int = 0,
         model_call: int = 0,
-    ) -> None:
+    ) -> dict | None:
+        """The step as recorded — None when nothing records steps."""
         if self.on_step is None and self.step_log is None:
-            return
+            return None
         # The envelope (#192) — the runtime's own verdict, travelling WITH the
         # result rather than sniffed off its first token. `ok` is kept, defined
         # as status == "ok", so the frontend needs no change and old logs read
@@ -7701,6 +8046,7 @@ class Agent:
             step["status"] = tools.STATUS_FAILED
             step["verdict_by"] = tools.VERDICT_GATE
         self._sink_step(step)
+        return step
 
     def _system_evidence(self) -> list[dict]:
         """The system-role messages as they are about to be SENT (#239).
@@ -12646,6 +12992,15 @@ class Agent:
         turns, and the step budget bounds a model that never replies."""
         if not self._pending_comment_response:
             return None
+        if name == checklist.PLAN_TOOL and name in NATIVE_TOOL_NAMES:
+            # Native only: a plugin may carry the name, and under AISH_PLAN=0
+            # there is no native plan to exempt. The plan executes nothing — it
+            # records the model's checklist,
+            # which the owner then sees — and a denial with a comment is the
+            # moment the owner's model most wants it revised (#433). Deny still
+            # means stop: every tool that acts stays refused, and only a
+            # text-only turn lifts the gate and ends the task.
+            return None
         if name == "run_command":  # so the trace shows why it was held, not a bare row
             self._run_meta = {
                 "command": str(args.get("command", "")),
@@ -12726,6 +13081,10 @@ class Agent:
         refusal = self._rule_gate(name, args)
         if refusal is not None:
             return refusal
+
+        if name == checklist.PLAN_TOOL and name in NATIVE_TOOL_NAMES:
+            # Records the model's checklist and nothing else (#433).
+            return self._plan_call(args)
 
         if name == "read_file":
             path = str(args.get("path", ""))
