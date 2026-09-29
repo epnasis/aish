@@ -14,7 +14,7 @@
 **#355 (2026-09-04) added `received` as §3.13** — the COMPLETE response of every successful model call, stored whole in the per-chat store beside the request, so what came back is captured as completely as what went out (the point is completeness and forward-compatibility, not a curated summary: `raw_blocks` carries provider content types verbatim, so a new one is kept whole rather than reduced to its name). Renderless, symmetric with `sent`; the reader states it and the step screen shows it beside the curated reasoning/said view.
 
 **#420 (2026-09-26) changed how `sent` (§3.12) serialises, and added `order`.** The blobs and the `request` digest were taken over SORTED keys (`agent._canonical`), so the stored request was not the one the model received wherever a chat template renders the request as JSON text — Qwen's renders the tool schemas. Measured on mi for session-20260925-204008-294943 turn 22 call 1: the request rebuilt from the record was 46,790 prompt tokens, the same request with the tool schemas' original key order 46,954 (exactly the original call), and greedy decoding of the sorted form produced a different reply. From #420 every blob, `options`, and the whole request are serialised in the order the adapter handed them to the client LIBRARY (`agent._as_sent`), and `order` lists the top-level keys in that order. **That is the adapter's order, which is not always the wire's.** On the OpenAI SDK (`local:` included) the stored `messages` and `tools` blobs equal the wire body's `messages` and `tools` serialised compactly with non-ASCII unescaped — pinned by a wire capture in the suite (`TestSentAtTheSeam.test_local_blobs_equal_the_wire_body`); the #420 review reported the same by wire capture on the Anthropic SDK, which the suite does not pin. On ollama the library rebuilds each message and tool through its own pydantic models before sending, so the wire carries ITS field order (a tool goes out `type` before `function`, `name`/`description`/`parameters` inside it), and the stored blob holds the arguments aish handed the library (`backends.passthrough_request`). The top-level order differs from the wire on every SDK: the OpenAI SDK flattens `extra_body` into the body and puts `messages` first, and the Anthropic and ollama libraries build their own body. **A record without `order` predates #420: its blobs hold the same values with keys sorted, and its `request` digest is over `_canonical({**options, messages, tools?, system?})`.** A reader that only resolves blobs by digest handles both unchanged; one that replays or re-hashes must branch on `order`.
-**#424 (2026-09-27) added `objective` as §3.14** — what the chat is FOR, as a ledger of goals and tasks, one revision per task end, written off the interactive path by the distiller role or the extractive floor. Renderless, and recorded only: nothing hands it to the model or the screen yet (#425, #426).
+**#424 (2026-09-27) added `objective` as §3.14** — what the chat is FOR, as a ledger of goals and tasks, one revision per task end, written off the interactive path by the distiller role or the extractive floor. **#432 (2026-09-29) reshaped it** under the owner's three-level decision: one model-written statement of his objective with cites, a trail of earlier statements, and owner edits. The ledger and the floor are retired. It now reaches the model through the per-task reminder and the screen through a pinned strip.
 **#352 slice 1 (2026-09-03) stamped `model_call` on the rendered `tool_start` and `tool` steps** — the second amendment to §2's fork 1(b), beside the `brief` one (`docs/diagnostics.md`). Additive; omitted rather than zeroed where no recorded model call issued the call (claude-max), matching the renderless `call` record it mirrors. The browser is built from rendered steps alone, so without it the trace card could fold its timeline into rounds only by counting rows. `thinking` is still untouched.
 **#339 (2026-08-30) added `retry` as §3.11, and with it the `superseded` KEY** — the first record in this document about the log being rewritten rather than about a decision inside a turn. It exists because Retry deleted what it discarded, so a §0-corollary-2 absence could be created *after the fact*, which no record shape here anticipated. Rendered, and the one record whose PLACEMENT is a reader rule.
 **#396 (2026-09-20) added `reminder` to §3.8** — the digest of the per-task system message the recalled items were injected AS, under the same content address the `brief` gives its system parts, so a reader joins the two records exactly instead of by position. Additive key on the existing `knowledge` step; absent on every log written before it, and a reader serves those by the positional join #386 shipped with. A stamp the brief has no part for is its own reader state (`not_on_brief`) and never a fallback to position: the writer named the message, and a part it did not name shown as "what the model was handed" is the confident-false-conclusion class §0 exists to prevent.
@@ -667,76 +667,75 @@ Every other record answers what the model **did**, what **governed** it, what it
 
 ---
 
-### 3.14 · `objective` — what the chat is FOR, one revision at a time (#423, #424)
+### 3.14 · `objective` — what the chat is FOR, one revision at a time (#423, #424, #432)
 
-**BUILT (#424, slice 1: recorded only).** Written at the END of a task, off the interactive path, by `objective.distill_at_boundary` through the server-side writer (`session.logref.step`, §1.1) — the web's `_after_turn` epilogue and the CLI REPL's post-task thread. Renderless: in `RENDERLESS_STEPS`, never handed to `on_step`, so it opens no card live or cold and is not activity (`docs/session-log.md` L3). Nothing reads it back into the model or the screen yet — that is #425 and #426. Rationale: `docs/objective.md`.
+**BUILT (#432, slice 1 of the three-level model).** The owner decided on 2026-09-29 that a chat has three levels: the **objective** (why we are here), the **plan and tasks** (how aish gets there), and **hints** (his comments on approval cards). This record is the first level only. The #424 shape (`goals[]` with `tasks[]`, and the `extractive` floor) is **retired**: a log written by #424 may still hold such records, and every reader here ignores an `objective` record that has no `statement`. Plan and tasks are slice 2, and they will be a record of their own. Rationale: `docs/objective.md`.
 
-One record per **revision**. The current Objective is the newest **live** `objective` record (L7: a superseded one is skipped), so Retry and forks inherit the existing rules instead of growing their own.
+**Who writes it.** Two writers, both through the server-side sink (§1.1, `SessionLog.append_steps_if`):
+
+- the **tracker** role (`aish/charters/tracker.md`), at the end of a task, off the interactive path (`objective.track_at_boundary`), from the web's post-turn epilogue and the CLI REPL's post-task thread;
+- the **owner**, through an edit (`objective.owner_edit`): the web's `set_objective` action and the CLI's `/objective edit`. **An edit is never a user message**, so the model does not see it as something he said in the chat; it reaches the model only through the reminder (below).
+
+**Renderless.** It is in `RENDERLESS_STEPS` and never handed to `on_step`, so no card opens for it, live or cold. It is not activity (`docs/session-log.md` L3). The screen shows it through live state instead (`docs/web-server.md`, *Live state, not transcript*).
+
+One record per **revision**. The current objective is the newest **live** `objective` record that has a `statement` (L7: a superseded one is skipped), so Retry and forks inherit the existing rules instead of growing their own.
 
 ```json
-{"kind": "objective", "turn": 12, "revision": 3, "origin": "distiller",
- "chat": "session-20260101-090000-000000", "covers_to_turn": 12, "confirmed": false,
- "change": "refined", "base": 2, "charter": "distiller", "version": "2",
- "model": "local:mlx-community/Qwen3.6-35B-A3B-8bit",
- "goals": [
-   {"id": "g1", "text": "Kurs EUR/PLN każdego ranka, żeby zdecydować o wymianie",
-    "state": "active", "state_by": "distiller", "text_by": "distiller",
-    "cites": [{"session": "session-20260101-090000-000000", "ref": "m:a1b2c3d4e5f6"}],
-    "why": {"text": "żeby zdecydować czy wymieniać",
-            "cites": [{"session": "…", "ref": "m:a1b2c3d4e5f6"}]},
-    "done_when": "unstated",
-    "constraints": [{"text": "klucze trzymaj w aish secrets",
-                     "cites": [{"session": "…", "ref": "m:0a1b2c3d4e5f"}]}],
-    "tasks": [
-      {"id": "t4", "text": "zapisać skrypt jako skill", "state": "done",
-       "state_by": "distiller", "text_by": "distiller",
-       "cites": [{"session": "…", "ref": "t11.c3"}]}]}],
- "not_goal_bearing": ["m:9f8e7d6c5b4a"],
- "downgrades": [{"task": "t5", "from": "done", "why": "no answer or action cited"}]}
+{"kind": "objective", "turn": 12, "revision": 3, "origin": "tracker",
+ "chat": "session-20260101-090000-000000", "covers_to_turn": 12,
+ "statement": "Codziennie rano znać kurs EUR/PLN, żeby zdecydować, czy wymieniać",
+ "cites": [{"session": "session-20260101-090000-000000", "ref": "m:a1b2c3d4e5f6"}],
+ "change": "evolved", "base": 2,
+ "charter": "tracker", "version": "1", "model": "local:mlx-community/Qwen3.6-35B-A3B-8bit",
+ "trail": [
+   {"revision": 1, "turn": 3, "origin": "tracker", "statement": "Które API kursów walut są darmowe",
+    "cites": [{"session": "…", "ref": "m:0a1b2c3d4e5f"}], "left": "evolved"},
+   {"revision": 2, "turn": 7, "origin": "owner", "statement": "Kurs EUR/PLN co rano",
+    "cites": [], "left": "evolved"}]}
 ```
 
 | field | why |
 |---|---|
-| `turn` | The task boundary this revision was taken at — the §2 turn of the task whose end triggered it, never the turn running when the write landed. A slow local distill lands while the NEXT task runs; stamping the running turn would attribute it to a task it never read. |
-| `revision` | 1 + the highest revision in the file, superseded ones included — an id handed out is never reissued (the `last_turn` rule). |
-| `origin` | `distiller` (the isolated role, `docs/roles.md`), `extractive` (the floor, no model), `owner` (an edit, D7 — no writer yet; #425). |
-| `covers_to_turn` | **Set by code, never claimed by the model.** Every owner text the floor would keep (below) in a turn ≤ this is accounted for. On a distiller revision it is always the boundary: a revision that leaves one uncited and unlisted does not validate. On an extractive one it is the boundary, because the floor copies every such text verbatim. |
-| `not_goal_bearing` | Distiller only: owner texts the distiller declared carry nothing about what he wants, instead of citing them. The other half of the coverage rule. |
-| `downgrades` | Distiller only: `[{goal\|task: id, from: "done", why}]` — each `done` the model claimed without an answer or action cited, which code turned into `unknown`. |
-| `base` | The revision the distiller was handed as "previous" — the newest live `distiller` or `owner` revision; `null` for the first. An `extractive` revision is never a base: it copies text, it does not account for it. The distiller rebuilds from ALL the material up to `turn`; the base only lends ids, `change`, owner-set fields, `was` and quoted purposes. |
-| `confirmed` | Always `false` here. Only the owner confirms (#425). |
-| `change` | The distiller's word: `new` \| `unchanged` \| `refined` \| `expanded` \| `pivoted` \| `unknown`. Recorded, acted on by nothing yet (the pivot question is #425). Absent on `extractive`. |
-| `goals[]` | Self-contained (§0 corollary 1): the whole ledger, not a diff. `state` ∈ `active` \| `parked` \| `done` \| `dropped` \| `unknown`; at most one `active`. |
-| `goals[].tasks[]` | `state` ∈ `pending` \| `in_progress` \| `done` \| `stopped` \| `superseded` \| `unknown`; `superseded` carries `replaced_by` naming another task of the revision. |
-| `was` | On a goal or task whose `state` is `unknown`: the last state it had that was not. Set by code, so leaving `unknown` is judged from there — without it, done → unknown → in_progress would reopen in two revisions what one may not. |
-| `state_by` / `text_by` | Who last SET that field: `distiller` \| `owner`. A distiller revision may not change a field whose previous value was set by the owner. |
-| `cites[]` | `{session, ref}`. `session` is the chat the ref resolves in (always this chat in slice 1; a compacted chat's refs resolve in its original, #427). |
-| `constraints[]` | Owner requirements, each **a verbatim substring** (whitespace runs collapsed on both sides, nothing else) of the owner text of one of its cites. |
-| `goals[].why` / `done_when` | His purpose and his finish line: `{text, cites}` checked like a constraint, or `"unstated"`. Once quoted, either may be replaced only by words quoted FROM a message of his at a later turn than the old quote's source, never by `"unstated"`. |
-| `extract[]` | Extractive only: `{ref, turn, text}` — the owner's texts in (`base.covers_to_turn`, `turn`] that pass the floor filter, verbatim. `goals` on an extractive revision are the base's, carried unchanged. |
-| `charter` / `version` / `model` | Distiller only: what wrote it. The `role` record (§ roles D7) written immediately before, with the same `turn`, carries attempts, latency, usage and the input bytes' digest. |
+| `turn` | The task boundary the revision was taken at (the §2 turn of the task whose end triggered it), never the turn running when the write landed. A tracker call can land while the NEXT task runs. For an owner edit, it is the latest turn the log holds when he saved. |
+| `revision` | 1 + the highest revision in the file, superseded ones included. An id handed out is never reissued (the `last_turn` rule). |
+| `origin` | `tracker` (the role) or `owner` (his edit). |
+| `statement` | The objective in one or two sentences, at most the charter's `max_chars` (400) after `roles.capped`. **A tracker statement is a model's reading of his goal, in the model's own words** — not his words, and not a quote. It is written in the language most of his messages use. An owner statement is exactly what he typed, capped the same way. |
+| `cites[]` | `{session, ref}`, where `ref` is an `m:<id>` or `m#<digest>` owner-message ref (`objective.material`, the same refs #424 defined). A tracker revision cites **at least one** owner message it was shown, and every cite must resolve to one of those messages (`objective.validate_answer`). **Only typed owner messages can be cited: card comments, denials, answers and actions are never in the tracker's input**, so they cannot be cited. An owner edit cites nothing; the edit is its own source. |
+| `change` | How this statement relates to the one before it. `new`: there was none. This is set by code, never by the model. `evolved`: the same line of work, sharpened or extended. `pivoted`: he turned to something else. `unknown`: the model cannot tell which. `edited`: an owner edit. |
+| `base` | The revision the tracker was shown as the current statement (`null` for none). An owner edit records the revision it replaced. |
+| `covers_to_turn` | **Set by code.** The owner messages in turns up to this one have been read into the objective. For a tracker revision it is the boundary. For an owner edit it is the latest turn of the chat at the moment he saved, because he had every message up to then in front of him. The tracker's next input starts after it (see *Coverage*). |
+| `trail[]` | The earlier statements, oldest first, each `{revision, turn, origin, statement, cites, left}`. `left` is how the NEXT statement changed it: `evolved`, `pivoted`, `unknown` or `edited`. The trail is copied whole into every revision, so a record is self-contained (§0 corollary 1): what the strip shows is this one record, never a join across revisions. It holds only revisions that were live when this one was written. |
+| `charter` / `version` / `model` | Tracker revisions only: what wrote it. The `role` record written immediately before it, with the same `turn`, carries the attempts, latency, usage and the digest of the input bytes. |
 
-**Refs.** `m:<id>` — a `message` record's minted `turn` id (an owner message, a final answer, a stopped task's answer). `t<N>.c<M>` — the `tool` step with §2 turn N and call M (an action that ran, or one the owner denied or held). `t<N>.end` — a `task_end` that recorded a failure. `c#<digest>` — an audit `command` record: a `!` command he ran, or, in a log from before call ids, a denial, a card comment or an approved action. A message with no id (a log from before ids) is `m#<digest>`. Both digests are of what the record says and when, so a rewrite of the file cannot move them. Every ref a revision carries is one the distiller was shown, so it resolves in the log by construction.
+**The tracker's `role` record** (roles D7, shape unchanged) gains two fields when the call validated. `verdict` is `revised`, `unchanged` or `unknown`. `covers_to_turn` is the boundary when the verdict was `revised` or `unchanged`, and absent on `unknown`. `input.messages` counts the owner messages the tracker was shown, and `input.omitted` counts older unread ones left out by the cap. An `unchanged` verdict writes no `objective` record: the statement stands, and the role record is the evidence that the new messages were read (§0 corollary 2).
 
-**What each state must cite**, checked in code (`objective.validate_answer`) — every one is a claim (L8):
+**Coverage: what "since the last revision" means.** The tracker's input is the current statement plus the owner's typed messages from the turns after the newest of these two points:
 
-| state | must cite |
+- the current revision's `covers_to_turn`;
+- the `covers_to_turn` of the newest live tracker `role` record.
+
+Both points are read from live records only, so a Retry that discards a task also discards what it covered. The input is bounded to a constant size: at most `TRACKER_MESSAGES` (12) messages, the newest ones, each cut at `TRACKER_MESSAGE_CHARS` (2000). The number left out is recorded as `input.omitted`. `unknown`, `invalid`, `unavailable` and `unadmitted` do not advance coverage, so the next task end reads those messages again. A task end with no new owner message makes **no** call and writes nothing.
+
+**What the tracker's answer must satisfy**, checked in code (`objective.validate_answer`):
+
+| verdict | must |
 |---|---|
-| goal, any but `unknown` | at least one owner text (a message, or a card comment) — a goal nobody asked for is invented |
-| task `pending` / `in_progress` | where it was asked or planned: an owner text or an answer |
-| `done` (goal or task) | evidence: a final answer, an action that ran (`t<N>.c<M>` with `ok: true`), or a command he ran himself that recorded exit code 0. Without it the item is DOWNGRADED to `unknown` and listed in `downgrades` — the revision stands |
-| task `stopped` | the owner's own act: a denial, a stopped task, a command he ran himself, or his message |
-| goal `dropped` | an owner cite — a denial or his message; never inferred |
-| task `superseded` | `replaced_by` |
-| `unknown` | nothing: always legal |
+| `revised` | a non-empty `statement`; `cites` naming 1 to `max_cites` messages from the input; `change` one of `evolved`, `pivoted`, `unknown` when a statement exists, and code sets `new` when none does. A `revised` statement that is the current one, apart from whitespace, is recorded as `unchanged`. |
+| `unchanged` | nothing else. With no current statement, it means none of these messages states an objective yet. |
+| `unknown` | nothing else. It is the vocabulary's "I cannot tell" (roles R4). |
 
-**There is no "dropped silently" state.** An open task that no revision advances is a derived REPORT for a reader (#428), worded as the observation — never a state a writer can set.
+**What is NOT checked**, stated so the words do not outrun the code: that the statement says what its cites say, that `change` is truthful, and that the model ignored an instruction quoted inside one of his messages. Those are the tracker's judgements. The measurement (`scripts/measure_objective.py`) puts them in front of the owner, who is the judge of them.
 
-**Transitions** against the base revision: `done` and `stopped` may reopen only with an owner cite from the new material; `superseded` may only move to `unknown`, and `dropped` back only with such a cite; anything the distiller set may become `unknown` (a field the owner set may not be changed at all), and leaving `unknown` is judged from `was`. A goal or task the model leaves out is **carried forward unchanged by code** — a pivot never overwrites.
+**The owner outranks the tracker, in two enforced ways:**
 
-**Failure.** A distill that does not validate, cannot run (claude-max has no seam; an unadmitted charter), or raises writes its `role` record with the status and `why`, leaves the previous revision standing, and writes an `extractive` revision if any owner text is uncovered. It never raises into the task.
+1. **A tracker revision is written only if the current revision is still the one it was shown** (`base`). The check runs under the log's write lock, inside the same predicate as the boundary check. So an edit he saves while a tracker call is thinking always wins: the call's `role` record is kept with `discarded` naming why, and its revision is dropped.
+2. **A tracker revision after an edit can rest only on messages he typed after the edit.** The edit's `covers_to_turn` is the latest turn, so the tracker's input holds nothing older, and a cite must resolve in the input. The tracker CAN still evolve or pivot an edited statement, once he says something new: the objective follows him and is not frozen. The trail keeps his edit, labelled with how it was left.
 
-**A rewritten chat.** The boundary is the file's size at `task_end` plus the bytes of its last line. The distill reads and writes under the log's write lock (the lock every rewrite holds) and only while the file still ends, at that size, with that line. A Retry or redaction that lands first yields one `role` record with `why` saying the boundary no longer exists; one that lands while the model is thinking yields the `role` record — the call was made and paid for — carrying `discarded`, and no revision. A revision distilled from an attempt the owner discarded is never written.
+**Failure.** A tracker that does not validate, cannot run (claude-max has no seam; an unadmitted charter), or raises writes only its `role` record, with the status and `why`. The previous revision stands, and nothing raises into the task. There is no floor any more: the #424 floor copied his words, and the objective is now written in a model's words.
+
+**A rewritten chat.** Unchanged from #424. The boundary is the file's size at `task_end` plus the bytes of its last line. The tracker reads and writes under the log's write lock, and only while the file still ends, at that size, with that line. A Retry or a redaction that lands first yields a `role` record whose `why` says the boundary no longer exists. One that lands while the model is thinking yields the `role` record carrying `discarded`, and no revision.
+
+**Where it reaches the model.** Only through the per-task reminder, as a delta (`agent.objective_delta`, `docs/agent-core.md`). The statement is shown in full when it differs from the one in force in the reminders already in history, confirmed as unchanged when it does not, and withdrawn when there was one and there is none now. It is always introduced as aish's reading of his goal, or as his own words when he edited it. `messages[0]` never carries it, so the prompt prefix stays byte-stable. The `context` record (§3.10) gains `objective: {revision, origin, shown}`, where `shown` is `full`, `unchanged` or `none`. It is absent when the chat has no objective and none was ever shown.
 
 ---
 
