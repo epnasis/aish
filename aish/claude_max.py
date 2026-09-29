@@ -195,6 +195,17 @@ class ClaudeMaxAgent:
         return self.inner.lessons_path
 
     @property
+    def objective_source(self):
+        return self.inner.objective_source
+
+    @objective_source.setter
+    def objective_source(self, source) -> None:
+        # Held on the inner Agent for symmetry with every other entry point.
+        # claude-max composes no per-task reminder (its SDK owns the loop), so
+        # the objective is not shown to the model here (#432).
+        self.inner.objective_source = source
+
+    @property
     def browse_key(self) -> str:
         # The inner Agent is what dispatches `browse`, so its BrowseView holds
         # the tab this chat is driving — and the live watch (#289 slice 2) has

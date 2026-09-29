@@ -62,7 +62,7 @@ CHARTERS_DIR = Path(__file__).resolve().parent / "charters"
 # Named here rather than spelled at the call site so the wiring, the charter
 # file and the caller cannot drift into three spellings.
 SNIPPET_READER = "snippet-reader"
-DISTILLER = "distiller"  # #424, the Objective — the first role with a live caller
+TRACKER = "tracker"  # #432, the Objective — the role with a live caller
 
 # Where the owner's own material lives: full-fidelity mined exam cases, one
 # directory per charter. ADDITIVE — absent is the normal case, and a fresh
@@ -140,10 +140,12 @@ class Shape:
     """The output a charter declares.
 
     Two shapes, each with a customer. `rows` is the snippet reader's: one typed
-    record per input row. `objective` is the distiller's (#424): a nested ledger
-    of goals and tasks whose rules — cites that resolve, evidence for `done`,
-    verbatim constraints, legal transitions — are checked by `objective.py`
-    against the input the role was given. Its frontmatter declares only caps.
+    record per input row. `objective` is the tracker's (#432): a verdict and,
+    when it revised, one statement with cites — whose rules (the cites resolve
+    in the input, the vocabularies are closed) are checked by `objective.py`
+    against the input the role was given. Its frontmatter declares only caps,
+    and the one text field that can leave the role, `statement`, is declared
+    from them so the wiring law can see it.
     """
 
     kind: str
@@ -246,9 +248,9 @@ def _parse_field(raw: Any) -> Field:
     raise CharterError(f"unknown output field type {kind!r} (row | text | enum)")
 
 
-# The caps an `objective` output must declare. Every text the ledger carries is
-# bounded by one of them; there is no uncapped string here either.
-OBJECTIVE_CAPS = ("max_goals", "max_tasks", "max_chars", "max_constraint_chars", "max_cites")
+# The caps an `objective` output must declare. The statement is bounded by
+# `max_chars`; there is no uncapped string here either.
+OBJECTIVE_CAPS = ("max_chars", "max_cites")
 
 
 def _parse_shape(raw: Any) -> Shape:
@@ -262,7 +264,8 @@ def _parse_shape(raw: Any) -> Shape:
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise CharterError(f"an objective output must declare a positive {name}")
             caps[name] = value
-        return Shape(kind, (), 0, caps)
+        statement = Field("statement", "text", max_chars=caps["max_chars"])
+        return Shape(kind, (statement,), 0, caps)
     if kind != "rows":
         raise CharterError(f"unknown output shape {kind!r} (rows | objective)")
     fields = tuple(_parse_field(f) for f in (raw.get("fields") or ()))
@@ -337,7 +340,7 @@ class Charter:
     cases: tuple[Case, ...]
     path: Path | None = None
     # Whether the call asks the model to think before answering. A CHARTER
-    # setting (#424: the distiller reads a whole chat and must weigh it), so
+    # setting (#424: the distiller read a whole chat and had to weigh it), so
     # turning it on for one role changes no other role's cost or latency.
     think: bool = False
     # The content address of the file this was parsed from. It is what
@@ -592,19 +595,26 @@ class Wiring:
     at: str  # where in the code, for a reader who has to find it
 
 
-# **No wiring ships today, and that is a measurement rather than an oversight.**
-# v1's one edge ran every `web_search` through the snippet reader; a controlled
-# experiment retired it, and rendering a result as title and address alone
-# delivers the property the reader was justified by, for free (`docs/roles.md`,
-# *Title and address only*). The charter stays, admitted and examined, with no
-# caller.
+# **One wiring ships: the tracker's statement into the acting model's reminder**
+# (#432). The objective is shown to the model at the start of every task, so it
+# is an edge into a context that proposes actions, and the law must see it. It
+# carries the one declared field, `statement`, which is capped (`max_chars`)
+# and control-stripped by `capped`; the tracker's input is the owner's own typed
+# messages, which the acting model already holds verbatim as his turns, so the
+# edge opens no channel the context did not already have.
 #
-# An empty tuple rather than an edge naming a function that no longer exists: a
-# wiring is a claim that a path is live, and a claim wider than the code is the
-# defect #328 is about. `check_wirings` runs over it unchanged, so the law is
-# in place before the wirings that need it — which was always D5's argument for
-# shipping it first.
-WIRINGS: tuple[Wiring, ...] = ()
+# The snippet reader's edge is gone, and that was a measurement rather than an
+# oversight: a controlled experiment retired it (`docs/roles.md`, *Title and
+# address only*). Its charter stays, admitted and examined, with no caller. A
+# wiring is a claim that a path is live, so only a live one is listed here.
+WIRINGS: tuple[Wiring, ...] = (
+    Wiring(
+        charter=TRACKER,
+        into="acting",
+        carries=("statement",),
+        at="agent.objective_delta (the per-task reminder)",
+    ),
+)
 
 ACTING = "acting"
 

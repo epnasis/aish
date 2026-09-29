@@ -630,10 +630,11 @@ RENDERLESS_STEPS = frozenset(
         # per-chat store beside the request. Same pair as `sent`: log-only,
         # skipped on replay, read by `aish explain` and the step screen.
         "received",  # #355
-        # #424. A revision of the chat's Objective, written after the answer by
-        # the distiller or the extractive floor. Recorded only in this slice —
-        # the owner sees it through #425's strip, never as a trace row — so it
-        # renders nowhere live, is skipped on replay, and is not activity.
+        # #424, #432. A revision of the chat's objective, written after the
+        # answer by the tracker, or by the owner's edit. The owner sees it in
+        # the pinned strip (live state, re-read on attach), never as a trace
+        # row — so it renders nowhere live, is skipped on replay, and is not
+        # activity.
         "objective",  # #424
     }
 )
@@ -828,6 +829,50 @@ def _step_kind(record: dict) -> str:
     """The trace step kind a record carries, or "" for anything else."""
     step = record.get("step")
     return str(step.get("kind") or "") if isinstance(step, dict) else ""
+
+
+def _forget_in_objectives(
+    records: list[dict], lines: list[str], ref: str
+) -> tuple[list[dict], list[str]]:
+    """The surviving objective revisions (#432), rid of what rested on a
+    removed message: a tracker statement that cites it is DELETED — a model's
+    reading of that message, the reason stale auto titles are — and a trail
+    entry that cites it is dropped from every revision that carries one. His
+    own statements stay. A statement that does not cite the message is kept,
+    even if it carried the content forward from one that did."""
+    out_records: list[dict] = []
+    out_lines: list[str] = []
+    for record, line in zip(records, lines, strict=True):
+        step = record.get("step")
+        if _step_kind(record) != "objective" or not isinstance(step, dict):
+            out_records.append(record)
+            out_lines.append(line)
+            continue
+
+        def cites(entry: dict) -> bool:
+            return any(
+                isinstance(c, dict) and c.get("ref") == ref for c in entry.get("cites") or ()
+            )
+
+        if step.get("origin") != "owner" and cites(step):
+            continue
+        trail = step.get("trail")
+        if isinstance(trail, list) and any(isinstance(e, dict) and cites(e) for e in trail):
+            step = {**step, "trail": [e for e in trail if not (isinstance(e, dict) and cites(e))]}
+            record = {**record, "step": step}
+            line = json.dumps(record, ensure_ascii=False)
+        out_records.append(record)
+        out_lines.append(line)
+    return out_records, out_lines
+
+
+def _is_owner_objective(record: dict) -> bool:
+    """An objective the OWNER wrote (#432) — his own words, which a Retry or a
+    redaction of the turn it sits in must not take back."""
+    step = record.get("step")
+    return _step_kind(record) == "objective" and isinstance(step, dict) and (
+        step.get("origin") == "owner"
+    )
 
 
 def _pair_tool_calls(
@@ -2612,6 +2657,11 @@ class SessionLog:
                     # walks, and the press history #339 exists to keep —
                     # marking them would hide the owner's own decisions.
                     continue
+                if _is_owner_objective(record):
+                    # His own statement of the objective (#432), saved while
+                    # this turn was the last one. It is not part of the attempt
+                    # being discarded, and a Retry must not take it back.
+                    continue
                 record = {**record, "superseded": True}
                 records[i] = record
                 kept[i] = json.dumps(record, ensure_ascii=False)
@@ -2833,6 +2883,10 @@ class SessionLog:
             )
             end = len(records) if next_user is None else _turn_opens_at(records, next_user)
 
+            # His own statements of the objective (#432) written inside the
+            # range survive it, after the tombstone: they are his words, not the
+            # removed exchange — the reason titles he typed are kept below.
+            his = [i for i in range(first, end) if _is_owner_objective(records[i])]
             tombstone = {
                 "ts": datetime.datetime.now().isoformat(timespec="seconds"),
                 "kind": REDACT_KIND,
@@ -2840,13 +2894,19 @@ class SessionLog:
                 # When the removed turn happened, so the marker can sit in the
                 # transcript's own timeline rather than claiming to be new.
                 "at": records[start].get("ts", ""),
-                "records": end - first,
+                "records": end - first - len(his),
             }
-            kept_records = records[:first] + [tombstone] + records[end:]
+            kept_records = (
+                records[:first] + [tombstone] + [records[i] for i in his] + records[end:]
+            )
             kept_lines = (
                 lines[:first]
                 + [json.dumps(tombstone, ensure_ascii=False)]
+                + [lines[i] for i in his]
                 + lines[end:]
+            )
+            kept_records, kept_lines = _forget_in_objectives(
+                kept_records, kept_lines, f"m:{turn}"
             )
             title = self._retitle_after_redaction(kept_records)
             if title is not None:

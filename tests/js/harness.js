@@ -289,6 +289,10 @@ function hostileWorld({ visible = false, width = 1100, globals = {} } = {}) {
     setCtxFill() {},
     showModelName() {},
     ctxFill: null,
+    // The objective strip ([OBJECTIVE-STRIP]): a chat switch clears it, so
+    // every block that enters a session reaches it; test_objective_strip.js
+    // drives the real thing.
+    clearObjective() {},
   };
   sandbox.window = sandbox;
   sandbox.self = sandbox;

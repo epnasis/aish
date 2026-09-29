@@ -145,16 +145,16 @@ class TestShippedCharter:
         roles.check_wirings(found)
         assert roles.SNIPPET_READER in found
 
-    def test_no_wiring_ships_and_the_charter_still_loads(self):
+    def test_no_wiring_ships_for_it_and_the_charter_still_loads(self):
         """The one edge v1 shipped — every `web_search` through this
         reader — was measured over 42 runs and removed; the framework, the
         exam, the admission binding and the record stayed.
 
-        An empty tuple rather than an edge naming a function that no longer
-        exists. A charter with no caller is a fine thing to keep; a declaration
-        that a path is live when it is not is the class of defect #328 is
-        about."""
-        assert roles.WIRINGS == ()
+        No wiring names it, rather than an edge naming a function that no
+        longer exists. A charter with no caller is a fine thing to keep; a
+        declaration that a path is live when it is not is the class of defect
+        #328 is about. The one live edge is the tracker's (#432)."""
+        assert [w.charter for w in roles.WIRINGS] == [roles.TRACKER]
         assert roles.SNIPPET_READER in roles.load_charters()
 
     def test_the_snippet_reader_still_declares_a_bounded_output(self):

@@ -206,7 +206,7 @@ class ChipStream:
 SLASH_COMMANDS = (
     "/add-dir", "/aliases", "/browser", "/cd", "/chat", "/clear", "/delete",
     "/dir-add", "/exit", "/feedback", "/help", "/jobs", "/learn", "/model",
-    "/new", "/quit", "/rename", "/resume", "/session",
+    "/new", "/objective", "/quit", "/rename", "/resume", "/session",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
@@ -224,6 +224,11 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  deleted
   {CYAN}/rename <title>{RESET} give this chat a custom title (overrides the one derived
                  from the first message; shown in /resume and the web drawer)
+  {CYAN}/objective{RESET}     show this chat's objective — aish's reading of why you are
+                 here, written from your messages after each task — with the
+                 messages it rests on and the earlier statements it replaced
+  {CYAN}/objective edit <text>{RESET} set it in your own words; aish then moves it
+                 only on something you say later
   {CYAN}/new, /clear{RESET}   fresh conversation in a new chat (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
@@ -1655,6 +1660,9 @@ def handle_slash(
             f"'aish trash restore {selected.path.name}'{RESET}"
         )
         return "handled"
+    if command == "/objective":
+        show_or_edit_objective(task, logref)
+        return "handled"
     if command == "/rename":
         parts = task.split(maxsplit=1)
         title = parts[1].strip() if len(parts) > 1 else ""
@@ -2022,9 +2030,88 @@ def _purge_trash_at_launch(state_dir) -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
-def distill_in_background(agent, logref: LogRef, state_dir) -> threading.Thread | None:
-    """The chat's next Objective revision (#424), on a daemon thread after the
-    answer has printed — the CLI's counterpart of the web's post-turn epilogue.
+# What the objective screen says about the tracker when there is no statement
+# yet: what was OBSERVED about its last call, never a cause (L8).
+TRACKER_SAID = {
+    "unchanged": "it read your messages and found no objective stated yet",
+    "unknown": "it read your messages and could not tell what you are after",
+}
+
+
+def objective_lines(view: dict) -> list[str]:
+    """The `/objective` screen, as lines. `view` is `objective.view`'s answer."""
+    revision = view.get("objective")
+    if not revision:
+        lines = [f"{BOLD}objective{RESET} {DIM}— none yet{RESET}"]
+        tracker = view.get("tracker") or {}
+        if not tracker:
+            lines.append(f"{DIM}  aish has not read this chat for one yet (it does so "
+                         f"after each task){RESET}")
+        elif tracker.get("status") == "ok":
+            said = TRACKER_SAID.get(str(tracker.get("verdict") or ""), "it answered")
+            lines.append(f"{DIM}  after turn {tracker.get('turn')}, {said}{RESET}")
+        else:
+            why = f": {tracker['why']}" if tracker.get("why") else ""
+            lines.append(f"{DIM}  after turn {tracker.get('turn')}, the tracker did not "
+                         f"produce one ({tracker.get('status')}{why}){RESET}")
+        lines.append(f"{DIM}  /objective edit <text> sets it in your own words{RESET}")
+        return lines
+    whose = (
+        "in your own words" if revision.get("origin") == "owner"
+        else "aish's reading of your goal, from your messages"
+    )
+    lines = [
+        f"{BOLD}objective{RESET} {DIM}— {whose} (revision {revision.get('revision')}, "
+        f"turn {revision.get('turn')}, {revision.get('change')}){RESET}",
+        f"  {revision.get('statement')}",
+    ]
+    for source in revision.get("sources") or ():
+        text = " ".join(str(source.get("text") or "(its text is not shown)").split())
+        lines.append(f"{DIM}  rests on: {text[:100]}{'…' if len(text) > 100 else ''}{RESET}")
+    trail = list(revision.get("trail") or ())
+    if trail:
+        lines.append(f"{DIM}earlier, newest first:{RESET}")
+        for entry in reversed(trail):
+            who = "you" if entry.get("origin") == "owner" else "aish"
+            lines.append(
+                f"{DIM}  r{entry.get('revision')} · turn {entry.get('turn')} · {who} · "
+                f"then {entry.get('left')}:{RESET} {entry.get('statement')}"
+            )
+    return lines
+
+
+def show_or_edit_objective(task: str, logref: LogRef) -> None:
+    """`/objective` shows the chat's objective; `/objective edit <text>` writes
+    his own statement as an `origin: owner` revision — never a user message."""
+    parts = task.split(maxsplit=2)
+    log = logref.log
+    if len(parts) > 1 and parts[1].lower() == "edit":
+        text = parts[2].strip() if len(parts) > 2 else ""
+        if not text:
+            current = objective.read_current(log.path)
+            print(f"{DIM}usage: /objective edit <the objective, in your words>{RESET}")
+            if current:
+                print(f"{DIM}now: {current.get('statement')}{RESET}")
+            return
+        try:
+            objective.owner_edit(log, text)
+        except ValueError as exc:
+            print(f"{RED}{exc}{RESET}")
+            return
+        print(f"{DIM}objective set in your words — aish now moves it only on something "
+              f"you say later{RESET}")
+        return
+    if len(parts) > 1:
+        print(f"{DIM}usage: /objective, or /objective edit <text>{RESET}")
+        return
+    for line in objective_lines(objective.read_view(log.path)):
+        print(line)
+
+
+def track_in_background(agent, logref: LogRef, state_dir) -> threading.Thread | None:
+    """Read the owner's new messages into the chat's objective (#432), on a
+    daemon thread after the answer has printed — the CLI's counterpart of the
+    web's post-turn epilogue.
 
     The boundary (the log's size and the turn) is taken HERE, synchronously,
     and the log object is bound now, so a /resume into another chat while it
@@ -2046,7 +2133,7 @@ def distill_in_background(agent, logref: LogRef, state_dir) -> threading.Thread 
     if boundary is None:
         return None
     thread = threading.Thread(
-        target=objective.distill_at_boundary,
+        target=objective.track_at_boundary,
         args=(boundary, log),
         name="aish-objective",
         daemon=True,
@@ -2837,6 +2924,11 @@ def main() -> int:
             aliases=config.get("aliases"),
         )
         agent.provider = provider
+    # The objective reaches the model through the per-task reminder (#432),
+    # read through `logref` so a /resume or /new is read where it lives now.
+    agent.objective_source = lambda: objective.read_current(
+        logref.log.path
+    )
     agent_holder.append(agent)
     if _box is not None:
         _box.get_cwd = lambda: agent.cwd  # /cd path completion follows the agent
@@ -2930,7 +3022,7 @@ def main() -> int:
                 # After a turn ends, the evidence store is swept to its budget
                 # (#352) — here as in the web server, never inside a tool call.
                 _sweep_turns(state_dir)
-                distill_in_background(agent, logref, state_dir)
+                track_in_background(agent, logref, state_dir)
                 if chip_stream is not None:
                     chip_stream.close()
                 clean, pending_chips = parse_reply_chips(result)
