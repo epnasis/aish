@@ -751,7 +751,7 @@ Both points are read from live records only, so a Retry that discards a task als
 
 **Renderless.** In `RENDERLESS_STEPS`, never handed to `on_step`. The screen shows it through live state on the objective strip (`docs/web-server.md`, *Live state, not transcript*). The `plan` tool call itself is an ordinary `tool_start`/`tool` step and renders as a trace row like any call.
 
-One record per **revision**. The current plan is the newest **live** `plan` record (L7), with the owner-drop overlay below applied.
+One record per **revision**. The current plan is the newest **live** model revision (L7), with every live owner drop applied over it (the overlay below). His records carry the whole list as he saw it, so each is self-contained (§0 corollary 1), but the plan is never READ from them: a Retry that discards the model revision he acted on must not leave his record carrying that attempt's states.
 
 ```json
 {"kind": "plan", "turn": 5, "revision": 3, "origin": "model", "action": "revise",
@@ -778,7 +778,7 @@ One record per **revision**. The current plan is the newest **live** `plan` reco
 | `action` | `revise` (a model call), `drop` or `replan` (owner). An owner revision names the task in `task` for `drop`. |
 | `base` | The revision the writer computed against (`null` for none). |
 | `call` / `model_call` | Model revisions only: the plan tool call that wrote it, joining the record to its `tool` step (§2). |
-| `tasks[]` | The whole list after this revision. `id` is a short string (the model's, or assigned by code when it gave none or one already taken); `title` at most `plan.TITLE_CHARS` (160), **the model's words**, never the owner's. `state` is one of the five below. `evidence` on a `done` task; `downgraded` on a task the model called done without evidence that resolves; `dropped` (`explicit` \| `vanished`) on a `dropped_replan` task. |
+| `tasks[]` | The whole list after this revision. `id` is a short string (the model's, or assigned by code when it gave none or one already taken); `title` at most `plan.TASK_TITLE_CHARS` (160), **the model's words**, never the owner's. `state` is one of the five below. `evidence` on a `done` task; `downgraded` on a task the model called done without evidence that resolves; `dropped` (`explicit` \| `vanished`) on a `dropped_replan` task. |
 | `counts` | Tasks per state, so a reader needs no pass over `tasks[]`. |
 | `downgraded` | How many of the model's `done`s in THIS call were recorded as `pending`. Absent when none. |
 | `refused` | The model's changes code did not apply, each `{id, why}`: an owner-dropped task it tried to change. Absent when none. |
@@ -791,7 +791,7 @@ One record per **revision**. The current plan is the newest **live** `plan` reco
 |---|---|
 | `tasks` is a list of at most `plan.MAX_TASKS` (20) objects, each with a non-empty `title` and a `state` from the model's vocabulary | refusal, nothing written |
 | no two tasks carry the same `id`, and no two open tasks the same title | refusal, nothing written |
-| **matching**: an incoming task is the current task with the same `id`; failing that, the one with the same title (whitespace squashed, case folded); failing that, a new task | code |
+| **matching**: an incoming task is the current task with the same `id` — unless that task is closed (`done` or dropped) and the title differs, since a model that renumbers must not turn a finished task into another; failing that, the one with the same title (whitespace squashed, case folded); failing that, a new task with a fresh id | code |
 | **replan keeps what it replaces**: a current task the new list does not match stays in the record — `pending`/`doing` become `dropped_replan` with `dropped: "vanished"`; `done`, `dropped_replan` and `dropped_by_owner` keep their state. **Nothing is ever deleted.** | code |
 | **done needs evidence**: a `done` task's `evidence` must resolve (below). If it does not, and the task was not already `done` with resolved evidence, it is recorded as `pending` with `downgraded` saying what was cited and why it did not resolve. A task already `done` keeps its recorded evidence when the model repeats `done` without any. | code; `downgraded` on the task and the record |
 | **an owner-dropped task is immutable to the model**: a matched `dropped_by_owner` task keeps its state and title whatever the model sent; a change it asked for is listed in `refused` | code |

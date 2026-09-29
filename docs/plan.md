@@ -1,0 +1,161 @@
+# The plan — aish's own checklist for the objective
+
+`plan.py`, the `plan` tool in `tools.py`, `Agent._plan_call`. Epic #423; this page
+covers slice 2 of the owner's three-level model, #433: **the plan.** The record's
+schema is contract §3.15; this page is why it is shaped that way.
+
+> **What runs today.** The acting model has a `plan` tool on its menu. When it calls
+> it, code checks the list and records a revision; nothing executes. The plan is
+> shown to the model in the tool's result and in the per-task reminder beside the
+> objective, and to the owner under the objective strip on the web and through
+> `/plan` in the CLI. He can drop a task or ask for a replan. A task marked done
+> without evidence that resolves is recorded as pending. `AISH_PLAN=0` takes the tool
+> off the menu; `AISH_PLAN=tool` keeps it and turns the replan triggers off. Both
+> exist for the measurement below.
+
+## Which level this is
+
+The owner's decisions of 2026-09-29 (epic #423): the **objective** is why he is here
+(`docs/objective.md`); the **plan** is how aish gets there; **hints** are his card
+comments. For the plan he decided:
+
+- it is created **only by aish, when planning**, and never from his messages;
+- it is **optional**: only for objectives that need several steps;
+- a task sits **above a single command** ("test service X"): if one tool call
+  finishes it, it is not a task;
+- **done needs evidence** that the work was done and produced a result;
+- **replanning** may add, change or drop tasks, and that is expected;
+- it is **visible to him**: an odd task shows him a misunderstanding early, and he can
+  drop a task or ask for a replan;
+- **card comments are hints**: they may prompt a replan, never become tasks.
+
+Why it exists, in his words: a checklist so that, while working through a lot of
+output, aish — especially a small-context model — does not forget what it planned.
+
+## The tool, and why it only records
+
+`plan` takes the WHOLE list every time (`tasks: [{id, title, state, evidence}]`) and
+goes through `_dispatch` like every tool (L1). It is not in `READ_ONLY_TOOLS`, so it
+never takes the parallel path, and it executes nothing: `plan.revise` validates the
+list against the plan in force, the agent writes one `plan` record through its
+log-only sink, and the result says what was recorded. Its description carries the
+owner's rules as MUSTs with one example (the only phrasing measured to be followed,
+`docs/agent-core.md` §Narration), inside the menu fence
+(`tests/test_tool_menu_size.py`; the native menu is 33,006 of 34,000 characters with
+it).
+
+**Whole-list replace, not add/update/remove calls**, because a model that has to name
+what it removes forgets to, and a list that is sent whole can be compared whole. What
+the model leaves out is not lost: an open task it omits is kept as `dropped_replan`
+(`dropped: vanished`), and a done task it omits stays done. Nothing is ever deleted.
+
+**Matching** is by `id`, then by title (whitespace squashed, case folded), then new.
+Models renumber; a title that did not change is the same task. An `id` that names a
+CLOSED task (done or dropped) under a different title is taken as a new task with a
+fresh id, so a renumbering model cannot turn a finished task into another and lose
+its evidence.
+
+**Not progress.** A plan call learns nothing about the world, so it never counts as
+progress for the #108 step budget: a model re-planning in a circle still reaches the
+stall cap. It still enters the loop detector like any call.
+
+`tests/test_plan.py`: `TestTheRecordKind`, `TestParse`, `TestTheTool`, `TestReplanKeepsWhatItReplaces`.
+
+## Done needs evidence
+
+A `done` task must cite what proved it: an exact part of a successful call's command
+or arguments, or that call's ref `t<turn>.c<call>`, or part of a `!` command he ran
+with exit code 0, or of an earlier answer. `plan.resolve_evidence` looks it up in the
+chat's LIVE records (L7). The model does not know call refs up front, which is why a
+quote is accepted and the RESOLVED ref is what gets recorded; a result that downgraded
+something lists up to eight recent successful calls with their refs, so the next call
+can cite one.
+
+A done that does not resolve is **recorded as pending**, with `downgraded` naming what
+was cited and why it did not resolve, and the result says `NOT DONE`. The downgrade is
+a fact in the record, never a silent correction (L8).
+
+**What resolution does NOT establish**: that the cited call proves the task. "The
+call happened and succeeded" is code's; "it proves this task" is the model's claim.
+The measurement below reads a sample of dones blind for exactly that. `TestDoneNeedsEvidence`.
+
+## His drop is final
+
+A task he drops is `dropped_by_owner`, and the model cannot change it: a model list
+that tries is recorded with `refused`, and the task stays as he left it. Re-adding it
+under the same title matches it by title and is refused the same way.
+
+The model's revision is written through the agent's sink, not conditionally, so one
+computed just before his drop landed could omit it. So the drop is **re-applied on
+every read** (`plan.current`, the owner-drop overlay): the last word on any title he
+dropped is his, whatever order the writes landed in. His drop and replan records
+survive a Retry and a redaction of the turn they sit in (`session._is_owner_objective`
+covers both kinds), like his objective edits. `TestTheOwner`.
+
+## Where it reaches the model
+
+- **The tool result**, after every call: the recorded list, downgrades, refusals.
+- **The per-task reminder, as a delta** (`agent.plan_delta`), next to the objective:
+  in full when the list is not the newest one already in history, `PLAN_UNCHANGED`
+  when it is, `PLAN_NONE` when a Retry took the plan away. "Already in history"
+  includes the plan tool's own results, because the model wrote most of what it
+  holds. Never in `messages[0]`, so the prefix stays byte-stable. The `context`
+  record carries `plan: {revision, shown}`.
+- **The newest plan call's arguments are exempt from the #429 argument lever**
+  (`Agent._newest_plan_call`): the model's own latest list is never cut to 80
+  characters. Older plan calls are trimmable like any. A message holding both the
+  newest plan call and another long call has only the other call cut, and is then
+  marked stubbed, so its plan call stays whole even after a newer one exists — the
+  conservative direction. `TestTheReminder`, `TestTheArgumentLever`.
+
+## Replan triggers — one line each, never a forced call
+
+Each fires only while the plan has an open task, because a nudge to a finished plan
+is noise; each appends ONE line and the model decides. `AISH_PLAN=tool` turns them off.
+
+| trigger | where the line goes |
+|---|---|
+| a denial with a comment | appended to the denial's own result (`_call_result`, off the recorded decision). The plan tool is **exempt from the stop gate** that denial arms: it executes nothing, and this is the moment the owner's model most wants it revised. Deny still means stop — every tool that acts stays refused, and only a text-only turn ends the task |
+| a stall | an `[aish: …]` note after `STALL_REPLAN_AT` (4) no-progress steps, once per task; the stall cap (8) leaves room to act on it |
+| a failed task end | one reminder segment on the next task, when the previous one raised or ended at the stall cap, the step ceiling or the loop detector (`_task_unfinished`, kept on the agent: a restart of aish-web between the two tasks loses it) |
+
+The hold with a comment (approve + comment) is a hint too, and is deliberately NOT a
+trigger: the owner named the denial.
+
+His own actions are not triggers but reach the model the same way: a drop or a replan
+request made while a task runs sets `Agent.plan_owner_changed`, and the loop appends
+one `[aish: …]` note before its next model call; made while idle, the next reminder
+carries it (a pending replan request rides inside the full rendering). `TestTriggers`,
+`TestTheOwnerMidTask`.
+
+## Where it reaches the owner
+
+- **Web:** under the objective on the pinned strip — `Plan · 2 of 5 done · 1 dropped`,
+  then the open tasks, the one being worked on first, folded into `+N more open` past
+  three (`[OBJECTIVE-STRIP]`, `docs/web-frontend.md`). A tap opens the objective sheet
+  at its plan section: every task with its state and the evidence each done rests on,
+  a trailing ✕ on each open task (the Recents row's ✕), asked about in the shared
+  confirm modal because aish cannot bring it back, and *Ask aish to revise the plan*.
+  Both are receipted actions (`plan_action`), never chat messages. `/plan` opens the
+  same sheet.
+- **CLI:** `/plan` prints the list with evidence; `/plan drop <id>` and `/plan replan`.
+  `TestTheCliCommand`, `TestTheWeb`, `tests/js/test_plan_strip.js`.
+
+The plan rides the `objective` event (`docs/web-server.md`): one announcement and one
+ordering for the whole strip. A model revision repaints it as it lands, from the
+agent's thread (`announce_objective_threadsafe`).
+
+## What is not checked, and what is not done
+
+- **That a task is above single-command level.** The description tells the model;
+  nothing counts calls per task.
+- **That a resolved evidence step proves its task** — see *Done needs evidence*.
+- **claude-max** gets the tool (the SDK routes it through `_locked_dispatch`) but no
+  reminder, so the plan reaches that model only through the tool's results.
+- **A redacted message can survive in a task title** written after it, as the
+  objective's statements can (`docs/objective.md`).
+
+## Measurement
+
+Not yet run at the time this page was first written; see the section below once
+filled.

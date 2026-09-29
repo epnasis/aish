@@ -205,6 +205,30 @@ class ClaudeMaxAgent:
         # the objective is not shown to the model here (#432).
         self.inner.objective_source = source
 
+    # The plan (#433). Its tool runs here like any — the SDK routes it through
+    # `_locked_dispatch` into the inner `_dispatch` — so the inner Agent reads
+    # the log and announces revisions. There is no per-task reminder on this
+    # backend, so the plan reaches the model only through the tool's results.
+    @property
+    def plan_records(self):
+        return self.inner.plan_records
+
+    @plan_records.setter
+    def plan_records(self, source) -> None:
+        self.inner.plan_records = source
+
+    @property
+    def on_plan(self):
+        return self.inner.on_plan
+
+    @on_plan.setter
+    def on_plan(self, callback) -> None:
+        self.inner.on_plan = callback
+
+    @property
+    def plan_owner_changed(self):
+        return self.inner.plan_owner_changed
+
     @property
     def browse_key(self) -> str:
         # The inner Agent is what dispatches `browse`, so its BrowseView holds

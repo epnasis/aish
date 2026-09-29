@@ -74,6 +74,7 @@ from . import (
     turns,
     vault_writes,
 )
+from . import plan as checklist
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
@@ -2895,6 +2896,12 @@ class WebServer:
             await self._set_objective(
                 client, str(message.get("name", "")), str(message.get("statement", ""))
             )
+        elif kind == "plan_action":
+            self._claim(client)
+            await self._plan_action(
+                client, str(message.get("name", "")), str(message.get("action", "")),
+                str(message.get("task", "")),
+            )
         elif kind == "models":
             await self._send_models(client, str(message.get("query", "")))
         elif kind == "set_model":
@@ -3798,15 +3805,57 @@ class WebServer:
     async def _objective_event(self, session: Session) -> dict:
         """The strip's state for one chat, read from its log (#432): the
         current revision, or none and what the tracker last did."""
+        return await asyncio.to_thread(self._objective_state, session)
+
+    @staticmethod
+    def _objective_state(session: Session) -> dict:
+        """`_objective_event`'s body, synchronous: two reads of the chat's log.
+        The plan rides the same event (#433): it sits on the same strip, under
+        the objective, so one announcement and one ordering serve both."""
         path = getattr(session.logref.log, "path", None)
-        view = await asyncio.to_thread(objective.read_view, path)
-        return {"type": "objective", "name": session.name, "session": session.name, **view}
+        return {
+            "type": "objective", "name": session.name, "session": session.name,
+            **objective.read_view(path), "plan": checklist.read_view(path),
+        }
 
     async def _announce_objective(self, session: Session) -> None:
         """Tell every viewer of this chat what its objective is now. Live
         state, never transcript (L4): re-derived from the log on attach."""
         session.objective_version += 1
         session.bridge.emit(await self._objective_event(session), record=False)
+
+    def announce_objective_threadsafe(self, session: Session) -> None:
+        """`_announce_objective` from the agent's thread — a plan revision is
+        written mid-task (#433), and the strip repaints as it lands. The log
+        is read here, on that thread; `bridge.emit` is what crosses to the
+        loop, as every other event the agent's thread emits does."""
+        session.objective_version += 1
+        session.bridge.emit(self._objective_state(session), record=False)
+
+    async def _plan_action(self, client: Client, name: str, action: str, task: str) -> None:
+        """The owner's drop of one task, or his request for a replan (#433):
+        an `origin: owner` plan revision, never a user message. While a task
+        runs, the agent is told to read it before its next model call."""
+        session = client.viewing
+        if session is None or session.name != name:
+            await self._refuse(client, "that chat is not the one on screen", name=name)
+            return
+        log = session.logref.log
+        try:
+            if action == checklist.ACTION_DROP:
+                await asyncio.to_thread(checklist.owner_drop, log, task)
+            elif action == checklist.ACTION_REPLAN:
+                await asyncio.to_thread(checklist.owner_replan, log)
+            else:
+                raise ValueError(f"unknown plan action {action!r}")
+        except ValueError as exc:
+            await self._refuse(client, str(exc), name=name)
+            await self._announce_objective(session)
+            return
+        event = getattr(session.agent, "plan_owner_changed", None)
+        if session.busy and event is not None:
+            event.set()
+        await self._announce_objective(session)
 
     async def _set_objective(self, client: Client, name: str, statement: str) -> None:
         """The owner's own objective for the chat he is viewing (#432): an
@@ -7084,7 +7133,14 @@ def create_app(
         agent.objective_source = lambda: objective.read_current(
             getattr(logref.log, "path", None)
         )
+        # The plan (#433) is read from the same log: the plan in force, his
+        # drops and replan requests, and the calls a done may cite. A recorded
+        # revision repaints the strip at once, from the agent's thread.
+        agent.plan_records = lambda: checklist.read_records(getattr(logref.log, "path", None))
         session = Session(agent, logref, bridge, origin=origin, trigger_meta=trigger_meta)
+        agent.on_plan = lambda _record: (
+            server_ref[0].announce_objective_threadsafe(session) if server_ref else None
+        )
         session.custom_title = custom_title  # a renamed chat keeps its name hot
         session.title_auto = title_auto  # …and a HAND-typed one is never overwritten (#175)
         session_holder.append(session)  # #95: the mid-task get/drain callbacks read it

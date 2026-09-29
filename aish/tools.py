@@ -1744,4 +1744,61 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "plan",
+            "description": (
+                "Your own checklist for the owner's objective; he sees it. ONLY for work "
+                "that needs several steps, and each task MUST be bigger than one tool call "
+                "('Test service A', never 'curl A'). Call it once you know the steps, and "
+                "again when a task starts, finishes or the steps change. Send the WHOLE list "
+                "every time: an open task you leave out is kept as dropped. A done task MUST "
+                "cite evidence or it is recorded as pending. Before your final answer every "
+                "task MUST be done or dropped. Example: {\"tasks\": [{\"id\": \"1\", "
+                "\"title\": \"Test service A\", \"state\": \"done\", \"evidence\": "
+                "\"curl -s https://a.example/health\"}, {\"id\": \"2\", \"title\": "
+                "\"Test service B\", \"state\": \"doing\"}]}"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "The whole plan, in order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "Keep each task's id across calls.",
+                                },
+                                "title": {"type": "string"},
+                                "state": {
+                                    "type": "string",
+                                    "enum": ["pending", "doing", "done", "dropped"],
+                                },
+                                "evidence": {
+                                    "type": "string",
+                                    "description": (
+                                        "For done: an exact part of the command or arguments "
+                                        "of the successful call that proved it, or its ref "
+                                        "(t3.c2) from an earlier plan result."
+                                    ),
+                                },
+                            },
+                            "required": ["title", "state"],
+                        },
+                    },
+                },
+                "required": ["tasks"],
+            },
+        },
+    },
 ]
+
+# The plan tool's measurement arm (#433): AISH_PLAN=0 takes it off the menu, so
+# a run can compare the same agent with and without it. Read once, at import,
+# because the menu is byte-frozen for the life of the process (#404).
+if os.environ.get("AISH_PLAN", "").strip() == "0":
+    TOOL_SCHEMAS = [s for s in TOOL_SCHEMAS if s["function"]["name"] != "plan"]

@@ -28,6 +28,7 @@ from . import (
     turns,
     vault_writes,
 )
+from . import plan as checklist
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
@@ -206,7 +207,7 @@ class ChipStream:
 SLASH_COMMANDS = (
     "/add-dir", "/aliases", "/browser", "/cd", "/chat", "/clear", "/delete",
     "/dir-add", "/exit", "/feedback", "/help", "/jobs", "/learn", "/model",
-    "/new", "/objective", "/quit", "/rename", "/resume", "/session",
+    "/new", "/objective", "/plan", "/quit", "/rename", "/resume", "/session",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
@@ -229,6 +230,10 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  messages it rests on and the earlier statements it replaced
   {CYAN}/objective edit <text>{RESET} set it in your own words; aish then moves it
                  only on something you say later
+  {CYAN}/plan{RESET}          show aish's own plan for the objective — its tasks, their
+                 states, and the evidence each done rests on
+  {CYAN}/plan drop <id>{RESET} drop a task; aish cannot bring it back
+  {CYAN}/plan replan{RESET}   ask aish to revise the plan at its next task
   {CYAN}/new, /clear{RESET}   fresh conversation in a new chat (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
@@ -1663,6 +1668,9 @@ def handle_slash(
     if command == "/objective":
         show_or_edit_objective(task, logref)
         return "handled"
+    if command == "/plan":
+        show_or_change_plan(task, logref)
+        return "handled"
     if command == "/rename":
         parts = task.split(maxsplit=1)
         title = parts[1].strip() if len(parts) > 1 else ""
@@ -2108,6 +2116,72 @@ def show_or_edit_objective(task: str, logref: LogRef) -> None:
         print(f"{DIM}usage: /objective, or /objective edit <text>{RESET}")
         return
     for line in objective_lines(objective.read_view(log.path)):
+        print(line)
+
+
+# How each state reads on the /plan screen.
+PLAN_STATE_WORDS = {
+    checklist.PENDING: "pending",
+    checklist.DOING: "doing",
+    checklist.DONE: "done",
+    checklist.DROPPED_REPLAN: "dropped (replan)",
+    checklist.DROPPED_BY_OWNER: "dropped by you",
+}
+
+
+def plan_lines(view: dict | None) -> list[str]:
+    """The `/plan` screen, as lines. `view` is `plan.view`'s answer."""
+    if not view:
+        return [
+            f"{BOLD}plan{RESET} {DIM}— none. aish writes one for itself when a piece of "
+            f"work needs several steps{RESET}"
+        ]
+    tally = view.get("counts") or {}
+    active = sum(tally.get(s, 0) for s in (checklist.PENDING, checklist.DOING, checklist.DONE))
+    who = "you" if view.get("changed_by") == checklist.ORIGIN_OWNER else "aish"
+    lines = [
+        f"{BOLD}plan{RESET} {DIM}— aish's own checklist (revision {view.get('revision')}, "
+        f"turn {view.get('turn')}, last changed by {who}); "
+        f"{tally.get(checklist.DONE, 0)} of {active} done{RESET}"
+    ]
+    for task in view.get("tasks") or ():
+        state = task.get("state")
+        word = PLAN_STATE_WORDS.get(state, str(state))
+        colour = DIM if state in (checklist.DROPPED_REPLAN, checklist.DROPPED_BY_OWNER) else ""
+        lines.append(f"  {colour}[{task.get('id')}] {word:<16} {task.get('title')}{RESET}")
+        evidence = task.get("evidence")
+        if isinstance(evidence, dict):
+            lines.append(
+                f"{DIM}      rests on {evidence.get('ref')}: {evidence.get('quote')}{RESET}"
+            )
+    if view.get("replan_requested"):
+        lines.append(f"{DIM}  you asked for a replan; aish has not revised it yet{RESET}")
+    lines.append(f"{DIM}  /plan drop <id> drops a task · /plan replan asks aish to revise{RESET}")
+    return lines
+
+
+def show_or_change_plan(task: str, logref: LogRef) -> None:
+    """`/plan` shows aish's plan; `/plan drop <id>` and `/plan replan` are the
+    owner's two actions on it — plan revisions of his, never user messages."""
+    parts = task.split()
+    log = logref.log
+    if len(parts) > 1:
+        action = parts[1].lower()
+        try:
+            if action == checklist.ACTION_DROP and len(parts) == 3:
+                checklist.owner_drop(log, parts[2])
+                print(f"{DIM}dropped task {parts[2]} — aish will not work on it{RESET}")
+            elif action == checklist.ACTION_REPLAN and len(parts) == 2:
+                checklist.owner_replan(log)
+                print(f"{DIM}asked aish to revise the plan — it is told at its next "
+                      f"task{RESET}")
+            else:
+                print(f"{DIM}usage: /plan, /plan drop <id>, or /plan replan{RESET}")
+                return
+        except ValueError as exc:
+            print(f"{RED}{exc}{RESET}")
+            return
+    for line in plan_lines(checklist.read_view(log.path)):
         print(line)
 
 
@@ -2932,6 +3006,8 @@ def main() -> int:
     agent.objective_source = lambda: objective.read_current(
         logref.log.path
     )
+    # The plan (#433), read from the same log.
+    agent.plan_records = lambda: checklist.read_records(logref.log.path)
     agent_holder.append(agent)
     if _box is not None:
         _box.get_cwd = lambda: agent.cwd  # /cd path completion follows the agent

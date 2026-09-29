@@ -640,6 +640,14 @@ this UI. Highlights:
   only where its role is admitted for the chat's model
   (`scripts/role-admission.py --model <spec> tracker`); elsewhere the strip
   says there is none yet and why.
+- **aish's plan, under the objective.** For work that needs several steps aish
+  keeps its own checklist — written by aish, never taken from your messages —
+  and the strip shows it under the objective: how many tasks are done and the
+  open ones. A task is only marked done when aish cites the successful step
+  that proved it; otherwise it stays pending and says why. Tap the plan to see
+  every task and what each done rests on, drop a task (aish cannot bring it
+  back), or ask aish to revise the plan. `/plan`, `/plan drop <id>` and
+  `/plan replan` do the same in the terminal.
 - **Nothing lost on a locked phone.** Reconnecting replays the transcript,
   including any approval still waiting. Survives server restarts too. Every turn
   carries the time it happened — including chats from long before the feature
@@ -895,7 +903,7 @@ scripts in `scripts/`, and reach it from your phone anytime.
 **While a command runs:** Ctrl-C cancels it (not aish itself); **Ctrl-B**
 detaches it into a background job that survives aish exiting (`/jobs` lists them).
 
-**Slash commands** (Tab completes): `/resume`, `/delete`, `/rename`, `/objective [edit <text>]`, `/new` (or
+**Slash commands** (Tab completes): `/resume`, `/delete`, `/rename`, `/objective [edit <text>]`, `/plan [drop <id>|replan]`, `/new` (or
 `/clear`), `/model [name]` (`--save` to persist), `/learn [hint]`,
 `/feedback [text]` (files a GitHub issue), `/fork` (branch the conversation),
 `/cd`, `/add-dir`, `/aliases`, `/jobs`, `/chat` (this chat's log file — the
