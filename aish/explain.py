@@ -1955,6 +1955,17 @@ def _fmt_n(value: int | float | None) -> str:
     return f"{int(value):,}" if isinstance(value, (int, float)) else "?"
 
 
+def _would_free(value: int | float | None) -> str:
+    """A skipped trim's `could_free` (#439) is measured against the ANCHORED
+    estimate, so it goes negative when the rewrite would have raised the
+    estimate; "freed -812 tokens" would say something nobody measured."""
+    if isinstance(value, (int, float)) and value < 0:
+        return f"freed nothing: the estimate would have risen by {_fmt_n(-value)} tokens"
+    if value == 0:
+        return "freed nothing"
+    return f"freed {_fmt_n(value)} tokens"
+
+
 def _brief_index(briefs: list[dict], number: int) -> int | None:
     """Which of the turn's briefs was in force for model call `number`: the
     last one written at or before it, else the carried one."""
@@ -2319,7 +2330,7 @@ def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
                     title="what the model was handed changed", before=number,
                 ))
         elif kind == "trim" and step.get("policy") in MID_TURN_TRIM and "could_free" in step:
-            facts = [{"k": "would have freed", "v": f"{_fmt_n(step.get('could_free'))} tokens"},
+            facts = [{"k": "would have", "v": _would_free(step.get("could_free"))},
                      {"k": "floor", "v": f"{_fmt_n(step.get('min_yield'))} tokens"},
                      {"k": "estimate", "v": f"{_fmt_n(step.get('estimate_after'))} "
                                             f"of {_fmt_n(step.get('budget'))}"}]
@@ -2523,8 +2534,9 @@ def _event_note(
                                  f"{when}; which ones was not recorded"})
         elif "could_free" in record:
             rows.append({"check": "trim_skipped", "where": where,
-                         "text": f"a trim {when} would have freed {record.get('could_free')} "
-                                 f"tokens, under the {record.get('min_yield')} a rewrite of "
+                         "text": f"a trim {when} would have "
+                                 f"{_would_free(record.get('could_free'))}, "
+                                 f"under the {record.get('min_yield')} a rewrite of "
                                  f"history must free, and left the request over its budget "
                                  f"of {record.get('budget')}; history was left as it was"})
         elif record.get("policy") == "over_budget":
@@ -2915,8 +2927,8 @@ def _given_lines(given: dict, show_tools: bool, show_context: bool, out: list[st
         )
         if "could_free" in record:
             out.append(
-                f"  {'':<10} not made: it would have freed {record.get('could_free')} "
-                f"tokens, under the {record.get('min_yield')} floor"
+                f"  {'':<10} not made: it would have {_would_free(record.get('could_free'))}, "
+                f"under the {record.get('min_yield')} floor"
             )
         if stubbed := record.get("stubbed"):
             listed = ", ".join(f"#{x.get('at')} {x.get('tool')}" for x in stubbed)
@@ -3507,8 +3519,8 @@ def _event_lines(event: dict, placed: bool) -> list[str]:
         record = event["record"]
         if "could_free" in record:
             return [
-                f"  {BOLD}⚠ {where}{RESET} a trim that would have freed "
-                f"{record.get('could_free')} tokens was not made"
+                f"  {BOLD}⚠ {where}{RESET} a trim was not made: it would have "
+                f"{_would_free(record.get('could_free'))}"
             ]
         stubbed = ", ".join(
             f"#{x.get('at')} {x.get('tool')}" for x in record.get("stubbed") or []

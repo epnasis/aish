@@ -3243,7 +3243,12 @@ function traceStep(step) {
         ? traceRow(
           t, traceSvg("thinking", "var(--dim)"),
           "Left the earlier conversation as it was",
-          `shortening it would free only ${step.could_free} tokens (under ${step.min_yield})`
+          // Measured against the anchored estimate (#439), so it can be negative.
+          step.could_free > 0
+            ? `shortening it would free only ${step.could_free} tokens (under ${step.min_yield})`
+            : step.could_free < 0
+              ? `shortening it would free nothing: the estimate would rise by ${-step.could_free} tokens`
+              : "shortening it would free nothing"
         )
         : traceRow(
           t, traceSvg("thinking", "var(--dim)"),
