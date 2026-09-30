@@ -215,6 +215,12 @@ REPEAT_NUDGE = (
 # Why a due nudge was not sent, as the record says it.
 REPEAT_PLAN_CALLED = "plan_called_in_task"
 REPEAT_PLAN_OPEN = "plan_has_open_tasks"
+# The step that crossed also ends the task (loop detector or stall cap): the
+# wrap-up turn that follows has no tools, so "before your next call" is false.
+REPEAT_TASK_ENDING = "task_ending"
+# A denial with a comment armed the stop gate: deny means stop (L2), and a line
+# inviting "your next call" would argue with it.
+REPEAT_STOP_GATE = "stop_gate_armed"
 
 
 def call_key(name: str, args: Any) -> tuple[str, str]:

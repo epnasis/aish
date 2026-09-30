@@ -935,6 +935,40 @@ class TestTheRepeatNudge:
         assert made["nudge"][0] == made["off"][0] == 1 + agent_module.LOOP_STOP_REPEATS + 1
         assert made["nudge"][1] == 2 and made["off"][1] == 0, "at 2 and at 4 repeats"
 
+    def test_not_on_the_step_that_ends_the_task_nor_under_the_stop_gate(self):
+        """Review findings: a task the loop detector or the stall cap is ending
+        gets a no-tools wrap-up, so "before your next call" would be false; and
+        while a denial's stop gate is armed, deny means stop."""
+        for setup, why in (("ending", plan.REPEAT_TASK_ENDING),
+                           ("gate", plan.REPEAT_STOP_GATE)):
+            records: list[dict] = []
+            agent, _ = make_agent([], step_log=records.append)
+            agent._pending_comment_response = setup == "gate"
+            repeats = plan.Repeats()
+            for _ in range(3):
+                repeats.add("run_command", {"command": "echo same"})
+            before = len(agent.messages)
+            agent._repeat_nudge(repeats, ending=setup == "ending")
+            assert len(agent.messages) == before, setup
+            [record] = logged("repeat_nudge", records)
+            assert record["sent"] is False and record["suppressed"] == why
+
+    def test_the_stall_cap_step_is_an_ending_step(self, tmp_path):
+        """Two calls alternating with fixed results: every step after the first
+        two is a stall step and an exact repeat, and neither key reaches the
+        loop detector's 5 before the 8th stall step ends the task — where the
+        repeats reach 8, the third threshold."""
+        records: list[dict] = []
+        pair = [command("echo a"), command("echo b")]
+        agent, _ = make_agent(pair * (1 + agent_module.MAX_STALL_STEPS // 2)
+                              + [model_says("stopped")],
+                              step_log=records.append, cwd=str(tmp_path))
+        agent.run_task("go")
+        got = [(r["repeats"], r["sent"], r.get("suppressed"))
+               for r in logged("repeat_nudge", records)]
+        assert got == [(2, True, None), (4, True, None), (8, False, plan.REPEAT_TASK_ENDING)]
+        assert len(nudges(agent)) == 2
+
     def test_the_key_is_exact(self):
         assert plan.call_key("t", {"a": 1, "b": 2}) == plan.call_key("t", {"b": 2, "a": 1})
         assert plan.call_key("t", {"c": "x y"}) != plan.call_key("t", {"c": "x  y"})

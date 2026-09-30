@@ -4434,7 +4434,7 @@ class Agent:
                 pass
         return checklist.tool_result(record, candidates)
 
-    def _repeat_nudge(self, repeats: checklist.Repeats) -> None:
+    def _repeat_nudge(self, repeats: checklist.Repeats, ending: bool) -> None:
         """The repeat nudge (#433, docs/plan.md): when this task's exact
         (tool, arguments) repeats cross the next threshold and the task has no
         live plan, ONE `[aish: …]` line stating the counted facts and asking for
@@ -4456,6 +4456,10 @@ class Agent:
         plan_now = None if repeats.plan_called else checklist.current(self._plan_records())
         if repeats.plan_called:
             record.update(sent=False, suppressed=checklist.REPEAT_PLAN_CALLED)
+        elif ending:
+            record.update(sent=False, suppressed=checklist.REPEAT_TASK_ENDING)
+        elif self._pending_comment_response:
+            record.update(sent=False, suppressed=checklist.REPEAT_STOP_GATE)
         elif checklist.open_tasks(plan_now):
             record.update(sent=False, suppressed=checklist.REPEAT_PLAN_OPEN,
                           plan_revision=(plan_now or {}).get("revision"))
@@ -5530,7 +5534,8 @@ class Agent:
             self._deliver_tool_media(tool_calls, results)
             for call in tool_calls:
                 repeats.add(call["function"]["name"], call["function"].get("arguments") or {})
-            self._repeat_nudge(repeats)
+            ending = stuck or (not progressed and stall + 1 >= MAX_STALL_STEPS)
+            self._repeat_nudge(repeats, ending)
             # Progress forgives everything: it resets the stall clock AND the
             # dead-retry streaks, so only a run of steps that learned nothing
             # can reach either cap.

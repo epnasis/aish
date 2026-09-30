@@ -2141,6 +2141,8 @@ def _tool_step(call: dict, placed: dict[int, int], how: dict[int, str],
 REPEAT_SUPPRESSED = {
     "plan_called_in_task": "the plan tool was called in this task",
     "plan_has_open_tasks": "the chat's plan has open tasks",
+    "task_ending": "the loop detector or the stall cap ended the task at that step",
+    "stop_gate_armed": "a denial with a comment had armed the stop gate",
 }
 
 

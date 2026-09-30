@@ -165,24 +165,33 @@ fuzzy match: anything looser counts as a repeat a call the model did not repeat.
 
 - after a step's results are appended, when K ≥ `plan.REPEAT_NUDGE_AT` (2) the first
   time, and afterwards only once K has at least **doubled** since the last threshold
-  crossed (2 → 4 → 8 …). "Once per task unless repeats grow further" is exactly that:
-  at most ⌈log₂⌉ of the step ceiling's calls, whatever the task does;
+  crossed (2 → 4 → 8 …). "Once per task unless repeats grow further" is exactly that,
+  and it is geometric: a task that made K exact repeats got at most ⌊log₂ K⌋ lines. A
+  step whose calls jump K past two levels at once (1 → 4) is one crossing, one record;
 - AND the task has no live plan: **no `plan` call in this task** (whatever it returned —
   the line says "none of them to the plan tool", and that must stay true) **and the
   chat's plan in force has no open task**. A finished plan from an earlier task is not
   a live one;
 - AND the replan triggers are on (`AISH_PLAN` is not `tool`) and the NATIVE `plan` tool
-  is on the menu (not under `AISH_PLAN=0`).
+  is on the menu (not under `AISH_PLAN=0`);
+- AND the step is not one that ENDS the task — the loop detector fires on it, or it is
+  the stall cap's last step — because the wrap-up turn that follows has no tools, so
+  "before your next call" would be false (review finding);
+- AND the stop gate is not armed: after a denial with a comment, deny means stop (L2),
+  and a line inviting "your next call" would argue with it (review finding).
 
-A crossing whose line is suppressed by a live plan still advances the level: each
-level is decided exactly once, and its record says which way.
+A crossing whose line is suppressed still advances the level: each level is decided
+exactly once, and its record says which way.
 
 **Why 2.** The three P2 points were at (N, K) = (13, 2), (6, 2) and (21, 4), and the
 line got a plan call at 8/10 of the K=2 samples. In that chat K first reached 2 in
 exactly the four long turns (10–13, at N = 7, 5, 13, 6); turns 1–9 never did (turn 8:
-one repeat in 19 calls). Replayed over that chat's `call` records, the built detector
-fires at exactly the three P2 points and emits a line **byte-identical** to the one
-tested there (checked against every arm-(b) line in `p2.jsonl`).
+one repeat in 19 calls). Replayed over that chat's `call` records, grouped by model
+call as the loop evaluates them, the built detector crosses seven times in turns 10–13
+— turn 10 at (N, K) = (7, 2) and (14, 4), turn 11 at (5, 2), turn 12 at (13, 2), turn 13
+at (6, 2), (21, 4) and (32, 8) — which include all three P2 points, and at each of those
+three it emits a line **byte-identical** to the one tested there (checked against every
+arm-(b) line in `p2.jsonl`). The other four crossings were never sent to a model.
 
 **What it will also catch** (measured 2026-09-30 over every `call` record in the state
 dir: 983 logs, 709 tasks with calls): 60 tasks reached K ≥ 2, at N = 3–28 (median 8).

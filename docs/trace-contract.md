@@ -824,7 +824,7 @@ The resolved `ref` is always the record's own ref (`t5.c2`, a `c#…` digest for
 
 **Built 2026-09-30.** Rationale, the measurement and the threshold's evidence: `docs/plan.md` §The repeat nudge. The agent counts, per task, every tool call the native loop dispatched and how many of them repeat an earlier call's `(tool, arguments)` exactly (`plan.call_key`: canonical JSON, keys sorted, values exact). Results are never looked at — that is the point: the loop detector (§6.6) keys on the result, so a repeated call against a live source whose answer differs a little each time is never a repeat to it.
 
-**Who writes it.** `Agent._repeat_nudge`, after a step's results are appended, through `_emit_record` (log-only, §1.2). One record **per threshold crossed**, sent or not: the first at `plan.REPEAT_NUDGE_AT` (2) exact repeats, each later one only when the count has at least doubled since the last crossing (2, 4, 8 …). Nothing is written while the replan triggers are off (`AISH_PLAN=tool`) or the native `plan` tool is not on the menu (`AISH_PLAN=0`): nothing is evaluated then. Never on claude-max, whose SDK owns the loop.
+**Who writes it.** `Agent._repeat_nudge`, after a step's results are appended, through `_emit_record` (log-only, §1.2). One record **per step whose calls cross a threshold**, sent or not (a step jumping K past two levels at once is one record): the first at `plan.REPEAT_NUDGE_AT` (2) exact repeats, each later one only when the count has at least doubled since the last crossing (2, 4, 8 …). Nothing is written while the replan triggers are off (`AISH_PLAN=tool`) or the native `plan` tool is not on the menu (`AISH_PLAN=0`): nothing is evaluated then. Never on claude-max, whose SDK owns the loop.
 
 **Renderless**, in `RENDERLESS_STEPS`. The line itself, when sent, is an ordinary `[aish: …]` user message (hot/cold parity as every note, #171).
 
@@ -847,7 +847,7 @@ The resolved `ref` is always the record's own ref (`t5.c2`, a `c#…` digest for
 | `repeated[]` | Up to `plan.REPEAT_LISTED` (3) repeated calls, most-repeated first (ties: first repeated first): `tool`, `shown` (a `run_command`'s command, else `name {arguments JSON}`, cut to 100 characters with `…`), `runs` (how many times it ran in the task). Exactly what the line lists. |
 | `sent` | `true` when the line was appended. |
 | `text` | `sent` only: the whole line as the model received it. |
-| `suppressed` | not `sent` only: `plan_called_in_task` (the plan tool was called in this task, whatever it returned) or `plan_has_open_tasks` (the chat's plan in force has an open task). |
+| `suppressed` | not `sent` only: `plan_called_in_task` (a call named `plan` was made in this task, whatever it returned), `task_ending` (the loop detector or the stall cap ends the task at this step; its wrap-up turn has no tools), `stop_gate_armed` (a denial with a comment armed the stop gate), or `plan_has_open_tasks` (the chat's plan in force has an open task). Checked in that order; the first that holds is recorded. |
 | `plan_revision` | with `plan_has_open_tasks`: the revision in force. |
 
 **What it does NOT establish**, so the words do not outrun the code: that the repeats were a loop (driving a page repeats calls by construction, #251), or that a plan written after the line helped. It records what was counted and what was said.
