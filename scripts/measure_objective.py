@@ -75,8 +75,12 @@ def run_chat(
         edge = objective.Boundary(path, 0, turn, model, None)
         base = objective.current(history)
         after = objective.accounted_to(history)
-        shown, omitted = objective.select_messages(objective.owner_messages(records), after, turn)
-        text = objective.compose_input(path.stem, turn, base, shown, omitted)
+        owned = objective.owner_messages(records)
+        shown, omitted = objective.select_messages(owned, after, turn)
+        earlier, _ = objective.select_earlier(
+            owned, base, after, objective.edit_floor(history, base)
+        )
+        text = objective.compose_input(path.stem, turn, base, shown, omitted, earlier)
         if dry_run:
             calls.append({"turn": turn, "input_chars": len(text), "messages": len(shown)})
             continue

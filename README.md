@@ -630,7 +630,8 @@ this UI. Highlights:
   explanation that follows a deny has to mark anything aish inferred but never
   got to verify, and name the step it was stopped from taking.
 - **The chat's objective, pinned.** After each task aish rereads what you have
-  said since and keeps one short statement of why you are here — its *reading*
+  said since, against what you said before it, and keeps one short statement of
+  why you are here — its *reading*
   of your goal, in its own words, citing the messages it rests on (never your
   comments on approval cards). A strip under the header shows it, labelled as
   aish's reading; tap it for the messages it rests on and how it evolved, or

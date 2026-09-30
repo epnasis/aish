@@ -14,11 +14,12 @@ Three parts:
   objective material, and they are excluded by construction (`owner_messages`).
 - **The tracker.** An isolated role (`docs/roles.md`, charter
   `aish/charters/tracker.md`), called at task end off the interactive path
-  (`track_at_boundary`). Its input has a constant size: the current statement
-  plus the owner's messages since the last point the tracker accounted for. It
-  answers `revised` with a new statement and its cites, `unchanged`, or
-  `unknown`, and code checks the answer (`validate_answer`) before anything
-  records it.
+  (`track_at_boundary`). Its input is bounded: the current statement, the
+  owner's messages since the last point the tracker accounted for (the NEW
+  ones), and, as context, the earlier ones the statement rests on plus his most
+  recent ones already read (`select_earlier`). It answers `revised` with a new
+  statement and its cites, `unchanged`, or `unknown`, and code checks the answer
+  (`validate_answer`) before anything records it.
 - **The owner's edit** (`owner_edit`). A revision with `origin: owner`, never a
   user message, and the tracker cannot write over it: a revision it computed
   against the statement he replaced is dropped, and a later one can rest only on
@@ -62,11 +63,24 @@ CHANGES = ("evolved", "pivoted", UNKNOWN)
 CHANGE_NEW = "new"
 CHANGE_EDITED = "edited"
 
-# The tracker's input is a constant size whatever the chat's length: the current
-# statement, and at most this many of the owner's unread messages (the newest),
-# each cut at this many characters. Older unread ones are counted, not shown.
+# The tracker's input is bounded whatever the chat's length: the current
+# statement, at most this many of the owner's unread messages (the newest), each
+# cut at this many characters, and the `earlier` context below. Older unread
+# ones are counted, not shown.
 TRACKER_MESSAGES = 12
 TRACKER_MESSAGE_CHARS = 2000
+# What it is shown of what it has ALREADY read (epic #423, 2026-09-30): the
+# messages the statement and its trail cite, and his newest this-many already
+# read, so a new message is read against what he said before it. Shown only the
+# new message, the tracker read "what are places to live for a family like
+# mine?" in a chat about a family trip as a pivot to relocating; the
+# experiment's control — the same charter words with no earlier messages —
+# kept the false pivot, so it is the messages themselves that remove it.
+TRACKER_RECENT = 12
+# The most characters of earlier messages it is shown, newest kept first, so
+# the input stays bounded whatever the lineage holds. Every earlier section in
+# the experiment was under 2 300 characters.
+TRACKER_EARLIER_CHARS = 12000
 # The longest statement, a model's or his. The charter declares the same cap
 # (`max_chars`), and a test holds the two equal.
 STATEMENT_CHARS = 400
@@ -547,10 +561,16 @@ def _trail_after(base: dict | None, left: str) -> list[dict]:
 
 
 def compose_input(
-    chat: str, boundary: int, base: dict | None, messages: list[Item], omitted: int = 0
+    chat: str,
+    boundary: int,
+    base: dict | None,
+    messages: list[Item],
+    omitted: int = 0,
+    earlier: Iterable[Item] = (),
 ) -> str:
-    """The tracker's ONE input: the current statement, and the owner's messages
-    it has not read yet.
+    """The tracker's ONE input: the current statement, the owner's messages it
+    has already read that give the new ones their sense (`earlier`), and the
+    ones it has not read yet (`messages`, the new ones).
 
     JSON, because the validator reads it back: what a cite is checked against
     is exactly what the model was shown, in production and in the exam alike.
@@ -567,13 +587,15 @@ def compose_input(
             if base
             else None
         ),
-        "messages": [
-            {"ref": m.ref, "turn": m.turn, "text": _cut(m.text, TRACKER_MESSAGE_CHARS)}
-            for m in messages
-        ],
+        "earlier": [_shown(m) for m in earlier],
+        "messages": [_shown(m) for m in messages],
         "omitted": omitted,
     }
     return json.dumps(payload, ensure_ascii=False, indent=1)
+
+
+def _shown(m: Item) -> dict[str, Any]:
+    return {"ref": m.ref, "turn": m.turn, "text": _cut(m.text, TRACKER_MESSAGE_CHARS)}
 
 
 def select_messages(items: list[Item], after: int, upto: int) -> tuple[list[Item], int]:
@@ -582,6 +604,86 @@ def select_messages(items: list[Item], after: int, upto: int) -> tuple[list[Item
     unread = [i for i in items if after < i.turn <= upto]
     shown = unread[-TRACKER_MESSAGES:]
     return shown, len(unread) - len(shown)
+
+
+def lineage_refs(base: dict | None) -> list[str]:
+    """The refs the statement rests on — its own cites and those of every
+    earlier statement in its trail, oldest first. A revision cites only what IT
+    added, so its own cites alone are not what led to it."""
+    if not base:
+        return []
+    refs: list[str] = []
+    for entry in [*(base.get("trail") or ()), base]:
+        if not isinstance(entry, dict):
+            continue
+        for cite in entry.get("cites") or ():
+            ref = str(cite.get("ref") if isinstance(cite, dict) else cite or "")
+            if ref and ref not in refs:
+                refs.append(ref)
+    return refs
+
+
+def _int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def edit_floor(history: Iterable[dict], base: dict | None) -> int:
+    """The turn up to which he had every message in front of him when he last
+    wrote the objective himself, in this statement's lineage; 0 when he never
+    did. Nothing at or before it is shown to the tracker, even as context, so a
+    revision after his edit still rests only on what he said later.
+
+    The base carries its own `covers_to_turn`; a trail entry does not, so an
+    edit further back is looked up by its revision number, and its `turn` (the
+    latest turn when he saved) stands in when that record is not found."""
+    if not base:
+        return 0
+    lineage = [e for e in [*(base.get("trail") or ()), base] if isinstance(e, dict)]
+    edit = next((e for e in reversed(lineage) if e.get("origin") == ORIGIN_OWNER), None)
+    if edit is None:
+        return 0
+    covered = _int(edit.get("covers_to_turn"))
+    if covered is None:
+        # Superseded records are searched too, on purpose: a revision number is
+        # never reissued, and what he had in front of him when he saved does not
+        # stop being true because a Retry later superseded the record.
+        covered = next(
+            (
+                found
+                for record in history
+                if is_revision(step := _step(record))
+                and step.get("origin") == ORIGIN_OWNER
+                and step.get("revision") == edit.get("revision")
+                and (found := _int(step.get("covers_to_turn"))) is not None
+            ),
+            None,
+        )
+    return covered if covered is not None else _int(edit.get("turn")) or 0
+
+
+def select_earlier(
+    items: list[Item], base: dict | None, after: int, floor: int = 0
+) -> tuple[list[Item], int]:
+    """The owner messages already read that the tracker is shown as context:
+    those the statement's lineage cites (the `TRACKER_MESSAGES` most recently
+    cited: the last in trail order, a revision's own cites in the order it gave
+    them) and his newest `TRACKER_RECENT` already read — each once, in turn order,
+    only from turns in (`floor`, `after`]. Bounded at `TRACKER_EARLIER_CHARS`,
+    newest kept first; returns them and how many that bound left out."""
+    read = [i for i in items if floor < i.turn <= after]
+    by_ref = {i.ref: i for i in read}
+    cited = [by_ref[r] for r in lineage_refs(base) if r in by_ref][-TRACKER_MESSAGES:]
+    wanted = {i.ref for i in cited} | {i.ref for i in read[-TRACKER_RECENT:]}
+    # Once per ref: two identical id-less messages in one second share a digest ref.
+    chosen = [i for i in read if i.ref in wanted and by_ref[i.ref] is i]
+    kept: list[Item] = []
+    spent = 0
+    for item in reversed(chosen):
+        spent += len(_cut(item.text, TRACKER_MESSAGE_CHARS))
+        if spent > TRACKER_EARLIER_CHARS:
+            break
+        kept.append(item)
+    return kept[::-1], len(chosen) - len(kept)
 
 
 @dataclass
@@ -602,8 +704,10 @@ def parse_input(text: str) -> Context:
     given = raw.get("current")
     base: dict = given if isinstance(given, dict) else {}
     messages = {}
-    for entry in raw.get("messages") or ():
-        if isinstance(entry, dict) and entry.get("ref"):
+    # A cite may name a message under `earlier` as well as a new one: a revision
+    # can rest on what he said before, and it was shown both.
+    for entry in [*(raw.get("messages") or ()), *(raw.get("earlier") or ())]:
+        if isinstance(entry, dict) and entry.get("ref") and str(entry["ref"]) not in messages:
             ref = str(entry["ref"])
             turn = int(entry.get("turn") or 0)
             messages[ref] = Item(ref, OWNER, turn, str(entry.get("text") or ""))
@@ -653,7 +757,7 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
     if not isinstance(raw, list) or not raw:
         raise ValueError(
             'a "revised" statement must cite at least one of the messages it rests on — '
-            'copy a "ref" exactly from an item under "messages"'
+            'copy a "ref" exactly from an item under "messages" or "earlier"'
         )
     if len(raw) > shape.caps["max_cites"]:
         raise ValueError(f"at most {shape.caps['max_cites']} cites")
@@ -663,7 +767,7 @@ def validate_answer(shape: roles.Shape, payload: Any, inputs: dict[str, str]) ->
         if ref not in ctx.messages:
             raise ValueError(
                 f"cite {ref!r} names none of the messages you were given — copy a "
-                '"ref" exactly from an item under "messages"'
+                '"ref" exactly from an item under "messages" or "earlier"'
             )
         if ref not in cites:
             cites.append(ref)
@@ -702,8 +806,8 @@ def contract_text(shape: roles.Shape) -> str:
             f"the messages it rests on, 1 to {shape.caps['max_cites']}",
             "}",
             "",
-            'A ref is copied exactly from the "ref" of an item under "messages". An answer '
-            "that breaks a rule is rejected and you are asked once more.",
+            'A ref is copied exactly from the "ref" of an item under "messages" or '
+            '"earlier". An answer that breaks a rule is rejected and you are asked once more.',
         ]
     )
 
@@ -933,9 +1037,11 @@ def track(
     after = accounted_to(history)
     if after >= boundary.turn:
         return [], base_revision  # a later boundary, or his edit, already read this far
-    messages, omitted = select_messages(owner_messages(records), after, boundary.turn)
+    owned = owner_messages(records)
+    messages, omitted = select_messages(owned, after, boundary.turn)
     if not messages:
         return [], base_revision
+    earlier, earlier_omitted = select_earlier(owned, base, after, edit_floor(history, base))
 
     try:
         charter = charter or roles.load_charters()[TRACKER]
@@ -943,7 +1049,7 @@ def track(
         why = f"the tracker charter does not load: {exc}"
         return [_skip_record(boundary.turn, why)], base_revision
 
-    text = compose_input(chat, boundary.turn, base, messages, omitted)
+    text = compose_input(chat, boundary.turn, base, messages, omitted, earlier)
     result = roles.run(
         charter,
         {TRACKER_INPUT: text},
@@ -957,6 +1063,8 @@ def track(
     role = role_record(charter, result, boundary.turn)
     role["input"]["messages"] = len(messages)
     role["input"]["omitted"] = omitted
+    role["input"]["earlier"] = len(earlier)
+    role["input"]["earlier_omitted"] = earlier_omitted
     out = [role]
     value = result.value if result.status == roles.Status.OK else None
     if not isinstance(value, Answer):

@@ -1,6 +1,6 @@
 ---
 name: tracker
-version: "1"
+version: "2"
 kind: worker
 model: session
 num_ctx: 16384
@@ -28,8 +28,15 @@ One JSON document:
 - `current` — the objective as it stands now, or `null` when there is none yet.
   Its `origin` says who wrote it: `tracker` (a model like you, reading his
   messages) or `owner` (he wrote it himself).
-- `messages` — the messages the owner typed since then, oldest first. Each has a
-  `ref`, the `turn` it was typed in, and its `text`.
+- `earlier` — messages he typed BEFORE the new ones, which were already read:
+  the ones the current objective rests on, and his most recent messages. They
+  are here so that you read the new messages the way he meant them, as a
+  continuation of the same conversation. They are not news: your verdict is
+  about what the NEW messages change. A revised statement may rest on them and
+  cite them.
+- `messages` — the NEW messages the owner typed since the objective was last
+  checked, oldest first. Each message, here and in `earlier`, has a `ref`, the
+  `turn` it was typed in, and its `text`.
 - `omitted` — how many older unread messages were left out to keep this short.
 
 Only his typed messages are here. The assistant's answers, the commands that
@@ -72,6 +79,16 @@ the next day — not three.
   - `pivoted` — he turned to something else;
   - `unknown` — you cannot tell which.
 - `unknown` — you cannot tell what he is after. Say so rather than guess.
+
+A requirement he states for the work in hand — who it is for, how many, a
+budget, a deadline, a condition it must meet — belongs in the objective when it
+shapes the whole goal: revise it (`evolved`) to take the requirement in, rather
+than answering `unchanged`. For example, with the objective "Find an electric
+car to lease for my daily commute" and a new message "it has to take three
+child seats across the back, and the lease must stay under 2500 PLN a month",
+the objective becomes leasing an electric car for the daily commute that takes
+three child seats across the back, for under 2500 PLN a month — `evolved`: not
+`unchanged`, and not a pivot.
 
 When `current` was written by the owner, those are his own words for his goal:
 keep what he wrote, and revise only when a newer message of his clearly moves
@@ -186,4 +203,25 @@ input:
      "omitted": 0}
 expect:
   verdict_in: [unchanged]
+```
+
+```yaml
+name: a-stated-requirement-is-absorbed
+input:
+  objective: |
+    {"chat": "session-h", "boundary_turn": 4,
+     "current": {"statement": "Plan my daughter's 8th birthday party at home on Saturday", "origin": "tracker", "revision": 1},
+     "earlier": [
+      {"ref": "m:h1", "turn": 1, "text": "help me plan my daughter's 8th birthday party, at our place this Saturday"},
+      {"ref": "m:h2", "turn": 2, "text": "what games work for kids that age indoors?"}
+     ],
+     "messages": [
+      {"ref": "m:h4", "turn": 4, "text": "her whole class is coming, 24 kids, and two of them can't eat gluten. what can we serve for under 600 PLN?"}
+     ],
+     "omitted": 0}
+expect:
+  verdict_in: [revised]
+  change_in: [evolved]
+  cites_any: [["m:h4"]]
+  mentions_any: [["24"], ["gluten", "glut"]]
 ```
