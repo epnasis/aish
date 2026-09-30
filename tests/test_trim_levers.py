@@ -208,6 +208,12 @@ class TestAFutilePassRewritesNothing:
         assert not [t for t in _trims(steps) if t["affected"]]
 
 
+def at_most_gap() -> int:
+    """A budget gap wider than the one output can close (~1,800 tokens at the
+    ratio), so a pass that runs must have cleared the floor while over budget."""
+    return 2_500
+
+
 class TestTheYieldIsMeasuredAgainstTheAnchor:
     """#439: the yield of a mid-task pass is the ANCHORED estimate now minus the
     whole request at the ratio after it, because the rewrite drops the anchor.
@@ -217,7 +223,7 @@ class TestTheYieldIsMeasuredAgainstTheAnchor:
     RATIO = 2.0
     OUTPUT_CHARS = 4_000  # ~1,800 tokens freed at the ratio: over the floor
 
-    def _anchored(self, monkeypatch, tmp_path, steps, overcount: int):
+    def _anchored(self, monkeypatch, tmp_path, steps, overcount: int, budget_gap: int = 100):
         """A task over its budget whose one cuttable output frees over the
         floor at the ratio, anchored at a server count `overcount` tokens
         under the whole request at the ratio."""
@@ -238,7 +244,7 @@ class TestTheYieldIsMeasuredAgainstTheAnchor:
         planned = agent._plan_output_stub(output)
         at_ratio = ratio.tokens(chars) - ratio.tokens(chars + planned.payload_delta)
         assert at_ratio >= agent_module.MIN_TRIM_YIELD_TOKENS, "the old measure would run it"
-        _budget_at(monkeypatch, estimate["tokens"] - 100)
+        _budget_at(monkeypatch, estimate["tokens"] - budget_gap)
         return agent, task_start, estimate["tokens"], at_ratio
 
     def test_a_pass_the_anchor_loss_eats_is_not_applied(self, monkeypatch, tmp_path):
@@ -262,19 +268,24 @@ class TestTheYieldIsMeasuredAgainstTheAnchor:
         assert skipped["min_yield"] == agent_module.MIN_TRIM_YIELD_TOKENS
 
     def test_a_pass_that_clears_the_floor_net_of_the_anchor_runs(self, monkeypatch, tmp_path):
+        """Still over budget after the pass, yet it frees the floor net of the
+        anchor loss, so it runs — the branch the replay's fourth trim took. The
+        budget sits further below than the pass can reach, so the
+        always-runs-when-it-fits branch cannot be what lets it through."""
         steps: list[dict] = []
         agent, task_start, anchored, at_ratio = self._anchored(
-            monkeypatch, tmp_path, steps, overcount=100
+            monkeypatch, tmp_path, steps, overcount=100, budget_gap=at_most_gap()
         )
-        assert at_ratio - 100 >= agent_module.MIN_TRIM_YIELD_TOKENS
+        net = at_ratio - 100
+        assert agent_module.MIN_TRIM_YIELD_TOKENS <= net < at_most_gap()
 
         agent._enforce_budget(task_start)
 
         applied = [t for t in _trims(steps) if t["affected"]]
-        assert [t["policy"] for t in applied] == ["mid_task_budget"]
+        assert applied and applied[0]["policy"] == "mid_task_budget"
+        assert applied[0]["fits"] is False, "it must still be over budget"
         assert applied[0]["estimate_before"] == anchored
-        assert anchored - applied[0]["estimate_after"] == at_ratio - 100
-        assert not [t for t in _trims(steps) if "could_free" in t]
+        assert anchored - applied[0]["estimate_after"] == net
         assert agent._token_anchor is None
 
 
