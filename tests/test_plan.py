@@ -777,3 +777,171 @@ class TestReviewFindings:
         agent.messages.extend([older, newest])
         assert agent._plan_output_stub(older) is not None
         assert agent._plan_output_stub(newest) is None
+
+
+# --------------------------------------------------------------- the repeat nudge
+
+SEARCH = ('trippy search --site booking --location "Tokyo" --checkin "2027-03-20" '
+          '--checkout "2027-03-23" --adults 4 --children 2')
+DETAILS = "trippy details --site booking --property-id 15590386,13328622,15633765 --live"
+
+
+def command(text):
+    return model_says(tool_calls=[tool_call("run_command", command=text)])
+
+
+def live_results(agent):
+    """Every command returns a different result, as a live search does: the
+    loop detector keys on the result and so never sees these as repeats."""
+    count = iter(range(1, 1000))
+    original = agent._dispatch
+
+    def dispatch(name, args):
+        if name == "run_command":
+            return f"kept {next(count)}/25 offers\n[warning] no cached offer for property"
+        return original(name, args)
+
+    agent._dispatch = dispatch
+
+
+def nudges(agent):
+    return [m["content"] for m in agent.messages if m.get("role") == "user"
+            and str(m.get("content")).startswith("[aish: this task has made")]
+
+
+class TestTheRepeatNudge:
+    """#433, decided 2026-09-30: exact (tool, arguments) repeats, whatever the
+    results, and one line asking for a plan when the task has no live plan."""
+
+    def test_the_japan_pattern_is_nudged_once_with_the_counted_facts(self, tmp_path):
+        rendered: list[dict] = []
+        records: list[dict] = []
+        agent, chat = make_agent(
+            [command(SEARCH), command(DETAILS), command(SEARCH), command(DETAILS),
+             command("trippy search --location Osaka"), model_says("here")],
+            on_step=rendered.append, step_log=records.append, cwd=str(tmp_path),
+        )
+        live_results(agent)
+        agent.run_task("check hotels for my family")
+        search = SEARCH[:99] + "…"
+        line = (
+            "[aish: this task has made 4 tool calls, none of them to the plan tool; 2 of them "
+            f"repeated an earlier call exactly: `{search}` (run 2 times); `{DETAILS}` (run 2 "
+            "times). Before your next call, write a plan with the plan tool: what is left to "
+            "do, one task per item.]"
+        )
+        assert nudges(agent) == [line]
+        assert chat.snapshots[4][-1] == {"role": "user", "content": line}, (
+            "the line is the last thing the next model call is handed")
+        assert all(s[0] == chat.snapshots[0][0] for s in chat.snapshots), (
+            "messages[0] stays byte-stable")
+        [record] = logged("repeat_nudge", records)
+        assert record["sent"] is True and record["text"] == line
+        assert (record["calls"], record["repeats"], record["threshold"]) == (4, 2, 2)
+        assert record["repeated"] == [
+            {"tool": "run_command", "shown": search, "runs": 2},
+            {"tool": "run_command", "shown": DETAILS, "runs": 2}]
+        assert record["turn"] == 1 and record["model_call"] == 4
+        assert not [s for s in rendered if s.get("kind") == "repeat_nudge"], "log-only"
+        assert "repeat_nudge" in session_module.RENDERLESS_STEPS
+
+    def test_it_comes_again_only_when_the_repeats_double(self, tmp_path):
+        records: list[dict] = []
+        responses = [command(SEARCH)] + [command(SEARCH)] * 8 + [model_says("done")]
+        agent, _ = make_agent(responses, step_log=records.append, cwd=str(tmp_path))
+        live_results(agent)
+        agent.run_task("go")
+        sent = logged("repeat_nudge", records)
+        assert [(r["repeats"], r["threshold"]) for r in sent] == [(2, 2), (4, 4), (8, 8)]
+        assert [re.search(r"; (\d+) of them", n).group(1) for n in nudges(agent)] == [
+            "2", "4", "8"]
+
+    def test_varied_calls_are_not_nudged(self, tmp_path):
+        records: list[dict] = []
+        responses = [command(f"trippy search --location city{i}") for i in range(10)]
+        responses.append(model_says("done"))
+        agent, _ = make_agent(responses, step_log=records.append, cwd=str(tmp_path))
+        live_results(agent)
+        agent.run_task("go")
+        assert nudges(agent) == []
+        assert logged("repeat_nudge", records) == []
+
+    def test_a_plan_in_this_task_suppresses_it_and_says_so(self, tmp_path):
+        records: list[dict] = []
+        agent, _ = make_agent(
+            [plan_call({"id": "1", "title": "Tokyo", "state": "doing"}),
+             command(SEARCH), command(SEARCH), command(SEARCH), model_says("done")],
+            step_log=records.append, cwd=str(tmp_path),
+        )
+        live_results(agent)
+        agent.run_task("go")
+        assert nudges(agent) == []
+        [record] = logged("repeat_nudge", records)
+        assert record["sent"] is False and record["suppressed"] == plan.REPEAT_PLAN_CALLED
+        assert "text" not in record
+
+    def test_an_open_plan_from_an_earlier_task_suppresses_it(self, tmp_path):
+        records: list[dict] = []
+        agent, _ = make_agent(
+            [plan_call({"id": "1", "title": "Tokyo", "state": "pending"}), model_says("planned"),
+             command(SEARCH), command(SEARCH), command(SEARCH), model_says("done")],
+            step_log=records.append, cwd=str(tmp_path),
+        )
+        live_results(agent)
+        agent.run_task("plan it")
+        agent.run_task("go on")
+        assert nudges(agent) == []
+        [record] = logged("repeat_nudge", records)
+        assert record["suppressed"] == plan.REPEAT_PLAN_OPEN and record["plan_revision"] == 1
+
+    def test_a_finished_plan_is_not_a_live_one(self, tmp_path):
+        agent, _ = make_agent(
+            [plan_call({"id": "1", "title": "Tokyo", "state": "dropped"}), model_says("dropped"),
+             command(SEARCH), command(SEARCH), command(SEARCH), model_says("done")],
+            step_log=lambda _s: None, cwd=str(tmp_path),
+        )
+        live_results(agent)
+        agent.run_task("plan it")
+        agent.run_task("go on")
+        assert len(nudges(agent)) == 1
+
+    def test_off_with_the_triggers_or_without_the_native_tool(self, tmp_path, monkeypatch):
+        for setup in ("triggers off", "no native plan"):
+            with monkeypatch.context() as patch:
+                if setup == "triggers off":
+                    patch.setenv("AISH_PLAN", "tool")
+                else:
+                    patch.setattr(agent_module, "NATIVE_TOOL_NAMES",
+                                  agent_module.NATIVE_TOOL_NAMES - {"plan"})
+                records: list[dict] = []
+                agent, _ = make_agent([command(SEARCH)] * 3 + [model_says("done")],
+                                      step_log=records.append, cwd=str(tmp_path))
+                live_results(agent)
+                agent.run_task("go")
+                assert nudges(agent) == [] and logged("repeat_nudge", records) == [], setup
+
+    def test_it_is_never_progress(self, tmp_path, monkeypatch):
+        """Identical calls with identical results: the loop detector stops the
+        task after exactly as many model calls with the nudge as without."""
+        made = {}
+        for setup in ("nudge", "off"):
+            if setup == "off":
+                monkeypatch.setenv("AISH_PLAN", "tool")
+            responses = [command("echo same")] * 12 + [model_says("stopped")]
+            agent, chat = make_agent(responses, step_log=lambda _s: None, cwd=str(tmp_path))
+            agent.run_task("go")
+            made[setup] = (len(chat.calls), len(nudges(agent)))
+        # One progressing call, LOOP_STOP_REPEATS dead ones, then the wrap-up.
+        assert made["nudge"][0] == made["off"][0] == 1 + agent_module.LOOP_STOP_REPEATS + 1
+        assert made["nudge"][1] == 2 and made["off"][1] == 0, "at 2 and at 4 repeats"
+
+    def test_the_key_is_exact(self):
+        assert plan.call_key("t", {"a": 1, "b": 2}) == plan.call_key("t", {"b": 2, "a": 1})
+        assert plan.call_key("t", {"c": "x y"}) != plan.call_key("t", {"c": "x  y"})
+        assert plan.call_key("t", {"c": "X"}) != plan.call_key("t", {"c": "x"})
+        assert plan.call_key("t", {"c": "x"}) != plan.call_key("u", {"c": "x"})
+        repeats = plan.Repeats()
+        for _ in range(2):
+            repeats.add("read_url", {"url": "https://example.com/ü"})
+        assert repeats.repeated() == [
+            {"tool": "read_url", "shown": 'read_url {"url": "https://example.com/ü"}', "runs": 2}]

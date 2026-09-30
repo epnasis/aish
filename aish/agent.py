@@ -4434,6 +4434,37 @@ class Agent:
                 pass
         return checklist.tool_result(record, candidates)
 
+    def _repeat_nudge(self, repeats: checklist.Repeats) -> None:
+        """The repeat nudge (#433, docs/plan.md): when this task's exact
+        (tool, arguments) repeats cross the next threshold and the task has no
+        live plan, ONE `[aish: …]` line stating the counted facts and asking for
+        a plan. Never a call, never progress. Every crossing leaves a
+        `repeat_nudge` record, sent or not (contract §3.16)."""
+        if not self.plan_triggers or checklist.PLAN_TOOL not in NATIVE_TOOL_NAMES:
+            return
+        threshold = repeats.due()
+        if not threshold:
+            return
+        record: dict[str, Any] = {
+            "kind": "repeat_nudge",
+            "model_call": self._model_call,
+            "calls": repeats.calls,
+            "repeats": repeats.repeats,
+            "threshold": threshold,
+            "repeated": repeats.repeated(),
+        }
+        plan_now = None if repeats.plan_called else checklist.current(self._plan_records())
+        if repeats.plan_called:
+            record.update(sent=False, suppressed=checklist.REPEAT_PLAN_CALLED)
+        elif checklist.open_tasks(plan_now):
+            record.update(sent=False, suppressed=checklist.REPEAT_PLAN_OPEN,
+                          plan_revision=(plan_now or {}).get("revision"))
+        else:
+            line = AISH_NOTE + repeats.text() + "]"
+            self._append({"role": "user", "content": line})
+            record.update(sent=True, text=line)
+        self._emit_record(**record)
+
     def _plan_has_open(self) -> bool:
         return bool(checklist.open_tasks(checklist.current(self._plan_records())))
 
@@ -5173,6 +5204,8 @@ class Agent:
         # into a stop.
         seen: set[tuple] = set()
         run: dict[tuple, int] = {}
+        # What the model ASKED, independent of results (#433): the repeat nudge.
+        repeats = checklist.Repeats()
         # Progress-gated budget (#108): `max_steps` is the base, the ceiling is
         # the hard cost cap nothing exceeds, and `stall` counts consecutive
         # no-new-progress steps. A progressing task extends past max_steps; a
@@ -5495,6 +5528,9 @@ class Agent:
             # After every result is appended, never between two of them: the
             # pictures belong to the turn, not to one call in it.
             self._deliver_tool_media(tool_calls, results)
+            for call in tool_calls:
+                repeats.add(call["function"]["name"], call["function"].get("arguments") or {})
+            self._repeat_nudge(repeats)
             # Progress forgives everything: it resets the stall clock AND the
             # dead-retry streaks, so only a run of steps that learned nothing
             # can reach either cap.

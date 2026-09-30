@@ -9,9 +9,11 @@ schema is contract §3.15; this page is why it is shaped that way.
 > shown to the model in the tool's result and in the per-task reminder beside the
 > objective, and to the owner under the objective strip on the web and through
 > `/plan` in the CLI. He can drop a task or ask for a replan. A task marked done
-> without evidence that resolves is recorded as pending. `AISH_PLAN=0` takes the tool
-> off the menu; `AISH_PLAN=tool` keeps it and turns the replan triggers off. Both
-> exist for the measurement below.
+> without evidence that resolves is recorded as pending. A task that repeats calls
+> exactly with no live plan is asked, once per doubling, to write one (the repeat
+> nudge). `AISH_PLAN=0` takes the tool off the menu; `AISH_PLAN=tool` keeps it and
+> turns the replan triggers and the repeat nudge off. Both exist for the measurement
+> below.
 
 ## Which level this is
 
@@ -115,14 +117,17 @@ covers both kinds), like his objective edits. `TestTheOwner`.
 
 ## Replan triggers — one line each, never a forced call
 
-Each fires only while the plan has an open task, because a nudge to a finished plan
-is noise; each appends ONE line and the model decides. `AISH_PLAN=tool` turns them off.
+The first three fire only while the plan has an open task, because a nudge to a
+finished plan is noise; the repeat nudge is their mirror image and fires only while
+there is NO live plan. Each appends ONE line and the model decides. `AISH_PLAN=tool`
+turns them all off.
 
 | trigger | where the line goes |
 |---|---|
 | a denial with a comment | appended to the denial's own result (`_call_result`, off the recorded decision). The NATIVE plan tool is **exempt from the stop gate** (a plugin that takes the name is not) that denial arms: it executes nothing, and this is the moment the owner's model most wants it revised. Deny still means stop — every tool that acts stays refused, and only a text-only turn ends the task |
 | a stall | an `[aish: …]` note after `STALL_REPLAN_AT` (4) no-progress steps, once per task; the stall cap (8) leaves room to act on it |
 | a failed task end | one reminder segment on the next task, when the previous one raised or ended at the stall cap, the step ceiling or the loop detector (`_task_unfinished`, kept on the agent: a restart of aish-web between the two tasks loses it) |
+| exact repeats, no live plan | the **repeat nudge**, below: an `[aish: …]` note after the step whose calls crossed the threshold. The one trigger that fires WITHOUT a plan — its job is to get one written |
 
 The hold with a comment (approve + comment) is a hint too, and is deliberately NOT a
 trigger: the owner named the denial.
@@ -132,6 +137,85 @@ request made while a task runs sets `Agent.plan_owner_changed`, and the loop app
 one `[aish: …]` note before its next model call; made while idle, the next reminder
 carries it (a pending replan request rides inside the full rendering). `TestTriggers`,
 `TestTheOwnerMidTask`.
+
+### The repeat nudge (decided 2026-09-30)
+
+**Why.** In the Japan chat (`session-20260929-214924-097047`, turns 10–13) the model
+re-ran the same `trippy search` and the same comma-joined `trippy details` over and
+over, and never called `plan`. Neither stop fired: the loop detector keys on
+(tool, args, RESULT) and a live search returns a slightly different result each time
+("kept 14/25" vs "kept 12/20"), so every repeat counted as progress, and the stall
+counter never started. The replay experiment (`~/.cache/aish-exp-plan/`, P2) took three
+points inside those turns and sent each 5 times per arm: the line below got a plan call
+**11/15**, the request as sent **0/15**, and the same counted facts WITHOUT the
+instruction to plan **0/15** — stating the counts alone did nothing. Plan-first rules,
+reminders and planning steps were measured too (P1: an imperative rule 2g got a
+plan-first call 0/32 on the Japan requests, and the plans the other arms wrote were read
+as too fine) and, by the owner's decision, are NOT built.
+
+**What is counted** (`plan.Repeats`, a `run_task` local, so per task by construction):
+every tool call the native loop dispatched, in order. N = the calls so far; K = the
+calls whose (tool, arguments) equal an earlier call's in the same task. **Results are
+never looked at.** The key is `plan.call_key`: the tool name and the arguments as
+canonical JSON — keys sorted (the order a backend serialised them in is not the model's
+choice), every value compared EXACTLY, whitespace and case included. No squashing and no
+fuzzy match: anything looser counts as a repeat a call the model did not repeat.
+
+**When it fires** — the rule, stated before the tests were written:
+
+- after a step's results are appended, when K ≥ `plan.REPEAT_NUDGE_AT` (2) the first
+  time, and afterwards only once K has at least **doubled** since the last threshold
+  crossed (2 → 4 → 8 …). "Once per task unless repeats grow further" is exactly that:
+  at most ⌈log₂⌉ of the step ceiling's calls, whatever the task does;
+- AND the task has no live plan: **no `plan` call in this task** (whatever it returned —
+  the line says "none of them to the plan tool", and that must stay true) **and the
+  chat's plan in force has no open task**. A finished plan from an earlier task is not
+  a live one;
+- AND the replan triggers are on (`AISH_PLAN` is not `tool`) and the NATIVE `plan` tool
+  is on the menu (not under `AISH_PLAN=0`).
+
+A crossing whose line is suppressed by a live plan still advances the level: each
+level is decided exactly once, and its record says which way.
+
+**Why 2.** The three P2 points were at (N, K) = (13, 2), (6, 2) and (21, 4), and the
+line got a plan call at 8/10 of the K=2 samples. In that chat K first reached 2 in
+exactly the four long turns (10–13, at N = 7, 5, 13, 6); turns 1–9 never did (turn 8:
+one repeat in 19 calls). Replayed over that chat's `call` records, the built detector
+fires at exactly the three P2 points and emits a line **byte-identical** to the one
+tested there (checked against every arm-(b) line in `p2.jsonl`).
+
+**What it will also catch** (measured 2026-09-30 over every `call` record in the state
+dir: 983 logs, 709 tasks with calls): 60 tasks reached K ≥ 2, at N = 3–28 (median 8).
+The call that crossed was `browse_act` in 22 of them, `run_command` 10, `browse` 8,
+`read_file` 6, `read_url` 5, others 9. Driving a page repeats calls by construction
+(#251), so on browse tasks this line will often be asked for where no loop was. Whether
+it helps or costs there is not measured.
+
+**The line** states only what code counted, then the instruction:
+
+> [aish: this task has made {N} tool calls, none of them to the plan tool; {K} of them
+> repeated an earlier call exactly: `{call}` (run {n} times); …. Before your next call,
+> write a plan with the plan tool: what is left to do, one task per item.]
+
+Up to `REPEAT_LISTED` (3) calls, the most-repeated first (ties: the first repeated
+first); a `run_command` shows its command, any other tool `name {arguments JSON}`;
+each cut to `REPEAT_SHOWN_CHARS` (100) with `…`. One `[aish: …]` user message after the
+step's tool results, never in `messages[0]`, never a forced call. It is **never
+progress**: it touches neither `seen` nor the stall count, so a task hammering one call
+with one result stops at the loop detector after exactly as many model calls with the
+nudge as without (`test_it_is_never_progress`).
+
+**Recorded** at every crossing, sent or not, as a renderless `repeat_nudge` record
+(contract §3.16): the counts, the threshold, the calls shown, and either the line as
+sent or why it was not. `aish explain` shows it between the rounds it fell between, as
+a step on the step screen, and as a row worth a look. `TestTheRepeatNudge`,
+`TestTheRepeatNudgeIsExplained`.
+
+**Not covered.** claude-max (the SDK owns its loop, so nothing counts there). A
+continuation after a Retry or a restart counts from zero: calls made by the attempt it
+continues are not in this task's count. Whether the plan the line elicits then makes the
+task SUCCEED is not established — P2 measured one response; P3 (does planning help
+completion) is a separate question.
 
 ## Where it reaches the owner
 
@@ -153,7 +237,8 @@ agent's thread (`announce_objective_threadsafe`).
 ## What is not checked, and what is not done
 
 - **That a task is above single-command level.** The description tells the model;
-  nothing counts calls per task.
+  nothing counts calls per plan task (the repeat nudge counts calls per aish task, not
+  per plan task).
 - **That a resolved evidence step proves its task** — see *Done needs evidence*.
 - **claude-max** gets the tool (the SDK routes it through `_locked_dispatch`) but no
   reminder, so the plan reaches that model only through the tool's results.

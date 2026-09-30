@@ -816,9 +816,43 @@ The resolved `ref` is always the record's own ref (`t5.c2`, a `c#…` digest for
 - **The tool result**, after every call: the recorded list, one line per task with its id and state, what was downgraded and why, what was refused, and — when something was downgraded — up to `plan.CITABLE_SHOWN` (8) recent successful calls with their refs, so the next call can cite one.
 - **The per-task reminder, as a delta**, next to the objective (`agent.plan_delta`): the plan in full when its rendering is not already the newest plan rendering in history (a reminder segment or a `plan` tool result), `PLAN_UNCHANGED` when it is, `PLAN_NONE` when one was shown and there is none now. **Never `messages[0]`.** A pending replan request rides inside the full rendering. The `context` record (§3.10) gains `plan: {revision, shown}`, absent when the chat has no plan and none was shown.
 - **The newest plan call's arguments are exempt from the #429 argument lever**, so the model's own latest list is never cut to 80 characters; older plan calls' arguments are trimmable like any. The newest recorded plan tool RESULT is exempt from the output lever, since `PLAN_UNCHANGED` points at it.
-- **Replan triggers** (`AISH_PLAN` not `tool`): each appends ONE line and never forces a call. They fire only while the plan has an open task. A **denial with a comment** appends the line to the denial's own result; the native `plan` tool (never a plugin carrying the name) is exempt from the stop gate it arms, because it executes nothing. A **stall** of `agent.STALL_REPLAN_AT` (4) no-progress steps appends one `[aish: …]` note, once per task. A **failed task end** — the previous task raised, or ended at the stall cap, the step ceiling or the loop detector — adds one reminder segment to the next task. His **drop or replan** while a task runs appends one `[aish: …]` note before the next model call; while idle, the next reminder carries it in the plan's rendering.
+- **Replan triggers** (`AISH_PLAN` not `tool`): each appends ONE line and never forces a call. They fire only while the plan has an open task. A **denial with a comment** appends the line to the denial's own result; the native `plan` tool (never a plugin carrying the name) is exempt from the stop gate it arms, because it executes nothing. A **stall** of `agent.STALL_REPLAN_AT` (4) no-progress steps appends one `[aish: …]` note, once per task. A **failed task end** — the previous task raised, or ended at the stall cap, the step ceiling or the loop detector — adds one reminder segment to the next task. His **drop or replan** while a task runs appends one `[aish: …]` note before the next model call; while idle, the next reminder carries it in the plan's rendering. The **repeat nudge** is the one trigger that fires with NO live plan, and the one that leaves a record of its own (§3.16).
 
-**What is NOT checked**, so the words do not outrun the code: that a task is above single-command level (the tool description tells the model; nothing counts calls per task), that a resolved evidence step proves its task, and that the titles say what the model then does.
+**What is NOT checked**, so the words do not outrun the code: that a task is above single-command level (the tool description tells the model; nothing counts calls per plan task — §3.16 counts them per aish task), that a resolved evidence step proves its task, and that the titles say what the model then does.
+
+### 3.16 · `repeat_nudge` — a task repeating calls exactly, and the line that asks for a plan (#433)
+
+**Built 2026-09-30.** Rationale, the measurement and the threshold's evidence: `docs/plan.md` §The repeat nudge. The agent counts, per task, every tool call the native loop dispatched and how many of them repeat an earlier call's `(tool, arguments)` exactly (`plan.call_key`: canonical JSON, keys sorted, values exact). Results are never looked at — that is the point: the loop detector (§6.6) keys on the result, so a repeated call against a live source whose answer differs a little each time is never a repeat to it.
+
+**Who writes it.** `Agent._repeat_nudge`, after a step's results are appended, through `_emit_record` (log-only, §1.2). One record **per threshold crossed**, sent or not: the first at `plan.REPEAT_NUDGE_AT` (2) exact repeats, each later one only when the count has at least doubled since the last crossing (2, 4, 8 …). Nothing is written while the replan triggers are off (`AISH_PLAN=tool`) or the native `plan` tool is not on the menu (`AISH_PLAN=0`): nothing is evaluated then. Never on claude-max, whose SDK owns the loop.
+
+**Renderless**, in `RENDERLESS_STEPS`. The line itself, when sent, is an ordinary `[aish: …]` user message (hot/cold parity as every note, #171).
+
+```json
+{"kind": "repeat_nudge", "turn": 13, "model_call": 6, "calls": 6, "repeats": 2, "threshold": 2,
+ "repeated": [{"tool": "run_command",
+               "shown": "trippy search --site booking --location \"Osaka\" --checkin \"2027-03-23\" --checkout \"2027-03-27\" --ad…",
+               "runs": 3}],
+ "sent": true,
+ "text": "[aish: this task has made 6 tool calls, none of them to the plan tool; 2 of them repeated an earlier call exactly: `trippy search … --ad…` (run 3 times). Before your next call, write a plan with the plan tool: what is left to do, one task per item.]"}
+```
+
+| field | why |
+|---|---|
+| `turn` | Stamped by `_emit_record` (§2). |
+| `model_call` | The model call whose tool calls took the count over the threshold; the line, if sent, is in front of the NEXT one. |
+| `calls` | N: tool calls the loop dispatched in this task so far, the plan tool's included. |
+| `repeats` | K: of those, the calls whose `(tool, arguments)` equal an earlier call's in this task. |
+| `threshold` | The level crossed. The next record needs `repeats ≥ 2 × this record's repeats`. |
+| `repeated[]` | Up to `plan.REPEAT_LISTED` (3) repeated calls, most-repeated first (ties: first repeated first): `tool`, `shown` (a `run_command`'s command, else `name {arguments JSON}`, cut to 100 characters with `…`), `runs` (how many times it ran in the task). Exactly what the line lists. |
+| `sent` | `true` when the line was appended. |
+| `text` | `sent` only: the whole line as the model received it. |
+| `suppressed` | not `sent` only: `plan_called_in_task` (the plan tool was called in this task, whatever it returned) or `plan_has_open_tasks` (the chat's plan in force has an open task). |
+| `plan_revision` | with `plan_has_open_tasks`: the revision in force. |
+
+**What it does NOT establish**, so the words do not outrun the code: that the repeats were a loop (driving a page repeats calls by construction, #251), or that a plan written after the line helped. It records what was counted and what was said.
+
+**Read by** `aish explain`: an event between the rounds it fell between (`flow`), a `repeat_nudge` step on the step screen (pane `event`: the facts, the line as sent, the record), and a `repeat_nudge` row among the notes. `TestTheRepeatNudgeIsExplained`.
 
 ---
 
@@ -951,6 +985,8 @@ The other approval outcomes are recorded but as **prose decision strings** on a 
 *Today:* **nothing structured.** The nudge and the stop are `[aish: …]` user-role messages, which `synthetic_kind` classifies as notes and `reconstruct_events` **skips**. So "why did this task stop?" is answerable only by string-matching aish's own prose inside a conversation record — the precise anti-pattern this document forbids.
 
 *Must log:* `gate{gate:"loop"|"stall"|"ceiling", at:"loop", verdict:"advised"|"stopped", evidence:{repeats:5, tool:"read_url", args_sha:"…", stall:8, step:34, ceiling:60}}`. The step budget's progress-gating (#108) is invisible for the same reason: a task that ran to 47 steps and one that stalled at 12 leave logs that differ only in length.
+
+*Beside it (#433):* the repeat nudge is NOT this gate — it counts `(tool, arguments)` without the result, stops nothing, and already leaves its own record, `repeat_nudge` (§3.16).
 
 ### 6.7 · Near-duplicate memory gate (#178 P1-8) · ✓ *(closed by #192)*
 
