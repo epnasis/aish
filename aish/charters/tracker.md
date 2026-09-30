@@ -3,7 +3,7 @@ name: tracker
 version: "2"
 kind: worker
 model: session
-num_ctx: 16384
+num_ctx: 32768
 think: true
 tools: []
 degradation: skip

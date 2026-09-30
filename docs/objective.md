@@ -123,9 +123,11 @@ summary of it.
 **Size.** In the experiment every `earlier` section was under 2 300 characters and the
 median provider-reported input was ~1 850 tokens (local) and ~2 040 (gemini), against
 ~1 150 for v1. The worst case is 12 new messages at 2000 characters plus 12000 of
-`earlier` — about 36 000 characters. Whether that worst case, plus the charter and the
-model's thinking, fits `num_ctx` (16384) was NOT measured; no call in the experiment
-came near it.
+`earlier` — about 36 000 characters, ~45 000 with the charter's own ~8 800. `num_ctx` is
+32768 (raised from 16384 when v2 shipped, since that worst case plus thinking could reach
+16k), and it binds only on Ollama: the mlx server and the cloud backends ignore it
+(`backends.py`, `context_window`). The worst case was NOT measured; no call in the
+experiment came near it.
 
 **Verification of the shipped build (2026-09-30).** The experiment's harness, with the
 input composed by `select_earlier`/`compose_input` and validated by `parse_input` from this
