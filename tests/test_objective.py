@@ -507,6 +507,16 @@ class TestValidation:
     def test_repeated_cites_count_once(self, shape):
         assert check(shape, {**REVISED, "cites": ["m:a1", "m:a1"]}).cites == ("m:a1",)
 
+    def test_a_cite_may_name_an_earlier_message_it_was_shown(self, shape):
+        earlier = [objective.Item("m:e0", "owner", 1, "kursy walut dla firmy")]
+        new = [objective.Item("m:a1", "owner", 2, "co rano")]
+        text = objective.compose_input(CHAT, 2, None, new, 0, earlier)
+        value = roles.validate(shape, {**REVISED, "cites": ["m:e0", "m:a1"]}, (),
+                               {"objective": text})
+        assert value.cites == ("m:e0", "m:a1")
+        with pytest.raises(ValueError, match='"messages" or "earlier"'):
+            roles.validate(shape, {**REVISED, "cites": ["m:gone"]}, (), {"objective": text})
+
 
 # --------------------------------------------------------------- the charter
 
@@ -533,6 +543,7 @@ class TestTheCharter:
             "a-greeting-states-no-objective",
             "a-quoted-instruction-is-not-his-objective",
             "his-own-statement-survives-a-nudge",
+            "a-stated-requirement-is-absorbed",
         } <= names
 
     def test_a_rows_assertion_means_nothing_here(self, charter):
@@ -666,7 +677,7 @@ class TestTrack:
             "chat": CHAT, "covers_to_turn": 1,
             "statement": "Codziennie rano znać kurs EUR/PLN",
             "cites": [{"session": CHAT, "ref": "m:a1"}],
-            "change": "new", "base": None, "charter": "tracker", "version": "1",
+            "change": "new", "base": None, "charter": "tracker", "version": "2",
             "model": "fake:m", "trail": [],
         }
         assert chat.calls[0]["tools"] == [] and chat.calls[0]["think"] is True
@@ -683,6 +694,7 @@ class TestTrack:
         assert sent["current"] == {"statement": "Codziennie rano znać kurs EUR/PLN",
                                    "origin": "tracker", "revision": 1}
         assert [m["ref"] for m in sent["messages"]] == ["m:b1"]
+        assert [m["ref"] for m in sent["earlier"]] == ["m:a1"]
         assert revision["revision"] == 2 and revision["base"] == 1
         assert revision["change"] == "evolved"
         assert revision["trail"] == [{
@@ -782,6 +794,76 @@ class TestTrack:
         assert "later question" not in chat.calls[0]["messages"][1]["content"]
 
 
+def refs(entries) -> list[str]:
+    return [m["ref"] for m in entries]
+
+
+class TestTheEarlierMessages:
+    """What the tracker is shown of what it already read (#423, 2026-09-30):
+    the messages the statement rests on and his newest ones, as context."""
+
+    def chat_of(self, tmp_path, turns: int, text=lambda n: f"message {n}") -> Path:
+        log = SessionLog(tmp_path / f"{CHAT}.jsonl")
+        for n in range(1, turns + 1):
+            add_task(log, n, text(n), f"t{n}-")
+        return log.path
+
+    def read_to(self, path, turn, cites=("m:t1-1",)):
+        """A revision taken at turn 1, and a tracker call that read up to `turn`."""
+        write(path, [
+            {"kind": "objective", "turn": 1, "revision": 1, "origin": "tracker",
+             "covers_to_turn": 1, "statement": "Plan something",
+             "cites": [{"session": CHAT, "ref": r} for r in cites], "change": "new",
+             "trail": []},
+            {"kind": "role", "charter": "tracker", "turn": turn, "covers_to_turn": turn},
+        ])
+
+    def test_it_is_what_the_statement_rests_on_and_his_newest_never_the_new(self, tmp_path):
+        path = self.chat_of(tmp_path, 15)
+        self.read_to(path, 14)
+        (role,), chat = track(path, turn=15, replies=[{"verdict": "unchanged"}])
+        sent = sent_input(chat.calls[0])
+        assert refs(sent["messages"]) == ["m:t15-1"]
+        # turn 1 because the statement cites it; 3..14 as his newest twelve read
+        assert refs(sent["earlier"]) == ["m:t1-1"] + [f"m:t{n}-1" for n in range(3, 15)]
+        assert role["input"]["earlier"] == 13 and role["input"]["earlier_omitted"] == 0
+
+    def test_it_is_bounded_newest_kept_and_the_cut_is_recorded(self, tmp_path):
+        path = self.chat_of(tmp_path, 15, text=lambda n: f"message {n} " + "x" * 3000)
+        self.read_to(path, 14)
+        (role,), chat = track(path, turn=15, replies=[{"verdict": "unchanged"}])
+        earlier = sent_input(chat.calls[0])["earlier"]
+        assert sum(len(m["text"]) for m in earlier) <= objective.TRACKER_EARLIER_CHARS
+        assert refs(earlier)[-1] == "m:t14-1" and "m:t1-1" not in refs(earlier)
+        assert role["input"]["earlier"] == len(earlier)
+        assert role["input"]["earlier_omitted"] == 13 - len(earlier) > 0
+
+    def test_his_edit_further_back_still_fences_what_he_had(self, tmp_path):
+        path = self.chat_of(tmp_path, 2)
+        objective.owner_edit(SessionLog(path), "My own words")  # covers turn 2
+        add_task(SessionLog(path), 3, "message 3", "t3-")
+        evolved = {"verdict": "revised", "statement": "My own words, sharpened",
+                   "change": "evolved", "cites": ["m:t3-1"]}
+        write(path, track(path, turn=3, replies=[evolved])[0])
+        add_task(SessionLog(path), 4, "message 4", "t4-")
+        _, chat = track(path, turn=4, replies=[{"verdict": "unchanged"}])
+        sent = sent_input(chat.calls[0])
+        assert sent["current"]["origin"] == "tracker"
+        assert refs(sent["earlier"]) == ["m:t3-1"]
+
+    def test_an_edit_in_the_trail_fences_at_its_own_records_coverage(self, tmp_path):
+        """A trail entry carries no `covers_to_turn`; the edit's record does."""
+        edit = {"kind": "objective", "turn": 1, "revision": 1, "origin": "owner",
+                "covers_to_turn": 3, "statement": "Mine", "cites": [], "change": "edited"}
+        entry = {k: edit[k] for k in ("revision", "turn", "origin", "statement", "cites")}
+        base = {"kind": "objective", "turn": 4, "revision": 2, "origin": "tracker",
+                "covers_to_turn": 4, "statement": "Mine, sharpened", "cites": [],
+                "change": "evolved", "trail": [{**entry, "left": "evolved"}]}
+        history = [{"kind": "trace", "step": edit}, {"kind": "trace", "step": base}]
+        assert objective.edit_floor(history, base) == 3
+        assert objective.edit_floor([], base) == 1  # record not found: its turn stands in
+
+
 # --------------------------------------------------------------- the owner's edit
 
 
@@ -816,6 +898,7 @@ class TestOwnerEdit:
         sent = sent_input(chat.calls[0])
         assert sent["current"]["origin"] == "owner"
         assert [m["ref"] for m in sent["messages"]] == ["m:b1"]
+        assert sent["earlier"] == []  # not even as context: he had it when he wrote
         assert revision["trail"][-1]["origin"] == "owner"
 
     def test_a_retry_does_not_take_his_edit_back(self, tmp_path):

@@ -66,12 +66,105 @@ A narrow role (`docs/roles.md`): one sealed call, no tools, no history, a code-v
 typed answer. Its charter declares class `session` (the chat's own backend, so his words
 never ride to a provider he did not choose for this chat) and `think: true`.
 
-`TestWhichModel` pins the class. **Its input is a constant size** (owner decision): the current statement, and the
-owner's messages since the tracker last accounted for them — at most
-`TRACKER_MESSAGES` (12), the newest, each cut at `TRACKER_MESSAGE_CHARS` (2000), with
-the number left out recorded. Across the five benchmark chats every input was 285–2 912
-characters. #424's distiller was shown the whole chat at every boundary (up to 58 717
-characters on the #422 chat); the tracker never is.
+`TestWhichModel` pins the class. **Its input is bounded** (owner decision): the current
+statement; the NEW messages — the owner's messages since the tracker last accounted for
+them, at most `TRACKER_MESSAGES` (12), the newest, each cut at `TRACKER_MESSAGE_CHARS`
+(2000), with the number left out recorded; and, since charter v2, `earlier` — messages
+it already read, as context (next section). #424's distiller was shown the whole chat at
+every boundary (up to 58 717 characters on the #422 chat); the tracker never is.
+
+### What it is shown of what it already read (charter v2, 2026-09-30)
+
+`TestTheEarlierMessages`. **The defect** (the Japan chat, `session-20260929-214924-097047`,
+turn 9): charter v1 saw the statement and exactly ONE new message per call, because it
+runs at every task end and `unchanged` advances coverage. The statement had never taken in
+"accommodation for the whole family" (turns 4 and 7 were answered `unchanged`), and "Looks
+prohibitively expensive. What are places in Japan to live in typically for family like
+mine?" — lodging for the trip — was relabelled a PIVOT to relocating to Japan.
+
+**What v2 shows it** (`objective.select_earlier`, owner decision 2026-09-30 from the
+experiment in `~/.cache/aish-exp-objective/`, `RESULTS.md`): under `earlier`, the owner
+messages the statement and its trail cite (a revision cites only what IT added, so its own
+cites alone are not what led to it; the 12 most recently cited) plus his last `TRACKER_RECENT` (12) messages already
+read — each once, in turn order, together at most `TRACKER_EARLIER_CHARS` (12000)
+characters, the newest kept, the number cut recorded as `input.earlier_omitted`. New
+messages stay under `messages`, which is what marks them new. A cite may name either
+(`objective.parse_input` reads both back, so what a cite is checked against is still
+exactly what the model was shown).
+
+Why each part, from the experiment:
+
+- **More of his messages removes the false pivot, and it is their content that does it.**
+  With `earlier` (arm O2) no turn-9 sample on either model pivoted or read as relocation.
+  The control arm OW — the same charter words describing `earlier`, with `earlier` always
+  empty — kept the false pivot (4 of 5 gemini, 5 of 5 local samples labelled `pivoted`),
+  so the wording is not what fixed it.
+- **The worked example in the prose** (*What to answer*: a requirement stated inside the
+  same line of work is taken in as `evolved`, not left `unchanged`, and is not a pivot)
+  was the only thing in the experiment that cured the staleness — O2 alone left the
+  turn-9 statement stale in 19 of 19 local and 9 of 19 gemini samples. **The shipped
+  example is from a different domain** (leasing an electric car with three child seats)
+  than the experiment's, which was a near-paraphrase of the Japan case (a family trip,
+  lodging for five, a nightly budget) and would have taught the charter to the test. See
+  *Verification* below for what the different domain does to that cure.
+- **aish's first narration of the turn is NOT given** (arm O3): it made the tracker worse
+  on the chains (gemini 57% correct against O2's 76%, local 55% against 65%).
+- **Card comments never feed it**, as before: `earlier` is built from `owner_messages`.
+
+**His edit still fences it.** `earlier` starts after the newest owner edit in the
+statement's lineage (`objective.edit_floor`: the edit's own `covers_to_turn`, looked up by
+revision when the edit is deeper in the trail) — so a tracker revision after his edit still
+rests only on what he said after it, even as context
+(`TestOwnerEdit::test_the_tracker_rereads_nothing_he_had_when_he_wrote_it`,
+`TestTheEarlierMessages::test_his_edit_further_back_still_fences_what_he_had`). The cost is
+that the tracker sees nothing of what led to his edit; his statement is taken as the
+summary of it.
+
+**Size.** In the experiment every `earlier` section was under 2 300 characters and the
+median provider-reported input was ~1 850 tokens (local) and ~2 040 (gemini), against
+~1 150 for v1. The worst case is 12 new messages at 2000 characters plus 12000 of
+`earlier` — about 36 000 characters. Whether that worst case, plus the charter and the
+model's thinking, fits `num_ctx` (16384) was NOT measured; no call in the experiment
+came near it.
+
+**Verification of the shipped build (2026-09-30).** The experiment's harness, with the
+input composed by `select_earlier`/`compose_input` and validated by `parse_input` from this
+tree and this charter (arm SHIP, `~/.cache/aish-exp-objective/verify_ship.py`). Its
+turn-9 fixed-base input is byte-identical to the prototype's (O4-O2). Statements
+blind-judged by Fable 5.0 with the experiment's own `judge.py`. Japan turn 9, judged
+correct / stale / wrong, and turn-9 samples labelled `pivoted`:
+
+| model | arm | fixed base (10) | chained (9) | `pivoted` |
+|---|---|---|---|---|
+| local | O0 (v1) | 5 / 1 / 4 | 2 / 2 / 5 | 11 |
+| local | O4-O2 (prototype) | 2 / 8 / 0 | 0 / 4 / 0 (n=4) | 0 |
+| local | **v2** | 1 / 9 / 0 | 5 / 4 / 0 | 0 |
+| gemini | O0 (v1) | 7 / 0 / 3 | 8 / 0 / 1 | 2 |
+| gemini | O4-O2 (prototype) | 10 / 0 / 0 | 7 / 0 / 0 (+2 unjudged) | 0 |
+| gemini | **v2** | 3 / 7 / 0 | 9 / 0 / 0 | 0 |
+
+The other Japan turns (3 chains, 33 items each): v2 gemini 33 correct / 0 stale / 0 wrong
+(v1: 29 / 4 / 0), local 17 / 16 / 0 (v1: 22 / 7 / 4). Median input: ~1 800 tokens on
+both models (v1: ~1 140).
+
+What this shows, and what it does not:
+
+- **The false pivot is gone** in all 38 turn-9 samples, on both models: none judged
+  wrong, none labelled `pivoted`, none read as relocation.
+- **The staleness cure did NOT carry over to the different-domain example on the fixed
+  base.** From production's stale statement, gemini left it unchanged (stale) in 7 of
+  10, where the prototype's near-paraphrase example had 10 of 10 correct. So on that
+  probe the prototype's cure came at least partly from resembling the test. A one-line
+  addition ("the same holds for a requirement in `earlier` the statement does not carry
+  yet") changed nothing (gemini 3 / 7 / 0 again) and is not shipped. Chained — where
+  the statement is v2's own from the start — gemini was correct at every turn.
+- **Local stays stale** from the stale base (9 of 10), as the prototype was (8 of 10),
+  and on 16 of 33 chained items. v2 does not fix local staleness; it removes local's
+  wrong readings.
+- One chat, one judge model, small n; the other five experiment chats were not rerun
+  (their input follows the prototype's rules — checked byte-identical only on the Japan
+  turn-9 input — so their input cost should be close to O4-O2's: median 1 843 tokens
+  local, 2 038 gemini).
 
 **Its answer** is one of three verdicts: `revised` (a new statement, cites, and how it
 changed — `evolved`, `pivoted`, `unknown`), `unchanged`, or `unknown`. `unchanged` is
@@ -96,10 +189,14 @@ the charter — each time by abstaining (`unchanged`/`unknown`), never by adopti
 injected goal. With thinking on, the whole exam passed 7/7 in all three runs (two on an
 earlier wording, one on the shipped charter). The cost is latency (*Cost*, below).
 
-**Admitted on 2026-09-29** (`~/.local/state/aish/roles/admission.json`, charter v1,
+**Charter v1 was admitted on 2026-09-29** (`~/.local/state/aish/roles/admission.json`,
 digest `9c0a72777d25…`): `local:mlx-community/Qwen3.6-35B-A3B-8bit` 7/7 and
-`gemini:gemini-3.5-flash` 7/7. Any other model spec — `gemini-3.8-flash`, another local
-model — records `unadmitted` until its own exam is run.
+`gemini:gemini-3.5-flash` 7/7. **Admission binds to the charter's digest, so charter v2
+runs nowhere until its own exam is recorded** — every task end records `unadmitted` until
+then. v2's exam (8 cases, adding `a-stated-requirement-is-absorbed`) was run on
+2026-09-30 into a scratch state dir, not the live one: 8/8 on
+`local:mlx-community/Qwen3.6-35B-A3B-8bit`, `gemini:gemini-3.5-flash` and
+`gemini:gemini-3.8-flash`, every case valid on its first attempt.
 
 ## The owner's edit, and why it outranks the tracker
 
