@@ -46,7 +46,7 @@ BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 # Steps rendered in their own sections rather than in the generic trace dump.
 _SECTIONED = frozenset(
     {"brief", "rule_eval", "binding", "gate", "context", "knowledge", "trim",
-     "tool_start", "tool", "thinking", "thinking_start", "thinking_cancel"}
+     "tool_start", "tool", "thinking", "thinking_start", "thinking_cancel", "repeat_nudge"}
 )
 
 
@@ -347,6 +347,7 @@ CHECKS: tuple[tuple[str, str], ...] = (
     ("over_budget", "a request went out estimated over the local window's budget"),
     ("trim_skipped", "a trim was planned and not made because it would free too little"),
     ("steering", "text was typed while the task ran"),
+    ("repeat_nudge", "calls repeated exactly and aish asked for a plan, or chose not to"),
     ("reminder_demoted", "the per-task reminder reached the model as a user message"),
     ("brief_changed", "what the model was handed changed mid-turn"),
     ("stop_unusual", "the model stopped for an unusual reason"),
@@ -1755,6 +1756,10 @@ def _rounds(turn: Turn, doc: dict) -> dict:
             after.setdefault(at.get(index, 0), []).append(
                 {"kind": "steering", "text": str(step.get("text") or "")}
             )
+        elif kind == "repeat_nudge":
+            after.setdefault(at.get(index, 0), []).append(
+                {"kind": STEP_REPEAT_NUDGE, "record": dict(step)}
+            )
 
     numbers = sorted({int(t["model_call"]) for t in thoughts if t.get("model_call")} | set(
         placed.values()
@@ -1818,9 +1823,11 @@ STEP_BRIEF_CHANGED = "brief_changed"
 STEP_MODEL_ERROR = "model_error"
 STEP_RETRY = "retry"
 STEP_KNOWLEDGE = "knowledge"
+STEP_REPEAT_NUDGE = "repeat_nudge"
 # Between-round kinds share one pane: the fact and its numbers.
 EVENT_STEPS = frozenset(
-    {STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED, STEP_MODEL_ERROR, STEP_RETRY, STEP_KNOWLEDGE}
+    {STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED, STEP_MODEL_ERROR, STEP_RETRY, STEP_KNOWLEDGE,
+     STEP_REPEAT_NUDGE}
 )
 # The injected text of a `knowledge` step could not be told apart from the
 # other system parts of the brief (see _reminder): a state of its own, because
@@ -2130,6 +2137,37 @@ def _tool_step(call: dict, placed: dict[int, int], how: dict[int, str],
     }
 
 
+# Why a due repeat nudge was not sent, in words, keyed by the record's value.
+REPEAT_SUPPRESSED = {
+    "plan_called_in_task": "the plan tool was called in this task",
+    "plan_has_open_tasks": "the chat's plan has open tasks",
+    "task_ending": "the loop detector or the stall cap ended the task at that step",
+    "stop_gate_armed": "a denial with a comment had armed the stop gate",
+}
+
+
+def _repeat_why(record: dict) -> str:
+    return REPEAT_SUPPRESSED.get(str(record.get("suppressed")), NOT_RECORDED)
+
+
+def _repeat_title(record: dict) -> str:
+    if record.get("sent"):
+        return "aish asked for a plan: calls repeated exactly"
+    return "calls repeated exactly; no line was sent"
+
+
+def _repeat_facts(record: dict) -> list[dict]:
+    """The repeat nudge's counts, as the record holds them (docs/plan.md)."""
+    facts = [{"k": "calls", "v": _fmt_n(record.get("calls"))},
+             {"k": "exact repeats", "v": f"{_fmt_n(record.get('repeats'))} "
+                                        f"(threshold {_fmt_n(record.get('threshold'))})"}]
+    for item in record.get("repeated") or []:
+        facts.append({"k": f"ran {item.get('runs')} times", "v": str(item.get("shown") or "")})
+    if not record.get("sent"):
+        facts.append({"k": "not sent", "v": _repeat_why(record)})
+    return facts
+
+
 def _event_step(kind: str, record: dict, facts: list[dict], **extra) -> dict:
     return {"kind": kind, "panes": [PANE_EVENT], "facts": facts, "record": record, **extra}
 
@@ -2354,6 +2392,10 @@ def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
                                      [{"k": "chars", "v": _fmt_n(len(text))}],
                                      id=event_id("s"), title="you typed while it ran",
                                      text=text, before=before(index)))
+        elif kind == "repeat_nudge":
+            steps.append(_event_step(STEP_REPEAT_NUDGE, dict(step), _repeat_facts(step),
+                                     id=event_id("r"), title=_repeat_title(step),
+                                     before=before(index)))
         elif kind == "knowledge":
             steps.append(_knowledge_step(step, doc, event_id("k"), before(index)))
         elif kind == "reasoning":
@@ -2420,14 +2462,16 @@ def _link_events(doc: dict) -> None:
     the flow can cite the step screen's exact step. Matched by kind and record
     equality in order — both lists come from the same file-order walk."""
     unused = [
-        s for s in doc["steps"] if s["kind"] in (STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED)
+        s for s in doc["steps"]
+        if s["kind"] in (STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED, STEP_REPEAT_NUDGE)
     ]
     events = [e for r in doc["flow"]["rounds"] for e in r["before"]] + list(doc["flow"]["loose"])
     for event in events:
         for step in unused:
             if step["kind"] != event["kind"]:
                 continue
-            if event["kind"] == STEP_TRIM and step["record"] != event.get("record"):
+            recorded = (STEP_TRIM, STEP_REPEAT_NUDGE)
+            if event["kind"] in recorded and step["record"] != event.get("record"):
                 continue
             if event["kind"] == STEP_STEERING and step.get("text") != event.get("text"):
                 continue
@@ -2548,6 +2592,15 @@ def _event_note(
         rows.append({"check": "steering", "where": where,
                      "text": "you typed while the task was running and it was folded into "
                              f"the model's messages, {when}: {event['text'][:120]}"})
+    elif event["kind"] == STEP_REPEAT_NUDGE:
+        record = event["record"]
+        counted = (f"{record.get('repeats')} of {record.get('calls')} calls repeated an "
+                   f"earlier call exactly")
+        if record.get("sent"):
+            text = f"{counted}; aish added a line asking for a plan {when}"
+        else:
+            text = f"{counted}; no line was sent {when}: {_repeat_why(record)}"
+        rows.append({"check": "repeat_nudge", "where": where, "text": text})
 
 
 def _note(rows: list[dict], check: str, text: str, **where) -> None:
@@ -3532,6 +3585,13 @@ def _event_lines(event: dict, placed: bool) -> list[str]:
         ]
     if event["kind"] == "steering":
         return [f"  {BOLD}⚠ you typed mid-task{RESET}: {event['text'][:200]}"]
+    if event["kind"] == STEP_REPEAT_NUDGE:
+        record = event["record"]
+        head = (f"  {BOLD}⚠ {where}{RESET} {record.get('repeats')} of {record.get('calls')} "
+                f"calls had repeated an earlier call exactly")
+        if record.get("sent"):
+            return [head + "; aish told the model:", f"    {record.get('text')}"]
+        return [head + f"; no line was sent: {_repeat_why(record)}"]
     if event["kind"] == "brief_changed":
         return [f"  {BOLD}⚠ what the model was handed changed here{RESET}"]
     return []

@@ -13720,6 +13720,11 @@ function ssEventSegs(doc, step) {
   } else if (step.kind === "trim") {
     b.meta("THE RECORD");
     b.rec(step.record || {});
+  } else if (step.kind === "repeat_nudge") {
+    const record = step.record || {};
+    if (record.sent) { b.meta("WHAT AISH TOLD THE MODEL"); b.text(record.text || "", "plain"); }
+    b.meta("THE RECORD");
+    b.rec(record);
   } else if (step.kind === "retry") {
     const record = step.record || {};
     b.meta(record.continued ? "continued from what it had already done"

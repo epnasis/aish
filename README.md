@@ -647,7 +647,9 @@ this UI. Highlights:
   that proved it; otherwise it stays pending and says why. Tap the plan to see
   every task and what each done rests on, drop a task (aish cannot bring it
   back), or ask aish to revise the plan. `/plan`, `/plan drop <id>` and
-  `/plan replan` do the same in the terminal.
+  `/plan replan` do the same in the terminal. When a task with no plan keeps
+  repeating the exact same calls, aish tells the model how many it repeated and
+  asks it to write a plan — one line, never a forced step; `aish explain` shows it.
 - **Nothing lost on a locked phone.** Reconnecting replays the transcript,
   including any approval still waiting. Survives server restarts too. Every turn
   carries the time it happened — including chats from long before the feature

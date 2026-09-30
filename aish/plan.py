@@ -190,6 +190,102 @@ def open_tasks(plan: dict | None) -> list[dict]:
     return [t for t in (plan or {}).get("tasks") or () if t.get("state") in OPEN]
 
 
+# ---------------------------------------------------------------- repeats
+
+
+# The repeat nudge (#433, decided 2026-09-30). The loop detector keys on
+# (tool, args, RESULT), so a call re-run against a live source whose answer
+# differs slightly each time is new progress to it; in the Japan chat
+# (session-20260929-214924-097047, turns 10-13) neither it nor the stall
+# counter fired. This counts what the model ASKED, independent of results.
+#
+# The first nudge is due at REPEAT_NUDGE_AT exact repeats, and the next only
+# once the count has doubled since the last (2, 4, 8, …): once per task unless
+# repeats keep growing, and bounded by the log of the step ceiling. 2 because
+# it was the measured point: at K=2 (N=6 and N=13) the tested line got a plan
+# call 8/10, and in that chat only the looping turns reached 2.
+REPEAT_NUDGE_AT = 2
+REPEAT_LISTED = 3
+REPEAT_SHOWN_CHARS = 100
+REPEAT_NUDGE = (
+    "this task has made {calls} tool calls, none of them to the plan tool; {repeats} of "
+    "them repeated an earlier call exactly: {listed}. Before your next call, write a plan "
+    "with the plan tool: what is left to do, one task per item."
+)
+# Why a due nudge was not sent, as the record says it.
+REPEAT_PLAN_CALLED = "plan_called_in_task"
+REPEAT_PLAN_OPEN = "plan_has_open_tasks"
+# The step that crossed also ends the task (loop detector or stall cap): the
+# wrap-up turn that follows has no tools, so "before your next call" is false.
+REPEAT_TASK_ENDING = "task_ending"
+# A denial with a comment armed the stop gate: deny means stop (L2), and a line
+# inviting "your next call" would argue with it.
+REPEAT_STOP_GATE = "stop_gate_armed"
+
+
+def call_key(name: str, args: Any) -> tuple[str, str]:
+    """A call's identity for counting repeats: the tool name and its arguments
+    as canonical JSON. Keys are sorted, because the order a backend serialised
+    them in is not something the model chose; every value is compared exactly,
+    whitespace and case included, because anything looser would count as a
+    repeat a call the model did not repeat."""
+    return name, json.dumps(args, sort_keys=True, ensure_ascii=False, default=repr)
+
+
+def _shown_call(name: str, args: Any) -> str:
+    if name == "run_command" and isinstance(args, dict) and isinstance(args.get("command"), str):
+        text = args["command"]
+    else:
+        text = f"{name} {json.dumps(args, sort_keys=True, ensure_ascii=False, default=repr)}"
+    if len(text) > REPEAT_SHOWN_CHARS:
+        text = text[: REPEAT_SHOWN_CHARS - 1] + "…"
+    return text
+
+
+class Repeats:
+    """One task's calls, counted: `calls` made, `repeats` of them whose
+    (tool, arguments) equal an earlier call's in the same task."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.repeats = 0
+        self.plan_called = False
+        self._seen: set[tuple[str, str]] = set()
+        # Per repeated key, in the order it was FIRST repeated: how many times
+        # it repeated, and how it is shown.
+        self._repeated: dict[tuple[str, str], list[Any]] = {}
+        self._nudged_at = 0
+
+    def add(self, name: str, args: Any) -> None:
+        self.calls += 1
+        if name == PLAN_TOOL:
+            self.plan_called = True
+        key = call_key(name, args)
+        if key in self._seen:
+            self.repeats += 1
+            entry = self._repeated.setdefault(key, [name, _shown_call(name, args), 0])
+            entry[2] += 1
+        self._seen.add(key)
+
+    def due(self) -> int:
+        """The threshold just crossed, or 0 when no nudge is due. Advances on
+        every crossing, sent or not, so each level is decided exactly once."""
+        threshold = max(REPEAT_NUDGE_AT, 2 * self._nudged_at)
+        if self.repeats < threshold:
+            return 0
+        self._nudged_at = self.repeats
+        return threshold
+
+    def repeated(self) -> list[dict]:
+        """The most-repeated calls, most first (ties: first repeated first)."""
+        ordered = sorted(self._repeated.values(), key=lambda e: -e[2])[:REPEAT_LISTED]
+        return [{"tool": name, "shown": shown, "runs": k + 1} for name, shown, k in ordered]
+
+    def text(self) -> str:
+        listed = "; ".join(f"`{r['shown']}` (run {r['runs']} times)" for r in self.repeated())
+        return REPEAT_NUDGE.format(calls=self.calls, repeats=self.repeats, listed=listed)
+
+
 # ---------------------------------------------------------------- evidence
 
 

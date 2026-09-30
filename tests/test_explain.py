@@ -3183,3 +3183,56 @@ class TestSentRecord:
         assert cost["basis"] == explain_mod.BASIS_INFERRED
         assert all(c["basis"] == explain_mod.BASIS_INFERRED for c in cost["calls"])
         assert "(inferred)" in explain_mod.explain(stripped, root=tmp_path)
+
+
+class TestTheRepeatNudgeIsExplained:
+    """The repeat nudge (#433) leaves a `repeat_nudge` record at every threshold
+    it crosses; `aish explain` shows it between the rounds it fell between, on
+    the step screen, and as a row worth a look — sent or not."""
+
+    def _run(self, tmp_path, responses):
+        agent, _, log = make_logged_agent(responses, tmp_path, cwd=str(tmp_path))
+        count = iter(range(1, 1000))
+        original = agent._dispatch
+
+        def dispatch(name, args):  # a live source: a different result each time
+            if name == "run_command":
+                return f"kept {next(count)}/25 offers"
+            return original(name, args)
+
+        agent._dispatch = dispatch
+        return agent, log
+
+    def test_a_sent_nudge_is_an_event_a_step_and_a_row(self, tmp_path):
+        search = model_says(tool_calls=[tool_call("run_command", command="trippy search")])
+        agent, log = self._run(tmp_path, [search, search, search, model_says("done")])
+        agent.run_task("find hotels")
+        (record,) = steps(log.path, "repeat_nudge")
+        assert record["sent"] is True
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        (event,) = [e for r in doc["flow"]["rounds"] for e in r["before"]
+                    if e["kind"] == "repeat_nudge"]
+        assert event["record"]["text"] == record["text"]
+        (step,) = [s for s in doc["steps"] if s["kind"] == "repeat_nudge"]
+        assert step["panes"] == ["event"] and step["before"] == 4
+        assert {"k": "ran 3 times", "v": "trippy search"} in step["facts"]
+        assert event["step"] == step["id"], "the flow event links to its step"
+        (row,) = [r for r in doc["notes"]["rows"] if r["check"] == "repeat_nudge"]
+        assert row["text"] == ("2 of 3 calls repeated an earlier call exactly; aish added a "
+                               "line asking for a plan before model call 4")
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "aish told the model:" in out and record["text"] in out
+
+    def test_a_suppressed_one_says_why(self, tmp_path):
+        search = model_says(tool_calls=[tool_call("run_command", command="trippy search")])
+        plan = model_says(tool_calls=[tool_call(
+            "plan", tasks=[{"id": "1", "title": "Tokyo", "state": "doing"}])])
+        agent, log = self._run(tmp_path, [plan, search, search, search, model_says("done")])
+        agent.run_task("find hotels")
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        (step,) = [s for s in doc["steps"] if s["kind"] == "repeat_nudge"]
+        assert {"k": "not sent", "v": "the plan tool was called in this task"} in step["facts"]
+        assert "no line was sent: the plan tool was called in this task" in (
+            explain_mod.explain(log.path, root=tmp_path))

@@ -641,6 +641,10 @@ RENDERLESS_STEPS = frozenset(
         # as live state, never as a trace row; the plan tool CALL is an
         # ordinary tool step and renders like any.
         "plan",  # #433
+        # #433. The repeat nudge's decision at each threshold crossed: evidence
+        # about a line aish added (or chose not to add), read by `aish explain`.
+        # The line itself is an ordinary `[aish: …]` message.
+        "repeat_nudge",  # #433
     }
 )
 
