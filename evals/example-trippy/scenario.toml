@@ -1,0 +1,53 @@
+# SYNTHETIC example: the format, with invented turns and an invented party.
+# Scenarios mined from real owner sessions never live in this (public) repo —
+# they go in the private config tree, ~/.config/aish/evals/<name>/ (docs/replay.md).
+name = "example-trippy"
+description = "Invented example: apartments for 2 adults and children aged 9 and 5 across Lisbon and Porto, then EUR prices, one-unit stays and pictures."
+model = "local:mlx-community/Qwen3.6-35B-A3B-8bit"
+runs = 3
+timeout_s = 3600
+
+[source]
+# Provenance only. A mined scenario names the session file and record lines here.
+session = "none (synthetic)"
+note = "Invented turns, written to document the format."
+
+[[turns]]
+text = "Find places to stay for us: Lisbon Jul 10–14, Porto Jul 14–18 (2028). Two adults, kids aged 9 and 5."
+stand_in = true
+note = "Stands in for the planning turns a mined scenario would replace."
+
+[[turns]]
+text = "Show prices in EUR please"
+
+[[turns]]
+text = "Can all four of us stay in one apartment or house?"
+
+[[turns]]
+text = "Show me photos of the ones you suggest"
+
+[corpus]
+tools = []  # no plugin tools: trippy is a shell command
+
+[cards]
+# Deny is the default for every card. A command is approved only when it starts
+# with one of these AND carries no shell operator (replay_driver.SHELL_META).
+approve_commands = ["trippy "]
+approve_tools = ["show_image", "read_url", "web_search"]
+
+[env]
+TRIPPY_DATA_DIR = "{run}/trippy"
+
+[checks]
+use = [
+    "trippy_party",
+    "single_unit_only",
+    "details_max_three_ids",
+    "no_failed_trippy",
+    "no_pipes_or_redirects",
+    "no_unapproved_shell",
+    "links_from_evidence",
+    "images_from_evidence",
+    "repeated_calls",
+]
+target = ["trippy_party"]
