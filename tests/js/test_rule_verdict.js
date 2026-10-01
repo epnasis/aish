@@ -146,6 +146,31 @@ check("the verdict's own text is rendered, not the marker", () => {
   assert.ok(rendered.includes("links-you-actually-opened"), rendered.slice(0, 200));
 });
 
+// The same marker carries aish's announcement of a change that ran with NO
+// card (a note created in the vault, a mail to the owner): agent.AISH_LINE.
+// It must render in aish's voice too, never as the model's paragraph, and live
+// and replayed alike, since both paint from this function.
+const CARDLESS =
+  "[aish] Saved to your vault without asking you: " +
+  "Japan/Japonia 2027 — Plan wycieczki rodzinnej (created)";
+
+check("a cardless change is aish's own row after the answer", () => {
+  const out = blocks(`Oto plan wycieczki.\n\n${CARDLESS}`);
+  assert.strictEqual(out.length, 2);
+  assert.strictEqual(out[0].tagName, "P");
+  assert.strictEqual(out[1].className, "rule-verdict");
+  const rendered = JSON.stringify(out[1].children);
+  assert.ok(rendered.includes("Japonia 2027 — Plan wycieczki rodzinnej"), rendered);
+  assert.ok(!rendered.includes("[aish]"), rendered);
+});
+
+check("a verdict and a cardless line are two rows", () => {
+  const out = blocks(`Answer.\n\n${VERDICT}\n${CARDLESS}`);
+  assert.strictEqual(out.length, 3);
+  assert.strictEqual(out[1].className, "rule-verdict");
+  assert.strictEqual(out[2].className, "rule-verdict");
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

@@ -16090,7 +16090,7 @@ class TestNoVisionNote:
         agent.provider = "no-vision-backend"
         agent.run_task("show me")
         [note] = [m for m in agent.messages if "cannot see images" in str(m.get("content"))]
-        assert "You MUST still paste the line show_image returned" in note["content"]
+        assert "You MUST paste that line exactly as written" in note["content"]
 
     def test_other_producers_are_not_told_to_paste_a_line_they_never_gave(self):
         note = agent_module.TOOL_MEDIA_UNDELIVERABLE.format(tools="read_pdf", count=1, paste="")

@@ -135,6 +135,35 @@ VERB_MUST_FIRST = "must_first"
 # call this inexpressible. Enforced at the GATE, never at turn end — an
 # ordering that has already gone wrong cannot be repaired by asking.
 FIRST_ANSWER = "answer"
+# The calls `must_first: answer` does NOT hold back: pure local reads of aish's
+# OWN guidance. The rule exists because a model that runs before it speaks
+# leaves the owner looking at a spinner; reading a skill or a memory is how the
+# model learns WHAT to say and how to do the work. Refusing it was observed
+# doing harm: the rule refused `read_skill(trippy_search)` before any text, the
+# model skipped the skill and guessed a CLI command that does not exist. Every
+# other call stays gated — web reads, read-only shell commands, file reads —
+# because those are the waits the rule is about. An explicit list, never
+# "every read-only tool". Each pass is recorded as an `allowed` gate record
+# with `exempt: guidance_read`.
+#
+# - read_skill: loads one skill file from aish's skill dirs. No network, no
+#   shell.
+# - recall: searches aish's saved skills, memory and past-session logs. When
+#   the semantic layer is on it also embeds the query — and any skill or
+#   memory text not yet in the cache — through the Ollama host named by
+#   AISH_EMBED_HOST or OLLAMA_HOST (an HTTP call, which may be another
+#   machine), and writes the cache (embeddings.json in the state dir). No
+#   shell, and no host but that configured embedding server.
+#
+# Deliberately NOT here: read_docs (runs the named program to get its help
+# text, a process on the owner's machine), read_tool_output (pages an earlier
+# tool's RESULT, which is work output, not guidance), read_file (his files).
+#
+# Not a `vocab.declare` list: these are aish's own tool identifiers, matched
+# exactly against the name of a call aish dispatches. Nothing outside aish
+# writes the text it is matched against, so it cannot drift by a site's or a
+# language's wording, which is what the vocabulary counters measure.
+GUIDANCE_READS = frozenset({"read_skill", "recall"})
 VERB_ANSWER_MUST_INCLUDE = "answer_must_include"
 VERB_ANSWER_MUST_NOT_INCLUDE = "answer_must_not_include"
 # `ask_me_first: true` — the HOLD verb, and the other half of R7. Route,
@@ -2740,7 +2769,9 @@ def _obligation_line(obligation: dict, rule: Rule | None = None) -> str:
                 "· MUST say something to the user before running ANYTHING — in "
                 "the SAME turn as the call. Text alongside a tool call satisfies "
                 "this. A reply with NO tool call ends the task, so announcing the "
-                "work and stopping leaves it undone."
+                "work and stopping leaves it undone. Reading your own guidance "
+                f"first ({', '.join(sorted(GUIDANCE_READS))}) is allowed before "
+                "you say anything."
             )
         return (
             f"· MUST call {obligation['capability']} before answering. The answer "

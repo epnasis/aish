@@ -46,6 +46,7 @@ from . import (
     paths,
     provenance,
     ratelimit,
+    recipients,
     recordings,
     repetition,
     roles,
@@ -58,12 +59,13 @@ from . import (
     tool_plugins,
     tools,
     turns,
+    vault_writes,
     vocab,
     vouches,
     web,
 )
 from . import plan as checklist
-from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
+from .approval import Approved, Blocked, Denied, Licensed, is_scratch_delete, path_within
 from .session import (
     NOTE_MARKER,
     STOPPED_ANSWER,
@@ -224,7 +226,14 @@ Rules:
      check anything, so anything you INFERRED rather than OBSERVED MUST be
      marked as unverified and MUST name the check you did not get to run. Do
      NOT state it as fact, and do NOT give an instruction that depends on it.
+   When the card recorded why it asked, the result quotes it; if the comment
+   asks why approval was needed, answer from that quote and nothing else.
    A plain deny with no comment: do not retry it — change approach or ask.
+   A few changes run with NO card (a new note in the user's vault, a mail
+   only to the user). You MUST make such a change only when the user asked
+   for it or said yes to your offer — otherwise OFFER it (a quick-reply chip)
+   and do not do it. aish itself adds a line to your answer naming each
+   change that ran without a card.
 4. After running commands, analyze the output and answer concisely.
 5. Prefer read-only commands. Never bundle destructive operations
    (rm, mv, overwrite redirects) into a command unless the user explicitly
@@ -798,7 +807,7 @@ WRITE_DENIED = (
 # ORDERS it — MUST + a worked example.
 FEEDBACK_NOTE = (
     '\n\n[The user DENIED this and left a COMMENT: "{comment}"\n'
-    "Denial means STOP. Your NEXT reply MUST be plain text with NO tool call: "
+    "{card}Denial means STOP. Your NEXT reply MUST be plain text with NO tool call: "
     "address the user's concern, then wait for them. Do NOT retry a variant or "
     'run anything else first. Example — comment "this could delete real data" → '
     'reply "You\'re right, that would touch real files — I\'ve stopped. Here is '
@@ -835,7 +844,7 @@ WRITE_HELD_FOR_ADJUSTMENT = (
 
 TOOL_HELD_FOR_ADJUSTMENT = (
     'NOT RUN — the user APPROVED calling {name} but attached a COMMENT: "{comment}"\n'
-    "Approval means CONTINUE, so proceed — but the tool was NOT run. If the "
+    "{card}Approval means CONTINUE, so proceed — but the tool was NOT run. If the "
     "comment asks for a change, you MUST call {name} with the REWORKED "
     "arguments; if it asks for NO change to the call, you MUST call {name} "
     "again with the IDENTICAL arguments — do NOT invent a variation the user "
@@ -846,8 +855,114 @@ TOOL_HELD_FOR_ADJUSTMENT = (
 )
 
 
-def _with_feedback(base: str, comment: str) -> str:
-    return base + FEEDBACK_NOTE.format(comment=comment) if comment else base
+# What the card the owner answered said about why it was raised (its recorded
+# `preview`), handed back VERBATIM with his comment. Without it the model had
+# his comment and nothing else: asked "Why do I need to approve it?" about an
+# egress card that said the address carried a 64-character run of
+# random-looking text, it answered "every tool call goes through approval by
+# design" — a reason nothing recorded. A card with no recorded reason (a shell
+# command, a file write) adds nothing here, because there is nothing true to
+# add and an invented reason is exactly the failure.
+CARD_SAID = (
+    'The approval card the user answered showed them this, verbatim: "{preview}"\n'
+    "If the comment asks why approval was needed, answer from that text — it is "
+    "everything aish recorded about why it asked. Do NOT give any other reason.\n"
+)
+
+
+def _card_said(preview: str | None) -> str:
+    return CARD_SAID.format(preview=preview) if preview and preview.strip() else ""
+
+
+def _with_feedback(base: str, comment: str, *, card_said: str | None) -> str:
+    """`card_said` is required so every site that composes a denial decides it:
+    the card's recorded reason, or None where the card recorded none."""
+    if not comment:
+        return base
+    return base + FEEDBACK_NOTE.format(comment=comment, card=_card_said(card_said))
+
+
+# A change outside the conversation that ran with NO card is announced by
+# aish, in the answer it delivers, on a line of its own. The model's answer is
+# not a reliable channel: a no-vision local model created a note in the owner's
+# vault, licensed cardless (#379), during a turn that never asked to save
+# anything, and its answer never mentioned it. The marker is the one the web
+# renders as aish's own voice (`[RULE-VERDICT]` in app.js), so the line can
+# never read as the model's words, and it rides the logged answer, so a cold
+# replay shows it exactly as the live turn did.
+AISH_LINE = "[aish] "
+
+
+def _shown_args(args: dict) -> str:
+    shown = " ".join(", ".join(f"{k}={v!r}" for k, v in args.items()).split())
+    return shown if len(shown) <= 200 else shown[:199] + "…"
+
+
+def _cardless_line(name: str, args: dict, policy: str, *, ran_ok: bool) -> str:
+    """One line for one cardless effect: what happened and where, no cause."""
+    if policy == vault_writes.OWNER_OPTED:
+        sentence = vault_writes.announce(args, ran_ok=ran_ok)
+    elif policy == recipients.OWNER_ONLY:
+        sentence = recipients.announce(args, ran_ok=ran_ok)
+    else:
+        return _generic_cardless_line(name, _shown_args(args), 1, ran_ok=ran_ok)
+    return AISH_LINE + " ".join(sentence.split())
+
+
+def _generic_cardless_line(name: str, first: str, count: int, *, ran_ok: bool) -> str:
+    what = f"{name}({first})" if count == 1 else f"{name} ×{count} — the first: {name}({first})"
+    sentence = (
+        f"Ran without asking you: {what}" if ran_ok
+        else f"Tried to run without asking you, and it did not report success: {what}"
+    )
+    return AISH_LINE + " ".join(sentence.split())
+
+
+class _Cardless:
+    """This task's cardless changes, in the order they ran, as owner-facing
+    lines. A vault write or a mail is one line each — which note, which mail
+    is the point. Anything else (a triggered session's mail labelling) is
+    counted per tool and outcome: triage that labels ten messages gives one
+    line naming the count and the first call, not ten."""
+
+    def __init__(self) -> None:
+        self._entries: list[dict] = []
+
+    def add(self, name: str, args: dict, policy: str, *, ran_ok: bool) -> None:
+        if policy in (vault_writes.OWNER_OPTED, recipients.OWNER_ONLY):
+            self._entries.append(
+                {"line": _cardless_line(name, args, policy, ran_ok=ran_ok)}
+            )
+            return
+        for entry in self._entries:
+            if entry.get("tool") == name and entry["ran_ok"] == ran_ok:
+                entry["count"] += 1
+                return
+        self._entries.append(
+            {"tool": name, "ran_ok": ran_ok, "first": _shown_args(args), "count": 1}
+        )
+
+    def lines(self) -> list[str]:
+        return [
+            entry.get("line") or _generic_cardless_line(
+                entry["tool"], entry["first"], entry["count"], ran_ok=entry["ran_ok"]
+            )
+            for entry in self._entries
+        ]
+
+    def take(self) -> list[str]:
+        lines, self._entries = self.lines(), []
+        return lines
+
+    def __bool__(self) -> bool:
+        return bool(self._entries)
+
+
+def _tool_held(name: str, comment: str, *, card_said: str | None) -> str:
+    """The approve-with-comment result for a tool card; `card_said` as above."""
+    return TOOL_HELD_FOR_ADJUSTMENT.format(
+        name=name, comment=comment, card=_card_said(card_said)
+    )
 
 
 # Text that means THE ACTION DID NOT HAPPEN, for the paths that still return a
@@ -1896,18 +2011,26 @@ TOOL_MEDIA_CAPPED = (
     " [aish: {dropped} further picture(s) were NOT attached — at most "
     "{cap} come back in one turn. Ask for the rest in a smaller range.]"
 )
+# Every sentence says WHOSE limit it is. "They were NOT delivered" was read as
+# "the user cannot see pictures" twice on a no-vision model: one answer told
+# the owner show_image "won't actually show photos in this chat" and listed raw
+# image URLs instead, and a replay opened with "the system can't see images".
+# The limit is the MODEL's input, never the owner's screen.
 TOOL_MEDIA_UNDELIVERABLE = (
-    "[aish: {tools} produced {count} picture(s), but this model cannot see "
-    "images, so they were NOT delivered and you have not looked at them. Say so "
-    "rather than describing what you cannot see.{paste}]"
+    "[aish: {tools} produced {count} picture(s). YOU cannot see images — this "
+    "model takes no picture input — so they were not attached for you and you "
+    "have not looked at them. Do NOT describe what is in them; if the user asks, "
+    "say you could not look at them yourself.{paste}]"
 )
 # Only when show_image is among the producers: read_media frames and read_pdf
 # scan pages have no display line, and telling the model to paste one would
 # have it type a path the image check then fails (#430). Without this the
 # note above read as "you cannot show pictures" and the line was left out.
 TOOL_MEDIA_PASTE_ANYWAY = (
-    " You MUST still paste the line show_image returned, exactly as written, "
-    "so the user sees the picture — just do not describe what is in it."
+    " That limit is YOURS ONLY: the user's chat DOES display pictures, and the "
+    "user sees each one where you paste the line show_image returned. You MUST "
+    "paste that line exactly as written. Do NOT tell the user pictures cannot be "
+    "shown, and do NOT replace the line with a raw image URL."
 )
 TOOL_MEDIA_EXPIRED = (
     "[aish: picture(s) from an earlier task were dropped from view to save "
@@ -3863,6 +3986,9 @@ class Agent:
         # Harness-written lines for rules that could not be satisfied — appended
         # to the answer at delivery so a failure is never silent.
         self._not_followed: list[str] = []
+        # Lines naming each change that ran with NO card this task (AISH_LINE),
+        # appended to the delivered answer the same way.
+        self._cardless = _Cardless()
         # The display lines show_image handed back this task, and how many
         # times an answer was sent back for its pictures (#430).
         self._shown_images: list[str] = []
@@ -4720,6 +4846,7 @@ class Agent:
         self._held_entry = None
         self._last_rejected = None
         self._not_followed = []
+        self._cardless = _Cardless()
         self._shown_images = []
         self._image_asks = 0
         self._image_removal = None
@@ -4960,8 +5087,12 @@ class Agent:
             return self._run_task(
                 task, images, documents, keep_history=keep_history, continuing=continuing
             )
-        except Exception as exc:
-            self._task_unfinished = f"it failed: {type(exc).__name__}"
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                self._task_unfinished = f"it failed: {type(exc).__name__}"
+            # A turn that dies after a cardless change still says it happened:
+            # the failure ends the turn, it does not undo the change.
+            self.announce_cardless_apart()
             raise
         finally:
             self._flush_vocab()
@@ -5374,7 +5505,10 @@ class Agent:
                 # and not the answer (#212). Stamped only here: the wrap-up
                 # turn in _finish_stopped may also carry tool calls, and that
                 # text IS the answer.
-                self._append(entry, interim=bool(tool_calls))
+                self._append(
+                    entry, interim=bool(tool_calls),
+                    record_content=None if tool_calls else self._with_cardless(content),
+                )
 
             # Deny means STOP: only a TEXT-ONLY turn clears the stop gate.
             # Clearing on any content would be defeated by chatty preamble (or
@@ -5486,11 +5620,13 @@ class Agent:
                     continue
                 self._commit_image_removal()
                 was_held = self._held_answer is not None
-                result = self._release_held(text=result)
-                self._log_held_entry(result)
-                # A released hold has already streamed itself, notes included.
+                # A released hold streams itself, notes included; an unbound
+                # silent turn streams its placeholder here, BEFORE the release
+                # streams the cardless lines after it.
                 if not content.strip() and not was_held and self.on_token:
                     self.on_token(result + "\n")
+                result = self._release_held(text=result)
+                self._log_held_entry(result)
                 self._note(f"✓ answered in {format_secs(turn_secs)}{_tokens_note(usage)}")
                 total = time.perf_counter() - task_started
                 self._note(
@@ -5671,7 +5807,7 @@ class Agent:
                 self.messages.append(entry)
                 self._held_entry = entry
             else:
-                self._append(entry)
+                self._append(entry, record_content=self._with_cardless(content))
             for call in tool_calls:  # every tool_use still needs a paired result
                 self._append(
                     {
@@ -5714,6 +5850,8 @@ class Agent:
 
     def _finish_cancelled(self) -> str:
         """History stays model-consumable: an assistant note closes the turn."""
+        # Stopping the turn does not undo a change that already ran.
+        self.announce_cardless_apart()
         self._append({"role": "assistant", "content": CANCELLED_RESULT})
         if self.on_token:
             self.on_token(CANCELLED_RESULT + "\n")
@@ -10295,13 +10433,13 @@ class Agent:
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
-                _with_feedback(EGRESS_DENIED, decision.comment),
+                _with_feedback(EGRESS_DENIED, decision.comment, card_said=preview),
                 decision="denied",
                 comment=decision.comment,
             )
         if isinstance(decision, Approved):
             return _gate_outcome(
-                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
+                _tool_held(name, decision.comment, card_said=preview),
                 decision="held",
                 comment=decision.comment,
             )
@@ -10662,19 +10800,18 @@ class Agent:
             return _gate_outcome(
                 MAIL_LINK_NO_APPROVER.format(url=url), decision="blocked"
             )
-        decision = self._ask_owner(
-            ASKED_BY_MAIL_LINK, name, args, f"{MAIL_LINK_HELD}: {url}"
-        )
+        preview = f"{MAIL_LINK_HELD}: {url}"
+        decision = self._ask_owner(ASKED_BY_MAIL_LINK, name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
-                _with_feedback(MAIL_LINK_DENIED, decision.comment),
+                _with_feedback(MAIL_LINK_DENIED, decision.comment, card_said=preview),
                 decision="denied",
                 comment=decision.comment,
             )
         if isinstance(decision, Approved):
             return _gate_outcome(
-                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
+                _tool_held(name, decision.comment, card_said=preview),
                 decision="held",
                 comment=decision.comment,
             )
@@ -11546,13 +11683,13 @@ class Agent:
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
-                _with_feedback(denial, decision.comment),
+                _with_feedback(denial, decision.comment, card_said=preview),
                 decision="denied",
                 comment=decision.comment,
             )
         if isinstance(decision, Approved):
             return _gate_outcome(
-                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
+                _tool_held(name, decision.comment, card_said=preview),
                 decision="held",
                 comment=decision.comment,
             )
@@ -11607,13 +11744,13 @@ class Agent:
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             return _gate_outcome(
-                _with_feedback(REMEMBER_DENIED, decision.comment),
+                _with_feedback(REMEMBER_DENIED, decision.comment, card_said=preview),
                 decision="denied",
                 comment=decision.comment,
             )
         if isinstance(decision, Approved):
             return _gate_outcome(
-                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
+                _tool_held(name, decision.comment, card_said=preview),
                 decision="held",
                 comment=decision.comment,
             )
@@ -12365,12 +12502,12 @@ class Agent:
                 count=len(broken),
                 items=", ".join(f"{embed.target} ({reason})" for embed, reason in broken),
             )).strip()
-        if not self._bindings:
-            return answer
-        self._verify_answer(answer, ask=False)
-        if not self._not_followed:
-            return answer
+        if self._bindings:
+            self._verify_answer(answer, ask=False)
         notes, self._not_followed = self._not_followed, []
+        notes = notes + self._cardless.take()
+        if not notes:
+            return answer
         return (answer + "\n\n" + "\n".join(notes)).strip()
 
     def note_intent(self, said: str) -> None:
@@ -12587,6 +12724,52 @@ class Agent:
         # repeat a line it never wrote.
         self.on_message(_serialize({**entry, "content": text} if text else entry))
 
+    def announce_cardless_apart(
+        self,
+        *,
+        record: Callable[[dict], Any] | None = None,
+        stream: Callable[[str], Any] | None = None,
+        delivered: Callable[[str], Any] | None = None,
+    ) -> None:
+        """Deliver this task's cardless lines on their own, for an exit with
+        no answer to carry them: a stop, a model failure, any exception.
+
+        Logged as a SHOWN delivery (`interim` + `delivered`), the shape replay
+        keeps on every turn: beside the stop note as an earlier bubble, and on
+        a failed turn above its error, which keeps every delivery. Never put in
+        the model's own history, the same split as the notes on an answer.
+        Must not raise: it runs on the way out of a failure, and masking that
+        failure would cost more than the line. The keyword sinks are claude-
+        max's, whose wrapper owns the log and the stream."""
+        if not self._cardless:
+            return
+        text = "\n".join(self._cardless.take())
+        record = record if record is not None else self.on_message
+        stream = stream if stream is not None else self.on_token
+        delivered = delivered if delivered is not None else self.on_delivered
+        try:
+            if stream:
+                stream("\n" + text + "\n")
+            else:
+                self.echo(text)
+            if record:
+                record({"role": "assistant", "content": text,
+                        "interim": True, "delivered": True})
+            if delivered:
+                delivered(text)
+        except Exception:  # noqa: BLE001 — see docstring
+            pass
+
+    def _with_cardless(self, content: str) -> str | None:
+        """The LOG copy of an unbound answer, carrying this task's cardless
+        lines; None (log the model's words) when there are none. An unbound
+        answer is logged before `_release_held` streams the lines, so the log
+        copy has to be composed here or a cold replay would lose them. Read,
+        not consumed: the release that follows takes them."""
+        if not self._cardless:
+            return None
+        return (content + "\n\n" + "\n".join(self._cardless.lines())).strip()
+
     def _release_held(self, text: str = "", discard: bool = False) -> str:
         """Hand the withheld answer to the client, or drop it.
 
@@ -12604,8 +12787,14 @@ class Agent:
             self.on_token("\n" + ("".join(held) or text) + "\n")
         if discard and self._bindings:
             self._held_answer = []  # keep holding: the next answer is bound too
+        notes: list[str] = []
         if self._not_followed:
             notes, self._not_followed = self._not_followed, []
+        if self._cardless and not discard:
+            # A discarded draft is not delivered; the lines wait for the
+            # answer that is.
+            notes = notes + self._cardless.take()
+        if notes:
             text = (text + "\n\n" + "\n".join(notes)).strip()
             if self.on_token:
                 self.on_token("\n\n" + "\n".join(notes) + "\n")
@@ -12799,9 +12988,27 @@ class Agent:
         ordering has already happened, and no amount of asking repairs it.
         Bounded like every other rule refusal — the model complies by writing a
         line of text, which is entirely within its power (R7).
+
+        Reading aish's own guidance (`rules.GUIDANCE_READS`) is not "running
+        anything" in the sense the rule means, and passes without spending a
+        round: refusing it made the model skip the skill it needed. The pass is
+        an `allowed` gate record carrying `exempt: guidance_read`.
         """
         for binding in rules.wants_text_first(self._bindings):
             if self._said_something:
+                continue
+            if name in rules.GUIDANCE_READS:
+                # Recorded, so `aish explain` can tell a call this gate checked
+                # and let through from one it never looked at.
+                self._record_gate(
+                    rules.GateVerdict(
+                        verdict="allowed", binding=binding,
+                        evidence={"obligation": rules.VERB_MUST_FIRST,
+                                  "requires": rules.FIRST_ANSWER, "said_anything": False,
+                                  "exempt": "guidance_read"},
+                    ),
+                    name, {}, "allowed",
+                )
                 continue
             if binding.rounds >= binding.max_rounds:
                 continue  # bounded: it has had its say, let the turn proceed
@@ -12923,14 +13130,13 @@ class Agent:
             message = _with_feedback(
                 rules.OWNER_DENIED.format(rule=binding.name, tool=name),
                 decision.comment,
+                card_said=preview,
             )
             self._record_gate(verdict, name, args, "refused", escalated=True,
                               message=message)
             return _gate_outcome(message, decision="denied", comment=decision.comment)
         if isinstance(decision, Approved):
-            message = TOOL_HELD_FOR_ADJUSTMENT.format(
-                name=name, comment=decision.comment
-            )
+            message = _tool_held(name, decision.comment, card_said=preview)
             self._record_gate(verdict, name, args, "held", escalated=True,
                               message=message)
             return _gate_outcome(message, decision="held", comment=decision.comment)
@@ -12939,6 +13145,8 @@ class Agent:
             self._record_gate(verdict, name, args, "refused", escalated=True,
                               message=message)
             return _gate_outcome(message, decision="denied")
+        if isinstance(decision, Licensed):
+            return self._licensed_without_owner(verdict, name, args, decision)
         self._record_gate(verdict, name, args, "allowed", escalated=True,
                           message="owner approved this call")
         return None
@@ -12971,23 +13179,43 @@ class Agent:
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
             message = _with_feedback(
-                rules.OWNER_DENIED.format(rule=binding.name, tool=name), decision.comment
+                rules.OWNER_DENIED.format(rule=binding.name, tool=name), decision.comment,
+                card_said=preview,
             )
             self._record_gate(verdict, name, args, "refused", escalated=True, message=message)
             return _gate_outcome(message, decision="denied", comment=decision.comment)
         if isinstance(decision, Approved):
-            message = TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment)
+            message = _tool_held(name, decision.comment, card_said=preview)
             self._record_gate(verdict, name, args, "held", escalated=True, message=message)
             return _gate_outcome(message, decision="held", comment=decision.comment)
         if decision is None or decision is False:
             message = rules.OWNER_DENIED.format(rule=binding.name, tool=name)
             self._record_gate(verdict, name, args, "refused", escalated=True, message=message)
             return _gate_outcome(message, decision="denied")
+        if isinstance(decision, Licensed):
+            return self._licensed_without_owner(verdict, name, args, decision)
         binding.overridden = True
         self._record_gate(
             verdict, name, args, "allowed", escalated=True, message="owner allowed the exception"
         )
         return None
+
+    def _licensed_without_owner(
+        self, verdict: "rules.GateVerdict", name: str, args: dict, decision: Licensed
+    ) -> str:
+        """A rule asked the OWNER and an approver answered with a policy
+        instead of a card. Both approvers in this repo refuse to do that for a
+        rule (`ASKED_BY_RULE`), so this is the floor under an approver that does
+        not: nobody answered, so it fails toward restriction, and the record
+        says what happened — never "owner approved", which would be a decision
+        no human made."""
+        message = rules.OWNER_HELD.format(rule=verdict.binding.name, tool=name)
+        self._record_gate(
+            verdict, name, args, "refused", escalated=True,
+            message=f"no card was shown: the approver licensed it ({decision.policy}), "
+            "and a rule needs the owner's answer",
+        )
+        return _gate_outcome(message, decision="denied")
 
     def _record_gate(
         self,
@@ -13398,7 +13626,9 @@ class Agent:
                     "comment": decision.comment,
                 }
                 self._arm_stop_gate(decision.comment)
-                return _with_feedback(DENIED_RESULT, decision.comment)
+                # A shell card records no reason (`preview` is empty on its
+                # command record), so there is nothing true to hand back.
+                return _with_feedback(DENIED_RESULT, decision.comment, card_said=None)
             if isinstance(decision, Approved):
                 # Approve + comment = CONTINUE: the original command is NOT run
                 # as-is. Hold it — the model re-proposes (adjusted if the comment
@@ -13519,6 +13749,7 @@ class Agent:
                 error="invalid_args",
             )
 
+        licensed: Licensed | None = None
         if tool.mutating:
             if self.approve_tool is None:
                 # Not exposed without an approver, so this only fires on a stale
@@ -13539,7 +13770,7 @@ class Agent:
                 # Deny + comment = STOP (issue #81): address the concern, then halt.
                 self._arm_stop_gate(decision.comment)
                 return _gate_outcome(
-                    _with_feedback(DENIED_RESULT, decision.comment),
+                    _with_feedback(DENIED_RESULT, decision.comment, card_said=preview_text),
                     decision="denied",
                     comment=decision.comment,
                 )
@@ -13548,22 +13779,30 @@ class Agent:
                 # model re-proposes (reworked if the comment asks a change,
                 # identical if it asks none — #368) and is re-approved.
                 return _gate_outcome(
-                    TOOL_HELD_FOR_ADJUSTMENT.format(
-                        name=tool.name, comment=decision.comment
-                    ),
+                    _tool_held(tool.name, decision.comment, card_said=preview_text),
                     decision="held",
                     comment=decision.comment,
                 )
             if decision is None or decision is False:
                 return _gate_outcome(DENIED_RESULT, decision="denied")
+            if isinstance(decision, Licensed):
+                licensed = decision
 
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         self._note(f"→ {tool.name}({shown})")
         self.status.start(tool.name)
         try:
-            return self._execute_plugin(tool, args)
+            result = self._execute_plugin(tool, args)
         finally:
             self.status.stop()
+        if licensed is not None:
+            # Said whether or not it worked: a wrapper that failed may still
+            # have written part of it, and "it ran" is the fact either way.
+            # No recorded status reads as not-ok: "saved" is said only where
+            # the runtime's own verdict says the wrapper succeeded.
+            ran_ok = getattr(result, "meta", {}).get("status") == tools.STATUS_OK
+            self._cardless.add(tool.name, args, licensed.policy, ran_ok=ran_ok)
+        return result
 
     _WRAPPER_META = {  # lang -> (filename, shebang)
         "sh": ("run.sh", "#!/bin/sh"),
@@ -13791,7 +14030,7 @@ class Agent:
             # bare string sniffs as a SUCCESS, so a denied tool/rule file logged
             # green. And it carries the comment as its own key (#323).
             return _gate_outcome(
-                _with_feedback(WRITE_DENIED, decision.comment),
+                _with_feedback(WRITE_DENIED, decision.comment, card_said=None),
                 decision="denied",
                 comment=decision.comment,
             )
@@ -13889,7 +14128,7 @@ class Agent:
             # bare string sniffs as a SUCCESS, so a denied tool/rule file logged
             # green. And it carries the comment as its own key (#323).
             return _gate_outcome(
-                _with_feedback(WRITE_DENIED, decision.comment),
+                _with_feedback(WRITE_DENIED, decision.comment, card_said=None),
                 decision="denied",
                 comment=decision.comment,
             )
@@ -14155,6 +14394,7 @@ class Agent:
                     _with_feedback(
                         f"Import of {name!r} was DENIED — nothing was installed.",
                         decision.comment,
+                        card_said=None,
                     ),
                     decision="denied",
                     comment=decision.comment,
@@ -14263,7 +14503,7 @@ class Agent:
                 "comment": decision.comment, **diff_meta,
             }
             self._arm_stop_gate(decision.comment)
-            return _with_feedback(WRITE_DENIED, decision.comment)
+            return _with_feedback(WRITE_DENIED, decision.comment, card_said=None)
         if isinstance(decision, Approved):
             # Approve + comment = CONTINUE: hold the write (nothing is
             # committed), the model re-proposes (adjusted if the comment asks a

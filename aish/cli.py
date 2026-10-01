@@ -32,6 +32,7 @@ from . import plan as checklist
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
+    ASKED_BY_RULE,
     ASKED_BY_SHELL,
     ASKED_BY_WRITE,
     IDENTITY_SLOT,
@@ -45,6 +46,7 @@ from .agent import (
 )
 from .approval import (
     Blocked,
+    Licensed,
     check_denied,
     default_allowlist,
     default_denylist,
@@ -801,10 +803,15 @@ def make_tool_approver(log, get_intent=None, get_gate=None):
     unattended origin, so the origin-scoped half of that policy has nothing
     to say here."""
 
-    def approve_tool(name: str, args: dict, preview: "str | None" = None) -> bool:
+    def approve_tool(
+        name: str, args: dict, preview: "str | None" = None
+    ) -> "bool | Licensed":
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         said = (get_intent() if get_intent else "") or ""
-        policy = (
+        # A rule holding the call for the owner is asking HIM: no policy may
+        # answer in his place (the same fence as server.approve_tool).
+        asked_by_rule = (get_gate() if get_gate else "") == ASKED_BY_RULE
+        policy = None if asked_by_rule else (
             recipients.OWNER_ONLY
             if recipients.owner_scoped_send(name, args)
             else vault_writes.owner_opted_write(name, args)
@@ -817,7 +824,7 @@ def make_tool_approver(log, get_intent=None, get_gate=None):
                     f"tool {name}({shown})", f"auto ({policy})", said,
                     asked_by=(get_gate() if get_gate else "") or "",
                 )
-            return True
+            return Licensed(policy)
         print_intent(said)
         print(f"\n{YELLOW}{BOLD}▶ run tool?{RESET} {BOLD}{_plain(name)}{RESET}({_plain(shown)})")
         if preview:

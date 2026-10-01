@@ -432,3 +432,46 @@ def _frontmatter_pairs(raw: object) -> list[tuple[str, object]] | None:
             return None
         pairs.append((key.strip(), value.strip().strip("\"'")))
     return pairs
+
+
+# --------------------------------------------------------------------------
+# what the owner is told
+# --------------------------------------------------------------------------
+
+
+def _one_line(value: object, limit: int = 160) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def announce(args: Mapping, *, ran_ok: bool) -> str:
+    """The sentence aish says to the owner after a licensed write ran with no
+    card. Read off the ARGUMENTS aish licensed, never the wrapper's reply, and
+    it says what happened and where — no reason, no outcome it did not see.
+    `ran_ok` False means the wrapper did not report success, so the sentence
+    names the attempt rather than a saved note."""
+    action = str(args.get("action") or "").strip()
+    if action == "create":
+        folder = _one_line(args.get("folder")).strip("/")
+        title = _one_line(args.get("title"))
+        target = f"{folder}/{title}" if folder else title
+        done, tried = "created", "create"
+    else:
+        target = _one_line(args.get("note"))
+        if action == "set_frontmatter":
+            try:
+                keys = sorted(_plain_frontmatter_keys(args.get("frontmatter")) or ())
+            except (ValueError, TypeError, AttributeError):
+                keys = []  # the licence parsed it; a reader must not raise here
+            shown = ", ".join(keys) or "(unreadable)"
+            done, tried = f"properties added: {shown}", f"add properties: {shown}"
+        elif action == "append":
+            done, tried = "text appended", "append text"
+        else:
+            done, tried = action, action
+    if ran_ok:
+        return f"Saved to your vault without asking you: {target} ({done})"
+    return (
+        "Tried to save to your vault without asking you, and it did not report "
+        f"success: {target} ({tried})"
+    )

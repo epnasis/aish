@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from aish import recipients
 from aish import skills as skills_module
-from aish.approval import load_prefixes
+from aish.approval import Licensed, load_prefixes
 from aish.cli import (
     make_approver,
     make_import_approver,
@@ -2091,7 +2092,10 @@ def test_an_owner_only_send_needs_no_terminal_prompt(monkeypatch, capsys):
         raise AssertionError("prompted for an owner-only send")
     monkeypatch.setattr(builtins, "input", refuse)
     approve_tool = make_tool_approver(None)
-    assert approve_tool("gmail_send", {"to": "pawel@wenda.eu", "body": "hi"}) is True
+    verdict = approve_tool("gmail_send", {"to": "pawel@wenda.eu", "body": "hi"})
+    # Not a bare True: the agent announces a cardless send itself, so the
+    # approver says no card was drawn and which policy licensed it.
+    assert isinstance(verdict, Licensed) and verdict.policy == recipients.OWNER_ONLY
     assert "auto-approved" in capsys.readouterr().out
 
 

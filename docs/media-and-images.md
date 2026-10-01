@@ -104,6 +104,8 @@ So the answer's pictures are checked **before delivery**, in the same pass as th
 
 **The note to a model that cannot see** used to end "Say so rather than describing what you cannot see", and the model read it as *you cannot show pictures* and left the line out. It now adds `TOOL_MEDIA_PASTE_ANYWAY` — but only when `show_image` is among the producers: `read_media` frames and `read_pdf` scans have no display line, and telling the model to paste one would have it type a path this very check fails.
 
+**And it still read as the owner's limit, so every sentence now says whose limit it is.** *"They were NOT delivered and you have not looked at them"* was read twice on a no-vision local model (Qwen3.6-35B) as *the user cannot see pictures*: one answer told the owner `show_image` "won't actually show photos in this chat" and listed raw image URLs instead (2026-09-29), and a replay opened with *"the system can't see images"*. The note now says YOU cannot see images (this model takes no picture input), and — with `show_image` among the producers — that the limit is the model's ONLY: the user's chat does display pictures, each where the returned line is pasted, so the model must paste it, must not tell the user pictures cannot be shown, and must not swap the line for a raw URL. Not describing the content stays. `TestNoVisionNoteSaysWhoseLimitItIs` asserts each of those facts rather than the prose.
+
 Trace: `gate{at:"verify", gate:"image.verify"}` (`docs/trace-contract.md` §6.15), logged only when armed (the answer carries a picture, or shown narration did and is being asked about), verdict `refused` (asked) / `advised` (removed, or the model told afterwards) / `allowed`. `TestImageCheck`, `TestNoVisionNote`, `TestImageEmbeds`, `TestRendererLockstep`.
 
 ---
