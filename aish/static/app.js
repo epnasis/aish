@@ -4595,14 +4595,18 @@ function fmtSecs(s) {
 // [MODEL-LABEL-START]
 // The chip names the model the way a person would; the full spec
 // stays the chip's identity (`dataset.model`, hover title) and is what the
-// picker lists and searches. The publisher path is dropped for every spec;
-// `local:` becomes a "(local)" suffix that drops out whole when it does not fit.
+// picker lists and searches. The provider prefix and the publisher path are
+// dropped; `local:` alone comes back as a "(local)" suffix, which drops out
+// whole when it does not fit.
+// Only these prefixes name a provider; in `qwen3:8b` the colon is Ollama's tag.
+const MODEL_PROVIDERS = ["local", "gemini", "openai", "claude", "claude-max"];
+
 function modelChipLabel(spec) {
-  const local = spec.startsWith("local:");
-  const model = local ? spec.slice("local:".length) : spec;
-  // Keep a provider prefix (`openai:`), drop everything up to the last slash.
-  const name = model.replace(/^([^/:]*:)?.*\//, "$1");
-  return { name, suffix: local ? "(local)" : "" };
+  const colon = spec.indexOf(":");
+  const provider = colon > 0 && MODEL_PROVIDERS.includes(spec.slice(0, colon)) ? spec.slice(0, colon) : "";
+  const model = provider ? spec.slice(colon + 1) : spec;
+  const name = model.slice(model.lastIndexOf("/") + 1);
+  return { name, suffix: provider === "local" ? "(local)" : "" };
 }
 
 function showModelName(spec) {

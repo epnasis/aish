@@ -19,12 +19,12 @@ function world() {
     "model-suffix": fakeElement("span") };
   const sandbox = { $: (id) => els[id] };
   vm.createContext(sandbox);
-  const code = extract(appSource(), "function modelChipLabel(", "// [MODEL-LABEL-END]");
+  const code = extract(appSource(), "const MODEL_PROVIDERS =", "// [MODEL-LABEL-END]");
   vm.runInContext(surface(code), sandbox);
   return { sandbox, els };
 }
 
-// ---- 1. the label drops the publisher and turns `local:` into a suffix
+// ---- 1. the label drops provider and publisher; `local:` becomes a suffix
 {
   const { sandbox } = world();
   const cases = [
@@ -32,9 +32,12 @@ function world() {
     ["local:Qwen3-8B", "Qwen3-8B|(local)"],
     ["qwen3:8b", "qwen3:8b"],
     ["hf.co/unsloth/Qwen3-8B-GGUF:Q4_K_M", "Qwen3-8B-GGUF:Q4_K_M"],
-    ["claude:claude-sonnet-5", "claude:claude-sonnet-5"],
-    ["openai:org/some-model", "openai:some-model"],
+    ["claude:claude-sonnet-5", "claude-sonnet-5"],
+    ["claude-max:claude-opus-5-5", "claude-opus-5-5"],
+    ["gemini:gemini-3.5-flash", "gemini-3.5-flash"],
+    ["openai:org/some-model", "some-model"],
     ["gemini", "gemini"],
+    ["claude-max", "claude-max"],
   ];
   for (const [spec, want] of cases) {
     const label = sandbox.modelChipLabel(spec);
