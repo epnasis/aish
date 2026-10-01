@@ -19,6 +19,7 @@ import pytest
 from aish import server as server_module
 from aish import vault_writes
 from aish.agent import Agent
+from aish.approval import Licensed
 from tests.test_agent import model_says, tool_call, tool_messages
 from tests.test_recipients import _cli_cards, _FakeLog, _web_cards
 
@@ -189,14 +190,15 @@ def test_the_audit_line_names_the_policy_never_the_origin(vault, monkeypatch):
             ask_all=False, get_scope=lambda: (".", []),
             trust_dir=lambda p: "", get_origin=lambda o=origin: o,
         )
-        assert approvers[3]("obsidian_write", args) is True
+        verdict = approvers[3]("obsidian_write", args)
+        assert isinstance(verdict, Licensed) and verdict.policy == vault_writes.OWNER_OPTED
         assert log.records[0][1] == "auto (owner-opted vault write)"
         assert origin not in log.records[0][1]
     log = _FakeLog()
     monkeypatch.setattr("builtins.input", lambda _p="": pytest.fail("a card was drawn"))
     from aish.cli import make_tool_approver
 
-    assert make_tool_approver(log)("obsidian_write", args) is True
+    assert isinstance(make_tool_approver(log)("obsidian_write", args), Licensed)
     assert log.records[0][1] == "auto (owner-opted vault write)"
 
 
@@ -566,7 +568,10 @@ def test_a_triggered_session_creates_a_note_and_holds_a_replace(vault, tmp_path)
                                          note="Tagged", content="wiped")]),
         model_says("done"),
     ])
-    assert agent.run_task("capture this") == "done"
+    # aish says what it did with no card, in the answer, whatever the model wrote.
+    assert agent.run_task("capture this") == (
+        "done\n\n[aish] Saved to your vault without asking you: Captured (created)"
+    )
     offered = {t["function"]["name"] for t in chat.calls[0]["tools"]}
     assert "obsidian_write" in offered
     assert (vault / "Captured.md").read_text(encoding="utf-8").endswith("from mail")

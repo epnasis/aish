@@ -82,6 +82,17 @@ class Approved:
         self.comment = comment
         self.command = command
 
+
+class Licensed:
+    """Approver verdict for a tool call that ran with NO card, because a named
+    policy licensed it (#377, #379). Truthy, so every gate that proceeds on an
+    approval proceeds on this too; distinct from `True` so the agent knows no
+    human saw the action and can tell the owner it happened — the answer the
+    model writes is not a reliable channel for that."""
+
+    def __init__(self, policy: str):
+        self.policy = policy
+
 SAFE_COMMANDS = vocab.declare(
     "approval.SAFE_COMMANDS",
     languages="program names — locale-invariant",

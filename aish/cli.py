@@ -45,6 +45,7 @@ from .agent import (
 )
 from .approval import (
     Blocked,
+    Licensed,
     check_denied,
     default_allowlist,
     default_denylist,
@@ -801,7 +802,9 @@ def make_tool_approver(log, get_intent=None, get_gate=None):
     unattended origin, so the origin-scoped half of that policy has nothing
     to say here."""
 
-    def approve_tool(name: str, args: dict, preview: "str | None" = None) -> bool:
+    def approve_tool(
+        name: str, args: dict, preview: "str | None" = None
+    ) -> "bool | Licensed":
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         said = (get_intent() if get_intent else "") or ""
         policy = (
@@ -817,7 +820,7 @@ def make_tool_approver(log, get_intent=None, get_gate=None):
                     f"tool {name}({shown})", f"auto ({policy})", said,
                     asked_by=(get_gate() if get_gate else "") or "",
                 )
-            return True
+            return Licensed(policy)
         print_intent(said)
         print(f"\n{YELLOW}{BOLD}▶ run tool?{RESET} {BOLD}{_plain(name)}{RESET}({_plain(shown)})")
         if preview:

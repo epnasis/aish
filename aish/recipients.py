@@ -118,3 +118,17 @@ def owner_scoped_send(name: str, args: dict) -> bool:
     a third party is a fully-staged exfiltration one mistaken tap from sending,
     so it stays draftable but through the card, never silently."""
     return name == "gmail_send" and all_owner(args)
+
+
+def announce(args: dict, *, ran_ok: bool) -> str:
+    """The sentence aish says to the owner after an owner-only mail went out
+    with no card (#377): who it was addressed to and its subject, read off the
+    arguments aish licensed. `ran_ok` False names the attempt instead."""
+    to = " ".join(str(args.get("to") or "").split())
+    subject = " ".join(str(args.get("subject") or "").split())
+    if len(subject) > 120:
+        subject = subject[:119] + "…"
+    what = f"mail to {to}" + (f" — “{subject}”" if subject else "")
+    if ran_ok:
+        return f"Sent without asking you: {what}"
+    return f"Tried to send without asking you, and it did not report success: {what}"

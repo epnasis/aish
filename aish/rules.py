@@ -135,6 +135,24 @@ VERB_MUST_FIRST = "must_first"
 # call this inexpressible. Enforced at the GATE, never at turn end — an
 # ordering that has already gone wrong cannot be repaired by asking.
 FIRST_ANSWER = "answer"
+# The calls `must_first: answer` does NOT hold back: pure local reads of aish's
+# OWN guidance. The rule exists because a model that runs before it speaks
+# leaves the owner looking at a spinner; reading a skill or a memory is how the
+# model learns WHAT to say and how to do the work, and it returns from disk.
+# Refusing it was observed doing harm: the rule refused `read_skill
+# (trippy_search)` before any text, the model skipped the skill and guessed a
+# CLI command that does not exist. Every other call stays gated — web reads,
+# read-only shell commands, file reads — because those are the waits the rule
+# is about. An explicit list, never "every read-only tool".
+#
+# - read_skill: loads one skill file from aish's skill dirs. No host, no shell.
+# - recall: searches aish's saved skills, memory and past-session logs on this
+#   machine. No host, no shell.
+#
+# Deliberately NOT here: read_docs (runs the named program to get its help
+# text, a process on the owner's machine), read_tool_output (pages an earlier
+# tool's RESULT, which is work output, not guidance), read_file (his files).
+GUIDANCE_READS = frozenset({"read_skill", "recall"})
 VERB_ANSWER_MUST_INCLUDE = "answer_must_include"
 VERB_ANSWER_MUST_NOT_INCLUDE = "answer_must_not_include"
 # `ask_me_first: true` — the HOLD verb, and the other half of R7. Route,
@@ -2740,7 +2758,9 @@ def _obligation_line(obligation: dict, rule: Rule | None = None) -> str:
                 "· MUST say something to the user before running ANYTHING — in "
                 "the SAME turn as the call. Text alongside a tool call satisfies "
                 "this. A reply with NO tool call ends the task, so announcing the "
-                "work and stopping leaves it undone."
+                "work and stopping leaves it undone. Reading your own guidance "
+                f"first ({', '.join(sorted(GUIDANCE_READS))}) is allowed before "
+                "you say anything."
             )
         return (
             f"· MUST call {obligation['capability']} before answering. The answer "

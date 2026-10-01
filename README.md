@@ -510,7 +510,9 @@ thousands of entries without bloating the context.
   from a small closed set: `answer_from:` a named tool — or `source`, meaning
   **the material you handed over** (a link, an attached file or image, a path
   you typed), with aish picking the right reader for each — `never_use:` these
-  tools, `must_first:` call this before answering, `answer_must_include:` /
+  tools, `must_first:` call this before answering (or `must_first: answer` —
+  say something to you before running anything; reading aish's own skills and
+  memory is allowed before that first word), `answer_must_include:` /
   `answer_must_not_include:` something the finished answer must (or must not)
   contain — named as **what you would see**: a `picture`, a `video`, `sources`,
   or `{any_of: [picture, video]}` when either will do — and `must_tell_me_when:`
@@ -573,6 +575,14 @@ thousands of entries without bloating the context.
    prefix could actually silence the command: some commands are refused before
    the allowlist is even read (see below), and a rule saved for one of those
    would sit in the file doing nothing.
+   A few changes run with **no card**, because they cannot reach past you or
+   destroy anything you did not opt in: a mail addressed only to you, and a new
+   note (or an addition to a note you tagged `aish`) in your Obsidian vault.
+   Whenever one runs, **aish itself** adds a line to the answer saying what
+   changed and where — *"Saved to your vault without asking you:
+   Japan/Japonia 2027 — Plan wycieczki rodzinnej (created)"* — rendered as
+   aish's voice, not the model's, and kept when the chat is reopened. The
+   model is told to make such changes only when you asked or agreed.
    Auto-approval covers only a conservatively
    parsed set of read-only commands, and is **scoped to the project directory** —
    commands whose paths escape it (absolute, `~`, `..`, resolved symlinks) prompt
@@ -630,7 +640,10 @@ this UI. Highlights:
   travels with whichever button you press — *approve + comment* means "take my
   comment on board and re-propose" (reworked if the comment asks a change,
   unchanged if it doesn't; the re-proposal gets its own card either way),
-  *deny + comment* means "stop and explain". The
+  *deny + comment* means "stop and explain". Either way the model is also
+  handed, word for word, what the card said about why it asked, so *"why do I
+  have to approve this?"* is answered from the card's own reason, never a
+  made-up one. The
   explanation that follows a deny has to mark anything aish inferred but never
   got to verify, and name the step it was stopped from taking.
 - **The chat's objective, pinned.** After each task aish rereads what you have
@@ -710,7 +723,10 @@ this UI. Highlights:
   picture store — is caught. When a rule already holds the answer for
   checking, it goes back to the model to redo (twice at most) and a picture
   that still would not display is removed with a note saying so; when the
-  answer has already streamed, the model is told on its next turn. When something *does* fail to render, the browser says so and
+  answer has already streamed, the model is told on its next turn. A model
+  that cannot see images is told the limit is its own: the pictures still show
+  for you, so it pastes the line `show_image` gave it instead of telling you
+  pictures cannot be shown. When something *does* fail to render, the browser says so and
   the model is told — so it tries another source instead of leaving you looking
   at a broken picture.
 - **Tap an attachment to look at it.** A picture opens full-screen with the

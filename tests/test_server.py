@@ -34,6 +34,7 @@ import aish.notify as notify_module
 import aish.server as server_module
 import aish.session as session_module
 from aish.agent import DENIED_RESULT, WRITE_DENIED
+from aish.approval import Licensed
 from aish.server import (
     SESSION_TITLE_PROMPT,
     TITLE_PROMPT,
@@ -8285,7 +8286,8 @@ class TestTriggeredCapabilityPolicy:
     def test_safe_tool_auto_runs_in_triggered_session(self):
         approve_tool, bridge, log = self._approver("email")
         result = approve_tool("gmail_label", {"message_id": "m1", "add": "Receipts"})
-        assert result is True
+        # Licensed, not a bare True: no card was drawn, and the agent announces it.
+        assert isinstance(result, Licensed) and result.policy == "unattended: email"
         assert bridge.asked == []  # no card — auto-run, no human needed
         assert log.records and log.records[0][1] == "auto (unattended: email)"
 
@@ -8295,9 +8297,9 @@ class TestTriggeredCapabilityPolicy:
         # (still draftable, just through the card). Owner-addressed drafts
         # keep their autonomy.
         approve_tool, bridge, _ = self._approver("email")
-        assert approve_tool(
+        assert isinstance(approve_tool(
             "gmail_send", {"to": "pawel@wenda.eu", "body": "hi", "draft": True}
-        ) is True
+        ), Licensed)
         assert bridge.asked == []
         approve_tool2, bridge2, _ = self._approver("email")
         approve_tool2("gmail_send", {"to": "x@y.z", "body": "hi", "draft": True})
@@ -8357,9 +8359,9 @@ class TestTriggeredCapabilityPolicy:
         # The bug as reported: mailing himself, nobody on cc/bcc, drew a card in
         # his own chat while the poller sent the same mail with none.
         approve_tool, bridge, log = self._approver("user")
-        assert approve_tool(
+        assert isinstance(approve_tool(
             "gmail_send", {"to": "pawel@wenda.eu", "body": "here you go"}
-        ) is True
+        ), Licensed)
         assert bridge.asked == []
         # And the record names the POLICY: "auto (user)" would read as a human
         # decision, which is the one thing that did not happen.
@@ -8380,8 +8382,9 @@ class TestTriggeredCapabilityPolicy:
     def test_owner_scoped_send_auto_runs(self):
         # A live send to the owner needs no approval (recipient-scoped autonomy).
         approve_tool, bridge, _ = self._approver("email")
-        assert approve_tool("gmail_send",
-                            {"to": "pawel@wenda.eu", "body": "here you go"}) is True
+        assert isinstance(approve_tool("gmail_send",
+                                       {"to": "pawel@wenda.eu", "body": "here you go"}),
+                          Licensed)
         assert bridge.asked == []
 
     def test_send_to_third_party_still_holds(self):

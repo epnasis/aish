@@ -92,6 +92,7 @@ from .approval import (
     Approved,
     Blocked,
     Denied,
+    Licensed,
     check_denied,
     default_allowlist,
     default_denylist,
@@ -1576,7 +1577,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
 
     def approve_tool(
         name: str, args: dict, preview: "str | None" = None
-    ) -> "bool | Approved | Denied":
+    ) -> "bool | Approved | Denied | Licensed":
         # Reuses the command card verbatim (issue #141): same approve/deny +
         # comment verdicts, no denylist. Comment semantics match commands:
         # deny+comment = STOP, approve+comment = HOLD-and-adjust. A ground-truth
@@ -1594,7 +1595,9 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
             record(f"tool {name}({shown})", f"auto ({auto})", asked_by=gate())
             bridge.emit({"type": "echo", "text": f"✓ auto-approved ({auto}): {name}"})
-            return True
+            # Not `True`: the agent announces a cardless action to the owner
+            # itself, and needs to know no card was drawn for this one.
+            return Licensed(auto)
         request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "tool",
