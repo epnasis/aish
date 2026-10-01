@@ -567,6 +567,14 @@ ANSWER_WITHHELD = (
     "answer again, with the change."
 )
 
+# Same fact, different cause: the draft was held for the rules and he wrote
+# again before it was released. His messages follow this note.
+ANSWER_WITHHELD_FOR_MESSAGES = (
+    "The user has not seen that answer — they sent the messages below while "
+    "you were writing it, so it was withheld. Give the complete answer again, "
+    "taking them into account."
+)
+
 
 # About the TURN, not a reply: on _finish_stopped the wrap-up call can fail,
 # and then no reply arrived at all.
@@ -4266,7 +4274,11 @@ class Agent:
         return False
 
     def _append(
-        self, message: dict, interim: bool = False, record_content: str | None = None
+        self,
+        message: dict,
+        interim: bool = False,
+        record_content: str | None = None,
+        delivered: bool = False,
     ) -> None:
         """`interim` stamps the LOG record as a delivery — something said on
         the way to the answer (#212) — without touching the message dict the
@@ -4297,6 +4309,9 @@ class Agent:
             record["model_call"] = self._model_call
             if interim:
                 record["interim"] = True
+            if delivered:
+                # Shown to him past `_deliver_interim`'s cap; replay keeps it.
+                record["delivered"] = True
             if record_content is not None:
                 record["content"] = record_content
             self.on_message(record)
@@ -4649,11 +4664,18 @@ class Agent:
         as a turn-splitting second user bubble. Trade-off: the steering text is
         therefore not carried into --resume history (it shaped the answer, which
         is). Not a tool call — leaves the gates and loop counters untouched."""
+        self._inject_messages(self._take_pending_messages())
+
+    def _take_pending_messages(self) -> list[str]:
+        """Drain what the user queued while this task runs; empty if nothing
+        is wired or nothing is waiting. Consume-once: whoever takes a message
+        must inject it."""
         if self.check_pending_messages is None:
-            return
-        for msg in self.check_pending_messages():
-            if not msg:
-                continue
+            return []
+        return [msg for msg in self.check_pending_messages() if msg]
+
+    def _inject_messages(self, messages: list[str]) -> None:
+        for msg in messages:
             msg = provenance.disarm_markers(msg)
             # No echo line — the `injected` step ("You added" note) is the sole,
             # clean timeline marker for this (#95); a grey echo would duplicate it.
@@ -5333,7 +5355,18 @@ class Agent:
             # two answers for one turn, which is the thing the hold exists to
             # prevent. It is logged, once, if and when it is released.
             proposal = self._held_answer is not None and not tool_calls
-            if proposal:
+            # Messages he queued while this answer was being written. The loop
+            # top only drains before a model call, so without this a final
+            # answer ends the turn blind to them and they run one at a time as
+            # fresh tasks after it. Taken here, before the entry is logged:
+            # an answer that is not the turn's last word must not be logged as
+            # if it were.
+            late = self._take_pending_messages() if not tool_calls and content.strip() else []
+            if late and not proposal:
+                # Unbound: it already streamed, so he has read it. It stays,
+                # as a delivery on the way, and the turn goes on.
+                self._append(entry, interim=True, delivered=True)
+            elif proposal:
                 self.messages.append(entry)
                 self._held_entry = entry
             else:
@@ -5349,7 +5382,8 @@ class Agent:
             # call — another command would run in the same turn. So the gate
             # holds until the model stops and replies with no tool call; that
             # turn also ends the task (normal loop semantics), so the user
-            # steers before anything else runs.
+            # steers before anything else runs — unless he already did: with
+            # messages queued (`late`), the task goes on with them.
             # Captured BEFORE the clear: a denial's stop gate is lifted by this
             # very turn, and Verify must not then use the turn to keep going.
             was_stopped = self._pending_comment_response
@@ -5371,6 +5405,15 @@ class Agent:
                             "armed_by_call": self._stop_gate_armed_call,
                         },
                     )
+
+            if late:
+                self._answer_superseded(content, proposal)
+                self._emit_step(
+                    kind="thinking_cancel", secs=turn_secs, tokens=list(usage),
+                    answered=False, **self._fill_field(),
+                )
+                self._inject_messages(late)
+                continue
 
             if not tool_calls:
                 result = content if content.strip() else empty_answer(*empty_facts)
@@ -12471,6 +12514,27 @@ class Agent:
             # the hold arms whether or not a token sink is attached (it does two
             # jobs and only one is about streaming), so a non-streaming CLI on a
             # bound turn would otherwise be the one place narration vanished.
+            self.echo(text)
+        self._delivered.append(text)
+        if self.on_delivered:
+            self.on_delivered(text)
+
+    def _answer_superseded(self, content: str, held: bool) -> None:
+        """A finished answer that messages queued meanwhile turned into a step.
+
+        Held, he has not seen it: dropped, and the model is told so, or it
+        would send only the part that changed. Unbound, it already streamed:
+        it is a delivery, past `_deliver_interim`'s one-per-task cap, because
+        that cap governs what reaches him and this already has.
+        """
+        if held:
+            self._release_held(discard=True)
+            self._held_entry = None
+            note = AISH_NOTE + ANSWER_WITHHELD_FOR_MESSAGES + "]"
+            self._append({"role": "user", "content": note})
+            return
+        text = content.strip()
+        if self.on_token is None:
             self.echo(text)
         self._delivered.append(text)
         if self.on_delivered:

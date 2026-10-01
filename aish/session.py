@@ -2171,6 +2171,8 @@ class SessionLog:
         # names the ANSWER and never a count of what a client happened to render
         # (#229).
         delivery_ids: list[str] = []
+        # Deliveries the writer stamped as SHOWN past the one-per-turn cap.
+        delivery_shown: list[bool] = []
         open_turn = False
         has_trace = False
         running_steps = 0  # started (thinking/tool) but not finished — a cut-off turn
@@ -2215,7 +2217,7 @@ class SessionLog:
 
         def flush() -> None:
             nonlocal steps, answer, open_turn, running_steps, failure, deliveries
-            nonlocal delivery_ids, answer_id
+            nonlocal delivery_ids, delivery_shown, answer_id
             if not open_turn:
                 return
             if deliveries and not failure:
@@ -2239,17 +2241,23 @@ class SessionLog:
                 del steps[last : last + 2]
                 deliveries = deliveries[:-1]
                 delivery_ids = delivery_ids[:-1]
+                delivery_shown = delivery_shown[:-1]
             # ONE acknowledgement per turn reaches the owner, so replay shows
             # one too (L1). The log still records every interim message — that
             # is the honest record of what the model said — but the harness
             # delivers only the first, and a cold reload that replayed all of
             # them would show a play-by-play the live turn never did. Dropped
             # highest-index first, or removing one pair shifts the next.
-            for start in reversed(deliveries[1:]):
-                del steps[start : start + 2]
+            # Except one stamped `delivered`: an answer that messages queued
+            # meanwhile turned into a step had already streamed to him, so
+            # dropping it would erase words he read.
+            for start, shown in reversed(list(zip(deliveries, delivery_shown, strict=True))[1:]):
+                if not shown:
+                    del steps[start : start + 2]
             events.extend(steps)
             deliveries = []
             delivery_ids = []
+            delivery_shown = []
             if failure:
                 # The turn's own recorded failure, replayed as the `error` event
                 # a live viewer saw (#203). It outranks the inference below: the
@@ -2496,6 +2504,7 @@ class SessionLog:
                 if content:
                     deliveries.append(len(steps))
                     delivery_ids.append(_turn_id(record, index))
+                    delivery_shown.append(bool(record.get("delivered")))
                     steps.append({"type": "token", "text": content})
                     steps.append({"type": "delivery", "text": content})
         flush()

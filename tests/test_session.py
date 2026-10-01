@@ -345,6 +345,28 @@ def test_reconstruct_events_replays_the_one_delivery(tmp_path):
     assert events[-1]["result"] == "It folds."
 
 
+def test_reconstruct_events_keeps_an_answer_that_messages_superseded(tmp_path):
+    """An answer that streamed to him, then messages he queued meanwhile made
+    the turn go on: it is a delivery past the one-per-turn cap, stamped so by
+    the writer. Dropped as play-by-play, a reload would erase words he read."""
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "show me places"})
+    log.message({"role": "assistant", "content": "on it", "interim": True})
+    log.step({"kind": "tool", "name": "web_search", "ok": True})
+    log.message({"role": "assistant", "content": "narration", "interim": True})
+    log.step({"kind": "tool", "name": "read_url", "ok": True})
+    log.message(
+        {"role": "assistant", "content": "here are the places", "interim": True, "delivered": True}
+    )
+    log.step({"kind": "injected", "text": "add pictures"})
+    log.message({"role": "assistant", "content": "places with pictures"})
+
+    events = SessionLog.reconstruct_events(log.path)
+    said = [e["text"] for e in events if e["type"] == "delivery"]
+    assert said == ["on it", "here are the places"]
+    assert events[-1]["result"] == "places with pictures"
+
+
 def test_reconstruct_events_one_answer_replays_as_one_done(tmp_path):
     """The control: a turn that only ever said one thing is untouched — no
     token, no delivery, just the `done` every old log has always replayed."""
