@@ -223,6 +223,24 @@ class TestGuidanceReadsBeforeTheFirstWord:
         assert REFUSED not in skill_result["content"]
         assert REFUSED in docs_result["content"]
 
+    def test_the_exempted_read_leaves_an_allowed_gate_record(self, tmp_path):
+        """So `aish explain` can tell checked-and-passed from never-checked."""
+        steps: list[dict] = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(tool_calls=[read_skill_call("trippy_search")]), model_says("done")],
+            rule_texts=(ANSWER_FIRST,), step_log=steps.append,
+        )
+        agent.run_task("plan a trip")
+        [record] = [
+            s for s in steps
+            if s.get("kind") == "gate" and s.get("tool") == "read_skill"
+            and s["evidence"].get("requires") == "answer"
+        ]
+        assert record["verdict"] == "allowed"
+        assert record["evidence"]["exempt"] == "guidance_read"
+        assert record["rule"] == "answer-first"
+
     def test_a_web_read_is_still_held(self, tmp_path, monkeypatch):
         fetched: list[str] = []
         monkeypatch.setattr(
@@ -389,3 +407,222 @@ then:
             ran_ok=True,
         )
         assert said == "Saved to your vault without asking you: Pay/eon (properties added: paid)"
+
+
+# --------------------------------------------------------------------------
+# review follow-ups: every exit says it, triage is one line, rules ask HIM
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("project_scope")
+class TestEveryExitSaysIt:
+    """A stop or a failure ends the turn; it does not undo a change that ran."""
+
+    def _agent(self, tmp_path, approve_tool, chat=None, **kw):
+        _write_tool(tmp_path, "obsidian_write", schema=VAULT_SCHEMA)
+        if chat is not None:
+            return agent_module.Agent(
+                model="fake", approve=lambda _c: True, client_chat=chat,
+                cwd=str(tmp_path), approve_tool=approve_tool, **kw,
+            )
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("obsidian_write", **CREATE)]),
+             model_says("never reached")],
+            cwd=str(tmp_path), approve_tool=approve_tool, **kw,
+        )
+        return agent
+
+    def _stopping(self, holder):
+        def licence_then_stop(name, args, preview=None):
+            holder[0].cancel()  # he presses Stop while it runs
+            return Licensed(vault_writes.OWNER_OPTED)
+        return licence_then_stop
+
+    def test_a_stop_after_a_cardless_write_still_says_it(self, tmp_path):
+        log = SessionLog.new(tmp_path / "state")
+        tokens: list[str] = []
+        holder: list = []
+        agent = self._agent(
+            tmp_path, self._stopping(holder), on_message=log.message, step_log=log.step,
+            on_token=tokens.append,
+        )
+        holder.append(agent)
+        result = agent.run_task("plan a trip")
+        assert result == agent_module.CANCELLED_RESULT  # the stop note is unchanged
+        assert SAID in "".join(tokens)
+        events = SessionLog.reconstruct_events(log.path)
+        assert any(e.get("type") == "delivery" and e["text"] == SAID for e in events), (
+            "the line must survive a cold reload of a stopped turn"
+        )
+        assert [e["result"] for e in events if e["type"] == "done"] == [
+            agent_module.CANCELLED_RESULT
+        ]
+        assert all(SAID not in str(m.get("content")) for m in agent.messages)
+        assert not agent._cardless  # said once, never again on the next turn
+
+    def test_a_model_failure_after_a_cardless_write_still_says_it(self, tmp_path):
+        log = SessionLog.new(tmp_path / "state")
+        tokens: list[str] = []
+        calls = {"n": 0}
+
+        def chat(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                response = model_says(tool_calls=[tool_call("obsidian_write", **CREATE)])
+                return iter([response]) if kwargs.get("stream") else response
+            raise ConnectionError("overloaded")
+
+        agent = self._agent(
+            tmp_path, lambda n, a, p=None: Licensed(vault_writes.OWNER_OPTED), chat=chat,
+            on_message=log.message, step_log=log.step, on_token=tokens.append,
+        )
+        with pytest.raises(agent_module.ModelUnavailable):
+            agent.run_task("plan a trip")
+        log.task_end("failed", "task failed: overloaded")  # what the server writes
+        assert SAID in "".join(tokens)
+        events = SessionLog.reconstruct_events(log.path)
+        assert any(e.get("type") == "delivery" and e["text"] == SAID for e in events)
+        assert any(e["type"] == "error" for e in events)
+        assert "done" not in [e["type"] for e in events]
+
+
+@pytest.mark.usefixtures("project_scope")
+class TestTriageIsOneLinePerTool:
+    def test_ten_labels_are_one_line_with_the_count_and_the_first(self, tmp_path):
+        _write_tool(tmp_path, "gmail_label", schema=TEXT_SCHEMA)
+        calls = [tool_call("gmail_label", text=f"m{i}") for i in range(10)]
+        agent, _ = make_agent(
+            [model_says(tool_calls=calls), model_says("Labelled.")],
+            cwd=str(tmp_path),
+            approve_tool=lambda n, a, p=None: Licensed("unattended: email"),
+        )
+        result = agent.run_task("triage")
+        lines = [line for line in result.splitlines() if line.startswith("[aish]")]
+        assert lines == [
+            "[aish] Ran without asking you: gmail_label ×10 — the first: gmail_label(text='m0')"
+        ]
+
+    def test_vault_writes_stay_one_line_each(self, tmp_path):
+        _write_tool(tmp_path, "obsidian_write", schema=VAULT_SCHEMA)
+        second = {**CREATE, "title": "Drugi plan"}
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("obsidian_write", **CREATE),
+                                    tool_call("obsidian_write", **second)]),
+             model_says("ok")],
+            cwd=str(tmp_path),
+            approve_tool=lambda n, a, p=None: Licensed(vault_writes.OWNER_OPTED),
+        )
+        result = agent.run_task("save both")
+        assert SAID in result
+        assert "Japan/Drugi plan (created)" in result
+
+    def test_a_list_of_recipients_prints_as_addresses(self):
+        said = recipients.announce(
+            {"to": ["pawel@wenda.eu", "pawel@wenda.email"], "subject": "x"}, ran_ok=True
+        )
+        assert said == (
+            "Sent without asking you: mail to pawel@wenda.eu, pawel@wenda.email — “x”"
+        )
+
+
+ASK_ME_FIRST = """---
+name: writer-ask-first
+description: Check with me before writing.
+when:
+  action:
+    tool: writer
+then:
+  ask_me_first: true
+---
+"""
+
+
+@pytest.mark.usefixtures("project_scope")
+class TestARuleAsksTheOwnerNotAPolicy:
+    """An owner rule "ask me first" must reach HIM. An approver that answers
+    with a cardless policy instead is treated as nobody answering, and the
+    record never says the owner approved."""
+
+    def test_a_licence_never_satisfies_a_hold(self, tmp_path):
+        marker = tmp_path / "ran"
+        _write_tool(tmp_path, "writer", schema=TEXT_SCHEMA,
+                    script=f"#!/bin/sh\ntouch {marker}\ncat\n")
+        steps: list[dict] = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(tool_calls=[tool_call("writer", text="x")]), model_says("ok")],
+            rule_texts=(ASK_ME_FIRST,), cwd=str(tmp_path), step_log=steps.append,
+            approve_tool=lambda n, a, p=None: Licensed(vault_writes.OWNER_OPTED),
+        )
+        agent.run_task("write it")
+        assert not marker.exists()
+        held = [s for s in steps if s.get("kind") == "gate" and s.get("at") == "gate"][-1]
+        assert held["verdict"] == "refused"
+        assert "no card was shown" in held["message"]
+        assert not any("owner approved" in str(s.get("message")) for s in steps)
+
+    def test_a_licence_never_grants_an_exception(self, tmp_path, monkeypatch):
+        from tests.test_agent import TASK
+
+        steps: list[dict] = []
+        searched: list = []
+        monkeypatch.setattr(
+            agent_module.web, "web_search", lambda *a, **k: searched.append(a) or "results"
+        )
+        responses = [model_says(tool_calls=[tool_call("web_search", query=f"t{i}")])
+                     for i in range(3)] + [model_says("ok")]
+        agent, _ = rules_agent(tmp_path, responses, step_log=steps.append)
+        agent.approve_tool = lambda n, a, p=None: Licensed("unattended: email")
+        agent.run_task(TASK)
+        assert searched == []
+        assert not any(b.overridden for b in agent._bindings)
+        assert not any("owner allowed" in str(s.get("message")) for s in steps)
+
+
+MARKER_LINE = "[aish] Ran without asking you: marker(text='x')"
+
+
+@pytest.mark.usefixtures("project_scope")
+class TestClaudeMaxSaysItToo:
+    """The SDK owns this loop, so the answer's text never passes the native
+    release; the lines are streamed after it, logged with it, and delivered on
+    their own when the SDK turn dies."""
+
+    def _agent(self, monkeypatch, tmp_path, script, **kw):
+        from tests.test_claude_max import make_max_agent, write_plugin_tool
+
+        write_plugin_tool(tmp_path, "marker", mutating=True)
+        agent, fake = make_max_agent(
+            monkeypatch, tmp_path,
+            approve_tool=lambda n, a, p=None: Licensed("unattended: email"), **kw,
+        )
+        fake.scripts.append(script)
+        return agent
+
+    def test_the_line_streams_after_the_answer_and_is_logged(self, monkeypatch, tmp_path):
+        tokens: list[str] = []
+        logged: list[dict] = []
+
+        async def script(sdk):
+            await sdk.call("marker", {"text": "x"})
+            return "finished"
+
+        agent = self._agent(monkeypatch, tmp_path, script,
+                            on_token=tokens.append, on_message=logged.append)
+        result = agent.run_task("go")
+        assert result == "finished\n\n" + MARKER_LINE
+        assert MARKER_LINE in "".join(tokens)
+        assert logged[-1]["content"] == result
+
+    def test_a_dead_sdk_turn_still_says_it(self, monkeypatch, tmp_path):
+        logged: list[dict] = []
+
+        async def script(sdk):
+            await sdk.call("marker", {"text": "x"})
+            raise RuntimeError("cli exited")
+
+        agent = self._agent(monkeypatch, tmp_path, script, on_message=logged.append)
+        with pytest.raises(agent_module.ModelUnavailable):
+            agent.run_task("go")
+        assert {"role": "assistant", "content": MARKER_LINE, "interim": True,
+                "delivered": True} in logged

@@ -410,6 +410,13 @@ class ClaudeMaxAgent:
         task = provenance.disarm_markers(task)  # as Agent.run_task, for its reason
         try:
             return self._run_task_body(task)
+        except BaseException:
+            # The SDK loop died after a cardless change: still say it ran.
+            self.inner.announce_cardless_apart(
+                record=self.on_message, stream=self.on_token,
+                delivered=self.on_delivered,
+            )
+            raise
         finally:
             # Same reason as the reset above: the loop that flushes word-list
             # counters (#322) never runs on this backend, so a claude-max
@@ -466,7 +473,14 @@ class ClaudeMaxAgent:
         # The SDK's answer is final by the time it lands here, so Verify runs
         # in its note-only mode: no ask (there is no loop to ask into, and the
         # text has already streamed), but the rules still get their say.
+        answered = (result or "").strip()
         result = self.inner.verify_final(result)
+        if self.on_token and result.startswith(answered) and len(result) > len(answered):
+            # What aish appended (an unfollowed rule, a change made with no
+            # card) never passed through the SDK's stream, and a client that
+            # saw the answer stream does not repaint it from `done` — so the
+            # appended lines are streamed here, or they reach only the log.
+            self.on_token(result[len(answered):] + "\n")
         self._record({"role": "assistant", "content": result})
         return result
 

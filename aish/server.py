@@ -78,6 +78,7 @@ from . import plan as checklist
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
+    ASKED_BY_RULE,
     ASKED_BY_SHELL,
     ASKED_BY_WRITE,
     CANCELLED_RESULT,
@@ -1585,7 +1586,9 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         # description of an otherwise-opaque (e.g. id-addressed) action. The one
         # way past the card is `_auto_safe` below, which names its own reason.
         origin = get_origin() if get_origin else "user"
-        auto = _auto_safe(name, args, origin)
+        # A RULE that holds a call for the owner is asking HIM, so no policy
+        # may answer for him: the owner's "ask me first" is a card, always.
+        auto = None if gate() == ASKED_BY_RULE else _auto_safe(name, args, origin)
         if auto:
             # Capability policy (#160, #377): a safe mutation runs without a
             # card — either because nobody is there to answer one, or because

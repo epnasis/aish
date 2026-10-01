@@ -232,8 +232,8 @@ Rules:
    A few changes run with NO card (a new note in the user's vault, a mail
    only to the user). You MUST make such a change only when the user asked
    for it or said yes to your offer — otherwise OFFER it (a quick-reply chip)
-   and do not do it. aish itself adds a line to your answer naming every
-   change that ran without a card, so the user always learns of it.
+   and do not do it. aish itself adds a line to your answer naming each
+   change that ran without a card.
 4. After running commands, analyze the output and answer concisely.
 5. Prefer read-only commands. Never bundle destructive operations
    (rm, mv, overwrite redirects) into a command unless the user explicitly
@@ -893,6 +893,11 @@ def _with_feedback(base: str, comment: str, *, card_said: str | None) -> str:
 AISH_LINE = "[aish] "
 
 
+def _shown_args(args: dict) -> str:
+    shown = " ".join(", ".join(f"{k}={v!r}" for k, v in args.items()).split())
+    return shown if len(shown) <= 200 else shown[:199] + "…"
+
+
 def _cardless_line(name: str, args: dict, policy: str, *, ran_ok: bool) -> str:
     """One line for one cardless effect: what happened and where, no cause."""
     if policy == vault_writes.OWNER_OPTED:
@@ -900,15 +905,57 @@ def _cardless_line(name: str, args: dict, policy: str, *, ran_ok: bool) -> str:
     elif policy == recipients.OWNER_ONLY:
         sentence = recipients.announce(args, ran_ok=ran_ok)
     else:
-        shown = " ".join(", ".join(f"{k}={v!r}" for k, v in args.items()).split())
-        if len(shown) > 200:
-            shown = shown[:199] + "…"
-        sentence = (
-            f"Ran without asking you: {name}({shown})" if ran_ok
-            else f"Tried to run without asking you, and it did not report success: "
-            f"{name}({shown})"
-        )
+        return _generic_cardless_line(name, _shown_args(args), 1, ran_ok=ran_ok)
     return AISH_LINE + " ".join(sentence.split())
+
+
+def _generic_cardless_line(name: str, first: str, count: int, *, ran_ok: bool) -> str:
+    what = f"{name}({first})" if count == 1 else f"{name} ×{count} — the first: {name}({first})"
+    sentence = (
+        f"Ran without asking you: {what}" if ran_ok
+        else f"Tried to run without asking you, and it did not report success: {what}"
+    )
+    return AISH_LINE + " ".join(sentence.split())
+
+
+class _Cardless:
+    """This task's cardless changes, in the order they ran, as owner-facing
+    lines. A vault write or a mail is one line each — which note, which mail
+    is the point. Anything else (a triggered session's mail labelling) is
+    counted per tool and outcome: triage that labels ten messages gives one
+    line naming the count and the first call, not ten."""
+
+    def __init__(self) -> None:
+        self._entries: list[dict] = []
+
+    def add(self, name: str, args: dict, policy: str, *, ran_ok: bool) -> None:
+        if policy in (vault_writes.OWNER_OPTED, recipients.OWNER_ONLY):
+            self._entries.append(
+                {"line": _cardless_line(name, args, policy, ran_ok=ran_ok)}
+            )
+            return
+        for entry in self._entries:
+            if entry.get("tool") == name and entry["ran_ok"] == ran_ok:
+                entry["count"] += 1
+                return
+        self._entries.append(
+            {"tool": name, "ran_ok": ran_ok, "first": _shown_args(args), "count": 1}
+        )
+
+    def lines(self) -> list[str]:
+        return [
+            entry.get("line") or _generic_cardless_line(
+                entry["tool"], entry["first"], entry["count"], ran_ok=entry["ran_ok"]
+            )
+            for entry in self._entries
+        ]
+
+    def take(self) -> list[str]:
+        lines, self._entries = self.lines(), []
+        return lines
+
+    def __bool__(self) -> bool:
+        return bool(self._entries)
 
 
 def _tool_held(name: str, comment: str, *, card_said: str | None) -> str:
@@ -3941,7 +3988,7 @@ class Agent:
         self._not_followed: list[str] = []
         # Lines naming each change that ran with NO card this task (AISH_LINE),
         # appended to the delivered answer the same way.
-        self._cardless: list[str] = []
+        self._cardless = _Cardless()
         # The display lines show_image handed back this task, and how many
         # times an answer was sent back for its pictures (#430).
         self._shown_images: list[str] = []
@@ -4799,7 +4846,7 @@ class Agent:
         self._held_entry = None
         self._last_rejected = None
         self._not_followed = []
-        self._cardless = []
+        self._cardless = _Cardless()
         self._shown_images = []
         self._image_asks = 0
         self._image_removal = None
@@ -5040,8 +5087,12 @@ class Agent:
             return self._run_task(
                 task, images, documents, keep_history=keep_history, continuing=continuing
             )
-        except Exception as exc:
-            self._task_unfinished = f"it failed: {type(exc).__name__}"
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                self._task_unfinished = f"it failed: {type(exc).__name__}"
+            # A turn that dies after a cardless change still says it happened:
+            # the failure ends the turn, it does not undo the change.
+            self.announce_cardless_apart()
             raise
         finally:
             self._flush_vocab()
@@ -5799,6 +5850,8 @@ class Agent:
 
     def _finish_cancelled(self) -> str:
         """History stays model-consumable: an assistant note closes the turn."""
+        # Stopping the turn does not undo a change that already ran.
+        self.announce_cardless_apart()
         self._append({"role": "assistant", "content": CANCELLED_RESULT})
         if self.on_token:
             self.on_token(CANCELLED_RESULT + "\n")
@@ -12452,7 +12505,7 @@ class Agent:
         if self._bindings:
             self._verify_answer(answer, ask=False)
         notes, self._not_followed = self._not_followed, []
-        notes, self._cardless = notes + self._cardless, []
+        notes = notes + self._cardless.take()
         if not notes:
             return answer
         return (answer + "\n\n" + "\n".join(notes)).strip()
@@ -12671,6 +12724,42 @@ class Agent:
         # repeat a line it never wrote.
         self.on_message(_serialize({**entry, "content": text} if text else entry))
 
+    def announce_cardless_apart(
+        self,
+        *,
+        record: Callable[[dict], Any] | None = None,
+        stream: Callable[[str], Any] | None = None,
+        delivered: Callable[[str], Any] | None = None,
+    ) -> None:
+        """Deliver this task's cardless lines on their own, for an exit with
+        no answer to carry them: a stop, a model failure, any exception.
+
+        Logged as a SHOWN delivery (`interim` + `delivered`), the shape replay
+        keeps on every turn: beside the stop note as an earlier bubble, and on
+        a failed turn above its error, which keeps every delivery. Never put in
+        the model's own history, the same split as the notes on an answer.
+        Must not raise: it runs on the way out of a failure, and masking that
+        failure would cost more than the line. The keyword sinks are claude-
+        max's, whose wrapper owns the log and the stream."""
+        if not self._cardless:
+            return
+        text = "\n".join(self._cardless.take())
+        record = record if record is not None else self.on_message
+        stream = stream if stream is not None else self.on_token
+        delivered = delivered if delivered is not None else self.on_delivered
+        try:
+            if stream:
+                stream("\n" + text + "\n")
+            else:
+                self.echo(text)
+            if record:
+                record({"role": "assistant", "content": text,
+                        "interim": True, "delivered": True})
+            if delivered:
+                delivered(text)
+        except Exception:  # noqa: BLE001 — see docstring
+            pass
+
     def _with_cardless(self, content: str) -> str | None:
         """The LOG copy of an unbound answer, carrying this task's cardless
         lines; None (log the model's words) when there are none. An unbound
@@ -12679,7 +12768,7 @@ class Agent:
         not consumed: the release that follows takes them."""
         if not self._cardless:
             return None
-        return (content + "\n\n" + "\n".join(self._cardless)).strip()
+        return (content + "\n\n" + "\n".join(self._cardless.lines())).strip()
 
     def _release_held(self, text: str = "", discard: bool = False) -> str:
         """Hand the withheld answer to the client, or drop it.
@@ -12704,7 +12793,7 @@ class Agent:
         if self._cardless and not discard:
             # A discarded draft is not delivered; the lines wait for the
             # answer that is.
-            notes, self._cardless = notes + self._cardless, []
+            notes = notes + self._cardless.take()
         if notes:
             text = (text + "\n\n" + "\n".join(notes)).strip()
             if self.on_token:
@@ -12902,12 +12991,24 @@ class Agent:
 
         Reading aish's own guidance (`rules.GUIDANCE_READS`) is not "running
         anything" in the sense the rule means, and passes without spending a
-        round: refusing it made the model skip the skill it needed.
+        round: refusing it made the model skip the skill it needed. The pass is
+        an `allowed` gate record carrying `exempt: guidance_read`.
         """
-        if name in rules.GUIDANCE_READS:
-            return None
         for binding in rules.wants_text_first(self._bindings):
             if self._said_something:
+                continue
+            if name in rules.GUIDANCE_READS:
+                # Recorded, so `aish explain` can tell a call this gate checked
+                # and let through from one it never looked at.
+                self._record_gate(
+                    rules.GateVerdict(
+                        verdict="allowed", binding=binding,
+                        evidence={"obligation": rules.VERB_MUST_FIRST,
+                                  "requires": rules.FIRST_ANSWER, "said_anything": False,
+                                  "exempt": "guidance_read"},
+                    ),
+                    name, {}, "allowed",
+                )
                 continue
             if binding.rounds >= binding.max_rounds:
                 continue  # bounded: it has had its say, let the turn proceed
@@ -13044,6 +13145,8 @@ class Agent:
             self._record_gate(verdict, name, args, "refused", escalated=True,
                               message=message)
             return _gate_outcome(message, decision="denied")
+        if isinstance(decision, Licensed):
+            return self._licensed_without_owner(verdict, name, args, decision)
         self._record_gate(verdict, name, args, "allowed", escalated=True,
                           message="owner approved this call")
         return None
@@ -13089,11 +13192,30 @@ class Agent:
             message = rules.OWNER_DENIED.format(rule=binding.name, tool=name)
             self._record_gate(verdict, name, args, "refused", escalated=True, message=message)
             return _gate_outcome(message, decision="denied")
+        if isinstance(decision, Licensed):
+            return self._licensed_without_owner(verdict, name, args, decision)
         binding.overridden = True
         self._record_gate(
             verdict, name, args, "allowed", escalated=True, message="owner allowed the exception"
         )
         return None
+
+    def _licensed_without_owner(
+        self, verdict: "rules.GateVerdict", name: str, args: dict, decision: Licensed
+    ) -> str:
+        """A rule asked the OWNER and an approver answered with a policy
+        instead of a card. Both approvers in this repo refuse to do that for a
+        rule (`ASKED_BY_RULE`), so this is the floor under an approver that does
+        not: nobody answered, so it fails toward restriction, and the record
+        says what happened — never "owner approved", which would be a decision
+        no human made."""
+        message = rules.OWNER_HELD.format(rule=verdict.binding.name, tool=name)
+        self._record_gate(
+            verdict, name, args, "refused", escalated=True,
+            message=f"no card was shown: the approver licensed it ({decision.policy}), "
+            "and a rule needs the owner's answer",
+        )
+        return _gate_outcome(message, decision="denied")
 
     def _record_gate(
         self,
@@ -13679,9 +13801,7 @@ class Agent:
             # No recorded status reads as not-ok: "saved" is said only where
             # the runtime's own verdict says the wrapper succeeded.
             ran_ok = getattr(result, "meta", {}).get("status") == tools.STATUS_OK
-            self._cardless.append(
-                _cardless_line(tool.name, args, licensed.policy, ran_ok=ran_ok)
-            )
+            self._cardless.add(tool.name, args, licensed.policy, ran_ok=ran_ok)
         return result
 
     _WRAPPER_META = {  # lang -> (filename, shebang)

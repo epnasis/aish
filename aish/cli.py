@@ -32,6 +32,7 @@ from . import plan as checklist
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
+    ASKED_BY_RULE,
     ASKED_BY_SHELL,
     ASKED_BY_WRITE,
     IDENTITY_SLOT,
@@ -807,7 +808,10 @@ def make_tool_approver(log, get_intent=None, get_gate=None):
     ) -> "bool | Licensed":
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         said = (get_intent() if get_intent else "") or ""
-        policy = (
+        # A rule holding the call for the owner is asking HIM: no policy may
+        # answer in his place (the same fence as server.approve_tool).
+        asked_by_rule = (get_gate() if get_gate else "") == ASKED_BY_RULE
+        policy = None if asked_by_rule else (
             recipients.OWNER_ONLY
             if recipients.owner_scoped_send(name, args)
             else vault_writes.owner_opted_write(name, args)

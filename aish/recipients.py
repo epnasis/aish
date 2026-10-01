@@ -124,7 +124,10 @@ def announce(args: dict, *, ran_ok: bool) -> str:
     """The sentence aish says to the owner after an owner-only mail went out
     with no card (#377): who it was addressed to and its subject, read off the
     arguments aish licensed. `ran_ok` False names the attempt instead."""
-    to = " ".join(str(args.get("to") or "").split())
+    raw = args.get("to") or ""
+    # `all_owner` accepts a list as well as a string; print it as addresses.
+    text = ", ".join(str(v) for v in raw) if isinstance(raw, list) else str(raw)
+    to = " ".join(text.split())
     subject = " ".join(str(args.get("subject") or "").split())
     if len(subject) > 120:
         subject = subject[:119] + "…"

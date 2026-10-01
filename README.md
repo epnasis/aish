@@ -581,8 +581,12 @@ thousands of entries without bloating the context.
    Whenever one runs, **aish itself** adds a line to the answer saying what
    changed and where — *"Saved to your vault without asking you:
    Japan/Japonia 2027 — Plan wycieczki rodzinnej (created)"* — rendered as
-   aish's voice, not the model's, and kept when the chat is reopened. The
-   model is told to make such changes only when you asked or agreed.
+   aish's voice, not the model's, and kept when the chat is reopened — also
+   when the turn was stopped or failed. Two cases it does not cover: a Retry
+   that replaces the turn hides it from the reopened chat, and a server restart
+   in the middle of the turn loses it. The model is told to make such changes
+   only when you asked or agreed. A rule of yours that says *ask me first*
+   always gets a card, even for a change that would otherwise need none.
    Auto-approval covers only a conservatively
    parsed set of read-only commands, and is **scoped to the project directory** —
    commands whose paths escape it (absolute, `~`, `..`, resolved symlinks) prompt

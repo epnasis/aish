@@ -202,6 +202,31 @@ def test_the_audit_line_names_the_policy_never_the_origin(vault, monkeypatch):
     assert log.records[0][1] == "auto (owner-opted vault write)"
 
 
+def test_a_rule_asking_first_gets_a_card_for_a_licensed_write(vault, monkeypatch):
+    """The owner's "ask me first" is HIS question: when the RULE gate is the one
+    asking, neither surface lets a policy answer in his place."""
+    from aish.agent import ASKED_BY_RULE
+    from aish.cli import make_tool_approver
+
+    _seed(vault)
+    args = {"action": "append", "note": "Tagged", "content": "x"}
+    assert vault_writes.owner_opted_write("obsidian_write", args)  # licensed otherwise
+    bridge = _Bridge()
+    approvers = server_module.make_web_approvers(
+        bridge, _FakeLog(), Path("/x/allow"), Path("/x/deny"),
+        ask_all=False, get_scope=lambda: (".", []),
+        trust_dir=lambda p: "", get_origin=lambda: "user", get_gate=lambda: ASKED_BY_RULE,
+    )
+    assert approvers[3]("obsidian_write", args) is False  # the card, denied by the fake
+    assert len(bridge.asked) == 1
+    prompted: list[str] = []
+    monkeypatch.setattr("builtins.input", lambda p="": prompted.append(p) or "n")
+    assert make_tool_approver(_FakeLog(), get_gate=lambda: ASKED_BY_RULE)(
+        "obsidian_write", args
+    ) is False
+    assert prompted, "the terminal must ask too"
+
+
 class TestFailsClosed:
     """Every uncertainty is a card. #356 is the scar for the other direction."""
 
