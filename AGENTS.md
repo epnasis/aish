@@ -42,6 +42,8 @@ Why the rule has no exception: this checkout may hold the owner's or another ses
 
 Merge back to main after tests pass, then remove the worktree. `make ship` always runs from this main checkout after merge — never from a worktree path, and never as a bare `uv tool install` (see Shipping).
 
+**A fix that comes from an owner session ships with a replay scenario mined from that session** (in the private config tree, `~/.config/aish/evals/<name>/` — never the repo, which is public; `aish-replay`); the baseline must reproduce the failure; the commit carries the one-line verdict + run-dir path, the issue/PR carries the table. `docs/replay.md`.
+
 ## Never type into a chat you did not create
 
 **A verification run MUST NOT send a message to a chat it did not start.** Use the isolated harness in `.claude/skills/verify/SKILL.md` (its own `state_dir`, port 8899); if a check genuinely needs the live server, click ＋ for a NEW chat first and drive only that. The port is not a defence — `scripts/aish-preview.sh` points preview at PROD's `AISH_STATE_DIR` deliberately, so :8788 writes the same sessions as :8787. On 2026-07-28 a verification run drove the live UI through Chrome while the browser was parked on the owner's own shopping chat and typed five probes into it; a chat has no way to delete a message, so they are permanent, they auto-retitled the chat, and days later they were still what the owner saw when the chat flagged itself as having something new (#201).
@@ -85,6 +87,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `usage.py`, `aish usage`, anything that reports or attributes token spend | `docs/token-accounting.md` |
 | `vocab.py`, `aish vocab`, **any list of words matched against page text, a control label, error text or a command name** | `docs/vocabularies.md` |
 | `export.py` | `docs/export-pdf.md` |
+| `replay.py`, `replay_driver.py`, `replay_checks.py`, `evals/`, `aish-replay` | `docs/replay.md` |
 
 **New rationale goes in the area's doc, never here.** This file spent a year as a decision log — a paragraph per issue — and grew past the 150k-char limit Claude Code warns at, which is the point where the whole thing stops being reliable context. `tests/test_claude_md_size.py` fails if it passes 40k. Add a line here only for a rule that applies to *every* task; everything else belongs in `docs/`.
 
