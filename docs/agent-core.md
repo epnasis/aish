@@ -135,7 +135,7 @@ The incident: mid-investigation into why a utility invoice's PDF total and the p
 
 **Command framing.** `run_command` surfaces `command_start` (cwd + command) and `command_end` (exit code / detached / interrupted) so a UI can draw a bounded terminal block (`TestCommandFraming`).
 
-**Mid-task steering.** The loop polls two get/drain callbacks at the top of each iteration so a `/cd` or a message typed during a long task is applied between steps (`TestMidTaskSteering`; the server side is in `docs/web-server.md`).
+**Mid-task steering.** The loop polls two get/drain callbacks at the top of each iteration so a `/cd` or a message typed during a long task is applied between steps — and a text-only answer drains the queue once more before it is logged, so a message typed while the answer was being written reopens the turn instead of missing it (the `_finish_stopped` wrap-up and a silent reply after a rejection do not drain; what they miss starts the next turn, joined): a held answer is dropped with `ANSWER_WITHHELD_FOR_MESSAGES`, an already-streamed one becomes an interim delivery stamped `delivered: true`, which replay keeps past the one-acknowledgement cap. A denial's text-only reply still lifts the stop gate, but with messages queued the task goes on with them instead of ending — they are his own steering, and every action still re-gates (`_answer_superseded`; `TestMidTaskSteering`; the server side is in `docs/web-server.md`).
 
 **Redaction reaches the live conversation too.** Scrubbing the log is the durable half; the running `agent.messages` must lose the same turn, identified by occurrence because the live message dicts hold no ids (`TestRedactTurn`).
 

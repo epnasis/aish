@@ -112,7 +112,11 @@ is about to do, it says so straight away — *"looks like there are leaks about 
 folding model, let me dig into that"* — as an ordinary message, before the next
 tool runs, not as a status line you have to go looking for. So a turn arrives
 as several short messages and then the answer, and you can redirect it
-mid-task (anything you type while it works is handed over between steps)
+mid-task (anything you type while it works is handed over between steps,
+shows in the chat as your own message, and is read before the turn ends —
+even when it arrives while the answer is being written; whatever is still
+waiting when a turn ends starts the next one together, not one at a time.
+The claude-max backend runs its own loop and only gets them at the next turn)
 instead of finding out at the end that it went the wrong way. Routine steps
 stay quiet: it speaks when there is something to say.
 

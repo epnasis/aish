@@ -3302,6 +3302,11 @@ function traceStep(step) {
     t.started += 1;
     traceRow(t, traceSvg("chat", "var(--blue)"), "You added", step.text || "")
       .row.classList.add("step-steer");
+    // His words also go where his words go. The row alone lived inside a card
+    // that collapses when the turn ends, so the message he typed left the queue
+    // strip and was then visible nowhere — it read as never sent. Drawn here,
+    // the one handler live and replay share, so both place it alike (L2).
+    if (step.text) addMsg("user steer", step.text);
     removeQueueChip(step.text);
     updateTraceHead(t);
     return;

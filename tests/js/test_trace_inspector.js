@@ -139,6 +139,7 @@ function world() {
   for (const id of SS_IDS) ids.set(id, fakeEl("div"));
   const toasts = [];
   const removed = [];
+  const bubbles = [];
   const sandbox = {
     document: { createElement: fakeEl, createTextNode: (t) => ({ tagName: "#text", textContent: t, children: [], className: "" }), activeElement: null },
     $: (id) => ids.get(id) || null,
@@ -148,6 +149,7 @@ function world() {
     SPINNER: "", TOOL_META: {}, traceSvg: () => "", fmtSecs: (s) => `${s}s`,
     updateTraceHead() {}, updateScrollHints() {}, measurePinnedTrace() {},
     releasePinnedTrace() {}, scrollToEnd() {}, removeQueueChip() {},
+    addMsg: (kind, text) => { bubbles.push({ kind, text }); return fakeEl("div"); },
     renderDiff: () => fakeEl("div"), renderErrorBox() {}, clampNote: () => fakeEl("div"),
     setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {},
     requestAnimationFrame() {},
@@ -169,7 +171,7 @@ function world() {
   load("// [STEP-SCREEN-START]", "// [STEP-SCREEN-END]");
   assert(typeof sandbox.traceStep === "function" && typeof sandbox.finishTrace === "function");
   assert(typeof sandbox.traceInspector === "function", "the inspector is not in [TRACE-CLOSE]");
-  return { sandbox, ids, toasts, removed, el: (id) => ids.get(id) };
+  return { sandbox, ids, toasts, removed, bubbles, el: (id) => ids.get(id) };
 }
 
 function rows(t) {
@@ -282,6 +284,21 @@ check("a finished card's rows name the steps they are, and live and cold agree",
   assert(!lt.el.querySelector(".trace-explain"), "no Full record door — rows open the detail directly");
   assert(!lt.inner.querySelector(".trace-notes"), "no worth-a-look strip on the card — it lives in the detail now");
   assert.equal(lt.dossierFetch, undefined, "finishTrace must not fetch");
+});
+
+check("a message he added mid-turn is his own bubble too, live and cold — not only a row in a card that collapses", () => {
+  // session-20260929-214924: the row was the only trace of it, the card
+  // collapsed at the end, and the message read as never sent.
+  const live = world();
+  liveTurn(live.sandbox);
+  live.sandbox.finishTrace();
+  const cold = world();
+  cold.sandbox.replaying = true;
+  coldTurn(cold.sandbox);
+  cold.sandbox.finishTrace();
+  for (const w of [live, cold]) {
+    assert.deepEqual(w.bubbles, [{ kind: "user steer", text: "hurry" }]);
+  }
 });
 
 check("a thinking row takes its number from the tool rows under it, and counts only where nothing is stamped", () => {

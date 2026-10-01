@@ -3865,6 +3865,89 @@ class TestMidTaskSteering:
         injected = [m for m in agent.messages if m.get("content") == "pivot now"]
         assert len(injected) == 1  # not re-appended on later steps
 
+    @staticmethod
+    def _queued_at(call: int, messages: list[str]):
+        """A drain that yields `messages` on its `call`-th poll, once."""
+        polls = {"n": 0}
+
+        def check_msgs():
+            polls["n"] += 1
+            return list(messages) if polls["n"] == call else []
+
+        return check_msgs
+
+    def test_a_message_queued_during_the_final_answer_reopens_the_turn(self, tmp_path):
+        """session-20260929-214924: two messages typed while the answer was
+        being written were not seen by it; the turn ended, the first ran as a
+        new task and the second was injected into THAT. Poll 1 is the loop top
+        before the only model call, poll 2 is the finished answer."""
+        delivered: list[str] = []
+        logged: list[dict] = []
+        steps: list[dict] = []
+        agent, chat = make_agent(
+            [model_says("here are the places"), model_says("places, pictures and links")],
+            cwd=str(tmp_path),
+            on_step=steps.append,
+            on_delivered=delivered.append,
+            check_pending_messages=self._queued_at(2, ["add pictures", "and links"]),
+        )
+        agent.on_message = logged.append
+        assert agent.run_task("show me places") == "places, pictures and links"
+        # The model was asked again, and read BOTH messages, in order, after
+        # its first answer.
+        assert len(chat.calls) == 2
+        second = [m.get("content") for m in chat.snapshots[1]]
+        assert second[-2:] == ["add pictures", "and links"]
+        assert [s["text"] for s in steps if s.get("kind") == "injected"] == [
+            "add pictures", "and links",
+        ]
+        # Unbound, the first answer had already streamed: it stays, as a
+        # delivery on the way, and only the last answer is the answer.
+        assert delivered == ["here are the places"]
+        answers = [m for m in logged if m.get("role") == "assistant"]
+        assert [m["content"] for m in answers] == [
+            "here are the places", "places, pictures and links",
+        ]
+        assert answers[0].get("interim") is True and not answers[1].get("interim")
+        # Stamped, so a cold replay keeps it past the one-delivery cap.
+        assert answers[0].get("delivered") is True and not answers[1].get("delivered")
+
+    def test_a_held_answer_is_withheld_when_messages_arrive_before_release(self, tmp_path):
+        """Bound by a rule, the draft has not reached him yet. It is dropped,
+        and the model told he never saw it — or it sends only what changed."""
+        from aish.agent import ANSWER_WITHHELD_FOR_MESSAGES
+
+        streamed: list[str] = []
+        logged: list[dict] = []
+        agent, chat = rules_agent(
+            tmp_path,
+            [model_says("draft without pictures"), model_says("complete, with pictures")],
+            rule_texts=(RULE_VERIFY_SATISFIED,),
+            on_token=streamed.append,
+            check_pending_messages=self._queued_at(2, ["add pictures"]),
+        )
+        agent.on_message = logged.append
+        assert agent.run_task("show me places") == "complete, with pictures"
+        assert "draft without pictures" not in "".join(streamed)
+        answers = [m["content"] for m in logged if m.get("role") == "assistant"]
+        assert answers == ["complete, with pictures"]
+        second = [m.get("content") for m in chat.snapshots[1]]
+        assert ANSWER_WITHHELD_FOR_MESSAGES in second[-2]
+        assert second[-1] == "add pictures"
+
+    def test_an_answer_with_nothing_queued_ends_the_turn(self, tmp_path):
+        polls = {"n": 0}
+
+        def check_msgs():
+            polls["n"] += 1
+            return []
+
+        agent, chat = make_agent(
+            [model_says("done")], cwd=str(tmp_path), check_pending_messages=check_msgs
+        )
+        assert agent.run_task("go") == "done"
+        assert len(chat.calls) == 1 and polls["n"] == 2
+
     def test_no_steering_callbacks_is_harmless(self, tmp_path):
         (tmp_path / "x").mkdir()
         agent, _ = make_agent(

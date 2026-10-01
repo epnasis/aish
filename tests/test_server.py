@@ -2087,6 +2087,36 @@ class TestStopAndQueue:
                 m.get("content") == "second task" for m in server.active.agent.messages
             )
 
+    def test_queued_messages_left_at_turn_end_start_together(self):
+        """session-20260929-214924: only the first queued message started the
+        next turn; the rest waited. Every plain message at the head goes in
+        one prompt, each chip retired by name; a `!` or `/` runs alone."""
+        from types import SimpleNamespace
+
+        from aish.server import WebServer
+
+        emitted: list[dict] = []
+        session = SimpleNamespace(
+            queue=[
+                ("give me pics", []),
+                ("and links", ["/up/a.png"]),
+                ("!ls", []),
+                ("after", []),
+            ],
+            bridge=SimpleNamespace(emit=lambda ev, record=True: emitted.append(ev)),
+        )
+        text, attachments = WebServer._take_queued_run(session)
+        assert text == "give me pics\n\nand links"
+        assert attachments == ["/up/a.png"]
+        assert [e["text"] for e in emitted if e["type"] == "dequeued"] == [
+            "give me pics", "and links",
+        ]
+        assert WebServer._take_queued_run(session) == ("!ls", [])
+        emitted.clear()
+        assert WebServer._take_queued_run(session) == ("after", [])
+        assert emitted == []  # a lone message's own echo retires its chip
+        assert session.queue == []
+
     def test_bang_command_queued_while_busy_runs_as_shell_not_injected(
         self, app_env, tmp_path
     ):

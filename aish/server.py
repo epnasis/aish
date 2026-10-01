@@ -1804,8 +1804,10 @@ output) is grouped into one collapsible activity trace per turn. Swiping the \
 transcript sideways pages through recent chats.
 - Several chats can be open at once; a task keeps running when the user \
 switches to another chat and its result is there when they switch back. \
-While you work, messages the user sends are QUEUED and run one after \
-another; the user can also press Stop to cancel your current task — a \
+While you work, messages the user sends reach you between steps, and \
+before your answer goes out: if one arrives while you write it, you get it \
+and answer again with it taken into account. The user can also press Stop \
+to cancel your current task — a \
 "(task stopped by user)" note means exactly that, so do not treat it as an \
 error.
 - The web UI WORKS OFFLINE for READING. Past conversations are mirrored to the \
@@ -3480,6 +3482,31 @@ class WebServer:
         # every synchronous repair above.
         await self._announce_objective(session)
 
+    @staticmethod
+    def _take_queued_run(session: Session) -> tuple[str, list[str]]:
+        """Pop the next turn's worth of queued messages: every plain message
+        at the head of the queue, joined into ONE prompt, so what he typed
+        while the last turn ran is read together rather than one turn each
+        with the rest left waiting. A `!` command or a slash command is its
+        own action and runs alone, in order — joined to prose it would stop
+        being one."""
+
+        def plain(item: tuple[str, list[str]]) -> bool:
+            return not item[0].startswith(("!", "/"))
+
+        if not plain(session.queue[0]):
+            return session.queue.pop(0)
+        run: list[tuple[str, list[str]]] = []
+        while session.queue and plain(session.queue[0]):
+            run.append(session.queue.pop(0))
+        if len(run) > 1:
+            # Each chip was drawn for one message; the joined prompt's echo
+            # matches none of them, so each is retired by name.
+            for text, _attachments in run:
+                session.bridge.emit({"type": "dequeued", "text": text}, record=False)
+        texts = [text for text, _attachments in run if text]
+        return "\n\n".join(texts), [a for _text, attachments in run for a in attachments]
+
     def _dequeue(self, client: Client, text: str) -> None:
         """Drop the first still-waiting message matching `text` (the client's
         queued-chip remove button). A running task is never affected.
@@ -4180,7 +4207,7 @@ class WebServer:
             await self._launch_retry(session, text)
             return
         if session.queue:
-            text, attachments = session.queue.pop(0)
+            text, attachments = self._take_queued_run(session)
             self._launch(session, text, attachments)
             return
         # Back to idle. The row goes to everyone; the `notice` is what makes it
