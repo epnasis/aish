@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -593,6 +594,44 @@ class TestTheRunCommand:
         monkeypatch.setattr(replay, "baseline_code", lambda ref, dest: dest.mkdir(
             parents=True) or "abc")
         assert replay.main(["run", str(SCENARIO), "--baseline-ref", "HEAD"]) == 2
+
+
+    def test_a_tool_build_reaches_the_candidate_only(self, tmp_path, monkeypatch, capsys):
+        corpus = _corpus(tmp_path)
+        monkeypatch.setattr(replay, "config_home", lambda: corpus)
+        monkeypatch.setattr(replay, "state_home", lambda: tmp_path / "no-state")
+        monkeypatch.setenv("AISH_REPLAY_HOME", str(tmp_path / "replays"))
+        monkeypatch.setattr(replay, "candidate_code", lambda repo=None: "abc")
+        monkeypatch.setattr(replay, "baseline_code", lambda ref, dest: dest.mkdir(
+            parents=True) or "abc")
+        launch = FakeLaunch({"baseline": _failing_log(tmp_path),
+                             "candidate": _passing_log(tmp_path)})
+        real = replay.run_batch
+        monkeypatch.setattr(replay, "run_batch", lambda *a, **kw: real(*a, **kw, launch=launch))
+        build = tmp_path / "trippy-build-bin"
+        build.mkdir()
+        # Same code and corpus on both arms: only the tool differs, and that is enough.
+        code = replay.main(["run", str(SCENARIO), "--runs", "1", "--baseline-ref", "HEAD",
+                            "--candidate-path", str(build),
+                            "--candidate-env", "TRIPPY_FLAVOUR={run}/x"])
+        assert code == 0
+        env = {c["arm"]: c["env"] for c in launch.calls}
+        assert env["candidate"]["PATH"].split(os.pathsep)[0] == str(build.resolve())
+        assert str(build.resolve()) not in env["baseline"].get("PATH", "")
+        assert env["candidate"]["TRIPPY_FLAVOUR"].endswith("/candidate/1/x")
+        assert "TRIPPY_FLAVOUR" not in env["baseline"]
+        assert f"PATH first {build.resolve()}" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("pair", ["AISH_STATE_DIR=/x", "PATH=/x", "PYTHONPATH=/x",
+                                      "NOEQUALS"])
+    def test_an_arm_may_not_set_what_the_runner_owns(self, tmp_path, monkeypatch, pair):
+        monkeypatch.setenv("AISH_REPLAY_HOME", str(tmp_path / "replays"))
+        assert replay.main(["run", str(SCENARIO), "--candidate-env", pair]) == 2
+
+    def test_an_arm_path_must_exist(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AISH_REPLAY_HOME", str(tmp_path / "replays"))
+        assert replay.main(["run", str(SCENARIO), "--candidate-path",
+                            str(tmp_path / "missing")]) == 2
 
 
 class TestReport:

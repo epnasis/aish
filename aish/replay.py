@@ -274,11 +274,15 @@ def launch_subprocess(argv: list[str], env: dict[str, str], cwd: Path, timeout_s
 
 
 def run_env(base: dict[str, str], run_dir: Path, code_root: Path,
-            scenario_env: dict[str, str]) -> dict[str, str]:
+            scenario_env: dict[str, str], arm_env: dict[str, str] | None = None,
+            path_first: Sequence[str] = ()) -> dict[str, str]:
     """The run's environment: the caller's, minus every AISH_* knob, plus ours."""
     env = {k: v for k, v in base.items() if not k.startswith("AISH_") and k != "PYTHONPATH"}
     env.update({k: base[k] for k in PASSTHROUGH_ENV if k in base})
     env.update({k: v.replace("{run}", str(run_dir)) for k, v in scenario_env.items()})
+    env.update({k: v.replace("{run}", str(run_dir)) for k, v in (arm_env or {}).items()})
+    if path_first:
+        env["PATH"] = os.pathsep.join([*path_first, env.get("PATH", "")])
     env.update({
         "AISH_CONFIG_HOME": str(run_dir / "config"),
         "AISH_STATE_DIR": str(run_dir / "state"),
@@ -316,6 +320,11 @@ class Arm:
     code_root: Path
     code: str  # what the code is, as recorded
     overlays: dict[str, Path]
+    # A tool under test is a binary on PATH, not aish code or a corpus file: an arm may
+    # put its own build first on PATH and set its own variables, so a TOOL change gets
+    # the same A/B as a code or skill change.
+    env: dict[str, str] = field(default_factory=dict)
+    path_first: tuple[str, ...] = ()
 
 
 def run_batch(scenario: Scenario, *, runs: int, arms: Sequence[Arm], corpus_source: Path,
@@ -337,7 +346,8 @@ def run_batch(scenario: Scenario, *, runs: int, arms: Sequence[Arm], corpus_sour
     (batch_dir / "batch.json").write_text(json.dumps({
         "scenario": scenario.name, "model": scenario.model, "runs": runs,
         "arms": [{"name": a.name, "code": a.code, "code_root": str(a.code_root),
-                  "overlays": {k: str(v) for k, v in a.overlays.items()}} for a in arms],
+                  "overlays": {k: str(v) for k, v in a.overlays.items()},
+                  "env": a.env, "path_first": list(a.path_first)} for a in arms],
         "corpus_source": str(corpus_source), "corpus_excluded": excluded,
         "corpus_tools": scenario.corpus_tools,
         "embeddings": str(embeddings_source) if embeddings else None,
@@ -371,7 +381,7 @@ def _one_run(scenario: Scenario, arm: Arm, run_dir: Path, snapshot: Path,
         "events_path": str(run_dir / "events.jsonl"),
     }
     (run_dir / "spec.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
-    env = run_env(environ, run_dir, arm.code_root, scenario.env)
+    env = run_env(environ, run_dir, arm.code_root, scenario.env, arm.env, arm.path_first)
     started = _now()
     result = launch([sys.executable, "-P", str(DRIVER), str(run_dir / "spec.json")], env,
                     run_dir / "cwd", scenario.timeout_s, run_dir / "driver.log")
@@ -380,7 +390,8 @@ def _one_run(scenario: Scenario, arm: Arm, run_dir: Path, snapshot: Path,
         "overlays": applied, "started": started, "ended": _now(),
         "exit_code": result.exit_code, "timed_out": result.timed_out,
         "env_set": sorted(k for k in env if k.startswith("AISH_") or k in scenario.env
-                          or k == "PYTHONPATH"),
+                          or k in arm.env or k == "PYTHONPATH"),
+        "path_first": list(arm.path_first),
     }, indent=2), encoding="utf-8")
 
 
@@ -523,7 +534,9 @@ def render_report(scenario: Scenario, batch: dict, results: list[RunResult], bat
     head = [f"replay {scenario.name} · {batch_dir.name} · model {batch.get('model')}"]
     for spec in batch.get("arms") or []:
         overlays = ", ".join(spec.get("overlays") or {}) or "no overlay"
-        head.append(f"{spec.get('name')}: code {str(spec.get('code'))[:60]} · {overlays}")
+        extra = "".join(f" · PATH first {p}" for p in spec.get("path_first") or [])
+        extra += "".join(f" · {k}={v}" for k, v in (spec.get("env") or {}).items())
+        head.append(f"{spec.get('name')}: code {str(spec.get('code'))[:60]} · {overlays}{extra}")
     done = " · ".join(f"{a} {sum(1 for r in by_arm[a] if not r.problem)} of {len(by_arm[a])} "
                       "complete" for a in arms)
     head.append(f"runs (interleaved): {done}")
@@ -595,6 +608,26 @@ def _parse_overlays(pairs: Sequence[str]) -> dict[str, Path]:
     return out
 
 
+def _parse_arm_env(pairs: Sequence[str], flag: str) -> dict[str, str]:
+    out = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise ReplayError(f"{flag} wants KEY=VALUE, got {pair!r}")
+        if key.startswith("AISH_") or key in ("PYTHONPATH", "PATH"):
+            raise ReplayError(f"{flag} may not set {key} — the runner owns it "
+                              "(use --baseline-path/--candidate-path for PATH)")
+        out[key] = value
+    return out
+
+
+def _parse_path_first(dirs: Sequence[str], flag: str) -> tuple[str, ...]:
+    for d in dirs:
+        if not Path(d).is_dir():
+            raise ReplayError(f"{flag} {d!r} is not a directory")
+    return tuple(str(Path(d).resolve()) for d in dirs)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     scenario = load_scenario(resolve_scenario(args.scenario))
     for binary in unisolated_commands(scenario):
@@ -603,13 +636,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     overlays = {**scenario.overlays, **_parse_overlays(args.candidate_overlay or [])}
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     batch_dir = replay_home() / scenario.name / stamp
-    candidate = Arm("candidate", REPO_ROOT, f"this tree {candidate_code()}", overlays)
+    candidate = Arm("candidate", REPO_ROOT, f"this tree {candidate_code()}", overlays,
+                    _parse_arm_env(args.candidate_env or [], "--candidate-env"),
+                    _parse_path_first(args.candidate_path or [], "--candidate-path"))
+    base_env = _parse_arm_env(args.baseline_env or [], "--baseline-env")
+    base_path = _parse_path_first(args.baseline_path or [], "--baseline-path")
+    tool_differs = (candidate.env, candidate.path_first) != (base_env, base_path)
     base_root = batch_dir.parent / f".{stamp}-baseline-code"
     sha = baseline_code(args.baseline_ref, base_root)
-    if sha == candidate_code().split()[0] and not overlays and "uncommitted" not in candidate.code:
+    if (sha == candidate_code().split()[0] and not overlays and not tool_differs
+            and "uncommitted" not in candidate.code):
         shutil.rmtree(base_root)
         raise ReplayError("baseline and candidate would run identical code and corpus")
-    baseline = Arm("baseline", base_root, f"{args.baseline_ref} {sha[:12]}", {})
+    baseline = Arm("baseline", base_root, f"{args.baseline_ref} {sha[:12]}", {}, base_env,
+                   base_path)
     try:
         run_batch(scenario, runs=args.runs or scenario.runs, arms=[baseline, candidate],
                   corpus_source=config_home(), embeddings_source=state_home() / "embeddings.json",
@@ -645,6 +685,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--candidate-overlay", action="append", metavar="PATH=FILE",
                      help="replace PATH (relative to the corpus) with FILE in the candidate arm")
     run.add_argument("--baseline-ref", default="main")
+    for arm in ("baseline", "candidate"):
+        run.add_argument(f"--{arm}-env", action="append", metavar="KEY=VALUE",
+                         help=f"set a variable in the {arm} arm only ({{run}} = the run dir)")
+        run.add_argument(f"--{arm}-path", action="append", metavar="DIR",
+                         help=f"put DIR first on PATH in the {arm} arm only — e.g. a "
+                              "directory holding the tool build under test")
     run.set_defaults(func=cmd_run)
     report = sub.add_parser("report", help="the report for one batch directory")
     report.add_argument("batch_dir")
