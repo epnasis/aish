@@ -2453,11 +2453,13 @@ def _skill_cli(args: list[str]) -> int:
         return 0
     if cmd == "approve" and rest:
         try:
-            dest = skill_import.install(rest[0], skills.GLOBAL_SKILLS_DIR)
+            dest, dropped = skill_import.install(rest[0], skills.GLOBAL_SKILLS_DIR)
         except skill_import.SkillImportError as exc:
             print(f"error: {exc}")
             return 1
         print(f"installed {rest[0]} → {dest}")
+        for flag in skill_import.keywords_flag(dropped):
+            print(f"  {_plain(flag)}")
         return 0
     if cmd == "discard" and rest:
         ok = skill_import.discard(rest[0])

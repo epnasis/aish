@@ -97,8 +97,9 @@ class TestQuarantine:
         assert skill_import.pending(qroot) == ["myskill"]
         # install moves it into the skills dir and clears the quarantine
         skills_dir = tmp_path / "skills"
-        installed = skill_import.install("myskill", skills_dir, root=qroot)
+        installed, dropped = skill_import.install("myskill", skills_dir, root=qroot)
         assert (installed / "SKILL.md").exists()
+        assert dropped == []
         assert skill_import.pending(qroot) == []
 
     def test_stage_to_disk_flags_risky(self, tmp_path):
@@ -115,6 +116,40 @@ class TestQuarantine:
         assert skill_import.discard("myskill", root=qroot) is True
         assert skill_import.pending(qroot) == []
         assert skill_import.discard("gone", root=qroot) is False
+
+    def test_stage_to_disk_drops_non_english_keywords_and_flags_them(self, tmp_path):
+        """#444: an import is a keyword writer. The quarantine holds what will
+        install, so the drop happens before review and the review says so."""
+        make_repo(tmp_path / "src")
+        manifest = tmp_path / "src" / "myskill" / "SKILL.md"
+        manifest.write_text(
+            "---\nname: myskill\ndescription: Użyj przy imporcie\n"
+            "keywords: import, płatność, qrencode\n---\nZrób to.\n"
+        )
+        qroot = tmp_path / "q"
+        _, dest, flags = skill_import.stage_to_disk(str(tmp_path / "src"), "myskill", root=qroot)
+        assert (dest / "SKILL.md").read_text() == (
+            "---\nname: myskill\ndescription: Użyj przy imporcie\n"
+            "keywords: import, qrencode\n---\nZrób to.\n"
+        )  # only the keywords line changed; description and body untouched
+        assert "SKILL.md: keywords not English, not installed: płatność" in flags
+
+    def test_install_cleans_a_hand_edited_quarantine(self, tmp_path):
+        make_repo(tmp_path / "src")
+        qroot = tmp_path / "q"
+        _, dest, _ = skill_import.stage_to_disk(str(tmp_path / "src"), "myskill", root=qroot)
+        (dest / "SKILL.md").write_text(
+            "---\nname: myskill\ndescription: d\nkeywords: zażółć\n---\nbody\n"
+        )
+        installed, dropped = skill_import.install("myskill", tmp_path / "skills", root=qroot)
+        assert dropped == ["zażółć"]
+        assert (installed / "SKILL.md").read_text() == (
+            "---\nname: myskill\ndescription: d\n---\nbody\n"
+        )
+
+    def test_an_english_manifest_is_byte_identical(self):
+        text = "---\r\nname: s\r\nkeywords: a,  b\r\n---\r\nbody with zażółć\r\n"
+        assert skill_import.english_keywords(text) == (text, [])
 
     def test_install_missing_errors(self, tmp_path):
         with pytest.raises(skill_import.SkillImportError, match="no staged skill"):

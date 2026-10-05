@@ -16116,3 +16116,133 @@ class TestNoVisionNote:
     def test_other_producers_are_not_told_to_paste_a_line_they_never_gave(self):
         note = agent_module.TOOL_MEDIA_UNDELIVERABLE.format(tools="read_pdf", count=1, paste="")
         assert "paste" not in note
+
+
+class TestKeywordsAreEnglish:
+    """#444: knowledge keywords are English-only. The instruction is the root
+    cause, so every surface that asks for keywords says MUST + English; the
+    save-time backstop then drops a keyword with a non-English letter and the
+    TOOL RESULT names it, so the acting model can restate it in English."""
+
+    @staticmethod
+    def _call(tool, **arguments):
+        return SimpleNamespace(function=SimpleNamespace(name=tool, arguments=arguments))
+
+    def test_every_instruction_surface_asks_for_english(self):
+        from aish.agent import LEARN_PROMPT, SYSTEM_PROMPT_TEMPLATE
+        from aish.curate import judge_prompt
+
+        schemas = {s["function"]["name"]: s["function"] for s in tools_module.TOOL_SCHEMAS}
+        descs = [
+            schemas[tool]["parameters"]["properties"]["keywords"]["description"]
+            for tool in ("remember", "create_skill")
+        ]
+        for text in (*descs, SYSTEM_PROMPT_TEMPLATE, LEARN_PROMPT):
+            assert "every language the user types" not in text
+            flat = " ".join(text.split())
+            assert "MUST write them in English" in flat or "MUST write in English" in flat
+        for desc in descs:
+            assert "qrencode" in desc  # the brand that stays, by example
+        entry = SimpleNamespace(kind="memory", name="e", description="d",
+                                keywords=[], pinned=False, body="b")
+        assert "keywords in ENGLISH" in judge_prompt(entry, None, "missing")
+
+    def test_remember_drops_and_the_result_says_which(self, tmp_path):
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._call(
+                "remember", note="Energy bills arrive via e-kartoteka", name="power-bill",
+                keywords="invoice, prąd, e-kartoteka")]),
+             model_says("noted")],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("remember it")
+        text = (skills_module.GLOBAL_MEMORY_DIR / "power-bill.md").read_text()
+        assert "keywords: invoice, e-kartoteka\n" in text
+        result = tool_messages(agent.messages)[0]["content"]
+        assert result.startswith("remembered (power-bill)")
+        assert "Keywords NOT stored (not English): prąd." in result
+        assert "MUST be English" in result
+
+    def test_create_skill_drops_and_the_result_says_which(self, tmp_path):
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._call(
+                "create_skill", name="qr-payment", description="Use when paying by QR",
+                content="1. qrencode", keywords="qr, płatność, qrencode")]),
+             model_says("done")],
+            cwd=str(tmp_path),
+            approve_write=lambda plan: True,
+        )
+        agent.run_task("save it")
+        text = (skills_module.GLOBAL_SKILLS_DIR / "qr-payment.md").read_text()
+        assert "keywords: qr, qrencode\n" in text
+        result = tool_messages(agent.messages)[0]["content"]
+        assert result.startswith("Saved skill 'qr-payment'")
+        assert "Keywords NOT stored (not English): płatność." in result
+
+    def test_an_english_save_carries_no_note(self, tmp_path):
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._call(
+                "create_skill", name="qr-payment", description="Use when paying by QR",
+                content="1. qrencode", keywords="qr, przelew")]),
+             model_says("done")],
+            cwd=str(tmp_path),
+            approve_write=lambda plan: True,
+        )
+        agent.run_task("save it")
+        assert "NOT stored" not in tool_messages(agent.messages)[0]["content"]
+
+    def test_a_held_skill_write_says_what_would_be_dropped(self, tmp_path):
+        # The held path is re-proposed: the model must learn its keywords
+        # were cleaned BEFORE it proposes them again, and nothing was written.
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._call(
+                "create_skill", name="qr-payment", description="Use when paying by QR",
+                content="1. qrencode", keywords="qr, płatność")]),
+             model_says("ok")],
+            cwd=str(tmp_path),
+            approve_write=lambda plan: agent_module.Approved("make it shorter"),
+        )
+        agent.run_task("save it")
+        assert not (skills_module.GLOBAL_SKILLS_DIR / "qr-payment.md").exists()
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "Keywords that would NOT be stored (not English): płatność." in result
+        assert "Keywords NOT stored" not in result
+
+    def test_an_update_whose_every_keyword_is_dropped_keeps_the_old_line(self, tmp_path):
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._call(
+                "remember", note="new fact", name="power-bill", keywords="prąd, rachunek")]),
+             model_says(tool_calls=[self._call(
+                "remember", note="newer fact", name="power-bill", keywords="zażółć")]),
+             model_says("ok")],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("remember it")
+        text = (skills_module.GLOBAL_MEMORY_DIR / "power-bill.md").read_text()
+        assert "keywords: rachunek\n" in text and "newer fact" in text
+        result = tool_messages(agent.messages)[1]["content"]
+        assert "The entry's existing keywords were kept." in result
+
+    def test_an_import_drops_shows_it_in_review_and_says_so(self, tmp_path):
+        skill = tmp_path / "repo" / "myskill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: myskill\ndescription: Use when importing\n"
+            "keywords: import, płatność\n---\nDo it.\n"
+        )
+        reviewed = {}
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._call(
+                "import_skill", repo=str(tmp_path / "repo"), path="myskill")]),
+             model_says("done")],
+            cwd=str(tmp_path),
+            approve_import=lambda **kw: reviewed.update(kw) or True,
+        )
+        agent.run_task("import it")
+        installed = (skills_module.GLOBAL_SKILLS_DIR / "myskill" / "SKILL.md").read_text()
+        assert "keywords: import\n" in installed
+        # what was reviewed is exactly what installed, and the review said why
+        [manifest] = [f for f in reviewed["files"] if f["path"] == "SKILL.md"]
+        assert manifest["content"] == installed
+        assert "SKILL.md: keywords not English, not installed: płatność" in reviewed["flags"]
+        assert "not installed: płatność" in tool_messages(agent.messages)[0]["content"]
