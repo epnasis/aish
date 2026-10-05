@@ -180,6 +180,19 @@ class TestHonestAboutWhatItCannotSay:
         assert session.recorded is False
         assert usage.NOT_RECORDED in usage.render_session(session)
 
+    def test_a_call_that_reported_no_usage_has_no_prompt_count(self):
+        """The writer records zeros when the provider sent nothing (#444): the
+        one reading of a prompt count that replay and this report share must
+        hand that back as absent, while the spend totals keep their 0."""
+        detail = backends.usage_detail(backends.INPUT_INCLUDES_CACHE, input=812, output=3)
+        assert usage.recorded_input({"tokens": [812, 3], "usage": detail}) == 812
+        assert usage.recorded_input({"tokens": [640, 3]}) == 640  # pre-detail log
+        assert usage.recorded_input({"tokens": [0, 0]}) is None
+        assert usage.recorded_input({}) is None
+        session = usage.SessionUsage(name="s", path=None)  # type: ignore[arg-type]
+        call = usage._call_from(session, {}, {"tokens": [0, 0]}, 1)
+        assert call.input == 0
+
     def test_a_session_with_no_model_calls_is_not_flagged_as_unrecorded(self, tmp_path):
         """Nothing happened is a different fact from nothing was recorded."""
         path = write_log(tmp_path, [message("user", "hi", model_call=0)])

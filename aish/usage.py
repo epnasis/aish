@@ -287,6 +287,26 @@ def _fixed_floor(session: SessionUsage, step: dict, path: Path) -> None:
     session.menu_state = PURGED if size is None else RECORDED
 
 
+def recorded_input(step: dict) -> int | None:
+    """One `reasoning` step's prompt tokens as the provider reported them, or
+    None when it reported none.
+
+    The detail is authoritative where it exists: `tokens[0]` means three
+    different things across the three backends, and only `semantics` says
+    which. Falling back to it is honest for logs written before the split was
+    kept, and those are exactly the logs whose units are ambiguous.
+
+    A zero is NOT a count. `agent._usage` writes zeros when the provider sent
+    no usage, `backends.usage_detail` drops zero-valued keys, and a stream aish
+    stopped early records `tokens: [0, 0]` — so 0 here only ever means "nothing
+    was reported", and a reader that wants that absence must not see a 0.
+    """
+    tokens = step.get("tokens") or [0, 0]
+    detail = step.get("usage") or {}
+    value = int(detail.get("input") or (tokens[0] if tokens else 0) or 0)
+    return value or None
+
+
 def _call_from(session: SessionUsage, record: dict, step: dict, number: int) -> Call:
     tokens = step.get("tokens") or [0, 0]
     detail = step.get("usage") or {}
@@ -296,11 +316,7 @@ def _call_from(session: SessionUsage, record: dict, step: dict, number: int) -> 
         number=number,
         provider=session.provider,
         model=session.model,
-        # The detail is authoritative where it exists: `tokens[0]` means three
-        # different things across the three backends, and only `semantics` says
-        # which. Falling back to it is honest for logs written before the split
-        # was kept, and those are exactly the logs whose units are ambiguous.
-        input=int(detail.get("input") or (tokens[0] if tokens else 0)),
+        input=recorded_input(step) or 0,
         output=int(detail.get("output") or (tokens[1] if len(tokens) > 1 else 0)),
         cached=int(detail.get("cached") or detail.get("cache_read") or 0),
         semantics=str(detail.get("semantics") or ""),
