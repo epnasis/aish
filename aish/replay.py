@@ -6,8 +6,8 @@ report states raw counts. `docs/replay.md` is the area doc: why each piece is
 shaped this way, and the table of what is isolated and what is still shared.
 
     aish-replay run <name-or-path> [--runs N] [--candidate-overlay PATH=FILE ...]
-                                 [--baseline-ref REF]
-    aish-replay report <batch-dir> [--full]
+                                 [--baseline-ref REF] [--window TOKENS]
+    aish-replay report <batch-dir> [--full | --json] [--window TOKENS]
     aish-replay check <session.jsonl> --scenario <name-or-path>
 """
 
@@ -30,9 +30,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import files, replay_checks
+from . import backends, files, replay_checks
 from .paths import config_home, state_home
-from .replay_checks import CheckFn, RunRecord, Verdict
+from .replay_checks import CheckFn, RunContext, RunRecord, Verdict
+from .usage import LOCAL_WINDOW_TOKENS, _percentile, human
 
 DEFAULT_MODEL = "local:mlx-community/Qwen3.6-35B-A3B-8bit"
 DEFAULT_RUNS = 3
@@ -408,6 +409,9 @@ class RunResult:
     verdicts: list[Verdict]
     counts: dict[str, int | None]
     problem: str | None  # why the run cannot be read as a complete replay
+    #: What each model call was handed (#444); None when there was no single
+    #: session log to read it from.
+    context: RunContext | None = None
 
 
 def _events(run_dir: Path) -> list[dict]:
@@ -453,7 +457,7 @@ def read_run(run_dir: Path, arm: str, n: int, checks: dict[str, CheckFn]) -> Run
                     f"({problem}); {v.evidence}") for v in verdicts]
     counts = replay_checks.counts(record)
     counts["cards_raised"] = sum(1 for e in events if e.get("type") == "card")
-    return RunResult(arm, n, verdicts, counts, problem)
+    return RunResult(arm, n, verdicts, counts, problem, replay_checks.read_context(sessions[0]))
 
 
 def _json(path: Path) -> dict:
@@ -526,8 +530,125 @@ def withheld_reason(scenario: Scenario, baseline: list[RunResult]) -> str | None
     return None
 
 
+def context_summary(contexts: Sequence[RunContext], window: int) -> dict:
+    """What the model calls of these runs were handed, pooled call by call (#444).
+
+    Under the reader law of `docs/token-accounting.md`: a fact that was not
+    recorded is COUNTED as not recorded and its median is ABSENT, never 0;
+    tokens come only from the provider and chars only from the brief, and the
+    two are never added or converted. Medians and p95 are `aish usage`'s own
+    (`usage._percentile`), so the replay and the usage report say the same thing
+    about the same calls. A pool whose counts carry more than one unit label
+    gets no median and no overflow count — those would add quantities the
+    provider counted differently.
+    """
+    calls = sum(c.calls for c in contexts)
+    tokens = [t for c in contexts for t in c.prompt_tokens]
+    units = sorted({u for c in contexts for u in c.token_semantics})
+    out: dict = {"calls": calls}
+    prompt: dict = {"recorded": len(tokens),
+                    "not_recorded": sum(c.tokens_absent for c in contexts)}
+    if units:
+        prompt["semantics"] = units
+    if len(units) == 1:
+        prompt["median"] = _percentile(tokens, 0.5)
+        prompt["p95"] = _percentile(tokens, 0.95)
+        out["over_window"] = {"window": window, "calls": sum(t > window for t in tokens),
+                              "of": len(tokens)}
+    out["prompt_tokens"] = prompt
+    system = [s for c in contexts for s in c.system_chars]
+    out["system_chars"] = {"recorded": len(system),
+                           "not_recorded": sum(c.system_absent for c in contexts),
+                           **_median_max(system)}
+    menu = [m for c in contexts for m in c.menu_chars]
+    out["menu_chars"] = {"recorded": len(menu), "purged": sum(c.menu_purged for c in contexts),
+                         "not_recorded": sum(c.menu_missing for c in contexts),
+                         **_median_max(menu)}
+    tools = [t for c in contexts for t in c.tools]
+    out["tools"] = {"recorded": len(tools),
+                    "not_recorded": sum(c.tools_absent for c in contexts),
+                    **({"min": min(tools), "max": max(tools)} if tools else {})}
+    return out
+
+
+def _median_max(values: list[int]) -> dict:
+    return {"median": _percentile(values, 0.5), "max": max(values)} if values else {}
+
+
+#: `docs/token-accounting.md`: Ollama's `prompt_eval_count` leaves out the prefix
+#: it served from its KV cache, so a count in that unit is a floor.
+_KV_REUSE_NOTE = ("input_excludes_kv_reuse leaves out the prefix served from the KV cache: "
+                  "these counts, and the over-window count, are floors")
+
+
+def _context_line(label: str, summary: dict) -> list[str]:
+    """One arm (or one run) on one line, because the report is capped and the
+    evidence lines share the cap. Every absent figure is said in words."""
+    calls = summary["calls"]
+    if not calls:
+        return [f"{label}: no model call recorded"]
+    prompt = summary["prompt_tokens"]
+    absent = prompt["not_recorded"]
+    if not prompt["recorded"]:
+        tokens = f"tokens not recorded on any of {calls} calls"
+    elif "median" not in prompt:
+        tokens = f"tokens in mixed units ({', '.join(prompt['semantics'])}): not combined"
+    else:
+        tokens = (f"tokens median {human(prompt['median'])} p95 {human(prompt['p95'])} "
+                  f"{prompt['semantics'][0]}"
+                  + (f", not recorded on {absent} of {calls}" if absent else ""))
+    over = summary.get("over_window")
+    if over is not None:
+        overflow = f"over {over['window']:,}: {over['calls']} of {over['of']}"
+    else:
+        overflow = "over window: " + ("not combined" if prompt["recorded"] else "not recorded")
+    cells = [f"{label}, {calls} calls", tokens, overflow]
+    for name, key in (("sys", "system_chars"), ("menu", "menu_chars")):
+        part = summary[key]
+        gone = [f"{part[k]} {k.replace('_', ' ')}" for k in ("purged", "not_recorded")
+                if part.get(k)]
+        if "median" not in part:
+            cells.append(f"{name} not recorded")
+        else:
+            cells.append(f"{name} {human(part['median'])}/{human(part['max'])}"
+                         + (f" ({', '.join(gone)})" if gone else ""))
+    tools = summary["tools"]
+    if "min" not in tools:
+        cells.append("tools not recorded")
+    else:
+        span = tools["min"] if tools["min"] == tools["max"] else f"{tools['min']}-{tools['max']}"
+        cells.append(f"tools {span}")
+    lines = [" · ".join(cells)]
+    if backends.INPUT_EXCLUDES_KV_REUSE in prompt.get("semantics", []):
+        lines.append(f"  {_KV_REUSE_NOTE}")
+    return lines
+
+
+def _context_rows(by_arm: dict[str, list[RunResult]], shown: Sequence[str], window: int,
+                  *, full: bool) -> list[str]:
+    """Pooled over each arm's COMPLETE runs: a run that did not finish made
+    fewer calls than the scenario asks for, and folding it in would move the
+    arm's figures for a reason nobody could see. --full adds every run."""
+    rows = ["context per model call (complete runs pooled; sys/menu = chars median/max):"]
+    for arm in shown:
+        complete = [r.context for r in by_arm[arm] if not r.problem and r.context is not None]
+        if not complete:
+            rows.append(f"{arm}: no complete run to read")
+        else:
+            label = f"{arm} {len(complete)} run{'s' * (len(complete) != 1)}"
+            rows += _context_line(label, context_summary(complete, window))
+        if full:
+            for r in by_arm[arm]:
+                if r.context is None:
+                    rows.append(f"  {r.arm[0]}{r.n}: no single session log to read")
+                    continue
+                rows += ["  " + line for line in _context_line(
+                    f"{r.arm[0]}{r.n}", context_summary([r.context], window))]
+    return rows
+
+
 def render_report(scenario: Scenario, batch: dict, results: list[RunResult], batch_dir: Path,
-                  *, full: bool = False) -> str:
+                  *, full: bool = False, window: int = LOCAL_WINDOW_TOKENS) -> str:
     by_arm = {arm: [r for r in results if r.arm == arm] for arm in ARMS}
     arms = [a for a in ARMS if by_arm[a]]
     reason = withheld_reason(scenario, by_arm["baseline"]) if "candidate" in arms else None
@@ -563,6 +684,7 @@ def render_report(scenario: Scenario, batch: dict, results: list[RunResult], bat
                 and r.arm in shown]
     if problems:
         rows.append("incomplete: " + "; ".join(problems))
+    rows += [""] + _context_rows(by_arm, shown, window, full=full)
 
     body = "\n".join(head + [""] + rows)
     if full:
@@ -582,16 +704,59 @@ def render_report(scenario: Scenario, batch: dict, results: list[RunResult], bat
                 first = failing[0][1].evidence[:EVIDENCE_IN_REPORT]
                 evidence.append(f"{name} [{runs}] {first}")
     lines: list[str] = []
+    # Room for the omission note at its longest, so the note itself is never cut.
+    reserve = len(_omitted_note(len(evidence), batch_dir)) + 2
     for line in evidence:
         candidate = "\n".join([body, "", "evidence (first failures):"] + lines + [line])
-        if len(candidate) + 60 > REPORT_CAP:
+        if len(candidate) + reserve > REPORT_CAP:
             break
         lines.append(line)
     tail = ["", "evidence (first failures):"] + lines if lines else []
     omitted = len(evidence) - len(lines)
     if omitted:
-        tail.append(f"({omitted} more evidence lines: aish-replay report {batch_dir} --full)")
-    return "\n".join([body] + tail)[:REPORT_CAP] + "\n"
+        note = _omitted_note(omitted, batch_dir)
+        if len("\n".join([body] + tail + [note])) >= REPORT_CAP:
+            note = _omitted_note(omitted, None)  # the pointer whole, without the path
+        tail.append(note)
+    return "\n".join([body] + tail)[:REPORT_CAP - 1] + "\n"
+
+
+def _omitted_note(omitted: int, batch_dir: Path | None) -> str:
+    where = f"aish-replay report {batch_dir} --full" if batch_dir else "report --full"
+    return f"({omitted} more evidence lines: {where})"
+
+
+def json_report(scenario: Scenario, batch: dict, results: list[RunResult], batch_dir: Path,
+                *, window: int = LOCAL_WINDOW_TOKENS) -> dict:
+    """The same report for anything that is not a terminal, every run whole.
+
+    It withholds exactly what the text withholds (R4): no candidate key at all
+    when the baseline did not reproduce the target. A figure that could not be
+    taken is an absent key or a `not_recorded` count, never a 0."""
+    by_arm = {arm: [r for r in results if r.arm == arm] for arm in ARMS}
+    arms = [a for a in ARMS if by_arm[a]]
+    reason = withheld_reason(scenario, by_arm["baseline"]) if "candidate" in arms else None
+    shown = ["baseline"] if reason else arms
+    out: dict = {"scenario": scenario.name, "batch": str(batch_dir), "model": batch.get("model"),
+                 "window": window, "targets": scenario.targets, "withheld": reason, "arms": {}}
+    for arm in shown:
+        complete = [r.context for r in by_arm[arm] if not r.problem and r.context is not None]
+        out["arms"][arm] = {
+            "checks": {name: dict(zip(("passed", "failed", "could_not_tell"),
+                                      _tally(by_arm[arm], name), strict=True))
+                       for name in scenario.checks},
+            "complete_runs": len(complete),
+            # Pooled over complete runs only, as in the text (`_context_rows`).
+            **({"context": context_summary(complete, window)} if complete else {}),
+            "runs": [{
+                "n": r.n, "problem": r.problem, "counts": r.counts,
+                "verdicts": [{"check": v.check, "passed": v.passed, "evidence": v.evidence}
+                             for v in r.verdicts],
+                **({"context": context_summary([r.context], window)}
+                   if r.context is not None else {}),
+            } for r in by_arm[arm]],
+        }
+    return out
 
 
 # --- CLI ---------------------------------------------------------------------------
@@ -656,13 +821,18 @@ def cmd_run(args: argparse.Namespace) -> int:
                   batch_dir=batch_dir)
     finally:
         shutil.rmtree(base_root, ignore_errors=True)
-    print(render_report(*read_batch(batch_dir), batch_dir), end="")
+    print(render_report(*read_batch(batch_dir), batch_dir, window=args.window), end="")
     return 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:
     batch_dir = Path(args.batch_dir)
-    print(render_report(*read_batch(batch_dir), batch_dir, full=args.full), end="")
+    if args.json:
+        print(json.dumps(json_report(*read_batch(batch_dir), batch_dir, window=args.window),
+                         indent=2))
+        return 0
+    print(render_report(*read_batch(batch_dir), batch_dir, full=args.full, window=args.window),
+          end="")
     return 0
 
 
@@ -674,6 +844,18 @@ def cmd_check(args: argparse.Namespace) -> int:
     counts = replay_checks.counts(record)
     print("counts: " + ", ".join(f"{k} {'?' if v is None else v}" for k, v in counts.items()))
     return 0
+
+
+_WINDOW_HELP = ("count model calls whose RECORDED prompt tokens exceed this (default "
+                f"{LOCAL_WINDOW_TOKENS:,}, `aish usage`'s: a default, not a fact about any "
+                "backend)")
+
+
+def _window(text: str) -> int:
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("the window is a positive number of tokens")
+    return value
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -691,10 +873,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         run.add_argument(f"--{arm}-path", action="append", metavar="DIR",
                          help=f"put DIR first on PATH in the {arm} arm only — e.g. a "
                               "directory holding the tool build under test")
+    run.add_argument("--window", type=_window, default=LOCAL_WINDOW_TOKENS, metavar="TOKENS",
+                     help=_WINDOW_HELP)
     run.set_defaults(func=cmd_run)
     report = sub.add_parser("report", help="the report for one batch directory")
     report.add_argument("batch_dir")
     report.add_argument("--full", action="store_true")
+    report.add_argument("--json", action="store_true", help="the report as JSON, every run whole")
+    report.add_argument("--window", type=_window, default=LOCAL_WINDOW_TOKENS, metavar="TOKENS",
+                        help=_WINDOW_HELP)
     report.set_defaults(func=cmd_report)
     check = sub.add_parser("check", help="apply a scenario's checks to an existing session log")
     check.add_argument("session")

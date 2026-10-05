@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from aish import replay, replay_checks, replay_driver
+from aish import backends, evidence, replay, replay_checks, replay_driver
 from aish.replay_checks import RunRecord, Verdict
 from tests.fixtures.replay.make_fixture import generate
 
@@ -343,8 +343,9 @@ class FakeLaunch:
     run's artifacts the way the driver would."""
 
     def __init__(self, logs: dict[str, Path], mutate_corpus: bool = False,
-                 exit_code: int = 0):
+                 exit_code: int = 0, menus: tuple[str, ...] = ()):
         self.logs, self.mutate, self.exit_code = logs, mutate_corpus, exit_code
+        self.menus = menus  # bytes the run's evidence store holds, as the agent puts them
         self.calls: list[dict] = []
 
     def __call__(self, argv, env, cwd, timeout_s, log):
@@ -364,6 +365,8 @@ class FakeLaunch:
         Path(spec["events_path"]).write_text(
             "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
         shutil.copyfile(self.logs[arm], Path(spec["state_dir"]) / "session-1.jsonl")
+        for menu in self.menus:
+            evidence.put(menu, spec["state_dir"])
         log.write_text("", encoding="utf-8")
         return replay.LaunchResult(self.exit_code, False)
 
@@ -707,3 +710,199 @@ class TestReport:
         batch = _batch(tmp_path, FakeLaunch(_both_failing(tmp_path)))
         text = replay.render_report(*replay.read_batch(batch), batch, full=True)
         assert "b1 images_from_evidence (pass)" in text
+
+
+# --- context per model call (#444) ------------------------------------------------
+
+BIG_MENU, SMALL_MENU = "m" * 3000, "s" * 1000
+WRONG_PARTY = call(1, "run_command",
+                   {"command": "trippy search --adults 1 --children 9,5 --single-unit"})
+
+
+def brief(system: list[int] | None, menu: str = "", count: int = 26) -> dict:
+    """A `brief` as `Agent._record_brief` writes it; `system=None` is the #239
+    stratum that recorded no system half, `menu=""` a brief with no digest."""
+    step: dict = {"kind": "brief", "model_call": 1,
+                  "tools": {"digest": evidence.digest_of(menu) if menu else "",
+                            "count": count, "names": []}}
+    if system is not None:
+        step["system"] = [{"at": i, "chars": c, "digest": f"d{i}"} for i, c in enumerate(system)]
+    return {"kind": "trace", "step": step}
+
+
+def reasoning(n: int, prompt: int | None = None,
+              semantics: str | None = backends.INPUT_INCLUDES_CACHE) -> dict:
+    """`prompt=None` is a provider that reported nothing: the writer's zeros."""
+    step: dict = {"kind": "reasoning", "model_call": n, "tokens": [prompt or 0, 40]}
+    if prompt and semantics:
+        step["usage"] = backends.usage_detail(semantics, input=prompt, output=40)
+    return {"kind": "trace", "step": step}
+
+
+def _context_log(tmp_path, name: str, records: list[dict], menus: tuple[str, ...] = ()
+                 ) -> Path:
+    state = tmp_path / name
+    for menu in menus:
+        evidence.put(menu, state)
+    return write_log(state / "session-1.jsonl", records)
+
+
+def _arm_log(tmp_path, name: str, menu: str, prompts: list[int]) -> Path:
+    """A run that fails the target, so both arms are shown, with one brief and
+    one reasoning record per prompt count."""
+    return write_log(tmp_path / f"{name}.jsonl", [
+        TASK, brief([1000, 200], menu), *[reasoning(i + 1, p) for i, p in enumerate(prompts)],
+        WRONG_PARTY, result(1, "run_command"), answer("fine"), END])
+
+
+class TestContextPerModelCall:
+    """What each model call was handed, as recorded — never a 0 for an absence,
+    never chars and tokens in one figure (`docs/token-accounting.md`)."""
+
+    def test_each_call_is_joined_to_the_brief_in_force(self, tmp_path):
+        path = _context_log(tmp_path, "state", [
+            TASK, brief([1000, 200], BIG_MENU), reasoning(1, 40_000), reasoning(2, 70_000),
+            brief([1000, 400], BIG_MENU), reasoning(1, 65_000), reasoning(2), END,
+        ], menus=(BIG_MENU,))
+        context = replay_checks.read_context(path)
+        assert context.calls == 4
+        assert context.prompt_tokens == [40_000, 70_000, 65_000]
+        assert context.tokens_absent == 1
+        assert context.system_chars == [1200, 1200, 1400, 1400]
+        assert context.menu_chars == [3000] * 4
+        assert context.tools == [26] * 4
+
+    def test_median_p95_and_the_window_are_over_recorded_counts_only(self, tmp_path):
+        path = _context_log(tmp_path, "state", [
+            TASK, brief([1000], BIG_MENU), reasoning(1, 40_000), reasoning(2, 70_000),
+            reasoning(3, 65_000), reasoning(4), END], menus=(BIG_MENU,))
+        summary = replay.context_summary([replay_checks.read_context(path)], 60_000)
+        assert summary["prompt_tokens"] == {
+            "recorded": 3, "not_recorded": 1, "semantics": [backends.INPUT_INCLUDES_CACHE],
+            "median": 65_000, "p95": 70_000}
+        assert summary["over_window"] == {"window": 60_000, "calls": 2, "of": 3}
+        # Strictly OVER the window: a call at exactly the window fitted.
+        tight = replay.context_summary([replay_checks.read_context(path)], 65_000)
+        assert tight["over_window"]["calls"] == 1
+
+    def test_a_backend_that_reported_nothing_is_not_recorded_never_zero(self, tmp_path):
+        path = _context_log(tmp_path, "state", [
+            TASK, brief([1000], BIG_MENU), reasoning(1), reasoning(2), END], menus=(BIG_MENU,))
+        summary = replay.context_summary([replay_checks.read_context(path)], 60_000)
+        assert summary["prompt_tokens"] == {"recorded": 0, "not_recorded": 2}
+        assert "over_window" not in summary  # unknown, not "0 calls over"
+        lines = "\n".join(replay._context_line("baseline", summary))
+        assert "tokens not recorded on any of 2 calls" in lines
+        assert "over window: not recorded" in lines
+        # The chars are measured and stand; nothing estimates tokens from them.
+        assert "sys 1.0k/1.0k · menu 3.0k/3.0k · tools 26" in lines
+        assert "0 of" not in lines
+
+    def test_purged_menu_missing_brief_and_missing_system_are_counted_apart(self, tmp_path):
+        path = _context_log(tmp_path, "state", [
+            TASK, reasoning(1, 5_000),             # before any brief
+            brief(None, BIG_MENU), reasoning(2, 6_000),  # system half not kept; bytes gone
+            END])
+        context = replay_checks.read_context(path)
+        assert (context.calls, context.menu_chars, context.menu_purged,
+                context.menu_missing) == (2, [], 1, 1)
+        summary = replay.context_summary([context], 60_000)
+        assert summary["menu_chars"] == {"recorded": 0, "purged": 1, "not_recorded": 1}
+        assert summary["system_chars"] == {"recorded": 0, "not_recorded": 2}
+        assert summary["tools"] == {"recorded": 1, "not_recorded": 1, "min": 26, "max": 26}
+        line = "\n".join(replay._context_line("b1", summary))
+        assert "sys not recorded · menu not recorded · tools 26" in line
+
+    def test_counts_in_two_units_are_not_combined(self, tmp_path):
+        path = _context_log(tmp_path, "state", [
+            TASK, brief([10]), reasoning(1, 9_000),
+            reasoning(2, 70_000, semantics=backends.INPUT_EXCLUDES_KV_REUSE),
+            reasoning(3, 8_000, semantics=None), END])
+        summary = replay.context_summary([replay_checks.read_context(path)], 60_000)
+        assert summary["prompt_tokens"]["semantics"] == sorted([
+            backends.INPUT_INCLUDES_CACHE, backends.INPUT_EXCLUDES_KV_REUSE,
+            replay_checks.UNLABELLED])
+        assert "median" not in summary["prompt_tokens"] and "over_window" not in summary
+        line = "\n".join(replay._context_line("b1", summary))
+        assert "mixed units" in line and "over window: not combined" in line
+
+    def test_ollama_counts_say_they_are_floors(self, tmp_path):
+        path = _context_log(tmp_path, "state", [
+            TASK, brief([10]), reasoning(1, 9_000, semantics=backends.INPUT_EXCLUDES_KV_REUSE),
+            END])
+        summary = replay.context_summary([replay_checks.read_context(path)], 60_000)
+        assert "are floors" in "\n".join(replay._context_line("b1", summary))
+
+    def test_the_real_writer_with_a_backend_that_reports_no_usage(self, generated):
+        """The generated run is the real server and agent: its scripted model
+        reports no usage, so every count is absent, while the brief's chars are
+        recorded for every call that `counts` sees."""
+        for path in generated.values():
+            context = replay_checks.read_context(path)
+            run = replay_checks.load_run(path)
+            assert context.calls == replay_checks.counts(run)["model_calls"] > 0
+            assert context.prompt_tokens == [] and context.tokens_absent == context.calls
+            assert len(context.system_chars) == len(context.menu_chars) == context.calls
+            assert len(context.tools) == context.calls
+
+    def _batch(self, tmp_path, **launch_kw) -> Path:
+        logs = {"baseline": _arm_log(tmp_path, "base", BIG_MENU, [70_000, 50_000, 20_000]),
+                "candidate": _arm_log(tmp_path, "cand", SMALL_MENU, [40_000, 30_000, 10_000])}
+        return _batch(tmp_path, FakeLaunch(logs, menus=(BIG_MENU, SMALL_MENU), **launch_kw))
+
+    def test_the_report_pools_each_arm_call_by_call(self, tmp_path):
+        batch = self._batch(tmp_path)
+        text = replay.render_report(*replay.read_batch(batch), batch)
+        assert len(text) <= replay.REPORT_CAP
+        assert ("baseline 2 runs, 6 calls · tokens median 50.0k p95 70.0k input_includes_cache"
+                " · over 60,000: 2 of 6 · sys 1.2k/1.2k · menu 3.0k/3.0k · tools 26") in text
+        assert ("candidate 2 runs, 6 calls · tokens median 30.0k p95 40.0k input_includes_cache"
+                " · over 60,000: 0 of 6 · sys 1.2k/1.2k · menu 1.0k/1.0k · tools 26") in text
+        # The evidence lines share the cap; the pointer to them stays whole.
+        assert text.rstrip().endswith("more evidence lines: report --full)") or \
+            text.rstrip().endswith(f"aish-replay report {batch} --full)")
+        # The words of the report law still hold with the new rows in it.
+        for word in ("%", "fixed", "improved", "better", "resolved", "rate"):
+            assert word not in text.lower()
+
+    def test_full_adds_every_run(self, tmp_path):
+        batch = self._batch(tmp_path)
+        text = replay.render_report(*replay.read_batch(batch), batch, full=True)
+        assert "  b2, 3 calls · tokens median 50.0k p95 70.0k" in text
+        assert "  c1, 3 calls · tokens median 30.0k p95 40.0k" in text
+
+    def test_json_carries_runs_and_arms_and_takes_the_window(self, tmp_path, capsys):
+        batch = self._batch(tmp_path)
+        assert replay.main(["report", str(batch), "--json", "--window", "40000"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["window"] == 40_000 and payload["withheld"] is None
+        base, cand = payload["arms"]["baseline"], payload["arms"]["candidate"]
+        assert base["context"]["over_window"] == {"window": 40_000, "calls": 4, "of": 6}
+        assert cand["context"]["over_window"] == {"window": 40_000, "calls": 0, "of": 6}
+        assert cand["context"]["menu_chars"]["median"] == 1000
+        assert base["checks"]["trippy_party"] == {"passed": 0, "failed": 2, "could_not_tell": 0}
+        run = base["runs"][0]
+        assert run["context"]["prompt_tokens"]["p95"] == 70_000
+        assert run["context"]["calls"] == 3
+
+    def test_an_incomplete_run_is_not_pooled(self, tmp_path, capsys):
+        batch = self._batch(tmp_path, exit_code=1)
+        text = replay.render_report(*replay.read_batch(batch), batch)
+        assert "baseline: no complete run to read" in text
+        assert replay.main(["report", str(batch), "--json"]) == 0
+        base = json.loads(capsys.readouterr().out)["arms"]["baseline"]
+        assert base["complete_runs"] == 0 and "context" not in base
+        assert base["runs"][0]["context"]["calls"] == 3  # each run's own record stands
+
+    def test_json_withholds_the_candidate_as_the_text_does(self, tmp_path, capsys):
+        logs = {"baseline": _passing_log(tmp_path),
+                "candidate": _arm_log(tmp_path, "cand", SMALL_MENU, [1_000])}
+        batch = _batch(tmp_path, FakeLaunch(logs))
+        assert replay.main(["report", str(batch), "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["withheld"].startswith("the baseline did not reproduce")
+        assert list(payload["arms"]) == ["baseline"]
+
+    def test_the_window_must_be_positive(self, tmp_path):
+        with pytest.raises(SystemExit):
+            replay.main(["report", str(tmp_path), "--window", "0"])
