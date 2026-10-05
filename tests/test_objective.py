@@ -1041,7 +1041,7 @@ class TestRetryAndOrder:
         assert edge.upto == size
         track_with(monkeypatch, FakeRoleChat([FIRST]))
         written = objective.track_at_boundary(edge, SessionLog(path))
-        assert [r["kind"] for r in written] == ["role", "objective"]
+        assert [r["kind"] for r in written] == ["role", "objective", "outcome"]
 
     def test_a_retry_while_the_model_thinks_keeps_the_cost_and_drops_the_revision(
         self, tmp_path, monkeypatch
@@ -1370,3 +1370,77 @@ class TestTheCliCommand:
         handle_slash("/objective", SimpleNamespace(), LogRef(SessionLog(path)), tmp_path)
         out = capsys.readouterr().out
         assert "none yet" in out and "has not read this chat" in out
+
+
+class TestTheTrackersRow:
+    """The tracker's result as a row on the turn it read (contract §3.18):
+    written in the SAME conditional append as what it reports, drawn on that
+    turn's card on replay, and never activity."""
+
+    @pytest.fixture(autouse=True)
+    def emitting(self, monkeypatch):
+        monkeypatch.delenv("AISH_OBJECTIVE", raising=False)
+
+    def test_a_revision_is_a_row_on_the_turn_it_read(self, tmp_path, monkeypatch):
+        path = web_log(tmp_path)
+        track_with(monkeypatch, FakeRoleChat([FIRST]))
+        objective.track_at_boundary(boundary(path), SessionLog(path))
+        [row] = steps(path, "outcome")
+        assert row["of"] == "objective" and row["status"] == "revised"
+        assert row["statement"] == FIRST["statement"] and row["after_turn"] is True
+        events = SessionLog.reconstruct_events(path) or []
+        kinds = [(e["type"], e.get("kind")) for e in events]
+        assert kinds.index(("step", "outcome")) < kinds.index(("done", None)), (
+            "replayed on the card of the turn it read"
+        )
+        records = objective.read_records(path)
+        outcome = next(r for r in records if r.get("kind") == "trace"
+                       and r["step"].get("kind") == "outcome")
+        assert not SessionLog._is_activity(outcome), "it would mark a read chat unread"
+
+    def test_unchanged_draws_nothing(self, tmp_path, monkeypatch):
+        path = web_log(tmp_path)
+        track_with(monkeypatch, FakeRoleChat([{"verdict": "unchanged"}]))
+        objective.track_at_boundary(boundary(path), SessionLog(path))
+        assert steps(path, "role") and steps(path, "outcome") == []
+
+    def test_a_failed_call_on_a_named_model_is_a_row(self, tmp_path, monkeypatch):
+        path = web_log(tmp_path)
+        track_with(monkeypatch, FakeRoleChat([ConnectionError("refused")] * 2))
+        objective.track_at_boundary(boundary(path), SessionLog(path))
+        [row] = steps(path, "outcome")
+        assert row["status"] == "unavailable" and row["model"]
+
+    def test_an_outranked_revision_draws_nothing(self, tmp_path, monkeypatch):
+        path = web_log(tmp_path)
+        edge = boundary(path)
+        log = SessionLog(path)
+
+        class EditMidCall(FakeRoleChat):
+            def __call__(self, **kwargs):
+                objective.owner_edit(log, "His own words")
+                return super().__call__(**kwargs)
+
+        track_with(monkeypatch, EditMidCall([FIRST]))
+        objective.track_at_boundary(edge, log)
+        assert steps(path, "outcome") == []
+
+    def test_a_turn_that_began_meanwhile_keeps_the_revision_but_draws_no_row(
+        self, tmp_path, monkeypatch
+    ):
+        """His next turn started while the tracker was reading this one. The
+        revision may stand; a row appended now would sit in the NEXT turn's
+        records and be drawn on that turn's card — a false placement."""
+        path = web_log(tmp_path)
+        edge = boundary(path)
+        log = SessionLog(path)
+
+        class NextTurnMidCall(FakeRoleChat):
+            def __call__(self, **kwargs):
+                add_task(log, 2, "a jeszcze kurs CHF?", "b")
+                return super().__call__(**kwargs)
+
+        track_with(monkeypatch, NextTurnMidCall([FIRST]))
+        objective.track_at_boundary(edge, log)
+        assert steps(path, "objective"), "the revision itself still stands"
+        assert steps(path, "outcome") == []

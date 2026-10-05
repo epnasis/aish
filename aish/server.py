@@ -3816,6 +3816,12 @@ class WebServer:
                 )
                 if written and session.logref.log is chat_log:
                     await self._announce_objective(session)
+                    # The tracker's result as a row on the turn it read
+                    # (§3.18), the step the log just took — so a live viewer
+                    # and a cold replay draw the same one.
+                    for step in written:
+                        if step.get("kind") == "outcome":
+                            session.bridge.emit({"type": "step", **step})
             except Exception:  # noqa: BLE001 — an objective is never worth a crash
                 log.exception("objective tracking failed")
 

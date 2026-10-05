@@ -275,6 +275,65 @@ check("a note aish put inside a tool result is drawn under that call's row, and 
   }
 });
 
+check("outcome rows say what came of a side decision, and are steps like any row", () => {
+  for (const replaying of [false, true]) {
+    const w = world();
+    const s = w.sandbox;
+    s.currentTurnId = "turn-c";
+    s.replaying = replaying;
+    s.traceStep({ kind: "outcome", of: "rules", checked: 3,
+                  bound: [{ rule: "quick-reply-chips", trigger: "always" }] });
+    if (!replaying) s.traceStep({ kind: "tool_start", name: "create_rule", call: 1, model_call: 1 });
+    s.traceStep({ kind: "tool", name: "create_rule", call: 1, model_call: 1, ok: true, secs: 0.1 });
+    s.traceStep({ kind: "outcome", of: "rule_compile", call: 1, status: "partial",
+                  dropped: "the tone part", rounds: 2, model: "local:qwen" });
+    s.traceStep({ kind: "outcome", of: "answer_check", met: [], not_followed: ["quick-reply-chips"] });
+    const t = s.currentTrace;
+    s.finishTrace();
+    const outs = rows(t).filter((r) => r.classList.has("step-outcome"));
+    assert.equal(outs.length, 3, `replaying=${replaying}`);
+    const text = outs.map((r) => r.textContent);
+    assert(text[0].includes("Rules in force: quick-reply-chips"), text[0]);
+    assert(text[1].includes("Turned part of your words into a rule") && text[1].includes("the tone part"), text[1]);
+    assert(text[2].includes("without following: quick-reply-chips"), text[2]);
+    const tool = rows(t).find((r) => r.dataset.call === "1");
+    assert(tool.contains(outs[1]), "the compile result is not under its call");
+    assert.deepEqual(idsOf(t), ["o1", "c1", "o2", "o3"], idsOf(t).join(","));
+  }
+});
+
+check("a result decided after the answer joins the finished card, never a new one", () => {
+  const ROW = { kind: "outcome", of: "objective", status: "revised", after_turn: true,
+                statement: "Know the EUR/PLN rate every morning" };
+  // Live: the turn finished, then the tracker wrote.
+  const live = world();
+  const s = live.sandbox;
+  s.currentTurnId = "turn-d";
+  s.traceStep({ kind: "thinking", secs: 1, tokens: [1, 1] });
+  s.finishTrace();
+  const card = s.lastFinishedTrace;
+  assert(card, "finishTrace kept no handle on the card");
+  card.dossier = { stale: true };
+  s.afterTurnStep(ROW);
+  assert.equal(s.currentTrace, null, "an empty live card was opened for it");
+  const row = rows(card).find((r) => r.classList.has("step-outcome"));
+  assert(row && row.textContent.includes("Rewrote the objective"), "not drawn on the finished card");
+  assert.equal(card.dossier, null, "the cached record would miss the new row's step");
+  // Cold: the record sits inside its turn, whose card is still open.
+  const cold = world();
+  const c = cold.sandbox;
+  c.currentTurnId = "turn-d";
+  c.replaying = true;
+  c.traceStep({ kind: "thinking", secs: 1, tokens: [1, 1] });
+  const open = c.currentTrace;
+  c.afterTurnStep(ROW);
+  assert(rows(open).some((r) => r.classList.has("step-outcome")), "cold replay did not draw it");
+  // Nothing to attach to: nothing drawn, and no card opened.
+  const none = world();
+  none.sandbox.afterTurnStep(ROW);
+  assert.equal(none.sandbox.currentTrace, null);
+});
+
 (async () => {
   for (const run of pending) await run();
   if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }

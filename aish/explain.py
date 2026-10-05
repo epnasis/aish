@@ -1850,6 +1850,13 @@ STEP_TOOL_CALL = "tool_call"
 STEP_TRIM = "trim"
 STEP_STEERING = "steering"
 STEP_HARNESS = HARNESS_STEP
+STEP_OUTCOME = "outcome"
+OUTCOME_TITLES = {
+    "rules": "the rules in force",
+    "answer_check": "how the answer's checks ended",
+    "rule_compile": "a rule written from your words",
+    "objective": "the objective, after this turn",
+}
 STEP_BRIEF_CHANGED = "brief_changed"
 STEP_MODEL_ERROR = "model_error"
 STEP_RETRY = "retry"
@@ -1858,7 +1865,7 @@ STEP_REPEAT_NUDGE = "repeat_nudge"
 # Between-round kinds share one pane: the fact and its numbers.
 EVENT_STEPS = frozenset(
     {STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED, STEP_MODEL_ERROR, STEP_RETRY, STEP_KNOWLEDGE,
-     STEP_REPEAT_NUDGE, STEP_HARNESS}
+     STEP_REPEAT_NUDGE, STEP_HARNESS, STEP_OUTCOME}
 )
 # The injected text of a `knowledge` step could not be told apart from the
 # other system parts of the brief (see _reminder): a state of its own, because
@@ -2216,6 +2223,23 @@ def _repeat_facts(record: dict) -> list[dict]:
     return facts
 
 
+def _outcome_facts(step: dict) -> list[dict]:
+    """The strip of an `outcome` step (§3.18): the record's own fields,
+    named, and nothing worked out from them."""
+    facts = [{"k": "of", "v": str(step.get("of") or "?")}]
+    for key in ("status", "rounds", "model", "error", "dropped", "checked",
+                "revision", "change", "statement", "why"):
+        if step.get(key) not in (None, ""):
+            facts.append({"k": key, "v": str(step[key])})
+    if step.get("bound") is not None:
+        facts.append({"k": "in force", "v": ", ".join(
+            str(b.get("rule")) for b in step["bound"]) or "none"})
+    for key in ("unevaluable", "broken", "met", "not_followed"):
+        if step.get(key):
+            facts.append({"k": key.replace("_", " "), "v": ", ".join(map(str, step[key]))})
+    return facts
+
+
 def _event_step(kind: str, record: dict, facts: list[dict], **extra) -> dict:
     return {"kind": kind, "panes": [PANE_EVENT], "facts": facts, "record": record, **extra}
 
@@ -2453,6 +2477,12 @@ def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
             steps.append(_event_step(STEP_HARNESS, dict(step.get("message") or step), facts,
                                      id=event_id("h"),
                                      title="aish told the model", text=text,
+                                     before=before(index)))
+        elif kind == STEP_OUTCOME:
+            steps.append(_event_step(STEP_OUTCOME, dict(step), _outcome_facts(step),
+                                     id=event_id("o"),
+                                     title=OUTCOME_TITLES.get(str(step.get("of")),
+                                                              f"outcome: {step.get('of') or '?'}"),
                                      before=before(index)))
         elif kind == "repeat_nudge":
             steps.append(_event_step(STEP_REPEAT_NUDGE, dict(step), _repeat_facts(step),

@@ -2600,7 +2600,16 @@ KNOWLEDGE_WRITE_TOOLS = frozenset({"remember", "forget_memory"})
 # an answer always needs the tool steps and the knowledge step alongside the
 # gate records. `thinking` is deliberately left out: it is the high-volume kind
 # and buys nothing #197 asks for. Renderless kinds are stamped by _emit_record.
-TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge", "trim", "model_error"})
+TURN_STAMPED_STEPS = frozenset(
+    {"tool_start", "tool", "knowledge", "trim", "model_error", "outcome"}
+)
+
+# The result of a decision made beside the acting model — a rule compiled from
+# his words, the rules a turn bound, the answer's checks (contract §3.18). One
+# rendered kind for all of them, told apart by `of`; results only, never the
+# side call's prompt.
+OUTCOME_STEP = "outcome"
+OUTCOME_TEXT_CHARS = 400
 
 # Decisions meaning THE ACTION DID NOT HAPPEN. A step carrying one is never
 # green, whichever path set it — see _emit_tool_step for why this is one rule
@@ -12287,11 +12296,45 @@ class Agent:
                     f"⚠ rule '{row['rule']}' is not in force — "
                     f"{row['evidence'].get('error', 'it does not compile')}"
                 )
+        self._rules_outcome(rows)
         if not self._bindings:
             return ""
         for binding in self._bindings:
             self._note(f"⚖ rule in force: {binding.name}")
         return rules.seed_text(self._bindings)
+
+    def _rules_outcome(self, rows: list[dict]) -> None:
+        """Which of his rules govern this turn, as an `outcome` row (§3.18):
+        the result of the evaluation `rule_eval` records in full. Drawn only
+        when there is something to say — a rule in force, one that could not
+        be evaluated, one that does not compile — so an ordinary turn under no
+        rule gets no row; the record says that case."""
+        bound, unevaluable, broken = [], [], []
+        for row in rows:
+            if row.get("binding"):
+                in_force: dict[str, Any] = {"rule": row["rule"], "trigger": str(row["trigger"])}
+                evidence = row.get("evidence") or {}
+                if isinstance(evidence.get("sim"), (int, float)):
+                    # A meaning trigger is an embedding call outside the
+                    # conversation; its number is the result.
+                    in_force["sim"] = evidence["sim"]
+                    in_force["floor"] = evidence.get("floor")
+                if row["verdict"] == rules.VERDICT_UNEVALUABLE:
+                    in_force["held_unevaluable"] = True
+                bound.append(in_force)
+            elif row["verdict"] == rules.VERDICT_UNEVALUABLE:
+                unevaluable.append(row["rule"])
+            elif row["verdict"] == rules.VERDICT_ERROR:
+                broken.append(row["rule"])
+        if not (bound or unevaluable or broken):
+            return
+        step: dict[str, Any] = {"kind": OUTCOME_STEP, "of": "rules", "bound": bound,
+                                "checked": len(rows)}
+        if unevaluable:
+            step["unevaluable"] = unevaluable
+        if broken:
+            step["broken"] = broken
+        self._emit_step(**step)
 
     def _rule_forbidding(self, command: str) -> str | None:
         """The name of the rule in force that forbids running `command`, or
@@ -12595,11 +12638,20 @@ class Agent:
             # §7's counters counting passes rather than turns.
             for failure in unmet:
                 self._record_verify(failure, "not_followed")
+            met = []
             for binding in self._bindings:
                 if rules.has_verify([binding]) and not any(
                     f.binding is binding for f in failures
                 ):
                     self._record_verify_pass(binding)
+                    met.append(binding.name)
+            not_followed = list(dict.fromkeys(f.binding.name for f in unmet))
+            if met or not_followed:
+                # The delivered answer's verdicts, as one `outcome` row
+                # (§3.18) — the rows for each ask are drawn already; this is
+                # how the checks ENDED, which no row said.
+                self._emit_step(kind=OUTCOME_STEP, of="answer_check", met=met,
+                                not_followed=not_followed)
         if not asks:
             # Delivered, and SAID. Deduplicated: one line per rule, however
             # many of its obligations went unmet.
@@ -14316,9 +14368,26 @@ class Agent:
         named = self._rule_fields(args)
         if not request:
             return named
+        spec = roles.session_model_spec(self.provider, self.model)
+        if self.rule_compiler is None and not spec:
+            # claude-max has no stateless seam to ask; the fields the acting
+            # model named are the whole of what can be written.
+            self._compile_outcome("unreachable", spec, error="no model this backend can ask")
+            if named:
+                return named
+            return (
+                "ERROR: no model this backend can ask to turn that into a rule. "
+                "Call create_rule again naming the fields directly."
+            )
         try:
-            ask = self.rule_compiler or rule_compiler.make_compiler(self.model)
+            # The session's OWN backend, provider-qualified. The bare name the
+            # agent holds routes to ollama (`backends.parse_model`): by
+            # 2026-10-05, 14 create_rule calls in 7 of the owner's chats had
+            # failed with "model 'gemini-3.5-flash' not found" — ollama, asked
+            # for a Gemini model.
+            ask = self.rule_compiler or rule_compiler.make_compiler(spec)
         except Exception as exc:  # noqa: BLE001 — no backend is a fallback, not a crash
+            self._compile_outcome("unreachable", spec, error=str(exc))
             if named:
                 return named
             return (
@@ -14334,6 +14403,7 @@ class Agent:
             # happens on the first ask, so catching at construction covered
             # half the failure. Without this the owner gets "tool 'create_rule'
             # failed internally" for a model being down.
+            self._compile_outcome("unreachable", spec, error=str(exc))
             if named:
                 return named
             return (
@@ -14347,7 +14417,12 @@ class Agent:
             # feature request in structured form.
             # Marked as a failure even though the text is for a person: no rule
             # was written, and a call that wrote nothing must not log green.
+            self._compile_outcome("no_rule", spec, rounds=compiled.rounds)
             return "ERROR: " + compiled.problem
+        self._compile_outcome(
+            "partial" if compiled.dropped else "compiled", spec,
+            rounds=compiled.rounds, dropped=compiled.dropped,
+        )
         # Anything the acting model named itself wins: it heard the whole
         # conversation and the compiler heard one sentence of it.
         fields = {**compiled.fields, **named}
@@ -14357,6 +14432,28 @@ class Agent:
             # doing most of what he asked is worth having.
             fields["_could_not_express"] = compiled.dropped
         return fields
+
+    def _compile_outcome(
+        self, status: str, spec: str, *, rounds: int = 0, error: str = "", dropped: str = ""
+    ) -> None:
+        """What the rule compiler — a model call outside the conversation —
+        produced, as an `outcome` row under the create_rule/edit_rule call
+        (contract §3.18). The result only: the request is the call's own
+        argument, and the fields reach the approval card."""
+        step: dict[str, Any] = {
+            "kind": OUTCOME_STEP, "of": "rule_compile", "status": status,
+            "model": spec or "none",
+        }
+        call = getattr(self._call_ids, "current", 0)
+        if call:
+            step["call"] = call
+        if rounds:
+            step["rounds"] = rounds
+        if error:
+            step["error"] = secrets.scrub(error)[:OUTCOME_TEXT_CHARS]
+        if dropped:
+            step["dropped"] = dropped[:OUTCOME_TEXT_CHARS]
+        self._emit_step(**step)
 
     def _rule_file_lint(self, plan: "files.WritePlan") -> str | None:
         """Refuse a raw write into the rules folder that would not lint.

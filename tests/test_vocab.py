@@ -121,6 +121,10 @@ class TestTheCountingChangedNoMatching:
         # mutating, and a stale snapshot landing on it live would have been
         # pressed where `Kup teraz` is refused. Not one other word moved.
         "aish/browse.py:_MUTATING_WORDS": {"added": ["zamawiam"], "removed": []},
+        # Not a word list: trace step KINDS stamped with turn and call ids
+        # (contract §2). `outcome` (§3.18) is a rendered step a reader joins
+        # to its turn, so it is stamped like the others.
+        "aish/agent.py:TURN_STAMPED_STEPS": {"added": ["outcome"], "removed": []},
     }
 
     @staticmethod

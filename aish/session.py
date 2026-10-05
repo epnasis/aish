@@ -1529,6 +1529,12 @@ class SessionLog:
         if kind == "trace":
             step = record.get("step")
             step_kind = step.get("kind") if isinstance(step, dict) else None
+            # A result decided AFTER a turn (the objective tracker's row,
+            # contract §3.18) is about a turn he has already read: counted as
+            # activity, it would mark the chat unread seconds after he left
+            # it — the #201 defect, by a new route.
+            if isinstance(step, dict) and step.get("after_turn"):
+                return False
             return step_kind not in RENDERLESS_STEPS
         return True
 

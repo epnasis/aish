@@ -553,3 +553,115 @@ class TestEachResultNamesItsOwnCall:
                 assert result["content"].startswith(f"docs about {call['args']['command']}")
             else:
                 assert "middle" in result["content"]
+
+
+ALWAYS_CHIPS = """---
+name: chips-always
+description: Always give me tap buttons.
+when: always
+then:
+  answer_must_include:
+    pattern: 'aish-reply://'
+---
+"""
+
+COMPILED_RULE = json.dumps({
+    "name": "always-use-show-image",
+    "description": "Pictures come from show_image.",
+    "when_subject": "always",
+    "answer_must_include": "picture",
+})
+
+
+def outcomes(steps, of=None):
+    return [s for s in steps if s.get("kind") == "outcome" and (of is None or s.get("of") == of)]
+
+
+class TestOutcomes:
+    """The RESULT of decisions made beside the acting model, as rows
+    (contract §3.18): the rules a turn bound, how the answer's checks ended,
+    what became of the owner's words when a rule was compiled from them."""
+
+    def test_the_rules_in_force_and_how_the_checks_ended(self, tmp_path, monkeypatch):
+        agent, _, log, live = wired(
+            tmp_path,
+            [model_says("Here."), model_says("Here.\n[More](aish-reply://more)")],
+            monkeypatch, rule_texts=(ALWAYS_CHIPS,),
+        )
+        run(agent, log, "anything new?")
+        [rules_row] = outcomes(live, "rules")
+        assert [b["rule"] for b in rules_row["bound"]] == ["chips-always"]
+        [check] = outcomes(live, "answer_check")
+        assert check["met"] == ["chips-always"] and check["not_followed"] == []
+        assert outcomes(cold_steps(log)) == outcomes(live), "replay draws the same rows"
+
+    def test_an_answer_that_never_complied_says_so(self, tmp_path, monkeypatch):
+        agent, _, log, live = wired(tmp_path, [model_says("Here.")] * 6, monkeypatch,
+                                    rule_texts=(ALWAYS_CHIPS,))
+        run(agent, log, "anything new?")
+        [check] = outcomes(live, "answer_check")
+        assert check["not_followed"] == ["chips-always"]
+
+    def test_a_turn_under_no_rule_draws_no_rules_row(self, tmp_path, monkeypatch):
+        agent, _, log, live = wired(tmp_path, [model_says("hi")], monkeypatch)
+        run(agent, log, "hello")
+        assert outcomes(live) == []
+
+    def test_the_compiler_asks_the_sessions_own_backend(self, tmp_path, monkeypatch):
+        """The agent holds a BARE model name, which `parse_model` routes to
+        ollama: 14 of the owner's create_rule calls had failed with "model
+        'gemini-3.5-flash' not found" — ollama asked for a Gemini model."""
+        from aish import rule_compiler
+
+        asked: list[str] = []
+
+        def fake_make(spec):
+            asked.append(spec)
+            return lambda prompt: COMPILED_RULE
+
+        monkeypatch.setattr(rule_compiler, "make_compiler", fake_make)
+        agent, _, log, live = wired(tmp_path, [], monkeypatch)
+        agent.provider, agent.model = "gemini", "gemini-3.5-flash"
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", {"request": "always use show_image"})
+        assert asked == ["gemini:gemini-3.5-flash"]
+        assert not str(result).startswith("ERROR"), result
+        [row] = outcomes(live, "rule_compile")
+        assert row["status"] == "compiled" and row["model"] == "gemini:gemini-3.5-flash"
+        assert row["rounds"] == 1
+
+    def test_a_compiler_that_cannot_be_reached_is_a_red_row(self, tmp_path, monkeypatch):
+        from aish import rule_compiler
+
+        def dead(spec):
+            def ask(prompt):
+                raise ConnectionError("connection refused")
+            return ask
+
+        monkeypatch.setattr(rule_compiler, "make_compiler", dead)
+        agent, _, _, live = wired(tmp_path, [], monkeypatch)
+        agent.provider, agent.model = "local", "qwen"
+        result = agent._dispatch("create_rule", {"request": "always use show_image"})
+        assert str(result).startswith("ERROR")
+        [row] = outcomes(live, "rule_compile")
+        assert row["status"] == "unreachable" and "connection refused" in row["error"]
+
+    def test_the_compile_row_belongs_to_its_call_and_is_a_step(self, tmp_path, monkeypatch):
+        from aish import explain
+
+        agent, _, log, live = wired(
+            tmp_path,
+            [model_says(tool_calls=[tool_call("create_rule", request="always use show_image")]),
+             model_says("done")],
+            monkeypatch,
+        )
+        agent.rule_compiler = lambda prompt: COMPILED_RULE
+        agent.approve_write = lambda plan: True
+        run(agent, log, "make that a rule")
+        [row] = outcomes(live, "rule_compile")
+        tool = next(s for s in live if s.get("kind") == "tool")
+        assert row["call"] == tool["call"], "drawn under the create_rule call"
+        assert outcomes(cold_steps(log)) == outcomes(live)
+        lg = explain.load(log.path)
+        steps = explain.dossier(lg.turns[0], lg, tmp_path)["steps"]
+        assert [s["id"] for s in steps if s["kind"] == explain.STEP_OUTCOME] == ["o1"]

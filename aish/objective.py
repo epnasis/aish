@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import roles
+from . import roles, secrets
 from .session import synthetic_kind
 
 TRACKER = "tracker"
@@ -1133,6 +1133,29 @@ def role_record(charter: roles.Charter, result: roles.Result, turn: int) -> dict
     return record
 
 
+_TASK_START = b'"kind": "task_start"'
+
+
+def _outcome_of(out: list[dict], turn: int) -> dict | None:
+    """The tracker's result as an `outcome` row on the turn it read (contract
+    §3.18): a revised objective, or a call that failed on a model it named.
+    Unchanged, not admitted and no-model-to-run-on draw nothing — they would be
+    a row on nearly every turn, and the strip already says them."""
+    revision = next((r for r in out if r.get("kind") == "objective"), None)
+    role = next((r for r in out if r.get("kind") == "role"), None)
+    step: dict[str, Any] = {"kind": "outcome", "of": "objective", "turn": turn,
+                            "after_turn": True}
+    if revision is not None:
+        return {**step, "status": "revised", "revision": revision.get("revision"),
+                "change": revision.get("change"), "statement": revision.get("statement")}
+    if role is not None and role.get("model") and role.get("status") in (
+        roles.Status.INVALID, roles.Status.UNAVAILABLE,
+    ):
+        return {**step, "status": str(role["status"]), "model": role["model"],
+                "why": secrets.scrub(str(role.get("why") or ""))[:400]}
+    return None
+
+
 def _skip_record(turn: int, why: str) -> dict:
     return {
         "kind": "role",
@@ -1203,6 +1226,10 @@ def track_at_boundary(boundary: Boundary, log: Any) -> list[dict]:
                     out[0]["ms"] = int((time.perf_counter() - started) * 1000)
             if not out:
                 return written
+            if outcome := _outcome_of(out, boundary.turn):
+                # In the same conditional append: drawn only if what it
+                # reports was written (§3.18).
+                out.append(outcome)
             why_dropped: list[str] = []
 
             def unchanged() -> bool:
@@ -1215,6 +1242,12 @@ def track_at_boundary(boundary: Boundary, log: Any) -> list[dict]:
                 ):
                     why_dropped.append(OUTRANKED)
                     return False
+                if _TASK_START in now[boundary.upto:]:
+                    # His next turn began while this one was read: the
+                    # revision still stands (it may), but a row written now
+                    # would land in THAT turn's records, and a row about turn
+                    # N on turn N+1's card is a false placement (§3.18).
+                    out[:] = [r for r in out if r.get("kind") != "outcome"]
                 return True
 
             if log.append_steps_if(out, unchanged):

@@ -339,3 +339,5 @@ and writes `objectives.md`: per boundary, the owner messages since the previous 
 and the objective each model had there, then every call. It calls the backend directly,
 never a chat or aish-web, records no admission, and refuses an `--out` inside the
 repository — the results carry his words.
+
+**The tracker's result is a row on the turn it read (2026-10-05, `docs/trace-contract.md` §3.18).** A revision, or a call that failed on a model it named, is written as an `outcome` step in the same conditional append as the records it reports, and drawn on that turn's card live and on replay — unless his next turn began while it was read, when the revision is written without a row rather than with one on the wrong turn. It is not activity, so it never marks a read chat unread. Unchanged, not admitted and no-model-to-run-on draw nothing.

@@ -737,6 +737,10 @@ function enterSession(name, { source = "hello", title, stash = false } = {}) {
   // …and so is its objective ([OBJECTIVE-STRIP]): the incoming chat's own
   // `objective` event repaints the strip.
   if (name !== currentSession) clearObjective();
+  // …and so is the card an after-turn result joins (§3.18): a warm paint of
+  // the incoming chat runs no finishTrace, so without this a result for it
+  // would land on the LEFT chat's stashed card (found in delivery review).
+  if (name !== currentSession) lastFinishedTrace = null;
   currentSession = name;
   // Only the mirror paints a truncated copy, and only an unstashable view may
   // come from one — so provenance is a property of the SOURCE, not a flag each
@@ -1574,7 +1578,7 @@ function handle(event) {
     case "stream": traceStream(event.text); break;
     case "command_start": onCommandStart(event); break;
     case "command_end": onCommandEnd(event); break;
-    case "step": traceStep(event); break;
+    case "step": event.after_turn ? afterTurnStep(event) : traceStep(event); break;
     case "workspace": addWorkspaceNote(event.change, event.path); break;
     case "redacted": addRedactedMsg(); break;
     case "rating": markRating(event.turn, event.rating, event.comment); break;
@@ -3173,6 +3177,86 @@ function harnessHeadline(text) {
   return first.endsWith("]") ? first.slice(0, -1) : first;
 }
 
+// What a decision made beside the acting model produced (contract §3.18), as
+// [icon, colour, title, sub-line]. Results only, in what HE can see: which
+// rules govern the turn, how the answer's checks ended, what became of his
+// words when a rule was written from them. An `of` this does not know still
+// draws, as what it is.
+function outcomeView(step) {
+  const names = (xs) => (xs || []).join(", ");
+  if (step.of === "rules") {
+    const bound = (step.bound || []).map((b) => b.rule);
+    const extra = [];
+    if ((step.unevaluable || []).length) extra.push(`could not evaluate: ${names(step.unevaluable)}`);
+    if ((step.broken || []).length) extra.push(`does not compile: ${names(step.broken)}`);
+    return ["enforce", bound.length ? "var(--orange)" : "var(--dim)",
+      bound.length ? `Rules in force: ${names(bound)}` : "No rule in force for this turn",
+      [`${bound.length} of ${step.checked || 0} rules apply`, ...extra].join(" · ")];
+  }
+  if (step.of === "answer_check") {
+    const missed = step.not_followed || [];
+    return missed.length
+      ? ["denied", "var(--orange)", `Answer delivered without following: ${names(missed)}`,
+         (step.met || []).length ? `met: ${names(step.met)}` : ""]
+      : ["check", "var(--green)", `Answer met ${(step.met || []).length} rule check${(step.met || []).length === 1 ? "" : "s"}`,
+         names(step.met)];
+  }
+  if (step.of === "rule_compile") {
+    const how = [step.rounds ? `${step.rounds} round${step.rounds === 1 ? "" : "s"}` : "", step.model || ""]
+      .filter(Boolean).join(" · ");
+    if (step.status === "compiled") return ["write", "var(--green)", "Turned your words into a rule", how];
+    if (step.status === "partial") {
+      return ["write", "var(--orange)", "Turned part of your words into a rule", `not enforced: ${step.dropped || "?"}`];
+    }
+    if (step.status === "unreachable") {
+      return ["denied", "var(--red)", "Could not reach a model to write the rule", step.error || how];
+    }
+    return ["denied", "var(--orange)", "Could not turn your words into a rule", how];
+  }
+  if (step.of === "objective") {
+    // aish's reading of why he is here, rewritten after this turn — in the
+    // model's words, never his (docs/objective.md).
+    if (step.status === "revised") {
+      return ["inform", "var(--blue)",
+        step.change === "pivoted" ? "Rewrote the objective — you turned to something else" : "Rewrote the objective",
+        step.statement || ""];
+    }
+    return ["denied", "var(--orange)", "Could not update the objective", step.why || step.model || ""];
+  }
+  return ["dot", "var(--dim)", `aish decided: ${step.of || "?"}`, ""];
+}
+
+// The result of a decision made beside the acting model (§3.18). One that
+// belongs to a call (a rule compiled from his words) draws under it.
+function drawOutcome(t, step) {
+  t.started += 1;
+  const [icon, color, title, sub] = outcomeView(step);
+  const owner = step.call
+    ? [...t.inner.querySelectorAll(".step")].find((r) => r.dataset && r.dataset.call === String(step.call))
+    : null;
+  traceRow(t, traceSvg(icon, color), title, sub,
+    owner ? stepUnder(owner._ref || (owner._ref = { row: owner })) : undefined)
+    .row.classList.add("step-outcome");
+  updateTraceHead(t);
+}
+
+// A result decided AFTER the answer, off the turn — the objective tracker's
+// (§3.18). Live, the turn's card is finished by then, and a step through
+// traceStep would open an empty card of its own; so it joins the card it
+// belongs to, the last one finished, and that card's cached record is dropped
+// so a tap on the new row finds its step. On cold replay the record sits inside
+// its turn, whose card is still open, and draws through traceStep like any row.
+// With no card at all there is nothing to attach to, and it draws nowhere —
+// the objective strip says the same thing.
+let lastFinishedTrace = null;
+function afterTurnStep(step) {
+  if (replaying && currentTrace) { traceStep(step); return; }
+  const t = lastFinishedTrace;
+  if (!t || step.kind !== "outcome") return;
+  drawOutcome(t, step);
+  t.dossier = null;
+}
+
 function traceStep(step) {
   const t = ensureTrace();
   if (step.kind === "thinking_start") {
@@ -3374,6 +3458,7 @@ function traceStep(step) {
     updateTraceHead(t);
     return;
   }
+  if (step.kind === "outcome") { drawOutcome(t, step); return; }
   if (step.kind === "model_error") {
     // A failed model call draws a row for the same reason `trim` does: it
     // CONTRADICTS what is in front of you. Before #261 this was a grey echo
@@ -4463,6 +4548,7 @@ function finishTrace(errored, emptyEnding) {
   t.pending = null;
   t.activeStartedAt = null;
   currentTrace = null;
+  lastFinishedTrace = t;
   // Finalize any step still spinning — a tool cut off by a server restart
   // mid-run (the "co to czarna dziura?" deploy bug) leaves a running row with
   // no finish event; a closed trace must never keep a perpetual spinner.
@@ -4586,6 +4672,7 @@ function inspectKeys(rows) {
     }
     if (cl.contains("step-steer")) { ids[i] = `s${next("s")}`; return; }
     if (cl.contains("step-harness")) { ids[i] = `h${next("h")}`; return; }
+    if (cl.contains("step-outcome")) { ids[i] = `o${next("o")}`; return; }
     if (cl.contains("step-model-error")) { ids[i] = `e${next("e")}`; return; }
     if (cl.contains("step-retry")) { ids[i] = `retry${next("retry")}`; return; }
     if (cl.contains("step-knowledge")) { ids[i] = `k${next("k")}`; return; }
@@ -13209,6 +13296,10 @@ function ssStepIcon(doc, step) {
     const icon = (HARNESS_SOURCES[(step.record || {}).source] || ["inform"])[0];
     return traceSvg(icon, HARNESS_COLORS[icon]);
   }
+  if (step.kind === "outcome") {
+    const [icon, color] = outcomeView(step.record || {});
+    return traceSvg(icon, color);
+  }
   if (step.kind === "model_error") return traceSvg("denied", "var(--red)");
   if (step.kind === "knowledge") return traceSvg("knowledge", "var(--yellow)");
   return traceSvg("dot", "var(--dim)"); // trim, retry, brief_changed
@@ -13792,7 +13883,12 @@ function ssEventSegs(doc, step) {
   const facts = (step.facts || []).map((fact) => `${fact.k}: ${fact.v}`);
   if (facts.length) b.meta(...facts);
   if (step.kind === "steering") { b.meta("YOU TYPED"); b.text(step.text || "", "markdown"); }
-  else if (step.kind === "harness") {
+  else if (step.kind === "outcome") {
+    const [, , title, sub] = outcomeView(step.record || {});
+    b.meta("WHAT CAME OF IT", title + (sub ? ` — ${sub}` : ""));
+    b.meta("THE RECORD");
+    b.rec(step.record || {});
+  } else if (step.kind === "harness") {
     // Exactly what the model was handed, never rendered as markdown: the note
     // is shown as the bytes it was, so what you read is what it read.
     b.meta("WHAT AISH TOLD THE MODEL");
