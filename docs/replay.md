@@ -13,7 +13,7 @@ A fix used to be judged by reading one live session by eye. The owner's local mo
 ```sh
 aish-replay run <name>                       # baseline = main, candidate = this tree
 aish-replay run <name> --candidate-overlay skills/x/SKILL.md=./new.md --runs 5
-aish-replay report ~/.local/state/aish-replay/<name>/<stamp> [--full]
+aish-replay report ~/.local/state/aish-replay/<name>/<stamp> [--full | --json] [--window TOKENS]
 aish-replay check ~/.local/state/aish/<session>.jsonl --scenario <name>
 ```
 
@@ -98,7 +98,27 @@ Not built yet, and not to be implied: answer language, numbers and exchange rate
 
 ## Report
 
-`render_report`: header (arms, completions, `STILL_SHARED`), one row per check with each arm's raw counts, per-run counts (model calls, tool calls, cards raised, wall seconds), then one evidence line per failing check per arm, target checks first. Capped at `REPORT_CAP` = 2048 characters; `--full` prints every verdict of every run. A run that did not complete keeps the failures it recorded, but its passes become "could not tell": a pass from a run that never reached the hard part is not a pass.
+`render_report`: header (arms, completions, `STILL_SHARED`), one row per check with each arm's raw counts, per-run counts (model calls, tool calls, cards raised, wall seconds), one context row per arm (below), then one evidence line per failing check per arm, target checks first. Capped at `REPORT_CAP` = 2048 characters; `--full` prints every verdict of every run and every run's context row, and `--json` prints the whole report — every run's verdicts, counts and context — withholding exactly what the text withholds. A run that did not complete keeps the failures it recorded, but its passes become "could not tell": a pass from a run that never reached the hard part is not a pass.
+
+### Context per model call (#444, slice 0)
+
+So that a context experiment — a smaller menu, a shorter prompt — has a number per arm. `replay_checks.read_context` reads each run's own log: one entry per `reasoning` record (one per recorded model call of the acting loop; isolated roles write `role` records and are not counted, as in `aish usage`), each joined to the latest `brief` before it — `tooluse`'s join, because a brief is written only when what the model was handed changes. The report pools each arm's **complete** runs call by call (an incomplete run made fewer calls, and folding it in would move the arm's figures for a reason nobody could see) and prints one line per arm:
+
+```
+baseline 2 runs, 6 calls · tokens median 50.0k p95 70.0k input_includes_cache · over 60,000: 2 of 6 · sys 1.2k/1.2k · menu 3.0k/3.0k · tools 26
+```
+
+Under the reader law of `docs/token-accounting.md`, and reading through the same helpers so the replay and `aish usage` / `aish tooluse` cannot disagree about one record:
+
+- **Tokens are the provider's, read by `usage.recorded_input`.** A zero is not a count: the writer records zeros when the provider sent no usage, so such a call is *not recorded* — it is left out of the median, p95 and overflow and counted as such (`tokens not recorded on any of N calls`, `over window: not recorded`). The scripted backend of the generated fixtures reports nothing, and the test on those runs pins exactly that.
+- **The unit label rides with the number.** A pool whose counts carry more than one `semantics` label gets no median and no overflow count (`not combined`); counts in `input_excludes_kv_reuse` (Ollama, which leaves out the prefix it served from its KV cache) carry a note that they and the overflow count are floors.
+- **Chars are the brief's**: the system parts' `chars` summed per call, and the menu's bytes looked up by digest through `tooluse._menu_of` — `purged` and `not recorded` are counted apart, never 0. Tools is the brief's own `tools.count`, which survives a purge.
+- **Chars and tokens are never added or converted.** No figure estimates tokens from chars.
+- **`--window TOKENS`** (default `usage.LOCAL_WINDOW_TOKENS`, 60,000 — a default, not a fact about any backend) counts calls whose recorded tokens are strictly over it, out of the calls that recorded any.
+
+Medians and p95 are `usage._percentile`, `aish usage`'s own. R4 still governs: with no target failure reproduced, the candidate's context row is withheld like its other numbers. `TestContextPerModelCall`.
+
+**The cap is shared.** On `example-trippy` (nine checks) the header, check rows, counts and context rows take ~1.9k of the 2,048 characters, so the default report has no room left for evidence lines and says how many it omitted; `--full` and `--json` carry them.
 
 ## The driver against the real server
 

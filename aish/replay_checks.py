@@ -381,6 +381,92 @@ def counts(run: RunRecord) -> dict[str, int | None]:
     }
 
 
+#: The unit label of a token count read off `tokens[0]` because the call
+#: carried no `usage` detail — a log older than the detail, whose units the
+#: record does not say.
+UNLABELLED = "unlabelled"
+
+
+@dataclass
+class RunContext:
+    """What each model call of one run was handed, as RECORDED (#444).
+
+    One entry per `reasoning` record — one per recorded model call of the
+    acting loop; isolated roles write `role` records and are not here, as in
+    `aish usage`. Each call is joined to the most recent `brief` before it in
+    the log, the join `tooluse` makes, because a brief is written only when what
+    the model was handed CHANGES. A call whose fact was not recorded is left out
+    of that fact's list and counted by the matching property, never stored as 0.
+
+    Chars and tokens are different units and nothing here converts one into the
+    other (`docs/token-accounting.md`).
+    """
+
+    calls: int = 0
+    prompt_tokens: list[int] = field(default_factory=list)
+    #: The provider's own unit label for each recorded count, in call order.
+    token_semantics: list[str] = field(default_factory=list)
+    system_chars: list[int] = field(default_factory=list)
+    menu_chars: list[int] = field(default_factory=list)
+    menu_purged: int = 0
+    tools: list[int] = field(default_factory=list)
+
+    @property
+    def tokens_absent(self) -> int:
+        return self.calls - len(self.prompt_tokens)
+
+    @property
+    def system_absent(self) -> int:
+        return self.calls - len(self.system_chars)
+
+    @property
+    def menu_missing(self) -> int:
+        return self.calls - len(self.menu_chars) - self.menu_purged
+
+    @property
+    def tools_absent(self) -> int:
+        return self.calls - len(self.tools)
+
+
+def read_context(path: Path) -> RunContext:
+    """One session log → what its model calls were handed. The reading of a
+    prompt-token count is `usage.recorded_input` and the reading of a menu is
+    `tooluse._menu_of`, imported so the replay report and `aish usage` /
+    `aish tooluse` cannot disagree about the same record."""
+    from . import tooluse, usage
+    from .explain import _records
+
+    path = Path(path)
+    directory = path.parent  # the run's state dir, which holds its evidence store
+    context = RunContext()
+    sizes: dict[str, int | None] = {}
+    brief: dict | None = None
+    for record in _records(path):
+        step = record.get("step") if record.get("kind") == "trace" else None
+        if not isinstance(step, dict):
+            continue
+        if step.get("kind") == "brief":
+            brief = step
+        elif step.get("kind") == "reasoning":
+            context.calls += 1
+            tokens = usage.recorded_input(step)
+            if tokens is not None:
+                context.prompt_tokens.append(tokens)
+                detail = step.get("usage") or {}
+                context.token_semantics.append(str(detail.get("semantics") or UNLABELLED))
+            system = (brief or {}).get("system")
+            if isinstance(system, list):
+                context.system_chars.append(sum(int(p.get("chars") or 0) for p in system))
+            menu = tooluse._menu_of(brief, "", sizes, directory)
+            if menu.state == tooluse.RECORDED:
+                context.menu_chars.append(menu.chars)
+            elif menu.state == tooluse.PURGED:
+                context.menu_purged += 1
+            if menu.tools is not None:
+                context.tools.append(menu.tools)
+    return context
+
+
 def apply(run: RunRecord, checks: dict[str, CheckFn]) -> list[Verdict]:
     """Run every check; a check that RAISES is a check that could not tell."""
     verdicts = []
