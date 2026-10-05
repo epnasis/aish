@@ -5443,6 +5443,11 @@ class Agent:
                 "count": len(preload.names),
                 "names": list(preload.names),
                 **({"withheld": preload.withheld} if preload.withheld else {}),
+                # Here and not on `knowledge` (#435): that step is emitted only
+                # when something was admitted, so a miss on a turn that admitted
+                # nothing — the case worth watching — would have no record.
+                # Present whenever a selector ran, `items: []` included.
+                **({"near_misses": preload.near_miss_record()} if preload.mode else {}),
             },
         )
         if preload.withheld:

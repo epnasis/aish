@@ -9923,6 +9923,61 @@ class TestContextRecord:
         agent.run_task("hello")
         assert not [s for s in rendered if s.get("kind") == "context"]
 
+    def _semantic(self, table):
+        def scores(query, entries):
+            return {id(e): table.get(e.name, 0.0) for e in entries}
+
+        return SimpleNamespace(scores=scores, error=None)
+
+    def _run_semantic(self, tmp_path, table, task="hotels for my family"):
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [model_says("ok")], cwd=str(tmp_path), step_log=steps.append,
+            semantic=self._semantic(table),
+        )
+        agent.run_task(task)
+        return steps
+
+    def test_near_misses_ride_the_record_on_a_turn_that_admitted_nothing(self, tmp_path):
+        """#435: the miss worth watching is the one on a turn where nothing
+        was admitted — and that turn writes no `knowledge` step at all. The
+        `context` record is written on every turn, so the near-misses ride it."""
+        d = agent_module.skills.GLOBAL_MEMORY_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "family-profile.md").write_text(
+            "---\nname: family-profile\ndescription: who travels\nkeywords: family\n---\nb\n"
+        )
+        steps = self._run_semantic(tmp_path, {"family-profile": 0.154})
+        assert not [s for s in steps if s.get("kind") == "knowledge"]
+        (context,) = self._contexts(steps)
+        assert context["preload"]["near_misses"] == {
+            "band": agent_module.skills.PRELOAD_NEAR_MISS_BAND,
+            "max": agent_module.skills.PRELOAD_NEAR_MISS_MAX,
+            "items": [{
+                "label": "family-profile", "kind": "memory", "sim": 0.154, "rail": 3,
+                "floor": agent_module.skills.SEMANTIC_MIN_SIM, "floor_kind": "keyword",
+            }],
+            "truncated": 0,
+        }
+
+    def test_the_knowledge_step_keeps_its_shape(self, tmp_path):
+        """Nothing about ADMITTED entries changes: the `knowledge` step that
+        curate's ledger reads carries the winners only, in the shape it had."""
+        d = agent_module.skills.GLOBAL_MEMORY_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        for name in ("winner", "runner-up"):
+            (d / f"{name}.md").write_text(f"---\nname: {name}\ndescription: x\n---\nb\n")
+        steps = self._run_semantic(tmp_path, {"winner": 0.5, "runner-up": 0.3})
+        (knowledge,) = [s for s in steps if s.get("kind") == "knowledge"]
+        assert knowledge["items"] == [
+            {"label": "winner", "kind": "memory", "sim": 0.5, "rail": 0}
+        ]
+        assert set(knowledge) == {"kind", "mode", "items", "reminder", "turn"}
+        (context,) = self._contexts(steps)
+        assert [r["label"] for r in context["preload"]["near_misses"]["items"]] == [
+            "runner-up"
+        ]
+
 
 class TestReadPdf:
     """#219: reading a PDF is a capability, not a shell recipe the model

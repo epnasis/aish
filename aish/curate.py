@@ -155,6 +155,11 @@ def _windows(path: Path):
             step = rec.get("step", {})
             sk = step.get("kind")
             if sk == "knowledge":
+                # Admitted entries only. The near-misses (#435) are on the
+                # `context` record's `preload.near_misses`, which this ledger
+                # deliberately does not read: they are evidence for a human
+                # review of the preflight floors, and an entry that was never
+                # injected has no engagement to measure here.
                 pending = step.get("items", [])
             elif sk == "tool" and current is not None:
                 if step.get("name") == "read_skill":
