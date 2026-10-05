@@ -332,8 +332,12 @@ LOCAL_SAMPLING_FLOAT_KEYS = frozenset({"xtc_probability", "xtc_threshold"})
 # Providers whose streams always end with a finish_reason, checked in the
 # server's source (mlx-lm 0.31.3 `handle_completion` writes one on every path
 # that finishes, then `[DONE]`). A stream from these that ends without one was
-# cut off, not answered. Cloud providers are not listed: unverified.
-FINISH_REASON_ALWAYS_SENT = frozenset({LOCAL})
+# cut off, not answered. `gemini` is listed on its recorded streams: from
+# 2026-09-23 23:00 (when the reply record began keeping `stop`) to 2026-10-05,
+# 357 replies carried one and all 20 without one were empty or ended
+# mid-sentence (session-20261005-131021: "Sprawdzam teraz wą", "Strumieni").
+# Other cloud providers are not listed: unverified.
+FINISH_REASON_ALWAYS_SENT = frozenset({LOCAL, "gemini"})
 # Providers on which a request that lost its connection AFTER it was sent is
 # re-sent unchanged at most once per model call, then shrunk once, then given
 # up on (#419, `Agent._chat_turn`). On the owner's own server one request holds

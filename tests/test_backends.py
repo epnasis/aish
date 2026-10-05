@@ -224,7 +224,7 @@ def test_stream_preserves_gemini_thought_signature():
         function=SimpleNamespace(name="f", arguments="{}"),
         extra_content=extra,
     )
-    chunks = [_delta_chunk(tool_calls=[frag])]
+    chunks = [_delta_chunk(tool_calls=[frag]), _delta_chunk(finish_reason="stop")]
     backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "gemini")
     out = list(backend(model="m", messages=[], stream=True))
     assert out[-1].message.tool_calls[0].extra_content == extra
@@ -248,7 +248,11 @@ def test_stream_gemini_null_index_calls_stay_separate():
         function=SimpleNamespace(name="read_url", arguments='{"url": "https://b.example"}'),
         extra_content=None,
     )
-    chunks = [_delta_chunk(tool_calls=[frag1]), _delta_chunk(tool_calls=[frag2])]
+    chunks = [
+        _delta_chunk(tool_calls=[frag1]),
+        _delta_chunk(tool_calls=[frag2]),
+        _delta_chunk(finish_reason="stop"),
+    ]
     backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "gemini")
     out = list(backend(model="m", messages=[], stream=True))
     calls = out[-1].message.tool_calls
@@ -266,6 +270,7 @@ def test_gemini_stream_splits_thoughts_from_content():
         _delta_chunk(content="<thought>**Sky**\n\nWhy blue"),
         _delta_chunk(content="</thought>The sky is blue"),
         _delta_chunk(content=" because of scattering."),
+        _delta_chunk(finish_reason="stop"),
     ]
     client = FakeClient(stream_chunks=chunks)
     backend = OpenAICompatBackend(client, "gemini")
@@ -284,6 +289,7 @@ def test_gemini_stream_tag_split_across_deltas():
         _delta_chunk(content="<thou"),
         _delta_chunk(content="ght>hidden</th"),
         _delta_chunk(content="ought>shown"),
+        _delta_chunk(finish_reason="stop"),
     ]
     backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "gemini")
     out = list(backend(model="m", messages=[], stream=True))
@@ -293,7 +299,7 @@ def test_gemini_stream_tag_split_across_deltas():
 
 def test_gemini_stream_flushes_heldback_text_at_end():
     # A trailing "<" could open a tag — held back, then flushed as real text.
-    chunks = [_delta_chunk(content="a < b <")]
+    chunks = [_delta_chunk(content="a < b <"), _delta_chunk(finish_reason="stop")]
     backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "gemini")
     out = list(backend(model="m", messages=[], stream=True))
     assert "".join(c.message.content for c in out) == "a < b <"
@@ -480,6 +486,7 @@ def test_stream_yields_text_then_final_tool_calls_and_usage():
         _delta_chunk(content="king"),
         _delta_chunk(tool_calls=[frag1]),
         _delta_chunk(tool_calls=[frag2]),
+        _delta_chunk(finish_reason="stop"),
         SimpleNamespace(
             choices=[],
             usage=SimpleNamespace(prompt_tokens=11, completion_tokens=5),

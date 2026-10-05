@@ -362,11 +362,26 @@ class TestLocalStreamCutOff:
         assert out[-1].message.stop == "stop"
 
     def test_cloud_providers_are_not_judged_by_it(self):
-        """Unverified that every cloud stream carries a finish_reason, so a
-        cloud stream without one is still read as it always was."""
+        """Unverified that every other cloud stream carries a finish_reason, so
+        such a stream without one is still read as it always was."""
         backend = backends.OpenAICompatBackend(FakeClient(stream_chunks=self.CUT), "openai")
         out = list(backend(model="gpt", messages=[{"role": "user", "content": "x"}], stream=True))
         assert "".join(c.message.content for c in out) == "partial "
+
+    def test_a_gemini_stream_cut_mid_word_raises(self):
+        """session-20261005-131021: four replies stopped mid-word with no
+        finish_reason and each ended the owner's turn as if it were the answer."""
+        cut = [_delta(content="Sprawdzam teraz wą")]
+        backend = backends.OpenAICompatBackend(FakeClient(stream_chunks=cut), "gemini")
+        with pytest.raises(ratelimit.StreamCutOff, match="gemini server's reply stream"):
+            list(backend(model="g", messages=[{"role": "user", "content": "x"}], stream=True))
+
+    def test_a_finished_gemini_stream_is_untouched(self):
+        chunks = [_delta(content="whole answer"), _finish()]
+        backend = backends.OpenAICompatBackend(FakeClient(stream_chunks=chunks), "gemini")
+        out = list(backend(model="g", messages=[{"role": "user", "content": "x"}], stream=True))
+        assert "".join(c.message.content for c in out) == "whole answer"
+        assert out[-1].message.stop == "stop"
 
     def test_the_turn_is_retried_and_answers_instead_of_ending_empty(self, local_env):
         """The whole path: cut stream -> retry -> the restarted server answers."""
