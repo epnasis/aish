@@ -336,17 +336,43 @@ def clean_keywords(raw: str) -> tuple[list[str], list[str]]:
     return kept[:KEYWORDS_MAX], dropped
 
 
-def dropped_keywords_note(dropped: list[str]) -> str:
+def dropped_keywords_note(dropped: list[str], *, written: bool = True,
+                          kept_existing: bool = False) -> str:
     """The sentence a writer appends when `clean_keywords` dropped anything —
-    empty otherwise, so a caller can append it unconditionally."""
+    empty otherwise, so a caller can append it unconditionally.
+
+    `written=False` is for a result where nothing reached disk (a refusal, a
+    held or denied write), so the sentence does not claim a save happened.
+    `kept_existing` says an UPDATE whose every keyword was dropped kept the
+    entry's existing keyword line instead of erasing it. Names no entry: it
+    rides refusals that already name one, and two names in one message is
+    one too many."""
     if not dropped:
         return ""
-    return (
-        f" Keywords NOT stored (not English): {', '.join(dropped)}. Keywords "
-        "MUST be English — a keyword with a non-English letter is dropped. "
-        "Save again under the same name with English equivalents "
-        "(e.g. 'buy', not 'kupić')."
+    words = ", ".join(dropped)
+    head = (
+        f" Keywords NOT stored (not English): {words}."
+        if written else
+        f" Keywords that would NOT be stored (not English): {words}."
     )
+    kept = " The entry's existing keywords were kept." if kept_existing else ""
+    return (
+        f"{head}{kept} Keywords MUST be English — use English equivalents for "
+        "the dropped words (e.g. 'buy', not 'kupić')."
+    )
+
+
+def keywords_after_drop(kept: list[str], dropped: list[str],
+                        existing: list[str]) -> tuple[list[str], bool]:
+    """What an UPDATE writes: (keywords, kept_existing). When every keyword
+    the writer supplied was dropped, the entry keeps the line it already had —
+    a local judge ignoring the English instruction is the EXPECTED input
+    (#444), and erasing a working line over it would strictly reduce recall
+    while the writer reported success. Existing keywords are carried as they
+    are: this guards the inflow, never the corpus on disk."""
+    if dropped and not kept and existing:
+        return [frontmatter_value(w) for w in existing], True
+    return kept, False
 
 
 def _parse(path: Path, kind: str = "skill") -> Entry:
@@ -1275,7 +1301,7 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
     # `.strip()` left interior newlines, which is how a keyword smuggled
     # `status: disabled` onto its own line and retired the entry.
     keyword_list, dropped_kw = clean_keywords(keywords)
-    dropped_note = dropped_keywords_note(dropped_kw)
+    kept_existing = False
     directory = Path(memory_dir)
     path = directory / f"{slug}.md"
     if not force and not path.is_file():
@@ -1305,13 +1331,16 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
                 f"\"{similar.description}\". UPDATE it instead (remember with "
                 f"name=\"{similar.name}\") or forget_memory(\"{similar.name}\") "
                 "first; only if this is genuinely a different fact, retry with "
-                "force=true." + dropped_note
+                "force=true." + dropped_keywords_note(dropped_kw, written=False)
             )
     body = ""
     try:
         if path.is_file():  # update: keep body detail + undeclared frontmatter
             prior = _parse(path, "memory")
             body = prior.body
+            keyword_list, kept_existing = keywords_after_drop(
+                keyword_list, dropped_kw, prior.keywords
+            )
             if expiry is None:
                 expiry = prior.expires
             if pinned is None:
@@ -1333,9 +1362,13 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
             encoding="utf-8",
         )
     except OSError as exc:
-        return f"ERROR: could not save memory: {exc}"
+        return f"ERROR: could not save memory: {exc}" + dropped_keywords_note(
+            dropped_kw, written=False
+        )
     state = " [disabled]" if disabled else ""
-    return f"remembered ({slug}){state}: {text}" + dropped_note
+    return f"remembered ({slug}){state}: {text}" + dropped_keywords_note(
+        dropped_kw, kept_existing=kept_existing
+    )
 
 
 def forget_memory(name: str, cwd: str = "") -> str:
@@ -1393,12 +1426,14 @@ def plan_skill(name: str, description: str, content: str, keywords: str = "",
     `pinned:` would hand the next curate pass a `disable` the envelope
     refuses on pinned entries.
 
-    `on_keywords_dropped` receives the keywords `clean_keywords` refused as
-    not English (#444) — a callback for the same reason as `on_admission`:
-    the 3-tuple is what every caller unpacks, and the caller owns the result
-    line the drop must be reported on. Keywords preserved from the existing
-    file (none supplied, or every supplied one dropped) are carried as they
-    are: this guards what is written NOW, never the corpus already on disk.
+    `on_keywords_dropped(dropped, kept_existing)` receives the keywords
+    `clean_keywords` refused as not English (#444) and whether this update
+    kept the file's existing keyword line because none survived — a callback
+    for the same reason as `on_admission`: the 3-tuple is what every caller
+    unpacks, and the caller owns the result line the drop must be reported
+    on. Keywords preserved from the existing file (none supplied, or every
+    supplied one dropped) are carried as they are: this guards what is
+    written NOW, never the corpus already on disk.
     """
     slug = name.strip()
     if not NAME_RE.match(slug or ""):
@@ -1418,12 +1453,18 @@ def plan_skill(name: str, description: str, content: str, keywords: str = "",
     desc = frontmatter_value(description or "")
     # Keyword hygiene, identical to save_memory (#183, #209, #444).
     keyword_list, dropped_kw = clean_keywords(keywords)
-    if dropped_kw and on_keywords_dropped is not None:
-        on_keywords_dropped(dropped_kw)
     # _merged rather than load_entries: an update must find a RETIRED skill's
     # file too, or a disabled entry silently forks into a duplicate.
     all_skills = [e for e in _merged(skill_dirs(cwd), "skill") if e.path is not None]
     prior = next((e for e in all_skills if e.name == slug), None)
+    if dropped_kw and on_keywords_dropped is not None:
+        # Reported before any refusal below, so a retry knows too. The
+        # fallback that keeps an update's existing line is applied further
+        # down (it also covers keywords simply omitted).
+        on_keywords_dropped(
+            dropped_kw,
+            prior is not None and not keyword_list and bool(prior.keywords),
+        )
     if prior is None and not desc:
         # Before the dedup gate: an identity line with no description scores
         # nothing meaningful, and recording an admission for a call that then

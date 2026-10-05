@@ -2078,16 +2078,50 @@ class TestEnglishOnlyKeywords:
         assert result == "remembered (plain): a fact"
 
     def test_plan_skill_drops_and_reports_through_its_callback(self, tmp_path):
-        reported: list[list[str]] = []
+        reported: list[tuple[list[str], bool]] = []
         path, text, refusal = skills_module.plan_skill(
             "qr-payment", "Use when the user asks to pay by QR", "1. run qrencode",
             keywords="qr code, płatność, qrencode", cwd=str(tmp_path),
-            on_keywords_dropped=reported.append,
+            on_keywords_dropped=lambda d, kept: reported.append((d, kept)),
         )
         assert refusal == "" and path is not None
         assert "keywords: qr code, qrencode\n" in text
         assert "płatność" not in text
-        assert reported == [["płatność"]]
+        assert reported == [(["płatność"], False)]
+
+    def test_save_memory_update_whose_every_keyword_is_dropped_keeps_the_line(
+        self, tmp_path
+    ):
+        """The review's F1: the local judge (or model) ignoring the English
+        instruction is the EXPECTED input, and an update must not erase a
+        working keyword line over it while reporting success."""
+        memory = skills_module.GLOBAL_MEMORY_DIR
+        save_memory("old fact", memory, name="bill", keywords="invoice, energy",
+                    cwd=str(tmp_path))
+        result = save_memory("new fact", memory, name="bill", keywords="prąd, rachunek za prąd",
+                             cwd=str(tmp_path))
+        entry = _parse(memory / "bill.md", "memory")
+        assert entry.keywords == ["invoice", "energy"]
+        assert entry.description == "new fact"
+        assert "Keywords NOT stored (not English): prąd, rachunek za prąd." in result
+        assert "The entry's existing keywords were kept." in result
+
+    def test_save_memory_update_with_a_surviving_keyword_replaces_the_line(self, tmp_path):
+        memory = skills_module.GLOBAL_MEMORY_DIR
+        save_memory("old fact", memory, name="bill", keywords="invoice", cwd=str(tmp_path))
+        result = save_memory("new fact", memory, name="bill", keywords="prąd, power",
+                             cwd=str(tmp_path))
+        assert _parse(memory / "bill.md", "memory").keywords == ["power"]
+        assert "existing keywords were kept" not in result
+
+    def test_a_near_duplicate_refusal_names_one_entry_only(self, tmp_path):
+        memory = skills_module.GLOBAL_MEMORY_DIR
+        save_memory("pay the power bill by qr", memory, name="bill", cwd=str(tmp_path))
+        result = save_memory("pay the power bill by qr code", memory, name="bill-2",
+                             keywords="płatność", cwd=str(tmp_path))
+        assert result.startswith("NOT saved")
+        assert "Keywords that would NOT be stored (not English): płatność." in result
+        assert "same name" not in result
 
     def test_plan_skill_update_never_rewrites_keywords_it_was_not_given(self, tmp_path):
         # The backstop guards what is written NOW; an update that supplies no
@@ -2096,11 +2130,11 @@ class TestEnglishOnlyKeywords:
             "---\nname: qr-payment\ndescription: old trigger\n"
             "keywords: qr, przelew\n---\nold body\n"
         ))
-        reported: list[list[str]] = []
+        reported: list[tuple[list[str], bool]] = []
         _, text, refusal = skills_module.plan_skill(
             "qr-payment", "", "new body", keywords="płatność",
-            cwd=str(tmp_path), on_keywords_dropped=reported.append,
+            cwd=str(tmp_path), on_keywords_dropped=lambda d, kept: reported.append((d, kept)),
         )
         assert refusal == ""
         assert "keywords: qr, przelew\n" in text
-        assert reported == [["płatność"]]
+        assert reported == [(["płatność"], True)]

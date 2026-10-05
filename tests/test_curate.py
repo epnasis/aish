@@ -1184,26 +1184,47 @@ class TestRepairKeywordsAreEnglish:
 
     def test_update_entry_meta_drops_and_returns_what_it_dropped(self, tmp_path):
         path = make_entry(tmp_path, "e", "old desc", keywords="a", body="precious body")
-        dropped = update_entry_meta(path, description="Faktury za prąd",
-                                    keywords="invoice, prąd, e-kartoteka")
+        dropped, kept_existing = update_entry_meta(
+            path, description="Faktury za prąd", keywords="invoice, prąd, e-kartoteka"
+        )
         text = path.read_text(encoding="utf-8")
         assert "keywords: invoice, e-kartoteka\n" in text
-        assert dropped == ["prąd"]
+        assert (dropped, kept_existing) == (["prąd"], False)
         assert "description: Faktury za prąd" in text  # descriptions untouched
         assert text.endswith("precious body\n")
 
     def test_no_keywords_given_drops_nothing(self, tmp_path):
         path = make_entry(tmp_path, "e", "desc", keywords="zażółć")
-        assert update_entry_meta(path, pinned=True) == []
+        assert update_entry_meta(path, pinned=True) == ([], False)
         assert "keywords: zażółć" in path.read_text(encoding="utf-8")  # corpus untouched
 
-    def test_the_action_record_names_the_dropped_keywords(self, tmp_path, monkeypatch):
+    def test_a_repair_whose_every_keyword_is_dropped_keeps_the_old_line(self, tmp_path):
+        """The review's F1, reproduced live: the old line was removed and only
+        surviving words re-added, so an all-Polish repair ERASED a working
+        line while the record said "repair". The 8B judge ignoring the English
+        instruction is the expected input, not an edge case."""
+        path = make_entry(tmp_path, "e", "old desc", keywords="invoice, energy")
+        dropped, kept_existing = update_entry_meta(
+            path, description="new desc", keywords="faktura za prąd, rachunek za prąd"
+        )
+        assert (dropped, kept_existing) == (["faktura za prąd", "rachunek za prąd"], True)
+        text = path.read_text(encoding="utf-8")
+        assert "keywords: invoice, energy\n" in text
+        assert "description: new desc" in text  # the rest of the repair still applies
+
+    def test_all_dropped_with_no_line_to_keep_writes_none(self, tmp_path):
+        path = make_entry(tmp_path, "e", "desc")
+        assert update_entry_meta(path, keywords="prąd") == (["prąd"], False)
+        assert "keywords:" not in path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _repair(tmp_path, monkeypatch, keywords, judged_keywords):
         import aish.skills as skills_module
 
         gm = tmp_path / "gm"
         monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", gm)
         monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
-        path = make_entry(gm, "noisy", "generic thing", keywords="code, change")
+        path = make_entry(gm, "noisy", "generic thing", keywords=keywords)
         state = tmp_path / "state"
         records = []
         for i in range(MIN_INJECTIONS):
@@ -1215,18 +1236,36 @@ class TestRepairKeywordsAreEnglish:
 
         def judge(prompt):
             return ("VERDICT: repair\nREASON: generic keywords\n"
-                    "DESCRIPTION: power bills\nKEYWORDS: invoice, rachunek za prąd, energy")
+                    f"DESCRIPTION: power bills\nKEYWORDS: {judged_keywords}")
 
         run_curate(judge=judge, scores=lambda q, e: {}, notify_fn=lambda *a: None,
                    env={}, state_dir=state, now=NOW)
-        assert "keywords: invoice, energy\n" in path.read_text(encoding="utf-8")
         [action] = [
             json.loads(line)
             for line in (state / curate_module.ACTIONS_FILE).read_text().splitlines()
         ]
+        return path.read_text(encoding="utf-8"), action
+
+    def test_the_action_record_names_the_dropped_keywords(self, tmp_path, monkeypatch):
+        text, action = self._repair(tmp_path, monkeypatch, "code, change",
+                                    "invoice, rachunek za prąd, energy")
+        assert "keywords: invoice, energy\n" in text
         assert action["action"] == "repair"
         assert action["keywords_dropped"] == ["rachunek za prąd"]
+        assert action["keywords_kept_existing"] is False
 
-    def test_a_clean_repair_records_no_drop(self, tmp_path):
-        path = make_entry(tmp_path, "e", "desc")
-        assert update_entry_meta(path, keywords="invoice, energy") == []
+    def test_the_action_record_says_the_old_line_was_kept(self, tmp_path, monkeypatch):
+        text, action = self._repair(tmp_path, monkeypatch, "code, change",
+                                    "faktura, prąd, rachunek za prąd")
+        # `faktura` is ASCII and passes — the backstop under-catches by design.
+        assert "keywords: faktura\n" in text
+        assert action["keywords_kept_existing"] is False
+        text, action = self._repair(tmp_path / "2", monkeypatch, "code, change",
+                                    "prąd, rachunek za prąd")
+        assert "keywords: code, change\n" in text
+        assert action["keywords_dropped"] == ["prąd", "rachunek za prąd"]
+        assert action["keywords_kept_existing"] is True
+
+    def test_a_clean_repair_records_no_drop(self, tmp_path, monkeypatch):
+        _, action = self._repair(tmp_path, monkeypatch, "code", "invoice, energy")
+        assert "keywords_dropped" not in action and "keywords_kept_existing" not in action

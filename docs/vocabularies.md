@@ -336,7 +336,8 @@ sets in `web.py` and `export.py`, and attribute-name lists inside the page-readi
 backstop (#444), asks whether a keyword holds any non-ASCII letter. There is no vocabulary in
 it to go stale in a language nobody added, so it has no counter; its misses (ASCII-spelled
 Polish) are by design and stated in `docs/knowledge-layer.md`, and every drop it makes is
-reported in the writer's own result.
+reported where it is made — the `remember`/`create_skill` result (including a refused, held or
+denied write), curate's action record, or the skill-import review.
 
 **Decision vocabularies that are inventoried here but NOT instrumented in this slice**, named
 so the next person does not have to re-find them: `approval.EXEC_WRAPPERS` (27),

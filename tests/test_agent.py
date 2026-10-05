@@ -16190,3 +16190,59 @@ class TestKeywordsAreEnglish:
         )
         agent.run_task("save it")
         assert "NOT stored" not in tool_messages(agent.messages)[0]["content"]
+
+    def test_a_held_skill_write_says_what_would_be_dropped(self, tmp_path):
+        # The held path is re-proposed: the model must learn its keywords
+        # were cleaned BEFORE it proposes them again, and nothing was written.
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._call(
+                "create_skill", name="qr-payment", description="Use when paying by QR",
+                content="1. qrencode", keywords="qr, płatność")]),
+             model_says("ok")],
+            cwd=str(tmp_path),
+            approve_write=lambda plan: agent_module.Approved("make it shorter"),
+        )
+        agent.run_task("save it")
+        assert not (skills_module.GLOBAL_SKILLS_DIR / "qr-payment.md").exists()
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "Keywords that would NOT be stored (not English): płatność." in result
+        assert "Keywords NOT stored" not in result
+
+    def test_an_update_whose_every_keyword_is_dropped_keeps_the_old_line(self, tmp_path):
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._call(
+                "remember", note="new fact", name="power-bill", keywords="prąd, rachunek")]),
+             model_says(tool_calls=[self._call(
+                "remember", note="newer fact", name="power-bill", keywords="zażółć")]),
+             model_says("ok")],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("remember it")
+        text = (skills_module.GLOBAL_MEMORY_DIR / "power-bill.md").read_text()
+        assert "keywords: rachunek\n" in text and "newer fact" in text
+        result = tool_messages(agent.messages)[1]["content"]
+        assert "The entry's existing keywords were kept." in result
+
+    def test_an_import_drops_shows_it_in_review_and_says_so(self, tmp_path):
+        skill = tmp_path / "repo" / "myskill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: myskill\ndescription: Use when importing\n"
+            "keywords: import, płatność\n---\nDo it.\n"
+        )
+        reviewed = {}
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._call(
+                "import_skill", repo=str(tmp_path / "repo"), path="myskill")]),
+             model_says("done")],
+            cwd=str(tmp_path),
+            approve_import=lambda **kw: reviewed.update(kw) or True,
+        )
+        agent.run_task("import it")
+        installed = (skills_module.GLOBAL_SKILLS_DIR / "myskill" / "SKILL.md").read_text()
+        assert "keywords: import\n" in installed
+        # what was reviewed is exactly what installed, and the review said why
+        [manifest] = [f for f in reviewed["files"] if f["path"] == "SKILL.md"]
+        assert manifest["content"] == installed
+        assert "SKILL.md: keywords not English, not installed: płatność" in reviewed["flags"]
+        assert "not installed: płatność" in tool_messages(agent.messages)[0]["content"]

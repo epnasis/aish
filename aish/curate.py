@@ -780,16 +780,20 @@ def update_entry_meta(
     keywords: str | None = None,
     pinned: bool | None = None,
     disabled: bool | None = None,
-) -> list[str]:
+) -> tuple[list[str], bool]:
     """Frontmatter-only rewrite: description/keywords/pinned/status may
     change, every other frontmatter line and the ENTIRE body are preserved
     byte-for-byte. This is the whole mutation surface of the judge loop —
     bodies and deletion have no code path here, which is what makes the
     envelope enforcement code rather than prompt obedience.
 
-    Returns the judge's keywords that were NOT written because they are not
-    English (#444, `skills.clean_keywords`), so the caller can put them in
-    the action record — a drop nobody can see is a silent edit."""
+    Returns (dropped, kept_existing): the judge's keywords NOT written because
+    they are not English (#444, `skills.clean_keywords`), and whether the
+    entry's existing keyword line was kept byte-for-byte because NONE of the
+    judge's survived. The local judge ignoring the English instruction is the
+    expected input, and erasing a working line over it would strictly reduce
+    recall while the record said "repair". Both go into the action record —
+    a drop nobody can see is a silent edit."""
     text = path.read_text(encoding="utf-8")
     # The same reading as `_parse` (#209). Its own regex was near-correct but
     # stricter than this writer needs — no CRLF, no trailing space on either
@@ -798,12 +802,25 @@ def update_entry_meta(
     header, body = skills.split_frontmatter(text)
     if not header:
         raise ValueError(f"no frontmatter in {path}")
+    words: list[str] = []
+    dropped: list[str] = []
+    if keywords is not None:
+        # Judge-authored, and interpolated onto one line: a bare `.strip()`
+        # would let `status: disabled` ride in on a keyword and retire an
+        # entry the envelope refuses to disable directly (#209).
+        words, dropped = skills.clean_keywords(keywords)
+    has_line = any(
+        line.partition(":")[0].strip().casefold() == "keywords"
+        for line in header.splitlines()
+    )
+    kept_existing = bool(dropped) and not words and has_line
+    replace_keywords = keywords is not None and not kept_existing
     keep: list[str] = []
     for line in header.splitlines():
         key = line.partition(":")[0].strip().casefold()
         if key == "description" and description is not None:
             continue
-        if key == "keywords" and keywords is not None:
+        if key == "keywords" and replace_keywords:
             continue
         if key == "pinned" and pinned is not None:
             continue
@@ -813,20 +830,14 @@ def update_entry_meta(
     front = keep
     if description is not None:
         front.insert(1, f"description: {skills.frontmatter_value(description)}")
-    dropped: list[str] = []
-    if keywords is not None:
-        # Judge-authored, and interpolated onto one line: a bare `.strip()`
-        # would let `status: disabled` ride in on a keyword and retire an
-        # entry the envelope refuses to disable directly (#209).
-        words, dropped = skills.clean_keywords(keywords)
-        if words:
-            front.append(f"keywords: {', '.join(words)}")
+    if replace_keywords and words:
+        front.append(f"keywords: {', '.join(words)}")
     if pinned:
         front.append("pinned: yes")
     if disabled:
         front.append("status: disabled")
     path.write_text("---\n" + "\n".join(front) + "\n---\n" + body, encoding="utf-8")
-    return dropped
+    return dropped, kept_existing
 
 
 def load_recent_actions(state_dir, now: datetime) -> dict[str, str]:
@@ -1087,6 +1098,7 @@ def run_curate(
         assert entry.path is not None  # entries were filtered to file-backed
         verdict = _judged(judge, judge_prompt(entry, stat, category), parse_verdict)
         keywords_dropped: list[str] = []
+        keywords_kept_existing = False
         if verdict is None:
             counts["unparseable"] += 1
             record = {"action": "skip", "reason": "unparseable judge reply"}
@@ -1111,7 +1123,7 @@ def run_curate(
             record = {"action": verdict.action, "reason": verdict.reason}
             try:
                 if verdict.action == "repair":
-                    keywords_dropped = update_entry_meta(
+                    keywords_dropped, keywords_kept_existing = update_entry_meta(
                         entry.path,
                         description=verdict.description,
                         keywords=verdict.keywords or None,
@@ -1125,8 +1137,12 @@ def run_curate(
                 record = {"action": "skip", "reason": f"apply failed: {exc}"}
         acted_this_run.add(entry.name)
         # The repair WROTE fewer keywords than the judge gave (#444): the
-        # record says which, so the entry's history explains its keyword line.
-        dropped_field = {"keywords_dropped": keywords_dropped} if keywords_dropped else {}
+        # record says which, and whether the old line was kept because none
+        # survived, so the entry's history explains its keyword line.
+        dropped_field: dict[str, object] = {}
+        if keywords_dropped:
+            dropped_field = {"keywords_dropped": keywords_dropped,
+                             "keywords_kept_existing": keywords_kept_existing}
         log_action(
             state_dir,
             {"ts": now.isoformat(), "name": entry.name, "category": category,
@@ -1134,8 +1150,9 @@ def run_curate(
         )
         log(f"{entry.name}: {record['action']} — {record['reason'][:80]}")
         if keywords_dropped:
+            kept = "; existing keywords kept" if keywords_kept_existing else ""
             log(f"{entry.name}: keywords not written (not English): "
-                f"{', '.join(keywords_dropped)}")
+                f"{', '.join(keywords_dropped)}{kept}")
 
     for a, b, sim in pairs:
         if a.name in acted_this_run or b.name in acted_this_run:
