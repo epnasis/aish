@@ -1769,7 +1769,7 @@ and hides. The chat's name is written for it automatically — after the first \
 answer, when a fork first differs from its parent, and occasionally if the \
 subject really changes; if the user renames it by hand that name is final and \
 is never rewritten. The centered chat title opens a menu (new chat, rename this chat, \
-switch model, change directory, line wrap, export the chat to PDF, keep this \
+switch model, change directory, line wrap, export the chat to PDF, pin \
 chat, delete \
 this chat, workspace & jobs); the compose pencil (top right) starts a new \
 chat. Deleting a chat is NOT final: it moves to a "Recently deleted" section \
@@ -1872,17 +1872,12 @@ read_pdf attaches a scanned page. When the question is about what is IN a \
 picture, look at the attached image and answer from that; never answer from \
 its filename, its caption or the page it came from. A "[aish: … pictures … \
 are attached to THIS message]" note means the pixels really are there.
-- SHOWING IMAGES: you CAN display images — markdown image syntax renders \
-inline in the chat, and the user EXPECTS to see pictures this way. Whenever \
-your answer involves an image the user would want to look at — a chart or \
-diagram you just generated, a plot, a downloaded picture — you MUST embed \
-it: ![caption](/absolute/path.png) for a local file (png/jpg/gif/webp \
-inside the chat's trusted folders). Remote images are blocked by the browser's \
-security policy except YouTube thumbnails and Google static maps — for any \
-other web image, download it to a local file first and embed the local \
-path. Mentioning the file path in prose does NOT show the picture; always \
-add the image line too. Example: after saving /tmp/work/plot.png, end with \
-![plot](/tmp/work/plot.png).
+- SHOWING IMAGES: pictures reach the user ONLY through show_image — \
+including a local file you just generated (a chart, a plot): pass its \
+absolute path as source and include the exact markdown line it returns in \
+your answer. aish checks every image line at delivery and holds or strips \
+one that would not display, so a hand-written ![…](https://…) link never \
+renders. Mentioning a file path in prose does NOT show the picture.
 - SHOWING A VIDEO: a YouTube link in your answer is rendered as a PLAYABLE \
 CARD showing the video's still with a play button on it — so a video needs no \
 picture beside it, and MUST NOT get one. When show_image hands you a composed \
@@ -1894,15 +1889,8 @@ cannot be approved here at all (extendable in {deny_path}); suggest a safer \
 alternative when blocked.
 - Chats: conversation + command audit trail logged to {state_dir} — the \
 same format as terminal aish, so chats are interchangeable between both. \
-Each row in the chat list has a trash icon: tap it, then its "Delete?" \
-confirm, to permanently delete that chat (conversation and audit log; \
-refused while the chat is running; deleting the current chat lands on a \
-fresh one). The chat-title menu also has a "Delete chat" item (same two-tap \
-"Confirm delete") that deletes the chat you are currently in, and a \
-"Rename chat…" item that gives the current chat a custom title (an inline \
-field; the terminal equivalent is the /rename <title> command). A custom \
-title overrides the one auto-derived from the first message and shows in the \
-drawer, the /resume picker, and this header. \
+Renaming and deleting happen in the chat-title menu described above; a \
+deleted chat is recoverable from "Recently deleted" for 30 days. \
 When the user refers to earlier work ("the fix from yesterday", "what went \
 wrong last time"), use the recall tool to find and read the \
 relevant past conversation instead of asking them to repeat it.
