@@ -4192,3 +4192,6 @@ body.console-open #backdrop { z-index: 63; }
 .ss-hit { background: rgba(208, 135, 38, 0.35); color: inherit; border-radius: 2px; }
 .ss-hit.ss-cur { background: var(--accent); color: #fff; }
 #ss-body .step-frame { margin: 0 0 10px; }
+
+/* aish's own words to the model (contract §3.17): enforcement reads amber. */
+.step-harness-enforce .step-title { color: var(--orange); }

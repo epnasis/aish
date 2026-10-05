@@ -73,6 +73,8 @@ from .session import (
     SessionLog,
     attachment_guidance,
     attachment_names,
+    harness_headline,
+    harness_step,
     message_body,
     real_attachments,
     strip_attachment_notes,
@@ -3934,6 +3936,14 @@ class Agent:
         # carry this stamp, so a counter that only exists once a task has begun
         # makes the very first append raise.
         self._model_call = 0
+        # Notes aish wrote between tasks, waiting for the next task's card
+        # (`_show_harness`); `_in_task` is what tells the two apart.
+        self._in_task = False
+        self._held_harness: list[dict] = []
+        # What the latest task drew first thing, so a Retry that discards that
+        # task draws them again on the attempt that replaces it — the note is
+        # still in front of the typed question, and replay puts its row there.
+        self._drawn_at_start: list[dict] = []
         self._call_seq = itertools.count(1)
         # The call id currently being dispatched, so a `gate` verdict joins to
         # the `tool` step for the action it governed (§2). Thread-local rather
@@ -4152,6 +4162,11 @@ class Agent:
     def reset(self) -> None:
         """Drop the conversation, keep the system prompt."""
         del self.messages[1:]
+        # A note held for the next task belongs to the conversation just
+        # dropped: drawn in the next chat it would be a row for words that
+        # chat's model never received (found in delivery review).
+        self._held_harness.clear()
+        self._drawn_at_start = []
         self.context_fill = None
         # The terminal's /new and /resume reset and then switch the session
         # log, so the next estimate may look for evidence in a different chat.
@@ -4294,6 +4309,10 @@ class Agent:
             cut -= 1
         del self.messages[cut:]
         self._history_rewritten()
+        # The notes the discarded attempt drew first thing are still in front
+        # of the question, so the attempt that replaces it draws them again.
+        self._held_harness[:0] = self._drawn_at_start
+        self._drawn_at_start = []
         return text if isinstance(text, str) else None
 
     def _question_index(self) -> int | None:
@@ -4405,6 +4424,7 @@ class Agent:
         interim: bool = False,
         record_content: str | None = None,
         delivered: bool = False,
+        source: str | None = None,
     ) -> None:
         """`interim` stamps the LOG record as a delivery — something said on
         the way to the answer (#212) — without touching the message dict the
@@ -4421,8 +4441,15 @@ class Agent:
         tool-role record. That holds on this loop and nowhere else, so the fact
         is now stamped where it is known rather than re-derived downstream (the
         provenance rule in docs/web-server.md L5).
+
+        `source` names the site that wrote an aish-authored note (`[aish: …]`,
+        `/cd`, a console share): which code spoke, never why. Every such note
+        is ALSO a trace row (`_show_harness`), decided here because this is
+        the one door every note comes through — a row per call site is the
+        discipline that left twenty of them invisible (contract §3.17).
         """
         self.messages.append(message)
+        record = None
         if self.on_message:
             record = _serialize(message)
             # Which model call this message was in front of (#262). Membership
@@ -4440,7 +4467,36 @@ class Agent:
                 record["delivered"] = True
             if record_content is not None:
                 record["content"] = record_content
+            if source:
+                record["source"] = source
             self.on_message(record)
+        content = str(message.get("content") or "")
+        if message.get("role") == "user" and synthetic_kind(content) == "note":
+            if record is None:
+                record = {**_serialize(message), "model_call": self._model_call}
+                if source:
+                    record["source"] = source
+            self._show_harness(record)
+
+    def _show_harness(self, record: dict) -> None:
+        """Draw one aish-authored note as a trace row, from its message record.
+
+        Live-only by design: the row's ONE durable copy is the message record
+        already written, and `SessionLog.reconstruct_events` turns that same
+        record into the same step through the same `harness_step` — so the
+        text is never duplicated into the log (a redaction or a scrub has one
+        copy to act on), and a log written before this existed shows its
+        notes too. A note written between tasks cannot open a card (a step
+        with no turn is a ghost card), so it waits for the next task to begin,
+        which is where replay places it as well.
+        """
+        step = harness_step(record)
+        if not self._in_task:
+            self._held_harness.append(step)
+            return
+        self._note("⚑ aish told the model: " + harness_headline(step["text"]))
+        if self.on_step is not None:
+            self.on_step(step)
 
     def _note(self, text: str) -> None:
         """Terminal progress chatter (✓ ran X, → read Y, ✓ thought for …).
@@ -4606,7 +4662,7 @@ class Agent:
                           plan_revision=(plan_now or {}).get("revision"))
         else:
             line = AISH_NOTE + repeats.text() + "]"
-            self._append({"role": "user", "content": line})
+            self._append({"role": "user", "content": line}, source="repeat_nudge")
             record.update(sent=True, text=line)
         self._emit_record(**record)
 
@@ -5083,6 +5139,13 @@ class Agent:
         # How the previous task ended, for the plan's failed-task-end trigger
         # (#433); this task's own ending is written as it happens.
         self._previous_unfinished, self._task_unfinished = self._task_unfinished, ""
+        self._in_task = True
+        held, self._held_harness = self._held_harness, []
+        self._drawn_at_start = held
+        for step in held:
+            self._note("⚑ aish told the model: " + harness_headline(step["text"]))
+            if self.on_step is not None:
+                self.on_step(step)
         try:
             return self._run_task(
                 task, images, documents, keep_history=keep_history, continuing=continuing
@@ -5095,6 +5158,7 @@ class Agent:
             self.announce_cardless_apart()
             raise
         finally:
+            self._in_task = False
             self._flush_vocab()
 
     def _run_task(
@@ -5390,7 +5454,10 @@ class Agent:
                 self.plan_owner_changed.clear()
                 owner_note = self._plan_owner_note()
                 if owner_note:
-                    self._append({"role": "user", "content": AISH_NOTE + owner_note + "]"})
+                    self._append(
+                        {"role": "user", "content": AISH_NOTE + owner_note + "]"},
+                        source="plan_owner",
+                    )
             self._enforce_budget(task_start, protect_from=this_task)
             turn_start = time.perf_counter()
             # A live "Thinking…" row on the trace timeline; it finalizes to
@@ -5449,7 +5516,9 @@ class Agent:
                         kind="thinking_cancel", secs=turn_secs, tokens=list(usage),
                         answered=False, **self._fill_field(),
                     )
-                    self._append({"role": "user", "content": AISH_NOTE + note + "]"})
+                    self._append(
+                        {"role": "user", "content": AISH_NOTE + note + "]"}, source="empty_reply"
+                    )
                     continue
                 empty_facts = [empty_reply_asked, ASKED_AGAIN_FACT]
                 if repeated:
@@ -5616,7 +5685,9 @@ class Agent:
                     # Marked as aish's own words (#171), or replay renders the
                     # harness's question as a blue bubble the owner never typed.
                     ask = unmet + ("\n" + ANSWER_WITHHELD if withheld else "")
-                    self._append({"role": "user", "content": AISH_NOTE + ask + "]"})
+                    self._append(
+                        {"role": "user", "content": AISH_NOTE + ask + "]"}, source="answer_check"
+                    )
                     continue
                 self._commit_image_removal()
                 was_held = self._held_answer is not None
@@ -5737,7 +5808,7 @@ class Agent:
                 self._append({
                     "role": "user",
                     "content": AISH_NOTE + PLAN_TRIGGER_STALL.format(steps=stall) + "]",
-                })
+                }, source="plan_stall")
             if stall >= MAX_STALL_STEPS:
                 self.echo("⚠ no new progress for several steps — asking the model to wrap up")
                 return self._finish_stopped(STALL_NOTE, STOPPED_STALL)
@@ -5764,7 +5835,9 @@ class Agent:
             STOPPED_STALL: "stopped at the stall cap",
             STOPPED_LIMIT: "stopped at the step ceiling",
         }.get(headline, "stopped")
-        self._append({"role": "user", "content": note})
+        self._append({"role": "user", "content": note}, source={
+            STOPPED_LOOP: "loop_stop", STOPPED_STALL: "stall_stop", STOPPED_LIMIT: "step_limit",
+        }.get(headline, "stopped"))
         if self._held_answer is not None:
             # Per turn, like the loop's own reset — which this exit skips. The
             # stuck turn's buffered preamble was still in there and got streamed
@@ -6624,14 +6697,15 @@ class Agent:
                         tools=tools_named, count=len(paths),
                         paste=TOOL_MEDIA_PASTE_ANYWAY if "show_image" in names else "",
                     ),
-                }
+                },
+                source="tool_media",
             )
             return
         shown = paths[:TOOL_IMAGES_PER_TURN]
         note = TOOL_MEDIA_DELIVERED.format(count=len(shown), tools=tools_named)
         if dropped := len(paths) - len(shown):
             note += TOOL_MEDIA_CAPPED.format(dropped=dropped, cap=TOOL_IMAGES_PER_TURN)
-        self._append({"role": "user", "content": note, "images": shown})
+        self._append({"role": "user", "content": note, "images": shown}, source="tool_media")
 
     def _trim_tool_message(self, message: dict) -> str | None:
         """Shorten one tool result on its own; returns the continuation key, ""
@@ -7402,7 +7476,9 @@ class Agent:
         `[…]` framing keeps the logged turn out of the replayed transcript, which
         is where the live UI leaves it too (session.synthetic_kind, #171)."""
         self.note_owner_hosts(text)  # user-shared context is owner-authored
-        self._append({"role": "user", "content": provenance.disarm_markers(text)})
+        self._append(
+            {"role": "user", "content": provenance.disarm_markers(text)}, source="console_share"
+        )
 
     def rebase(self, target: str, announce: bool = True) -> str:
         """User-typed /cd (and its alias !cd): move cwd AND re-anchor the
@@ -7423,7 +7499,8 @@ class Agent:
         if announce:
             self._append(
                 {"role": "user", "content": f"[I moved the session to {self.cwd} with /cd — "
-                 "this directory is the project now]"}
+                 "this directory is the project now]"},
+                source="cd",
             )
         return result
 
@@ -7440,7 +7517,7 @@ class Agent:
         self.roots.append(path)
         self._emit_workspace("trust", str(path))
         note = f"[I added {path} as a session root with /add-dir — you may work there too]"
-        self._append({"role": "user", "content": note})
+        self._append({"role": "user", "content": note}, source="add_dir")
         return f"[added session root {path}]"
 
     def trust_root(self, target: str) -> str:
@@ -9812,7 +9889,7 @@ class Agent:
             return b"", f"{path} is not a png/jpg/gif/webp image."
         return data, None
 
-    def add_system_note(self, text: str) -> None:
+    def add_system_note(self, text: str, source: str | None = None) -> None:
         """Append a note aish itself wrote as the next turn's context, WITHOUT
         treating it as owner-authored.
 
@@ -9820,8 +9897,9 @@ class Agent:
         which would widen egress provenance with hosts taken from a string the
         MODEL chose (a failed image src) — the exact laundering the provenance
         model exists to prevent (#178 P0-2). The `[aish: …]` framing keeps it
-        out of the replayed transcript (session.synthetic_kind, #171)."""
-        self._append({"role": "user", "content": text})
+        out of the user bubbles and draws it as a trace row instead
+        (session.synthetic_kind, #171; contract §3.17)."""
+        self._append({"role": "user", "content": text}, source=source)
 
     def _collect_source(self, call: dict, result: str) -> None:
         """Track pages actually fetched this task, so answers can cite them.
@@ -12327,7 +12405,7 @@ class Agent:
             return answer, None
         items = ", ".join(f"{embed.target} ({reason})" for embed, reason in broken)
         if not held:
-            self.add_system_note(IMAGES_UNCHECKED_NOTE.format(items=items))
+            self.add_system_note(IMAGES_UNCHECKED_NOTE.format(items=items), source="image_check")
             self._record_image_verify("advised", final)
             return answer, None
         kept, cursor = [], 0
@@ -12668,7 +12746,7 @@ class Agent:
             self._release_held(discard=True)
             self._held_entry = None
             note = AISH_NOTE + ANSWER_WITHHELD_FOR_MESSAGES + "]"
-            self._append({"role": "user", "content": note})
+            self._append({"role": "user", "content": note}, source="answer_withheld")
             return
         text = content.strip()
         if self.on_token is None:

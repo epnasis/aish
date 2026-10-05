@@ -103,6 +103,13 @@ checking and why. Web lookups show the exact query and URL; answers cite the
 pages they read. When the turn ends it settles under the answer as a "Worked for
 12s" footnote you can open any time.
 
+What aish itself tells the model shows up there too. When a rule check sends an
+answer back for rework, a stop or a nudge fires, or aish passes on your `/cd`,
+the trace gets a row of its own — a shield for what was enforced, a signpost for
+what was steered — and a tap shows the exact words the model was handed. Those
+words reach the model inside the conversation, which is why a model can
+mistake them for you; the trace is where you can see that they were aish's.
+
 ![The activity trace expanded: a web search, a thinking step, and the page it read, each timed](docs/images/activity-trace.png)
 
 ### It tells you what it found, as it finds it

@@ -126,6 +126,11 @@ REDACT_KIND = "redact"
 # nothing on disk explaining why they are.
 RETRY_STEP = "retry"
 
+# aish's own words to the model, drawn as a trace row (contract §3.17). Not
+# in RENDERLESS_STEPS and never logged as a step: its record is the note's own
+# `message` record, which replay turns into this step (`harness_step`).
+HARNESS_STEP = "harness"
+
 
 def _turn_id(record: dict, index: int) -> str:
     """The name a message record answers to when something wants to point at
@@ -165,6 +170,41 @@ def synthetic_kind(content: str) -> str:
     if text.startswith(RESUME_MARKER):
         return "resume"
     return "note" if text.startswith(_NOTE_MARKERS) else ""
+
+
+def harness_step(record: dict) -> dict:
+    """The trace step for one aish-authored note, built from its message
+    record (contract §3.17). ONE builder for both paths — `Agent._show_harness`
+    live and `reconstruct_events` cold — so the two cannot draw different rows.
+
+    `role` is the role aish appended it with, which the record states; the role
+    a provider then delivered it in is a different fact, held by the `sent`
+    record, and is not claimed here.
+    """
+    step: dict = {
+        "kind": HARNESS_STEP,
+        "text": str(record.get("content") or ""),
+        "role": str(record.get("role") or "user"),
+    }
+    if record.get("source"):
+        step["source"] = str(record["source"])
+    if isinstance(record.get("model_call"), int):
+        step["model_call"] = record["model_call"]
+    return step
+
+
+def harness_headline(text: str) -> str:
+    """The note's first line without its bracket framing — for a terminal echo.
+    The cut `harnessHeadline` makes in app.js, plus a length cap the web row
+    does not need (its sub-line clamps to two lines by CSS)."""
+    body = text.strip()
+    if body.startswith(NOTE_MARKER):
+        body = body[len(NOTE_MARKER):]
+    elif body.startswith("["):
+        body = body[1:]
+    first = body.splitlines()[0] if body else ""
+    first = first.removesuffix("]")
+    return first if len(first) <= 160 else first[:159] + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -2188,6 +2228,12 @@ class SessionLog:
         # PREVIOUS turn's card, which is L1 breaking on the one record whose
         # whole job is to be visible.
         pending_retries: list[dict] = []
+        # aish's own notes written AFTER a turn's task_end (a /cd, a render
+        # report): live they cannot open a card, so `Agent._show_harness` holds
+        # them for the next task's card, and they are held here for the same
+        # turn (contract §3.17). `turn_ended` is what tells the two apart.
+        held_notes: list[dict] = []
+        turn_ended = False
 
         def model_call_edge(event: dict) -> str | None:
             kind = event.get("kind") if event.get("type") == "step" else None
@@ -2347,6 +2393,8 @@ class SessionLog:
             if record is None:
                 continue
             kind = record.get("kind")
+            if kind == "task_end" and not _is_superseded(record):
+                turn_ended = True
             if _is_superseded(record):
                 # A Retry's discarded attempt (#339). Kept on disk as evidence,
                 # hidden here so a cold replay shows the one turn a live viewer
@@ -2440,9 +2488,12 @@ class SessionLog:
                 content = record.get("content", "")
                 synthetic = synthetic_kind(content)
                 if synthetic == "note":
-                    # aish's own annotation — live it never reached the transcript
-                    # at all, and treating it as a user message would also split
-                    # the turn it sits inside. Skipping it IS the parity (#171).
+                    # aish's own words to the model. Never a user bubble — it
+                    # would split the turn it sits inside and claim he typed it
+                    # (#171) — but a trace ROW, built from this record by the
+                    # same `harness_step` the live path uses (contract §3.17).
+                    note = {"type": "step", **harness_step(record)}
+                    (steps if open_turn and not turn_ended else held_notes).append(note)
                     continue
                 flush()  # close the previous turn before the next one opens
                 if not synthetic and origin != "user" and first_user:
@@ -2490,9 +2541,14 @@ class SessionLog:
                         event["at"] = at
                     events.append(event)
                     open_turn = True
+                    turn_ended = False
                     # The presses that produced this turn, on its own timeline.
                     steps.extend(pending_retries)
                     pending_retries = []
+                    # Then what aish told the model while no task ran: live,
+                    # `Agent.run_task` draws those first thing.
+                    steps.extend(held_notes)
+                    held_notes = []
             elif kind == "message" and record.get("role") == "assistant":
                 # Every non-empty assistant text is a DELIVERY (#212): the
                 # prose a step said alongside its tool calls was already shown

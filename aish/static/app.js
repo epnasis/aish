@@ -2813,6 +2813,11 @@ const TRACE_ICONS = {
   chat: (c) => `<path d="M4.5 6.5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H10l-4 3.5V15.5H6.5a2 2 0 0 1-2-2z" fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"/>`,
   folder: (c) => `<path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="${c}" stroke-width="1.6"/>`,
   dot: (c) => `<circle cx="12" cy="12" r="3.5" fill="${c}"/>`,
+  // aish's own words to the model (contract §3.17): a shield for what it
+  // ENFORCED, a signpost for what it steered, an "i" for what it reported.
+  enforce: (c) => `<path d="M12 3.5l6.5 2.6v5.2c0 4-2.8 7.2-6.5 8.7-3.7-1.5-6.5-4.7-6.5-8.7V6.1z" fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 8v4.5M12 15.6v.1" stroke="${c}" stroke-width="1.8" stroke-linecap="round"/>`,
+  guide: (c) => `<path d="M12 3.5v17" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/><path d="M12 6h6l2 2-2 2h-6zM12 12H6.5l-2 2 2 2H12z" fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"/>`,
+  inform: (c) => `<circle cx="12" cy="12" r="8" fill="none" stroke="${c}" stroke-width="1.6"/><path d="M12 11v5M12 7.8v.1" stroke="${c}" stroke-width="1.8" stroke-linecap="round"/>`,
 };
 
 function traceSvg(name, color) {
@@ -3130,6 +3135,39 @@ function replayedTurnStart(event) {
   return ms;
 }
 
+// Which of aish's notes is which (contract §3.17): the `source` the writer
+// stamped names the code that spoke — never why it spoke. A source this map
+// does not know, or a note logged before sources existed, still draws: as a
+// plain "aish told the model", because an unnamed note is still a note.
+const HARNESS_SOURCES = {
+  answer_check: ["enforce", "Asked for the answer again — a check was not met"],
+  image_check: ["inform", "Told it pictures in its answer will not display"],
+  step_limit: ["enforce", "Stopped at the step limit"],
+  loop_stop: ["enforce", "Stopped a repeating call"],
+  stall_stop: ["enforce", "Stopped — no new progress"],
+  empty_reply: ["guide", "Asked for a reply again"],
+  answer_withheld: ["guide", "Held the answer — you wrote meanwhile"],
+  repeat_nudge: ["guide", "Asked for a plan — calls were repeating"],
+  plan_stall: ["guide", "Asked to revisit the plan"],
+  plan_owner: ["guide", "Passed on your plan change"],
+  tool_media: ["inform", "Told it about pictures a tool produced"],
+  render_error: ["inform", "Told it a picture did not display"],
+  cd: ["inform", "Told it about your /cd"],
+  add_dir: ["inform", "Told it about your /add-dir"],
+  console_share: ["inform", "Passed on what you shared from the console"],
+};
+const HARNESS_COLORS = { enforce: "var(--orange)", guide: "var(--yellow)", inform: "var(--dim)" };
+
+// The note's first line without its bracket framing ("[aish: …]", "[I moved
+// …]"), for the row's sub-line. The full text, framing included, is the tap.
+function harnessHeadline(text) {
+  let body = String(text || "").trim();
+  if (body.startsWith("[aish: ")) body = body.slice(7);
+  else if (body.startsWith("[")) body = body.slice(1);
+  const first = body.split("\n")[0];
+  return first.endsWith("]") ? first.slice(0, -1) : first;
+}
+
 function traceStep(step) {
   const t = ensureTrace();
   if (step.kind === "thinking_start") {
@@ -3308,6 +3346,20 @@ function traceStep(step) {
     // the one handler live and replay share, so both place it alike (L2).
     if (step.text) addMsg("user steer", step.text);
     removeQueueChip(step.text);
+    updateTraceHead(t);
+    return;
+  }
+  if (step.kind === "harness") {
+    // Something aish itself said to the model (contract §3.17) — a check that
+    // held the answer, a stop, a nudge, a note about a /cd. It reaches the
+    // model in the conversation like a message, which is why the model can
+    // mistake it for you; here it is drawn as what it is. A tap opens its step
+    // (`h<n>`), which shows the exact text. Built live and on replay from the
+    // same note record (L2).
+    t.started += 1;
+    const [icon, title] = HARNESS_SOURCES[step.source] || ["inform", "aish told the model"];
+    traceRow(t, traceSvg(icon, HARNESS_COLORS[icon]), title, harnessHeadline(step.text))
+      .row.classList.add("step-harness", `step-harness-${icon}`);
     updateTraceHead(t);
     return;
   }
@@ -4522,6 +4574,7 @@ function inspectKeys(rows) {
       return;
     }
     if (cl.contains("step-steer")) { ids[i] = `s${next("s")}`; return; }
+    if (cl.contains("step-harness")) { ids[i] = `h${next("h")}`; return; }
     if (cl.contains("step-model-error")) { ids[i] = `e${next("e")}`; return; }
     if (cl.contains("step-retry")) { ids[i] = `retry${next("retry")}`; return; }
     if (cl.contains("step-knowledge")) { ids[i] = `k${next("k")}`; return; }
@@ -13140,6 +13193,10 @@ function ssStepIcon(doc, step) {
     return traceSvg(name, failed ? "var(--red)" : `var(${meta[2]})`);
   }
   if (step.kind === "steering") return traceSvg("chat", "var(--blue)");
+  if (step.kind === "harness") {
+    const icon = (HARNESS_SOURCES[(step.record || {}).source] || ["inform"])[0];
+    return traceSvg(icon, HARNESS_COLORS[icon]);
+  }
   if (step.kind === "model_error") return traceSvg("denied", "var(--red)");
   if (step.kind === "knowledge") return traceSvg("knowledge", "var(--yellow)");
   return traceSvg("dot", "var(--dim)"); // trim, retry, brief_changed
@@ -13720,7 +13777,14 @@ function ssEventSegs(doc, step) {
   const facts = (step.facts || []).map((fact) => `${fact.k}: ${fact.v}`);
   if (facts.length) b.meta(...facts);
   if (step.kind === "steering") { b.meta("YOU TYPED"); b.text(step.text || "", "markdown"); }
-  else if (step.kind === "model_error") {
+  else if (step.kind === "harness") {
+    // Exactly what the model was handed, never rendered as markdown: the note
+    // is shown as the bytes it was, so what you read is what it read.
+    b.meta("WHAT AISH TOLD THE MODEL");
+    b.text(step.text || "", "plain");
+    b.meta("THE RECORD");
+    b.rec(step.record || {});
+  } else if (step.kind === "model_error") {
     const record = step.record || {};
     if (record.text) { b.meta("WHAT THE PROVIDER SAID"); b.text(record.text, "plain"); }
     if (record.truncated) b.meta(`… ${ssN(record.truncated)} characters were cut by ${record.cap_source || "a cap"}`);

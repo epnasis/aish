@@ -38,7 +38,7 @@ from pathlib import Path
 from . import evidence
 from . import turns as turn_store
 from .paths import state_home
-from .session import synthetic_kind
+from .session import HARNESS_STEP, harness_step, synthetic_kind
 
 NOT_RECORDED = "not recorded"
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
@@ -154,6 +154,11 @@ def load(path: os.PathLike | str) -> Log:
     redactions: list[dict] = []
     title = ""
     current: Turn | None = None
+    # aish's notes written after a turn's task_end (a /cd, a render report):
+    # the trace card draws them at the start of the NEXT turn, so the step
+    # list files them there too, or a tap on the row would find no step.
+    held_notes: list[dict] = []
+    ended = False
     for record in records:
         kind = record.get("kind")
         if kind == "title":
@@ -163,10 +168,17 @@ def load(path: os.PathLike | str) -> Log:
         if _starts_a_turn(record, current, on_task_start):
             current = Turn(ordinal=len(turns) + 1, ts=str(record.get("ts") or ""))
             turns.append(current)
+            current.steps.extend(held_notes)
+            held_notes, ended = [], False
         if current is None:
             # Records before the first boundary: session setup (model, cwd,
             # title). Inventing a turn 0 for them would put a bracket in the
-            # file that the writer never wrote.
+            # file that the writer never wrote. A note among them (a /cd before
+            # the first message) is held for turn 1, where the card draws it —
+            # dropped, every later h<n> on that card would open the wrong step.
+            if (kind == "message" and record.get("role") == "user"
+                    and synthetic_kind(str(record.get("content") or "")) == "note"):
+                held_notes.append({**harness_step(record), "message": record})
             continue
         if kind == "task_start":
             current.prompt = str(record.get("prompt") or "")
@@ -174,8 +186,19 @@ def load(path: os.PathLike | str) -> Log:
         if kind == "task_end":
             current.status = record.get("status")
             current.error = str(record.get("error") or "")
+            ended = True
         elif kind == "message":
             current.messages.append(record)
+            content = str(record.get("content") or "")
+            if record.get("role") == "user" and synthetic_kind(content) == "note":
+                # A DERIVED step, never one the writer logged (contract §3.17):
+                # the note's own record is its one durable copy. Built by the
+                # same `harness_step` the trace card is drawn from, and kept out
+                # of `kinds_present`, which answers what the WRITER emitted.
+                # `message` keeps the record itself, so the pane's "the record"
+                # is the line in the log and not this derived step.
+                derived = {**harness_step(record), "message": record}
+                (held_notes if ended else current.steps).append(derived)
             if record.get("role") == "user" and not current.prompt:
                 current.prompt = str(record.get("content") or "")
             if record.get("role") == "user" and not current.turn_id:
@@ -1819,6 +1842,7 @@ STEP_MODEL_CALL = "model_call"
 STEP_TOOL_CALL = "tool_call"
 STEP_TRIM = "trim"
 STEP_STEERING = "steering"
+STEP_HARNESS = HARNESS_STEP
 STEP_BRIEF_CHANGED = "brief_changed"
 STEP_MODEL_ERROR = "model_error"
 STEP_RETRY = "retry"
@@ -1827,7 +1851,7 @@ STEP_REPEAT_NUDGE = "repeat_nudge"
 # Between-round kinds share one pane: the fact and its numbers.
 EVENT_STEPS = frozenset(
     {STEP_TRIM, STEP_STEERING, STEP_BRIEF_CHANGED, STEP_MODEL_ERROR, STEP_RETRY, STEP_KNOWLEDGE,
-     STEP_REPEAT_NUDGE}
+     STEP_REPEAT_NUDGE, STEP_HARNESS}
 )
 # The injected text of a `knowledge` step could not be told apart from the
 # other system parts of the brief (see _reminder): a state of its own, because
@@ -2392,6 +2416,18 @@ def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
                                      [{"k": "chars", "v": _fmt_n(len(text))}],
                                      id=event_id("s"), title="you typed while it ran",
                                      text=text, before=before(index)))
+        elif kind == HARNESS_STEP:
+            text = str(step.get("text") or "")
+            facts = [{"k": "added as", "v": f"a {step.get('role') or 'user'} message"},
+                     {"k": "written by", "v": str(step.get("source") or "not recorded")},
+                     {"k": "chars", "v": _fmt_n(len(text))}]
+            if isinstance(step.get("model_call"), int):
+                facts.append({"k": "added while", "v": f"model call {step['model_call']} "
+                              "was the latest"})
+            steps.append(_event_step(STEP_HARNESS, dict(step.get("message") or step), facts,
+                                     id=event_id("h"),
+                                     title="aish told the model", text=text,
+                                     before=before(index)))
         elif kind == "repeat_nudge":
             steps.append(_event_step(STEP_REPEAT_NUDGE, dict(step), _repeat_facts(step),
                                      id=event_id("r"), title=_repeat_title(step),

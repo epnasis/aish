@@ -3058,7 +3058,7 @@ class WebServer:
             count=len(items), noun=noun, items=", ".join(items)
         )
         with contextlib.suppress(Exception):  # a note must never break a session
-            session.agent.add_system_note(note)
+            session.agent.add_system_note(note, source="render_error")
 
     async def _refuse(self, client: Client, text: str, name: str = "") -> None:
         """Tell ONE client that the request it just made will not happen.

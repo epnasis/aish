@@ -535,24 +535,41 @@ def test_reconstruct_events_marks_the_resume_note_synthetic(tmp_path):
     assert users[1]["text"] == RESUME_NOTE  # verbatim; only the framing changes
 
 
-def test_reconstruct_events_skips_aishs_own_notes(tmp_path):
+def test_reconstruct_events_draws_aishs_own_notes_as_rows_never_bubbles(tmp_path):
     # A nudge, a /cd announcement and shared console text are appended to the
-    # conversation as user turns but never shown live. Replaying them as
-    # bubbles both invented text the user never typed AND split the turn they
-    # sat inside — so they are dropped, which is exactly what live does (#171).
+    # conversation as user turns the human never typed. Replaying them as
+    # bubbles both invented text he never typed AND split the turn they sat
+    # inside (#171). Dropping them hid from him what the model was told
+    # (contract §3.17): they are trace ROWS. One written after the turn's
+    # task_end waits for the next turn, which is where live draws it too.
     log = SessionLog.new(tmp_path)
+    log.task_start("fix the tests")
     log.message({"role": "user", "content": "fix the tests"})
     log.step({"kind": "tool", "name": "read_file", "ok": True})
     log.message({"role": "user", "content": "[aish: you have issued this exact call…]"})
     log.step({"kind": "tool", "name": "read_file", "ok": True})
     log.message({"role": "assistant", "content": "fixed"})
+    log.task_end()
     log.message({"role": "user", "content": "[I moved the session to /proj with /cd — …]"})
     log.message({"role": "user", "content": "[Shared from my interactive terminal:]\nkey=x"})
 
     events = SessionLog.reconstruct_events(log.path)
-    assert [e["type"] for e in events] == ["user", "step", "step", "done"]
+    assert [(e["type"], e.get("kind")) for e in events] == [
+        ("user", None), ("step", "tool"), ("step", "harness"), ("step", "tool"), ("done", None),
+    ]
     assert events[0]["text"] == "fix the tests"  # one turn, not three
+    assert events[2]["text"] == "[aish: you have issued this exact call…]"
     assert events[-1]["result"] == "fixed"
+
+    log.task_start("next")
+    log.message({"role": "user", "content": "next"})
+    log.message({"role": "assistant", "content": "ok"})
+    log.task_end()
+    events = SessionLog.reconstruct_events(log.path)
+    second = events[events.index(next(e for e in events if e.get("text") == "next")):]
+    assert [e.get("text", "")[:12] for e in second if e.get("kind") == "harness"] == [
+        "[I moved the", "[Shared from",
+    ]
 
 
 def test_reconstruct_events_marks_a_triggered_sessions_opening_prompt(tmp_path):
