@@ -332,6 +332,12 @@ HTTP method and status sets (`_BODY_METHODS`, `signin._SUBMIT_METHODS`, `_REFUSE
 `browser.BLOCK_STATUS` — that last one being the STRUCTURAL half, not a vocabulary), HTML tag
 sets in `web.py` and `export.py`, and attribute-name lists inside the page-reading JavaScript.
 
+**A character class, not a list:** `skills._has_non_english_letter`, the English-only keyword
+backstop (#444), asks whether a keyword holds any non-ASCII letter. There is no vocabulary in
+it to go stale in a language nobody added, so it has no counter; its misses (ASCII-spelled
+Polish) are by design and stated in `docs/knowledge-layer.md`, and every drop it makes is
+reported in the writer's own result.
+
 **Decision vocabularies that are inventoried here but NOT instrumented in this slice**, named
 so the next person does not have to re-find them: `approval.EXEC_WRAPPERS` (27),
 `approval._CMD_WRAPPERS` (9), `approval._SHELL_NAMES` (5), `approval._WRAPPERS` (4),

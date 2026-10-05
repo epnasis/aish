@@ -1175,3 +1175,58 @@ class TestContextScan:
         assert curate_module.context_report(curate_module.scan_context(tmp_path, days=99999)) == (
             "no sessions in the window"
         )
+
+
+class TestRepairKeywordsAreEnglish:
+    """#444: the judge's repair goes through the same keyword backstop as
+    remember/create_skill, and what it dropped lands in the action record —
+    the entry's history must explain the keyword line it ended up with."""
+
+    def test_update_entry_meta_drops_and_returns_what_it_dropped(self, tmp_path):
+        path = make_entry(tmp_path, "e", "old desc", keywords="a", body="precious body")
+        dropped = update_entry_meta(path, description="Faktury za prąd",
+                                    keywords="invoice, prąd, e-kartoteka")
+        text = path.read_text(encoding="utf-8")
+        assert "keywords: invoice, e-kartoteka\n" in text
+        assert dropped == ["prąd"]
+        assert "description: Faktury za prąd" in text  # descriptions untouched
+        assert text.endswith("precious body\n")
+
+    def test_no_keywords_given_drops_nothing(self, tmp_path):
+        path = make_entry(tmp_path, "e", "desc", keywords="zażółć")
+        assert update_entry_meta(path, pinned=True) == []
+        assert "keywords: zażółć" in path.read_text(encoding="utf-8")  # corpus untouched
+
+    def test_the_action_record_names_the_dropped_keywords(self, tmp_path, monkeypatch):
+        import aish.skills as skills_module
+
+        gm = tmp_path / "gm"
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", gm)
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
+        path = make_entry(gm, "noisy", "generic thing", keywords="code, change")
+        state = tmp_path / "state"
+        records = []
+        for i in range(MIN_INJECTIONS):
+            records += [
+                knowledge([{"label": "noisy", "kind": "memory", "sim": 0.29, "rail": 3}]),
+                user(f"task {i}"),
+            ]
+        write_log(state, "session-20260728-100000-000001.jsonl", records)
+
+        def judge(prompt):
+            return ("VERDICT: repair\nREASON: generic keywords\n"
+                    "DESCRIPTION: power bills\nKEYWORDS: invoice, rachunek za prąd, energy")
+
+        run_curate(judge=judge, scores=lambda q, e: {}, notify_fn=lambda *a: None,
+                   env={}, state_dir=state, now=NOW)
+        assert "keywords: invoice, energy\n" in path.read_text(encoding="utf-8")
+        [action] = [
+            json.loads(line)
+            for line in (state / curate_module.ACTIONS_FILE).read_text().splitlines()
+        ]
+        assert action["action"] == "repair"
+        assert action["keywords_dropped"] == ["rachunek za prąd"]
+
+    def test_a_clean_repair_records_no_drop(self, tmp_path):
+        path = make_entry(tmp_path, "e", "desc")
+        assert update_entry_meta(path, keywords="invoice, energy") == []

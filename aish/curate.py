@@ -717,8 +717,9 @@ def judge_prompt(entry, stat: EntryStats | None, category: str) -> str:
         "DECIDE exactly one action:",
         "- repair — the entry is useful but its description/keywords are "
         "generic or wrong, so retrieval mis-fires; you MUST then provide a "
-        "corrected description and 3-6 DISTINCTIVE keywords (never generic "
-        "words like 'code', 'change', 'file').",
+        "corrected description and 3-6 DISTINCTIVE keywords in ENGLISH (never "
+        "generic words like 'code', 'change', 'file'; never Polish — "
+        "'invoice', not 'faktura').",
         "- pin — it is a standing always/never behavior rule that must apply "
         "to every task regardless of topic.",
         *([] if unobservable else [
@@ -779,12 +780,16 @@ def update_entry_meta(
     keywords: str | None = None,
     pinned: bool | None = None,
     disabled: bool | None = None,
-) -> None:
+) -> list[str]:
     """Frontmatter-only rewrite: description/keywords/pinned/status may
     change, every other frontmatter line and the ENTIRE body are preserved
     byte-for-byte. This is the whole mutation surface of the judge loop —
     bodies and deletion have no code path here, which is what makes the
-    envelope enforcement code rather than prompt obedience."""
+    envelope enforcement code rather than prompt obedience.
+
+    Returns the judge's keywords that were NOT written because they are not
+    English (#444, `skills.clean_keywords`), so the caller can put them in
+    the action record — a drop nobody can see is a silent edit."""
     text = path.read_text(encoding="utf-8")
     # The same reading as `_parse` (#209). Its own regex was near-correct but
     # stricter than this writer needs — no CRLF, no trailing space on either
@@ -808,23 +813,20 @@ def update_entry_meta(
     front = keep
     if description is not None:
         front.insert(1, f"description: {skills.frontmatter_value(description)}")
+    dropped: list[str] = []
     if keywords is not None:
-        seen: set[str] = set()
-        words = []
         # Judge-authored, and interpolated onto one line: a bare `.strip()`
         # would let `status: disabled` ride in on a keyword and retire an
         # entry the envelope refuses to disable directly (#209).
-        for word in (skills.frontmatter_value(w) for w in keywords.split(",")):
-            if word and word.casefold() not in seen:
-                seen.add(word.casefold())
-                words.append(word)
+        words, dropped = skills.clean_keywords(keywords)
         if words:
-            front.append(f"keywords: {', '.join(words[: skills.KEYWORDS_MAX])}")
+            front.append(f"keywords: {', '.join(words)}")
     if pinned:
         front.append("pinned: yes")
     if disabled:
         front.append("status: disabled")
     path.write_text("---\n" + "\n".join(front) + "\n---\n" + body, encoding="utf-8")
+    return dropped
 
 
 def load_recent_actions(state_dir, now: datetime) -> dict[str, str]:
@@ -1084,6 +1086,7 @@ def run_curate(
         entry = entries[stat.name]
         assert entry.path is not None  # entries were filtered to file-backed
         verdict = _judged(judge, judge_prompt(entry, stat, category), parse_verdict)
+        keywords_dropped: list[str] = []
         if verdict is None:
             counts["unparseable"] += 1
             record = {"action": "skip", "reason": "unparseable judge reply"}
@@ -1108,7 +1111,7 @@ def run_curate(
             record = {"action": verdict.action, "reason": verdict.reason}
             try:
                 if verdict.action == "repair":
-                    update_entry_meta(
+                    keywords_dropped = update_entry_meta(
                         entry.path,
                         description=verdict.description,
                         keywords=verdict.keywords or None,
@@ -1121,12 +1124,18 @@ def run_curate(
                 log(f"apply failed for {entry.name}: {exc}")
                 record = {"action": "skip", "reason": f"apply failed: {exc}"}
         acted_this_run.add(entry.name)
+        # The repair WROTE fewer keywords than the judge gave (#444): the
+        # record says which, so the entry's history explains its keyword line.
+        dropped_field = {"keywords_dropped": keywords_dropped} if keywords_dropped else {}
         log_action(
             state_dir,
             {"ts": now.isoformat(), "name": entry.name, "category": category,
-             "model": model, **record},
+             "model": model, **record, **dropped_field},
         )
         log(f"{entry.name}: {record['action']} — {record['reason'][:80]}")
+        if keywords_dropped:
+            log(f"{entry.name}: keywords not written (not English): "
+                f"{', '.join(keywords_dropped)}")
 
     for a, b, sim in pairs:
         if a.name in acted_this_run or b.name in acted_this_run:

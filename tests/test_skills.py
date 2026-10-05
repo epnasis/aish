@@ -2021,3 +2021,86 @@ class TestPlanSkillLifecycle:
         )
         assert path is None and "description is required" in refusal
         assert recorded == []
+
+
+class TestEnglishOnlyKeywords:
+    """#444: knowledge keywords are English-only. The tool descriptions carry
+    the policy; this is the lenient save-time backstop under them — a keyword
+    with a non-ASCII letter is dropped, everything else passes, the save is
+    never blocked, and every drop is SAID in the writer's own result."""
+
+    def test_a_non_english_letter_drops_the_keyword_and_nothing_else(self):
+        kept, dropped = skills_module.clean_keywords(
+            "invoice, faktura, kupić, ryczałt, cena, Zażółć, счёт, 請求書"
+        )
+        assert kept == ["invoice", "faktura", "cena"]  # ASCII Polish passes, by design
+        assert dropped == ["kupić", "ryczałt", "Zażółć", "счёт", "請求書"]
+
+    def test_a_brand_or_ascii_term_is_kept_as_written(self):
+        kept, dropped = skills_module.clean_keywords("qrencode, e-kartoteka, KSeF, 2fa, c++")
+        assert kept == ["qrencode", "e-kartoteka", "KSeF", "2fa", "c++"]
+        assert dropped == []
+        assert skills_module.dropped_keywords_note(dropped) == ""
+
+    def test_a_dropped_keyword_never_costs_an_english_one_its_slot(self):
+        words = [f"słowo{i}" for i in range(skills_module.KEYWORDS_MAX)]
+        words += [f"word{i}" for i in range(skills_module.KEYWORDS_MAX)]
+        kept, dropped = skills_module.clean_keywords(", ".join(words))
+        assert kept == [f"word{i}" for i in range(skills_module.KEYWORDS_MAX)]
+        assert len(dropped) == skills_module.KEYWORDS_MAX
+
+    def test_save_memory_drops_says_so_and_still_saves(self, tmp_path):
+        memory = skills_module.GLOBAL_MEMORY_DIR  # redirected by isolated_global_dirs
+        result = save_memory(
+            "Faktura za prąd przychodzi z e-kartoteka", memory, name="power-bill",
+            keywords="invoice, prąd, e-kartoteka, rachunek", cwd=str(tmp_path),
+        )
+        entry = _parse(memory / "power-bill.md", "memory")
+        assert entry.keywords == ["invoice", "e-kartoteka", "rachunek"]
+        # The fact itself is never touched — only keywords are restricted.
+        assert entry.description == "Faktura za prąd przychodzi z e-kartoteka"
+        assert result.startswith("remembered (power-bill): ")
+        assert "Keywords NOT stored (not English): prąd." in result
+        assert "MUST be English" in result
+
+    def test_save_memory_whose_every_keyword_is_dropped_still_saves(self, tmp_path):
+        memory = skills_module.GLOBAL_MEMORY_DIR
+        result = save_memory("a fact", memory, name="only-polish",
+                             keywords="zażółć, gęślą", cwd=str(tmp_path))
+        assert result.startswith("remembered (only-polish)")
+        assert "zażółć, gęślą" in result
+        entry = _parse(memory / "only-polish.md", "memory")
+        assert entry.keywords == [] and entry.description == "a fact"
+
+    def test_an_english_save_says_nothing_extra(self, tmp_path):
+        result = save_memory("a fact", skills_module.GLOBAL_MEMORY_DIR, name="plain",
+                             keywords="qrencode, payment", cwd=str(tmp_path))
+        assert result == "remembered (plain): a fact"
+
+    def test_plan_skill_drops_and_reports_through_its_callback(self, tmp_path):
+        reported: list[list[str]] = []
+        path, text, refusal = skills_module.plan_skill(
+            "qr-payment", "Use when the user asks to pay by QR", "1. run qrencode",
+            keywords="qr code, płatność, qrencode", cwd=str(tmp_path),
+            on_keywords_dropped=reported.append,
+        )
+        assert refusal == "" and path is not None
+        assert "keywords: qr code, qrencode\n" in text
+        assert "płatność" not in text
+        assert reported == [["płatność"]]
+
+    def test_plan_skill_update_never_rewrites_keywords_it_was_not_given(self, tmp_path):
+        # The backstop guards what is written NOW; an update that supplies no
+        # usable keyword keeps the file's own line exactly, corpus untouched.
+        write_skill(skills_module.GLOBAL_SKILLS_DIR, "qr-payment.md", (
+            "---\nname: qr-payment\ndescription: old trigger\n"
+            "keywords: qr, przelew\n---\nold body\n"
+        ))
+        reported: list[list[str]] = []
+        _, text, refusal = skills_module.plan_skill(
+            "qr-payment", "", "new body", keywords="płatność",
+            cwd=str(tmp_path), on_keywords_dropped=reported.append,
+        )
+        assert refusal == ""
+        assert "keywords: qr, przelew\n" in text
+        assert reported == [["płatność"]]

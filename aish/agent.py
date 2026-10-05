@@ -140,10 +140,12 @@ Rules:
    phrase the description like the tasks it should catch ("Use when the
    user wants to find, buy, or compare a product …"), never as a bare rule
    — generalized to the activity, not an item-by-item list — and give
-   keywords (topical words, no generic verbs) in every language the user
-   types. If saved knowledge should have applied to a task but was not
-   preloaded, that is a defect: repair that entry's description/keywords
-   (an improve-recall skill, if present, has the checklist).
+   keywords (topical words, no generic verbs) that you MUST write in English
+   whatever language the user types ('invoice', not 'faktura'); only a brand
+   or untranslatable term stays as-is. If saved knowledge should have
+   applied to a task but was not preloaded, that is a defect: repair that
+   entry's description/keywords (an improve-recall skill, if present, has
+   the checklist).
 2c. TOOLS vs SKILLS: skills TEACH, tools DO. A plugin tool is a validated
    TOOL.md (that you or the user added under ~/.config/aish/tools/ —
    project-scope ./.aish/ discovery is disabled pending a per-directory
@@ -1713,7 +1715,9 @@ LEARN_PROMPT = (
     "against future tasks: phrase every description like the tasks it must "
     "catch (the activity and its task shapes, generalized — no item-by-item "
     "lists; the rule after the trigger), and give keywords — topical nouns "
-    "and synonyms, no generic verbs — in every language the user types. If "
+    "and synonyms, no generic verbs — that you MUST write in English whatever "
+    "language the user types ('invoice', not 'faktura'; only a brand or "
+    "untranslatable term stays as-is). If "
     "this conversation shows saved knowledge that failed to trigger when it "
     "should have, repair that entry's description/keywords too. "
     "Then report what you saved and what you skipped and why. If nothing is "
@@ -13967,6 +13971,7 @@ class Agent:
         `admission` records with target "skill" (contract §3.7)."""
         name = str(args.get("name", "")).strip()
         disabled = args.get("disabled")
+        dropped_keywords: list[str] = []
         path, text, refusal = skills.plan_skill(
             name,
             str(args.get("description", "") or ""),
@@ -13978,8 +13983,11 @@ class Agent:
             expires=str(args.get("expires", "") or "") or None,
             disabled=None if disabled is None else bool(disabled),
             on_admission=partial(self._record_admission, target="skill"),
+            on_keywords_dropped=dropped_keywords.extend,
         )
+        dropped_note = skills.dropped_keywords_note(dropped_keywords)
         if refusal:
+            refusal += dropped_note
             self._note(f"→ {refusal}")
             if refusal.startswith("NOT saved"):
                 return _gate_outcome(refusal, decision="rejected")
@@ -14007,11 +14015,12 @@ class Agent:
                 f"Saved skill {name!r} at {path} — but it is retired "
                 f"({reason}), so it will NOT be indexed, preloaded or "
                 "recalled until re-enabled (create_skill with "
-                "disabled=false)."
+                "disabled=false)." + dropped_note
             )
         return (
             f"Saved skill {name!r} at {path}. It is indexed from the next "
             "task and preloaded when a task matches its description/keywords."
+            + dropped_note
         )
 
     def _create_tool(self, args: dict) -> str:

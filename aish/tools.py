@@ -654,8 +654,11 @@ TOOL_SCHEMAS: list[dict] = [
                         "type": "string",
                         "description": (
                             "Comma-separated topical retrieval keywords — singular "
-                            "nouns and synonyms, in every language the user types "
-                            "(e.g. 'price, buy, cena, kup')."
+                            "nouns and synonyms. You MUST write them in English "
+                            "whatever language the user types (e.g. 'price, buy', "
+                            "not 'cena, kup'); a brand or untranslatable term stays "
+                            "as-is (e.g. 'qrencode', 'e-kartoteka'). A keyword with "
+                            "a non-English letter (ą, ł, ó …) is dropped."
                         ),
                     },
                     "pinned": {
@@ -761,9 +764,11 @@ TOOL_SCHEMAS: list[dict] = [
                     "keywords": {
                         "type": "string",
                         "description": "Comma-separated retrieval keywords: topical "
-                        "nouns and synonyms in every language the user types (e.g. "
-                        "'qr code, payment, przelew'). Omit on update to keep the "
-                        "existing ones.",
+                        "nouns and synonyms. You MUST write them in English whatever "
+                        "language the user types (e.g. 'qr code, payment, transfer', "
+                        "not 'przelew'); a brand or untranslatable term stays as-is "
+                        "(e.g. 'qrencode'). A keyword with a non-English letter is "
+                        "dropped. Omit on update to keep the existing ones.",
                     },
                     "disabled": {
                         "type": "boolean",
