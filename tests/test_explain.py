@@ -1390,18 +1390,15 @@ class TestTheStepList:
         agent.run_task("go")
         doc = self._doc(log, tmp_path)
         docs, cmd = [s for s in doc["steps"] if s["kind"] == "tool_call"]
-        # read_docs keeps no text on its step: the tool-role message is the
-        # model-facing text, matched by name and order within its model call,
-        # and the step says that is how.
-        assert docs["ref"]["shown_how"] == explain_mod.SHOWN_MESSAGE_ORDER
-        message = doc["messages"][docs["ref"]["shown"]]
-        assert message["role"] == "tool" and message["tool_name"] == "read_docs"
-        assert message["text"] == [
-            m for m in agent.messages if m.get("role") == "tool"
-        ][0]["content"]
-        # run_command carries its stdout on the step itself.
-        assert cmd["ref"]["shown_how"] == explain_mod.SHOWN_STEP_OUTPUT
-        assert cmd["ref"]["shown"] is None
+        # Every result message names its call (2026-10-05), so the join is
+        # EXACT for both — including run_command, whose step output is the
+        # recorder's preview and not what the model was handed. The name-and-
+        # order inferences are for logs without the stamp (fixtures below).
+        results = [m for m in agent.messages if m.get("role") == "tool"]
+        for step, sent in ((docs, results[0]), (cmd, results[1])):
+            assert step["ref"]["shown_how"] == explain_mod.SHOWN_MESSAGE_CALL
+            message = doc["messages"][step["ref"]["shown"]]
+            assert message["role"] == "tool" and message["text"] == sent["content"]
 
     def test_a_join_that_cannot_be_settled_says_not_matched(self, tmp_path):
         """Two calls to the same tool in one round, and messages that do not

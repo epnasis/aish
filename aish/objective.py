@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from . import roles
+from .session import synthetic_kind
 
 TRACKER = "tracker"
 
@@ -97,6 +98,14 @@ RAN = "ran"  # a `!` command he ran himself, recorded exit code 0
 RAN_UNCHECKED = "ran_unchecked"  # one he ran whose exit code is not 0 or not recorded
 
 SYNTHETIC_PREFIX = "["
+
+
+def _aish_wrote(content: str) -> bool:
+    """Text aish put in the owner's slot, never his words. The bracket test
+    is this module's own and wider than `session.synthetic_kind`; the shared
+    classifier is asked TOO, so a marker added there (claude-max's rules note,
+    `<system-reminder>`, 2026-10-05) can never reach the tracker as his."""
+    return content.lstrip().startswith(SYNTHETIC_PREFIX) or bool(synthetic_kind(content))
 
 # What a reader of the material is SHOWN of each item. The owner's words travel
 # nearly whole; an answer is cut, since it is cited as evidence and never quoted.
@@ -200,7 +209,7 @@ def _opens_task(record: dict, bracketed: bool) -> bool:
         record.get("kind") == "message"
         and record.get("role") == "user"
         and record.get("model_call", 0) == 0
-        and not str(record.get("content") or "").lstrip().startswith(SYNTHETIC_PREFIX)
+        and not _aish_wrote(str(record.get("content") or ""))
     )
 
 
@@ -345,7 +354,7 @@ def _task_items(task: list[tuple[int, dict]], turn: int, read_only: frozenset[st
             if role == "user" and content.strip():
                 # L4: a synthetic turn is classified lexically. aish's own
                 # notes and reminders are never the owner's words.
-                if content.lstrip().startswith(SYNTHETIC_PREFIX):
+                if _aish_wrote(content):
                     continue
                 items.append(
                     Item(_message_ref(index, record), OWNER, turn, _cut(content, OWNER_CHARS))

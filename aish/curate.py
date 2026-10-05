@@ -67,7 +67,7 @@ from pathlib import Path
 from . import explain, skills
 from .embeddings import entry_text
 from .paths import state_home
-from .session import RATING_NONE
+from .session import RATING_NONE, synthetic_kind
 
 # The judge reads evidence excerpts of what the owner typed, so it must run
 # on a model meeting the strictest privacy bar among its sources: a LOCAL
@@ -160,6 +160,10 @@ def _windows(path: Path):
                 if step.get("name") == "read_skill":
                     current["reads"].append(str(step.get("summary", "")).strip())
         elif kind == "message" and rec.get("role") == "user":
+            if synthetic_kind(str(rec.get("content") or "")) == "note":
+                # aish's own words in the owner's slot: not a prompt, and one
+                # mid-task would split the window and hand its reads to aish.
+                continue
             if current is not None:
                 yield current
             current = {

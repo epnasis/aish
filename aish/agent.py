@@ -73,6 +73,7 @@ from .session import (
     SessionLog,
     attachment_guidance,
     attachment_names,
+    embedded_harness_steps,
     harness_headline,
     harness_step,
     message_body,
@@ -3524,6 +3525,19 @@ def _stub_shrinks(message: dict, fields: dict) -> bool:
     return _args_json_len(fields["tool_calls"]) < _args_json_len(message.get("tool_calls") or [])
 
 
+def _note_spans(content: str, notes: list[tuple[str, str]] | None) -> list[dict]:
+    """Where each registered note sits in a result, as offsets — so the record
+    points into its own content and the words are never stored twice. A note
+    the final content no longer holds is dropped: a span must point at the
+    words, or it is a claim about text that is not there."""
+    spans = []
+    for source, text in notes or []:
+        at = content.rfind(text)
+        if at >= 0:
+            spans.append({"source": source, "at": at, "chars": len(text)})
+    return spans
+
+
 def _serialize(message: dict) -> dict:
     keys = ("role", "content", "tool_name", "images", "documents", "interim")
     record = {k: message[k] for k in keys if k in message}
@@ -3936,6 +3950,10 @@ class Agent:
         # carry this stamp, so a counter that only exists once a task has begun
         # makes the very first append raise.
         self._model_call = 0
+        self._batch_call_ids: list[int] = []
+        # Notes aish wrote INTO a tool call's result, by call id, until the
+        # result is appended (`_note_in_result`, contract §3.17).
+        self._result_notes: dict[int, list[tuple[str, str]]] = {}
         # Notes aish wrote between tasks, waiting for the next task's card
         # (`_show_harness`); `_in_task` is what tells the two apart.
         self._in_task = False
@@ -4425,6 +4443,8 @@ class Agent:
         record_content: str | None = None,
         delivered: bool = False,
         source: str | None = None,
+        call: int | None = None,
+        notes: list[tuple[str, str]] | None = None,
     ) -> None:
         """`interim` stamps the LOG record as a delivery — something said on
         the way to the answer (#212) — without touching the message dict the
@@ -4469,14 +4489,39 @@ class Agent:
                 record["content"] = record_content
             if source:
                 record["source"] = source
+            if call:
+                # The tool call this result answers — an exact join for a
+                # reader, where name and order were only ever an inference.
+                record["call"] = call
+            if spans := _note_spans(str(message.get("content") or ""), notes):
+                record["notes"] = spans
             self.on_message(record)
         content = str(message.get("content") or "")
+        if message.get("role") == "tool" and notes and self.on_step is not None:
+            # aish's own words INSIDE a result: drawn under that call's row,
+            # from the same spans the record carries (`embedded_harness_steps`).
+            for step in embedded_harness_steps(
+                {"content": content, "call": call, "model_call": self._model_call,
+                 "notes": _note_spans(content, notes)}
+            ):
+                self.on_step(step)
         if message.get("role") == "user" and synthetic_kind(content) == "note":
             if record is None:
                 record = {**_serialize(message), "model_call": self._model_call}
                 if source:
                     record["source"] = source
             self._show_harness(record)
+
+    def _note_in_result(self, source: str, text: str, call_no: int | None = None) -> None:
+        """Register words aish is adding to a tool call's result, so the result
+        message can name where they sit and the trace can draw them (§3.17).
+
+        Explicit, never found by matching the text: a command's output or a
+        file read can contain a line in aish's note format, and a row claiming
+        aish wrote it would be the confident false statement §0 forbids."""
+        number = call_no or getattr(self._call_ids, "current", 0)
+        if number:
+            self._result_notes.setdefault(number, []).append((source, text))
 
     def _show_harness(self, record: dict) -> None:
         """Draw one aish-authored note as a trace row, from its message record.
@@ -4877,6 +4922,9 @@ class Agent:
         detector's `repeats` dict needs no entry: it is a run_task local,
         per-task by construction.
         """
+        # A note registered for a result the loop never appended (the SDK path
+        # runs tools without that loop) must not land on a later call's result.
+        self._result_notes = {}
         self.task_sources = []
         self._run_meta = None  # stale run_command detail must not tag a new task's first step
         self._cancel.clear()  # a stale stop must not kill the new task
@@ -5762,10 +5810,14 @@ class Agent:
             # shape, not a join, and the contract's whole posture is that a join
             # must not rest on emit-order luck (§0, §2).
             results = self._execute_tool_calls(tool_calls, self._model_call)
+            call_ids = self._batch_call_ids
             stuck = progressed = False
-            for call, result in zip(tool_calls, results, strict=True):
+            for position, (call, result) in enumerate(zip(tool_calls, results, strict=True)):
+                call_no = call_ids[position] if position < len(call_ids) else None
                 self._append(
-                    {"role": "tool", "tool_name": call["function"]["name"], "content": result}
+                    {"role": "tool", "tool_name": call["function"]["name"], "content": result},
+                    call=call_no,
+                    notes=self._result_notes.pop(call_no, None) if call_no else None,
                 )
                 self._collect_source(call, result)
                 key = self._call_key(call, result)
@@ -7626,6 +7678,9 @@ class Agent:
         sequential: two interleaved [y/N] prompts would be unanswerable.
         """
         calls = [(c["function"]["name"], c["function"]["arguments"] or {}) for c in tool_calls]
+        # Each result's call id, in result order, read by the loop that appends
+        # the results right after this returns (main thread, no interleaving).
+        self._batch_call_ids = []
         concurrent = [
             i
             for i, (name, args) in enumerate(calls)
@@ -7652,12 +7707,18 @@ class Agent:
         ):
             done: list[str] = []
             for name, args in calls:
+                # Minted where `_call_result` would have minted it — the same
+                # number in the same order — but kept, so the result message
+                # can name its call (contract §3.17's tool half).
+                call_no = next(self._call_seq)
+                self._batch_call_ids.append(call_no)
                 done.append(
                     self._call_result(
                         name,
                         partial(self._timed, partial(self._dispatch, name, args)),
                         args=args,
                         model_call=model_call,
+                        call=call_no,
                     )
                 )
             return done
@@ -7711,12 +7772,15 @@ class Agent:
             )
             for i, (name, args) in enumerate(calls):
                 if i not in futures:
+                    ids[i] = next(self._call_seq)
                     results[i] = self._call_result(
                         name,
                         partial(self._timed, partial(self._dispatch, name, args)),
                         args=args,
                         model_call=model_call,
+                        call=ids[i],
                     )
+        self._batch_call_ids = [ids[i] for i in range(len(calls))]
         return results
 
     def _as_call(self, call_no: int, thunk: Callable[[], str]) -> Callable[[], str]:
@@ -8234,6 +8298,7 @@ class Agent:
                 and self._plan_has_open()
             ):
                 meta = getattr(result, "meta", None)
+                self._note_in_result("plan_denial", PLAN_TRIGGER_DENIAL.strip(), call_no)
                 text = str(result) + PLAN_TRIGGER_DENIAL
                 result = tools.ToolOutcome(text, **meta) if meta is not None else text
             return result
@@ -13120,7 +13185,10 @@ class Agent:
         if not self._bindings:
             return None
         if speak_first := self._speak_first_gate(name):
-            return speak_first
+            # An envelope like every other rule refusal: returned as a bare
+            # string it was sniffed by prefix, matched none, and the refused
+            # call logged ok:true — green — with no text (delivery review).
+            return _gate_outcome(speak_first, decision="blocked")
         recorded: set[str] = set()
         # Bindings whose hold the owner has already answered FOR THIS CALL.
         # `ask_me_first` deliberately does not mark the binding overridden — it
@@ -13758,11 +13826,13 @@ class Agent:
             covered = self._tool_for_command(command)
             if covered is not None:
                 self._note(f"↩ prefer tool '{covered}' over raw command")
-                result += (
-                    f"\n\n[aish: the '{covered}' tool covers this operation and passes "
+                nudge = (
+                    f"[aish: the '{covered}' tool covers this operation and passes "
                     "arguments safely (no shell quoting) — prefer calling it over "
                     "composing this command by hand next time.]"
                 )
+                self._note_in_result("prefer_tool", nudge)
+                result += "\n\n" + nudge
             return result
 
         tool = self._plugin_tools.get(name)
@@ -14119,7 +14189,8 @@ class Agent:
                 comment=decision.comment,
             )
         if not decision:
-            return WRITE_DENIED
+            # Enveloped, or the denial logs ok:true — the green lie §6.13 named.
+            return _gate_outcome(WRITE_DENIED, decision="denied")
         files.commit(plan)
         if executable:
             try:
@@ -14217,7 +14288,8 @@ class Agent:
                 comment=decision.comment,
             )
         if not decision:
-            return WRITE_DENIED
+            # Enveloped, or the denial logs ok:true — the green lie §6.13 named.
+            return _gate_outcome(WRITE_DENIED, decision="denied")
         files.commit(plan)
         return (
             f"{verb} rule '{rule.name}'.\n\n{rules.explain(rule)}\n\n"

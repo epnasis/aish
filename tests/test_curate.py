@@ -81,6 +81,21 @@ class TestLedgerScan:
         assert row.reads == 1
         assert row.miss_reads == 0
 
+    def test_aishs_own_note_mid_task_neither_splits_the_window_nor_counts(self, tmp_path):
+        """A nudge is a user-role record the owner never typed. Treated as a
+        prompt it opened a window of its own, and the read after it lost its
+        injection: an engagement scored as a miss, and a task counted twice."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            knowledge([{"label": "deploy-web", "kind": "skill", "sim": 0.6, "rail": 0}]),
+            user("ship it"),
+            user("[aish: this task has made 4 tool calls, none of them to the plan tool]"),
+            tool("read_skill", "deploy-web"),
+        ])
+        ledger = scan_ledger(tmp_path, now=NOW)
+        row = ledger.entries["deploy-web"]
+        assert (row.reads, row.miss_reads) == (1, 0)
+        assert ledger.tasks == 1
+
     def test_read_without_injection_counts_as_miss(self, tmp_path):
         write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
             user("email marta about the recipe"),

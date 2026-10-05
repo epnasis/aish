@@ -38,7 +38,7 @@ from pathlib import Path
 from . import evidence
 from . import turns as turn_store
 from .paths import state_home
-from .session import HARNESS_STEP, harness_step, synthetic_kind
+from .session import HARNESS_STEP, embedded_harness_steps, harness_step, synthetic_kind
 
 NOT_RECORDED = "not recorded"
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
@@ -190,7 +190,10 @@ def load(path: os.PathLike | str) -> Log:
         elif kind == "message":
             current.messages.append(record)
             content = str(record.get("content") or "")
-            if record.get("role") == "user" and synthetic_kind(content) == "note":
+            # A Retry's discarded attempt draws no row on replay, so it gets no
+            # derived step here either, or every later h<n> would be off by one.
+            live = not record.get("superseded")
+            if live and record.get("role") == "user" and synthetic_kind(content) == "note":
                 # A DERIVED step, never one the writer logged (contract §3.17):
                 # the note's own record is its one durable copy. Built by the
                 # same `harness_step` the trace card is drawn from, and kept out
@@ -199,6 +202,10 @@ def load(path: os.PathLike | str) -> Log:
                 # is the line in the log and not this derived step.
                 derived = {**harness_step(record), "message": record}
                 (held_notes if ended else current.steps).append(derived)
+            elif live and record.get("role") == "tool":
+                current.steps.extend(
+                    {**step, "message": record} for step in embedded_harness_steps(record)
+                )
             if record.get("role") == "user" and not current.prompt:
                 current.prompt = str(record.get("content") or "")
             if record.get("role") == "user" and not current.turn_id:
@@ -1893,6 +1900,12 @@ PANE_EVENT = "event"
 # tool-role `message` record carries the tool's name and the model call it was
 # first in front of, and no call id — so it is matched to the calls of that
 # round by name and order, and the step says which.
+# Since 2026-10-05 a result message names its call (`call`), and that join is
+# EXACT: the record is the text the model was handed for this call, whole. It
+# outranks the step's own fields, which hold the recorder's preview — and, for
+# a shell command, the command's output without what aish added around it (an
+# edited-command line, a nudge, a denial's guidance).
+SHOWN_MESSAGE_CALL = "message_by_call"
 SHOWN_STEP_OUTPUT = "step_output"
 SHOWN_STEP_ERROR = "step_error"
 SHOWN_MESSAGE_ORDER = "message_by_order"
@@ -1932,6 +1945,7 @@ def _messages(turn: Turn) -> list[dict]:
                 "images": len(record.get("images") or []),
                 "documents": len(record.get("documents") or []),
                 "superseded": bool(record.get("superseded")),
+                "call": record["call"] if isinstance(record.get("call"), int) else None,
             }
         )
     return out
@@ -1970,6 +1984,13 @@ def _shown_messages(messages: list[dict], calls: list[dict], placed: dict[int, i
                 by_call[call["call"]] = (same_m[0]["at"], SHOWN_MESSAGE_NAME)
 
     completed = [c for c in calls if c["completed"] and c["call"]]
+    named = {m["call"]: m["at"] for messages_ in by_round.values() for m in messages_
+             if m.get("call")}
+    if named:
+        # A log that stamps the call id stamps every dispatched result; the
+        # inferences below never run on it, so they cannot overrule the stamp.
+        return {c["call"]: (named[c["call"]], SHOWN_MESSAGE_CALL)
+                for c in completed if c["call"] in named}
     if None in by_round and len(by_round) == 1:
         pair(by_round[None], sorted(completed, key=lambda c: c["call"]), SHOWN_MESSAGE_ORDER)
         return by_call
@@ -2128,7 +2149,10 @@ def _tool_step(call: dict, placed: dict[int, int], how: dict[int, str],
                                         "phases")) or bool(call["problem"]) or call["unchanged"]
     panes = [PANE_CALL, PANE_RESULT] + ([PANE_PAGE] if page else [])
     number = placed.get(call["call"])
-    if call["output"]:
+    exact = shown.get(call["call"])
+    if exact and exact[1] == SHOWN_MESSAGE_CALL:
+        shown_at, shown_how = exact
+    elif call["output"]:
         shown_at, shown_how = None, SHOWN_STEP_OUTPUT
     elif call["error"]:
         shown_at, shown_how = None, SHOWN_STEP_ERROR
@@ -2418,7 +2442,9 @@ def _steps(turn: Turn, log: Log, doc: dict) -> list[dict]:
                                      text=text, before=before(index)))
         elif kind == HARNESS_STEP:
             text = str(step.get("text") or "")
-            facts = [{"k": "added as", "v": f"a {step.get('role') or 'user'} message"},
+            facts = [{"k": "added as", "v": (
+                f"part of the result of tool call {step['call']}" if step.get("call")
+                else f"a {step.get('role') or 'user'} message")},
                      {"k": "written by", "v": str(step.get("source") or "not recorded")},
                      {"k": "chars", "v": _fmt_n(len(text))}]
             if isinstance(step.get("model_call"), int):

@@ -3140,6 +3140,8 @@ function replayedTurnStart(event) {
 // does not know, or a note logged before sources existed, still draws: as a
 // plain "aish told the model", because an unnamed note is still a note.
 const HARNESS_SOURCES = {
+  prefer_tool: ["guide", "Pointed it at a tool instead of the raw command"],
+  plan_denial: ["guide", "Asked it to revisit the plan after your denial"],
   answer_check: ["enforce", "Asked for the answer again — a check was not met"],
   image_check: ["inform", "Told it pictures in its answer will not display"],
   step_limit: ["enforce", "Stopped at the step limit"],
@@ -3155,6 +3157,8 @@ const HARNESS_SOURCES = {
   cd: ["inform", "Told it about your /cd"],
   add_dir: ["inform", "Told it about your /add-dir"],
   console_share: ["inform", "Passed on what you shared from the console"],
+  rules: ["enforce", "Told it the rules in force"],
+  user_command: ["inform", "Passed on the output of your ! command"],
 };
 const HARNESS_COLORS = { enforce: "var(--orange)", guide: "var(--yellow)", inform: "var(--dim)" };
 
@@ -3163,8 +3167,9 @@ const HARNESS_COLORS = { enforce: "var(--orange)", guide: "var(--yellow)", infor
 function harnessHeadline(text) {
   let body = String(text || "").trim();
   if (body.startsWith("[aish: ")) body = body.slice(7);
+  else if (body.startsWith("<system-reminder>")) body = body.slice(17).trimStart();
   else if (body.startsWith("[")) body = body.slice(1);
-  const first = body.split("\n")[0];
+  const first = body.split("\n")[0].replace(/<\/system-reminder>$/, "");
   return first.endsWith("]") ? first.slice(0, -1) : first;
 }
 
@@ -3358,7 +3363,13 @@ function traceStep(step) {
     // same note record (L2).
     t.started += 1;
     const [icon, title] = HARNESS_SOURCES[step.source] || ["inform", "aish told the model"];
-    traceRow(t, traceSvg(icon, HARNESS_COLORS[icon]), title, harnessHeadline(step.text))
+    // Words aish put INSIDE a tool result belong to that call: drawn under its
+    // row, which both paths have already drawn (the result follows its step).
+    const owner = step.call
+      ? [...t.inner.querySelectorAll(".step")].find((r) => r.dataset && r.dataset.call === String(step.call))
+      : null;
+    traceRow(t, traceSvg(icon, HARNESS_COLORS[icon]), title, harnessHeadline(step.text),
+      owner ? stepUnder(owner._ref || (owner._ref = { row: owner })) : undefined)
       .row.classList.add("step-harness", `step-harness-${icon}`);
     updateTraceHead(t);
     return;
@@ -13133,6 +13144,7 @@ const SS_PLACEMENT_WORDS = {
 // two message joins are inferences and say so; a wrong text presented as
 // "what the model saw" is the exact lie the inspector exists to prevent.
 const SS_SHOWN_WORDS = {
+  message_by_call: "the tool-role message this call's result was handed to the model as, joined by its call id — whole, including anything aish added to the result",
   step_output: "from the tool step's own output field — a preview the recorder capped; the whole output is not recorded yet",
   step_error: "from the tool step's own error field",
   message_by_order: "from the tool-role message record, matched to this call by tool name and order within its model call — the message carries no call id",
@@ -13713,9 +13725,12 @@ function ssResultSegs(doc, step) {
     else if (step.continuation_read === false) lines.push("nothing read the continuation back in this turn");
   }
   if (c.read) lines.push(`this call read back the continuation ${c.read}`);
-  lines.push("NOT RECORDED YET",
-    "the whole output before any cut: not recorded (part 3 of #352)",
-    "the text exactly as it was sent to the model: not recorded (part 2 of #352) — the text above is the record's copy");
+  lines.push("NOT RECORDED YET", "the whole output before any cut: not recorded (part 3 of #352)");
+  // Joined by call id, the text above IS the result as it was appended for
+  // the model; only the preview joins are a copy that can differ from it.
+  if (how !== "message_by_call") {
+    lines.push("the text exactly as it was sent to the model: not recorded (part 2 of #352) — the text above is the record's copy");
+  }
   b.meta(...lines);
   return b.segs;
 }

@@ -25,15 +25,19 @@ from typing import Any
 
 from . import provenance, tools
 from .agent import (
+    RULES_REMINDER,
     Agent,
     ModelUnavailable,
     compose_system_content,
     format_secs,
     identity_context,
 )
+from .session import harness_step
 
+# Opens with aish's note marker, so the log can tell it apart from words the
+# owner typed (`session.synthetic_kind`) and the trace draws it as aish's.
 SESSION_NOTE = (
-    "[note for the model: the user ran `{command}` directly; output:]\n{output}"
+    "[aish: the user ran `{command}` directly; output:]\n{output}"
 )
 
 
@@ -149,7 +153,8 @@ class ClaudeMaxAgent:
         self.base_context = context
         self.messages: list[dict] = []  # display-only history (replay/logs)
         self._session_id: str | None = None
-        self._pending_notes: list[str] = []
+        # (source, text): what aish will put in front of the next prompt.
+        self._pending_notes: list[tuple[str, str]] = []
         # The SDK may run tool handlers concurrently; the inner Agent is not
         # thread-safe (_run_meta, _pending_skill_reads, cwd) and two approval
         # prompts must never interleave — every entry into it serializes here.
@@ -240,19 +245,21 @@ class ClaudeMaxAgent:
     def rebase(self, target: str) -> str:
         result = self.inner.rebase(target)
         if not result.startswith("ERROR"):
-            self._pending_notes.append(
+            self._pending_notes.append((
+                "cd",
                 f"[I moved the session to {self.cwd} with /cd — this directory "
-                "is the project now]"
-            )
+                "is the project now]",
+            ))
         return result
 
     def add_root(self, target: str) -> str:
         result = self.inner.add_root(target)
         if result.startswith("[added"):
-            self._pending_notes.append(
+            self._pending_notes.append((
+                "add_dir",
                 f"[I added {self.roots[-1]} as a session root with /add-dir — "
-                "you may work there too]"
-            )
+                "you may work there too]",
+            ))
         return result
 
     def trust_root(self, target: str) -> str:
@@ -398,8 +405,17 @@ class ClaudeMaxAgent:
             allow_detach=True,
             log_dir=self.inner.job_log_dir,
         )
-        self._pending_notes.append(SESSION_NOTE.format(command=command, output=result))
+        self._pending_notes.append(
+            ("user_command", SESSION_NOTE.format(command=command, output=result))
+        )
         return result
+
+    def add_system_note(self, text: str, source: str | None = None) -> None:
+        """A note aish wrote (a picture that did not display), for the next
+        prompt. This backend had none, so the server's render report was
+        dropped silently inside its `suppress` (found by the harness-row
+        inventory)."""
+        self._pending_notes.append((source or "", text))
 
     def run_task(self, task: str) -> str:
         # The SDK owns the loop, so the inner Agent's run_task — where per-task
@@ -426,18 +442,26 @@ class ClaudeMaxAgent:
 
     def _run_task_body(self, task: str) -> str:
         self._refresh_server()  # plugin tools created since last task
-        prompt = task
-        if self._pending_notes:
-            prompt = "\n\n".join([*self._pending_notes, task])
-            self._pending_notes.clear()
+        notes, self._pending_notes = list(self._pending_notes), []
         # Seed this turn's rule bindings (#191). The SDK owns the loop, so the
         # prose rides the prompt rather than a system reminder — but the gate is
         # the SAME one, because every SDK tool call routes back through
         # inner._dispatch. A rule that governed only local turns would be a rule
-        # the model can escape by being asked on a different backend.
+        # the model can escape by being asked on a different backend. Wrapped
+        # as the native path wraps it, so it is aish's voice to the model AND
+        # to the log, which can then tell it from the owner's words.
         if rules_text := self.inner.seed_rules(task):
-            prompt = f"{rules_text}\n\n{prompt}"
+            # Disarmed before it is framed, as the native reminder disarms it:
+            # a closing tag inside a rule's prose would end aish's frame early.
+            framed = RULES_REMINDER.format(rules=provenance.disarm_markers(rules_text))
+            notes.insert(0, ("rules", framed))
             self.inner.mark_rules_seeded()
+        prompt = "\n\n".join([*(text for _source, text in notes), task])
+        # Everything in front of his words is recorded, each as the note it is,
+        # and drawn as a row (contract §3.17): before this, the rules prose and
+        # the pending notes reached the model and NO record held them.
+        for source, text in notes:
+            self._record_note(text, source)
         self._record({"role": "user", "content": task})
         # The one path the `sent` seam does not cover (#352, #242): the SDK
         # spawns the `claude` CLI, and the CLI issues the HTTP requests — the
@@ -512,6 +536,16 @@ class ClaudeMaxAgent:
         self.messages.append(message)
         if self.on_message:
             self.on_message(message)
+
+    def _record_note(self, text: str, source: str) -> None:
+        """One note in front of the prompt, as the record and the row the
+        native `Agent._append` makes of a note. NOT one message on the wire:
+        the SDK receives the notes and the task as ONE user message, which the
+        row's text does not claim otherwise — it says what aish added."""
+        record = {"role": "user", "content": text, **({"source": source} if source else {})}
+        self._record(record)
+        if self.inner.on_step is not None:
+            self.inner.on_step(harness_step(record))
 
     # ------------------------------------------------------------ SDK loop
 

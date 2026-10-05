@@ -253,6 +253,28 @@ check("a tap opens the step screen on it, with the note as payload, byte for byt
   assert.deepEqual(w.toasts, [], `no toast: ${w.toasts.join(" | ")}`);
 });
 
+check("a note aish put inside a tool result is drawn under that call's row, and is still a step", () => {
+  for (const replaying of [false, true]) {
+    const w = world();
+    const s = w.sandbox;
+    s.currentTurnId = "turn-b";
+    s.replaying = replaying;
+    if (!replaying) s.traceStep({ kind: "tool_start", name: "run_command", call: 1, model_call: 1 });
+    s.traceStep({ kind: "tool", name: "run_command", call: 1, model_call: 1, ok: true, secs: 0.1, output: "hi" });
+    s.traceStep({ kind: "harness", source: "prefer_tool", role: "tool", call: 1, model_call: 1,
+                  text: "[aish: the 'gh_issue' tool covers this operation]" });
+    const t = s.currentTrace;
+    s.finishTrace();
+    const note = rows(t).find((r) => r.classList.has("step-harness"));
+    assert(note, "no row was drawn for the note");
+    const tool = rows(t).find((r) => r.dataset.call === "1");
+    assert(note.parentNode && (note.parentNode.className || "").includes("step-under"),
+      `not nested (replaying=${replaying})`);
+    assert(tool.contains(note), `drawn under some other row (replaying=${replaying})`);
+    assert.deepEqual(idsOf(t), ["c1", "h1"], idsOf(t).join(","));
+  }
+});
+
 (async () => {
   for (const run of pending) await run();
   if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }

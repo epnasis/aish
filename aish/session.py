@@ -59,11 +59,17 @@ RESUME_MARKER = "[automatic resume]"  # server.RESUME_NOTE — a real turn, syst
 # not just be recognized by luck — agent.py's media deliveries (#215) open with
 # it, and the trim that later drops their pixels identifies them by it too.
 NOTE_MARKER = "[aish: "
+REMINDER_OPEN, REMINDER_CLOSE = "<system-reminder>", "</system-reminder>"
 _NOTE_MARKERS = (
     NOTE_MARKER,  # agent.LOOP_WARNING / STEP_LIMIT_NOTE / LOOP_STOP_NOTE / STALL_NOTE
     "[I moved the session to ",  # Agent.rebase announce (/cd)
     "[I added ",  # Agent.add_root announce (/add-dir)
     "[Shared from my interactive terminal:]",  # console share
+    # claude-max's rules prose, in front of the prompt (contract §3.17). Owner
+    # text never opens with it: `provenance.disarm_markers` breaks the tag in
+    # everything he types, and no log on the owner's machine held a user
+    # record opening with it when this was added (2026-10-05).
+    REMINDER_OPEN,
 )
 
 
@@ -193,6 +199,27 @@ def harness_step(record: dict) -> dict:
     return step
 
 
+def embedded_harness_steps(record: dict) -> list[dict]:
+    """The trace steps for words aish wrote INSIDE a tool result (§3.17): one
+    per span the result's message record names (`notes`, offsets into its own
+    content). Live and cold share it, like `harness_step`. `call` is what the
+    row nests under."""
+    content = str(record.get("content") or "")
+    steps = []
+    for span in record.get("notes") or []:
+        at, chars = span.get("at"), span.get("chars")
+        if not isinstance(at, int) or not isinstance(chars, int):
+            continue
+        step: dict = {"kind": HARNESS_STEP, "text": content[at:at + chars], "role": "tool",
+                      "source": str(span.get("source") or "")}
+        if isinstance(record.get("call"), int):
+            step["call"] = record["call"]
+        if isinstance(record.get("model_call"), int):
+            step["model_call"] = record["model_call"]
+        steps.append(step)
+    return steps
+
+
 def harness_headline(text: str) -> str:
     """The note's first line without its bracket framing — for a terminal echo.
     The cut `harnessHeadline` makes in app.js, plus a length cap the web row
@@ -200,10 +227,12 @@ def harness_headline(text: str) -> str:
     body = text.strip()
     if body.startswith(NOTE_MARKER):
         body = body[len(NOTE_MARKER):]
+    elif body.startswith(REMINDER_OPEN):
+        body = body[len(REMINDER_OPEN):].lstrip()
     elif body.startswith("["):
         body = body[1:]
     first = body.splitlines()[0] if body else ""
-    first = first.removesuffix("]")
+    first = first.removesuffix("]").removesuffix(REMINDER_CLOSE)
     return first if len(first) <= 160 else first[:159] + "…"
 
 
@@ -2549,6 +2578,11 @@ class SessionLog:
                     # `Agent.run_task` draws those first thing.
                     steps.extend(held_notes)
                     held_notes = []
+            elif kind == "message" and record.get("role") == "tool":
+                # Words aish wrote inside a result, drawn under that call's row
+                # (§3.17). Only spans the writer registered — never a match on
+                # the text, which a command's output can imitate.
+                steps.extend({"type": "step", **s} for s in embedded_harness_steps(record))
             elif kind == "message" and record.get("role") == "assistant":
                 # Every non-empty assistant text is a DELIVERY (#212): the
                 # prose a step said alongside its tool calls was already shown

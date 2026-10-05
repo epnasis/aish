@@ -4376,9 +4376,13 @@ class TestPluginTools:
                 model_says("done"),
             ],
             cwd=str(tmp_path), approve_write=lambda plan: False,
+            step_log=(steps := []).append,
         )
         agent.run_task("go")
         assert not (tmp_path / ".aish" / "tools" / "greeter").exists()
+        # A denied write is a refused step, never a green one (§6.13).
+        [tool] = [s for s in steps if s.get("kind") == "tool"]
+        assert tool["ok"] is False and tool["decision"] == "denied"
 
     def test_create_tool_flags_conflicting_knowledge(self, tmp_path, monkeypatch):
         import aish.skills as skills_mod
@@ -8846,6 +8850,21 @@ then:
         assert "BEFORE running anything" in refusal
         assert "Here is what I found" in result
 
+    def test_the_refused_call_is_logged_red_not_green(self, tmp_path):
+        """Returned as a bare string, the refusal was sniffed by prefix, matched
+        none, and logged `ok: true` with no decision — a refused call drawn as
+        a success (delivery review of the harness rows, 2026-10-05)."""
+        steps: list[dict] = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]),
+             model_says("Here is what I found.")],
+            rule_texts=(self.RULE,), step_log=steps.append,
+        )
+        agent.run_task("what does ls do?")
+        [tool] = [s for s in steps if s.get("kind") == "tool"]
+        assert tool["ok"] is False and tool["decision"] == "blocked"
+
     def test_text_alongside_the_call_is_enough(self, tmp_path, monkeypatch):
         """A model that answers and acts in the same breath has not made him
         wait — the rule is about being left in silence, not about turn count."""
@@ -8937,8 +8956,10 @@ class TestRuleAuthoring:
     def test_a_denied_rule_is_not_written(self, tmp_path):
         agent = self._agent(tmp_path)
         agent.approve_write = lambda plan: False
-        agent._dispatch("create_rule", self.FIELDS)
+        result = agent._dispatch("create_rule", self.FIELDS)
         assert not list((tmp_path / "rules").glob("*.md"))
+        # A refusal carries its verdict, or the step logs green (§6.13).
+        assert result.meta["decision"] == "denied" and result.meta["status"] != "ok"
 
     def test_an_approved_rule_lands_and_binds_the_next_turn(self, tmp_path):
         agent = self._agent(tmp_path)
