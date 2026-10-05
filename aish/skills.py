@@ -137,6 +137,18 @@ GATE_MIN_SIM = 0.45
 # explicit invocation must come from what the user just said.
 PREFLIGHT_CONTEXT_TASK_CHARS = 200
 PREFLIGHT_CONTEXT_CHARS = 600
+# Preload NEAR-MISSES (#435, epic #444): entries preflight scored and did NOT
+# admit, recorded when they fell within this band below the floor that applied
+# to them. The floors above can only be judged against what they turned away,
+# and the log held winners alone — #435's family-profile miss (keyword hit,
+# sim 0.154 under the 0.24 keyword floor) was unrecoverable from it, and the
+# Polish matches the keyword-language experiments left behind land at
+# ~0.26-0.34, just under the 0.35 plain floor. The band reaches both cases;
+# the cap keeps one turn's record bounded, nearest the floor first. Lexical
+# mode's floor is a tier, so its band is counted in tiers.
+PRELOAD_NEAR_MISS_BAND = 0.10
+PRELOAD_NEAR_MISS_LEXICAL_BAND = 1
+PRELOAD_NEAR_MISS_MAX = 5
 
 # save_memory keyword cap (#183): keywords are a retrieval rail and the
 # model writes them — beyond a handful they stop being curated triggers.
@@ -944,6 +956,44 @@ class Preload:
     # {name, rule}: skills kept out because a rule in force forbids every
     # command they teach — recorded so "why wasn't it preloaded" has an answer.
     withheld: list[dict] = field(default_factory=list)
+    # Scored, below the floor that applied, within the near-miss band; nearest
+    # the floor first and capped. Disjoint from `items` by construction: an
+    # admitted entry cleared its floor, a near-miss did not.
+    near_misses: list[dict] = field(default_factory=list)
+    near_misses_truncated: int = 0  # in-band rows the cap left out
+
+    def near_miss_record(self) -> dict:
+        """The near-miss block of the `context` record's `preload` (contract
+        §3.10). Written on every turn the selector ran, empty or not, so "none
+        were in the band" is a record and never an absence. The band and cap
+        travel with it: a later reader must know what an unlisted entry means
+        after the constants move."""
+        lexical = self.mode == "lexical"
+        return {
+            "band": PRELOAD_NEAR_MISS_LEXICAL_BAND if lexical else PRELOAD_NEAR_MISS_BAND,
+            "max": PRELOAD_NEAR_MISS_MAX,
+            "items": [dict(row) for row in self.near_misses],
+            "truncated": self.near_misses_truncated,
+        }
+
+
+def _under_floor(sim: float, floor: float) -> float:
+    """A near-miss's sim to 4 places that still reads as UNDER its floor.
+    Plain rounding would record a 0.34996 as 0.35 turned away by a 0.35 floor
+    — a row that contradicts itself — so the last 5e-5 below a floor is
+    recorded one place under it instead."""
+    shown = round(sim, 4)
+    return shown if shown < floor else round(floor - 0.0001, 4)
+
+
+def _nearest_first(missed: list[tuple[float, dict]]) -> tuple[list[dict], int]:
+    """(rows, how many the cap dropped). `missed` holds (margin, row) with
+    margin = score - floor (negative); a sort on the margin rather than the
+    raw score is what makes "nearest" mean the same thing for a keyword-floor
+    row and a plain-floor one. Stable, so ties keep corpus order."""
+    missed.sort(key=lambda pair: -pair[0])
+    rows = [row for _, row in missed]
+    return rows[:PRELOAD_NEAR_MISS_MAX], max(0, len(rows) - PRELOAD_NEAR_MISS_MAX)
 
 
 def preflight(
@@ -987,7 +1037,11 @@ def preflight(
     command keeps it — the rule restricts running, not reading — and so does
     NAMING it, for the reason a name hit is unconditional everywhere else. It
     stays in the index and read_skill still loads it. Only a skill that would
-    otherwise have taken a slot is reported in `withheld`."""
+    otherwise have taken a slot is reported in `withheld`.
+
+    `near_misses` records what scored within PRELOAD_NEAR_MISS_BAND under the
+    floor that applied to it, so the floors can be judged on live data. It is
+    a record only: nothing here reads it, and selection is unchanged by it."""
     if not task.split():
         return Preload()
     task_padded = _pad_words(task)
@@ -998,6 +1052,7 @@ def preflight(
     if context and len(task) < PREFLIGHT_CONTEXT_TASK_CHARS:
         query = f"{task}\n{context[:PREFLIGHT_CONTEXT_CHARS]}"
     sims = semantic(query, entries) if semantic is not None else None
+    missed: list[tuple[float, dict]] = []
     if sims is not None:
         mode = "semantic"
         ranked = []
@@ -1013,6 +1068,15 @@ def preflight(
             )
             if sim >= floor:
                 ranked.append((rail, sim, entry))
+            elif sim >= floor - PRELOAD_NEAR_MISS_BAND:
+                missed.append((sim - floor, {
+                    "label": entry.name,
+                    "kind": entry.kind,
+                    "sim": _under_floor(sim, floor),
+                    "rail": rail,
+                    "floor": floor,
+                    "floor_kind": "keyword" if rail else "plain",
+                }))
         ranked.sort(key=lambda t: (-t[0], -t[1]))
         chosen = [(entry, {"sim": round(sim, 3), "rail": rail}) for rail, sim, entry in ranked]
     else:
@@ -1023,6 +1087,14 @@ def preflight(
             score = max(forward.get(id(entry), 0), _reverse_score(entry, task_padded))
             if score >= PREFLIGHT_MIN_SCORE:
                 picked.append((score, entry))
+            elif score and score >= PREFLIGHT_MIN_SCORE - PRELOAD_NEAR_MISS_LEXICAL_BAND:
+                # score 0 is "no word matched at all", not a near anything.
+                missed.append((score - PREFLIGHT_MIN_SCORE, {
+                    "label": entry.name,
+                    "kind": entry.kind,
+                    "score": score,
+                    "threshold": PREFLIGHT_MIN_SCORE,
+                }))
         picked.sort(key=lambda pair: -pair[0])  # stable: corpus order within a tier
         # The rail rides along even though lexical selection does not use it:
         # with no similarity to clear, being NAMED is the only thing that may
@@ -1087,7 +1159,11 @@ def preflight(
         names.append(entry.name)
         items.append({"name": entry.name, "kind": entry.kind, **diag})
         remaining -= len(block) + 2  # +2 covers the join's blank line
-    return Preload("\n\n".join(blocks), names, unread, items, mode, blocks, withheld)
+    near_misses, near_misses_truncated = _nearest_first(missed)
+    return Preload(
+        "\n\n".join(blocks), names, unread, items, mode, blocks, withheld,
+        near_misses, near_misses_truncated,
+    )
 
 
 def _forbids_all(entry: Entry, forbidden_command) -> str | None:

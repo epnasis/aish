@@ -2990,6 +2990,26 @@ def _state_note(state: str, kind_note: str) -> str:
     }.get(state, "")
 
 
+def _near_miss_line(block) -> str:
+    """The preload's near-misses (#435) in one line: each row's score against
+    the floor that turned it away. A preload without the block predates it, and
+    says so rather than reading as "nothing came close"."""
+    if not isinstance(block, dict):
+        return f"near misses: {_state_note(MISSING, '')}"
+    rows = [row for row in block.get("items") or [] if isinstance(row, dict)]
+    band = block.get("band")
+    if not rows:
+        return f"near misses: none within {band} of the floor"
+    shown = ", ".join(
+        f"{row.get('label')} {row.get('sim')} < {row.get('floor')} {row.get('floor_kind')}"
+        if "sim" in row
+        else f"{row.get('label')} score {row.get('score')} < {row.get('threshold')}"
+        for row in rows
+    )
+    more = f" (+{block['truncated']} more)" if block.get("truncated") else ""
+    return f"near misses (within {band}): {shown}{more}"
+
+
 def _given_lines(given: dict, show_tools: bool, show_context: bool, out: list[str]) -> None:
     if not given["briefs"]:
         out.append(f"  {'brief':<10} {_state_note(given['state'], ' (log predates #239)')}")
@@ -3056,6 +3076,8 @@ def _given_lines(given: dict, show_tools: bool, show_context: bool, out: list[st
         )
         if preload.get("names"):
             out.append(f"  {'':<10} {', '.join(str(n) for n in preload['names'])}")
+        if preload.get("mode"):
+            out.append(f"  {'':<10} {_near_miss_line(preload.get('near_misses'))}")
 
     for record in given["knowledge"]:
         chosen = ", ".join(

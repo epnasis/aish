@@ -97,6 +97,8 @@ The thresholds, all calibrated on the #183 audit (`TestPreflightPrecision`):
 
 **Diagnostics ride the log.** `Preload.mode` (`semantic`|`lexical`) plus per-item `sim`/`rail` (or lexical `score`) go out on the `knowledge` trace step, so retrieval precision is auditable from logs alone — the #183 audit had to reconstruct all of this by hand. Keep it cheap and keep it there; the curation ledger reads exactly these records.
 
+**What the floors turned away rides the log too (#435, epic #444).** The `knowledge` step lists admitted entries only, so a floor could be judged only by replaying tasks against a corpus that has since changed — and #435's miss (family-profile: keyword hit, sim 0.154 under the 0.24 keyword floor) was unrecoverable from any record. The keyword-language experiments then put the owner's accepted Polish residue at ~0.26–0.34, just under the 0.35 plain floor, and showed no floor value buys it back at an acceptable noise cost: the band is where the next decision has to be watched. So preflight records every entry that scored within `PRELOAD_NEAR_MISS_BAND` (0.10) under the floor that applied to it — with that floor, its kind (`keyword`/`plain`), the rail and the sim — nearest the floor first, at most `PRELOAD_NEAR_MISS_MAX` (5) per task with the overflow counted. Lexical mode records the same shape in its own units: `score` against `PREFLIGHT_MIN_SCORE`, one tier below (a fuzzy-only match; no shared word at all is not near anything). It rides the renderless `context` record's `preload` — present on every turn a selector ran, `items: []` included — because the `knowledge` step is skipped when nothing was admitted — exactly the turns whose misses matter (`docs/trace-contract.md` §3.10). It is a record only: nothing reads it to select, and `TestPreloadNearMisses` pins that selection is identical with the band at zero. `aish explain` shows it as one line under the context row; curate's ledger deliberately ignores it (an entry never injected has no engagement to measure). `TestPreloadNearMisses`, `TestContextRecord`, `TestEveryReaderParsesALogWithNearMisses`.
+
 In lexical fallback the keyword rail is a full guarantee again — there is no similarity to confirm against (L2).
 
 ---
@@ -196,7 +198,7 @@ Every judged entry, skips included, lands in `curation-actions.jsonl`, which dou
 
 **Privacy.** Evidence excerpts quote owner-typed text, so the judge defaults to the LOCAL model and nothing leaves the machine unless `--model`/`AISH_CURATE_MODEL` names a cloud spec explicitly. A completed pass with actions sends one Pushover summary through the `notify_fn` seam. Seams: `run_curate(judge=…, scores=…, notify_fn=…, state_dir=…, now=…, dry_run=…)`; `--dry-run` lists suspects and pairs with no model calls and no writes.
 
-**Deliberately absent: automatic threshold retuning.** The ledger informs; `PREFLIGHT_MIN_SIM` moves by human decision.
+**Deliberately absent: automatic threshold retuning.** The ledger informs; `PREFLIGHT_MIN_SIM` moves by human decision. The evidence for that decision is the near-miss record on `context.preload` (#435), which the ledger does not read.
 
 ---
 
