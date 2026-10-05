@@ -1010,7 +1010,7 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "web_search",
             "description": (
-                "Search the web (DuckDuckGo); returns titles, URLs, and snippets. "
+                "Search the web (two indexes, merged); returns titles, URLs, and snippets. "
                 "Use for information NOT on this machine: current events, software "
                 "releases, unfamiliar error messages, general facts. Snippets alone "
                 "are rarely enough — follow up with read_url on the best result. "
@@ -1064,10 +1064,12 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "browse",
             "description": (
                 "Open a page in the user's OWN signed-in browser and get back its "
-                "text PLUS a numbered list of everything you can press on it — "
-                "links, buttons, fields, dropdowns. Use this instead of read_url "
-                "when what you need is behind a CONTROL rather than an address: a "
-                "button that switches account, a tab, a filter, a 'show more'. "
+                "text with every pressable control shown IN PLACE as a "
+                "[name](press:…) link — links, buttons, fields, dropdowns; a "
+                "control with no place in the text is listed at the end. Use "
+                "this instead of read_url when what you need is behind a "
+                "CONTROL rather than an address: a button that switches "
+                "account, a tab, a filter, a 'show more'. "
                 "NEVER guess a URL for something you saw as a button — press the "
                 "button with browse_act. The session persists, so the pages you "
                 "reach are the user's own account pages."
@@ -1106,8 +1108,9 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "browse_act",
             "description": (
                 "Do ONE thing to ONE control on the page browse opened, naming "
-                "it as the list writes it — browse_act(target=\"Log in\"). You "
-                "get back WHAT IS NEW, not the whole page (action=\"read\" for "
+                "it by the (press:cN·code) reference its link carries, or by "
+                "NAME — browse_act(target=\"Log in\"). You get back WHAT IS "
+                "NEW, not the whole page (action=\"read\" for "
                 "that); if it says nothing changed, the control did nothing — "
                 "pressing again will not help, find another route. READ any "
                 "\"the page's own console\" section before deciding what to do "
@@ -1125,9 +1128,10 @@ TOOL_SCHEMAS: list[dict] = [
                     "target": {
                         "type": "string",
                         "description": (
-                            "The control's NAME exactly as the list writes it in "
-                            "quotes — 'Log in', 'Szukaj'. Duplicates are numbered "
-                            "('Select #2'); a control with no words is asked for "
+                            "The control's (press:cN·code) reference exactly as "
+                            "shown, or its NAME in quotes — 'Log in', 'Szukaj'. "
+                            "Duplicates are numbered ('Select #2'); a control "
+                            "with no words is asked for "
                             "as '#12'."
                         ),
                     },

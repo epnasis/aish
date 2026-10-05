@@ -1,7 +1,7 @@
 """Web browsing tools: search the web and read pages as plain text.
 
 Both tools are read-only and auto-approved, but their input LEAVES THE
-MACHINE (the query goes to DuckDuckGo, the URL to its host), so every call
+MACHINE (the query goes to both search indexes, the URL to its host), so every call
 is echoed to the user and the system prompt forbids putting private local
 data into them. Fetching is restricted to http/https so read_url can never
 be steered at file:// or other local schemes, and to public hosts only —
