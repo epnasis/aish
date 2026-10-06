@@ -828,7 +828,12 @@ TASK_ERROR_CAP = 500
 # CANCELLED_RESULT` is bound to this string rather than copied, because it is
 # how `last_task` tells a turn the owner stopped from one that answered —
 # reading only the log, where both end `task_end: ok` (#387).
-STOPPED_ANSWER = "(task stopped by user — any partial work is above)"
+#
+# "not an error" since H3 (#444): the web usage notes told the model so on every
+# call; the note now says it itself, the one place it is read. A log is never
+# rewritten, so every spelling one may hold is still recognised as a stop.
+STOPPED_ANSWER = "(task stopped by user — not an error; any partial work is above)"
+STOPPED_ANSWERS = (STOPPED_ANSWER, "(task stopped by user — any partial work is above)")
 
 
 class CarriedWork(NamedTuple):
@@ -2091,7 +2096,7 @@ class SessionLog:
         elif status is None:
             ended = "unrecorded"
         elif status == "ok":
-            ended = "stopped" if last_assistant == STOPPED_ANSWER else "ok"
+            ended = "stopped" if last_assistant in STOPPED_ANSWERS else "ok"
         else:
             ended = "failed"
         return {

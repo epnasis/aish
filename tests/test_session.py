@@ -2604,6 +2604,8 @@ class TestLastTask:
         cases = {
             "ok": dict(end="ok", answer="4"),
             "stopped": dict(end="ok", answer=session_module.STOPPED_ANSWER),
+            # A log written before "not an error" joined the note (H3, #444).
+            "stopped-legacy": dict(end="ok", answer=session_module.STOPPED_ANSWERS[1]),
             "failed": dict(end="failed", error="model unavailable: 503",
                            give_up={"class": "server", "retryable": True}),
             "unknown": dict(),
@@ -2613,7 +2615,7 @@ class TestLastTask:
             log = SessionLog(tmp_path / f"session-{ended}.jsonl")
             self._attempt(log, "q", **kwargs)
             log.close()
-            assert SessionLog.last_task(log.path)["ended"] == ended, ended
+            assert SessionLog.last_task(log.path)["ended"] == ended.removesuffix("-legacy"), ended
 
     def test_the_failure_is_the_last_attempts_give_up_only(self, tmp_path):
         log = SessionLog.new(tmp_path)

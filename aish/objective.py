@@ -119,9 +119,13 @@ ACTION_ARGS_CHARS = 600
 SKILL_ARGS_CHARS = 6000
 WHOLE_ARGS_TOOLS = frozenset({"create_skill", "create_tool"})
 
-# `session.STOPPED_ANSWER`, spelled here rather than imported so this module
+# `session.STOPPED_ANSWERS`, spelled here rather than imported so this module
 # stays importable without the session layer (a pinned test holds them equal).
-STOPPED_ANSWER = "(task stopped by user — any partial work is above)"
+STOPPED_ANSWERS = (
+    "(task stopped by user — not an error; any partial work is above)",
+    "(task stopped by user — any partial work is above)",
+)
+STOPPED_ANSWER = STOPPED_ANSWERS[0]
 
 # ---------------------------------------------------------------- the material
 
@@ -390,7 +394,7 @@ def _task_items(task: list[tuple[int, dict]], turn: int, read_only: frozenset[st
     if answer is not None:
         index, record = answer
         content = str(record.get("content") or "").strip()
-        kind = CANCEL if content == STOPPED_ANSWER else ANSWER
+        kind = CANCEL if content in STOPPED_ANSWERS else ANSWER
         items.append(Item(_message_ref(index, record), kind, turn, _cut(content, ANSWER_CHARS)))
     return items
 
