@@ -1215,6 +1215,60 @@ class TestPasswordsAreNeverReadBack:
         assert "innerText" not in browser._FOCUS_JS.split("const value")[1]
 
 
+class TestAFieldInsideAnIframeIsTheFocus:
+    """booksy.com's sign-in is a cross-origin iframe. Tapping its e-mail box
+    left the main document reporting the IFRAME as focused, the probe stopped
+    at that first answer, and the owner's view offered no keyboard — the child
+    frame holding the focused input was never asked."""
+
+    class Frame:
+        def __init__(self, answer, box=None):
+            self.answer, self.box = answer, box
+
+        async def evaluate(self, js):
+            return self.answer
+
+        async def frame_element(self):
+            frame = self
+
+            class Element:
+                async def bounding_box(self):
+                    return frame.box
+
+            return Element()
+
+    @staticmethod
+    def _field(tag, editable, x, y):
+        return {"tag": tag, "editable": editable, "kind": "text" if editable else "other",
+                "rect": {"x": x, "y": y, "w": 300, "h": 40}}
+
+    def _probe(self, frames, click):
+        import asyncio
+
+        class Page:
+            main_frame = frames[0]
+
+        Page.frames = frames
+        return asyncio.new_event_loop().run_until_complete(browser._focus_info(Page(), click))
+
+    def test_the_field_in_the_child_frame_wins_over_the_iframe_holding_it(self):
+        main = self.Frame(self._field("iframe", False, 500, 180))
+        child = self.Frame(self._field("input", True, 16, 145), box={"x": 528, "y": 183})
+        info = self._probe([main, child], click=(700, 350))
+        assert info["tag"] == "input" and info["editable"]
+        assert info["rect"]["x"] == 544 and info["rect"]["y"] == 328
+        assert info["tapped"] is True
+
+    def test_an_unreadable_child_still_leaves_the_iframe_as_the_answer(self):
+        main = self.Frame(self._field("iframe", False, 500, 180))
+        silent = self.Frame(None)
+        info = self._probe([main, silent], click=(600, 200))
+        assert info["tag"] == "iframe" and info["tapped"] is True
+
+    def test_a_blank_aria_label_does_not_hide_the_visible_label(self):
+        assert "(a.getAttribute('aria-label') || '').trim()" in browser._FOCUS_JS
+
+
 class TestEditingUsesRealKeystrokes:
     def test_fill_selects_all_then_types(self):
         """Playwright fill() dispatches ONE input event and no key events, so

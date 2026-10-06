@@ -1690,7 +1690,10 @@ _FOCUS_JS = """() => {""" + _DEEP_ACTIVE_JS + """
                  auto === 'current-password' || auto === 'new-password';
   const editable = tag === 'textarea' || a.isContentEditable ||
                    (tag === 'input' && TEXTLIKE.includes(type));
-  let label = a.getAttribute('aria-label') || a.getAttribute('placeholder') || '';
+  // trimmed: a blank-but-present aria-label (booksy's is " ") must not win
+  // over the visible <label>, or the editor opens with no name on it.
+  let label = (a.getAttribute('aria-label') || '').trim() ||
+              (a.getAttribute('placeholder') || '').trim();
   if (!label && a.id) {
     try {
       const l = document.querySelector('label[for="' + CSS.escape(a.id) + '"]');
@@ -1727,12 +1730,22 @@ async def _focus_info(page: Any, click: tuple[float, float] | None) -> dict | No
     Probes child frames too — a login form is routinely in an iframe — and
     offsets their rects by the iframe's own box so the client can outline it in
     the one coordinate space it knows."""
+    # A frame whose focused element is an <iframe> has handed focus DOWN to it:
+    # the field is in the child. Measured on booksy.com, whose sign-in is a
+    # cross-origin iframe — the main document answered "an iframe, not
+    # editable" first, the child frame holding the focused e-mail input was
+    # never asked, and tapping the field offered no keyboard. The iframe stays
+    # as the answer only when no frame below it can say more.
+    delegated: dict | None = None
     for frame in page.frames:
         try:
             info = await frame.evaluate(_FOCUS_JS)
         except Exception:  # noqa: BLE001 — a cross-origin or dead frame is simply skipped
             continue
         if not info:
+            continue
+        if info["tag"] in ("iframe", "frame"):
+            delegated = delegated or info
             continue
         if frame is not page.main_frame:
             try:
@@ -1748,15 +1761,19 @@ async def _focus_info(page: Any, click: tuple[float, float] | None) -> dict | No
         # leave focus in one. Opening an editor then is the "surprising popup"
         # complaint rebuilt, so the client only opens one when the owner
         # actually aimed at the field.
-        r = info["rect"]
-        info["tapped"] = bool(
-            click
-            and r["w"]
-            and r["x"] <= click[0] <= r["x"] + r["w"]
-            and r["y"] <= click[1] <= r["y"] + r["h"]
-        )
-        return info
-    return None
+        return _mark_tapped(info, click)
+    return _mark_tapped(delegated, click) if delegated else None
+
+
+def _mark_tapped(info: dict, click: tuple[float, float] | None) -> dict:
+    r = info["rect"]
+    info["tapped"] = bool(
+        click
+        and r["w"]
+        and r["x"] <= click[0] <= r["x"] + r["w"]
+        and r["y"] <= click[1] <= r["y"] + r["h"]
+    )
+    return info
 
 
 async def _dismiss_consent(page: Any) -> str:
