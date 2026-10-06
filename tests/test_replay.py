@@ -329,11 +329,15 @@ def _corpus(root: Path) -> Path:
     return corpus
 
 
-def _scenario(root: Path, *, target: str | None = "trippy_party", extra: str = "") -> Path:
+def _scenario(root: Path, *, target: str | None = "trippy_party", extra: str = "",
+              kind: str | None = None) -> Path:
     directory = root / "scenario"
     shutil.copytree(SCENARIO, directory)
     text = (directory / "scenario.toml").read_text(encoding="utf-8")
     text = text.replace('target = ["trippy_party"]', f'target = ["{target}"]' if target else "")
+    if kind is not None:  # a top-level key, so before the first table
+        text = text.replace('name = "example-trippy"\n',
+                            f'name = "example-trippy"\nkind = "{kind}"\n')
     (directory / "scenario.toml").write_text(text + extra, encoding="utf-8")
     return directory
 
@@ -372,8 +376,8 @@ class FakeLaunch:
 
 
 def _batch(tmp_path, launch, *, target="trippy_party", runs=2, overlays=None,
-           environ=None, extra=""):
-    scenario = replay.load_scenario(_scenario(tmp_path, target=target, extra=extra))
+           environ=None, extra="", kind=None):
+    scenario = replay.load_scenario(_scenario(tmp_path, target=target, extra=extra, kind=kind))
     code = tmp_path / "code"
     (code / "aish").mkdir(parents=True, exist_ok=True)
     arms = [replay.Arm("baseline", code, "main abc", {}),
@@ -710,6 +714,123 @@ class TestReport:
         batch = _batch(tmp_path, FakeLaunch(_both_failing(tmp_path)))
         text = replay.render_report(*replay.read_batch(batch), batch, full=True)
         assert "b1 images_from_evidence (pass)" in text
+
+
+GOLDEN = Path(__file__).resolve().parent / "fixtures" / "replay" / "golden"
+
+
+class TestGuardScenarios:
+    """`kind = "guard"` (#444): R4 mirrored. A guard's baseline must PASS what it
+    guards, or the candidate is withheld; with a green baseline the candidate is
+    always shown and its failures are the headline. The fix kind is unchanged."""
+
+    def _text_and_json(self, tmp_path, capsys, logs, **kw) -> tuple[str, dict]:
+        batch = _batch(tmp_path, FakeLaunch(logs, **kw.pop("launch", {})), kind="guard", **kw)
+        text = replay.render_report(*replay.read_batch(batch), batch)
+        assert replay.main(["report", str(batch), "--json"]) == 0
+        return text, json.loads(capsys.readouterr().out)
+
+    def test_a_green_baseline_and_a_regressing_candidate_lead_with_the_regression(
+            self, tmp_path, capsys):
+        text, payload = self._text_and_json(tmp_path, capsys, {
+            "baseline": _passing_log(tmp_path), "candidate": _failing_log(tmp_path)})
+        headline = "guard: regression — trippy_party failed in 2 of 2 candidate runs"
+        assert headline in text and "withheld" not in text
+        assert ("trippy_party          * baseline passed 2 of 2 · candidate failed 2 of 2 "
+                "(regression)") in text
+        assert "(* = guarded check)" in text
+        assert "not observed" not in text.split("\n\n")[1].splitlines()[0]
+        assert text.split("evidence (first failures):\n")[1].startswith("trippy_party [c1,c2]")
+        for word in ("%", "fixed", "improved", "better", "resolved", "rate"):
+            assert word not in text.lower()
+        # --json says what the text says, and withholds nothing the text shows.
+        assert payload["kind"] == "guard" and payload["withheld"] is None
+        assert payload["headline"] == headline
+        assert list(payload["arms"]) == ["baseline", "candidate"]
+        assert payload["arms"]["candidate"]["checks"]["trippy_party"] == {
+            "passed": 0, "failed": 2, "could_not_tell": 0}
+
+    def test_a_green_candidate_is_shown_as_no_regression_observed(self, tmp_path, capsys):
+        text, payload = self._text_and_json(tmp_path, capsys, {
+            "baseline": _passing_log(tmp_path), "candidate": _passing_log(tmp_path)})
+        line = "guard: no regression observed — trippy_party passed 2 of 2"
+        assert line in text and payload["headline"] == line
+        assert "candidate passed 2 of 2" in text
+
+    def test_a_red_baseline_withholds_the_candidate_and_says_the_guard_is_broken(
+            self, tmp_path, capsys):
+        text, payload = self._text_and_json(tmp_path, capsys, {
+            "baseline": _failing_log(tmp_path), "candidate": _passing_log(tmp_path)})
+        reason = ("guard not green on baseline — trippy_party failed in 2 of 2 baseline runs: "
+                  "the guard itself is broken, and a regression verdict against a broken "
+                  "guard is noise")
+        assert f"candidate numbers withheld: {reason}" in text
+        assert "baseline failed 2 of 2 (guard not green)" in text
+        for shown in ("candidate passed", "candidate failed", "candidate 2 runs", "c1", "c2"):
+            assert shown not in text
+        assert "guard: " not in text.replace("withheld: guard not green", "")
+        assert payload["withheld"] == reason
+        assert list(payload["arms"]) == ["baseline"] and "headline" not in payload
+
+    def test_a_baseline_never_seen_green_withholds_too(self, tmp_path, capsys):
+        """An incomplete run's pass is not a pass; a guard nobody saw green is
+        no more judgeable than one seen red."""
+        text, payload = self._text_and_json(tmp_path, capsys, {
+            "baseline": _passing_log(tmp_path), "candidate": _failing_log(tmp_path)},
+            launch={"exit_code": 1})
+        assert ("candidate numbers withheld: guard not green on baseline — trippy_party passed "
+                "in none of 2 baseline runs (could not tell in 2)") in text
+        assert payload["withheld"].startswith("guard not green on baseline")
+        assert list(payload["arms"]) == ["baseline"]
+
+    def test_a_guard_without_a_target_is_withheld(self, tmp_path, capsys):
+        text, _ = self._text_and_json(tmp_path, capsys, _both_failing(tmp_path), target=None)
+        assert "candidate numbers withheld: scenario.toml declares no guarded check" in text
+
+    def test_context_rows_are_the_same_for_a_guard(self, tmp_path):
+        logs = {"baseline": _arm_log(tmp_path, "base", BIG_MENU, [70_000, 50_000, 20_000]),
+                "candidate": _arm_log(tmp_path, "cand", SMALL_MENU, [40_000, 30_000, 10_000])}
+        guard = _batch(tmp_path / "g", FakeLaunch(logs, menus=(BIG_MENU, SMALL_MENU)),
+                       kind="guard", target="single_unit_only")
+        fix = _batch(tmp_path / "f", FakeLaunch(logs, menus=(BIG_MENU, SMALL_MENU)))
+
+        def context(batch: Path) -> str:
+            text = replay.render_report(*replay.read_batch(batch), batch, full=True)
+            return text.split("context per model call")[1].split("\nevidence:")[0]
+        assert context(guard) == context(fix)
+        assert "candidate 2 runs, 6 calls · tokens median 30.0k" in context(guard)
+
+    def test_an_unknown_kind_is_refused(self, tmp_path):
+        with pytest.raises(replay.ReplayError, match="unknown scenario kind 'regression': "
+                                                     'kind is "fix" \\(the default\\) or "guard"'):
+            replay.load_scenario(_scenario(tmp_path, kind="regression"))
+
+    def test_check_is_the_same_for_a_guard(self, tmp_path, capsys):
+        log = _failing_log(tmp_path)
+        assert replay.main(["check", str(log), "--scenario", str(SCENARIO)]) == 0
+        fix = capsys.readouterr().out
+        guard = _scenario(tmp_path, kind="guard")
+        assert replay.main(["check", str(log), "--scenario", str(guard)]) == 0
+        assert capsys.readouterr().out == fix
+
+    @pytest.mark.parametrize("name, baseline, candidate", [
+        ("fix_reproduced", _failing_log, _passing_log),
+        ("fix_withheld", _passing_log, _failing_log)])
+    def test_the_fix_kind_report_is_unchanged(self, tmp_path, name, baseline, candidate):
+        """Pinned from the report as rendered BEFORE guards existed: the default
+        kind's text is byte-identical; its JSON gained only the `kind` key."""
+        batch = _batch(tmp_path, FakeLaunch({"baseline": baseline(tmp_path),
+                                             "candidate": candidate(tmp_path)}))
+        loaded = replay.read_batch(batch)
+        golden = (GOLDEN / f"{name}.txt").read_text(encoding="utf-8")
+        assert replay.render_report(*loaded, batch).replace(str(batch), "<batch>") == golden
+        if name == "fix_reproduced":
+            full = (GOLDEN / f"{name}.full.txt").read_text(encoding="utf-8")
+            assert replay.render_report(*loaded, batch, full=True) == full
+        payload = replay.json_report(*loaded, batch)
+        assert payload.pop("kind") == "fix"
+        assert json.dumps(payload, indent=2).replace(str(batch), "<batch>") == \
+            (GOLDEN / f"{name}.json").read_text(encoding="utf-8")
 
 
 # --- context per model call (#444) ------------------------------------------------

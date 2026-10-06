@@ -74,6 +74,63 @@ def safety_scan(files: list[tuple[str, str, bool]]) -> list[str]:
     return flags
 
 
+MANIFEST = "SKILL.md"
+
+
+def english_keywords(text: str) -> tuple[str, list[str]]:
+    """A SKILL.md's text with its `keywords:` line run through the one keyword
+    hygiene (`skills.clean_keywords`, #444), and what was dropped. An import
+    is a keyword writer like remember/create_skill/curate, and one import
+    would otherwise re-pollute the English-only corpus with nothing said.
+
+    Restrict-only, like everywhere: the text is returned UNCHANGED unless a
+    keyword was dropped, and then only that one line changes — the
+    description, the body and every other header line stay byte-for-byte."""
+    from . import skills as sk
+
+    header, _body = sk.split_frontmatter(text)
+    if not header:
+        return text, []
+    for line in header.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep or key.strip().casefold() != "keywords":
+            continue
+        kept, dropped = sk.clean_keywords(value)
+        if not dropped:
+            return text, []
+        replacement = f"keywords: {', '.join(kept)}" if kept else ""
+        if kept:
+            return text.replace(line, replacement, 1), dropped
+        # No keyword survived: remove the line with its own line ending.
+        for ending in ("\r\n", "\n"):
+            if line + ending in text:
+                return text.replace(line + ending, "", 1), dropped
+        return text.replace(line, "", 1), dropped
+    return text, []
+
+
+def english_manifest(
+    files: list[tuple[str, str, bool]],
+) -> tuple[list[tuple[str, str, bool]], list[str]]:
+    """`english_keywords` applied to the staged SKILL.md, BEFORE review, so
+    what the owner reviews is exactly what installs."""
+    out: list[tuple[str, str, bool]] = []
+    dropped: list[str] = []
+    for rel, text, is_exec in files:
+        if rel == MANIFEST:
+            text, dropped = english_keywords(text)
+        out.append((rel, text, is_exec))
+    return out, dropped
+
+
+def keywords_flag(dropped: list[str]) -> list[str]:
+    """The line the import's consolidated review shows for a drop — empty
+    when nothing was dropped, so it can be added to the flags unconditionally."""
+    if not dropped:
+        return []
+    return [f"{MANIFEST}: keywords not English, not installed: {', '.join(dropped)}"]
+
+
 class SkillImportError(RuntimeError):
     pass
 
@@ -166,6 +223,7 @@ def stage_to_disk(
     installs. Returns (name, quarantine_dir, risk_flags)."""
     root = root or quarantine_root()
     name, _description, files, _skipped, tmp = stage(repo, path)
+    files, dropped = english_manifest(files)
     try:
         dest = root / name
         shutil.rmtree(dest, ignore_errors=True)
@@ -178,7 +236,7 @@ def stage_to_disk(
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
-    return name, dest, safety_scan(files)
+    return name, dest, safety_scan(files) + keywords_flag(dropped)
 
 
 def pending(root: Path | None = None) -> list[str]:
@@ -189,17 +247,25 @@ def pending(root: Path | None = None) -> list[str]:
         return []
 
 
-def install(name: str, dest_skills_dir: Path, root: Path | None = None) -> Path:
-    """Move a quarantined skill into the skills dir. Returns the install path."""
+def install(
+    name: str, dest_skills_dir: Path, root: Path | None = None
+) -> tuple[Path, list[str]]:
+    """Move a quarantined skill into the skills dir. Returns (install path,
+    keywords dropped as not English). The quarantine is hand-editable between
+    stage and approve, so the manifest is cleaned again here, at the write."""
     root = root or quarantine_root()
     src = root / name
-    if not (src / "SKILL.md").is_file():
+    if not (src / MANIFEST).is_file():
         raise SkillImportError(f"no staged skill named {name!r} (see `aish skill list`)")
     dest = dest_skills_dir / name
     shutil.rmtree(dest, ignore_errors=True)
     shutil.copytree(src, dest)
     shutil.rmtree(src, ignore_errors=True)
-    return dest
+    manifest = dest / MANIFEST
+    text, dropped = english_keywords(manifest.read_text(encoding="utf-8"))
+    if dropped:
+        manifest.write_text(text, encoding="utf-8")
+    return dest, dropped
 
 
 def discard(name: str, root: Path | None = None) -> bool:

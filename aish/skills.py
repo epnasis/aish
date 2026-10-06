@@ -137,6 +137,18 @@ GATE_MIN_SIM = 0.45
 # explicit invocation must come from what the user just said.
 PREFLIGHT_CONTEXT_TASK_CHARS = 200
 PREFLIGHT_CONTEXT_CHARS = 600
+# Preload NEAR-MISSES (#435, epic #444): entries preflight scored and did NOT
+# admit, recorded when they fell within this band below the floor that applied
+# to them. The floors above can only be judged against what they turned away,
+# and the log held winners alone — #435's family-profile miss (keyword hit,
+# sim 0.154 under the 0.24 keyword floor) was unrecoverable from it, and the
+# Polish matches the keyword-language experiments left behind land at
+# ~0.26-0.34, just under the 0.35 plain floor. The band reaches both cases;
+# the cap keeps one turn's record bounded, nearest the floor first. Lexical
+# mode's floor is a tier, so its band is counted in tiers.
+PRELOAD_NEAR_MISS_BAND = 0.10
+PRELOAD_NEAR_MISS_LEXICAL_BAND = 1
+PRELOAD_NEAR_MISS_MAX = 5
 
 # save_memory keyword cap (#183): keywords are a retrieval rail and the
 # model writes them — beyond a handful they stop being curated triggers.
@@ -297,6 +309,82 @@ def frontmatter_value(value: str) -> str:
     it is visible rather than merely unlucky (#209).
     """
     return " ".join(str(value).split())
+
+
+def _has_non_english_letter(word: str) -> bool:
+    # Deliberately a CHARACTER CLASS, not a word list: there is no vocabulary
+    # here to go stale in a language nobody added, which is the failure the
+    # counters in docs/vocabularies.md exist to catch — so it is not
+    # catalogued there and carries no counter. Its misses are by design and
+    # stated: ASCII-spelled Polish (`cena`, `kup`) and ASCII brands
+    # (`qrencode`, `e-kartoteka`) pass. The tool descriptions carry the
+    # English-only policy (#444); this only stops the plainly-visible leak,
+    # and every drop is reported back by the writer that made it.
+    return any(ch.isalpha() and not ch.isascii() for ch in word)
+
+
+def clean_keywords(raw: str) -> tuple[list[str], list[str]]:
+    """The ONE keyword hygiene every writer uses: (kept, dropped_non_english).
+
+    Each keyword is model-authored and occupies part of ONE frontmatter line,
+    so it is flattened (#209); deduped case-insensitively and capped at
+    KEYWORDS_MAX so one entry cannot carpet-bomb the trigger space (#183);
+    and one containing a non-ASCII letter is dropped, because keywords are
+    English-only (#444). The drop happens BEFORE the cap, so a dropped word
+    never costs an English one its slot. It only ever removes keywords — the
+    caller still saves the entry, and must report `dropped` to whoever wrote
+    them (`dropped_keywords_note`)."""
+    seen: set[str] = set()
+    kept: list[str] = []
+    dropped: list[str] = []
+    for word in (frontmatter_value(w) for w in (raw or "").split(",")):
+        if not word or word.casefold() in seen:
+            continue
+        seen.add(word.casefold())
+        if _has_non_english_letter(word):
+            dropped.append(word)
+        else:
+            kept.append(word)
+    return kept[:KEYWORDS_MAX], dropped
+
+
+def dropped_keywords_note(dropped: list[str], *, written: bool = True,
+                          kept_existing: bool = False) -> str:
+    """The sentence a writer appends when `clean_keywords` dropped anything —
+    empty otherwise, so a caller can append it unconditionally.
+
+    `written=False` is for a result where nothing reached disk (a refusal, a
+    held or denied write), so the sentence does not claim a save happened.
+    `kept_existing` says an UPDATE whose every keyword was dropped kept the
+    entry's existing keyword line instead of erasing it. Names no entry: it
+    rides refusals that already name one, and two names in one message is
+    one too many."""
+    if not dropped:
+        return ""
+    words = ", ".join(dropped)
+    head = (
+        f" Keywords NOT stored (not English): {words}."
+        if written else
+        f" Keywords that would NOT be stored (not English): {words}."
+    )
+    kept = " The entry's existing keywords were kept." if kept_existing else ""
+    return (
+        f"{head}{kept} Keywords MUST be English — use English equivalents for "
+        "the dropped words (e.g. 'buy', not 'kupić')."
+    )
+
+
+def keywords_after_drop(kept: list[str], dropped: list[str],
+                        existing: list[str]) -> tuple[list[str], bool]:
+    """What an UPDATE writes: (keywords, kept_existing). When every keyword
+    the writer supplied was dropped, the entry keeps the line it already had —
+    a local judge ignoring the English instruction is the EXPECTED input
+    (#444), and erasing a working line over it would strictly reduce recall
+    while the writer reported success. Existing keywords are carried as they
+    are: this guards the inflow, never the corpus on disk."""
+    if dropped and not kept and existing:
+        return [frontmatter_value(w) for w in existing], True
+    return kept, False
 
 
 def _parse(path: Path, kind: str = "skill") -> Entry:
@@ -868,6 +956,44 @@ class Preload:
     # {name, rule}: skills kept out because a rule in force forbids every
     # command they teach — recorded so "why wasn't it preloaded" has an answer.
     withheld: list[dict] = field(default_factory=list)
+    # Scored, below the floor that applied, within the near-miss band; nearest
+    # the floor first and capped. Disjoint from `items` by construction: an
+    # admitted entry cleared its floor, a near-miss did not.
+    near_misses: list[dict] = field(default_factory=list)
+    near_misses_truncated: int = 0  # in-band rows the cap left out
+
+    def near_miss_record(self) -> dict:
+        """The near-miss block of the `context` record's `preload` (contract
+        §3.10). Written on every turn the selector ran, empty or not, so "none
+        were in the band" is a record and never an absence. The band and cap
+        travel with it: a later reader must know what an unlisted entry means
+        after the constants move."""
+        lexical = self.mode == "lexical"
+        return {
+            "band": PRELOAD_NEAR_MISS_LEXICAL_BAND if lexical else PRELOAD_NEAR_MISS_BAND,
+            "max": PRELOAD_NEAR_MISS_MAX,
+            "items": [dict(row) for row in self.near_misses],
+            "truncated": self.near_misses_truncated,
+        }
+
+
+def _under_floor(sim: float, floor: float) -> float:
+    """A near-miss's sim to 4 places that still reads as UNDER its floor.
+    Plain rounding would record a 0.34996 as 0.35 turned away by a 0.35 floor
+    — a row that contradicts itself — so the last 5e-5 below a floor is
+    recorded one place under it instead."""
+    shown = round(sim, 4)
+    return shown if shown < floor else round(floor - 0.0001, 4)
+
+
+def _nearest_first(missed: list[tuple[float, dict]]) -> tuple[list[dict], int]:
+    """(rows, how many the cap dropped). `missed` holds (margin, row) with
+    margin = score - floor (negative); a sort on the margin rather than the
+    raw score is what makes "nearest" mean the same thing for a keyword-floor
+    row and a plain-floor one. Stable, so ties keep corpus order."""
+    missed.sort(key=lambda pair: -pair[0])
+    rows = [row for _, row in missed]
+    return rows[:PRELOAD_NEAR_MISS_MAX], max(0, len(rows) - PRELOAD_NEAR_MISS_MAX)
 
 
 def preflight(
@@ -911,7 +1037,11 @@ def preflight(
     command keeps it — the rule restricts running, not reading — and so does
     NAMING it, for the reason a name hit is unconditional everywhere else. It
     stays in the index and read_skill still loads it. Only a skill that would
-    otherwise have taken a slot is reported in `withheld`."""
+    otherwise have taken a slot is reported in `withheld`.
+
+    `near_misses` records what scored within PRELOAD_NEAR_MISS_BAND under the
+    floor that applied to it, so the floors can be judged on live data. It is
+    a record only: nothing here reads it, and selection is unchanged by it."""
     if not task.split():
         return Preload()
     task_padded = _pad_words(task)
@@ -922,6 +1052,7 @@ def preflight(
     if context and len(task) < PREFLIGHT_CONTEXT_TASK_CHARS:
         query = f"{task}\n{context[:PREFLIGHT_CONTEXT_CHARS]}"
     sims = semantic(query, entries) if semantic is not None else None
+    missed: list[tuple[float, dict]] = []
     if sims is not None:
         mode = "semantic"
         ranked = []
@@ -937,6 +1068,15 @@ def preflight(
             )
             if sim >= floor:
                 ranked.append((rail, sim, entry))
+            elif sim >= floor - PRELOAD_NEAR_MISS_BAND:
+                missed.append((sim - floor, {
+                    "label": entry.name,
+                    "kind": entry.kind,
+                    "sim": _under_floor(sim, floor),
+                    "rail": rail,
+                    "floor": floor,
+                    "floor_kind": "keyword" if rail else "plain",
+                }))
         ranked.sort(key=lambda t: (-t[0], -t[1]))
         chosen = [(entry, {"sim": round(sim, 3), "rail": rail}) for rail, sim, entry in ranked]
     else:
@@ -947,6 +1087,14 @@ def preflight(
             score = max(forward.get(id(entry), 0), _reverse_score(entry, task_padded))
             if score >= PREFLIGHT_MIN_SCORE:
                 picked.append((score, entry))
+            elif score and score >= PREFLIGHT_MIN_SCORE - PRELOAD_NEAR_MISS_LEXICAL_BAND:
+                # score 0 is "no word matched at all", not a near anything.
+                missed.append((score - PREFLIGHT_MIN_SCORE, {
+                    "label": entry.name,
+                    "kind": entry.kind,
+                    "score": score,
+                    "threshold": PREFLIGHT_MIN_SCORE,
+                }))
         picked.sort(key=lambda pair: -pair[0])  # stable: corpus order within a tier
         # The rail rides along even though lexical selection does not use it:
         # with no similarity to clear, being NAMED is the only thing that may
@@ -1011,7 +1159,11 @@ def preflight(
         names.append(entry.name)
         items.append({"name": entry.name, "kind": entry.kind, **diag})
         remaining -= len(block) + 2  # +2 covers the join's blank line
-    return Preload("\n\n".join(blocks), names, unread, items, mode, blocks, withheld)
+    near_misses, near_misses_truncated = _nearest_first(missed)
+    return Preload(
+        "\n\n".join(blocks), names, unread, items, mode, blocks, withheld,
+        near_misses, near_misses_truncated,
+    )
 
 
 def _forbids_all(entry: Entry, forbidden_command) -> str | None:
@@ -1221,18 +1373,11 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
         if entry.kind == "memory" and entry.description == text:
             if entry.path is None or entry.name != slug:
                 return "(already remembered)"
-    # Keyword hygiene (#183): keywords feed a retrieval rail, and the model
-    # authors them — dedupe case-insensitively and cap the count so one
-    # entry cannot carpet-bomb the trigger space with generic words. A bare
+    # Keyword hygiene (#183, #209, #444) — see clean_keywords. A bare
     # `.strip()` left interior newlines, which is how a keyword smuggled
-    # `status: disabled` onto its own line and retired the entry (#209).
-    seen_kw: set[str] = set()
-    keyword_list = []
-    for word in (frontmatter_value(w) for w in keywords.split(",")):
-        if word and word.casefold() not in seen_kw:
-            seen_kw.add(word.casefold())
-            keyword_list.append(word)
-    keyword_list = keyword_list[:KEYWORDS_MAX]
+    # `status: disabled` onto its own line and retired the entry.
+    keyword_list, dropped_kw = clean_keywords(keywords)
+    kept_existing = False
     directory = Path(memory_dir)
     path = directory / f"{slug}.md"
     if not force and not path.is_file():
@@ -1262,13 +1407,16 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
                 f"\"{similar.description}\". UPDATE it instead (remember with "
                 f"name=\"{similar.name}\") or forget_memory(\"{similar.name}\") "
                 "first; only if this is genuinely a different fact, retry with "
-                "force=true."
+                "force=true." + dropped_keywords_note(dropped_kw, written=False)
             )
     body = ""
     try:
         if path.is_file():  # update: keep body detail + undeclared frontmatter
             prior = _parse(path, "memory")
             body = prior.body
+            keyword_list, kept_existing = keywords_after_drop(
+                keyword_list, dropped_kw, prior.keywords
+            )
             if expiry is None:
                 expiry = prior.expires
             if pinned is None:
@@ -1290,9 +1438,13 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
             encoding="utf-8",
         )
     except OSError as exc:
-        return f"ERROR: could not save memory: {exc}"
+        return f"ERROR: could not save memory: {exc}" + dropped_keywords_note(
+            dropped_kw, written=False
+        )
     state = " [disabled]" if disabled else ""
-    return f"remembered ({slug}){state}: {text}"
+    return f"remembered ({slug}){state}: {text}" + dropped_keywords_note(
+        dropped_kw, kept_existing=kept_existing
+    )
 
 
 def forget_memory(name: str, cwd: str = "") -> str:
@@ -1322,7 +1474,8 @@ def forget_memory(name: str, cwd: str = "") -> str:
 def plan_skill(name: str, description: str, content: str, keywords: str = "",
                cwd: str = "", semantic=None, force: bool = False,
                expires: str | None = None, disabled: bool | None = None,
-               on_admission=None) -> tuple[Path | None, str, str]:
+               on_admission=None,
+               on_keywords_dropped=None) -> tuple[Path | None, str, str]:
     """Compose one skill file WITHOUT touching disk — the files.py plan/commit
     shape, because unlike `save_memory` the write must go through the caller's
     diff-approval gate (a skill instructs every future session, so it is never
@@ -1348,6 +1501,15 @@ def plan_skill(name: str, description: str, content: str, keywords: str = "",
     the header is regenerated, and a regenerated header that dropped
     `pinned:` would hand the next curate pass a `disable` the envelope
     refuses on pinned entries.
+
+    `on_keywords_dropped(dropped, kept_existing)` receives the keywords
+    `clean_keywords` refused as not English (#444) and whether this update
+    kept the file's existing keyword line because none survived — a callback
+    for the same reason as `on_admission`: the 3-tuple is what every caller
+    unpacks, and the caller owns the result line the drop must be reported
+    on. Keywords preserved from the existing file (none supplied, or every
+    supplied one dropped) are carried as they are: this guards what is
+    written NOW, never the corpus already on disk.
     """
     slug = name.strip()
     if not NAME_RE.match(slug or ""):
@@ -1365,19 +1527,20 @@ def plan_skill(name: str, description: str, content: str, keywords: str = "",
         except ValueError:
             return None, "", f"ERROR: invalid expires date {expires!r} — use YYYY-MM-DD"
     desc = frontmatter_value(description or "")
-    # Keyword hygiene, identical to save_memory (#183, #209): each keyword is
-    # model-authored and occupies part of ONE frontmatter line.
-    seen_kw: set[str] = set()
-    keyword_list = []
-    for word in (frontmatter_value(w) for w in (keywords or "").split(",")):
-        if word and word.casefold() not in seen_kw:
-            seen_kw.add(word.casefold())
-            keyword_list.append(word)
-    keyword_list = keyword_list[:KEYWORDS_MAX]
+    # Keyword hygiene, identical to save_memory (#183, #209, #444).
+    keyword_list, dropped_kw = clean_keywords(keywords)
     # _merged rather than load_entries: an update must find a RETIRED skill's
     # file too, or a disabled entry silently forks into a duplicate.
     all_skills = [e for e in _merged(skill_dirs(cwd), "skill") if e.path is not None]
     prior = next((e for e in all_skills if e.name == slug), None)
+    if dropped_kw and on_keywords_dropped is not None:
+        # Reported before any refusal below, so a retry knows too. The
+        # fallback that keeps an update's existing line is applied further
+        # down (it also covers keywords simply omitted).
+        on_keywords_dropped(
+            dropped_kw,
+            prior is not None and not keyword_list and bool(prior.keywords),
+        )
     if prior is None and not desc:
         # Before the dedup gate: an identity line with no description scores
         # nothing meaningful, and recording an admission for a call that then

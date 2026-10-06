@@ -39,7 +39,20 @@ The same rule binds fixtures — and a mined log cannot be made safe by scrubbin
 
 **R4 · No candidate numbers unless the baseline reproduced the target failure.** If the baseline never showed the failure the fix is for, a clean candidate says nothing about the fix, so the report withholds the candidate column and says why. No declared target is treated the same way. `withheld_reason`.
 
+R4 holds for the default kind, `fix`. A `guard` scenario mirrors it (§ Guard scenarios, below).
+
 **R5 · A check may say it could not tell.** `Verdict.passed` is `True`, `False` or `None`. A check forced to choose would guess, and the guess would read as a measurement. A check that raises, a run that did not finish, a source missing from output that was cut, a log in which no command ran or no card was raised, and an answer with links but no timestamp all report `None` (§ Checks).
+
+### Guard scenarios — R4 mirrored (#444)
+
+A regression guard — a scenario that pins behaviour which already works — passes on the baseline by design. Under R4 that alone withholds every candidate number, so a regression in the candidate never reached the report. A guard is blind under R4.
+
+`kind` is a top-level `scenario.toml` key. `"fix"` is the default and keeps R4 as above. `"guard"` turns the `[checks] target` list into the guarded checks and inverts the contract:
+
+- **The baseline must pass every guarded check, or the candidate is withheld.** "Pass" means no baseline run failed it and at least one passed it. Otherwise the header reads `candidate numbers withheld: guard not green on baseline — <check> failed in N of M baseline runs: the guard itself is broken, and a regression verdict against a broken guard is noise`. A baseline that only ever "could not tell" gets the same treatment (`passed in none of M baseline runs`), because a guard nobody saw pass is no more judgeable than one seen failing. No declared target is withheld here too (`declares no guarded check`).
+- **With a green baseline, candidate numbers are always shown, and the candidate's failures are the headline.** `guard: regression — <check> failed in N of M candidate runs`, or `guard: no regression observed — <check> passed N of M`. The cells read `failed N of M (regression)` for the candidate and `(guard not green)` for the baseline. A guarded check that passes is counted as `passed N of M`, not "not observed": for a guard, the pass is what the check is there to show.
+
+**Why both kinds withhold.** It is one law: a candidate's result on a target means something only against a baseline that shows the opposite. A fix credited against a baseline that never failed says nothing about the fix. A regression flagged against a baseline that already failed says nothing about the candidate, because its failure cannot be told from the baseline's own. `--json` withholds what the text withholds, and carries the guard's `headline` and the scenario's `kind`. Context rows, non-target checks and `check` are the same for both kinds. `TestGuardScenarios` pins the fix kind's text, byte for byte, against the report as rendered before guards existed (`tests/fixtures/replay/golden/`). Its JSON gained only the `kind` key.
 
 ---
 

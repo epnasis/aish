@@ -140,10 +140,12 @@ Rules:
    phrase the description like the tasks it should catch ("Use when the
    user wants to find, buy, or compare a product …"), never as a bare rule
    — generalized to the activity, not an item-by-item list — and give
-   keywords (topical words, no generic verbs) in every language the user
-   types. If saved knowledge should have applied to a task but was not
-   preloaded, that is a defect: repair that entry's description/keywords
-   (an improve-recall skill, if present, has the checklist).
+   keywords (topical words, no generic verbs) that you MUST write in English
+   whatever language the user types ('invoice', not 'faktura'); only a brand
+   or untranslatable term stays as-is. If saved knowledge should have
+   applied to a task but was not preloaded, that is a defect: repair that
+   entry's description/keywords (an improve-recall skill, if present, has
+   the checklist).
 2c. TOOLS vs SKILLS: skills TEACH, tools DO. A plugin tool is a validated
    TOOL.md (that you or the user added under ~/.config/aish/tools/ —
    project-scope ./.aish/ discovery is disabled pending a per-directory
@@ -1713,7 +1715,9 @@ LEARN_PROMPT = (
     "against future tasks: phrase every description like the tasks it must "
     "catch (the activity and its task shapes, generalized — no item-by-item "
     "lists; the rule after the trigger), and give keywords — topical nouns "
-    "and synonyms, no generic verbs — in every language the user types. If "
+    "and synonyms, no generic verbs — that you MUST write in English whatever "
+    "language the user types ('invoice', not 'faktura'; only a brand or "
+    "untranslatable term stays as-is). If "
     "this conversation shows saved knowledge that failed to trigger when it "
     "should have, repair that entry's description/keywords too. "
     "Then report what you saved and what you skipped and why. If nothing is "
@@ -5454,6 +5458,11 @@ class Agent:
                 "count": len(preload.names),
                 "names": list(preload.names),
                 **({"withheld": preload.withheld} if preload.withheld else {}),
+                # Here and not on `knowledge` (#435): that step is emitted only
+                # when something was admitted, so a miss on a turn that admitted
+                # nothing — the case worth watching — would have no record.
+                # Present whenever a selector ran, `items: []` included.
+                **({"near_misses": preload.near_miss_record()} if preload.mode else {}),
             },
         )
         if preload.withheld:
@@ -14037,6 +14046,13 @@ class Agent:
         `admission` records with target "skill" (contract §3.7)."""
         name = str(args.get("name", "")).strip()
         disabled = args.get("disabled")
+        dropped_keywords: list[str] = []
+        kept_existing: list[bool] = []
+
+        def keywords_dropped(dropped: list[str], kept: bool) -> None:
+            dropped_keywords.extend(dropped)
+            kept_existing.append(kept)
+
         path, text, refusal = skills.plan_skill(
             name,
             str(args.get("description", "") or ""),
@@ -14048,20 +14064,35 @@ class Agent:
             expires=str(args.get("expires", "") or "") or None,
             disabled=None if disabled is None else bool(disabled),
             on_admission=partial(self._record_admission, target="skill"),
+            on_keywords_dropped=keywords_dropped,
+        )
+        # Nothing reached disk on a refusal or a gate stop, so those say what
+        # WOULD be dropped: a held write is re-proposed, and the model must
+        # know its keywords were cleaned before it proposes them again.
+        unwritten_note = skills.dropped_keywords_note(dropped_keywords, written=False)
+        dropped_note = skills.dropped_keywords_note(
+            dropped_keywords, kept_existing=any(kept_existing)
         )
         if refusal:
+            refusal += unwritten_note
             self._note(f"→ {refusal}")
             if refusal.startswith("NOT saved"):
                 return _gate_outcome(refusal, decision="rejected")
             return refusal
         assert path is not None
         if self.approve_write is None:
-            return "ERROR: no write approver available; cannot save a skill."
+            return "ERROR: no write approver available; cannot save a skill." + unwritten_note
         verb = "updating" if path.exists() else "creating"
         self._note(f"→ {verb} skill {name} at {_display_path(path)}")
         commit_res = self._commit_tool_file(path, text, executable=False)
         if commit_res is not None:
-            return commit_res
+            if not unwritten_note:
+                return commit_res
+            # Rebuilt, not concatenated: a ToolOutcome's envelope does not
+            # survive string concatenation (tools.ToolOutcome).
+            meta = getattr(commit_res, "meta", None)
+            noted = str(commit_res) + unwritten_note
+            return tools.ToolOutcome(noted, **meta) if meta is not None else noted
         self._note(f"→ saved skill {name}")
         # The claim below is read off the ARTIFACT, not assumed: an update to
         # a retired or expired skill preserves that state, and "indexed from
@@ -14077,11 +14108,12 @@ class Agent:
                 f"Saved skill {name!r} at {path} — but it is retired "
                 f"({reason}), so it will NOT be indexed, preloaded or "
                 "recalled until re-enabled (create_skill with "
-                "disabled=false)."
+                "disabled=false)." + dropped_note
             )
         return (
             f"Saved skill {name!r} at {path}. It is indexed from the next "
             "task and preloaded when a task matches its description/keywords."
+            + dropped_note
         )
 
     def _create_tool(self, args: dict) -> str:
@@ -14635,6 +14667,8 @@ class Agent:
             )
         except skill_import.SkillImportError as exc:
             return f"ERROR: {exc}"
+        # Before the review, so the owner reviews exactly what installs (#444).
+        imported, dropped_keywords = skill_import.english_manifest(imported)
         try:
             override = str(args.get("name", "")).strip()
             if override:
@@ -14642,7 +14676,9 @@ class Agent:
                     return f"ERROR: invalid skill name {override!r}."
                 name = override
             dest = skills.GLOBAL_SKILLS_DIR / name
-            flags = skill_import.safety_scan(imported)
+            flags = skill_import.safety_scan(imported) + skill_import.keywords_flag(
+                dropped_keywords
+            )
             files_payload = [
                 {"path": rel, "content": text, "lang": skill_import.lang_for(rel),
                  "executable": is_exec}
@@ -14685,9 +14721,12 @@ class Agent:
                 shutil.rmtree(tmp, ignore_errors=True)
         self._note(f"→ imported skill '{name}'")
         skipped_note = f" Skipped binary assets: {', '.join(skipped)}." if skipped else ""
+        keywords_note = "".join(
+            f" {flag}." for flag in skill_import.keywords_flag(dropped_keywords)
+        )
         return (
             f"Imported skill {name!r} into {dest} ({len(imported)} files)."
-            f"{skipped_note} It is available on the next task."
+            f"{skipped_note}{keywords_note} It is available on the next task."
         )
 
     def _dispatch_write(self, name: str, args: dict) -> str:

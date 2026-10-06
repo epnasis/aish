@@ -1085,6 +1085,179 @@ class TestPreflightPrecision:
         assert saved[:3] == ["Alpha", "beta", "kw0"]
 
 
+class TestPreloadNearMisses:
+    """#435 / epic #444: the floors are judged on what they turned away, and
+    the log held only what they admitted. #435's family-profile miss — keyword
+    hit, sim 0.154 under the 0.24 keyword floor — could not be recovered from
+    any record. Preflight now keeps what scored within a band under the floor
+    that applied, with that floor beside it, bounded per task."""
+
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "gm")
+
+    def _memory(self, tmp_path, name, description="unrelated words here", keywords=""):
+        kw = f"keywords: {keywords}\n" if keywords else ""
+        write_skill(
+            tmp_path / "gm",
+            f"{name}.md",
+            f"---\nname: {name}\ndescription: {description}\n{kw}---\nbody of {name}\n",
+        )
+
+    def _sims(self, table):
+        return lambda query, entries: {id(e): table.get(e.name, 0.0) for e in entries}
+
+    def test_the_435_shape_is_recorded_with_its_rail_and_floor(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(tmp_path, "family-profile", keywords="family")
+        self._memory(tmp_path, "polish-residue")
+        self._memory(tmp_path, "far-below")
+        self._memory(tmp_path, "admitted")
+        preload = preflight(
+            str(tmp_path), None, "hotels for my family",
+            semantic=self._sims({
+                "family-profile": 0.154,  # keyword floor 0.24, 0.086 under
+                "polish-residue": 0.327,  # plain floor 0.35, 0.023 under
+                "far-below": 0.20,  # plain floor, 0.15 under: outside the band
+                "admitted": 0.50,
+            }),
+        )
+        assert preload.names == ["admitted"]
+        assert preload.near_misses == [
+            {"label": "polish-residue", "kind": "memory", "sim": 0.327, "rail": 0,
+             "floor": skills_module.PREFLIGHT_MIN_SIM, "floor_kind": "plain"},
+            {"label": "family-profile", "kind": "memory", "sim": 0.154, "rail": 3,
+             "floor": skills_module.SEMANTIC_MIN_SIM, "floor_kind": "keyword"},
+        ]
+        assert preload.near_misses_truncated == 0
+        assert preload.near_miss_record() == {
+            "band": skills_module.PRELOAD_NEAR_MISS_BAND,
+            "max": skills_module.PRELOAD_NEAR_MISS_MAX,
+            "items": preload.near_misses,
+            "truncated": 0,
+        }
+
+    def test_a_row_is_never_recorded_at_its_floor(self, tmp_path, monkeypatch):
+        """Rounding 0.34996 to 4 places gives 0.35 — a row claiming 0.35 was
+        turned away by a 0.35 floor. The last sliver under a floor reads one
+        place under it instead."""
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(tmp_path, "plain-edge")
+        self._memory(tmp_path, "kw-edge", keywords="zzword")
+        preload = preflight(
+            str(tmp_path), None, "a zzword task",
+            semantic=self._sims({"plain-edge": 0.34996, "kw-edge": 0.23996}),
+        )
+        assert preload.names == []
+        rows = {row["label"]: row for row in preload.near_misses}
+        assert rows["plain-edge"]["sim"] == 0.3499
+        assert rows["kw-edge"]["sim"] == 0.2399
+        assert all(row["sim"] < row["floor"] for row in rows.values())
+
+    def test_nearest_the_floor_first_and_capped(self, tmp_path, monkeypatch):
+        """Nearest is the margin under the row's OWN floor, not the raw sim:
+        a keyword row 0.01 under 0.24 is nearer than a plain one 0.03 under
+        0.35, though its sim is lower."""
+        self._isolate(tmp_path, monkeypatch)
+        sims = {}
+        for i in range(8):
+            self._memory(tmp_path, f"plain-{i}")
+            sims[f"plain-{i}"] = 0.34 - 0.01 * i  # 0.01 .. 0.08 under 0.35
+        self._memory(tmp_path, "kw-close", keywords="zzword")
+        sims["kw-close"] = 0.235  # 0.005 under 0.24
+        preload = preflight(
+            str(tmp_path), None, "a zzword task", semantic=self._sims(sims)
+        )
+        assert preload.names == []
+        cap = skills_module.PRELOAD_NEAR_MISS_MAX
+        assert [row["label"] for row in preload.near_misses] == (
+            ["kw-close"] + [f"plain-{i}" for i in range(cap - 1)]
+        )
+        assert preload.near_misses_truncated == 9 - cap
+        assert preload.near_miss_record()["truncated"] == 9 - cap
+
+    def test_an_admitted_entry_is_never_a_near_miss(self, tmp_path, monkeypatch):
+        """Including one that cleared its floor and still lost its slot to the
+        top-N cap: it was not turned away by a floor, so it is not this record."""
+        self._isolate(tmp_path, monkeypatch)
+        sims = {}
+        for i in range(PREFLIGHT_TOP + 2):
+            self._memory(tmp_path, f"strong-{i}")
+            sims[f"strong-{i}"] = 0.60 - 0.01 * i
+        self._memory(tmp_path, "kw-entry", keywords="zzword")
+        sims["kw-entry"] = 0.30  # clears the 0.24 keyword floor, not 0.35
+        self._memory(tmp_path, "just-under")
+        sims["just-under"] = 0.349
+        preload = preflight(str(tmp_path), None, "a zzword task", semantic=self._sims(sims))
+        missed = [row["label"] for row in preload.near_misses]
+        assert missed == ["just-under"]
+        assert not set(missed) & set(preload.names)
+        assert "kw-entry" in preload.names
+
+    def test_nothing_in_the_band_is_an_empty_record_not_an_absent_one(
+        self, tmp_path, monkeypatch
+    ):
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(tmp_path, "far-below")
+        preload = preflight(
+            str(tmp_path), None, "a task", semantic=self._sims({"far-below": 0.05})
+        )
+        assert preload.near_miss_record() == {
+            "band": skills_module.PRELOAD_NEAR_MISS_BAND,
+            "max": skills_module.PRELOAD_NEAR_MISS_MAX,
+            "items": [],
+            "truncated": 0,
+        }
+
+    def test_selection_is_unchanged_by_the_record(self, tmp_path, monkeypatch):
+        """The record observes; it may not move a selection. Same corpus, same
+        sims, the band constant set to zero: identical admitted items."""
+        self._isolate(tmp_path, monkeypatch)
+        sims = {"a": 0.50, "b": 0.33, "c": 0.36}
+        for name in sims:
+            self._memory(tmp_path, name)
+        with_band = preflight(str(tmp_path), None, "a task", semantic=self._sims(sims))
+        monkeypatch.setattr(skills_module, "PRELOAD_NEAR_MISS_BAND", 0.0)
+        without = preflight(str(tmp_path), None, "a task", semantic=self._sims(sims))
+        assert with_band.items == without.items
+        assert with_band.text == without.text
+        assert [row["label"] for row in with_band.near_misses] == ["b"]
+        assert without.near_misses == []
+
+    def test_lexical_mode_records_score_against_threshold(self, tmp_path, monkeypatch):
+        """Embeddings down: the floor is PREFLIGHT_MIN_SCORE, a tier, and the
+        band is counted in tiers. A fuzzy-only match (tier 1) is the near-miss;
+        an entry with no word in common at all is not near anything."""
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(tmp_path, "frob-notes", description="how to zzfrob things")
+        self._memory(tmp_path, "unrelated", description="completely different matter")
+        self._memory(tmp_path, "zzlever", description="the lever", keywords="zzfrobb")
+        preload = preflight(str(tmp_path), None, "zzfrobb", semantic=None)
+        assert preload.mode == "lexical"
+        assert preload.names == ["zzlever"]
+        threshold = skills_module.PREFLIGHT_MIN_SCORE
+        assert preload.near_misses == [
+            {"label": "frob-notes", "kind": "memory", "score": 1, "threshold": threshold}
+        ]
+        record = preload.near_miss_record()
+        assert record["band"] == skills_module.PRELOAD_NEAR_MISS_LEXICAL_BAND
+        assert record["items"] == preload.near_misses
+
+    def test_lexical_cap_holds(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        for i in range(8):
+            self._memory(tmp_path, f"frob-{i}", description="how to zzfrob things")
+        preload = preflight(str(tmp_path), None, "zzfrobb", semantic=None)
+        assert preload.names == []
+        assert len(preload.near_misses) == skills_module.PRELOAD_NEAR_MISS_MAX
+        assert preload.near_misses_truncated == 8 - skills_module.PRELOAD_NEAR_MISS_MAX
+
+    def test_a_blank_task_ran_no_selector_and_has_no_block(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        preload = preflight(str(tmp_path), None, "   ", semantic=self._sims({}))
+        assert preload.mode == "" and preload.near_misses == []
+
+
 class TestSemanticRecall:
     """#178 P1-9: rank_entries/recall_text fuse embedding similarity with the
     lexical tiers; lexical strong hits stay a deterministic rail, and a None
@@ -2021,3 +2194,120 @@ class TestPlanSkillLifecycle:
         )
         assert path is None and "description is required" in refusal
         assert recorded == []
+
+
+class TestEnglishOnlyKeywords:
+    """#444: knowledge keywords are English-only. The tool descriptions carry
+    the policy; this is the lenient save-time backstop under them — a keyword
+    with a non-ASCII letter is dropped, everything else passes, the save is
+    never blocked, and every drop is SAID in the writer's own result."""
+
+    def test_a_non_english_letter_drops_the_keyword_and_nothing_else(self):
+        kept, dropped = skills_module.clean_keywords(
+            "invoice, faktura, kupić, ryczałt, cena, Zażółć, счёт, 請求書"
+        )
+        assert kept == ["invoice", "faktura", "cena"]  # ASCII Polish passes, by design
+        assert dropped == ["kupić", "ryczałt", "Zażółć", "счёт", "請求書"]
+
+    def test_a_brand_or_ascii_term_is_kept_as_written(self):
+        kept, dropped = skills_module.clean_keywords("qrencode, e-kartoteka, KSeF, 2fa, c++")
+        assert kept == ["qrencode", "e-kartoteka", "KSeF", "2fa", "c++"]
+        assert dropped == []
+        assert skills_module.dropped_keywords_note(dropped) == ""
+
+    def test_a_dropped_keyword_never_costs_an_english_one_its_slot(self):
+        words = [f"słowo{i}" for i in range(skills_module.KEYWORDS_MAX)]
+        words += [f"word{i}" for i in range(skills_module.KEYWORDS_MAX)]
+        kept, dropped = skills_module.clean_keywords(", ".join(words))
+        assert kept == [f"word{i}" for i in range(skills_module.KEYWORDS_MAX)]
+        assert len(dropped) == skills_module.KEYWORDS_MAX
+
+    def test_save_memory_drops_says_so_and_still_saves(self, tmp_path):
+        memory = skills_module.GLOBAL_MEMORY_DIR  # redirected by isolated_global_dirs
+        result = save_memory(
+            "Faktura za prąd przychodzi z e-kartoteka", memory, name="power-bill",
+            keywords="invoice, prąd, e-kartoteka, rachunek", cwd=str(tmp_path),
+        )
+        entry = _parse(memory / "power-bill.md", "memory")
+        assert entry.keywords == ["invoice", "e-kartoteka", "rachunek"]
+        # The fact itself is never touched — only keywords are restricted.
+        assert entry.description == "Faktura za prąd przychodzi z e-kartoteka"
+        assert result.startswith("remembered (power-bill): ")
+        assert "Keywords NOT stored (not English): prąd." in result
+        assert "MUST be English" in result
+
+    def test_save_memory_whose_every_keyword_is_dropped_still_saves(self, tmp_path):
+        memory = skills_module.GLOBAL_MEMORY_DIR
+        result = save_memory("a fact", memory, name="only-polish",
+                             keywords="zażółć, gęślą", cwd=str(tmp_path))
+        assert result.startswith("remembered (only-polish)")
+        assert "zażółć, gęślą" in result
+        entry = _parse(memory / "only-polish.md", "memory")
+        assert entry.keywords == [] and entry.description == "a fact"
+
+    def test_an_english_save_says_nothing_extra(self, tmp_path):
+        result = save_memory("a fact", skills_module.GLOBAL_MEMORY_DIR, name="plain",
+                             keywords="qrencode, payment", cwd=str(tmp_path))
+        assert result == "remembered (plain): a fact"
+
+    def test_plan_skill_drops_and_reports_through_its_callback(self, tmp_path):
+        reported: list[tuple[list[str], bool]] = []
+        path, text, refusal = skills_module.plan_skill(
+            "qr-payment", "Use when the user asks to pay by QR", "1. run qrencode",
+            keywords="qr code, płatność, qrencode", cwd=str(tmp_path),
+            on_keywords_dropped=lambda d, kept: reported.append((d, kept)),
+        )
+        assert refusal == "" and path is not None
+        assert "keywords: qr code, qrencode\n" in text
+        assert "płatność" not in text
+        assert reported == [(["płatność"], False)]
+
+    def test_save_memory_update_whose_every_keyword_is_dropped_keeps_the_line(
+        self, tmp_path
+    ):
+        """The review's F1: the local judge (or model) ignoring the English
+        instruction is the EXPECTED input, and an update must not erase a
+        working keyword line over it while reporting success."""
+        memory = skills_module.GLOBAL_MEMORY_DIR
+        save_memory("old fact", memory, name="bill", keywords="invoice, energy",
+                    cwd=str(tmp_path))
+        result = save_memory("new fact", memory, name="bill", keywords="prąd, rachunek za prąd",
+                             cwd=str(tmp_path))
+        entry = _parse(memory / "bill.md", "memory")
+        assert entry.keywords == ["invoice", "energy"]
+        assert entry.description == "new fact"
+        assert "Keywords NOT stored (not English): prąd, rachunek za prąd." in result
+        assert "The entry's existing keywords were kept." in result
+
+    def test_save_memory_update_with_a_surviving_keyword_replaces_the_line(self, tmp_path):
+        memory = skills_module.GLOBAL_MEMORY_DIR
+        save_memory("old fact", memory, name="bill", keywords="invoice", cwd=str(tmp_path))
+        result = save_memory("new fact", memory, name="bill", keywords="prąd, power",
+                             cwd=str(tmp_path))
+        assert _parse(memory / "bill.md", "memory").keywords == ["power"]
+        assert "existing keywords were kept" not in result
+
+    def test_a_near_duplicate_refusal_names_one_entry_only(self, tmp_path):
+        memory = skills_module.GLOBAL_MEMORY_DIR
+        save_memory("pay the power bill by qr", memory, name="bill", cwd=str(tmp_path))
+        result = save_memory("pay the power bill by qr code", memory, name="bill-2",
+                             keywords="płatność", cwd=str(tmp_path))
+        assert result.startswith("NOT saved")
+        assert "Keywords that would NOT be stored (not English): płatność." in result
+        assert "same name" not in result
+
+    def test_plan_skill_update_never_rewrites_keywords_it_was_not_given(self, tmp_path):
+        # The backstop guards what is written NOW; an update that supplies no
+        # usable keyword keeps the file's own line exactly, corpus untouched.
+        write_skill(skills_module.GLOBAL_SKILLS_DIR, "qr-payment.md", (
+            "---\nname: qr-payment\ndescription: old trigger\n"
+            "keywords: qr, przelew\n---\nold body\n"
+        ))
+        reported: list[tuple[list[str], bool]] = []
+        _, text, refusal = skills_module.plan_skill(
+            "qr-payment", "", "new body", keywords="płatność",
+            cwd=str(tmp_path), on_keywords_dropped=lambda d, kept: reported.append((d, kept)),
+        )
+        assert refusal == ""
+        assert "keywords: qr, przelew\n" in text
+        assert reported == [(["płatność"], True)]

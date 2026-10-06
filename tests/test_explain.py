@@ -1999,6 +1999,102 @@ class TestTheKnowledgeStep:
         assert step["reminder"]["text"] is None
 
 
+class TestEveryReaderParsesALogWithNearMisses:
+    """#435: `preload.near_misses` is a new key on the `context` record. Every
+    reader of a session log is driven over a log the REAL agent wrote with
+    near-misses in it — explain (text and dossier), usage, curate's ledger and
+    its context scan, the tool and vocabulary counters, the cold replay — and
+    the ledger is pinned to count admitted entries only."""
+
+    def _log_with_near_misses(self, tmp_path):
+        memory = agent_module.skills.GLOBAL_MEMORY_DIR
+        memory.mkdir(parents=True, exist_ok=True)
+        for name in ("winner", "runner-up", "family-profile"):
+            keywords = "keywords: family\n" if name == "family-profile" else ""
+            (memory / f"{name}.md").write_text(
+                f"---\nname: {name}\ndescription: about {name}\n{keywords}---\nbody\n"
+            )
+        table = {"winner": 0.5, "runner-up": 0.3, "family-profile": 0.154}
+        semantic = SimpleNamespace(
+            scores=lambda query, entries: {id(e): table.get(e.name, 0.0) for e in entries},
+            error=None,
+        )
+        agent, _, log = make_logged_agent(
+            [model_says("first"), model_says("second")], tmp_path, semantic=semantic
+        )
+        for task in ("hotels for my family", "and the second one"):
+            log.task_start(task)
+            agent.run_task(task)
+            log.task_end()
+        (context, _) = steps(log.path, "context")
+        assert [r["label"] for r in context["preload"]["near_misses"]["items"]] == [
+            "runner-up", "family-profile"
+        ]
+        return log
+
+    def test_explain_shows_them_and_the_dossier_carries_them(self, tmp_path):
+        log = self._log_with_near_misses(tmp_path)
+        out = explain_mod.explain(log.path, 1, root=tmp_path)
+        assert "near misses (within 0.1): runner-up 0.3 < 0.35 plain" in out
+        assert "family-profile 0.154 < 0.24 keyword" in out
+        lg = explain_mod.load(log.path)
+        doc = json.loads(json.dumps(explain_mod.dossier(lg.turns[0], lg, tmp_path)))
+        (record,) = doc["given"]["context"]["records"]
+        assert record["preload"]["near_misses"]["truncated"] == 0
+        assert [it["label"] for it in doc["given"]["knowledge"][0]["items"]] == ["winner"]
+
+    def test_a_preload_older_than_the_key_says_not_recorded(self, tmp_path):
+        log = self._log_with_near_misses(tmp_path)
+        old = tmp_path / "session-20260101-000000-000001.jsonl"
+        lines = []
+        for line in log.path.read_text().splitlines():
+            record = json.loads(line)
+            step = record.get("step") or {}
+            if step.get("kind") == "context":
+                step["preload"].pop("near_misses")
+            lines.append(json.dumps(record))
+        old.write_text("\n".join(lines) + "\n")
+        out = explain_mod.explain(old, 1, root=tmp_path)
+        plain = out.replace(explain_mod.DIM, "").replace(explain_mod.RESET, "")
+        assert "near misses: " + explain_mod.NOT_RECORDED in plain
+
+    def test_the_line_says_empty_truncated_and_lexical_plainly(self):
+        line = explain_mod._near_miss_line
+        assert line({"band": 0.1, "items": [], "truncated": 0}) == (
+            "near misses: none within 0.1 of the floor"
+        )
+        assert line({
+            "band": 1, "truncated": 2,
+            "items": [{"label": "frob", "kind": "skill", "score": 1, "threshold": 2}],
+        }) == "near misses (within 1): frob score 1 < 2 (+2 more)"
+
+    def test_usage_tooluse_vocab_and_replay_read_it(self, tmp_path):
+        from aish import tooluse, usage, vocab
+
+        log = self._log_with_near_misses(tmp_path)
+        assert usage.scan_session(log.path).path == log.path
+        assert any(s.path == log.path for s in usage.scan(tmp_path))
+        tooluse.scan(tmp_path)
+        vocab.scan(tmp_path)
+        events = SessionLog.reconstruct_events(log.path)
+        assert events
+        assert not [e for e in events if (e.get("step") or {}).get("kind") == "context"]
+
+    def test_curate_ledger_counts_admitted_entries_only(self, tmp_path):
+        from datetime import datetime
+
+        from aish import curate
+
+        self._log_with_near_misses(tmp_path)
+        now = datetime(2026, 1, 2)
+        ledger = curate.scan_ledger(tmp_path, now=now)
+        assert ledger.tasks == 2
+        assert "winner" in ledger.entries
+        assert "runner-up" not in ledger.entries
+        assert "family-profile" not in ledger.entries
+        curate.scan_context(tmp_path, now=now)
+
+
 class TestUsageOnTheReasoningRecord:
     """The provider's usage report reaches the log with its units intact (#262).
 

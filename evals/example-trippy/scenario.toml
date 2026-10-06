@@ -2,6 +2,8 @@
 # Scenarios mined from real owner sessions never live in this (public) repo —
 # they go in the private config tree, ~/.config/aish/evals/<name>/ (docs/replay.md).
 name = "example-trippy"
+# kind = "fix" is the default: the targets are a failure the candidate should remove.
+# kind = "guard": the targets are behaviour that must not break (docs/replay.md § Guard scenarios).
 description = "Invented example: apartments for 2 adults and children aged 9 and 5 across Lisbon and Porto, then EUR prices, one-unit stays and pictures."
 model = "local:mlx-community/Qwen3.6-35B-A3B-8bit"
 runs = 3

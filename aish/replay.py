@@ -42,6 +42,14 @@ REPORT_CAP = 2048
 EVIDENCE_IN_REPORT = 160
 #: What a target failure seen in each arm means — and nothing stronger.
 _TARGET_FAILED = {"baseline": " (reproduced)", "candidate": " (the failure still occurs)"}
+#: The same for a guard (#444): a guarded check failing is the guard not
+#: holding on the baseline, and a regression in the candidate.
+_GUARD_FAILED = {"baseline": " (guard not green)", "candidate": " (regression)"}
+#: `fix` (the default): the batch is for a failure the candidate should remove,
+#: and R4 withholds the candidate unless the baseline showed it. `guard`: the
+#: batch is for behaviour that must not break, and the same law is mirrored —
+#: the candidate is withheld unless the baseline passed (docs/replay.md).
+SCENARIO_KINDS = ("fix", "guard")
 ARMS = ("baseline", "candidate")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DRIVER = Path(__file__).resolve().parent / "replay_driver.py"
@@ -60,8 +68,9 @@ STILL_SHARED = (
 )
 #: Top-level keys, each with the keys its table may hold (empty = not checked).
 _SCENARIO_KEYS: dict[str, set[str]] = {
-    "name": set(), "description": set(), "model": set(), "runs": set(), "timeout_s": set(),
-    "max_steps": set(), "num_ctx": set(), "source": set(), "turns": set(), "env": set(),
+    "name": set(), "kind": set(), "description": set(), "model": set(), "runs": set(),
+    "timeout_s": set(), "max_steps": set(), "num_ctx": set(), "source": set(), "turns": set(),
+    "env": set(),
     "corpus": {"tools"}, "cards": {"approve_commands", "approve_tools"},
     "checks": {"use", "target"}, "candidate": {"overlays"},
 }
@@ -104,6 +113,7 @@ class Scenario:
     max_steps: int | None = None
     num_ctx: int | None = None
     source: dict = field(default_factory=dict)
+    kind: str = "fix"
 
 
 def _local_checks(directory: Path) -> dict[str, CheckFn]:
@@ -169,6 +179,10 @@ def load_scenario(directory: Path) -> Scenario:
             unknown += [f"{table}.{k}" for k in sorted(set(data[table]) - allowed)]
     if unknown:
         raise ReplayError(f"unknown scenario keys: {', '.join(unknown)}")
+    kind = data.get("kind", "fix")
+    if kind not in SCENARIO_KINDS:
+        raise ReplayError(f"unknown scenario kind {kind!r}: kind is \"fix\" (the default) or "
+                          "\"guard\"")
     turns = [Turn(str(t["text"]), bool(t.get("stand_in")), str(t.get("note") or ""))
              for t in data.get("turns") or []]
     if not turns:
@@ -201,7 +215,7 @@ def load_scenario(directory: Path) -> Scenario:
         corpus_tools=[str(t) for t in (data.get("corpus") or {}).get("tools") or []],
         env=env, checks={n: available[n] for n in names}, targets=targets,
         overlays=overlays, max_steps=data.get("max_steps"), num_ctx=data.get("num_ctx"),
-        source=dict(data.get("source") or {}),
+        source=dict(data.get("source") or {}), kind=kind,
     )
 
 
@@ -497,17 +511,20 @@ def _tally(results: list[RunResult], check: str) -> tuple[int, int, int]:
     return passed, failed, unknown
 
 
-def cell(passed: int, failed: int, unknown: int, *, target: bool, arm: str) -> str:
+def cell(passed: int, failed: int, unknown: int, *, target: bool, arm: str,
+         kind: str = "fix") -> str:
     """One arm's result for one check — raw counts, never a rate, never a verdict
     about the change. A failure seen is the only strong claim; an absence is
-    only ever "not observed"."""
+    only ever "not observed". A guarded check's pass IS what it guards, so it
+    is counted as a pass."""
     total = passed + failed + unknown
+    meaning = _TARGET_FAILED if kind == "fix" else _GUARD_FAILED
     parts = []
     if failed:
-        parts.append(f"failed {failed} of {total}"
-                     + (_TARGET_FAILED[arm] if target else ""))
+        parts.append(f"failed {failed} of {total}" + (meaning[arm] if target else ""))
     elif passed:
-        parts.append(f"not observed in {passed} run{'s' * (passed != 1)}" if target
+        parts.append(f"not observed in {passed} run{'s' * (passed != 1)}"
+                     if target and kind == "fix"
                      else f"passed {passed} of {total}")
     if unknown:
         parts.append(f"could not tell in {unknown} of {total}")
@@ -519,7 +536,14 @@ def withheld_reason(scenario: Scenario, baseline: list[RunResult]) -> str | None
 
     A candidate that "passes" a check the baseline also passed says nothing
     about the change; reporting it anyway is how a fix gets credited for a
-    failure that was never reproduced."""
+    failure that was never reproduced.
+
+    A guard mirrors it: a candidate failing a check the baseline ALSO failed
+    says nothing about the change either, so a guard is judgeable only when
+    the baseline failed none of its guarded checks and passed each at least
+    once."""
+    if scenario.kind == "guard":
+        return _guard_withheld_reason(scenario, baseline)
     if not scenario.targets:
         return "scenario.toml declares no target failure ([checks] target)"
     for target in scenario.targets:
@@ -528,6 +552,38 @@ def withheld_reason(scenario: Scenario, baseline: list[RunResult]) -> str | None
             return (f"the baseline did not reproduce the target failure ({target}: not "
                     f"observed in {len(baseline)} runs)")
     return None
+
+
+def _guard_withheld_reason(scenario: Scenario, baseline: list[RunResult]) -> str | None:
+    if not scenario.targets:
+        return "scenario.toml declares no guarded check ([checks] target)"
+    for target in scenario.targets:
+        passed, failed, unknown = _tally(baseline, target)
+        if failed:
+            return (f"guard not green on baseline — {target} failed in {failed} of "
+                    f"{len(baseline)} baseline runs: the guard itself is broken, and a "
+                    "regression verdict against a broken guard is noise")
+        if not passed:
+            return (f"guard not green on baseline — {target} passed in none of "
+                    f"{len(baseline)} baseline runs (could not tell in {unknown}): the guard "
+                    "was never seen green, and a regression verdict against it is noise")
+    return None
+
+
+def guard_headline(scenario: Scenario, candidate: list[RunResult]) -> str:
+    """What a judgeable guard batch is for, said first: the candidate's
+    failures of a guarded check. Raw counts, as everywhere else (R3)."""
+    regressions = []
+    for target in scenario.targets:
+        _, failed, _ = _tally(candidate, target)
+        if failed:
+            regressions.append(f"{target} failed in {failed} of {len(candidate)} "
+                               "candidate runs")
+    if regressions:
+        return "guard: regression — " + "; ".join(regressions)
+    return "guard: no regression observed — " + "; ".join(
+        f"{t} {cell(*_tally(candidate, t), target=True, arm='candidate', kind='guard')}"
+        for t in scenario.targets)
 
 
 def context_summary(contexts: Sequence[RunContext], window: int) -> dict:
@@ -669,13 +725,17 @@ def render_report(scenario: Scenario, batch: dict, results: list[RunResult], bat
         head.append(f"candidate numbers withheld: {reason}")
 
     shown = ["baseline"] if reason else arms
+    if scenario.kind == "guard" and "candidate" in shown:
+        head.append(guard_headline(scenario, by_arm["candidate"]))
     width = max(len(n) for n in scenario.checks)
     rows = []
     for name in scenario.checks:
         target = name in scenario.targets
-        cells = [f"{a} {cell(*_tally(by_arm[a], name), target=target, arm=a)}" for a in shown]
+        cells = [f"{a} {cell(*_tally(by_arm[a], name), target=target, arm=a, kind=scenario.kind)}"
+                 for a in shown]
         rows.append(f"{name.ljust(width)}{' *' if target else '  '} " + " · ".join(cells))
-    rows.append("(* = target failure)" if scenario.targets else "")
+    legend = "(* = guarded check)" if scenario.kind == "guard" else "(* = target failure)"
+    rows.append(legend if scenario.targets else "")
     for key in ("model_calls", "tool_calls", "cards_raised", "wall_s"):
         rows.append(f"{key}: " + " · ".join(
             f"{a} " + ",".join("?" if r.counts.get(key) is None else str(r.counts[key])
@@ -731,14 +791,18 @@ def json_report(scenario: Scenario, batch: dict, results: list[RunResult], batch
     """The same report for anything that is not a terminal, every run whole.
 
     It withholds exactly what the text withholds (R4): no candidate key at all
-    when the baseline did not reproduce the target. A figure that could not be
-    taken is an absent key or a `not_recorded` count, never a 0."""
+    when the baseline did not reproduce the target — or, for a guard, did not
+    pass it. A figure that could not be taken is an absent key or a
+    `not_recorded` count, never a 0."""
     by_arm = {arm: [r for r in results if r.arm == arm] for arm in ARMS}
     arms = [a for a in ARMS if by_arm[a]]
     reason = withheld_reason(scenario, by_arm["baseline"]) if "candidate" in arms else None
     shown = ["baseline"] if reason else arms
-    out: dict = {"scenario": scenario.name, "batch": str(batch_dir), "model": batch.get("model"),
-                 "window": window, "targets": scenario.targets, "withheld": reason, "arms": {}}
+    out: dict = {"scenario": scenario.name, "kind": scenario.kind, "batch": str(batch_dir),
+                 "model": batch.get("model"), "window": window, "targets": scenario.targets,
+                 "withheld": reason, "arms": {}}
+    if scenario.kind == "guard" and "candidate" in shown:
+        out["headline"] = guard_headline(scenario, by_arm["candidate"])
     for arm in shown:
         complete = [r.context for r in by_arm[arm] if not r.problem and r.context is not None]
         out["arms"][arm] = {
