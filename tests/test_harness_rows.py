@@ -450,6 +450,45 @@ class TestWordsInsideAResult:
         assert harness(live) == [] and harness(cold_steps(log)) == []
 
 
+class TestJustInTimeNotesOnACommand:
+    """The core prompt's flag and fetching lines moved onto the result they are
+    about (H3, #444): each is registered by the code that writes it, so it is
+    a row under its call, live and on replay, and never matched from text."""
+
+    def _ran(self, tmp_path, monkeypatch, command, output):
+        from aish import agent as agent_module
+
+        agent, chat, log, live = wired(
+            tmp_path,
+            [model_says(tool_calls=[tool_call("run_command", command=command)]),
+             model_says("done")],
+            monkeypatch,
+        )
+        monkeypatch.setattr(agent_module.tools, "run_command", lambda *_a, **_k: output)
+        run(agent, log, "go")
+        sent = [m for m in chat.snapshots[1] if m.get("role") == "tool"][-1]["content"]
+        return sent, live, log
+
+    def test_a_usage_error_status_points_at_read_docs(self, tmp_path, monkeypatch):
+        output = "ps: illegal option -- -\nusage: ps [-AaCcEefhjlMmrSTvwXx]\n[exit code: 1]"
+        sent, live, log = self._ran(tmp_path, monkeypatch, "ps --sort=-rss", output)
+        rows = harness(live)
+        assert [r["source"] for r in rows] == ["read_docs_hint"]
+        assert rows[0]["text"] in sent and "status 1" in rows[0]["text"]
+        assert "If its output is a usage or unknown-flag error" in rows[0]["text"]
+        assert harness(cold_steps(log)) == rows
+
+    @pytest.mark.parametrize("output", [
+        "hi\n[exit code: 0]",  # it worked
+        "[exit code: 1]",  # nothing printed — grep's no-match
+        "zsh: command not found: frob\n[exit code: 127]",  # not a flag problem
+    ])
+    def test_no_hint_where_no_usage_error_can_be(self, tmp_path, monkeypatch, output):
+        sent, live, _ = self._ran(tmp_path, monkeypatch, "frob", output)
+        assert harness(live) == []
+        assert "read_docs" not in sent
+
+
 class TestClaudeMaxNotes:
     """claude-max sends ONE user message: the rules prose, the pending notes,
     then the owner's words — and recorded only his words. Every piece in front

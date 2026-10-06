@@ -537,6 +537,9 @@ Nothing carried is a grant: the links a page offered, mail links and personal va
 
 **One phrase departs from the draft**, because its words outran the code: §2 said aish strips its markers out of "such content" — files and command output included — and those are deliberately not disarmed (below). The core names what is.
 
+**The notes built for the move ride the moment they are about**, each tiny, each registered by the code that writes it (a row under its call, contract §3.17):
+- **A usage-error exit status** (1 BSD, 2 GNU getopt, 64 `EX_USAGE`) with output to read appends `USAGE_ERROR_NOTE` to the `run_command` result — conditional ("if its output is a usage or unknown-flag error, call read_docs"), because the status cannot tell a usage error from any other failure, and keyed on no word list (`docs/vocabularies.md`). `TestJustInTimeNotesOnACommand`.
+
 **Fenced.** `tests/test_core_prompt.py`: each surface's render ≤ 8,000 chars with the longest identity in place (4,253 web / 4,361 CLI without one at landing), a per-section cap, and the old usage-note builders asserted gone. `tests/test_chat_vocabulary.py` holds the renders and the shipped skills to the chat-not-session law.
 
 ## Only aish may wear aish's voice

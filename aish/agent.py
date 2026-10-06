@@ -244,6 +244,23 @@ DENIED_RESULT = (
     "Do not propose it again; change approach or ask the user."
 )
 
+# JIT (H3, #444): the core's one line on flags ("when unsure of a flag,
+# read_docs first") moved its "after a usage error" half here, onto the result
+# that failed. Keyed on the exit STATUS a usage error gets — 1 (BSD userland:
+# ps, sed and date print "usage:" and exit 1), 2 (GNU getopt), 64 (EX_USAGE,
+# sysexits.h) — and on there being output to read. The status cannot tell a
+# usage error from any other failure (a test run that fails is 1 too), so the
+# note is CONDITIONAL and the model, which can read the output, decides; aish
+# states the status and nothing about why (L8). No word list on purpose:
+# matching "usage:" in the output would be a vocabulary (docs/vocabularies.md)
+# for a note whose false positive costs one line.
+USAGE_EXIT_CODES = frozenset({1, 2, 64})
+USAGE_ERROR_NOTE = (
+    "[aish: the command exited with status {code}. If its output is a usage or "
+    "unknown-flag error, call read_docs for that command before retrying — never "
+    "guess a flag.]"
+)
+
 CD_NOT_STICKY = (
     "cd was NOT run: every command executes in the project directory ({cwd}) "
     "— a bare cd does not persist. To run something elsewhere, chain it in "
@@ -996,6 +1013,17 @@ def _parse_exit_code(result: str) -> int | None:
     command never started (a bare 'ERROR: failed to start …')."""
     match = _EXIT_CODE_RE.search(result)
     return int(match.group(1)) if match else None
+
+
+def usage_error_note(result: str) -> str:
+    """The read_docs nudge for a finished run_command result, or "" — only
+    for a usage-error exit status with output the model can read."""
+    match = _EXIT_CODE_RE.search(result)
+    if match is None or int(match.group(1)) not in USAGE_EXIT_CODES:
+        return ""
+    if not result[: match.start()].strip():
+        return ""  # nothing printed: there is no message to judge
+    return USAGE_ERROR_NOTE.format(code=match.group(1))
 
 
 def _parse_job_id(result: str) -> str:
@@ -13663,6 +13691,11 @@ class Agent:
                 self.echo(result)
             if final != command:
                 result = f"[user edited the command to: {final}]\n{result}"
+            usage_note = "" if self._cancel.is_set() else usage_error_note(result)
+            if usage_note:
+                self._note("↩ failed with a usage-error status: pointed at read_docs")
+                self._note_in_result("read_docs_hint", usage_note)
+                result += "\n\n" + usage_note
             # Drift nudge (#140): the model ran a raw command a reliable plugin
             # tool already covers — point it at the tool for next time. Advisory
             # only; the command still ran.
