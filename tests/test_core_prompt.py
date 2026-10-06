@@ -35,7 +35,7 @@ REPO = Path(__file__).resolve().parent.parent
 HELP_SKILLS_DIR = REPO / "docs" / "shipped-skills"
 
 # The approved cap (h3a draft, "Deliberate decisions" 3). The render measured
-# at landing: web 4,253 / CLI 4,361 without the identity line.
+# after the review fixes: web 4,293 / CLI 4,336 without the identity line.
 MAX_CORE_CHARS = 8_000
 
 # Per section, the rendered size at landing rounded up with ~100 chars of
@@ -122,6 +122,10 @@ def test_one_template_two_renders():
     assert "speaking with him through this terminal." in cli
     assert "each on its own line (one-tap buttons);" in web
     assert "each on its own line (a numbered pick menu);" in cli
+    # The terminal sends a picked chip at once (cli.resolve_chip_selection):
+    # only the web, which seeds its composer, may promise a pre-fill.
+    assert 'a payload ending in ":" or a space pre-fills instead of sending' in web
+    assert "pre-fills" not in cli
     assert 'read_skill("aish-web-help")' in web
     assert 'read_skill("aish-cli-help")' in cli
     # Everything outside the marks is shared, byte for byte.

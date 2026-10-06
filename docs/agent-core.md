@@ -535,7 +535,9 @@ Nothing carried is a grant: the links a page offered, mail links and personal va
 
 **What fills it.** §1's `{owner}` is the account's full name (`pwd` gecos, else the login) — a property of the machine, so cache-stable. `IDENTITY_SLOT` is filled from the live model (above) and dropped when no identity is given. §6's platform sentence is `_PLATFORM_NOTES` — the BSD trap list it used to hold is gone. The per-chat scratch path still rides the task reminder (§9 says so); claude-max has no reminder, so `SCRATCH_IN_PLACE` states it at the end of the core there.
 
-**One phrase departs from the draft**, because its words outran the code: §2 said aish strips its markers out of "such content" — files and command output included — and those are deliberately not disarmed (below). The core names what is.
+**Two places depart from the draft**, because its words outran the code: §2 said aish strips its markers out of "such content" — files and command output included — and those are deliberately not disarmed (below); the core names what is. And §7's pre-fill clause renders on the web only: the terminal sends a picked chip at once (`cli.resolve_chip_selection`), so it has no pre-fill to describe.
+
+**Nothing installs the shipped skills.** They reach the model only once copied into the skills directory (`~/.config/aish/skills/`), by hand; until then §10's `read_skill` answers "no skill named …". `tests/test_core_prompt.py` copies them itself, so it proves the loader reads them, not that a machine has them.
 
 **The notes built for the move ride the moment they are about**, each tiny, each registered by the code that writes it (a row under its call, contract §3.17):
 - **A usage-error exit status** (1 BSD, 2 GNU getopt, 64 `EX_USAGE`) with output to read appends `USAGE_ERROR_NOTE` to the `run_command` result — conditional ("if its output is a usage or unknown-flag error, call read_docs"), because the status cannot tell a usage error from any other failure, and keyed on no word list (`docs/vocabularies.md`). `TestJustInTimeNotesOnACommand`.
@@ -548,7 +550,7 @@ Nothing carried is a grant: the links a page offered, mail links and personal va
 
 **Moved onto the tools they govern** (the draft's TOOL-DESC list), each in a sentence: what makes a saved entry findable (`create_skill`'s description, `remember`'s note — name the activity, repair an entry that should have been preloaded); browse consent (`browse`: reading asks nothing, a changing press asks once per site and covers read_url too, a no refuses press and site; `browse_fill`: a declared personal value asks once per site, never split across fields); browse mechanics (`browse_act`: a result row's button carries its row, never quote a figure not in it; a region that did not scroll is at its end; `browse_fill`: a stopped batch did not send). The rule-YAML ban was already in `create_rule`'s description and needed nothing. The menu fence rose to 34,400 for it (below).
 
-**Fenced.** `tests/test_core_prompt.py`: each surface's render ≤ 8,000 chars with the longest identity in place (4,253 web / 4,361 CLI without one at landing), a per-section cap, and the old usage-note builders asserted gone. `tests/test_chat_vocabulary.py` holds the renders and the shipped skills to the chat-not-session law.
+**Fenced.** `tests/test_core_prompt.py`: each surface's render ≤ 8,000 chars with the longest identity in place (4,293 web / 4,336 CLI without one, as of the review fixes), a per-section cap, and the old usage-note builders asserted gone. `tests/test_chat_vocabulary.py` holds the renders and the shipped skills to the chat-not-session law.
 
 ## Only aish may wear aish's voice
 

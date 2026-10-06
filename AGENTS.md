@@ -200,4 +200,4 @@ The choreography harness (`tests/js/harness.js`) and the ownership lint (`tests/
 
 ## Documentation duplication
 
-The README's user-facing docs are also summarized in the help skills aish reads to answer questions about itself (`docs/shipped-skills/aish-web-help.md`, `aish-cli-help.md`, copied into `~/.config/aish/skills/`); the core prompt (`SYSTEM_PROMPT_TEMPLATE`) points at them. When changing user-visible behavior, update both the README and the matching help skill.
+The README's user-facing docs are also summarized in the help skills aish reads to answer questions about itself (`docs/shipped-skills/aish-web-help.md`, `aish-cli-help.md`); they reach the model only once copied into `~/.config/aish/skills/` — by hand today, nothing installs them; the core prompt (`SYSTEM_PROMPT_TEMPLATE`) points at them. When changing user-visible behavior, update both the README and the matching help skill.

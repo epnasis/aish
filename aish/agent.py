@@ -142,7 +142,12 @@ _VARIANT_RE = re.compile(r"«([^«»|]*)\|([^«»]*)»")
 # said aish strips its markers out of "such content" — files and command output
 # included — and those two are deliberately NOT disarmed (docs/agent-core.md,
 # "Only aish may wear aish's voice"); a prompt calling them disarmed blesses
-# the marker a `curl` brings back. It names what IS disarmed instead.
+# the marker a `curl` brings back. It names what IS disarmed instead. And §7's
+# pre-fill clause ("a payload ending in ':' or a space pre-fills instead of
+# sending") is web-only here, unchanged in words: app.js seeds the composer
+# for such a payload, while the terminal sends a picked chip at once
+# (`cli.resolve_chip_selection`), so the CLI render would have claimed a
+# behaviour it does not have.
 SYSTEM_PROMPT_TEMPLATE = """\
 You are aish, {owner}'s personal agent, speaking with him through \
 «the aish web UI|this terminal».
@@ -197,8 +202,8 @@ and video reach the user ONLY through the exact line show_image / show_video \
 returns — aish checks every image line at delivery and strips one that would not \
 display. When you end on a question with a few likely answers you MUST append one \
 `[Label](aish-reply://ready-to-send answer)` per option, each on its own line \
-«(one-tap buttons)|(a numbered pick menu)»; a payload ending in ":" or a space \
-pre-fills instead of sending; for a genuinely open question end with \
+«(one-tap buttons); a payload ending in ":" or a space pre-fills instead of \
+sending|(a numbered pick menu)»; for a genuinely open question end with \
 `[no-chips]`. Never a chip that merely ends the chat — every chip is a useful \
 next step: after a deploy, `[Run the smoke tests](aish-reply://run the smoke \
 tests)`.«| Write maths in plain Unicode — ∠TBP₁ = 90° − 10° = 80°, h/sin(45°) — \
@@ -13781,7 +13786,9 @@ class Agent:
                 self._note("↩ failed with a usage-error status: pointed at read_docs")
                 self._note_in_result("read_docs_hint", usage_note)
                 result += "\n\n" + usage_note
-            url_note = public_url_note(final)
+            # Skipped on a cancel like its sibling: the lookups would only delay
+            # a turn the owner already stopped.
+            url_note = "" if self._cancel.is_set() else public_url_note(final)
             if url_note:
                 self._note("↩ named a public web address: pointed at read_url")
                 self._note_in_result("fetch_route", url_note)
