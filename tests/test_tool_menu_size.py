@@ -25,7 +25,15 @@ from aish import tools
 # and with plugin tools included (`Agent._record_brief`), so its numbers run a
 # couple of percent higher plus the plugins. This fence bounds growth; it does
 # not predict that report's figure.
-MAX_MENU_CHARS = 34_000
+#
+# Raised 34,000 -> 34,400 on 2026-10-06 (H3, epic #444), and the trade is
+# stated so it is never mistaken for drift: the from-scratch core moved the
+# browse consent and mechanics clauses and the knowledge-findability clause
+# out of the system prompt and onto the tools they govern, +808 chars here
+# (33,516 -> 34,324), while the system prompt fell 45,351 -> 4,893 chars on the
+# web and 42,350 -> 5,001 in the terminal (gemini identity in place) — about
+# -40k for +0.8k, both paid on every call.
+MAX_MENU_CHARS = 34_400
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.

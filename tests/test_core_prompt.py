@@ -221,6 +221,34 @@ def test_every_shipped_skill_parses_to_its_own_name():
         assert entry.keywords and all(k.isascii() for k in entry.keywords), path.name
 
 
+MOVED_TO_TOOLS = [
+    # (tool, parameter or None, clause) — the draft's TOOL-DESC list.
+    ("create_skill", "description", "name the ACTIVITY, never a bare rule"),
+    ("create_skill", "description", "repair its description and keywords"),
+    ("remember", "note", "name the activity it applies to"),
+    ("create_rule", None, "you never write the file or YAML"),
+    ("browse", None, "Reading asks nothing"),
+    ("browse", None, "yes covers read_url and browse there"),
+    ("browse", None, "never try another control to get around it"),
+    ("browse_fill", None, "never split one across fields to avoid it"),
+    ("browse_fill", "steps", "a batch that stopped did NOT send the form"),
+    ("browse_act", "target", "NEVER quote a price or time that is not in the row"),
+    ("browse_act", "text", "A region that did not move is at that end: stop."),
+]
+
+
+@pytest.mark.parametrize("tool, param, clause", MOVED_TO_TOOLS)
+def test_the_moved_clauses_ride_their_tools(tool, param, clause):
+    from aish import tools
+
+    [schema] = [s["function"] for s in tools.TOOL_SCHEMAS if s["function"]["name"] == tool]
+    text = (
+        schema["description"] if param is None
+        else schema["parameters"]["properties"][param]["description"]
+    )
+    assert clause in text
+
+
 def test_the_help_skills_carry_the_corrected_facts():
     web = (HELP_SKILLS_DIR / "aish-web-help.md").read_text(encoding="utf-8")
     cli = (HELP_SKILLS_DIR / "aish-cli-help.md").read_text(encoding="utf-8")
