@@ -9314,7 +9314,10 @@ class TestAttachmentFormsAcrossTheSeam:
         )
         return agent, uploads
 
-    GUIDANCE = "[image attached: cat.png — you can see it; file at {p}]"
+    GUIDANCE = (
+        "[image attached: cat.png — you can see it; file at {p}"
+        + session_module.ATTACHMENT_HINTS["image"] + "]"
+    )
 
     def test_the_model_gets_guidance_and_the_log_gets_the_record(self, tmp_path):
         logged: list[dict] = []
@@ -9357,7 +9360,8 @@ class TestAttachmentFormsAcrossTheSeam:
         cold, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
         cold.load_history([{"role": "user", "content": f"look\n![[{archive}]]"}])
         content = cold.messages[-1]["content"]
-        assert content == f"look\n\n[attached file: {archive}]", (
+        hint = session_module.ATTACHMENT_HINTS[""]
+        assert content == f"look\n\n[attached file: {archive}{hint}]", (
             "nothing said the bytes were delivered, so the model must be told to open it"
         )
 

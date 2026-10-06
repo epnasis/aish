@@ -5716,8 +5716,9 @@ class TestUpload:
             sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
             # …and what the MODEL got is the guidance, asserted where it lives.
             assert "you can see it" in sent["content"]  # image went native
+            hint = session_module.ATTACHMENT_HINTS["document"]
             assert f"[document attached: paper.pdf — you can read it; " \
-                   f"file at {pdf['path']}]" in sent["content"]
+                   f"file at {pdf['path']}{hint}]" in sent["content"]
             assert sent.get("images") == [image["path"]]
             assert "documents" not in sent  # not native on this backend
 
@@ -5735,7 +5736,8 @@ class TestUpload:
             assert f"![[{secret}]]" in user["text"]
             recv_until(ws, "done")
             sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
-            assert f"[attached file: {secret}]" in sent["content"]  # go and open it
+            hint = session_module.ATTACHMENT_HINTS[""]
+            assert f"[attached file: {secret}{hint}]" in sent["content"]  # go and open it
             assert "images" not in sent  # nothing base64'd from outside uploads
 
     def test_upload_requires_token_when_set(self, app_env):
@@ -5990,6 +5992,14 @@ class TestAttachmentNoteFormat:
     NATIVE_DOC = "[document attached: {name} — you can read it; file at {path}]"
     PLAIN = "[attached file: {path}]"
 
+    @staticmethod
+    def hinted(shape: str, kind: str) -> str:
+        """Since H3 (#444) the guidance carries what the model may DO with the
+        file, inside the bracket after the path — a sentence nothing stores,
+        and one every reader strips by exact text before parsing. With it
+        removed, the line IS the pinned shape, byte for byte."""
+        return shape[:-1] + session_module.ATTACHMENT_HINTS[kind] + "]"
+
     def test_guidance_matches_the_shapes_the_frontend_still_parses(self, app_env):
         client, _ = make_client(app_env, [])
         with client:
@@ -6001,6 +6011,10 @@ class TestAttachmentNoteFormat:
                 str(image), str(outside),
             ])
             assert guidance == [
+                self.hinted(self.NATIVE_IMAGE.format(name=image.name, path=image), "image"),
+                self.hinted(self.PLAIN.format(path=outside), ""),
+            ]
+            assert [session_module._without_hint(g) for g in guidance] == [
                 self.NATIVE_IMAGE.format(name=image.name, path=image),
                 self.PLAIN.format(path=outside),
             ]
@@ -6010,7 +6024,7 @@ class TestAttachmentNoteFormat:
         against the builder directly rather than through a live turn."""
         assert session_module.attachment_guidance(
             "paper.pdf", "/u/paper.pdf", "document"
-        ) == self.NATIVE_DOC.format(name="paper.pdf", path="/u/paper.pdf")
+        ) == self.hinted(self.NATIVE_DOC.format(name="paper.pdf", path="/u/paper.pdf"), "document")
 
     def test_the_record_form_is_a_name_for_a_file_aish_holds(self, app_env):
         client, _ = make_client(app_env, [])
@@ -7772,7 +7786,7 @@ class TestFeedbackAttachmentSwitch:
             prompt = self._last_user_prompt(chat, 1)
             # The attachment was detected and the model re-anchored on the
             # classic flow, with the consent listing (confirm/deselect).
-            assert "[attached file: /tmp/shot.png]" in prompt
+            assert "[attached file: /tmp/shot.png — NOT delivered to you" in prompt
             assert "SWITCH to the classic flow" in prompt
             assert "aish-reply://Create the issue" in prompt
             assert "aish-reply://Exclude <name> from the issue" in prompt
