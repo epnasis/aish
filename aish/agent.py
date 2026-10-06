@@ -1445,6 +1445,46 @@ def plan_delta(
     return plan_segment(current, replan_pending), "full"
 
 
+# JIT (H3, #444): the terminal's old usage note on `@<path>` rides the task
+# that uses one, in that task's reminder. Only a FILE that exists inside the
+# project directory is named — an `@handle` or the domain half of an address
+# never resolves to one — and only on the terminal, which is where the note
+# lived (the draft's disposition; the web composer's @ was never described).
+_AT_MENTION_RE = re.compile(r"(?<![\w@])@([^\s@]+)")
+_AT_MENTION_TRAILING = ".,;:!?)]}'\""
+AT_MENTION_NOTE = (
+    "THE USER'S MESSAGE MENTIONS FILES WITH @ (paths relative to the project "
+    "directory): {items}. When a file's contents matter to the task, read it with "
+    "read_file before answering."
+)
+
+
+def mentioned_files(task: str, cwd: str) -> list[tuple[str, str]]:
+    """(as written, absolute path) for each `@<path>` in the task naming a file
+    inside `cwd`, in order, each once."""
+    root = Path(cwd).resolve()
+    found: dict[str, str] = {}
+    for raw in _AT_MENTION_RE.findall(task or ""):
+        for written in dict.fromkeys((raw, raw.rstrip(_AT_MENTION_TRAILING))):
+            try:
+                path = (root / written).resolve()
+                if path.is_file() and files.contains(root, path):
+                    found.setdefault(written, str(path))
+                    break
+            except (OSError, ValueError):
+                continue
+    return list(found.items())
+
+
+def at_mention_note(task: str, cwd: str) -> str:
+    items = mentioned_files(task, cwd)
+    if not items:
+        return ""
+    return AT_MENTION_NOTE.format(items=provenance.disarm_markers(
+        "; ".join(f"@{written} = {path}" for written, path in items)
+    ))
+
+
 def task_reminder(
     index: str,
     preload_text: str = "",
@@ -1454,6 +1494,7 @@ def task_reminder(
     objective_text: str = "",
     plan_text: str = "",
     trigger_text: str = "",
+    mention_text: str = "",
 ) -> str:
     """The per-task system reminder: always the current local time (issue #36
     — it lives here, not in the system prompt, so messages[0] stays
@@ -1477,6 +1518,8 @@ def task_reminder(
         time_note += "\n" + OBJECTIVE_REMINDER.format(objective=plan_text)
     if trigger_text:
         time_note += "\n" + OBJECTIVE_REMINDER.format(objective=trigger_text)
+    if mention_text:
+        time_note += "\n" + OBJECTIVE_REMINDER.format(objective=mention_text)
     if preload_text:
         return f"{time_note}\n{PRELOAD_REMINDER.format(knowledge=preload_text)}"
     return f"{time_note}\n{TASK_REMINDER}" if index else time_note
@@ -5231,6 +5274,11 @@ class Agent:
             objective_text=objective_text,
             plan_text=plan_text,
             trigger_text=trigger_text,
+            mention_text=(
+                at_mention_note(task, self.cwd)
+                if take_surface(self.base_context)[0] == "cli"
+                else ""
+            ),
         )
         self.messages.append({"role": "system", "content": reminder})
         if rules_text:

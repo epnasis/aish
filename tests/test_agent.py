@@ -15934,6 +15934,45 @@ class TestReminderDelta:
         assert knowledge == "[skill: b]\nbody b\n\n" + KNOWLEDGE_SHOWN_EARLIER.format(names="a")
 
 
+class TestTheAtMentionNote:
+    """JIT (H3, #444): the terminal's old usage note on `@<path>` rides the
+    task that uses one, in the reminder the model receives with it."""
+
+    def _reminder(self, tmp_path, surface, task):
+        agent, chat = make_agent(
+            [model_says("ok")], cwd=str(tmp_path),
+            context=f"{agent_module.surface_slot(surface)}\n\n- x",
+        )
+        agent.run_task(task)
+        return next(
+            m["content"] for m in chat.snapshots[0]
+            if m["role"] == "system" and m["content"].startswith("<system-reminder>")
+        )
+
+    def test_a_mentioned_file_is_named_with_its_path(self, tmp_path):
+        (tmp_path / "notes.md").write_text("x")
+        reminder = self._reminder(tmp_path, "cli", "summarise @notes.md, briefly")
+        assert "MENTIONS FILES WITH @" in reminder
+        assert f"@notes.md = {(tmp_path / 'notes.md').resolve()}" in reminder
+        assert "read it with read_file" in reminder
+
+    @pytest.mark.parametrize("task", [
+        "ping @nobody about it",  # a handle, not a file
+        "mail pawel@notes.md",  # the domain half of an address
+        "summarise @../outside.md",  # a file outside the project
+    ])
+    def test_nothing_that_is_not_a_project_file_is_named(self, tmp_path, task):
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / "notes.md").write_text("x")
+        (tmp_path / "outside.md").write_text("x")
+        assert "MENTIONS FILES" not in self._reminder(project, "cli", task)
+
+    def test_the_web_never_carried_this_note(self, tmp_path):
+        (tmp_path / "notes.md").write_text("x")
+        assert "MENTIONS FILES" not in self._reminder(tmp_path, "web", "read @notes.md")
+
+
 class TestIdentityFollowsTheModel:
     """The system prompt's identity section is filled from the agent's LIVE
     (model, provider) at every rebuild — never a string baked at startup. The
