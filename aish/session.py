@@ -225,10 +225,11 @@ def harness_headline(text: str) -> str:
     The cut `harnessHeadline` makes in app.js, plus a length cap the web row
     does not need (its sub-line clamps to two lines by CSS)."""
     body = text.strip()
+    if body.startswith(REMINDER_OPEN):
+        # A wrapped note (`agent.NOTE_REMINDER`) or claude-max's rules prose.
+        body = body[len(REMINDER_OPEN):].removesuffix(REMINDER_CLOSE).strip()
     if body.startswith(NOTE_MARKER):
         body = body[len(NOTE_MARKER):]
-    elif body.startswith(REMINDER_OPEN):
-        body = body[len(REMINDER_OPEN):].lstrip()
     elif body.startswith("["):
         body = body[1:]
     first = body.splitlines()[0] if body else ""

@@ -2678,6 +2678,11 @@ REMEMBER_DENIED = (
 # harness speaking rather than as a blue bubble the owner never typed.
 AISH_NOTE = "[aish: "
 
+# How every `[aish: …]` note reaches the model (§3.17): inside the tag the
+# system prompt already names as aish's voice (rule 2e). `_append` applies it,
+# so no call site can forget it; the measure script's arm D is this string.
+NOTE_REMINDER = "<system-reminder>\n{note}\n</system-reminder>"
+
 NOT_FOLLOWED_NOTE = (
     "[aish] rule '{rule}' not followed: {detail}"
 )
@@ -4477,6 +4482,16 @@ class Agent:
         the one door every note comes through — a row per call site is the
         discipline that left twenty of them invisible (contract §3.17).
         """
+        if message.get("role") == "user" and str(message.get("content") or "").startswith(
+            NOTE_MARKER
+        ):
+            # Measured, not assumed (2026-10-05, scripts/measure_note_voice.py
+            # over 105 recorded calls on the owner's local model, blind-read):
+            # the reasoning after a bare note credited it to "the user" in 62
+            # of 105, after the same note wrapped in 37 — per case, 35 stopped
+            # and 10 started. Rewording it in aish's voice moved nothing
+            # (62 → 59), alone or on top of the wrapper.
+            message["content"] = NOTE_REMINDER.format(note=message["content"])
         self.messages.append(message)
         record = None
         if self.on_message:
@@ -7030,7 +7045,10 @@ class Agent:
             message = self.messages[i]
             if not message.get("images"):
                 continue
-            if not str(message.get("content", "")).startswith(NOTE_MARKER):
+            # aish's own delivery, wrapped or not (`synthetic_kind`): matching
+            # the bare marker alone would keep every wrapped delivery's
+            # pictures in context for good.
+            if synthetic_kind(str(message.get("content", ""))) != "note":
                 continue
             del message["images"]
             message["content"] = TOOL_MEDIA_EXPIRED

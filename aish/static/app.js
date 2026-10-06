@@ -3170,8 +3170,11 @@ const HARNESS_COLORS = { enforce: "var(--orange)", guide: "var(--yellow)", infor
 // …]"), for the row's sub-line. The full text, framing included, is the tap.
 function harnessHeadline(text) {
   let body = String(text || "").trim();
+  if (body.startsWith("<system-reminder>")) {
+    // A wrapped note, or claude-max's rules prose: the frame, then the note.
+    body = body.slice(17).replace(/<\/system-reminder>$/, "").trim();
+  }
   if (body.startsWith("[aish: ")) body = body.slice(7);
-  else if (body.startsWith("<system-reminder>")) body = body.slice(17).trimStart();
   else if (body.startsWith("[")) body = body.slice(1);
   const first = body.split("\n")[0].replace(/<\/system-reminder>$/, "");
   return first.endsWith("]") ? first.slice(0, -1) : first;

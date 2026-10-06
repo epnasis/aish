@@ -14,6 +14,7 @@ import pytest
 from aish import agent as agent_module
 from aish import repetition
 from aish.agent import AISH_NOTE, Agent
+from tests.test_agent import unwrapped
 
 # The four lines that repeated, verbatim from the recorded reasoning.
 LOOP = "I'll start now.\nI'll read the skill.\nThen I'll update it.\nThen I'll run it.\n"
@@ -176,7 +177,7 @@ class TestARepeatingReplyIsStopped:
         assert chat.pulled[0] < (len(PREAMBLE) + 2 * repetition.MIN_SPAN_CHARS) / 5
         # The re-ask says what aish observed and did — never why.
         asked = chat.calls[1]["messages"][-1]
-        assert asked["role"] == "user" and asked["content"].startswith(AISH_NOTE)
+        assert asked["role"] == "user" and unwrapped(asked["content"]).startswith(AISH_NOTE)
         assert "aish stopped your last reply" in asked["content"]
         assert "76-character passage repeated" in asked["content"]
         # The request that looped is never sent again unchanged.

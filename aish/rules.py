@@ -3407,7 +3407,9 @@ def past_turns(state_dir: Path, limit: int = 400) -> list[dict]:
 
 # Text in the user slot that the OWNER did not type. Kept here rather than
 # imported from session.py, which imports nothing from this module by design.
-AISH_NOTE_MARKERS = ("[aish:", "[aish]", "[automatic resume]")
+# `<system-reminder>`: aish's notes are sent wrapped since 2026-10-05
+# (`agent.NOTE_REMINDER`), so a wrapped note must not read as a prompt here.
+AISH_NOTE_MARKERS = ("[aish:", "[aish]", "[automatic resume]", "<system-reminder>")
 
 
 def retro_match(rule: Rule, turns: list[dict], meaning=None) -> RetroMatch:

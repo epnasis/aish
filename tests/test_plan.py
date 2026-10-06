@@ -17,9 +17,10 @@ from types import SimpleNamespace
 from aish import agent as agent_module
 from aish import plan
 from aish import session as session_module
+from aish.agent import NOTE_REMINDER
 from aish.approval import Denied
 from aish.session import SessionLog
-from tests.test_agent import make_agent, model_says, tool_call
+from tests.test_agent import make_agent, model_says, tool_call, unwrapped
 
 CHAT = "session-20260101-000000-000000"
 
@@ -558,7 +559,8 @@ class TestTriggers:
         agent.run_task("test A")
         notes = [m["content"] for m in agent.messages if m.get("role") == "user"
                  and "Revisit the" in str(m.get("content"))]
-        assert len(notes) == 1 and notes[0].startswith("[aish: No new progress for 4 steps")
+        assert len(notes) == 1
+        assert unwrapped(notes[0]).startswith("[aish: No new progress for 4 steps")
 
     def test_a_failed_task_end_rides_the_next_reminder(self, tmp_path):
         records: list[dict] = []
@@ -598,7 +600,8 @@ class TestTheOwnerMidTask:
         agent.run_task("go on")
         notes = [m["content"] for m in agent.messages if m.get("role") == "user"
                  and "the owner dropped" in str(m.get("content"))]
-        assert notes == ["[aish: the owner dropped [2] Test B from your plan — never work on it]"]
+        assert [unwrapped(n) for n in notes] == [
+            "[aish: the owner dropped [2] Test B from your plan — never work on it]"]
 
 
 class TestTheArgumentLever:
@@ -805,8 +808,10 @@ def live_results(agent):
 
 
 def nudges(agent):
-    return [m["content"] for m in agent.messages if m.get("role") == "user"
-            and str(m.get("content")).startswith("[aish: this task has made")]
+    """The repeat nudges, as aish wrote them (unwrapped from the reminder
+    frame they are sent in)."""
+    return [unwrapped(m["content"]) for m in agent.messages if m.get("role") == "user"
+            and unwrapped(str(m.get("content"))).startswith("[aish: this task has made")]
 
 
 class TestTheRepeatNudge:
@@ -831,7 +836,8 @@ class TestTheRepeatNudge:
             "do, one task per item.]"
         )
         assert nudges(agent) == [line]
-        assert chat.snapshots[4][-1] == {"role": "user", "content": line}, (
+        sent = {"role": "user", "content": NOTE_REMINDER.format(note=line)}
+        assert chat.snapshots[4][-1] == sent, (
             "the line is the last thing the next model call is handed")
         assert all(s[0] == chat.snapshots[0][0] for s in chat.snapshots), (
             "messages[0] stays byte-stable")

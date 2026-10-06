@@ -22,7 +22,7 @@ import pytest
 from aish import rules as rules_module
 from aish.agent import AISH_NOTE, Agent
 from aish.session import HARNESS_STEP, SessionLog, harness_step
-from tests.test_agent import FakeChat, model_says, tool_call, write_rule
+from tests.test_agent import FakeChat, model_says, tool_call, unwrapped, write_rule
 
 CHIPS_RULE = """---
 name: quick-reply-chips
@@ -96,7 +96,7 @@ class TestANoteIsARow:
         assert len(rows) == 1
         sent = [m for m in chat.snapshots[1] if m.get("role") == "user"][-1]
         assert rows[0]["text"] == sent["content"]  # byte-identical to what it received
-        assert rows[0]["text"].startswith(AISH_NOTE)
+        assert unwrapped(rows[0]["text"]).startswith(AISH_NOTE), "the note, framed as sent"
         assert "quick-reply-chips" in rows[0]["text"]
         assert rows[0]["source"] == "answer_check"
         assert rows[0]["role"] == "user"
@@ -126,7 +126,8 @@ class TestANoteIsARow:
         raw = log.path.read_text()
         assert '"kind": "harness"' not in raw
         notes = [r for r in map(json.loads, raw.splitlines())
-                 if r.get("kind") == "message" and str(r.get("content", "")).startswith(AISH_NOTE)]
+                 if r.get("kind") == "message"
+                 and unwrapped(str(r.get("content", ""))).startswith(AISH_NOTE)]
         assert len(notes) == 1
 
     def test_a_stop_is_drawn_and_named(self, tmp_path, monkeypatch):
@@ -388,7 +389,8 @@ class TestWordsInsideAResult:
         tool_step = next(s for s in live if s.get("kind") == "tool")
         assert rows[0]["call"] == tool_step["call"], "drawn under the call it belongs to"
         sent = [m for m in chat.snapshots[1] if m.get("role") == "tool"][-1]["content"]
-        assert rows[0]["text"] in sent and rows[0]["text"].startswith(AISH_NOTE)
+        assert rows[0]["text"] in sent and rows[0]["text"].startswith(AISH_NOTE), (
+            "a note INSIDE a result is not framed — only the messages were measured")
         assert harness(cold_steps(log)) == rows, "replay draws the same rows"
 
     def test_the_record_points_into_its_own_content(self, tmp_path, monkeypatch):
@@ -665,3 +667,39 @@ class TestOutcomes:
         lg = explain.load(log.path)
         steps = explain.dossier(lg.turns[0], lg, tmp_path)["steps"]
         assert [s["id"] for s in steps if s["kind"] == explain.STEP_OUTCOME] == ["o1"]
+
+
+class TestTheMeasuredWording:
+    """aish's notes reach the model in the wording that was MEASURED to help
+    (contract §3.17): arm D of scripts/measure_note_voice.py. Pinned to the
+    script's own function, so the code and the experiment cannot drift apart."""
+
+    def _script(self):
+        import importlib.util
+
+        path = Path(__file__).resolve().parent.parent / "scripts" / "measure_note_voice.py"
+        spec = importlib.util.spec_from_file_location("measure_note_voice", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_a_note_is_sent_exactly_as_arm_d_sent_it(self, tmp_path, monkeypatch):
+        script = self._script()
+        agent, chat, log, _ = wired(
+            tmp_path,
+            [model_says("Want me to check more?"),
+             model_says("Want me to check more?\n[Yes](aish-reply://yes)")],
+            monkeypatch, rule_texts=(CHIPS_RULE,),
+        )
+        run(agent, log, "anything new?")
+        sent = [m for m in chat.snapshots[1] if m.get("role") == "user"][-1]["content"]
+        assert sent == script.arm_text(unwrapped(sent), "D")[0]
+
+    def test_only_aishs_bracket_notes_are_framed(self, tmp_path, monkeypatch):
+        """The measured cases were `[aish: …]` notes. A /cd announcement is
+        worded as the owner's own action and was not measured: unchanged."""
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        agent, _, _, _ = wired(tmp_path, [], monkeypatch)
+        agent.rebase(str(other))
+        assert agent.messages[-1]["content"].startswith("[I moved the session")

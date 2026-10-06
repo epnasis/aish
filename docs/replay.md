@@ -124,6 +124,10 @@ Medians and p95 are `usage._percentile`, `aish usage`'s own. R4 still governs: w
 
 `TestDriverOverTheRealServer` runs `drive` against the real `create_app` with a scripted model and the command implementation stubbed: the approved card reaches the run path, the denied one does not, and the recorded log then fails `no_unapproved_shell`. It also pins the driver's import fence.
 
+## One message, resent — `scripts/measure_note_voice.py`
+
+When the question is how the model reads ONE message, a whole-turn replay is the wrong instrument: the model may never reach the state the message is sent in. The step-level A/B resends recorded requests instead — rebuilt byte for byte from the `sent` record's blobs (contract §3.12), one message rewritten per arm, the recorded options kept, arms interleaved per case in a shuffled order so the server's prefix cache and drift land on every arm alike — and writes a blind file (model output only, opaque ids, the key beside it) for readers who never see the arm. Stdlib only, for the system python3 (uv's interpreter is refused LAN sockets on the owner's machine); it refuses an output directory inside this repo. It measured how aish's notes are framed (contract §3.17); the R3/R4 laws apply to what it reports.
+
 ## Not here (later slices of #441)
 
 The tool cassette (record tool outputs once, replay them so only the model varies) — required before before/after numbers go into commit messages. Step replay from the `sent` record. Judged checks.

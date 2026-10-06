@@ -27,13 +27,23 @@ from aish import secrets as secrets_module
 from aish import session as session_module
 from aish import skills as skills_module
 from aish import tools as tools_module
-from aish.agent import AISH_NOTE, DENIED_RESULT, Agent
+from aish.agent import AISH_NOTE, DENIED_RESULT, NOTE_REMINDER, Agent
 from aish.approval import Approved, Blocked, Denied
 from aish.session import SessionLog
 
 # The one list of values that used to change the meaning of the file holding
 # them — every writer in the md+frontmatter family is probed with it (#209).
 from tests.test_skills import SMUGGLED
+
+
+def unwrapped(text: str) -> str:
+    """A note as aish wrote it: without the `<system-reminder>` frame `_append`
+    sends every `[aish: …]` note in (`agent.NOTE_REMINDER`). Strips exactly that
+    frame and nothing else, so a test still compares the note's exact text."""
+    head, tail = NOTE_REMINDER.split("{note}")
+    if text.startswith(head) and text.endswith(tail):
+        return text[len(head):-len(tail)]
+    return text
 
 
 def tool_call(name: str, **arguments):
@@ -1504,7 +1514,8 @@ class TestModelResilience:
     def _note(first: str, then: str) -> dict:
         from aish.agent import USER_SAW_NOTHING
 
-        return {"role": "user", "content": AISH_NOTE + first + USER_SAW_NOTHING + then + "]"}
+        note = AISH_NOTE + first + USER_SAW_NOTHING + then + "]"
+        return {"role": "user", "content": NOTE_REMINDER.format(note=note)}
 
     @staticmethod
     def _asked_with(chat, call: int) -> list[dict]:
@@ -5606,7 +5617,8 @@ class TestToolMedia:
         return [
             m
             for m in agent.messages
-            if m.get("role") == "user" and str(m.get("content", "")).startswith("[aish: ")
+            if m.get("role") == "user"
+            and unwrapped(str(m.get("content", ""))).startswith("[aish: ")
         ]
 
     def _fetching_agent(self, tmp_path, monkeypatch, calls=1, **kwargs):
@@ -5648,7 +5660,8 @@ class TestToolMedia:
         agent = self._fetching_agent(tmp_path, monkeypatch)
         agent.run_task("show me")
         content = self._delivered(agent)[0]["content"]
-        assert content.startswith(session_module.NOTE_MARKER)
+        assert unwrapped(content).startswith(session_module.NOTE_MARKER)
+        assert session_module.synthetic_kind(content) == "note"
         # The marker is only worth writing if the classifier still honours it.
         assert session_module.NOTE_MARKER in session_module._NOTE_MARKERS
 
@@ -8738,7 +8751,8 @@ then:
         # Asked, reworked, delivered clean — no note, because the rule was met.
         assert "tiles.example" not in answer
         assert "not followed" not in answer
-        ask = [m for m in agent.messages if str(m.get("content", "")).startswith("[aish:")]
+        ask = [m for m in agent.messages
+               if unwrapped(str(m.get("content", ""))).startswith("[aish:")]
         assert ask and "show_image" in ask[0]["content"]
 
     def test_a_denial_outranks_verify(self, tmp_path):
@@ -16046,7 +16060,7 @@ class TestImageCheck:
         agent, _ = self._agent(tmp_path, monkeypatch, [model_says(text)], bound=False)
         assert agent.run_task("chart it") == text
         note = agent.messages[-1]
-        assert note["role"] == "user" and note["content"].startswith("[aish: ")
+        assert note["role"] == "user" and unwrapped(note["content"]).startswith("[aish: ")
         assert f"{missing} (no such file)" in note["content"]
 
     def test_the_rules_and_the_pictures_ask_in_one_message(self, tmp_path, monkeypatch):
