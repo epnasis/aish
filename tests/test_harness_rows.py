@@ -488,6 +488,43 @@ class TestJustInTimeNotesOnACommand:
         assert harness(live) == []
         assert "read_docs" not in sent
 
+    @staticmethod
+    def _public_is(monkeypatch, *public_hosts):
+        """read_url's own SSRF check, answered without DNS."""
+        from aish import agent as agent_module
+
+        def require_public(url):
+            if not any(f"//{host}" in url for host in public_hosts):
+                raise agent_module.web.BlockedURLError(f"{url} is not public")
+
+        monkeypatch.setattr(agent_module.web, "require_public", require_public)
+
+    def test_a_command_naming_a_public_address_is_pointed_at_read_url(
+        self, tmp_path, monkeypatch
+    ):
+        self._public_is(monkeypatch, "allegro.pl")
+        sent, live, log = self._ran(
+            tmp_path, monkeypatch, "curl -s 'https://allegro.pl/listing?string=x'",
+            "<html>…</html>\n[exit code: 0]",
+        )
+        rows = harness(live)
+        assert [r["source"] for r in rows] == ["fetch_route"]
+        assert rows[0]["text"] in sent
+        assert "https://allegro.pl/listing?string=x" in rows[0]["text"]
+        assert "pages come through read_url or browse only" in rows[0]["text"]
+        assert harness(cold_steps(log)) == rows
+
+    def test_a_lan_address_is_the_shells_to_reach(self, tmp_path, monkeypatch):
+        """read_url refuses a LAN host, so curl is the right route there and
+        nothing may say otherwise."""
+        self._public_is(monkeypatch, "allegro.pl")
+        sent, live, _ = self._ran(
+            tmp_path, monkeypatch, "curl -s http://192.168.199.1:8123/api/states",
+            "[]\n[exit code: 0]",
+        )
+        assert harness(live) == []
+        assert "read_url" not in sent
+
 
 class TestClaudeMaxNotes:
     """claude-max sends ONE user message: the rules prose, the pending notes,

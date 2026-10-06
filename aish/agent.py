@@ -261,6 +261,22 @@ USAGE_ERROR_NOTE = (
     "guess a flag.]"
 )
 
+# JIT (H3, #444): the core's "pages come through read_url or browse only" also
+# rides the result of a shell command that named a public web address. "Public"
+# is `web.require_public`, the very check read_url enforces, so a localhost or
+# LAN address — where a shell command IS the route — draws nothing.
+# Conditional, because naming a URL is not fetching a page (git clone, pip
+# install) and aish does not parse which a command did.
+PUBLIC_URL_NOTE = (
+    "[aish: this command named a public web address ({url}). If it fetched a web "
+    "page, that was the wrong route: pages come through read_url or browse only — "
+    "never curl, wget or a script.]"
+)
+# How many of a command's URLs are resolved, and how much of one is quoted
+# back. A command naming more than a few is rare; each check is a DNS lookup.
+PUBLIC_URL_CHECKS = 3
+PUBLIC_URL_QUOTE_CHARS = 200
+
 CD_NOT_STICKY = (
     "cd was NOT run: every command executes in the project directory ({cwd}) "
     "— a bare cd does not persist. To run something elsewhere, chain it in "
@@ -1024,6 +1040,18 @@ def usage_error_note(result: str) -> str:
     if not result[: match.start()].strip():
         return ""  # nothing printed: there is no message to judge
     return USAGE_ERROR_NOTE.format(code=match.group(1))
+
+
+def public_url_note(command: str) -> str:
+    """The read_url reminder for a command that named an address read_url
+    itself would reach, or ""."""
+    for url in provenance.urls_in(command)[:PUBLIC_URL_CHECKS]:
+        try:
+            web.require_public(url)
+        except (web.BlockedURLError, ValueError, OSError):
+            continue  # LAN, localhost, unresolvable: not read_url's to fetch
+        return PUBLIC_URL_NOTE.format(url=url[:PUBLIC_URL_QUOTE_CHARS])
+    return ""
 
 
 def _parse_job_id(result: str) -> str:
@@ -13696,6 +13724,11 @@ class Agent:
                 self._note("↩ failed with a usage-error status: pointed at read_docs")
                 self._note_in_result("read_docs_hint", usage_note)
                 result += "\n\n" + usage_note
+            url_note = public_url_note(final)
+            if url_note:
+                self._note("↩ named a public web address: pointed at read_url")
+                self._note_in_result("fetch_route", url_note)
+                result += "\n\n" + url_note
             # Drift nudge (#140): the model ran a raw command a reliable plugin
             # tool already covers — point it at the tool for next time. Advisory
             # only; the command still ran.

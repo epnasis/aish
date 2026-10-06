@@ -539,6 +539,7 @@ Nothing carried is a grant: the links a page offered, mail links and personal va
 
 **The notes built for the move ride the moment they are about**, each tiny, each registered by the code that writes it (a row under its call, contract §3.17):
 - **A usage-error exit status** (1 BSD, 2 GNU getopt, 64 `EX_USAGE`) with output to read appends `USAGE_ERROR_NOTE` to the `run_command` result — conditional ("if its output is a usage or unknown-flag error, call read_docs"), because the status cannot tell a usage error from any other failure, and keyed on no word list (`docs/vocabularies.md`). `TestJustInTimeNotesOnACommand`.
+- **A command that named a public web address** gets `PUBLIC_URL_NOTE`: pages come through read_url or browse only. "Public" is `web.require_public`, read_url's own check, so a LAN or localhost address — where the shell IS the route — draws nothing; conditional, because naming a URL is not fetching a page (`git clone`). At most `PUBLIC_URL_CHECKS` URLs are resolved per command. Same test class.
 
 **Fenced.** `tests/test_core_prompt.py`: each surface's render ≤ 8,000 chars with the longest identity in place (4,253 web / 4,361 CLI without one at landing), a per-section cap, and the old usage-note builders asserted gone. `tests/test_chat_vocabulary.py` holds the renders and the shipped skills to the chat-not-session law.
 
