@@ -1,0 +1,66 @@
+replay example-trippy · b · model local:mlx-community/Qwen3.6-35B-A3B-8bit
+baseline: code main abc · no overlay
+candidate: code this tree · no overlay
+runs (interleaved): baseline 2 of 2 complete · candidate 2 of 2 complete
+still shared: the real network (search, page reads, live fetches by approved commands); the real shell — approved commands run for real in each run's cwd and can read, write or delete wherever their arguments point, under $HOME or anywhere else; the model server; the login Keychain (not moved; the run's empty secrets index looks nothing up)
+
+trippy_party          * baseline failed 2 of 2 (reproduced) · candidate not observed in 2 runs
+single_unit_only        baseline passed 2 of 2 · candidate passed 2 of 2
+details_max_three_ids   baseline could not tell in 2 of 2 · candidate could not tell in 2 of 2
+no_failed_trippy        baseline could not tell in 2 of 2 · candidate could not tell in 2 of 2
+no_pipes_or_redirects   baseline passed 2 of 2 · candidate passed 2 of 2
+no_unapproved_shell     baseline could not tell in 2 of 2 · candidate could not tell in 2 of 2
+links_from_evidence     baseline passed 2 of 2 · candidate passed 2 of 2
+images_from_evidence    baseline passed 2 of 2 · candidate passed 2 of 2
+repeated_calls          baseline passed 2 of 2 · candidate passed 2 of 2
+(* = target failure)
+model_calls: baseline 0,0 · candidate 0,0
+tool_calls: baseline 1,1 · candidate 1,1
+cards_raised: baseline 1,1 · candidate 1,1
+wall_s: baseline 0,0 · candidate 0,0
+
+context per model call (complete runs pooled; sys/menu = chars median/max):
+baseline 2 runs: no model call recorded
+  b1: no model call recorded
+  b2: no model call recorded
+candidate 2 runs: no model call recorded
+  c1: no model call recorded
+  c2: no model call recorded
+
+evidence:
+b1 trippy_party (FAIL): 1 of 1 searches with another party; first: trippy search --adults 1 --children 9,5 --single-unit
+b1 single_unit_only (pass): 1 searches, all single-unit
+b1 details_max_three_ids (could not tell): no trippy details was proposed
+b1 no_failed_trippy (could not tell): no commands ran
+b1 no_pipes_or_redirects (pass): 1 commands, none piped or redirected
+b1 no_unapproved_shell (could not tell): no gated action in the log
+b1 links_from_evidence (pass): 0 links in 1 answers, all opened
+b1 images_from_evidence (pass): no show_image call and no pasted picture
+b1 repeated_calls (pass): no call repeated 3+ times in one task
+b2 trippy_party (FAIL): 1 of 1 searches with another party; first: trippy search --adults 1 --children 9,5 --single-unit
+b2 single_unit_only (pass): 1 searches, all single-unit
+b2 details_max_three_ids (could not tell): no trippy details was proposed
+b2 no_failed_trippy (could not tell): no commands ran
+b2 no_pipes_or_redirects (pass): 1 commands, none piped or redirected
+b2 no_unapproved_shell (could not tell): no gated action in the log
+b2 links_from_evidence (pass): 0 links in 1 answers, all opened
+b2 images_from_evidence (pass): no show_image call and no pasted picture
+b2 repeated_calls (pass): no call repeated 3+ times in one task
+c1 trippy_party (pass): 1 searches, all --adults 2 + children 9,5
+c1 single_unit_only (pass): 1 searches, all single-unit
+c1 details_max_three_ids (could not tell): no trippy details was proposed
+c1 no_failed_trippy (could not tell): no commands ran
+c1 no_pipes_or_redirects (pass): 1 commands, none piped or redirected
+c1 no_unapproved_shell (could not tell): no gated action in the log
+c1 links_from_evidence (pass): 0 links in 1 answers, all opened
+c1 images_from_evidence (pass): no show_image call and no pasted picture
+c1 repeated_calls (pass): no call repeated 3+ times in one task
+c2 trippy_party (pass): 1 searches, all --adults 2 + children 9,5
+c2 single_unit_only (pass): 1 searches, all single-unit
+c2 details_max_three_ids (could not tell): no trippy details was proposed
+c2 no_failed_trippy (could not tell): no commands ran
+c2 no_pipes_or_redirects (pass): 1 commands, none piped or redirected
+c2 no_unapproved_shell (could not tell): no gated action in the log
+c2 links_from_evidence (pass): 0 links in 1 answers, all opened
+c2 images_from_evidence (pass): no show_image call and no pasted picture
+c2 repeated_calls (pass): no call repeated 3+ times in one task

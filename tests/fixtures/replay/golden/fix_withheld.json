@@ -1,0 +1,248 @@
+{
+  "scenario": "example-trippy",
+  "batch": "<batch>",
+  "model": "local:mlx-community/Qwen3.6-35B-A3B-8bit",
+  "window": 60000,
+  "targets": [
+    "trippy_party"
+  ],
+  "withheld": "the baseline did not reproduce the target failure (trippy_party: not observed in 2 runs)",
+  "arms": {
+    "baseline": {
+      "checks": {
+        "trippy_party": {
+          "passed": 2,
+          "failed": 0,
+          "could_not_tell": 0
+        },
+        "single_unit_only": {
+          "passed": 2,
+          "failed": 0,
+          "could_not_tell": 0
+        },
+        "details_max_three_ids": {
+          "passed": 0,
+          "failed": 0,
+          "could_not_tell": 2
+        },
+        "no_failed_trippy": {
+          "passed": 0,
+          "failed": 0,
+          "could_not_tell": 2
+        },
+        "no_pipes_or_redirects": {
+          "passed": 2,
+          "failed": 0,
+          "could_not_tell": 0
+        },
+        "no_unapproved_shell": {
+          "passed": 0,
+          "failed": 0,
+          "could_not_tell": 2
+        },
+        "links_from_evidence": {
+          "passed": 2,
+          "failed": 0,
+          "could_not_tell": 0
+        },
+        "images_from_evidence": {
+          "passed": 2,
+          "failed": 0,
+          "could_not_tell": 0
+        },
+        "repeated_calls": {
+          "passed": 2,
+          "failed": 0,
+          "could_not_tell": 0
+        }
+      },
+      "complete_runs": 2,
+      "context": {
+        "calls": 0,
+        "prompt_tokens": {
+          "recorded": 0,
+          "not_recorded": 0
+        },
+        "system_chars": {
+          "recorded": 0,
+          "not_recorded": 0
+        },
+        "menu_chars": {
+          "recorded": 0,
+          "purged": 0,
+          "not_recorded": 0
+        },
+        "tools": {
+          "recorded": 0,
+          "not_recorded": 0
+        }
+      },
+      "runs": [
+        {
+          "n": 1,
+          "problem": null,
+          "counts": {
+            "tasks": 1,
+            "answered": 1,
+            "model_calls": 0,
+            "tool_calls": 1,
+            "commands": 1,
+            "cards": 0,
+            "cards_denied": 0,
+            "wall_s": 0,
+            "cards_raised": 1
+          },
+          "verdicts": [
+            {
+              "check": "trippy_party",
+              "passed": true,
+              "evidence": "1 searches, all --adults 2 + children 9,5"
+            },
+            {
+              "check": "single_unit_only",
+              "passed": true,
+              "evidence": "1 searches, all single-unit"
+            },
+            {
+              "check": "details_max_three_ids",
+              "passed": null,
+              "evidence": "no trippy details was proposed"
+            },
+            {
+              "check": "no_failed_trippy",
+              "passed": null,
+              "evidence": "no commands ran"
+            },
+            {
+              "check": "no_pipes_or_redirects",
+              "passed": true,
+              "evidence": "1 commands, none piped or redirected"
+            },
+            {
+              "check": "no_unapproved_shell",
+              "passed": null,
+              "evidence": "no gated action in the log"
+            },
+            {
+              "check": "links_from_evidence",
+              "passed": true,
+              "evidence": "0 links in 1 answers, all opened"
+            },
+            {
+              "check": "images_from_evidence",
+              "passed": true,
+              "evidence": "no show_image call and no pasted picture"
+            },
+            {
+              "check": "repeated_calls",
+              "passed": true,
+              "evidence": "no call repeated 3+ times in one task"
+            }
+          ],
+          "context": {
+            "calls": 0,
+            "prompt_tokens": {
+              "recorded": 0,
+              "not_recorded": 0
+            },
+            "system_chars": {
+              "recorded": 0,
+              "not_recorded": 0
+            },
+            "menu_chars": {
+              "recorded": 0,
+              "purged": 0,
+              "not_recorded": 0
+            },
+            "tools": {
+              "recorded": 0,
+              "not_recorded": 0
+            }
+          }
+        },
+        {
+          "n": 2,
+          "problem": null,
+          "counts": {
+            "tasks": 1,
+            "answered": 1,
+            "model_calls": 0,
+            "tool_calls": 1,
+            "commands": 1,
+            "cards": 0,
+            "cards_denied": 0,
+            "wall_s": 0,
+            "cards_raised": 1
+          },
+          "verdicts": [
+            {
+              "check": "trippy_party",
+              "passed": true,
+              "evidence": "1 searches, all --adults 2 + children 9,5"
+            },
+            {
+              "check": "single_unit_only",
+              "passed": true,
+              "evidence": "1 searches, all single-unit"
+            },
+            {
+              "check": "details_max_three_ids",
+              "passed": null,
+              "evidence": "no trippy details was proposed"
+            },
+            {
+              "check": "no_failed_trippy",
+              "passed": null,
+              "evidence": "no commands ran"
+            },
+            {
+              "check": "no_pipes_or_redirects",
+              "passed": true,
+              "evidence": "1 commands, none piped or redirected"
+            },
+            {
+              "check": "no_unapproved_shell",
+              "passed": null,
+              "evidence": "no gated action in the log"
+            },
+            {
+              "check": "links_from_evidence",
+              "passed": true,
+              "evidence": "0 links in 1 answers, all opened"
+            },
+            {
+              "check": "images_from_evidence",
+              "passed": true,
+              "evidence": "no show_image call and no pasted picture"
+            },
+            {
+              "check": "repeated_calls",
+              "passed": true,
+              "evidence": "no call repeated 3+ times in one task"
+            }
+          ],
+          "context": {
+            "calls": 0,
+            "prompt_tokens": {
+              "recorded": 0,
+              "not_recorded": 0
+            },
+            "system_chars": {
+              "recorded": 0,
+              "not_recorded": 0
+            },
+            "menu_chars": {
+              "recorded": 0,
+              "purged": 0,
+              "not_recorded": 0
+            },
+            "tools": {
+              "recorded": 0,
+              "not_recorded": 0
+            }
+          }
+        }
+      ]
+    }
+  }
+}
