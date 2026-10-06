@@ -1,6 +1,7 @@
 """Approver flow tests: monkeypatch input() to script the interactive prompt."""
 
 import builtins
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -290,14 +291,15 @@ class TestConfig:
 
 
 class TestUsageContext:
-    def test_mentions_all_self_knowledge(self, tmp_path):
-        from aish.agent import IDENTITY_SLOT
-        from aish.cli import usage_context
+    """The terminal's usage notes (`usage_context`) are gone (H3, #444): the
+    core prompt's CLI render took what every task needs, and the reference
+    half moved to the aish-cli-help skill the core points at. What these tests
+    guarded follows the facts to where they live now."""
 
-        text = usage_context(
-            False, tmp_path / "allow.txt", tmp_path / "state",
-            tmp_path / "config.toml",
-        )
+    HELP = Path(__file__).resolve().parent.parent / "docs" / "shipped-skills" / "aish-cli-help.md"
+
+    def test_the_help_skill_carries_the_self_knowledge(self):
+        text = self.HELP.read_text(encoding="utf-8")
         for needle in (
             "--resume",
             "!<command>",
@@ -305,64 +307,38 @@ class TestUsageContext:
             "always allow",
             "vi_mode = true",
             "AISH.md",
-            str(tmp_path / "allow.txt"),
-            str(tmp_path / "config.toml"),
-            "currently false",
-            # The identity is the SLOT here — the agent fills it from its LIVE
-            # model at every rebuild, so no model name is baked at startup.
-            IDENTITY_SLOT,
+            "~/.config/aish/allow.txt",
+            "~/.config/aish/config.toml",
+            "~/.config/aish/deny.txt",
         ):
             assert needle in text, needle
 
-    def test_reflects_vi_mode_state(self, tmp_path):
-        from aish.cli import usage_context
-
-        text = usage_context(True, tmp_path, tmp_path, tmp_path)
-        assert "currently true" in text
-
-    def test_names_the_skills_dir_in_effect_now(self, tmp_path):
-        """`from .skills import GLOBAL_SKILLS_DIR` copied the path at IMPORT, so
-        this line kept naming the owner's real ~/.config/aish/skills however the
-        constant was later moved — an isolated suite told the model where the
-        owner's corpus was, and the verify harness (#254) was told wrong too
-        (#381). Reading the module attribute is what makes a rebind take."""
-        from aish.cli import usage_context
-        from aish.paths import DEFAULT_CONFIG_HOME
-
-        text = usage_context(False, tmp_path, tmp_path, tmp_path)
-        assert str(skills_module.GLOBAL_SKILLS_DIR) in text
-        assert str(DEFAULT_CONFIG_HOME / "skills") not in text
-
-    def test_names_the_deny_and_lessons_paths_in_effect_now(self, tmp_path):
-        """Same shape as the skills dir, one parameter over (#390): the
-        defaults for `deny_path` and `lessons_path` were module constants
-        bound at DEFINITION, so a caller that left them out told the model
-        where the owner's real files were, whatever config home was in
-        effect. Resolved at call time they follow the tmp home instead."""
-        from aish.cli import usage_context
+    def test_the_prompt_names_no_config_path_so_none_can_be_stale(self, tmp_path):
+        """#381 and #390: paths bound at import told an isolated suite (and the
+        verify harness) where the OWNER's corpus and lists were. The usage
+        notes that named them are gone, and the composed terminal prompt names
+        no config path at all — the one way it cannot name the wrong one."""
+        from aish.agent import compose_system_content, environment_context, surface_slot
         from aish.paths import DEFAULT_CONFIG_HOME, config_home
 
-        text = usage_context(False, tmp_path, tmp_path, tmp_path)
-        assert str(config_home() / "deny.txt") in text
-        assert str(config_home() / "lessons.md") in text
-        assert str(DEFAULT_CONFIG_HOME / "deny.txt") not in text
-        assert str(DEFAULT_CONFIG_HOME / "lessons.md") not in text
+        context = f"{surface_slot('cli')}\n\n{environment_context(str(tmp_path))}"
+        text = compose_system_content(context, str(tmp_path), index="")
+        for path in (DEFAULT_CONFIG_HOME, config_home(), skills_module.GLOBAL_SKILLS_DIR):
+            assert str(path) not in text
 
-    def test_asks_for_unicode_maths_imperatively_with_an_example(self, tmp_path):
+    def test_asks_for_unicode_maths_with_an_example(self):
         """#391: the terminal prints an answer's markdown as typed, so a model's
         LaTeX reaches the owner raw. The web renders LaTeX and says nothing
-        about maths (tests/test_server.py pins that); the terminal's own block
-        asks for Unicode — as MUST plus an example, since capability phrasing
-        in these prompts is ignored."""
-        from aish.cli import usage_context
+        about maths (tests/test_server.py pins that); the terminal's render of
+        the core asks for Unicode, imperatively and with an example."""
+        from aish.agent import system_prompt
 
-        text = usage_context(False, tmp_path, tmp_path, tmp_path)
-        line = next(part for part in text.split("\n- ") if part.startswith("MATHS"))
-        assert "MUST" in line
-        assert "Unicode" in line
+        text = system_prompt(surface="cli")
+        line = next(part for part in text.split("\n\n") if "maths" in part)
+        assert "Write maths in plain Unicode" in line
         assert "∠TBP₁ = 90° − 10° = 80°" in line
         assert "h/sin(45°)" in line
-        assert "\\frac{h}{\\sin(45^\\circ)}" in line  # the shape it must NOT write
+        assert "cannot typeset LaTeX" in line
 
     def test_grounds_identity_as_local_ollama(self):
         # The identity section itself (usage_context carries only the SLOT).
@@ -1616,13 +1592,17 @@ def test_lessons_surface_in_memory_index_not_bulk_context(tmp_path, monkeypatch)
     assert "ps aux -m" in index
 
 
-def test_darwin_note_has_ps_guidance():
+def test_darwin_note_names_bsd_and_read_docs():
+    """The BSD trap list (ps --sort, sed -i '', date -d) left the core with
+    H3 (#444): it rode every call for the tasks that run a command. What stays
+    is the userland family and the tool that checks a flag; a usage error now
+    draws its own read_docs note on the failed result."""
     import sys
 
     from aish.agent import system_prompt
 
     if sys.platform == "darwin":
-        assert "ps aux -r" in system_prompt() or "ps aux -m" in system_prompt()
+        assert "This Mac has BSD userland: when unsure of a flag, read_docs(" in system_prompt()
 
 
 class TestLiveTimer:
@@ -2012,18 +1992,26 @@ class TestLaunchResume:
         effect NOW: conftest points AISH_CONFIG_HOME at a tmp dir, and that
         is where all three must resolve."""
         from aish import cli
+        from aish.agent import Agent
         from aish.paths import DEFAULT_CONFIG_HOME, config_home
 
+        # Observed where the launch HANDS them over — the approver gets the two
+        # lists, the agent the lessons file (the usage notes that used to echo
+        # all three are gone, H3 #444).
         seen: dict = {}
-        real_usage_context = cli.usage_context
+        real_make_approver = cli.make_approver
+        real_init = Agent.__init__
 
-        def record(vi, allow_path, state_dir, config_path, deny_path, lessons_path, **kw):
-            seen.update(allow=allow_path, deny=deny_path, lessons=lessons_path)
-            return real_usage_context(
-                vi, allow_path, state_dir, config_path, deny_path, lessons_path, **kw
-            )
+        def record_approver(ask_all, allow_path, logref, deny_path, *a, **kw):
+            seen.update(allow=allow_path, deny=deny_path)
+            return real_make_approver(ask_all, allow_path, logref, deny_path, *a, **kw)
 
-        monkeypatch.setattr(cli, "usage_context", record)
+        def record_agent(agent, *a, **kw):
+            seen["lessons"] = kw.get("lessons_path")
+            real_init(agent, *a, **kw)
+
+        monkeypatch.setattr(cli, "make_approver", record_approver)
+        monkeypatch.setattr(Agent, "__init__", record_agent)
         self.launch(monkeypatch, tmp_path, [], name_the_lists=False)
 
         home = config_home()

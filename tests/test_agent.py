@@ -2521,8 +2521,9 @@ class TestStepLimitAndLoops:
         # And the standing rule, not only the moment it is being stopped.
         from aish.agent import SYSTEM_PROMPT_TEMPLATE
 
-        assert "THE SOURCE THE USER NAMED IS THE SOURCE" in SYSTEM_PROMPT_TEMPLATE
-        assert "another site's prices as if" in SYSTEM_PROMPT_TEMPLATE
+        prompt = " ".join(SYSTEM_PROMPT_TEMPLATE.split())
+        assert "The source the user named is the source" in prompt
+        assert "never substitute another source silently" in prompt
 
     def test_loop_stops_after_five_dead_retries(self, monkeypatch):
         self._docs(monkeypatch, lambda c, topic=None: "same docs")
@@ -3066,7 +3067,10 @@ class TestSkillGate:
 
         for surface in (SKILL_GATE_REFUSAL, PRELOAD_REMINDER, SYSTEM_PROMPT_TEMPLATE):
             assert "why it does not apply" not in surface  # no invitation to justify
+        for surface in (SKILL_GATE_REFUSAL, PRELOAD_REMINDER):
             assert "did or did not use" in surface  # the silence order
+        # The core's own wording of the same silence order (H3, #444).
+        assert "without narrating the retrieval" in " ".join(SYSTEM_PROMPT_TEMPLATE.split())
 
     def test_gate_resets_per_task(self, tmp_path):
         self._write_big_skill(tmp_path)
@@ -3466,7 +3470,10 @@ class TestScratchWorkspace:
         agent, chat = self._agent(tmp_path)
         assert agent.scratch_dir.is_dir()
         assert "aish-scratch-" in agent.scratch_dir.name
-        assert "SCRATCH WORKSPACE" in agent.messages[0]["content"]
+        system = agent.messages[0]["content"]
+        assert "your scratch directory (writes there are auto-approved" in system
+        # The per-chat path rides the reminder, never the cached system message.
+        assert str(agent.scratch_dir) not in system
         chat.responses = [model_says("ok")]
         agent.run_task("hi")
         reminder = next(
@@ -15931,7 +15938,9 @@ class TestIdentityFollowsTheModel:
     on Google's cloud, privacy warning included."""
 
     def _base(self):
-        return f"About aish (you):\n{agent_module.IDENTITY_SLOT}\n- more lines"
+        # The shape the entry points build: a surface declaration and their
+        # own context. The identity slot itself lives in the core (§1).
+        return f"{agent_module.surface_slot('web')}\n\n- more lines"
 
     def test_the_first_task_names_the_model_actually_serving(self):
         agent, chat = make_agent([model_says("hi")], context=self._base())
@@ -16206,7 +16215,11 @@ class TestKeywordsAreEnglish:
             schemas[tool]["parameters"]["properties"]["keywords"]["description"]
             for tool in ("remember", "create_skill")
         ]
-        for text in (*descs, SYSTEM_PROMPT_TEMPLATE, LEARN_PROMPT):
+        # The core no longer teaches keyword-writing at all (H3, #444): the
+        # order rides the two tools whose parameter it is, and the core must
+        # not contradict it.
+        assert "every language the user types" not in SYSTEM_PROMPT_TEMPLATE
+        for text in (*descs, LEARN_PROMPT):
             assert "every language the user types" not in text
             flat = " ".join(text.split())
             assert "MUST write them in English" in flat or "MUST write in English" in flat
