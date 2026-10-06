@@ -101,6 +101,22 @@ class TestANoteIsARow:
         assert rows[0]["source"] == "answer_check"
         assert rows[0]["role"] == "user"
 
+    def test_the_ask_ends_by_forbidding_any_mention_of_itself(self, tmp_path, monkeypatch):
+        """JIT (H3, #444): the core's "never mention the note in the rewrite"
+        also rides the ask itself, as its last line — deliberately in both."""
+        from aish.agent import ANSWER_CHECK_UNSAID, SYSTEM_PROMPT_TEMPLATE
+
+        agent, chat, log, live = wired(
+            tmp_path,
+            [model_says("Want me to check more?"),
+             model_says("Want me to check more?\n[Yes](aish-reply://yes)")],
+            monkeypatch, rule_texts=(CHIPS_RULE,),
+        )
+        run(agent, log, "anything new?")
+        sent = [m for m in chat.snapshots[1] if m.get("role") == "user"][-1]["content"]
+        assert unwrapped(sent).endswith(ANSWER_CHECK_UNSAID + "]")
+        assert "never mention the note in the rewrite" in " ".join(SYSTEM_PROMPT_TEMPLATE.split())
+
     def test_replay_draws_the_same_row_in_the_same_place(self, tmp_path, monkeypatch):
         agent, _, log, live = wired(
             tmp_path,

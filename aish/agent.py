@@ -344,6 +344,12 @@ ANSWER_WITHHELD = (
 
 # Same fact, different cause: the draft was held for the rules and he wrote
 # again before it was released. His messages follow this note.
+# JIT (H3, #444): the core's "never mention the note in the rewrite" (§3) is
+# also the last line of every answer-check ask — the moment it applies. Small
+# local models answered the note itself ("Sure, here are the buttons!"); the
+# draft keeps the sentence in both places on purpose.
+ANSWER_CHECK_UNSAID = "Never mention this note in the rewrite."
+
 ANSWER_WITHHELD_FOR_MESSAGES = (
     "The user has not seen that answer — they sent the messages below while "
     "you were writing it, so it was withheld. Give the complete answer again, "
@@ -5633,7 +5639,10 @@ class Agent:
                     )
                     # Marked as aish's own words (#171), or replay renders the
                     # harness's question as a blue bubble the owner never typed.
-                    ask = unmet + ("\n" + ANSWER_WITHHELD if withheld else "")
+                    ask = (
+                        unmet + ("\n" + ANSWER_WITHHELD if withheld else "")
+                        + "\n" + ANSWER_CHECK_UNSAID
+                    )
                     self._append(
                         {"role": "user", "content": AISH_NOTE + ask + "]"}, source="answer_check"
                     )
