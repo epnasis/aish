@@ -13051,6 +13051,140 @@ class TestThePayloadPredicateReadsTheValue:
         assert reached == []
 
 
+class TestAFetchLeavesItsFragmentBehind:
+    """Session 20261005-155302: the page offered `https://mtm-sa.com.pl/o-nas/`,
+    the model composed `/o-nas/#krs` from a menu label, and the owner got a card
+    saying the address "carries a query". A fetch never needs the fragment, so
+    it is dropped before the gate AND the fetch — one string, gated as sent —
+    and the composed address is the offered one."""
+
+    PAGE = "https://mtm-sa.com.pl"
+    OFFERED = "https://mtm-sa.com.pl/o-nas/"
+
+    def _site(self, monkeypatch, links):
+        import aish.agent as agent_module
+
+        fetched: list[str] = []
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None, **_kw: (
+                fetched.append(url),
+                f"{agent_module.web.UNTRUSTED_NOTE}[{url}]\n- O nas → {links}\n- KRS",
+            )[1],
+        )
+        return fetched
+
+    def _run(self, monkeypatch, turns, links=OFFERED, **kw):
+        fetched = self._site(monkeypatch, links)
+        asked: list = []
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [model_says(tool_calls=calls) for calls in turns] + [model_says("done")],
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or True,
+            step_log=steps.append,
+            **kw,
+        )
+        agent._approved_hosts.clear()
+        agent.run_task("mtm-sa.com.pl - zrob research tej domeny")
+        return agent, fetched, asked, steps
+
+    def test_the_session_that_filed_it_draws_no_card(self, monkeypatch):
+        _agent, fetched, asked, steps = self._run(
+            monkeypatch,
+            [
+                [tool_call("read_url", url=self.PAGE)],
+                [tool_call("read_url", url=self.OFFERED + "#krs", topic="KRS")],
+            ],
+        )
+        assert asked == []
+        assert fetched == [self.PAGE, self.OFFERED]
+        # The trace still records the call as the model emitted it.
+        calls = [s for s in steps if s.get("kind") == "call"]
+        assert calls[-1]["args"]["url"] == self.OFFERED + "#krs"
+
+    def test_the_parallel_path_fetches_without_the_fragment_too(self, monkeypatch):
+        _agent, fetched, asked, _steps = self._run(
+            monkeypatch,
+            [
+                [tool_call("read_url", url=self.PAGE)],
+                [
+                    tool_call("read_url", url=self.OFFERED + "#krs"),
+                    tool_call("read_url", url=self.OFFERED + "#zarzad"),
+                ],
+            ],
+        )
+        assert asked == []
+        assert fetched == [self.PAGE, self.OFFERED, self.OFFERED]
+
+    def test_a_link_offered_with_a_fragment_excuses_its_stripped_fetch(self, monkeypatch):
+        agent, fetched, asked, _steps = self._run(
+            monkeypatch,
+            [
+                [tool_call("read_url", url=self.PAGE)],
+                [tool_call("read_url", url=self.OFFERED + "#krs")],
+            ],
+            links=self.OFFERED + "#krs",
+        )
+        assert asked == []
+        assert fetched == [self.PAGE, self.OFFERED]
+        # Both forms are held: `browse` keeps fragments and matches the original.
+        assert {self.OFFERED, self.OFFERED + "#krs"} <= agent._offered_links
+
+    def test_the_stripped_echo_of_the_request_is_not_an_offer(self, monkeypatch):
+        """The header echoes what was FETCHED, which is the stripped address —
+        aish's words, not the page's, exactly like the unstripped echo."""
+        agent, _fetched, _asked, _steps = self._run(
+            monkeypatch,
+            [[tool_call("read_url", url="https://other.example/a#b")]],
+            links="https://other.example/next",
+        )
+        assert not agent._url_was_offered("https://other.example/a")
+
+    def test_stripping_frees_nothing_the_address_still_carries(self, monkeypatch):
+        """Only the fragment goes: a composed query at a host nobody vouched
+        still draws the card it always drew."""
+        _agent, fetched, asked, _steps = self._run(
+            monkeypatch,
+            [
+                [tool_call("read_url", url=self.PAGE)],
+                [tool_call("read_url", url=self.OFFERED + "?d=his+invoice#krs")],
+            ],
+        )
+        assert asked and "carries a query, and" in asked[0]
+        assert fetched[-1] == self.OFFERED + "?d=his+invoice"
+
+    def test_browse_keeps_its_fragment_and_its_card(self):
+        """A hash-routed app needs the fragment, and Chrome hands it to the
+        page's script — so `browse` is not stripped and the arm still fires."""
+        import aish.agent as agent_module
+
+        assert agent_module._fetched_args("browse", {"url": "https://x.example/#/a"}) == {
+            "url": "https://x.example/#/a"
+        }
+        agent, _ = make_agent([])
+        agent._tainted = True
+        agent._approved_hosts.clear()
+        shown: list = []
+        agent.approve_tool = lambda n, a, p=None: shown.append(p) or True
+        agent._egress_gate("browse", {"url": "https://drop.example/app#his-total"})
+        assert shown and "carries a #fragment" in shown[0]
+
+    @pytest.mark.parametrize(
+        "name,args",
+        [
+            # A local file may have `#` in its name; only http(s) is touched.
+            ("read_pdf", {"source": "/tmp/report#2.pdf"}),
+            ("show_image", {"source": "~/pics/a#b.png"}),
+            # Not a fetch: the query goes to the search engine whole.
+            ("web_search", {"query": "https://drop.example/x#data"}),
+        ],
+    )
+    def test_what_is_not_an_http_fetch_is_left_alone(self, name, args):
+        import aish.agent as agent_module
+
+        assert agent_module._fetched_args(name, args) is args
+
+
 class TestTheEgressCardSaysWhatALineChecked:
     """The headline failure of #341, and an L8 violation: the card said "wants
     to send something" wherever it fired — a cause no line of code established
@@ -13084,6 +13218,16 @@ class TestTheEgressCardSaysWhatALineChecked:
             (
                 "https://drop.example/q?ask=his+invoice+total",
                 "carries a query, and you have never agreed to send anything there",
+            ),
+            # Reached by `browse`, which keeps fragments: the card names the
+            # part that is actually there, never "a query" for a fragment.
+            (
+                "https://drop.example/app#his-invoice-total",
+                "carries a #fragment, and you have never agreed to send anything there",
+            ),
+            (
+                "https://drop.example/q?ask=x#y",
+                "carries a query and a #fragment, and you have never agreed",
             ),
             (
                 "https://" + "z" * 50 + ".example/x",

@@ -1916,6 +1916,49 @@ EGRESS_TOOLS = frozenset(
     {"web_search", "read_url", "show_image", "read_pdf", "read_media", "browse"}
 )
 
+# The tools that FETCH an address rather than show it to a page, and the argument
+# that holds it. A `#fragment` is never part of an HTTP request, but these tools
+# can still hand the address to something that reads it — `read_url` escalates a
+# 403 into real Chrome, where the page's own script sees `location.hash`, and
+# `read_media` gives it to an ffmpeg subprocess. Reading needs no fragment, so it
+# is dropped before the egress gate and the fetch alike: what is gated is exactly
+# what leaves, and a composed `/o-nas/#krs` is the offered `/o-nas/`.
+#
+# `browse` is deliberately absent: a hash-routed app keeps its location in the
+# fragment, so there it is load-bearing, it reaches the page's script, and the
+# destination arm keeps gating it.
+FRAGMENT_FREE_FETCHES = {
+    "read_url": "url",
+    "show_image": "source",
+    "read_pdf": "source",
+    "read_media": "source",
+}
+
+
+def _without_fragment(url: str) -> str:
+    """An http(s) address with its `#fragment` dropped; anything else as given.
+
+    A local path may legitimately contain `#`, and an address that does not parse
+    is left for the gate to refuse on its own terms."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    if parts.scheme.lower() not in ("http", "https") or "#" not in url:
+        return url
+    return urllib.parse.urlunsplit(parts._replace(fragment=""))
+
+
+def _fetched_args(name: str, args: dict) -> dict:
+    """The arguments the call is GATED and RUN with: the model's own, minus a
+    fragment it could not have needed (see FRAGMENT_FREE_FETCHES). A copy, so
+    the `call` record keeps the call as the model emitted it."""
+    key = FRAGMENT_FREE_FETCHES.get(name)
+    if key is None or not isinstance(args.get(key), str):
+        return args
+    stripped = _without_fragment(args[key])
+    return args if stripped == args[key] else {**args, key: stripped}
+
 # A tainted ATTENDED turn gates only an egress that CARRIES something. A plain
 # address is how reading the web works, and gating it would put a card in front
 # of ordinary research — the "gating everything makes the system unusable"
@@ -7765,7 +7808,8 @@ class Agent:
             futures = {}
             ids = {}
             for i in concurrent:
-                label, thunk = self._read_only_call(*calls[i])
+                name, args = calls[i]
+                label, thunk = self._read_only_call(name, _fetched_args(name, args))
                 self._note(label)
                 # Minted HERE rather than at collection (#297). The work below
                 # runs on a worker thread, and anything IT records — a role
@@ -7997,10 +8041,16 @@ class Agent:
             _, banner, said = result.partition(web.UNTRUSTED_NOTE)
             if not banner:
                 return
+        # The fetch dropped the requested address's fragment (`_fetched_args`),
+        # so the header echoes the stripped form; both are aish's, not the page's.
         requested = str(args.get("url") or args.get("source") or "").strip()
-        self._offered_links.update(
-            url for url in provenance.urls_in(said) if url != requested
-        )
+        echoed = {requested, _without_fragment(requested)}
+        for url in provenance.urls_in(said):
+            if url in echoed:
+                continue
+            # Both forms: `browse` keeps fragments, and the fetch tools gate the
+            # stripped address — which carries less than the link the page wrote.
+            self._offered_links.update({url, _without_fragment(url)})
 
     def _note_taint(self, name: str, args: dict) -> None:
         """Did this call bring in content from outside? Then the task is
@@ -10036,7 +10086,7 @@ class Agent:
             url not in self._approved_mail_links
         ):
             return True
-        return self._egress_novel_hosts(name, args) is not None
+        return self._egress_novel_hosts(name, _fetched_args(name, args)) is not None
 
     def _egress_hosts(self, name: str, args: dict) -> set[str]:
         """The hosts an outbound call would reach — a LOOKUP, for keying the
@@ -10503,9 +10553,20 @@ class Agent:
                 f"carries a {run}-character run in its path, and you have never "
                 "agreed to send anything there"
             )
-        if parts.query or parts.fragment:
+        # The sentence names the part the line found: on a fragment-only address
+        # "carries a query" stated something false.
+        carried_part = " and ".join(
+            part
+            for part, present in (
+                ("a query", parts.query),
+                ("a #fragment", parts.fragment),
+            )
+            if present
+        )
+        if carried_part:
             return (
-                "carries a query, and you have never agreed to send anything there"
+                f"carries {carried_part}, and you have never agreed to send "
+                "anything there"
             )
         return ""
 
@@ -13710,6 +13771,9 @@ class Agent:
             refusal = self._mail_link_gate(name, args)
             if refusal is not None:
                 return refusal
+            # After the mail-link gate, which matches the link exactly as the
+            # mail wrote it; before the egress gate, which must see what leaves.
+            args = _fetched_args(name, args)
             refusal = self._egress_gate(name, args)
             if refusal is not None:
                 return refusal
