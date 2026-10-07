@@ -19,9 +19,11 @@ wedges a small model into a stall-out).
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import tempfile
+import urllib.parse
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
@@ -289,7 +291,7 @@ NAMED_UNVERIFIED_LINKS = "unverified_links"
 NAMED_UNVERIFIED_PRICES = "unverified_prices"
 
 NAMED_ANSWER_CHECKS = {
-    NAMED_UNVERIFIED_LINKS: "a link you never opened",
+    NAMED_UNVERIFIED_LINKS: "a link you never opened (addresses on your own network excepted)",
     NAMED_UNVERIFIED_PRICES: "a price that is not on the page you linked it to",
 }
 
@@ -365,7 +367,10 @@ KIND_SPECS: dict[str, dict] = {
 _CITE_TOKEN_RE = re.compile(r"\((?P<inner>[^)\s]+)\)")
 
 _MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
-_MD_LINK_RE = re.compile(r"\]\(\s*(https?://[^)\s]+)|(?<![\w(])(https?://[^\s)<>\]]+)")
+# A backtick ends a bare link: it is not a URL character (RFC 3986), and a model
+# writes addresses as `inline code`, so without it every such link was graded
+# with the backtick on — never equal to the URL that was actually opened.
+_MD_LINK_RE = re.compile(r"\]\(\s*(https?://[^)\s]+)|(?<![\w(])(https?://[^\s)<>\]`]+)")
 
 # `answer_from: material` — the obligation names THE MATERIAL THE OWNER HANDED
 # OVER, not a tool. The reader is resolved at bind time, so one rule covers
@@ -2386,6 +2391,42 @@ def normalise_url(url: str) -> str:
     return url.rstrip("/").casefold()
 
 
+# Names that can only ever mean a machine on the owner's own network: mDNS
+# (RFC 6762), the home-network zone (RFC 8375), ICANN's private-use TLD, and the
+# `.lan` that home routers hand out. None can be registered publicly.
+_LOCAL_SUFFIXES = (".local", ".home.arpa", ".internal", ".lan")
+_NUMERIC_HOST = re.compile(r"0x[0-9a-f]+|\d+")
+
+
+def is_local_link(url: str) -> bool:
+    """A link to the owner's own network or this machine — one read_url refuses
+    by construction (web._require_public), so "open it first" cannot be obeyed.
+
+    Decided from the address AS WRITTEN, never by resolving it: a verify check
+    must not touch the network, and an mDNS name for a box that is switched off
+    would stall it. So a public-looking name that happens to resolve to the LAN
+    is not recognised and is still checked. A link to a public host is never
+    exempt, which is what keeps an invented URL from passing.
+    """
+    try:
+        host = (urllib.parse.urlsplit(str(url or "").strip()).hostname or "").rstrip(".")
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if _NUMERIC_HOST.fullmatch(host):
+        # `http://2899908878/` is an IPv4 address in inet_aton's legacy form —
+        # public, and read_url opens it — not a single-label LAN name.
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host == "localhost" or "." not in host or host.endswith(_LOCAL_SUFFIXES)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return not ip.is_global
+
+
 def urls_acted_on(calls: Iterable[dict]) -> set[str]:
     """URLs a SUCCESSFUL call in these records actually acted on, normalised.
 
@@ -2437,6 +2478,10 @@ def _verify_links(
     what was fetched. This is the general form of the rule the owner kept
     writing per topic — the failure was never "visas", it was handing over URLs
     that were never opened, and that happens in every subject there is.
+
+    Except a link to his own network (`is_local_link`): read_url refuses those
+    by design, so the ask could only send the model at a guaranteed refusal,
+    and it dropped mi's address from a correct answer to get past (2026-10-05).
     """
     answer = evidence.looked_at(obligation.get("in", WHERE_ANYWHERE))
     linked: list[str] = []
@@ -2447,7 +2492,9 @@ def _verify_links(
     if not linked:
         return None  # nothing claimed, nothing to verify
     acted = _acted_on(evidence)
-    unverified = [url for url in linked if normalise_url(url) not in acted]
+    unverified = [
+        url for url in linked if normalise_url(url) not in acted and not is_local_link(url)
+    ]
     if not unverified:
         return None
     shown = ", ".join(unverified[:3]) + ("…" if len(unverified) > 3 else "")
@@ -2516,7 +2563,7 @@ def _verify_prices(
     pages = _pages_read(evidence)
     # A link that was never opened is the OTHER rule's finding. Saying it twice
     # sends the model two asks for one mistake, and the link rule's is the one
-    # that can be acted on.
+    # that can be acted on. A local link (is_local_link) is checked by neither.
     unverified = [
         (url, written)
         for url, amount, written in claimed

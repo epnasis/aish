@@ -2374,6 +2374,37 @@ class TestLinksYouDidNotOpen:
         )
         assert "example.com/gone" in failure.ask
 
+    def test_a_link_to_the_owners_own_network_is_not_required_to_be_opened(self):
+        """read_url refuses these by design, so the ask could only send the
+        model at a guaranteed refusal. On 2026-10-05 that is what it did with
+        mi's address, and the model dropped the address to get the answer out."""
+        for url in ("http://10.99.0.2:8080", "http://192.168.10.20:8787/", "http://127.0.0.1:5000",
+                    "http://localhost:8080/completion", "http://[::1]:9000/",
+                    "http://m5-pro-mini.local:11434", "http://haos.lan:8123",
+                    "http://router.home.arpa/", "http://svc.internal/", "http://mm:8787/"):
+            assert self._check(f"It runs [here]({url}).") == [], url
+
+    def test_a_public_host_is_still_checked_however_local_it_looks(self):
+        """The exemption is the address as WRITTEN. A public name that
+        mentions a local word is a public name, and an invented one must still
+        be refused — that is the rule's whole point."""
+        for url in ("https://local.example.com/x", "https://lan.example/x",
+                    "http://93.184.216.34/", "https://example.local.com/",
+                    # inet_aton's legacy forms: one is a public Google address
+                    # read_url would open, so a dotless NUMBER is never a LAN name.
+                    "http://2899908878/", "http://0x7f000001/"):
+            [failure] = self._check(f"See [{url}]({url}).")
+            assert failure.evidence["unverified"] == [url]
+
+    def test_a_link_in_inline_code_is_graded_without_its_backtick(self):
+        """Every LAN firing in the logs carried the closing backtick in the URL,
+        which no fetch ever has — so an opened link in `code` could not match."""
+        assert self._check(
+            "Docs: `https://example.com/guide`",
+            [{"tool": "read_url", "args": {"url": "https://example.com/guide"},
+              "status": "ok"}],
+        ) == []
+
     def test_seeing_a_url_in_a_search_RESULT_is_not_opening_it(self):
         """The distinction the whole check rests on. Quoting a URL out of a
         search snippet is precisely the move being stopped, and a snippet is

@@ -145,6 +145,12 @@ class TestChecksThreeStates:
         assert verdict.passed is False and "https://b.example/q" in verdict.evidence
         assert "1 of 2" in verdict.evidence
 
+    def test_a_link_on_the_owners_network_is_not_checked_and_says_so(self, tmp_path):
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, answer("mi serves at `http://10.99.0.2:8080`"), END])
+        verdict = replay_checks.links_from_evidence(replay_checks.load_run(log))
+        assert verdict.passed is True and "1 of them on the owner's network" in verdict.evidence
+
     def test_a_failed_fetch_does_not_count_as_opened(self, tmp_path):
         log = write_log(tmp_path / "s.jsonl", [
             TASK, call(1, "read_url", {"url": "https://a.example/p"}),

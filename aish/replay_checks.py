@@ -299,6 +299,7 @@ def links_from_evidence(run: RunRecord) -> Verdict:
     total = 0
     unopened: list[tuple[int, str]] = []
     undated: list[int] = []
+    local = 0  # the owner's own network: read_url refuses it, so not checked
     for task in answered:
         links = answer_urls(task.answer or "")
         total += len(links)
@@ -309,11 +310,17 @@ def links_from_evidence(run: RunRecord) -> Verdict:
             continue
         cutoff = task.answer_at or 0
         opened = rules.urls_acted_on(call for call, when in run.ran if when <= cutoff)
-        unopened += [(task.index, u) for u in links if rules.normalise_url(u) not in opened]
+        local += sum(rules.is_local_link(u) for u in links)
+        unopened += [(task.index, u) for u in links
+                     if rules.normalise_url(u) not in opened and not rules.is_local_link(u)]
     if not unopened and undated:
         return Verdict(name, None, f"answers of tasks {undated} carry links but no "
                                    "timestamp, so when they were written is unknown")
     if not unopened:
+        if local:
+            return Verdict(name, True, f"{total} links in {len(answered)} answers, {local} of "
+                                       "them on the owner's network and not checked, the "
+                                       "rest opened")
         return Verdict(name, True, f"{total} links in {len(answered)} answers, all opened")
     task_index, url = unopened[0]
     return Verdict(name, False, _short(f"{len(unopened)} of {total} links never opened; "
