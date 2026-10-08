@@ -122,6 +122,36 @@ check("a space in the file name survives", () => {
   assert.strictEqual(out.node.textContent, "faktura 09-2026.pdf");
 });
 
+check("a parenthesised copy number in the file name survives", () => {
+  // The session that filed this: a store that never overwrites named the second
+  // copy "Bilet - WH64426282 (2).pdf", the path was cut at its first ")", and
+  // the answer showed a dead link with ".pdf)" trailing after it.
+  const ticket = "/Users/x/.local/state/aish/tool-downloads/Bilet - WH64426282 (2).pdf";
+  const out = render(`[Pobierz bilet](${ticket})`);
+  assert.strictEqual(out.kind, "file");
+  assert.strictEqual(out.node.textContent, "Bilet - WH64426282 (2).pdf");
+});
+
+check("an unpaired open paren in the name still matches", () => {
+  const out = render(`[x](/a/b (draft.pdf)`);
+  assert.strictEqual(out.kind, "file");
+  assert.strictEqual(out.node.textContent, "b (draft.pdf");
+});
+
+check("pathological parens do not backtrack", () => {
+  const t0 = Date.now();
+  for (const s of ["(".repeat(5000), "(a)".repeat(20000), "((a)".repeat(5000), "(a(".repeat(5000)]) {
+    `[x](/p${s}`.match(box.INLINE_RE);
+    `[x](/p${s} .pdf)`.match(box.INLINE_RE);
+  }
+  assert(Date.now() - t0 < 500, `took ${Date.now() - t0} ms`);
+});
+
+check("text after the link is not swallowed into its path", () => {
+  const m = `[a.pdf](/x/a.pdf) (see above)`.match(box.INLINE_RE);
+  assert.strictEqual(m[12], "/x/a.pdf");
+});
+
 check("a file:// link the model invented renders as the file", () => {
   // Seven of these in one real answer, every one inert. A chat log is never
   // rewritten, so the old answer has to render as the files it named.

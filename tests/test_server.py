@@ -6479,10 +6479,8 @@ class TestPdfPreview:
 
 class TestDownloadEndpoint:
     """GET /download (#218 follow-up): looking at an attachment is not having
-    it. The rule this pins is the narrow one the endpoint states — you may save
-    what aish can already SHOW you (an image, a PDF) and what you ATTACHED
-    (anything in the uploads dir) — because the roots also contain a whole
-    project tree that no chat has ever displayed.
+    it. Any file inside the roots — or in a store aish fetched into for him —
+    may be saved, whatever its type; everything outside them stays 403.
     """
 
     def test_saves_an_attachment_under_its_own_name(self, app_env):
@@ -6555,18 +6553,41 @@ class TestDownloadEndpoint:
         with client:
             assert client.get("/download", params={"path": str(secret)}).status_code == 403
 
-    def test_refuses_a_file_no_chat_ever_displayed(self, app_env):
-        """The roots hold a project tree. `/file` has always answered 415 for a
-        .env or a .py, and a download must not be the looser door beside it."""
+    def test_any_file_type_inside_the_roots_is_saved(self, app_env):
+        """The owner widened the rule: type no longer decides, the roots do. A
+        .docx in a project folder is a file he may want on his phone."""
         client, _ = make_client(app_env, [])
         with client:
-            secret = Path(app_env["cwd"]) / ".env"
-            secret.write_text("API_KEY=hunter2", encoding="utf-8")
-            refused = client.get("/download", params={"path": str(secret)})
-            assert refused.status_code == 415
-            source = Path(app_env["cwd"]) / "main.py"
-            source.write_text("print('hi')", encoding="utf-8")
-            assert client.get("/download", params={"path": str(source)}).status_code == 415
+            doc = Path(app_env["cwd"]) / "umowa.docx"
+            doc.write_bytes(b"PK\x03\x04docx")
+            got = client.get("/download", params={"path": str(doc)})
+            assert got.status_code == 200
+            assert got.content == b"PK\x03\x04docx"
+            assert got.headers["content-type"] == "application/octet-stream"
+            assert got.headers["x-content-type-options"] == "nosniff"
+
+    def test_a_tool_download_is_saved_with_no_session_open(
+        self, app_env, tmp_path_factory
+    ):
+        """The session that filed this: a ticket PDF fetched by tuta_attachments
+        into tool-downloads, named "Bilet - X (2).pdf". The store is named
+        outright, not only through an open session's roots, so the chip in a
+        chat reopened after a restart still hands the file over."""
+        app_env["cwd"] = str(tmp_path_factory.mktemp("project"))
+        store = Path(app_env["state_dir"]) / "tool-downloads"
+        store.mkdir(parents=True)
+        ticket = store / "Bilet - WH64426282 (2).pdf"
+        ticket.write_bytes(b"%PDF-ticket")
+        attachment = store / "rozklad.xlsx"
+        attachment.write_bytes(b"PK\x03\x04xlsx")
+        client, _ = make_client(app_env, [])
+        with client:
+            client.app.state.server.sessions.clear()
+            got = client.get("/download", params={"path": str(ticket)})
+            assert got.status_code == 200
+            assert got.content == b"%PDF-ticket"
+            other = client.get("/download", params={"path": str(attachment)})
+            assert other.status_code == 200
 
     def test_scoped_and_gated_exactly_like_the_image_endpoint(
         self, app_env, tmp_path, tmp_path_factory

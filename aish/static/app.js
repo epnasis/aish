@@ -6097,7 +6097,10 @@ const INLINE_RE = new RegExp(
   // are all read as themselves first, and appended rather than inserted so no
   // existing branch's group number moves. Spaces are allowed inside the
   // parentheses on purpose: the site names the file, and "faktura 09-2026.pdf"
-  // is what a real invoice is called.
+  // is what a real invoice is called. So are balanced parentheses, one level
+  // deep: a store that never overwrites names the second copy "bilet (2).pdf",
+  // and stopping at its first ")" left a dead link and a stray ".pdf)" on screen.
+  // A lone "(" is still accepted, as it was before, so "b (draft.pdf" matches.
   //
   // `file://` is accepted and thrown away. aish never writes it — the tool
   // hands the model the exact line — but a model reaching for "a link to a file
@@ -6105,7 +6108,7 @@ const INLINE_RE = new RegExp(
   // in one real answer, every one of them inert, because a page cannot link to
   // the filesystem. A chat log is never rewritten, so that answer has to keep
   // rendering for as long as the chat exists — and now it renders as the files.
-  "|\\[([^\\]\\n]+)\\]\\((?:file:\\/\\/)?(\\/[^)\\n]+)\\)" +
+  "|\\[([^\\]\\n]+)\\]\\((?:file:\\/\\/)?(\\/(?:[^()\\n]|\\([^()\\n]*\\)|\\()+)\\)" +
   // A control ON THE BROWSED PAGE (#364), shown in place: [label](press:cN·…).
   // The model presses these; to the owner they render as a read-only chip so
   // the reading shows what is pressable, the way the real page does. Appended
