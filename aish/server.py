@@ -6164,23 +6164,19 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         Looking at an attachment is not having it: a photo could be pinched and
         a PDF paged through, and there was still no way to get either off the
         chat and into Files. This is the same act as `/file` — bytes leaving the
-        machine over plain HTTP — so it is the same gate, plus a rule about
-        WHICH files, which is deliberately narrow and states itself:
+        machine over plain HTTP — so it is the same gate: the token, an absolute
+        path, symlinks resolved before containment, and `_workspace_roots()`.
 
-        **you may save what aish can already show you, what you attached, and
-        what you sent aish to fetch.**
-
-        Images and PDFs are the first (`/file` renders one inline, `/pdf/page`
-        renders the other page by page), the uploads dir is the second — the
-        owner put those there, and an attachment nobody can open is the gap this
-        closes. The browse downloads folder is the third: he asked aish to press
-        the button that produced that file, through his own signed-in session,
-        and a document only aish can open is aish keeping it. Everything else in
-        the roots stays unreachable here: a source tree full of files aish has
-        never shown anyone is not what "download the attachment" means.
+        Within that scope ANY file may be saved, whatever its type. It used to
+        be narrower — images and PDFs, uploads, browse downloads — and that
+        narrowness is what left a mail attachment aish fetched with a tool
+        (`tool-downloads/`) as a chip that refused to hand over anything but a
+        PDF. The owner chose the wider door: he holds the token, and the roots
+        are his own machine's folders. What stays unreachable is everything
+        OUTSIDE the roots, exactly as on `/file`.
 
         `Content-Disposition: attachment` + `nosniff` on every response, so a
-        `.html` in uploads is saved rather than rendered as same-origin markup.
+        `.html` is saved rather than rendered as same-origin markup.
         """
         if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
@@ -6197,20 +6193,10 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         # the same predicate `/frame` displays it by, so the two endpoints
         # cannot come to disagree about what a frame is.
         if path is None or not (
-            self._is_frame(path) or files.within_roots(self._workspace_roots(), path)
+            self._is_frame(path) or files.within_roots(self._download_roots(), path)
         ):
             return JSONResponse({"error": "outside the trusted folders"}, status_code=403)
         suffix = path.suffix.lower()
-        shown = suffix in IMAGE_TYPES or suffix == ".pdf"
-        # And what aish FETCHED for him, through his own session, because he
-        # asked it to (#237). A browse click that lands an invoice is the same
-        # relationship as an upload with the direction reversed: he chose the
-        # file, it is his, and a document he cannot open is aish keeping it.
-        mine = files.contains(self.uploads_dir, path) or files.contains(
-            browser.downloads_dir(), path
-        )
-        if not shown and not mine:
-            return JSONResponse({"error": "not a downloadable file"}, status_code=415)
         if not path.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
         media_type = IMAGE_TYPES.get(suffix) or (
@@ -6235,6 +6221,18 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    def _download_roots(self) -> list[Path]:
+        """Where `/download` may save from: the display boundary plus the two
+        stores aish fetches INTO for him — browse downloads and tool downloads
+        (mail attachments, Drive exports). Named here and not only through an
+        open session's roots, because a chip in a chat reopened after a restart
+        has no live session behind it, and the file is still his."""
+        return [
+            *self._workspace_roots(),
+            browser.downloads_dir().resolve(),
+            (Path(self.state_dir) / "tool-downloads").resolve(),
+        ]
 
     def _workspace_roots(self) -> list[Path]:
         """The ONE boundary a local image may be displayed from — used by both
