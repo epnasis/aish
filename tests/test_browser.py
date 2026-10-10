@@ -1938,6 +1938,44 @@ class TestEveryActionActuallyRuns:
             self._run(owner, monkeypatch, "drag", path=[[1, 1, 0], [2, 2, 0]])
         assert page.did[-1] == ("up",)
 
+    def test_every_frame_carries_the_views_refusals_none_is_drained(
+        self, monkeypatch
+    ):
+        """Draining into one frame lost the report whenever that frame was
+        never sent — the watcher drops a frame whose picture did not change."""
+        owner = self._owner()
+        refused = {"method": "POST", "where": "https://x.pl/l", "status": 400, "said": "no"}
+        owner.view_failures = [refused]
+        assert self._run(owner, monkeypatch, "scroll", dy=100).failures == [refused]
+        assert self._run(owner, monkeypatch, "scroll", dy=100).failures == [refused]
+
+    def test_a_reply_still_being_read_makes_it_into_the_frame(self, monkeypatch):
+        """A page that already looks finished gets no follow-up frame, so a
+        refusal whose body is mid-read at the shutter must be waited for."""
+        import asyncio
+
+        owner = self._owner()
+        refused = {"method": "POST", "where": "https://x.pl/l", "status": 400, "said": "late"}
+        owner.view_failures_pending = 1
+
+        async def lands_late(page_job):
+            async def arrive():
+                await asyncio.sleep(0.2)
+                owner.view_failures = [refused]
+                owner.view_failures_pending = 0
+
+            task = asyncio.ensure_future(arrive())
+            frame = await page_job(owner)
+            await task
+            return frame
+
+        def drive(job, timeout):
+            return asyncio.new_event_loop().run_until_complete(lands_late(job))
+
+        monkeypatch.setattr(browser, "_submit", drive)
+        monkeypatch.setattr(browser, "_settle", lambda page: asyncio.sleep(0))
+        assert browser.view_act("scroll", dy=100).failures == [refused]
+
     def test_the_detail_capture_really_reaches_chrome(self, monkeypatch):
         """EXECUTED, not read. `view_detail` goes straight to CDP because
         Playwright's screenshot() has no per-clip scale — a path nothing else
@@ -5013,3 +5051,115 @@ class TestDragSteps:
         total = sum(wait for _, _, wait in steps)
         assert total == pytest.approx(browser.VIEW_DRAG_MAX_SECONDS)
         assert steps[1][2] == pytest.approx(steps[2][2])
+
+
+class TestWhatTheSiteRefused:
+    """A site's on-page error can say less than its reply: booksy.com renders
+    "Request malformed - Hcaptcha" and nothing else, and the frame could not
+    show what the server actually answered. These are shown to him alone."""
+
+    def test_the_report_keeps_the_path_and_drops_the_query(self):
+        report = browser.failure_report(
+            "POST", "https://api.x.pl/v2/login?token=abc&email=a%40b.pl#f", 400,
+            '{"error":  "hcaptcha",\n "code": "expired"}', (),
+        )
+        assert report == {
+            "method": "POST", "where": "https://api.x.pl/v2/login", "status": 400,
+            "said": '{"error": "hcaptcha", "code": "expired"}',
+        }
+
+    def test_the_reply_is_cut_to_an_excerpt(self):
+        report = browser.failure_report("GET", "https://x.pl/", 500, "a" * 5000, ())
+        assert len(report["said"]) == browser.VIEW_FAILURE_EXCERPT
+
+    @pytest.mark.parametrize(
+        "body",
+        ['{"password": "S3cr3t!pw"}', "password=S3cr3t%21pw&x=1",
+         " " * 400 + "S3cr3t!pw"],  # past the excerpt still counts
+    )
+    def test_a_reply_that_echoes_his_password_is_withheld(self, body):
+        from aish import signin
+
+        report = browser.failure_report(
+            "POST", "https://x.pl/login", 400, body, signin.secret_needles("S3cr3t!pw")
+        )
+        assert report["said"] == browser.WITHHELD_REPLY
+
+    def _watched(self, owner):
+        handlers = {}
+
+        class Page:
+            url = "https://x.pl/sign-in"
+
+            def on(self, event, handler):
+                handlers[event] = handler
+
+        browser._watch_failures(owner, Page())
+        return handlers["response"]
+
+    def _response(self, status, kind, body="nope"):
+        request = type("Q", (), {"method": "POST", "resource_type": kind})()
+
+        class Response:
+            url = "https://x.pl/api?secret=1"
+
+            async def text(self):
+                return body
+
+        response = Response()
+        response.status = status
+        response.request = request
+        return response
+
+    def test_only_refused_page_requests_are_collected(self):
+        import asyncio
+
+        owner = browser._Owner()
+        owner.view_failures = []
+
+        async def drive():
+            seen = self._watched(owner)
+            seen(self._response(400, "xhr"))
+            seen(self._response(404, "image"))     # a missing picture says nothing
+            seen(self._response(200, "fetch"))     # not a refusal
+            seen(self._response(503, "document"))
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+        asyncio.new_event_loop().run_until_complete(drive())
+        assert [(f["status"], f["where"]) for f in owner.view_failures] == [
+            (400, "https://x.pl/api"), (503, "https://x.pl/api"),
+        ]
+
+    def test_keeping_evicts_another_sites_refusals_before_the_pages_own(self):
+        """Five tracker failures must not push the login's out unseen."""
+        login = {"method": "POST", "where": "https://api.x.pl/login", "status": 400, "said": ""}
+        noise = [
+            {"method": "GET", "where": f"https://t{i}.tracker.com/p", "status": 404, "said": ""}
+            for i in range(browser.VIEW_FAILURES_KEPT)
+        ]
+        kept = browser.keep_failures([login, *noise], "https://x.pl/sign-in")
+        assert len(kept) == browser.VIEW_FAILURES_KEPT
+        assert kept[0] is login
+        own = [dict(login, status=s) for s in range(400, 400 + browser.VIEW_FAILURES_KEPT + 2)]
+        assert browser.keep_failures(own, "https://x.pl/")[-1]["status"] == own[-1]["status"]
+
+    def test_a_typed_password_is_withheld_even_after_the_sign_in_looked_done(self):
+        """`pending_credential` is cleared when a sign-in LOOKS done, and an
+        interstitial looks done — the login's error can arrive after that."""
+        import asyncio
+
+        from aish import signin
+
+        owner = browser._Owner()
+        owner.view_failures = []
+        owner.pending_credential = {}
+        owner.view_secret_needles = list(signin.secret_needles("hunter2"))
+
+        async def drive():
+            self._watched(owner)(self._response(400, "xhr", body='{"pw":"hunter2"}'))
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+        asyncio.new_event_loop().run_until_complete(drive())
+        assert owner.view_failures[0]["said"] == browser.WITHHELD_REPLY

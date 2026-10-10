@@ -10455,6 +10455,79 @@ class TestBrowserView:
         for log in Path(app_env["state_dir"]).glob("session-*.jsonl"):
             assert "hunter2-secret" not in log.read_text()
 
+    def test_what_the_site_refused_reaches_his_screen_and_no_log(
+        self, app_env, monkeypatch
+    ):
+        """The site's reply is shown so he can read what it really said, and it
+        goes nowhere else: not the session log, not a trace."""
+        from aish import browser as browser_module
+
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        refused = {
+            "method": "POST", "where": "https://x.pl/login", "status": 400,
+            "said": "hcaptcha-reply-marker",
+        }
+        monkeypatch.setattr(
+            browser_module, "view_act",
+            lambda action, **kw: browser_module.Frame(
+                jpeg=b"\xff\xd8", url="https://x.pl/", title="T", failures=[refused]
+            ),
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "click", "x": 1, "y": 1})
+            event = recv_until(ws, "browser_view")
+        assert event["failures"] == [refused]
+        for log in Path(app_env["state_dir"]).rglob("*"):
+            if log.is_file():
+                assert b"hcaptcha-reply-marker" not in log.read_bytes(), log
+
+    def test_a_new_refusal_is_sent_even_when_the_picture_did_not_change(
+        self, app_env, monkeypatch
+    ):
+        """The booksy case: a login that fails the same way again repaints
+        identical pixels, and the watcher dropped identical frames — refusal
+        and all."""
+        from aish import browser as browser_module
+
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        self._fast_watch(monkeypatch)
+        monkeypatch.setattr(
+            browser_module, "view_activity",
+            lambda: {"gen": 5, "nav": 0, "quiet": 9_999, "ready": True},
+        )
+        refused = {"method": "POST", "where": "https://x.pl/l", "status": 400, "said": "x"}
+        monkeypatch.setattr(
+            browser_module, "view_settled_frame",
+            lambda: browser_module.Frame(
+                jpeg=b"\xff\xd8jpeg", url="https://x.pl/after", title="After",
+                gen=5, failures=[refused],
+            ),
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "click", "x": 5, "y": 5})
+            frames = [recv_until(ws, "browser_view")]
+            time.sleep(0.5)   # the watcher polls every 5 ms here
+            # A close ends the exchange either way, so a missing frame FAILS
+            # below instead of hanging the suite on a receive.
+            ws.send_json({"type": "browser_view", "action": "close"})
+            while (event := recv_until(ws, "browser_view"))["action"] != "closed":
+                frames.append(event)
+        assert "failures" not in frames[0]
+        assert [f.get("failures") for f in frames[1:]] == [[refused]]
+        assert frames[1]["jpeg"] == frames[0]["jpeg"]
+
+    def test_an_ordinary_frame_carries_no_failures_key(self, app_env, monkeypatch):
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "click", "x": 1, "y": 1})
+            assert "failures" not in recv_until(ws, "browser_view")
+
     def test_closing_reports_what_it_WATCHED_and_asks_nothing(
         self, app_env, monkeypatch
     ):

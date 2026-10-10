@@ -2020,6 +2020,16 @@ class _Owner:
         # about it — a leaked count, a long-poll that never finishes — leaves
         # the number too high and the behaviour exactly as it was.
         self.view_requests = 0
+        # What the site REFUSED on the view page, for his eyes only (see
+        # `failure_report`): the most recent few for the life of the view,
+        # sent with EVERY frame rather than drained into one, so a frame that
+        # is never sent cannot take a report down with it.
+        self.view_failures: list[dict] = []
+        self.view_failures_pending = 0   # replies still being read
+        # Every spelling of every password typed into this view, for the life
+        # of the view. Kept apart from `pending_credential`, which is cleared
+        # the moment a sign-in looks done — an interstitial looks done too.
+        self.view_secret_needles: list[str] = []
         # The pages the MODEL is driving (#237, #272), ONE PER CHAT. Each is a
         # page on the same context, never the view's: the view is the owner's
         # hands at a phone viewport, and the two must not fight over one page.
@@ -4607,6 +4617,9 @@ class Frame:
     # `already_finished` for exactly what that claims — it is an observation
     # made at the shutter, never a promise about the future.
     settled: bool = False
+    # Requests the site answered with an error since the last frame — see
+    # `failure_report`. Shown to the owner and nowhere else.
+    failures: list[dict] = field(default_factory=list)
 
 
 async def _frame(
@@ -4628,6 +4641,12 @@ async def _frame(
         await _settle(page)
     else:
         await page.wait_for_timeout(FIRST_FRAME_MS)
+    # A refusal whose reply is still being read belongs in THIS frame: a page
+    # that already looks finished gets no follow-up frame to carry it later.
+    waited = 0.0
+    while owner.view_failures_pending > 0 and waited < VIEW_FAILURE_WAIT_S:
+        await asyncio.sleep(0.05)
+        waited += 0.05
     size = page.viewport_size or {"width": VIEW_WIDTH, "height": VIEW_HEIGHT}
     # BEFORE the screenshot, deliberately. A mutation landing between the two is
     # then counted as "not in the picture", which costs a redundant capture that
@@ -4656,6 +4675,7 @@ async def _frame(
         settled=already_finished(
             activity=gen, requests_in_flight=owner.view_requests
         ),
+        failures=list(owner.view_failures),
     )
     # Recorded per NAVIGATION, not per frame: a frame is sent for every tap,
     # scroll and keystroke, and rewriting the file on each of those would spend
@@ -4761,6 +4781,97 @@ def _count_requests(owner: _Owner, page: Any) -> None:
     page.on("requestfailed", ended)
 
 
+# A refusal a site renders as a sentence on the page often says less than the
+# response it came from: booksy.com shows "Request malformed - Hcaptcha" and
+# nothing else, and the frame cannot show what the server actually answered.
+VIEW_FAILURE_KINDS = frozenset({"document", "xhr", "fetch"})
+VIEW_FAILURE_EXCERPT = 300
+VIEW_FAILURES_KEPT = 5
+VIEW_FAILURE_WAIT_S = 1.5
+WITHHELD_REPLY = "[withheld: the reply contained what you typed]"
+
+
+def failure_report(
+    method: str, url: str, status: int, body: str, needles: tuple[str, ...]
+) -> dict:
+    """One refused request, as he may see it: method, where, status, and the
+    opening of what the site said back.
+
+    **The query is dropped**, because it is where tokens and identifiers ride.
+    **A reply that carries the password he typed is withheld whole**, in any
+    spelling `signin.carries_secret` knows: a site that echoes the form back in
+    its error would otherwise put the password on the phone's screen."""
+    parsed = urllib.parse.urlsplit(url)
+    where = f"{parsed.scheme}://{parsed.netloc}{parsed.path}" if parsed.netloc else ""
+    said = " ".join(body.split())[:VIEW_FAILURE_EXCERPT]
+    if needles and (
+        signin_mod.carries_secret(said, needles) or signin_mod.carries_secret(body, needles)
+    ):
+        said = WITHHELD_REPLY
+    return {"method": method, "where": where, "status": int(status), "said": said}
+
+
+def _site(host: str) -> str:
+    """The last two labels — enough to tell booksy.com's own API from a
+    tracker, which is all the keep policy asks."""
+    return ".".join(host.split(".")[-2:])
+
+
+def keep_failures(failures: list[dict], page_url: str) -> list[dict]:
+    """At most `VIEW_FAILURES_KEPT`, evicting ANOTHER site's refusals first.
+
+    A tracker that 4xxs is noise beside the page's own login call, and keeping
+    simply the newest let five analytics failures push the one that mattered
+    out before he ever saw it."""
+    kept = list(failures)
+    own = _site(host_of(page_url) or "")
+    while len(kept) > VIEW_FAILURES_KEPT:
+        foreign = [
+            i for i, f in enumerate(kept)
+            if _site(host_of(f["where"]) or "") != own
+        ]
+        del kept[foreign[0] if foreign else 0]
+    return kept
+
+
+def _watch_failures(owner: _Owner, page: Any) -> None:
+    """Collect what the site refused on the view page, for the next frame.
+
+    Observed from outside the page, as `_count_requests` is: nothing is
+    injected, so the page cannot tell. Documents, fetch and XHR from any
+    origin — an image or a font that 404s says nothing he can act on — with
+    the page's own site kept in preference to others (`keep_failures`)."""
+
+    async def note(response: Any) -> None:
+        try:
+            request = response.request
+            try:
+                body = await response.text()
+            except Exception:  # noqa: BLE001 — the status alone is still evidence
+                body = ""
+            report = failure_report(
+                request.method, response.url, response.status, body,
+                tuple(owner.view_secret_needles),
+            )
+            owner.view_failures = keep_failures(
+                [*owner.view_failures, report], page.url or ""
+            )
+        except Exception:  # noqa: BLE001 — a reply aish cannot read says nothing
+            pass
+        finally:
+            owner.view_failures_pending = max(0, owner.view_failures_pending - 1)
+
+    def seen(response: Any) -> None:
+        with contextlib.suppress(Exception):
+            if response.status >= 400 and (
+                response.request.resource_type in VIEW_FAILURE_KINDS
+            ):
+                owner.view_failures_pending += 1
+                asyncio.ensure_future(note(response))
+
+    page.on("response", seen)
+
+
 async def _note_dialog(owner: _Owner, dialog: Any) -> None:
     owner.notice = f"the page said: {dialog.message[:200]}"
     try:
@@ -4808,6 +4919,10 @@ async def _open_view(
     # would simply hang. Refuse it and say so.
     page.on("filechooser", lambda c: asyncio.ensure_future(_refuse_upload(owner, c)))
     _count_requests(owner, page)
+    owner.view_failures = []
+    owner.view_failures_pending = 0
+    owner.view_secret_needles = []
+    _watch_failures(owner, page)
     owner.view = page
     owner.view_hosts = set()
     owner.view_touched = time.monotonic()
@@ -5030,6 +5145,7 @@ def view_act(action: str, **kwargs: Any) -> Frame:
                 # after-the-password test false and silently losing the
                 # question.
                 if kwargs.get("secret"):
+                    owner.view_secret_needles.extend(signin_mod.secret_needles(text))
                     # A password went into THIS host — remember which, so the
                     # sign-in question can name it, here and now.
                     owner.pending_signin = host_of(page.url)
@@ -7359,6 +7475,8 @@ def view_close() -> list[str]:
         owner.view_hosts = set()
         owner.password_hosts = set()
         owner.signed_in_here = set()
+        owner.view_failures = []
+        owner.view_secret_needles = []
         await owner.close_now()  # next read relaunches off-screen at full size
         return watched
 
