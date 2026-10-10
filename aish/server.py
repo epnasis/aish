@@ -5200,6 +5200,7 @@ class WebServer:
                 remember=bool(message.get("remember")),
                 submit=bool(message.get("submit")),
                 dy=message.get("dy", 600),
+                path=message.get("path"),
                 key=message.get("key", "Enter"),
                 url=message.get("url", ""),
                 width=message.get("width"),

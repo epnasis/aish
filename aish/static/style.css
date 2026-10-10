@@ -3756,6 +3756,9 @@ body.console-open #backdrop { z-index: 63; }
      move in, with no scroll and a stale drag left behind. Measured: pointerdown,
      ONE pointermove, then silence. */
   -webkit-user-drag: none;
+  /* Hold-to-drag is a gesture here; iOS would otherwise answer a held finger
+     on an image with its Save/Copy callout and swallow the drag. */
+  -webkit-touch-callout: none;
   user-select: none;
   will-change: transform;
 }
@@ -3780,6 +3783,12 @@ body.console-open #backdrop { z-index: 63; }
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
 }
 .bv-tap.ping { animation: bv-ping 0.45s ease-out forwards; }
+/* Carrying something: a larger ring that follows the finger until release. */
+.bv-tap.grab {
+  width: 30px; height: 30px; margin: -15px 0 0 -15px;
+  background: rgba(10, 132, 255, 0.35);
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px rgba(10, 132, 255, 0.8);
+}
 @keyframes bv-ping {
   from { transform: scale(0.5); opacity: 0.95; }
   to   { transform: scale(2.2); opacity: 0; }

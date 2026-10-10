@@ -15024,6 +15024,11 @@ let bvBusy = false;
 // than showing an enlarged blur.
 const BV_MAX_ZOOM = 4;
 const BV_TAP_SLOP = 8;           // px of movement still counted as a tap
+// Press and HOLD, then drag: iOS's own drag-and-drop gesture. A plain swipe
+// already scrolls (or pans, zoomed in), so a drag on the PAGE — a slider, a
+// drag-the-piece check — needs a gesture of its own, and holding still first
+// is the one a phone user already knows means "pick this up".
+const BV_GRAB_MS = 400;
 // A tap waits this long to see whether it is half of a double-tap. The old
 // code sent the click immediately, arguing a 300ms wait "would make the view
 // feel broken" and a stray click "costs a frame, not data". Both halves were
@@ -15041,6 +15046,49 @@ const bvPointers = new Map();
 let bvDragFrom = null;           // {x, y, zoom, moved} while one finger is down
 let bvPinchFrom = null;          // {dist, scale} while two are
 let bvLastTapAt = 0;
+
+/** The finger held still long enough: from here on it is carrying something
+ *  across the page, and every point it passes is recorded in PAGE pixels with
+ *  the time it got there, so the replay moves at his pace. */
+function bvGrab() {
+  const drag = bvDragFrom;
+  if (!drag || drag.moved > BV_TAP_SLOP || bvPointers.size !== 1) return;
+  const point = browserViewPoint($("bv-frame"), drag.x, drag.y);
+  if (!point) return;
+  drag.grab = { t0: performance.now(), path: [[point.x, point.y, 0]] };
+  bvMarkGrab(drag.x, drag.y);
+  $("bv-status").textContent = "dragging — let go where it belongs";
+}
+
+function bvGrabPoint(grab, clientX, clientY) {
+  const point = browserViewPoint($("bv-frame"), clientX, clientY);
+  if (!point) return;   // off the page: nothing to aim at there
+  grab.path.push([point.x, point.y, Math.round(performance.now() - grab.t0)]);
+}
+
+/** The marker FOLLOWS the finger while it carries something — the page itself
+ *  only moves when the frame after the release arrives. */
+function bvMarkGrab(clientX, clientY) {
+  const mark = $("bv-tap");
+  if (!mark) return;
+  const stage = $("bv-frame").parentElement.getBoundingClientRect();
+  mark.classList.remove("ping");
+  mark.classList.add("grab");
+  mark.style.left = `${clientX - stage.left}px`;
+  mark.style.top = `${clientY - stage.top}px`;
+  mark.hidden = false;
+}
+
+function bvDropGrab() {
+  const mark = $("bv-tap");
+  if (mark) { mark.classList.remove("grab"); mark.hidden = true; }
+}
+
+/** A drag that ends WITHOUT being sent must not leave the status claiming one. */
+function bvAbandonGrab() {
+  bvDropGrab();
+  $("bv-status").textContent = "drag cancelled — nothing was sent";
+}
 
 /** Keep the picture over the stage: at 1x it is centred and immovable, and
  *  zoomed in it can never be panned so far that the page is off screen. The
@@ -15105,7 +15153,7 @@ function bvMarkTap(clientX, clientY) {
   mark.style.left = `${clientX - stage.left}px`;
   mark.style.top = `${clientY - stage.top}px`;
   mark.hidden = false;
-  mark.classList.remove("ping");
+  mark.classList.remove("ping", "grab");
   void mark.offsetWidth;               // restart the animation
   mark.classList.add("ping");
 }
@@ -15844,11 +15892,14 @@ function wireBrowserView() {
     if (bvPointers.size === 2) {
       const [a, b] = [...bvPointers.values()];
       bvPinchFrom = { dist: Math.hypot(a.x - b.x, a.y - b.y), scale: bvZoom.scale };
+      if (bvDragFrom) clearTimeout(bvDragFrom.grabTimer);   // a pinch, not a hold
+      if (bvDragFrom && bvDragFrom.grab) bvAbandonGrab();
       bvDragFrom = null;
     } else if (bvPointers.size === 1) {
       bvDragFrom = {
         x: e.clientX, y: e.clientY, lastY: e.clientY,
         zoom: { ...bvZoom }, moved: 0,
+        grabTimer: bvMayTouchPage() ? setTimeout(bvGrab, BV_GRAB_MS) : null,
       };
     }
   });
@@ -15867,10 +15918,17 @@ function wireBrowserView() {
       return;
     }
     if (!bvDragFrom) return;
+    if (bvDragFrom.grab) {
+      bvGrabPoint(bvDragFrom.grab, e.clientX, e.clientY);
+      bvMarkGrab(e.clientX, e.clientY);
+      e.preventDefault();
+      return;   // carrying something: neither a pan nor a scroll
+    }
     const dx = e.clientX - bvDragFrom.x;
     const dy = e.clientY - bvDragFrom.y;
     bvDragFrom.lastY = e.clientY;
     bvDragFrom.moved = Math.max(bvDragFrom.moved, Math.hypot(dx, dy));
+    if (bvDragFrom.moved > BV_TAP_SLOP) clearTimeout(bvDragFrom.grabTimer);
     if (bvZoom.scale > 1) {
       bvZoom = { scale: bvZoom.scale, x: bvDragFrom.zoom.x + dx, y: bvDragFrom.zoom.y + dy };
       bvPaint(false);
@@ -15889,6 +15947,20 @@ function wireBrowserView() {
     // carries. Scheduled, not sent: the settle timer is what keeps a gesture
     // in several parts from costing a trip per part.
     if (bvPointers.size === 0) bvScheduleDetail();
+    if (wasDrag) clearTimeout(wasDrag.grabTimer);
+    if (wasDrag && wasDrag.grab) {
+      bvDropGrab();
+      if (pinching) return;
+      // The release is where he let go, and it is the point that matters
+      // most — recorded from the release itself, since moves get coalesced.
+      if (Number.isFinite(e.clientX)) bvGrabPoint(wasDrag.grab, e.clientX, e.clientY);
+      const path = wasDrag.grab.path;
+      if (path.length < 2) path.push([path[0][0], path[0][1],
+        Math.round(performance.now() - wasDrag.grab.t0)]);   // a hold with no move
+      $("bv-status").textContent = bvSend({ action: "drag", path })
+        ? "dragging…" : "busy — drag again";
+      return;
+    }
     if (pinching || !wasDrag) return;
     if (wasDrag.moved > BV_TAP_SLOP) {
       // A SWIPE SCROLLS THE PAGE. At 1x there is nothing to pan — the frame
@@ -15952,11 +16024,15 @@ function wireBrowserView() {
   // and is deliberately avoided here — on an <img> it silently breaks drags,
   // the same lesson the photo viewer records.)
   window.addEventListener("pointerup", (e) => {
-    if (bvDragFrom && !$("browser-sheet").hidden) release(e);
+    // Only a finger this gesture is TRACKING: another one lifting elsewhere on
+    // the sheet would otherwise end a drag that is still being carried.
+    if (bvDragFrom && bvPointers.has(e.pointerId) && !$("browser-sheet").hidden) release(e);
   });
   img.addEventListener("pointercancel", (e) => {
     bvPointers.delete(e.pointerId);
     bvPinchFrom = null;
+    if (bvDragFrom) clearTimeout(bvDragFrom.grabTimer);
+    if (bvDragFrom && bvDragFrom.grab) bvAbandonGrab();   // cancelled: nothing is sent
     if (!bvPointers.size) bvDragFrom = null;
   });
   // Focusing the address selects ALL of it, as every browser does — so the
