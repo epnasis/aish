@@ -5065,7 +5065,7 @@ class TestWhatTheSiteRefused:
         )
         assert report == {
             "method": "POST", "where": "https://api.x.pl/v2/login", "status": 400,
-            "said": '{"error": "hcaptcha", "code": "expired"}',
+            "said": '{"error": "hcaptcha", "code": "expired"}', "sent": "",
         }
 
     def test_the_reply_is_cut_to_an_excerpt(self):
@@ -5097,8 +5097,11 @@ class TestWhatTheSiteRefused:
         browser._watch_failures(owner, Page())
         return handlers["response"]
 
-    def _response(self, status, kind, body="nope"):
-        request = type("Q", (), {"method": "POST", "resource_type": kind})()
+    def _response(self, status, kind, body="nope", sent='{"a": "bc"}'):
+        request = type("Q", (), {
+            "method": "POST", "resource_type": kind, "post_data": sent,
+            "headers": {"content-type": "application/json"},
+        })()
 
         class Response:
             url = "https://x.pl/api?secret=1"
@@ -5130,6 +5133,58 @@ class TestWhatTheSiteRefused:
         assert [(f["status"], f["where"]) for f in owner.view_failures] == [
             (400, "https://x.pl/api"), (503, "https://x.pl/api"),
         ]
+
+    def test_the_shape_names_fields_and_sizes_and_never_a_value(self):
+        from aish import signin
+
+        body = (
+            '{"email": "me@x.pl", "password": "hunter2", "hcaptcha": "P1_' + "e" * 2000
+            + '", "remember": true, "meta": {"v": 2, "tags": ["a", "b"]}}'
+        )
+        shape = browser.request_shape(
+            body, "application/json", signin.secret_needles("hunter2")
+        )
+        assert shape == (
+            "{email: text(7), password: [typed password], hcaptcha: text(2003), "
+            "remember: bool, meta: {v: number, tags: list(2)}}"
+        )
+        for value in ("me@x.pl", "hunter2", "P1_"):
+            assert value not in shape
+
+    def test_an_empty_or_missing_field_is_visible_as_such(self):
+        assert browser.request_shape(
+            "user=a&h-captcha-response=&pw=x",
+            "application/x-www-form-urlencoded", (),
+        ) == "{user: text(1), h-captcha-response: text(0), pw: text(1)}"
+        assert browser.request_shape(None, "", ()) == "no body"
+        assert browser.request_shape("\x00\x01", "multipart/form-data", ()) == (
+            "2 bytes of multipart/form-data"
+        )
+
+    def test_without_needles_a_password_still_shows_only_its_length(self):
+        """Construction, not filtering: a password typed into a field the view
+        did not recognise has no needle, and still no value can appear."""
+        shape = browser.request_shape('{"pw": "hunter2"}', "application/json", ())
+        assert shape == "{pw: text(7)}"
+
+    def test_a_long_shape_is_cut(self):
+        body = "{" + ", ".join(f'"k{i}": 1' for i in range(500)) + "}"
+        shape = browser.request_shape(body, "application/json", ())
+        assert len(shape) == browser.VIEW_SHAPE_MAX and shape.endswith("…")
+
+    def test_the_report_carries_what_the_request_sent(self):
+        import asyncio
+
+        owner = browser._Owner()
+        owner.view_failures = []
+
+        async def drive():
+            self._watched(owner)(self._response(400, "xhr"))
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+        asyncio.new_event_loop().run_until_complete(drive())
+        assert owner.view_failures[0]["sent"] == "{a: text(2)}"
 
     def test_keeping_evicts_another_sites_refusals_before_the_pages_own(self):
         """Five tracker failures must not push the login's out unseen."""

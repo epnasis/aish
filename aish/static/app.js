@@ -15609,7 +15609,8 @@ function bvShowFailures(failures) {
   for (const f of failures) {
     const line = document.createElement("div");
     line.className = "bv-failure";
-    const head = `${f.method} ${f.where} → ${f.status}`;
+    const head = `${f.method} ${f.where} → ${f.status}` +
+      (f.sent ? ` · sent ${f.sent}` : "");
     line.textContent = f.said ? `${head} · ${f.said}` : `${head} · (no reply text)`;
     box.appendChild(line);
   }
