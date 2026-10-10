@@ -54,6 +54,13 @@ function render(failures) {
 }
 
 {
+  const box = render([{ method: "POST", where: "https://x.pl/l", status: 400,
+    said: "no", sent: "{hcaptcha: text(0)}" }]);
+  ok("what the request carried is shown beside the reply",
+    box.children[0].textContent === "POST https://x.pl/l → 400 · sent {hcaptcha: text(0)} · no");
+}
+
+{
   const box = render([{ method: "GET", where: "https://x.pl/", status: 503, said: "" }]);
   ok("an empty reply says so rather than showing nothing",
     box.children[0].textContent.endsWith("(no reply text)"));

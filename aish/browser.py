@@ -4791,8 +4791,65 @@ VIEW_FAILURE_WAIT_S = 1.5
 WITHHELD_REPLY = "[withheld: the reply contained what you typed]"
 
 
+VIEW_SHAPE_MAX = 400
+TYPED_PASSWORD = "[typed password]"
+
+
+def request_shape(body: str | None, content_type: str, needles: tuple[str, ...]) -> str:
+    """What a request CARRIED, as field names with the kind and length of
+    each value — never a value. Built that way rather than filtered, so there
+    is no value in the output for a redaction to miss: the needles only decide
+    that a field holding a typed password does not even show its length.
+
+    Answers the one question a site's "request malformed" cannot: was the
+    field there, empty, or full?"""
+    if not body:
+        return "no body"
+
+    def secret(text: str) -> bool:
+        return bool(needles) and signin_mod.carries_secret(text, needles)
+
+    def kind(value: Any, depth: int) -> str:
+        if isinstance(value, str):
+            return TYPED_PASSWORD if secret(value) else f"text({len(value)})"
+        if isinstance(value, bool):
+            return "bool"
+        if isinstance(value, (int, float)):
+            return "number"
+        if value is None:
+            return "null"
+        if isinstance(value, list):
+            return f"list({len(value)})"
+        if isinstance(value, dict):
+            if depth >= 3:
+                return f"object({len(value)})"
+            return "{" + ", ".join(
+                f"{'[withheld]' if secret(str(k)) else k}: {kind(v, depth + 1)}"
+                for k, v in value.items()
+            ) + "}"
+        return type(value).__name__
+
+    shape = ""
+    if "json" in content_type or body.lstrip().startswith(("{", "[")):
+        try:
+            shape = kind(json.loads(body), 0)
+        except ValueError:
+            shape = ""
+    if not shape and "x-www-form-urlencoded" in content_type:
+        fields = urllib.parse.parse_qsl(body, keep_blank_values=True)
+        shape = "{" + ", ".join(
+            f"{'[withheld]' if secret(k) else k}: {kind(v, 1)}" for k, v in fields
+        ) + "}"
+    if not shape:
+        shape = f"{len(body)} bytes of {content_type or 'unknown type'}"
+    if len(shape) > VIEW_SHAPE_MAX:
+        shape = shape[: VIEW_SHAPE_MAX - 1] + "…"
+    return shape
+
+
 def failure_report(
-    method: str, url: str, status: int, body: str, needles: tuple[str, ...]
+    method: str, url: str, status: int, body: str, needles: tuple[str, ...],
+    sent: str = "",
 ) -> dict:
     """One refused request, as he may see it: method, where, status, and the
     opening of what the site said back.
@@ -4808,7 +4865,10 @@ def failure_report(
         signin_mod.carries_secret(said, needles) or signin_mod.carries_secret(body, needles)
     ):
         said = WITHHELD_REPLY
-    return {"method": method, "where": where, "status": int(status), "said": said}
+    return {
+        "method": method, "where": where, "status": int(status), "said": said,
+        "sent": sent,
+    }
 
 
 def _site(host: str) -> str:
@@ -4849,9 +4909,18 @@ def _watch_failures(owner: _Owner, page: Any) -> None:
                 body = await response.text()
             except Exception:  # noqa: BLE001 — the status alone is still evidence
                 body = ""
+            needles = tuple(owner.view_secret_needles)
+            try:
+                sent = request_shape(
+                    request.post_data,
+                    str((request.headers or {}).get("content-type", "")),
+                    needles,
+                )
+            except Exception:  # noqa: BLE001 — an unreadable body is said plainly
+                sent = "body could not be read"
             report = failure_report(
-                request.method, response.url, response.status, body,
-                tuple(owner.view_secret_needles),
+                request.method, response.url, response.status, body, needles,
+                sent=sent if request.method != "GET" else "",
             )
             owner.view_failures = keep_failures(
                 [*owner.view_failures, report], page.url or ""
