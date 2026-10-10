@@ -46,7 +46,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import itertools
 import json
+import math
 import os
 import re
 import threading
@@ -4528,6 +4530,55 @@ def view_size(width: object, height: object) -> tuple[int, int]:
     )
 
 
+# A drag is replayed after the finger lifts, inside one request, so it is
+# bounded: the points a phone samples in a few seconds, and a few seconds.
+VIEW_DRAG_MAX_POINTS = 400
+VIEW_DRAG_MAX_SECONDS = 6.0
+
+
+def drag_steps(path: object) -> list[tuple[float, float, float]]:
+    """The owner's drag as (x, y, wait-before-this-point in seconds).
+
+    The path is his own finger's, in page pixels, with the milliseconds at
+    which each point was sampled — so the replay moves at HIS pace, not at a
+    pace aish invented. Some widgets (a slider puzzle, a drag-to-sort list)
+    watch the movement and not just the endpoints; a teleport from start to
+    finish is not the gesture he made.
+
+    Arrives straight off a WebSocket, so anything malformed is refused rather
+    than guessed at: fewer than two points is not a drag. A path longer than
+    the bounds is thinned or time-compressed, never truncated — the END is
+    where he let go, and it must survive."""
+    if not isinstance(path, list) or len(path) < 2:
+        raise ValueError("a drag needs at least two points")
+    points: list[tuple[float, float, float]] = []
+    for item in path:
+        if (
+            not isinstance(item, (list, tuple))
+            or len(item) != 3
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in item)
+            or not all(math.isfinite(v) for v in item)
+        ):
+            raise ValueError("a drag point is [x, y, ms]")
+        x, y, ms = (float(v) for v in item)
+        # Time only runs forward. Allowing it back is what would let one wait
+        # escape the bound below, which is computed from the span.
+        if points and ms < points[-1][2]:
+            raise ValueError("a drag's times must not go backwards")
+        points.append((x, y, ms))
+    if len(points) > VIEW_DRAG_MAX_POINTS:
+        stride = len(points) / (VIEW_DRAG_MAX_POINTS - 1)
+        released = points[-1]
+        points = [points[int(i * stride)] for i in range(VIEW_DRAG_MAX_POINTS - 1)]
+        points.append(released)
+    total = max(0.0, (points[-1][2] - points[0][2]) / 1000)
+    squeeze = VIEW_DRAG_MAX_SECONDS / total if total > VIEW_DRAG_MAX_SECONDS else 1.0
+    steps = [(points[0][0], points[0][1], 0.0)]
+    for (_, _, before), (x, y, ms) in itertools.pairwise(points):
+        steps.append((x, y, max(0.0, (ms - before) / 1000) * squeeze))
+    return steps
+
+
 @dataclass
 class Frame:
     """One rendered look at the page the owner is driving.
@@ -5007,6 +5058,24 @@ def view_act(action: str, **kwargs: Any) -> Frame:
             await page.set_viewport_size({"width": rw, "height": rh})
         elif action == "scroll":
             await page.mouse.wheel(0, float(kwargs.get("dy", 600)))
+        elif action == "drag":
+            # Press, move, release — the one gesture a tap and a swipe cannot
+            # make, and what a slider or drag-the-piece check asks for. It is
+            # his hand relayed point for point; aish decides nothing about
+            # where it goes.
+            steps = drag_steps(kwargs.get("path"))
+            x, y, _ = steps[0]
+            await page.mouse.move(x, y)
+            await page.mouse.down()
+            try:
+                for x, y, wait in steps[1:]:
+                    if wait:
+                        await asyncio.sleep(wait)
+                    await page.mouse.move(x, y)
+            finally:
+                # Never leave the button held: a page that saw a down and no
+                # up treats every later tap as part of the same drag.
+                await page.mouse.up()
         elif action == "back":
             try:
                 await page.go_back(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)

@@ -10170,6 +10170,20 @@ class TestBrowserView:
                 b"\xff\xd8images"
             )
 
+    def test_a_drag_reaches_the_browser_with_its_whole_path(self, app_env, monkeypatch):
+        """A slider check is solved by dragging, and the sheet had no way to
+        send one (booksy.com's drag-the-letter check). The path is the
+        gesture, so it must arrive intact rather than as two endpoints."""
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        path = [[10, 20, 0], [40, 22, 80], [90, 25, 200]]
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "drag", "path": path})
+            recv_until(ws, "browser_view")
+        drags = [c for c in calls if c[0] == "drag"]
+        assert drags and drags[0][1]["path"] == path
+
     def test_a_finished_page_is_never_captured_a_second_time(self, app_env, monkeypatch):
         """The #223 inversion, and the reason this is cheaper than what it
         replaces. The old correction paid for a full second capture on EVERY

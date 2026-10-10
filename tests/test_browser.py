@@ -1808,6 +1808,15 @@ class TestEveryActionActuallyRuns:
             async def wheel(self, dx, dy):
                 self.page.did.append(("wheel", dy))
 
+            async def move(self, x, y):
+                self.page.did.append(("move", x, y))
+
+            async def down(self):
+                self.page.did.append(("down",))
+
+            async def up(self):
+                self.page.did.append(("up",))
+
         class _Keyboard:
             def __init__(self, page):
                 self.page = page
@@ -1885,6 +1894,7 @@ class TestEveryActionActuallyRuns:
             ("clear", {}),
             ("key", {"key": "Enter"}),
             ("scroll", {"dy": 400}),
+            ("drag", {"path": [[1, 2, 0], [3, 4, 0]]}),
             ("back", {}),
             ("refresh", {}),
             ("goto", {"url": "https://example.com/x"}),
@@ -1897,6 +1907,36 @@ class TestEveryActionActuallyRuns:
         frame = self._run(owner, monkeypatch, action, **kwargs)
         assert isinstance(frame, browser.Frame)
         assert owner.view.did, f"{action} did nothing to the page"
+
+    def test_a_drag_presses_moves_along_the_path_and_releases(self, monkeypatch):
+        """His gesture, in order: down at the start, every sampled point,
+        up at the end. A teleport between endpoints is not what a slider
+        check watches for."""
+        owner = self._owner()
+        self._run(
+            owner, monkeypatch, "drag",
+            path=[[10, 20, 0], [30, 21, 0], [60, 25, 0]],
+        )
+        mouse = [d for d in owner.view.did if d[0] in ("move", "down", "up")]
+        assert mouse == [
+            ("move", 10.0, 20.0), ("down",),
+            ("move", 30.0, 21.0), ("move", 60.0, 25.0), ("up",),
+        ]
+
+    def test_a_drag_never_leaves_the_button_held(self, monkeypatch):
+        """A down with no up makes every later tap part of the same drag."""
+        owner = self._owner()
+        page = owner.view
+
+        async def broken_move(x, y):
+            page.did.append(("move", x, y))
+            if len([d for d in page.did if d[0] == "move"]) > 1:
+                raise RuntimeError("target closed")
+
+        page.mouse.move = broken_move
+        with pytest.raises(RuntimeError):
+            self._run(owner, monkeypatch, "drag", path=[[1, 1, 0], [2, 2, 0]])
+        assert page.did[-1] == ("up",)
 
     def test_the_detail_capture_really_reaches_chrome(self, monkeypatch):
         """EXECUTED, not read. `view_detail` goes straight to CDP because
@@ -4940,3 +4980,36 @@ class TestTheBrowserSelfHealsADeadDriver:
         with pytest.raises(Exception, match="Executable"):
             asyncio.run(owner._open(tmp_path / "profile"))
         assert calls["launch"] == 1, "a non-driver error is not retried"
+
+
+class TestDragSteps:
+    """The owner's drag, validated off the WebSocket and bounded in time."""
+
+    def test_his_timing_is_kept(self):
+        steps = browser.drag_steps([[0, 0, 100], [5, 0, 150], [9, 1, 400]])
+        assert steps == [(0.0, 0.0, 0.0), (5.0, 0.0, 0.05), (9.0, 1.0, 0.25)]
+
+    @pytest.mark.parametrize(
+        "path",
+        [None, [], [[1, 2, 0]], [[1, 2]], [[1, 2, 0], "x"],
+         [[1, 2, 0], [float("nan"), 2, 5]], {"x": 1},
+         [["1", "2", "0"], [3, 4, 5]], [[True, 2, 0], [3, 4, 5]],
+         # Backwards time would let one step's wait escape the time bound.
+         [[0, 0, 0], [1, 1, 3.6e9], [2, 2, 100]]],
+    )
+    def test_a_malformed_path_is_refused(self, path):
+        with pytest.raises(ValueError):
+            browser.drag_steps(path)
+
+    def test_a_long_path_is_thinned_but_still_ends_where_he_let_go(self):
+        path = [[i, i, i] for i in range(browser.VIEW_DRAG_MAX_POINTS * 3)]
+        steps = browser.drag_steps(path)
+        assert len(steps) == browser.VIEW_DRAG_MAX_POINTS
+        assert steps[0][:2] == (0.0, 0.0)
+        assert steps[-1][:2] == (float(path[-1][0]), float(path[-1][1]))
+
+    def test_a_slow_drag_is_compressed_into_the_time_bound(self):
+        steps = browser.drag_steps([[0, 0, 0], [5, 5, 30_000], [9, 9, 60_000]])
+        total = sum(wait for _, _, wait in steps)
+        assert total == pytest.approx(browser.VIEW_DRAG_MAX_SECONDS)
+        assert steps[1][2] == pytest.approx(steps[2][2])

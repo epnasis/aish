@@ -263,8 +263,12 @@ you didn't ask for must never quietly pull your account data into a chat.
 recently — one row per site, so a run of searches doesn't bury everything else
 — and each row reopens in the profile it was opened in. The address bar takes
 **a search as readily as an address**: anything that isn't shaped like a URL is
-looked up, the way your own browser's does. `/browser forget <host>` stops
-treating a site as signed in and `/browser close` shuts it down.
+looked up, the way your own browser's does. On the phone, tap to click, swipe
+to scroll, and **press and hold, then drag** for anything the page wants
+dragged — a slider, or a "drag the piece into place" check at sign-in; your
+finger's path is replayed in the browser when you let go.
+`/browser forget <host>` stops treating a site as signed in and
+`/browser close` shuts it down.
 
 When aish is **driving** a page in a chat — pressing buttons, filling a form —
 `/watch` opens that same sheet as a **live window on the page it is on**, in
