@@ -838,6 +838,10 @@ So the deep end is fetched for the rectangle he is actually looking at. The clie
 
 The patch is positioned in **page coordinates inside the layer's untransformed box**, and the layer then carries the frame's own transform string — so the two can never diverge under zoom or pan, and there is one geometry rather than two. The layer is `pointer-events: none`, because the frame underneath owns the coordinate mapping and a tap must reach it. — `test_browser_view_detail.js`
 
+### `[BROWSER-VIEW-FAILURES]` — what the site refused, as text
+
+`bvShowFailures` renders the `failures` a frame carries (the site's own 4xx/5xx replies on the view page; why they exist and what is withheld is in `docs/browser.md`) under the status line. Every byte of `said` is the site's, so it is set through `textContent` and never markup: this is the one place site-authored text enters aish's origin, and the rule that the `<img>` is the whole rendering surface would otherwise end here. The server sends the view's recent refusals with every frame, so the client is a plain mirror and does NOT clear on navigation: a failed login's redirect is a navigation, and clearing there erased the one line that explained it. `tests/js/test_browser_view_failures.js` runs the shipped function with an `innerHTML` that throws.
+
 ### `[BROWSER-VIEW-COORDS]` — where a tap actually lands
 
 The `/browser <url>` sheet shows aish's own Chrome (running on the headless Mac) as a letterboxed `<img>` and turns a tap into a click at the same point on the real page. `browserViewPoint` owns that translation.

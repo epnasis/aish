@@ -3782,6 +3782,13 @@ body.console-open #backdrop { z-index: 63; }
   background: rgba(255, 255, 255, 0.85);
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
 }
+/* The site's own error replies: small, selectable, and capped so a chatty
+   reply cannot push the page off the sheet. */
+.bv-failures {
+  max-height: 72px; overflow-y: auto; margin: 2px 0 4px;
+  font: 11px/1.35 var(--mono, ui-monospace, monospace); color: var(--red, #ff453a);
+  user-select: text; -webkit-user-select: text; word-break: break-all;
+}
 .bv-tap.ping { animation: bv-ping 0.45s ease-out forwards; }
 /* Carrying something: a larger ring that follows the finger until release. */
 .bv-tap.grab {

@@ -15570,6 +15570,10 @@ function onBrowserView(event) {
     if (bvLastNav !== -1) bvZoom = { scale: 1, x: 0, y: 0 };
     bvLastNav = event.nav;
   }
+  // The server sends the view's recent refusals with EVERY frame, so this is
+  // a plain mirror — not cleared on navigation, because a failed login's own
+  // redirect is a navigation and would erase the line that explains it.
+  bvShowFailures(event.failures || []);
   $("bv-empty").hidden = true;
   // A password went into this host and the page then moved — which is what a
   // successful sign-in looks like from out here. Ask NOW, naming the site,
@@ -15593,6 +15597,25 @@ function onBrowserView(event) {
   if (event.focus && event.focus.tapped && event.focus.editable) bvOpenEditor(event.focus);
   else if (event.focus && event.focus.tapped && event.focus.options) bvOpenPicker(event.focus);
 }
+
+// [BROWSER-VIEW-FAILURES-START]
+/** What the site answered with an error, as the site said it. Rendered as
+ *  TEXT only: every byte of `said` is the site's, and none of it may become
+ *  markup in aish's own origin. */
+function bvShowFailures(failures) {
+  const box = $("bv-failures");
+  if (!box) return;
+  box.replaceChildren();
+  for (const f of failures) {
+    const line = document.createElement("div");
+    line.className = "bv-failure";
+    const head = `${f.method} ${f.where} → ${f.status}`;
+    line.textContent = f.said ? `${head} · ${f.said}` : `${head} · (no reply text)`;
+    box.appendChild(line);
+  }
+  box.hidden = failures.length === 0;
+}
+// [BROWSER-VIEW-FAILURES-END]
 
 // [BROWSER-VIEW-EDIT-START]
 // Tapping a field opens an editor, because that is what a phone does
