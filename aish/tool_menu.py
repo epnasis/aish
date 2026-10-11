@@ -20,8 +20,9 @@ from .paths import config_home
 
 #: Always sent (while they exist on the full menu). The first eight are the
 #: owner-specified core; read_skill and read_tool_output join them because
-#: aish's own standing text instructs them on every call (the knowledge index
-#: and SYSTEM_PROMPT_TEMPLATE rule 7c) — a menu without them builds the miss.
+#: aish's own text instructs them: the knowledge index and the core prompt's
+#: help pointer name read_skill, and a cut whose rest was cached names
+#: read_tool_output with its key — a menu without them builds the miss.
 CORE_TOOLS = (
     "read_url", "web_search", "run_command", "browse", "browse_act", "recall",
     "show_image", "read_file", "read_skill", "read_tool_output",
