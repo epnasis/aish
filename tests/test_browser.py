@@ -1938,6 +1938,12 @@ class TestEveryActionActuallyRuns:
             self._run(owner, monkeypatch, "drag", path=[[1, 1, 0], [2, 2, 0]])
         assert page.did[-1] == ("up",)
 
+    def test_a_frame_carries_the_view_console(self, monkeypatch):
+        owner = self._owner()
+        owner.view_console.note("warn", "Failed to fetch hCaptcha token")
+        frame = self._run(owner, monkeypatch, "scroll", dy=100)
+        assert frame.console == ["warning: Failed to fetch hCaptcha token"]
+
     def test_every_frame_carries_the_views_refusals_none_is_drained(
         self, monkeypatch
     ):
@@ -5066,6 +5072,7 @@ class TestWhatTheSiteRefused:
         assert report == {
             "method": "POST", "where": "https://api.x.pl/v2/login", "status": 400,
             "said": '{"error": "hcaptcha", "code": "expired"}', "sent": "",
+            "headers": "",
         }
 
     def test_the_reply_is_cut_to_an_excerpt(self):
@@ -5098,9 +5105,13 @@ class TestWhatTheSiteRefused:
         return handlers["response"]
 
     def _response(self, status, kind, body="nope", sent='{"a": "bc"}'):
+        async def all_headers(self):
+            return {"content-type": "application/json", "x-hcaptcha-token": "t" * 9}
+
         request = type("Q", (), {
             "method": "POST", "resource_type": kind, "post_data": sent,
             "headers": {"content-type": "application/json"},
+            "all_headers": all_headers,
         })()
 
         class Response:
@@ -5185,6 +5196,60 @@ class TestWhatTheSiteRefused:
 
         asyncio.new_event_loop().run_until_complete(drive())
         assert owner.view_failures[0]["sent"] == "{a: text(2)}"
+        assert owner.view_failures[0]["headers"] == (
+            "{x-hcaptcha-token: text(9), content-type: text(16)}"
+        )
+
+    def test_headers_are_names_and_lengths_with_the_pages_own_first(self):
+        from aish import signin
+
+        shape = browser.header_shape(
+            {"accept": "*/*", "cookie": "sid=abc", "x-api-key": "k" * 32,
+             "x-pw": "hunter2"},
+            signin.secret_needles("hunter2"),
+        )
+        assert shape == (
+            "{x-api-key: text(32), x-pw: [typed password], accept: text(3), "
+            "cookie: text(7)}"
+        )
+        assert "abc" not in shape and "hunter2" not in shape
+        assert browser.header_shape({}, ()) == "none"
+
+    def test_the_rolling_console_stays_below_the_cap_it_inherits(self):
+        """At the parent's cap `ConsoleLog` stops appending, so the NEWEST
+        line — the one this subclass exists to keep — would be the one lost."""
+        from aish import browse
+
+        assert browser.VIEW_CONSOLE_KEPT < browse.CONSOLE_MAX_MESSAGES
+        log = browser.ViewConsole()
+        for i in range(browse.CONSOLE_MAX_MESSAGES * 3):
+            log.note("error", f"line {i}")
+        assert log.lines[-1] == f"error: line {browse.CONSOLE_MAX_MESSAGES * 3 - 1}"
+        assert log.dropped == 0
+
+    def test_a_header_name_carrying_his_password_is_withheld_too(self):
+        from aish import signin
+
+        shape = browser.header_shape({"hunter2": "v"}, signin.secret_needles("hunter2"))
+        assert shape == "{[withheld]: text(1)}"
+
+    def test_the_view_console_keeps_the_latest_and_withholds_his_password(self):
+        from aish import signin
+
+        log = browser.ViewConsole()
+        for i in range(browser.VIEW_CONSOLE_KEPT + 3):
+            log.note("warn", f"noise {i}")
+        log.note("info", "not a level worth keeping")
+        log.note("warning", "Failed to fetch hCaptcha token due to: challenge-closed")
+        log.note("error", "echo hunter2")
+        shown = log.shown(signin.secret_needles("hunter2"))
+        assert len(shown) == browser.VIEW_CONSOLE_KEPT
+        assert shown[-2] == (
+            "warning: Failed to fetch hCaptcha token due to: challenge-closed"
+        )
+        assert shown[-1] == browser.WITHHELD_CONSOLE
+        assert "noise 0" not in " ".join(shown)
+        assert log.shown(signin.secret_needles("hunter2")) == shown   # not drained
 
     def test_keeping_evicts_another_sites_refusals_before_the_pages_own(self):
         """Five tracker failures must not push the login's out unseen."""

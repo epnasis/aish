@@ -5299,6 +5299,7 @@ class WebServer:
                 # What the site refused since the last frame. To his screen and
                 # nowhere else: never a session entry, a trace or a log line.
                 **({"failures": f} if (f := getattr(result, "failures", None)) else {}),
+                **({"console": c} if (c := getattr(result, "console", None)) else {}),
             }
         )
 
@@ -5334,6 +5335,7 @@ class WebServer:
         seen = (shown.nav, shown.gen)
         on_screen = shown.jpeg
         failures_shown = getattr(shown, "failures", None) or []
+        console_shown = getattr(shown, "console", None) or []
         try:
             while True:
                 await asyncio.sleep(browser.WATCH_POLL_MS / 1000)
@@ -5365,9 +5367,14 @@ class WebServer:
                 seen = (frame.nav, frame.gen)
                 # New refusals are news even on an identical picture: a login
                 # that fails the same way twice repaints nothing.
-                if frame.jpeg != on_screen or frame.failures != failures_shown:
+                if (
+                    frame.jpeg != on_screen
+                    or frame.failures != failures_shown
+                    or frame.console != console_shown
+                ):
                     on_screen = frame.jpeg
                     failures_shown = frame.failures
+                    console_shown = frame.console
                     await self._send_frame(client, frame)
                 if verdict == "last":
                     return

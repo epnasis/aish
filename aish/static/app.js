@@ -15573,7 +15573,7 @@ function onBrowserView(event) {
   // The server sends the view's recent refusals with EVERY frame, so this is
   // a plain mirror — not cleared on navigation, because a failed login's own
   // redirect is a navigation and would erase the line that explains it.
-  bvShowFailures(event.failures || []);
+  bvShowFailures(event.failures || [], event.console || []);
   $("bv-empty").hidden = true;
   // A password went into this host and the page then moved — which is what a
   // successful sign-in looks like from out here. Ask NOW, naming the site,
@@ -15602,7 +15602,7 @@ function onBrowserView(event) {
 /** What the site answered with an error, as the site said it. Rendered as
  *  TEXT only: every byte of `said` is the site's, and none of it may become
  *  markup in aish's own origin. */
-function bvShowFailures(failures) {
+function bvShowFailures(failures, consoleLines = []) {
   const box = $("bv-failures");
   if (!box) return;
   box.replaceChildren();
@@ -15610,11 +15610,18 @@ function bvShowFailures(failures) {
     const line = document.createElement("div");
     line.className = "bv-failure";
     const head = `${f.method} ${f.where} → ${f.status}` +
-      (f.sent ? ` · sent ${f.sent}` : "");
+      (f.sent ? ` · sent ${f.sent}` : "") +
+      (f.headers ? ` · headers ${f.headers}` : "");
     line.textContent = f.said ? `${head} · ${f.said}` : `${head} · (no reply text)`;
     box.appendChild(line);
   }
-  box.hidden = failures.length === 0;
+  for (const text of consoleLines) {
+    const line = document.createElement("div");
+    line.className = "bv-failure";
+    line.textContent = `console ${text}`;
+    box.appendChild(line);
+  }
+  box.hidden = failures.length === 0 && consoleLines.length === 0;
 }
 // [BROWSER-VIEW-FAILURES-END]
 

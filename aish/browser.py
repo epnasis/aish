@@ -2030,6 +2030,7 @@ class _Owner:
         # of the view. Kept apart from `pending_credential`, which is cleared
         # the moment a sign-in looks done — an interstitial looks done too.
         self.view_secret_needles: list[str] = []
+        self.view_console = ViewConsole()
         # The pages the MODEL is driving (#237, #272), ONE PER CHAT. Each is a
         # page on the same context, never the view's: the view is the owner's
         # hands at a phone viewport, and the two must not fight over one page.
@@ -4620,6 +4621,9 @@ class Frame:
     # Requests the site answered with an error since the last frame — see
     # `failure_report`. Shown to the owner and nowhere else.
     failures: list[dict] = field(default_factory=list)
+    # The view page's latest console warnings and errors (`ViewConsole`), for
+    # the same eyes only.
+    console: list[str] = field(default_factory=list)
 
 
 async def _frame(
@@ -4676,6 +4680,7 @@ async def _frame(
             activity=gen, requests_in_flight=owner.view_requests
         ),
         failures=list(owner.view_failures),
+        console=owner.view_console.shown(tuple(owner.view_secret_needles)),
     )
     # Recorded per NAVIGATION, not per frame: a frame is sent for every tap,
     # scroll and keystroke, and rewriting the file on each of those would spend
@@ -4793,6 +4798,56 @@ WITHHELD_REPLY = "[withheld: the reply contained what you typed]"
 
 VIEW_SHAPE_MAX = 400
 TYPED_PASSWORD = "[typed password]"
+VIEW_CONSOLE_KEPT = 8
+WITHHELD_CONSOLE = "[withheld: the message contained what you typed]"
+
+
+class ViewConsole(browse_mod.ConsoleLog):
+    """The view page's console, ROLLING: the latest `VIEW_CONSOLE_KEPT`.
+
+    `ConsoleLog` keeps the first messages of one model action and drops the
+    rest. The view lives for a whole sign-in, and the line that explains a
+    refusal — booksy.com's request layer swallows a failed hCaptcha
+    `execute` into `console.warn("Failed to fetch hCaptcha token due to: …")`
+    and sends the login anyway — arrives late, so here the oldest go."""
+
+    __slots__ = ()
+
+    def note(self, level: str, text: str) -> None:
+        super().note(level, text)
+        del self.lines[:-VIEW_CONSOLE_KEPT]
+
+    def shown(self, needles: tuple[str, ...]) -> list[str]:
+        """Not drained — sent with every frame, as the failures are."""
+        return [
+            WITHHELD_CONSOLE if needles and signin_mod.carries_secret(line, needles)
+            else line
+            for line in self.lines
+        ]
+
+
+def header_shape(headers: dict, needles: tuple[str, ...]) -> str:
+    """A request's headers as names and value lengths — never a value.
+
+    booksy.com sends its hCaptcha token as `x-hcaptcha-token`, and attaches it
+    only when hCaptcha produced one, so whether that NAME is present is the
+    observation. The page's own `x-` headers come first, since a cap that
+    cut them for `accept-language` would cut the one that matters."""
+    if not headers:
+        return "none"
+
+    def secret(text: str) -> bool:
+        return bool(needles) and signin_mod.carries_secret(text, needles)
+
+    names = sorted(headers, key=lambda n: (not str(n).lower().startswith("x-"), str(n)))
+    shape = "{" + ", ".join(
+        f"{'[withheld]' if secret(str(n)) else n}: "
+        f"{TYPED_PASSWORD if secret(str(headers[n])) else f'text({len(str(headers[n]))})'}"
+        for n in names
+    ) + "}"
+    if len(shape) > VIEW_SHAPE_MAX:
+        shape = shape[: VIEW_SHAPE_MAX - 1] + "…"
+    return shape
 
 
 def request_shape(body: str | None, content_type: str, needles: tuple[str, ...]) -> str:
@@ -4849,7 +4904,7 @@ def request_shape(body: str | None, content_type: str, needles: tuple[str, ...])
 
 def failure_report(
     method: str, url: str, status: int, body: str, needles: tuple[str, ...],
-    sent: str = "",
+    sent: str = "", headers: str = "",
 ) -> dict:
     """One refused request, as he may see it: method, where, status, and the
     opening of what the site said back.
@@ -4867,7 +4922,7 @@ def failure_report(
         said = WITHHELD_REPLY
     return {
         "method": method, "where": where, "status": int(status), "said": said,
-        "sent": sent,
+        "sent": sent, "headers": headers,
     }
 
 
@@ -4918,9 +4973,16 @@ def _watch_failures(owner: _Owner, page: Any) -> None:
                 )
             except Exception:  # noqa: BLE001 — an unreadable body is said plainly
                 sent = "body could not be read"
+            try:
+                # ALL headers: the plain `headers` property leaves out what
+                # Chrome adds below the page, and a missing name must mean the
+                # page did not send it, not that aish did not look.
+                headers = header_shape(await request.all_headers(), needles)
+            except Exception:  # noqa: BLE001
+                headers = "headers could not be read"
             report = failure_report(
                 request.method, response.url, response.status, body, needles,
-                sent=sent if request.method != "GET" else "",
+                sent=sent if request.method != "GET" else "", headers=headers,
             )
             owner.view_failures = keep_failures(
                 [*owner.view_failures, report], page.url or ""
@@ -4991,7 +5053,9 @@ async def _open_view(
     owner.view_failures = []
     owner.view_failures_pending = 0
     owner.view_secret_needles = []
+    owner.view_console = ViewConsole()
     _watch_failures(owner, page)
+    _watch_console(page, owner.view_console)
     owner.view = page
     owner.view_hosts = set()
     owner.view_touched = time.monotonic()
@@ -7546,6 +7610,7 @@ def view_close() -> list[str]:
         owner.signed_in_here = set()
         owner.view_failures = []
         owner.view_secret_needles = []
+        owner.view_console = ViewConsole()
         await owner.close_now()  # next read relaunches off-screen at full size
         return watched
 
