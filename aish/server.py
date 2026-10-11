@@ -5121,7 +5121,12 @@ class WebServer:
         text = await asyncio.get_running_loop().run_in_executor(
             self.worker_pool, browser.command, arg
         )
-        await client.ws.send_json({"type": "job_list", "text": text})
+        # `screen` acts on the Mac's display, not on any sheet: its answer is
+        # shown where he is, not filed under the workspace's background jobs.
+        shown_as_toast = bool(arg) and arg.split()[0].lower() == "screen"
+        await client.ws.send_json(
+            {"type": "job_list", "text": text, **({"toast": True} if shown_as_toast else {})}
+        )
 
     async def _browser_view(self, client: Client, message: dict) -> None:
         """The remote browser view: one frame per interaction (#221).

@@ -1648,7 +1648,11 @@ function handle(event) {
     case "model_list": renderModels(event); break;
     case "model_changed": onModelChanged(event); break;
     case "cwd_changed": renderWorkspace(event); break;
-    case "job_list": $("ws-jobs").textContent = event.text || "—"; break;
+    case "job_list":
+      $("ws-jobs").textContent = event.text || "—";
+      // Long enough to read how to end it (⌘Q, or /browser close).
+      if (event.toast) showToast(event.text || "", false, 12000);
+      break;
     case "browser_view": onBrowserView(event); break;
     case "browser_watch": onBrowserWatch(event); break;
     case "file_list": onFileList(event); break;
@@ -9794,10 +9798,10 @@ function handleSlash(text) {
       // browser with a settings panel; the name promises one thing and it did
       // another. Only the bookkeeping verbs stay as text.
       const verb = arg.split(/\s+/)[0].toLowerCase();
-      // `screen` opens a plain Chrome on the MAC's display (for Screen Sharing),
-      // not this sheet — so it answers as text like the bookkeeping verbs.
-      if (verb === "forget" || verb === "logout" || verb === "close" ||
-          verb === "screen") {
+      // `screen` opens a plain Chrome on the MAC's display (for Screen Sharing):
+      // no sheet at all — the server marks its answer to be shown as a toast.
+      if (verb === "screen") return send({ type: "browser", arg });
+      if (verb === "forget" || verb === "logout" || verb === "close") {
         openSheet("workspace-sheet");
         return send({ type: "browser", arg });
       }
@@ -19582,12 +19586,12 @@ $("dir-use").onclick = () => {
 let toastTimer;
 // sticky keeps the toast up until the next showToast/hideToast — used for
 // in-progress feedback (e.g. a slow PDF export) that a later call resolves.
-function showToast(text, sticky = false) {
+function showToast(text, sticky = false, ms = 3500) {
   const toast = $("toast");
   toast.textContent = text;
   toast.hidden = false;
   clearTimeout(toastTimer);
-  if (!sticky) toastTimer = setTimeout(() => { toast.hidden = true; }, 3500);
+  if (!sticky) toastTimer = setTimeout(() => { toast.hidden = true; }, ms);
 }
 
 function hideToast() {
