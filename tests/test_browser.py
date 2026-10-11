@@ -5370,6 +5370,9 @@ class TestTheOwnersOwnChromeOnTheScreen:
         assert f"--user-data-dir={browser.profile_dir()}" in argv
         assert argv[-1] == "https://booksy.com"
         assert not any("automation" in a.lower() or "remote-debugging" in a for a in argv)
+        # Playwright's own cookie encryption, or aish cannot read the session
+        # he makes here (measured: see `_SCREEN_ARGS`).
+        assert "--use-mock-keychain" in argv and "--password-store=basic" in argv
         assert "Screen Sharing" in reply and "⌘Q" in reply
 
     def test_aish_will_not_launch_on_the_profile_while_his_chrome_holds_it(
