@@ -51,6 +51,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -230,12 +231,43 @@ def _driver_is_dead(exc: BaseException) -> bool:
     return vocab.hit("browser._DRIVER_DEAD_MARKERS", _DRIVER_DEAD_MARKERS, str(exc).lower())
 
 
+def lock_holder_alive(lock_target: str) -> bool:
+    """Is the Chrome named by a `SingletonLock` (`<host>-<pid>`) still running?
+
+    Errs ALIVE: a target it cannot read, or a PID that answers at all, is a
+    live Chrome — the cost of that error is a launch that fails and says so,
+    where the opposite error is a second Chrome on the same profile."""
+    _, _, pid_text = lock_target.rpartition("-")
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return True
+    if pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True   # exists, owned by someone else
+    return True
+
+
 def _clear_stale_lock(exc: BaseException) -> bool:
     """Remove a dead Chrome's profile lock. True when something was cleared.
 
-    Deliberately narrow: only for errors that NAME a lock, and only the lock
-    files — never the profile, which is the owner's logins."""
+    Deliberately narrow: only for errors that NAME a lock, only the lock
+    files — never the profile, which is the owner's logins — and **only when
+    the Chrome that holds it is dead**. A live holder is the owner's own Chrome
+    on this profile (`/browser screen`); clearing its lock and launching would
+    put two Chromes on one profile, which is how a profile gets corrupted."""
     if not vocab.hit("browser._LOCK_MARKERS", _LOCK_MARKERS, str(exc).lower()):
+        return False
+    try:
+        holder = os.readlink(profile_dir() / "SingletonLock")
+    except OSError:
+        holder = ""
+    if holder and lock_holder_alive(holder):
         return False
     cleared = False
     for name in _LOCK_FILES:
@@ -1030,6 +1062,9 @@ WATCH_SETTLED_MS = 5_000
 # the cap — on CAPTURES, not on sends, or identical bytes would loop for free —
 # is the difference between a few extra frames and an open-ended stream.
 WATCH_MAX_CAPTURES = 3
+# How often to LOOK when the probe cannot see: a page with child frames whose
+# insides `_WATCH_JS` never observes (see `watch_step`'s `blind`).
+WATCH_BLIND_LOOK_MS = 1_500
 
 
 def page_is_done(
@@ -1064,6 +1099,7 @@ def watch_step(
     since_capture_ms: float,
     captured: int,
     unknown: bool = False,
+    blind: bool = False,
 ) -> str:
     """Should the watcher capture again, keep waiting, or let go?
 
@@ -1094,6 +1130,13 @@ def watch_step(
             return "wait"
         # Capture once it holds still, so the frame is not caught mid-paint.
         return "capture" if quiet_ms >= WATCH_QUIET_MS else "wait"
+    if blind:
+        # The page has child frames, and the probe sees only the top document:
+        # a challenge widget's next screen, inside its own iframe, moves
+        # nothing it can observe. "Nothing moved" is then not evidence, so
+        # LOOK at a steady pace instead — the capture cap bounds it, and an
+        # identical picture is never sent.
+        return "capture" if since_capture_ms >= WATCH_BLIND_LOOK_MS else "wait"
     # Nothing has changed since the picture they are looking at. Letting go asks
     # a HARDER question than "is it quiet?" — see WATCH_SETTLED_MS.
     return "stop" if page_is_done(quiet_ms=quiet_ms, ready=ready) else "wait"
@@ -1392,6 +1435,13 @@ async def _settle(
         seen.released = "quiet_with_traffic" if met_the_bar else "timeout"
     seen.waited_ms = round((time.perf_counter() - began) * 1000)
     return seen
+
+
+def _frame_count(page: Any) -> int:
+    try:
+        return len(page.frames)
+    except Exception:  # noqa: BLE001 — cannot count is not "one frame"
+        return 2
 
 
 async def _activity(page: Any) -> dict | None:
@@ -2174,6 +2224,8 @@ class _Owner:
         device_scale_factor: float | None = None,
     ) -> Any:
         """Launch one persistent context on `profile`. Caller holds the lock."""
+        if profile == profile_dir() and (why := screen_holds_profile()):
+            raise BrowserUnavailable(why)
         try:
             from playwright.async_api import async_playwright
         except ImportError as exc:  # pragma: no cover — see unavailable_reason
@@ -4275,6 +4327,75 @@ def open_for_login(url: str, *, timeout: float = LOGIN_WINDOW_TIMEOUT) -> list[s
     return _submit(job, timeout + 30.0)
 
 
+# `/browser screen`: a PLAIN Chrome — no Playwright, no automation flags — on
+# aish's own profile, on this Mac's display, for the owner to drive over Screen
+# Sharing. booksy.com refused every sign-in made through the automated browser
+# and accepted the same one in Safari; this is the same profile in a browser
+# nothing is driving, so the session he makes is the one aish then reads with.
+SCREEN_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+_SCREEN_ARGS = [
+    "--no-first-run", "--no-default-browser-check",
+    "--window-position=80,60", "--window-size=1280,900",
+]
+_SCREEN: Any = None   # the Popen of the owner's on-screen Chrome, if any
+SCREEN_HOLDS = (
+    "your own Chrome window on the Mac has aish's profile open (/browser screen) "
+    "— quit it there (⌘Q; closing the window is not enough on a Mac) or run "
+    "/browser close"
+)
+
+
+def screen_holds_profile() -> str:
+    """Why aish may not launch on the profile right now, or ""."""
+    if _SCREEN is not None and _SCREEN.poll() is None:
+        return SCREEN_HOLDS
+    return ""
+
+
+def open_on_screen(url: str) -> None:
+    """Hand the profile to a plain Chrome on the display and return at once.
+
+    aish's own contexts are closed first — Chrome locks a profile to one
+    process — and `screen_holds_profile` then refuses every launch on it until
+    he quits. Started in its own session so a restart of aish-web does not take
+    his window with it; the lock-liveness check is what still protects the
+    profile then."""
+    global _SCREEN
+    reason = unavailable_reason()
+    if reason:
+        raise BrowserUnavailable(reason)
+    if screen_holds_profile():
+        raise BrowserUnavailable("your Chrome window on the Mac is already open")
+    if not Path(SCREEN_CHROME).exists():
+        raise BrowserUnavailable(f"Google Chrome is not at {SCREEN_CHROME}")
+    shutdown()
+    _SCREEN = _spawn_screen(
+        [SCREEN_CHROME, f"--user-data-dir={profile_dir()}", *_SCREEN_ARGS, url]
+    )
+
+
+def _spawn_screen(argv: list[str]) -> Any:
+    """The one place a plain Chrome is started — the seam the suite guards."""
+    return subprocess.Popen(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+
+
+def close_screen() -> bool:
+    """Quit the owner's on-screen Chrome, gracefully. True if one was open."""
+    global _SCREEN
+    proc, _SCREEN = _SCREEN, None
+    if proc is None or proc.poll() is not None:
+        return False
+    proc.terminate()   # SIGTERM: Chrome saves the profile and exits
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    return True
+
+
 def command(arg: str) -> str:
     """`/browser` — the owner's own door into the persistent profile.
 
@@ -4316,8 +4437,26 @@ def command(arg: str) -> str:
         return " ".join(lines)
 
     if verb == "close":
+        had_screen = screen_holds_profile() != ""
         shutdown()
-        return "browser closed."
+        return "browser closed, and your Chrome window on the Mac with it." if (
+            had_screen
+        ) else "browser closed."
+    if verb == "screen":
+        target = as_address(rest) if rest else "about:blank"
+        try:
+            open_on_screen(target)
+        except BrowserUnavailable as exc:
+            return f"cannot open Chrome on the Mac: {exc}"
+        except Exception as exc:  # noqa: BLE001 — a launch failure is his to see
+            return f"Chrome failed to start: {exc}"
+        return (
+            f"Opened Chrome on the Mac's screen with aish's profile at {target} — "
+            "a plain Chrome, nothing automating it. Connect with Screen Sharing "
+            "and sign in there; the session is saved in aish's profile.\n"
+            "aish's own browser is paused until you quit that Chrome (⌘Q — "
+            "closing the window is not enough on a Mac) or run /browser close."
+        )
 
     if verb in ("anon", "search"):
         signed = sorted(search_logged_in_hosts())
@@ -4364,7 +4503,10 @@ def command(arg: str) -> str:
             "/browser <url>       open a real window there so you can sign in",
             "/browser forget <host>  forget a site: the record AND any saved sign-in",
             "/browser anon        the separate profile searches are read with",
+            "/browser screen <url>  a plain Chrome on the Mac's screen, aish's "
+            "profile, for Screen Sharing",
             "/browser close       shut the browser down now",
+            *([SCREEN_HOLDS] if screen_holds_profile() else []),
         ]
         return "\n".join(lines)
 
@@ -4676,7 +4818,9 @@ async def _frame(
         # Read at the SHUTTER, from the same probe the generation comes from,
         # so the answer describes the picture that is about to be sent and not
         # the page a moment later.
-        settled=already_finished(
+        # A page with child frames is never "already finished": the probe
+        # cannot see inside them, so the watcher must be left to look.
+        settled=_frame_count(page) <= 1 and already_finished(
             activity=gen, requests_in_flight=owner.view_requests
         ),
         failures=list(owner.view_failures),
@@ -5095,6 +5239,7 @@ def view_activity(timeout: float = 10.0) -> dict | None:
         if state is None:
             return None
         state["nav"] = owner.navigations
+        state["frames"] = _frame_count(page)
         owner.view_touched = time.monotonic()
         return state
 
@@ -5306,6 +5451,16 @@ def view_act(action: str, **kwargs: Any) -> Frame:
             rw, rh = view_size(kwargs.get("width"), kwargs.get("height"))
             await page.set_viewport_size({"width": rw, "height": rh})
         elif action == "scroll":
+            # AT THE FINGER. A wheel lands on whatever is under the mouse, and
+            # the mouse sat wherever the last tap left it — so a swipe over a
+            # widget's own scrolling panel scrolled something else entirely.
+            at = kwargs.get("at")
+            if (
+                isinstance(at, (list, tuple)) and len(at) == 2
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                        and math.isfinite(v) for v in at)
+            ):
+                await page.mouse.move(float(at[0]), float(at[1]))
             await page.mouse.wheel(0, float(kwargs.get("dy", 600)))
         elif action == "drag":
             # Press, move, release — the one gesture a tap and a swipe cannot
@@ -7638,7 +7793,9 @@ def view_is_open() -> bool:
 
 
 def shutdown() -> None:
-    """Close the browser now (tests, and `/browser close`)."""
+    """Close the browser now (tests, and `/browser close`) — the owner's own
+    on-screen Chrome included."""
+    close_screen()
     if _OWNER is None or not _OWNER.is_alive():
         return
     try:

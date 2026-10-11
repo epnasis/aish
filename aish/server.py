@@ -5102,7 +5102,7 @@ class WebServer:
         phone tapping /browser with a URL otherwise waits on something it
         cannot see."""
         opens_window = bool(arg) and arg.split()[0].lower() not in (
-            "forget", "logout", "close"
+            "forget", "logout", "close", "screen"
         )
         if opens_window:
             await client.ws.send_json(
@@ -5201,6 +5201,7 @@ class WebServer:
                 submit=bool(message.get("submit")),
                 dy=message.get("dy", 600),
                 path=message.get("path"),
+                at=message.get("at"),
                 key=message.get("key", "Enter"),
                 url=message.get("url", ""),
                 width=message.get("width"),
@@ -5352,6 +5353,7 @@ class WebServer:
                     since_capture_ms=(now - last_capture) * 1000,
                     captured=captured,
                     unknown=activity is None,
+                    blind=activity is not None and int(activity.get("frames", 1)) > 1,
                 )
                 if verdict == "wait":
                     continue

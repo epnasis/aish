@@ -273,6 +273,10 @@ def no_real_browser(tmp_path_factory, monkeypatch, no_inherited_aish_env):
 
     monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path_factory.mktemp("state")))
     monkeypatch.setattr(browser_module, "_submit", refuse)
+    # `/browser screen` starts a PLAIN Chrome with no Playwright at all, so the
+    # `_submit` guard above never sees it.
+    monkeypatch.setattr(browser_module, "_spawn_screen", refuse)
+    monkeypatch.setattr(browser_module, "_SCREEN", None)
     # `web_search` reads a results page through the browser on EVERY call
     # (#263), so the guard above turned every test that searches into a hard
     # failure — eight of them at once, none of them about the browser. Unlike
