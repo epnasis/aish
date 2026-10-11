@@ -1302,6 +1302,7 @@ async def _settle(
     still_for: float = SETTLE_QUIET_MS,
     timeout_ms: float = SETTLE_MAX_MS,
     inflight: Callable[[], int] | None = None,
+    probe: Callable[[], Any] | None = None,
 ) -> Settled:
     """Wait until the page stops changing, or `timeout_ms`, whichever first.
 
@@ -1348,7 +1349,11 @@ async def _settle(
     baseline: dict[str, int] | None = None
     last_gen: int | None = None
     while waited < timeout_ms:
-        state = await _activity(page)
+        # The view passes its own probe (`_view_eval`), which reads the same
+        # counters from an isolated world the page cannot see.
+        state = await (probe() if probe is not None else _activity(page))
+        if not isinstance(state, dict):
+            state = None
         seen.polls += 1
         if state is None:
             unknown += 1
@@ -1776,6 +1781,48 @@ _FOCUS_JS = """() => {""" + _DEEP_ACTIVE_JS + """
 }"""
 
 
+async def _view_eval(owner: Any, page: Any, js: str, *, quiet: bool = True) -> Any:
+    """Run one of aish's own probes on the view's top page WITHOUT the page
+    seeing it: in an isolated world, which shares the DOM and nothing else.
+
+    `page.evaluate` runs in the page's own JavaScript, so the watcher's global
+    and its observers were there for any script on the page to find — and on
+    booksy.com that includes hCaptcha's loader, in the one tab hCaptcha treated
+    differently. Measured: Chrome hands back the SAME isolated world for the
+    same document on every call (the watcher's counters persist), the world
+    reads the page's DOM, and the page's `window` never sees what it defines.
+
+    No fallback into the page: a probe that cannot run here returns None, which
+    every caller already reads as could-not-tell. With `quiet=False` the
+    failure is raised instead, for callers that skip on an exception."""
+    try:
+        session = getattr(owner, "view_webauthn", None)
+        if session is None:
+            session = await page.context.new_cdp_session(page)
+            owner.view_webauthn = session
+        tree = await session.send("Page.getFrameTree")
+        world = await session.send(
+            "Page.createIsolatedWorld",
+            {"frameId": tree["frameTree"]["frame"]["id"], "worldName": "aish"},
+        )
+        answer = await session.send(
+            "Runtime.evaluate",
+            {
+                "expression": f"({js})()",
+                "contextId": world["executionContextId"],
+                "returnByValue": True,
+                "awaitPromise": True,
+            },
+        )
+        if "exceptionDetails" in answer:
+            raise RuntimeError("probe threw")
+        return answer.get("result", {}).get("value")
+    except Exception:
+        if not quiet:
+            raise
+        return None
+
+
 def is_challenge_frame(url: str) -> bool:
     """Is this frame a challenge widget's own (hCaptcha, reCAPTCHA, ...)?
 
@@ -1791,7 +1838,9 @@ def is_challenge_frame(url: str) -> bool:
     return any(token in host for token, _ in signin_mod._CAPTCHA_TOKENS)
 
 
-async def _focus_info(page: Any, click: tuple[float, float] | None) -> dict | None:
+async def _focus_info(
+    page: Any, click: tuple[float, float] | None, main_eval: Any = None
+) -> dict | None:
     """The focused field, in FRAME coordinates, or None.
 
     Probes child frames too — a login form is routinely in an iframe — and
@@ -1808,7 +1857,10 @@ async def _focus_info(page: Any, click: tuple[float, float] | None) -> dict | No
         if frame is not page.main_frame and is_challenge_frame(getattr(frame, "url", "")):
             continue
         try:
-            info = await frame.evaluate(_FOCUS_JS)
+            if frame is page.main_frame and main_eval is not None:
+                info = await main_eval(_FOCUS_JS)
+            else:
+                info = await frame.evaluate(_FOCUS_JS)
         except Exception:  # noqa: BLE001 — a cross-origin or dead frame is simply skipped
             continue
         if not info:
@@ -4841,7 +4893,7 @@ async def _frame(
     to show two screenshots… needs to be just once"."""
     page = owner.view
     if settle:
-        await _settle(page)
+        await _settle(page, probe=lambda: _view_eval(owner, page, _WATCH_JS))
     else:
         await page.wait_for_timeout(FIRST_FRAME_MS)
     # A refusal whose reply is still being read belongs in THIS frame: a page
@@ -4855,7 +4907,8 @@ async def _frame(
     # then counted as "not in the picture", which costs a redundant capture that
     # the byte-compare throws away; reading it after would count that mutation as
     # already shown and lose the frame. Err toward the wasted compare.
-    gen = await _activity(page)
+    gen = await _view_eval(owner, page, _WATCH_JS)
+    gen = gen if isinstance(gen, dict) else None
     # Asked once per frame and reused: `view_act` needs it to tell a successful
     # sign-in from a failed one, and `view_close` needs it to know which sites
     # are even candidates for the question.
@@ -4868,7 +4921,9 @@ async def _frame(
         title=(await page.title()) or "",
         width=size["width"],
         height=size["height"],
-        focus=await _focus_info(page, click),
+        focus=await _focus_info(
+            page, click, lambda js: _view_eval(owner, page, js, quiet=False)
+        ),
         nav=owner.navigations,
         gen=-1 if gen is None else int(gen.get("gen", -1)),
         asks_password=asks_for_a_password,
@@ -5292,8 +5347,8 @@ def view_activity(timeout: float = 10.0) -> dict | None:
         page = owner.view
         if page is None:
             return None
-        state = await _activity(page)
-        if state is None:
+        state = await _view_eval(owner, page, _WATCH_JS)
+        if not isinstance(state, dict):
             return None
         state["nav"] = owner.navigations
         state["frames"] = _frame_count(page)

@@ -1478,7 +1478,8 @@ class TestFramesWaitForThePageToSettle:
 
         source = inspect.getsource(browser._frame)
         assert "if settle:" in source
-        assert "await _settle(page)" in source
+        # With the VIEW's probe: its counters live in an isolated world.
+        assert "await _settle(page, probe=lambda: _view_eval(owner, page, _WATCH_JS))" in source
 
     def test_the_first_frame_does_NOT_wait_for_the_settle(self):
         """Waiting for quiet before showing ANYTHING read as nothing
@@ -1591,13 +1592,20 @@ class TestTheWatcherKeepsLookingAfterTheFirstCorrection:
         assert "let w = window.__aish_watch;" in browser._WATCH_JS
         assert "if (!w)" in browser._WATCH_JS
 
-    def test_a_frame_carries_the_generation_it_was_captured_at(self):
+    def test_a_frame_carries_the_generation_it_was_captured_at(self, monkeypatch):
         """"Has anything happened since the picture they are LOOKING AT?" is the
         only comparison that answers whether the screen is still true. Comparing
         against the last poll instead would absorb whatever arrived between the
         capture and the first probe — which is the narrow window this whole
         feature is about."""
         import asyncio
+
+        # The view reads its probe in an isolated world (`_view_eval`); these
+        # fakes answer through `evaluate`, so route the seam to them.
+        async def through_evaluate(owner, page, js, *, quiet=True):
+            return await page.evaluate(js)
+
+        monkeypatch.setattr(browser, "_view_eval", through_evaluate)
 
         class Page:
             url = "https://x.pl/"
@@ -1717,11 +1725,18 @@ class TestAnAlreadyQuietPageNeedsNoCorrection:
             activity=None, requests_in_flight=0
         ) is False
 
-    def test_the_frame_reports_what_it_observed_at_the_shutter(self):
+    def test_the_frame_reports_what_it_observed_at_the_shutter(self, monkeypatch):
         """Not which code path ran. `_settle` returns on a timeout and on three
         unanswered probes as well as on a finished page, so "we called settle"
         is not evidence of anything; the probe read beside the screenshot is."""
         import asyncio
+
+        # The view reads its probe in an isolated world (`_view_eval`); these
+        # fakes answer through `evaluate`, so route the seam to them.
+        async def through_evaluate(owner, page, js, *, quiet=True):
+            return await page.evaluate(js)
+
+        monkeypatch.setattr(browser, "_view_eval", through_evaluate)
 
         class Page:
             url = "https://x.pl/"
@@ -5520,3 +5535,65 @@ class TestNoScriptRunsInsideAChallengeFrame:
         info = asyncio.new_event_loop().run_until_complete(browser._focus_info(Page(), None))
         assert "https://newassets.hcaptcha.com/c/x" not in asked
         assert info is not None and asked[-1] == "https://pl.booksy.com/login"
+
+
+class TestTheViewsProbesRunWhereThePageCannotSeeThem:
+    """booksy.com challenged every sign-in made through the view and none made
+    by hand in another tab of the same Chrome. The watcher put a global and
+    observers into the page's own JavaScript, where hCaptcha's loader runs."""
+
+    def _owner_with(self, answers, sent):
+        class Session:
+            async def send(self, method, params=None):
+                sent.append(method)
+                return answers[method]
+
+        owner = browser._Owner()
+        owner.view_webauthn = Session()
+        return owner
+
+    def test_a_probe_runs_in_an_isolated_world_and_returns_its_value(self):
+        import asyncio
+
+        sent = []
+        owner = self._owner_with({
+            "Page.getFrameTree": {"frameTree": {"frame": {"id": "F1"}}},
+            "Page.createIsolatedWorld": {"executionContextId": 7},
+            "Runtime.evaluate": {"result": {"value": {"gen": 3}}},
+        }, sent)
+
+        class Page:
+            async def evaluate(self, js):
+                raise AssertionError("ran in the page's own world")
+
+        value = asyncio.new_event_loop().run_until_complete(
+            browser._view_eval(owner, Page(), browser._WATCH_JS)
+        )
+        assert value == {"gen": 3}
+        assert sent == ["Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate"]
+
+    def test_a_probe_that_cannot_run_there_is_could_not_tell_never_the_page(self):
+        import asyncio
+
+        owner = self._owner_with({
+            "Page.getFrameTree": {"frameTree": {"frame": {"id": "F1"}}},
+            "Page.createIsolatedWorld": {"executionContextId": 7},
+            "Runtime.evaluate": {"exceptionDetails": {"text": "x"}},
+        }, [])
+
+        class Page:
+            async def evaluate(self, js):
+                raise AssertionError("fell back into the page")
+
+        loop = asyncio.new_event_loop()
+        assert loop.run_until_complete(browser._view_eval(owner, Page(), "() => 1")) is None
+        with pytest.raises(RuntimeError):
+            loop.run_until_complete(browser._view_eval(owner, Page(), "() => 1", quiet=False))
+
+    def test_the_view_paths_never_evaluate_the_watcher_in_the_page(self):
+        import inspect
+
+        for fn in (browser.view_activity, browser._frame):
+            source = inspect.getsource(fn)
+            assert "_activity(page)" not in source
+            assert "_view_eval(owner, page, _WATCH_JS)" in source
