@@ -1776,6 +1776,21 @@ _FOCUS_JS = """() => {""" + _DEEP_ACTIVE_JS + """
 }"""
 
 
+def is_challenge_frame(url: str) -> bool:
+    """Is this frame a challenge widget's own (hCaptcha, reCAPTCHA, ...)?
+
+    EXPERIMENT (2026-10-11), not a design: `_focus_info` runs a script in
+    every frame after every capture, so on booksy.com aish was executing its
+    own JavaScript inside hCaptcha's iframe right after each tap on the
+    challenge — while the owner's own tab in the same Chrome, which nothing
+    probed, was never challenged. Skipping these frames tests that one
+    hypothesis while the owner can still type into the site's own sign-in
+    frame. If it holds, the method changes — focus read from Chrome's
+    accessibility data, no page script in any frame — and this list goes."""
+    host = host_of(url) or ""
+    return any(token in host for token, _ in signin_mod._CAPTCHA_TOKENS)
+
+
 async def _focus_info(page: Any, click: tuple[float, float] | None) -> dict | None:
     """The focused field, in FRAME coordinates, or None.
 
@@ -1790,6 +1805,8 @@ async def _focus_info(page: Any, click: tuple[float, float] | None) -> dict | No
     # as the answer only when no frame below it can say more.
     delegated: dict | None = None
     for frame in page.frames:
+        if frame is not page.main_frame and is_challenge_frame(getattr(frame, "url", "")):
+            continue
         try:
             info = await frame.evaluate(_FOCUS_JS)
         except Exception:  # noqa: BLE001 — a cross-origin or dead frame is simply skipped
