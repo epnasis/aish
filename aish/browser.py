@@ -2081,6 +2081,10 @@ class _Owner:
         # the moment a sign-in looks done — an interstitial looks done too.
         self.view_secret_needles: list[str] = []
         self.view_console = ViewConsole()
+        # How the view's passkey dialogs are kept away (`_no_native_passkey_ui`)
+        # and the CDP session that does it, held so it is not detached.
+        self.view_passkeys = ""
+        self.view_webauthn: Any = None
         # The pages the MODEL is driving (#237, #272), ONE PER CHAT. Each is a
         # page on the same context, never the view's: the view is the owner's
         # hands at a phone viewport, and the two must not fight over one page.
@@ -4633,6 +4637,33 @@ try {
 } catch (e) { /* a site that froze navigator keeps its passkeys; nothing to do */ }
 """
 
+async def _no_native_passkey_ui(owner: _Owner, page: Any) -> None:
+    """Turn off the native passkey dialogs IN THE BROWSER, not in the page.
+
+    The page script above did the job by deleting `PublicKeyCredential` and
+    blanking `navigator.credentials` in every frame — a page that no real
+    Chrome ever presents, and it ran inside hCaptcha's iframe on booksy.com,
+    where every sign-in through the view was challenged while the owner's own
+    tab in the SAME Chrome was not. Chrome's WebAuthn domain with
+    `enableUI: false` keeps both APIs exactly as they are and takes the
+    dialogs away. Measured on a local page: the page sees a function and an
+    object, conditional mediation — the Google sign-in dead end — reports
+    unavailable, and a modal request ends on its own timeout with nothing
+    pressed. The session is kept on the owner: detaching it would hand the
+    dialogs back.
+
+    Falls back to the page script if the domain is refused, because a dead
+    end is worse than a modified page — `owner.view_passkeys` says which."""
+    try:
+        session = await page.context.new_cdp_session(page)
+        await session.send("WebAuthn.enable", {"enableUI": False})
+        owner.view_webauthn = session
+        owner.view_passkeys = "browser"
+    except Exception:  # noqa: BLE001 — see the docstring: degrade, do not dead-end
+        await page.add_init_script(_NO_NATIVE_CREDENTIAL_UI)
+        owner.view_passkeys = "page-script"
+
+
 # The view is DESKTOP, and briefly it was not. Serving the phone's web to a
 # phone-shaped viewport looked obviously right and was wrong for this UI: sites
 # spend the whole first mobile screen on app-install banners and navigation, so
@@ -5193,7 +5224,7 @@ async def _open_view(
     page = await context.new_page()
     owner.navigations = 0
     page.on("framenavigated", lambda f: _count_navigation(owner, page, f))
-    await page.add_init_script(_NO_NATIVE_CREDENTIAL_UI)
+    await _no_native_passkey_ui(owner, page)
     # Native dialogs the owner cannot see either. Playwright DISMISSES these by
     # default, silently — so a login that asks "leave site?" or alerts an error
     # would vanish without trace. Accepting and reporting at least leaves the

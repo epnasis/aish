@@ -1299,17 +1299,66 @@ class TestNativeDialogsAreDeadEnds:
     in this browser before the fix: WebAuthn available, conditional mediation
     available."""
 
-    def test_webauthn_is_removed_from_the_view(self):
-        script = browser._NO_NATIVE_CREDENTIAL_UI
-        assert "PublicKeyCredential" in script
-        assert "navigator" in script and "credentials" in script
+    def test_passkey_dialogs_are_turned_off_in_the_browser_not_the_page(self):
+        """booksy.com challenged every sign-in made in the view and none in the
+        owner's own tab of the same Chrome; the view deleted the WebAuthn API
+        from every frame, hCaptcha's included. Chrome's WebAuthn domain keeps
+        the API and removes only the dialogs."""
+        import asyncio
 
-    def test_the_view_installs_it_before_navigating(self):
+        sent, scripts = [], []
+
+        class Session:
+            async def send(self, method, params):
+                sent.append((method, params))
+
+        class Context:
+            async def new_cdp_session(self, page):
+                return Session()
+
+        class Page:
+            context = Context()
+
+            async def add_init_script(self, script):
+                scripts.append(script)
+
+        owner = browser._Owner()
+        asyncio.new_event_loop().run_until_complete(
+            browser._no_native_passkey_ui(owner, Page())
+        )
+        assert sent == [("WebAuthn.enable", {"enableUI": False})]
+        assert scripts == [] and owner.view_passkeys == "browser"
+        assert owner.view_webauthn is not None   # held: detaching restores the dialogs
+
+    def test_a_refused_domain_falls_back_to_the_page_script_and_says_so(self):
+        import asyncio
+
+        scripts = []
+
+        class Context:
+            async def new_cdp_session(self, page):
+                raise RuntimeError("Target closed")
+
+        class Page:
+            context = Context()
+
+            async def add_init_script(self, script):
+                scripts.append(script)
+
+        owner = browser._Owner()
+        asyncio.new_event_loop().run_until_complete(
+            browser._no_native_passkey_ui(owner, Page())
+        )
+        assert scripts == [browser._NO_NATIVE_CREDENTIAL_UI]
+        assert owner.view_passkeys == "page-script"
+
+    def test_the_view_turns_them_off_before_navigating(self):
         import inspect
 
         source = inspect.getsource(browser._open_view)
-        assert "add_init_script(_NO_NATIVE_CREDENTIAL_UI)" in source
-        assert source.index("add_init_script") < source.index("page.goto")
+        assert "_no_native_passkey_ui(owner, page)" in source
+        assert "add_init_script(_NO_NATIVE_CREDENTIAL_UI)" not in source
+        assert source.index("_no_native_passkey_ui") < source.index("page.goto")
 
     def test_a_native_dialog_is_reported_rather_than_silently_dismissed(self):
         """Playwright dismisses dialogs by DEFAULT, silently — so a login that
