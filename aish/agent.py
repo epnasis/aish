@@ -6032,6 +6032,9 @@ class Agent:
         while True:
             attempt += 1
             observed.clear()
+            # Per attempt, like `observed`: only the attempt that succeeded is
+            # timed on the record, and a failed one says its own `elapsed_s`.
+            timing = backends.CallTiming()
             if self._token_budgeted():
                 # Per attempt: an overflow retry sends a different request.
                 self._call_estimate = self._prompt_estimate(menu)
@@ -6042,7 +6045,9 @@ class Agent:
                 # adapted to the exact `ollama.chat` convention so this file
                 # never learns which provider it is on, and a keyword added for
                 # the governor's benefit would break that.
-                with backends.observe_sent(observed.append), ratelimit.hooks(
+                with backends.observe_sent(observed.append), backends.observe_timing(
+                    timing
+                ), ratelimit.hooks(
                     should_stop=self._cancel.is_set,
                     on_wait=self.status.note,
                     ceiling=self._wait_ceiling(),
@@ -6180,7 +6185,7 @@ class Agent:
                 # The ONE emit point for what the model produced, so no caller
                 # can forget it: _chat_turn is reached by the tool-call path,
                 # the text-only path and the final no-tools turn alike.
-                self._record_reasoning(turn)
+                self._record_reasoning(turn, timing.record())
                 # The COMPLETE response, stored whole beside the request (#355)
                 # — symmetric with _record_sent, so what came back is captured
                 # as completely as what went out, new content types included.
@@ -6335,8 +6340,10 @@ class Agent:
             ),
         ))
 
-    def _record_reasoning(self, turn: tuple) -> None:
-        """Everything the model produced on one call, in full (#240).
+    def _record_reasoning(self, turn: tuple, timing: dict | None = None) -> None:
+        """Everything the model produced on one call, in full (#240), and how
+        long it took (#444): `timing` is `backends.CallTiming.record()` of the
+        attempt that succeeded — empty where no seam observed the call.
 
         The rendered `thinking` step keeps a 120-character snippet for a live
         status ticker, and that fragment — 26 characters on average across a
@@ -6381,6 +6388,11 @@ class Agent:
         if meta.get("synthesized"):
             # The content is aish's sentence, not the model's.
             record["synthesized"] = True
+        # Measured at the backend seam, after any wait for rate-limit headroom
+        # (`backends.CallTiming`). Each key only where it was observed: a chat
+        # callable that is not `governed` reports nothing, and a call that did
+        # not stream has no first chunk — neither is ever written as 0.
+        record.update(timing or {})
         self._emit_record(**record)
 
     def _record_received(self, turn: tuple) -> None:

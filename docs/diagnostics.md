@@ -137,6 +137,8 @@ Before this, the rendered `thinking` step kept a 120-character snippet for a liv
 
 **Malformed arguments are a fact about the model's output, not about execution.** A JSON decode failure becomes `{}` inside the backend adapter, which downstream is indistinguishable from a call the model deliberately made with no arguments — and the two route to completely different repairs. The raw string dies in the adapter, so the flag is set there and reported on the `reasoning` record for the call that emitted it.
 
+**How long the call took rides the same record (#444).** `ms` and, on a streamed call, `first_chunk_ms` — measured at the backend seam after any rate-limit wait, absent where nothing observed them. Before it only isolated role calls recorded `ms`; the acting loop's own calls had the rendered `thinking` step's live `secs` and nothing on the renderless record a reader joins by `model_call`. Shape and per-backend meaning: `docs/trace-contract.md` §3.13.
+
 **A synthesized sentence is marked.** The Anthropic path fabricates *"(the model declined this request for safety reasons)"* on a refusal and logs it as model content; unmarked, a dossier credits the harness's own words to the model.
 
 ---

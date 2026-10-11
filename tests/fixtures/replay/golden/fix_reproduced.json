@@ -75,6 +75,31 @@
         "tools": {
           "recorded": 0,
           "not_recorded": 0
+        },
+        "timing": {
+          "position_not_recorded": 0,
+          "first": {
+            "calls": 0,
+            "ms": {
+              "recorded": 0,
+              "not_recorded": 0
+            },
+            "first_chunk_ms": {
+              "recorded": 0,
+              "not_recorded": 0
+            }
+          },
+          "later": {
+            "calls": 0,
+            "ms": {
+              "recorded": 0,
+              "not_recorded": 0
+            },
+            "first_chunk_ms": {
+              "recorded": 0,
+              "not_recorded": 0
+            }
+          }
         }
       },
       "runs": [
@@ -157,6 +182,31 @@
             "tools": {
               "recorded": 0,
               "not_recorded": 0
+            },
+            "timing": {
+              "position_not_recorded": 0,
+              "first": {
+                "calls": 0,
+                "ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                },
+                "first_chunk_ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                }
+              },
+              "later": {
+                "calls": 0,
+                "ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                },
+                "first_chunk_ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                }
+              }
             }
           }
         },
@@ -239,6 +289,31 @@
             "tools": {
               "recorded": 0,
               "not_recorded": 0
+            },
+            "timing": {
+              "position_not_recorded": 0,
+              "first": {
+                "calls": 0,
+                "ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                },
+                "first_chunk_ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                }
+              },
+              "later": {
+                "calls": 0,
+                "ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                },
+                "first_chunk_ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                }
+              }
             }
           }
         }
@@ -311,6 +386,31 @@
         "tools": {
           "recorded": 0,
           "not_recorded": 0
+        },
+        "timing": {
+          "position_not_recorded": 0,
+          "first": {
+            "calls": 0,
+            "ms": {
+              "recorded": 0,
+              "not_recorded": 0
+            },
+            "first_chunk_ms": {
+              "recorded": 0,
+              "not_recorded": 0
+            }
+          },
+          "later": {
+            "calls": 0,
+            "ms": {
+              "recorded": 0,
+              "not_recorded": 0
+            },
+            "first_chunk_ms": {
+              "recorded": 0,
+              "not_recorded": 0
+            }
+          }
         }
       },
       "runs": [
@@ -393,6 +493,31 @@
             "tools": {
               "recorded": 0,
               "not_recorded": 0
+            },
+            "timing": {
+              "position_not_recorded": 0,
+              "first": {
+                "calls": 0,
+                "ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                },
+                "first_chunk_ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                }
+              },
+              "later": {
+                "calls": 0,
+                "ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                },
+                "first_chunk_ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                }
+              }
             }
           }
         },
@@ -475,6 +600,31 @@
             "tools": {
               "recorded": 0,
               "not_recorded": 0
+            },
+            "timing": {
+              "position_not_recorded": 0,
+              "first": {
+                "calls": 0,
+                "ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                },
+                "first_chunk_ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                }
+              },
+              "later": {
+                "calls": 0,
+                "ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                },
+                "first_chunk_ms": {
+                  "recorded": 0,
+                  "not_recorded": 0
+                }
+              }
             }
           }
         }

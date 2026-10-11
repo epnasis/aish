@@ -393,6 +393,9 @@ def counts(run: RunRecord) -> dict[str, int | None]:
 #: record does not say.
 UNLABELLED = "unlabelled"
 
+#: A model call's position in its task, for the timing split (#444).
+FIRST, LATER = "first", "later"
+
 
 @dataclass
 class RunContext:
@@ -417,6 +420,15 @@ class RunContext:
     menu_chars: list[int] = field(default_factory=list)
     menu_purged: int = 0
     tools: list[int] = field(default_factory=list)
+    #: Milliseconds per call (`backends.CALL_MS` / `FIRST_CHUNK_MS`), split by
+    #: position in its task: FIRST (`model_call` 1, where a per-task menu
+    #: changes the request's head) and LATER. A call with no `model_call`
+    #: cannot be placed and is counted in `position_absent` instead.
+    ms: dict[str, list[int]] = field(default_factory=lambda: {FIRST: [], LATER: []})
+    first_chunk_ms: dict[str, list[int]] = field(
+        default_factory=lambda: {FIRST: [], LATER: []})
+    calls_at: dict[str, int] = field(default_factory=lambda: {FIRST: 0, LATER: 0})
+    position_absent: int = 0
 
     @property
     def tokens_absent(self) -> int:
@@ -471,7 +483,26 @@ def read_context(path: Path) -> RunContext:
                 context.menu_purged += 1
             if menu.tools is not None:
                 context.tools.append(menu.tools)
+            _read_timing(context, step)
     return context
+
+
+def _read_timing(context: RunContext, step: dict) -> None:
+    """One `reasoning` record's timing, placed by its `model_call` — which
+    restarts at 1 with every task. A key the record lacks was not observed
+    and is left out; it is never read as 0."""
+    from .backends import CALL_MS, FIRST_CHUNK_MS
+
+    number = step.get("model_call")
+    if not isinstance(number, int) or number < 1:
+        context.position_absent += 1
+        return
+    position = FIRST if number == 1 else LATER
+    context.calls_at[position] += 1
+    for key, into in ((CALL_MS, context.ms), (FIRST_CHUNK_MS, context.first_chunk_ms)):
+        value = step.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            into[position].append(value)
 
 
 def apply(run: RunRecord, checks: dict[str, CheckFn]) -> list[Verdict]:

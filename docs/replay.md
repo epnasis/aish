@@ -128,6 +128,13 @@ Under the reader law of `docs/token-accounting.md`, and reading through the same
 - **Chars are the brief's**: the system parts' `chars` summed per call, and the menu's bytes looked up by digest through `tooluse._menu_of` — `purged` and `not recorded` are counted apart, never 0. Tools is the brief's own `tools.count`, which survives a purge.
 - **Chars and tokens are never added or converted.** No figure estimates tokens from chars.
 - **`--window TOKENS`** (default `usage.LOCAL_WINDOW_TOKENS`, 60,000 — a default, not a fact about any backend) counts calls whose recorded tokens are strictly over it, out of the calls that recorded any.
+- **Time per call (#444) is a second line under each arm**, read off the `reasoning` record's `ms` and `first_chunk_ms` (`docs/trace-contract.md` §3.13) and split by the call's place in its task: `first` is `model_call` 1, `later` the rest — the split that shows whether the first call after a task boundary is slower, which is where a per-task tool menu changes the head of the request:
+
+  ```
+    time median/p95 · first 2: 9.0s/9.0s, chunk 8.0s/8.0s · later 3: 1.2s/1.2s (1 not recorded), chunk 0.2s/0.2s (2 not recorded)
+  ```
+
+  `chunk` is the time to the stream's first chunk — the first chunk's arrival, not a measured prefill. A call that did not stream has no first chunk, and a backend not wrapped by `backends.governed` records neither; both are counted as not recorded, and a pool with neither on any call says `time not recorded on any of N calls`. A record with no `model_call` cannot be placed and is counted `unplaced`. **When the time lines would push the body past `REPORT_CAP`** they are dropped together and `TIME_DROPPED` says so in their place (in the suite's two-arm `example-trippy` batch they do not fit: `test_time_lines_that_would_not_fit_under_the_cap_are_dropped_and_said`); `--full` and `--json` (`context.timing`) always carry them. A run whose menu grew mid-task carries that growth's cold re-read in a `later` call (`docs/tool-menu.md`, *What is not built*), so the split separates task boundaries from the rest, not cache misses from everything else.
 
 Medians and p95 are `usage._percentile`, `aish usage`'s own. R4 still governs: with no target failure reproduced, the candidate's context row is withheld like its other numbers. `TestContextPerModelCall`.
 
