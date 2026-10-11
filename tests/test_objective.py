@@ -93,6 +93,7 @@ class TestTheRecordKind:
 
     def test_the_stopped_answer_spelling_matches_the_session_layer(self):
         assert objective.STOPPED_ANSWER == session_module.STOPPED_ANSWER
+        assert objective.STOPPED_ANSWERS == session_module.STOPPED_ANSWERS
 
 
 # --------------------------------------------------------------- the material
@@ -158,6 +159,17 @@ class TestMaterial:
             ("t2.end", "failed", 2),
             ("m:a2", "cancel", 2),
         ]
+
+    def test_a_stop_logged_before_not_an_error_joined_the_note_is_a_stop(self):
+        """H3 (#444) reworded the note; a log is never rewritten."""
+        records = [
+            r if r.get("content") != objective.STOPPED_ANSWER
+            else {**r, "content": objective.STOPPED_ANSWERS[1]}
+            for r in a_chat()
+        ]
+        assert any(r.get("content") == objective.STOPPED_ANSWERS[1] for r in records)
+        kinds = {i.ref: i.kind for i in objective.material(records, READ_ONLY)}
+        assert kinds["m:a2"] == objective.CANCEL
 
     def test_never_tool_outputs_never_reminders_never_interim_text(self):
         blob = json.dumps([i.as_json() for i in objective.material(a_chat(), READ_ONLY)])

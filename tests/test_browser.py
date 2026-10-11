@@ -852,36 +852,40 @@ class TestTheReadingContract:
 
     Pinned as text because every clause here was written to stop a SPECIFIC
     thing the model did in the owner's live tests, and a well-meaning tidy-up
-    of the prompt would silently bring each one back."""
+    of the prompt would silently bring each one back. Since H3 (#444) the core
+    says each in fewer words, and the shop clause lives in the shop-search
+    skill retrieval preloads on shopping tasks."""
 
     def _prompt(self):
         from aish.agent import SYSTEM_PROMPT_TEMPLATE
 
-        return SYSTEM_PROMPT_TEMPLATE
+        return " ".join(SYSTEM_PROMPT_TEMPLATE.split())
 
     def test_no_hand_rolled_fetchers_in_any_language(self):
         """It wrote its own Python fetcher and ran it — curl with extra steps,
         on a page read_url handles. The owner has denied that shape three
         times across two sessions."""
         prompt = self._prompt()
-        assert "MUST NOT fetch a web page any other way" in prompt
-        assert "Python" in prompt
+        # "a script" is any language — the Python fetcher included.
+        assert "MUST NOT fetch a page any other way (curl, wget, a script)" in prompt
 
     def test_a_shop_is_read_at_its_own_listing_url(self):
         """Twelve `site:allegro.pl` searches returned the search engine's index
         instead of today's prices."""
-        prompt = self._prompt()
-        assert "site:allegro.pl" in prompt
-        assert "listing?string=" in prompt
+        repo = pathlib.Path(__file__).resolve().parent.parent
+        skill = repo / "docs" / "shipped-skills" / "shop-search.md"
+        text = skill.read_text(encoding="utf-8")
+        assert "site:allegro.pl" in text
+        assert "listing?string=" in text
+        assert "MUST NOT use web_search with a `site:` filter" in text
 
     def test_success_must_not_be_reported_as_failure(self):
         """The one that actually cost the owner an answer: it read three
         Allegro pages, then told him Allegro blocks automated reading and
         answered from other shops — throwing away data it already had."""
         prompt = self._prompt()
-        assert "REPORT WHAT ACTUALLY HAPPENED" in prompt
-        assert "rendered in the browser" in prompt
-        assert "blocks automated reading" in prompt
+        assert "Answer from what you read or observed in THIS task" in prompt
+        assert "if it failed, was cut or does not contain the answer, say exactly that" in prompt
 
 
 class TestASignedInHostIsReadAsTheOwner:

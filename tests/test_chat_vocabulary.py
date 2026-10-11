@@ -22,9 +22,10 @@ session` in the terminal is being handed two names for one thing, which is the
 complaint that started the web rename.
 
 What this file reads is the text a person sees: attributes and prose in
-`index.html`, string literals in `app.js` and in `cli.py`, and BOTH system
-prompts — the model describing aish back to its owner has to use the owner's
-words too, or it is describing an app that does not exist.
+`index.html`, string literals in `app.js` and in `cli.py`, BOTH renders of the
+system prompt, and the two help skills aish answers questions about itself
+from (H3, #444) — the model describing aish back to its owner has to use the
+owner's words too, or it is describing an app that does not exist.
 
 A genuinely different meaning is allowlisted below, by exact string, each with
 what it means instead: an allowlist without reasons rots into a list of things
@@ -43,7 +44,7 @@ INDEX = (REPO / "aish" / "static" / "index.html").read_text()
 APP_JS = (REPO / "aish" / "static" / "app.js").read_text()
 SERVER = (REPO / "aish" / "server.py").read_text()
 CLI = (REPO / "aish" / "cli.py").read_text()
-AGENT = (REPO / "aish" / "agent.py").read_text()
+SHIPPED_SKILLS = sorted((REPO / "docs" / "shipped-skills").glob("*.md"))
 
 _WORD = re.compile(r"\bsessions?\b", re.I)
 
@@ -58,13 +59,6 @@ _KEPT_SPELLING = re.compile(r"--session\b|/session\b")
 ALLOWED = {
     # A signed-in session in aish's browser: a cookie jar, not a conversation.
     "If you just signed in, aish can use that sign-in when it reads ${host} ",
-    # The three below are the SAME cookie jar, in the CLI system prompt: what
-    # the site remembers about the owner being logged in. Nothing to do with
-    # the conversation — the chat outlives the sign-in and resumes without it.
-    "The browser keeps the user's own signed-in sessions. READING one of their sites is free by",
-    "AISH, not from the page, and it is true — it tells you the session has expired, or that the",
-    'says and then STOP. Say "your eon.pl session has expired — run /browser '
-    "https://eon.pl to sign",
     # The sign-in attempt's outcome on a trace step: the SITE's login session,
     # seen to come up (or not) after an automatic renewal — the same cookie
     # jar as above, worded to exactly what `signin.ok` records.
@@ -128,10 +122,11 @@ def _app_js_strings() -> list[tuple[str, str]]:
 
 
 def _web_prompt() -> str:
-    """The `web_usage_context` f-string: aish describing this UI to its owner."""
-    start = SERVER.index("def web_usage_context")
-    body = SERVER.index('return f"""\\', start)
-    return SERVER[body : SERVER.index('"""', body + 14)]
+    """The core prompt as the web renders it: aish describing itself to its
+    owner on the surface he is looking at."""
+    from aish.agent import system_prompt
+
+    return system_prompt(surface="web")
 
 
 def _cli_strings() -> list[tuple[str, str]]:
@@ -162,15 +157,11 @@ def _cli_strings() -> list[tuple[str, str]]:
 
 
 def _cli_prompt() -> str:
-    """`SYSTEM_PROMPT_TEMPLATE`: the CLI's half of aish's self-knowledge.
+    """The core prompt as the terminal renders it — the counterpart to
+    `_web_prompt`, read by the same rule."""
+    from aish.agent import system_prompt
 
-    The counterpart to `web_usage_context`, and read by the same rule — aish
-    answers questions about itself out of this text, so it has to name things
-    the way the person it is answering does.
-    """
-    start = AGENT.index("SYSTEM_PROMPT_TEMPLATE = ")
-    body = AGENT.index('"""\\', start)
-    return AGENT[body : AGENT.index('\n"""', body)]
+    return system_prompt(surface="cli")
 
 
 def _snippet(text: str) -> str:
@@ -226,27 +217,28 @@ def test_the_web_prompt_describes_the_ui_in_the_ui_s_words() -> None:
     """aish answers questions about itself from this text. If it says 'session'
     while every control says 'chat', it is describing an app that does not
     exist — the same failure as letting the README go stale (CLAUDE.md)."""
+    prompt = _web_prompt()
+    assert "WHO IS SPEAKING" in prompt, "the web render moved or was rewritten"
     offenders = [
         line.strip()
-        for line in _web_prompt().split("\n")
+        for line in prompt.split("\n")
         if _says_session(line) and line.strip() not in ALLOWED
     ]
     assert not offenders, (
-        f"web_usage_context still calls a chat a session: {offenders}"
+        f"the web system prompt still calls a chat a session: {offenders}"
     )
 
 
 def test_the_cli_prompt_describes_the_terminal_in_the_terminal_s_words() -> None:
-    """The same rule on SYSTEM_PROMPT_TEMPLATE (#260).
+    """The same rule on the terminal's render of the core (#260).
 
-    Judged line by line, and ALLOWED matches a whole stripped line: the three
-    allowed ones are the browser's cookie jar, and pinning them to their exact
-    wrapped line means a rewrite has to re-state that it still means a cookie
-    jar rather than inheriting the exemption silently.
+    Judged line by line, and ALLOWED matches a whole stripped line, so a
+    rewrite that needs the word for something other than a chat has to state
+    what it means instead of inheriting an exemption silently.
     """
     prompt = _cli_prompt()
     # Same guard as the CLI's: a slice that missed the template reads clean.
-    assert "GROUNDING" in prompt, "SYSTEM_PROMPT_TEMPLATE moved or was rewritten"
+    assert "WHO IS SPEAKING" in prompt, "the terminal render moved or was rewritten"
     offenders = [
         line.strip()
         for line in prompt.split("\n")
@@ -255,6 +247,21 @@ def test_the_cli_prompt_describes_the_terminal_in_the_terminal_s_words() -> None
     assert not offenders, (
         f"SYSTEM_PROMPT_TEMPLATE still calls a chat a session: {offenders}"
     )
+
+
+def test_the_help_skills_describe_aish_in_the_owner_s_words() -> None:
+    """The UI tour and the terminal reference left the prompt for the
+    aish-web-help / aish-cli-help skills (H3, #444), and aish now answers
+    questions about itself FROM them — so they, and every skill shipped beside
+    them, are held to the same rule."""
+    assert {"aish-web-help", "aish-cli-help"} <= {p.stem for p in SHIPPED_SKILLS}
+    offenders = [
+        (path.name, line.strip())
+        for path in SHIPPED_SKILLS
+        for line in path.read_text(encoding="utf-8").split("\n")
+        if _says_session(line) and line.strip() not in ALLOWED
+    ]
+    assert not offenders, f"a help skill calls a chat a session: {offenders}"
 
 
 def test_the_wire_still_says_session() -> None:

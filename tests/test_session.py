@@ -2310,7 +2310,24 @@ class TestAttachmentForms:
         assert "you can see it" in attachment_guidance("c.png", "/u/c.png", "image")
         assert "you can read it" in attachment_guidance("p.pdf", "/u/p.pdf", "document")
         # No kind means the bytes did not go: the model must open the file.
-        assert attachment_guidance("x.zip", "/u/x.zip", "") == "[attached file: /u/x.zip]"
+        plain = attachment_guidance("x.zip", "/u/x.zip", "")
+        assert plain.startswith("[attached file: /u/x.zip — NOT delivered to you")
+        # What it may DO rides with it (H3, #444) — the old usage notes' half.
+        assert "never write a script" in attachment_guidance("c.png", "/u/c.png", "image")
+        assert "read_pdf(source=" in attachment_guidance("p.pdf", "/u/p.pdf", "document")
+        assert "read_file" in plain
+
+    def test_every_guidance_line_reads_back_as_its_file(self):
+        """The hint sits after the path; every reader must still get the path
+        and the name, and the record form must still be the embed."""
+        from aish.session import attachment_refs, strip_attachment_notes, to_record_form
+
+        for kind, name in (("image", "c.png"), ("document", "p.pdf"), ("", "x.zip")):
+            line = attachment_guidance(name, f"/u/{name}", kind)
+            [ref] = attachment_refs(line)
+            assert (ref.ref, ref.name) == (f"/u/{name}", name), kind
+            assert to_record_form(f"look\n{line}", Path("/u")) == f"look\n![[{name}]]"
+            assert strip_attachment_notes(f"look\n{line}") == "look"
 
 
 class TestEveryCutWalksBackToTaskStart:
@@ -2587,6 +2604,8 @@ class TestLastTask:
         cases = {
             "ok": dict(end="ok", answer="4"),
             "stopped": dict(end="ok", answer=session_module.STOPPED_ANSWER),
+            # A log written before "not an error" joined the note (H3, #444).
+            "stopped-legacy": dict(end="ok", answer=session_module.STOPPED_ANSWERS[1]),
             "failed": dict(end="failed", error="model unavailable: 503",
                            give_up={"class": "server", "retryable": True}),
             "unknown": dict(),
@@ -2596,7 +2615,7 @@ class TestLastTask:
             log = SessionLog(tmp_path / f"session-{ended}.jsonl")
             self._attempt(log, "q", **kwargs)
             log.close()
-            assert SessionLog.last_task(log.path)["ended"] == ended, ended
+            assert SessionLog.last_task(log.path)["ended"] == ended.removesuffix("-legacy"), ended
 
     def test_the_failure_is_the_last_attempts_give_up_only(self, tmp_path):
         log = SessionLog.new(tmp_path)

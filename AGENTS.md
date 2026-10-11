@@ -186,7 +186,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 
 Startup safety: launching either entry point from `$HOME` re-anchors the session to `~/aish` (`cli.default_workspace`, also used by `create_app`) so the home tree never becomes the auto-approval root; explicit `cwd` overrides are respected.
 
-Web-only UI conventions the model is told about (in `web_usage_context`): quick-reply chips — `[Label](aish-reply://answer text)` links rendered as one-tap buttons by `app.js` — and the approval-card feedback field that produces `Denied(comment)`.
+Web-only UI conventions the model is told about (the web render of the core prompt, `SYSTEM_PROMPT_TEMPLATE`'s `«web|cli»` variants): quick-reply chips — `[Label](aish-reply://answer text)` links rendered as one-tap buttons by `app.js` — and the approval-card feedback field that produces `Denied(comment)`.
 
 ## Testing pattern
 
@@ -200,4 +200,4 @@ The choreography harness (`tests/js/harness.js`) and the ownership lint (`tests/
 
 ## Documentation duplication
 
-The README's user-facing docs are also summarized in the agent's own system prompt (`SYSTEM_PROMPT_TEMPLATE` in `agent.py` — aish answers questions about itself). When changing user-visible behavior, update both the README and the system prompt text.
+The README's user-facing docs are also summarized in the help skills aish reads to answer questions about itself (`docs/shipped-skills/aish-web-help.md`, `aish-cli-help.md`); they reach the model only once copied into `~/.config/aish/skills/` — by hand today, nothing installs them; the core prompt (`SYSTEM_PROMPT_TEMPLATE`) points at them. When changing user-visible behavior, update both the README and the matching help skill.

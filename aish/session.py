@@ -447,7 +447,7 @@ def to_record_form(content: str, uploads_dir: Path | None) -> str:
     }
     out: list[str] = []
     for raw in (content or "").split("\n"):
-        line = raw.strip()
+        line = _without_hint(raw.strip())
         if _EMBED_RE.search(raw):
             # Already the record form, wherever on the line it sits. Left
             # exactly as written — rewriting it would move an inline file out of
@@ -534,6 +534,35 @@ def files_named(content: str, uploads_dir: Path | None) -> list[dict] | None:
     ]
 
 
+# What the model may DO with each kind of attached file — the model half of the
+# web UI's old attachments note (H3, #444), now delivered with the file it is
+# about instead of riding every call. It sits inside the bracket AFTER the
+# path, and `_without_hint` takes it back off by EXACT text before any reader
+# parses a path, so the three prose shapes every reader knows stay the shapes
+# they parse (tests/test_server.py::TestAttachmentNoteFormat).
+ATTACHMENT_HINTS = {
+    "image": " — look at it directly; never write a script to parse it",
+    "document": (
+        " — read_pdf(source=<this path>) always reads it, and gets one page, a "
+        "search or a scanned page"
+    ),
+    "": (
+        " — NOT delivered to you: read text with read_file, binaries with shell "
+        "tools; you cannot see an image sent this way, so say so if asked to "
+        "describe it"
+    ),
+}
+
+
+def _without_hint(line: str) -> str:
+    """A guidance line with its hint removed, by exact text; any other line
+    unchanged."""
+    for hint in ATTACHMENT_HINTS.values():
+        if line.endswith(hint + "]"):
+            return line[: -len(hint) - 1] + "]"
+    return line
+
+
 def attachment_guidance(name: str, path: str, kind: str) -> str:
     """The sentence the MODEL is given about one attached file.
 
@@ -549,10 +578,13 @@ def attachment_guidance(name: str, path: str, kind: str) -> str:
     it just happened or happened last month. Nothing that comes out of here is
     ever written to the log; the log holds `attachment_embed` instead."""
     if kind == "image":
-        return f"[image attached: {name} — you can see it; file at {path}]"
+        return f"[image attached: {name} — you can see it; file at {path}{ATTACHMENT_HINTS[kind]}]"
     if kind == "document":
-        return f"[document attached: {name} — you can read it; file at {path}]"
-    return f"[attached file: {path}]"
+        return (
+            f"[document attached: {name} — you can read it; file at {path}"
+            f"{ATTACHMENT_HINTS[kind]}]"
+        )
+    return f"[attached file: {path}{ATTACHMENT_HINTS['']}]"
 
 
 class Attachment(NamedTuple):
@@ -575,7 +607,7 @@ def attachment_refs(content: str) -> list[Attachment]:
     same way."""
     refs: list[Attachment] = []
     for raw in (content or "").split("\n"):
-        line = raw.strip()
+        line = _without_hint(raw.strip())
         embeds = _EMBED_RE.findall(raw)
         if embeds:
             # Every embed on the line, in the order written — one alone (an
@@ -796,7 +828,12 @@ TASK_ERROR_CAP = 500
 # CANCELLED_RESULT` is bound to this string rather than copied, because it is
 # how `last_task` tells a turn the owner stopped from one that answered —
 # reading only the log, where both end `task_end: ok` (#387).
-STOPPED_ANSWER = "(task stopped by user — any partial work is above)"
+#
+# "not an error" since H3 (#444): the web usage notes told the model so on every
+# call; the note now says it itself, the one place it is read. A log is never
+# rewritten, so every spelling one may hold is still recognised as a stop.
+STOPPED_ANSWER = "(task stopped by user — not an error; any partial work is above)"
+STOPPED_ANSWERS = (STOPPED_ANSWER, "(task stopped by user — any partial work is above)")
 
 
 class CarriedWork(NamedTuple):
@@ -2059,7 +2096,7 @@ class SessionLog:
         elif status is None:
             ended = "unrecorded"
         elif status == "ok":
-            ended = "stopped" if last_assistant == STOPPED_ANSWER else "ok"
+            ended = "stopped" if last_assistant in STOPPED_ANSWERS else "ok"
         else:
             ended = "failed"
         return {

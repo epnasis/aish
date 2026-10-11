@@ -1032,6 +1032,12 @@ class TestTheFileIsHandedOverNotDescribed:
         assert "MUST" in note
         assert "EXACTLY as written" in note
 
+    def test_the_note_forbids_the_file_url_the_model_once_reached_for(self):
+        """The docstring's `file://` — the core prompt's rule 7 said it until
+        H3 (#444) moved it onto the note that hands the file over."""
+        note = web_module.downloaded_note([self.PDF], "this action downloaded")
+        assert "a file:// link is dead on a web page, so NEVER write one" in note
+
     def test_every_file_gets_its_own_line(self):
         note = web_module.downloaded_note(
             ["/d/a.pdf", "/d/b.pdf"], "this action downloaded"

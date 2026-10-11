@@ -1897,7 +1897,8 @@ def downloaded_note(paths: list[str], what: str) -> str:
         "machine, so do NOT fetch it again.\nYou MUST also give the user the "
         "file itself: put the line(s) below in your answer EXACTLY as written, "
         "on their own line. That is what makes it something they can open — a "
-        f"path in a sentence is not.\n{lines}]\n"
+        "path in a sentence is not, and a file:// link is dead on a web page, so "
+        f"NEVER write one.\n{lines}]\n"
     )
 
 

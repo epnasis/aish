@@ -679,33 +679,39 @@ class TestSecurityHeaders:
             assert "src=" in tag, f"inline script would violate CSP: {tag}"
 
 
+def _web_system_message(app_env) -> str:
+    """The system message a web chat's agent really holds — composed by
+    create_app, not by a test re-assembling its parts."""
+    client, _ = make_client(app_env, [])
+    with client:
+        return client.app.state.server.active.agent.messages[0]["content"]
+
+
 class TestQuickReplyPromptGuidance:
     """Issue #78: the system prompt must forbid terminating quick-reply chips
     ("Thanks, that's all") — the user can end the chat anytime, so chips must
     only offer useful next steps."""
 
-    def test_forbids_terminating_chips(self):
-        context = server_module.web_usage_context("/allow", "/deny", "/state")
-        assert "NEVER generate a chip whose only purpose is to end the conversation" in context
-        assert "Thanks, that's all" in context
-        assert "useful next step" in context
+    def test_forbids_terminating_chips(self, app_env):
+        system = _web_system_message(app_env)
+        assert "Never a chip that merely ends the chat" in system
+        assert "every chip is a useful next step" in system
+        assert "(one-tap buttons)" in system  # the web's own rendering of chips
 
 
 class TestMathsPromptGuidance:
-    """#391: the web renders a model's LaTeX (KaTeX), so its prompt block must
-    not ask the model to write around it. The Unicode directive belongs to the
-    terminal's block only (tests/test_cli.py pins that it is there)."""
+    """#391: the web renders a model's LaTeX (KaTeX), so its prompt must not
+    ask the model to write around it. The Unicode directive belongs to the
+    terminal's render only (tests/test_cli.py pins that it is there)."""
 
-    def test_the_web_block_says_nothing_about_maths(self):
-        context = server_module.web_usage_context("/allow", "/deny", "/state")
-        lower = context.lower()
+    def test_the_web_block_says_nothing_about_maths(self, app_env):
+        system = _web_system_message(app_env)
+        lower = system.lower()
         for word in ("maths", "latex", "unicode", "typeset", "formula", "equation"):
             assert word not in lower, word
-        from aish.cli import usage_context
+        from aish.agent import system_prompt
 
-        cli = usage_context(False, Path("/allow"), Path("/state"), Path("/config"))
-        assert "MUST write mathematics in plain Unicode" in cli
-        assert "MUST write mathematics in plain Unicode" not in context
+        assert "Write maths in plain Unicode" in system_prompt(surface="cli")
 
 
 class TestQuickReplyNet:
@@ -5710,8 +5716,9 @@ class TestUpload:
             sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
             # …and what the MODEL got is the guidance, asserted where it lives.
             assert "you can see it" in sent["content"]  # image went native
+            hint = session_module.ATTACHMENT_HINTS["document"]
             assert f"[document attached: paper.pdf — you can read it; " \
-                   f"file at {pdf['path']}]" in sent["content"]
+                   f"file at {pdf['path']}{hint}]" in sent["content"]
             assert sent.get("images") == [image["path"]]
             assert "documents" not in sent  # not native on this backend
 
@@ -5729,7 +5736,8 @@ class TestUpload:
             assert f"![[{secret}]]" in user["text"]
             recv_until(ws, "done")
             sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
-            assert f"[attached file: {secret}]" in sent["content"]  # go and open it
+            hint = session_module.ATTACHMENT_HINTS[""]
+            assert f"[attached file: {secret}{hint}]" in sent["content"]  # go and open it
             assert "images" not in sent  # nothing base64'd from outside uploads
 
     def test_upload_requires_token_when_set(self, app_env):
@@ -5984,6 +5992,14 @@ class TestAttachmentNoteFormat:
     NATIVE_DOC = "[document attached: {name} — you can read it; file at {path}]"
     PLAIN = "[attached file: {path}]"
 
+    @staticmethod
+    def hinted(shape: str, kind: str) -> str:
+        """Since H3 (#444) the guidance carries what the model may DO with the
+        file, inside the bracket after the path — a sentence nothing stores,
+        and one every reader strips by exact text before parsing. With it
+        removed, the line IS the pinned shape, byte for byte."""
+        return shape[:-1] + session_module.ATTACHMENT_HINTS[kind] + "]"
+
     def test_guidance_matches_the_shapes_the_frontend_still_parses(self, app_env):
         client, _ = make_client(app_env, [])
         with client:
@@ -5995,6 +6011,10 @@ class TestAttachmentNoteFormat:
                 str(image), str(outside),
             ])
             assert guidance == [
+                self.hinted(self.NATIVE_IMAGE.format(name=image.name, path=image), "image"),
+                self.hinted(self.PLAIN.format(path=outside), ""),
+            ]
+            assert [session_module._without_hint(g) for g in guidance] == [
                 self.NATIVE_IMAGE.format(name=image.name, path=image),
                 self.PLAIN.format(path=outside),
             ]
@@ -6004,7 +6024,7 @@ class TestAttachmentNoteFormat:
         against the builder directly rather than through a live turn."""
         assert session_module.attachment_guidance(
             "paper.pdf", "/u/paper.pdf", "document"
-        ) == self.NATIVE_DOC.format(name="paper.pdf", path="/u/paper.pdf")
+        ) == self.hinted(self.NATIVE_DOC.format(name="paper.pdf", path="/u/paper.pdf"), "document")
 
     def test_the_record_form_is_a_name_for_a_file_aish_holds(self, app_env):
         client, _ = make_client(app_env, [])
@@ -7787,7 +7807,7 @@ class TestFeedbackAttachmentSwitch:
             prompt = self._last_user_prompt(chat, 1)
             # The attachment was detected and the model re-anchored on the
             # classic flow, with the consent listing (confirm/deselect).
-            assert "[attached file: /tmp/shot.png]" in prompt
+            assert "[attached file: /tmp/shot.png — NOT delivered to you" in prompt
             assert "SWITCH to the classic flow" in prompt
             assert "aish-reply://Create the issue" in prompt
             assert "aish-reply://Exclude <name> from the issue" in prompt
@@ -10962,10 +10982,13 @@ class TestBrowseWatch:
         has never heard of is one the owner has to discover on his own. Stated
         as what it IS — a window — because the tempting misreading is that the
         owner can now step in, which is a later slice with its own approval."""
-        context = server_module.web_usage_context("/allow", "/deny", "/state")
-        assert "/watch" in context
-        assert "read-only window" in context
-        assert "not a way for them to click" in context
+        # The UI tour moved to the aish-web-help skill the core points at
+        # (H3, #444); aish answers from it.
+        skill = Path(__file__).resolve().parent.parent / "docs" / "shipped-skills"
+        text = (skill / "aish-web-help.md").read_text(encoding="utf-8")
+        assert "/watch" in text
+        assert "read-only window" in text
+        assert "no clicking, typing or scrolling" in text
 
     def test_a_live_frame_is_never_recorded(self, app_env, monkeypatch):
         """Live frames go to the socket and nowhere else. Not through the

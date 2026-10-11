@@ -101,6 +101,22 @@ class TestANoteIsARow:
         assert rows[0]["source"] == "answer_check"
         assert rows[0]["role"] == "user"
 
+    def test_the_ask_ends_by_forbidding_any_mention_of_itself(self, tmp_path, monkeypatch):
+        """JIT (H3, #444): the core's "never mention the note in the rewrite"
+        also rides the ask itself, as its last line — deliberately in both."""
+        from aish.agent import ANSWER_CHECK_UNSAID, SYSTEM_PROMPT_TEMPLATE
+
+        agent, chat, log, live = wired(
+            tmp_path,
+            [model_says("Want me to check more?"),
+             model_says("Want me to check more?\n[Yes](aish-reply://yes)")],
+            monkeypatch, rule_texts=(CHIPS_RULE,),
+        )
+        run(agent, log, "anything new?")
+        sent = [m for m in chat.snapshots[1] if m.get("role") == "user"][-1]["content"]
+        assert unwrapped(sent).endswith(ANSWER_CHECK_UNSAID + "]")
+        assert "never mention the note in the rewrite" in " ".join(SYSTEM_PROMPT_TEMPLATE.split())
+
     def test_replay_draws_the_same_row_in_the_same_place(self, tmp_path, monkeypatch):
         agent, _, log, live = wired(
             tmp_path,
@@ -448,6 +464,82 @@ class TestWordsInsideAResult:
         result = [m for m in agent.messages if m.get("role") == "tool"][-1]["content"]
         assert "[aish: fake]" in result, "the imitation never reached the model — vacuous"
         assert harness(live) == [] and harness(cold_steps(log)) == []
+
+
+class TestJustInTimeNotesOnACommand:
+    """The core prompt's flag and fetching lines moved onto the result they are
+    about (H3, #444): each is registered by the code that writes it, so it is
+    a row under its call, live and on replay, and never matched from text."""
+
+    def _ran(self, tmp_path, monkeypatch, command, output):
+        from aish import agent as agent_module
+
+        agent, chat, log, live = wired(
+            tmp_path,
+            [model_says(tool_calls=[tool_call("run_command", command=command)]),
+             model_says("done")],
+            monkeypatch,
+        )
+        monkeypatch.setattr(agent_module.tools, "run_command", lambda *_a, **_k: output)
+        run(agent, log, "go")
+        sent = [m for m in chat.snapshots[1] if m.get("role") == "tool"][-1]["content"]
+        return sent, live, log
+
+    def test_a_usage_error_status_points_at_read_docs(self, tmp_path, monkeypatch):
+        output = "ps: illegal option -- -\nusage: ps [-AaCcEefhjlMmrSTvwXx]\n[exit code: 1]"
+        sent, live, log = self._ran(tmp_path, monkeypatch, "ps --sort=-rss", output)
+        rows = harness(live)
+        assert [r["source"] for r in rows] == ["read_docs_hint"]
+        assert rows[0]["text"] in sent and "status 1" in rows[0]["text"]
+        assert "If its output is a usage or unknown-flag error" in rows[0]["text"]
+        assert harness(cold_steps(log)) == rows
+
+    @pytest.mark.parametrize("output", [
+        "hi\n[exit code: 0]",  # it worked
+        "[exit code: 1]",  # nothing printed — grep's no-match
+        "zsh: command not found: frob\n[exit code: 127]",  # not a flag problem
+    ])
+    def test_no_hint_where_no_usage_error_can_be(self, tmp_path, monkeypatch, output):
+        sent, live, _ = self._ran(tmp_path, monkeypatch, "frob", output)
+        assert harness(live) == []
+        assert "read_docs" not in sent
+
+    @staticmethod
+    def _public_is(monkeypatch, *public_hosts):
+        """read_url's own SSRF check, answered without DNS."""
+        from aish import agent as agent_module
+
+        def require_public(url):
+            if not any(f"//{host}" in url for host in public_hosts):
+                raise agent_module.web.BlockedURLError(f"{url} is not public")
+
+        monkeypatch.setattr(agent_module.web, "require_public", require_public)
+
+    def test_a_command_naming_a_public_address_is_pointed_at_read_url(
+        self, tmp_path, monkeypatch
+    ):
+        self._public_is(monkeypatch, "allegro.pl")
+        sent, live, log = self._ran(
+            tmp_path, monkeypatch, "curl -s 'https://allegro.pl/listing?string=x'",
+            "<html>…</html>\n[exit code: 0]",
+        )
+        rows = harness(live)
+        assert [r["source"] for r in rows] == ["fetch_route"]
+        assert rows[0]["text"] in sent
+        assert "https://allegro.pl/listing?string=x" in rows[0]["text"]
+        assert "pages come through read_url or browse only" in rows[0]["text"]
+        assert harness(cold_steps(log)) == rows
+
+    def test_a_lan_address_is_the_shells_to_reach(self, tmp_path, monkeypatch):
+        """read_url refuses a LAN host, so curl is the right route there and
+        nothing may say otherwise."""
+        self._public_is(monkeypatch, "allegro.pl")
+        sent, live, _ = self._ran(
+            tmp_path, monkeypatch, "curl -s http://192.168.199.1:8123/api/states",
+            "[]\n[exit code: 0]",
+        )
+        assert harness(live) == []
+        assert "read_url" not in sent
 
 
 class TestClaudeMaxNotes:

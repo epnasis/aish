@@ -641,7 +641,11 @@ TOOL_SCHEMAS: list[dict] = [
                 "properties": {
                     "note": {
                         "type": "string",
-                        "description": "One-line fact, e.g. 'macOS ps: sort by mem = ps aux -m'.",
+                        "description": (
+                            "One-line fact, e.g. 'macOS ps: sort by mem = ps aux -m'. "
+                            "It is found again by these words, so name the activity it "
+                            "applies to."
+                        ),
                     },
                     "name": {
                         "type": "string",
@@ -751,8 +755,11 @@ TOOL_SCHEMAS: list[dict] = [
                         "type": "string",
                         "description": "Trigger-phrased one-liner — 'Use when the "
                         "user asks to …' — matched against future tasks; it is what "
-                        "makes the skill fire. Required for a new skill; omit on "
-                        "update to keep the existing one.",
+                        "makes the skill fire, so name the ACTIVITY, never a bare rule "
+                        "or a list of items. Required for a new skill; omit on "
+                        "update to keep the existing one. An entry that should have "
+                        "been preloaded and was not: repair its description and "
+                        "keywords.",
                     },
                     "content": {
                         "type": "string",
@@ -1077,7 +1084,10 @@ TOOL_SCHEMAS: list[dict] = [
                 "account, a tab, a filter, a 'show more'. "
                 "NEVER guess a URL for something you saw as a button — press the "
                 "button with browse_act. The session persists, so the pages you "
-                "reach are the user's own account pages."
+                "reach are the user's own account pages. Reading asks nothing; "
+                "only a press that CHANGES something asks, once per site, and that "
+                "yes covers read_url and browse there. A no refuses the press AND "
+                "the site — never try another control to get around it."
             ),
             "parameters": {
                 "type": "object",
@@ -1137,7 +1147,9 @@ TOOL_SCHEMAS: list[dict] = [
                             "shown, or its NAME in quotes — 'Log in', 'Szukaj'. "
                             "Duplicates are numbered ('Select #2'); a control "
                             "with no words is asked for "
-                            "as '#12'."
+                            "as '#12'. A result row's button carries its row "
+                            "('Wybierz — 07:45'): NEVER quote a price or time that "
+                            "is not in the row you acted on."
                         ),
                     },
                     "action": {
@@ -1168,7 +1180,7 @@ TOOL_SCHEMAS: list[dict] = [
                             "For type: what to type. For scroll: the direction — "
                             "'up' for older/top, anything else for down (more "
                             "results); target names the region to move, or the "
-                            "page."
+                            "page. A region that did not move is at that end: stop."
                         ),
                     },
                     "value": {
@@ -1208,8 +1220,10 @@ TOOL_SCHEMAS: list[dict] = [
                 "call). do=\"fill\" types AND picks the page's matching "
                 "suggestion, so it works on a rich destination box. Filling "
                 "needs no approval; the ONE step that sends the form does, so "
-                "it must be LAST. You get back what each control HOLDS "
-                "afterwards, plus what changed on the page."
+                "it must be LAST. A value the user declared as theirs (address, "
+                "phone, birth date, e-mail, name) asks once per site — never "
+                "split one across fields to avoid it. You get back what each "
+                "control HOLDS afterwards, plus what changed on the page."
             ),
             "parameters": {
                 "type": "object",
@@ -1219,7 +1233,8 @@ TOOL_SCHEMAS: list[dict] = [
                         "description": (
                             "The steps, in the order a person would do them. "
                             "Stops at the first one it cannot carry out and "
-                            "tells you where it got to — nothing is skipped."
+                            "tells you where it got to — nothing is skipped, and "
+                            "a batch that stopped did NOT send the form."
                         ),
                         "items": {
                             "type": "object",
