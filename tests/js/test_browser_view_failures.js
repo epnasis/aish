@@ -21,7 +21,7 @@ function fakeBox() {
   return box;
 }
 
-function render(failures) {
+function render(failures, consoleLines = []) {
   const box = fakeBox();
   const sandbox = {
     $: (id) => (id === "bv-failures" ? box : null),
@@ -41,7 +41,7 @@ function render(failures) {
       "// [BROWSER-VIEW-FAILURES-START]", "// [BROWSER-VIEW-FAILURES-END]")),
     sandbox,
   );
-  sandbox.bvShowFailures(failures);
+  sandbox.bvShowFailures(failures, consoleLines);
   return box;
 }
 
@@ -64,6 +64,21 @@ function render(failures) {
   const box = render([{ method: "GET", where: "https://x.pl/", status: 503, said: "" }]);
   ok("an empty reply says so rather than showing nothing",
     box.children[0].textContent.endsWith("(no reply text)"));
+}
+
+{
+  const box = render([{ method: "POST", where: "https://x.pl/l", status: 400,
+    said: "no", sent: "{a: text(1)}", headers: "{x-hcaptcha-token: text(9)}" }]);
+  ok("the headers' shape is shown with what was sent",
+    box.children[0].textContent ===
+      "POST https://x.pl/l → 400 · sent {a: text(1)} · headers {x-hcaptcha-token: text(9)} · no");
+}
+
+{
+  const box = render([], ['warning: <b onmouseover="x()">Failed</b> to fetch']);
+  ok("console lines show on their own, as text",
+    !box.hidden && box.children[0].textContent ===
+      'console warning: <b onmouseover="x()">Failed</b> to fetch');
 }
 
 {

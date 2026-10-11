@@ -10520,6 +10520,36 @@ class TestBrowserView:
         assert [f.get("failures") for f in frames[1:]] == [[refused]]
         assert frames[1]["jpeg"] == frames[0]["jpeg"]
 
+    def test_a_new_console_line_is_sent_even_when_the_picture_did_not_change(
+        self, app_env, monkeypatch
+    ):
+        from aish import browser as browser_module
+
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        self._fast_watch(monkeypatch)
+        monkeypatch.setattr(
+            browser_module, "view_activity",
+            lambda: {"gen": 5, "nav": 0, "quiet": 9_999, "ready": True},
+        )
+        line = "warning: Failed to fetch hCaptcha token due to: x"
+        monkeypatch.setattr(
+            browser_module, "view_settled_frame",
+            lambda: browser_module.Frame(
+                jpeg=b"\xff\xd8jpeg", url="https://x.pl/after", title="After",
+                gen=5, console=[line],
+            ),
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "click", "x": 5, "y": 5})
+            frames = [recv_until(ws, "browser_view")]
+            time.sleep(0.5)
+            ws.send_json({"type": "browser_view", "action": "close"})
+            while (event := recv_until(ws, "browser_view"))["action"] != "closed":
+                frames.append(event)
+        assert [f.get("console") for f in frames[1:]] == [[line]]
+
     def test_an_ordinary_frame_carries_no_failures_key(self, app_env, monkeypatch):
         calls = []
         self._fake_view(monkeypatch, calls)
