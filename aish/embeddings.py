@@ -77,12 +77,22 @@ def entry_text(entry) -> str:
 class SemanticIndex:
     """Task-vs-entry similarity with a persistent per-entry vector cache."""
 
-    def __init__(self, state_dir=None, model: str | None = None, embed=_ollama_embed):
+    def __init__(self, state_dir=None, model: str | None = None, embed=_ollama_embed,
+                 cache_name: str = "embeddings.json"):
         self.model = model or os.environ.get("AISH_EMBED_MODEL", DEFAULT_MODEL)
-        self.cache_path = Path(state_dir) / "embeddings.json" if state_dir else None
+        self.cache_path = Path(state_dir) / cache_name if state_dir else None
         self._embed = embed
         self._cache: dict[str, list[float]] | None = None
         self.error: str | None = None
+
+    def sibling(self, cache_name: str) -> "SemanticIndex":
+        """The same model, embed function and prefixes over a separate cache
+        file. Separate because `_save` keeps only the keys of the corpus it
+        was just asked about: two corpora sharing one file would each evict
+        the other's vectors on every save (`docs/tool-menu.md`)."""
+        state_dir = self.cache_path.parent if self.cache_path is not None else None
+        return SemanticIndex(state_dir, model=self.model, embed=self._embed,
+                             cache_name=cache_name)
 
     def _key(self, text: str) -> str:
         return hashlib.sha256(f"{self.model}\0{text}".encode()).hexdigest()

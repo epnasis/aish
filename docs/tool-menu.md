@@ -1,0 +1,94 @@
+# Tool menu — a per-task, harness-selected menu (#444 H1)
+
+`tool_menu.py`, the selection seam in `agent.py` (`_select_menu`, `_sent_menu`, `_admit_off_menu`), the `off_menu` counter in `tooluse.py`.
+
+**How to use this file.** The status line first, because this is an experiment arm and not a decision. Then the mechanism, then the invariants — each with the bug it exists to prevent — then the one tension this design cannot remove (the prompt cache), then what is recorded and what is not built.
+
+**Status: replay candidate for epic #444 H1, arm B. Not shipped, not merged.** The measurement decides whether it lives. Nothing below is a claim that a smaller menu makes the model better — that is the hypothesis; the epic's research digest is why it is worth a measurement, and the replay batch is the only thing that can settle it.
+
+---
+
+## Why
+
+Measured 2026-10-05 (epic #444 §1): the tool menu was ~78.7k characters, 59 tools, sent whole on every model call, with no pruning, deferral or relevance filtering of any kind. 30-day `aish tooluse` shows usage extremely skewed — the top 8 tools carry ~75% of all calls, ~20 tools were called fewer than 10 times — yet every schema rode every call. The published evidence (the epic's §2): selection accuracy degrades past ~30–50 tools; harness-side retrieval of the top-k tools is validated on 7–8B models; a model-called "load a tool" meta-tool is NOT validated below Claude 4.5-class models. So the HARNESS selects, and a safety net catches what it misses.
+
+## Mechanism
+
+**At task start, once.** `_run_task` calls `_select_menu` after the rules are seeded and preflight has run, and before the task's reminder is appended. It produces a `tool_menu.Selection`: a set of names, the category each name came in under, the mode and the scores. `_chat_turn` then sends `_sent_menu()` — the FULL menu (`TOOL_SCHEMAS` + the exposed plugin tools, refreshed as before) filtered to those names, **in the full menu's own order**.
+
+**The menu is the union of four categories**, each name recorded under the first one that claims it:
+
+| category | what | why it is not left to similarity |
+|---|---|---|
+| `core` | `CORE_TOOLS`: read_url, web_search, run_command, browse, browse_act, recall, show_image, read_file (the owner-specified eight), **plus read_skill and read_tool_output**, plus `plan` while a plan has open tasks | The eight carry most calls (30-day tooluse). read_skill and read_tool_output are added because aish's own standing text instructs them on every call: the knowledge index in `messages[0]` tells the model to call read_skill for a matching skill (`skills.knowledge_index`), and `SYSTEM_PROMPT_TEMPLATE` rule 7c tells it to page a cut result with read_tool_output — which read_url and browse results, capped plugin results and trim stubs all carry keys for. A harness that instructs a call to a tool it did not send has built the miss itself. |
+| `required` | tools a structure of THIS task needs: every tool a seeded rule binding routes to, demands first, or needs to make a kind real (`rules.needed_tools`, the same enumeration as the bind-time unsatisfiability check); read_skill when preflight armed the skill-read gate | A rule's seed prose names the tool and its gate refuses the alternatives (`docs/rules-engine.md` R5/R6); a model handed no schema for the one tool it may use has to guess its arguments, or give up. The skill gate refuses every tool until read_skill runs. |
+| `continuity` | tools called since the previous task's reminder — the previous task, which on a continuation (#387) is the attempt being continued | A follow-up ("now the same for March") has no surface to rank on, and the history it continues already shows the calls it would repeat. |
+| `relevant` | the remaining tools ranked against the task text: a NAME hit first (the tool's name, its name with `_` as spaces, or its family prefix — `gmail` for `gmail_search` — as a whole word in the message), then similarity; at most `RELEVANT_TOP_K` (12), name hits included even past it | The hypothesis under test. |
+
+**Ranking uses the same embedding seam preflight uses.** `SemanticIndex.sibling` gives a second index on the same model, the same embed function and the same task-type prefixes, cached in its own file (`tool-embeddings.json`) by `sha256(model + text)` exactly like the knowledge vectors. Each tool embeds as one identity line, `name: description` (`embeddings.entry_text`). The query is preflight's query, from the same helper (`skills.retrieval_query`): the message, with recent user turns appended when it is short (#183). Content addressing is the refresh rule: a plugin rescan that changes a description changes the line, and the next selection embeds it; nothing has to invalidate anything.
+
+**Lexical is the floor (knowledge-layer L2).** With no embedder wired, or one that fails (`scores()` returns None), the same ranking runs on words: a name hit, then the count of the description's content words that occur in the message (`skills._content_words`, the existing stopword filter — no new word list). A tool that scores 0 is not admitted; there is no fill. The mode is recorded, so a lexical selection is never read as a semantic one.
+
+**Frozen for the task, and only ever GROWN within it.** Two things add a name mid-task, and nothing removes one:
+
+1. **The off-menu net.** A call to a tool that exists on the full menu but was not sent runs exactly as it would have (same `_dispatch`, same gates), joins the menu for the rest of the task, and its `tool` step carries `off_menu: true`. It is not an unknown-tool error and `aish tooluse` counts it in its own column. A name on neither menu is still `UNKNOWN_TOOL_PREFIX`, unchanged. The admission happens in `_call_result`, the funnel every call passes — the parallel read fan-out included — BEFORE the gates decide, so a call a gate then refuses still joins the menu: the model asked for that tool, and whether this particular call may run is the gate's question, not the menu's.
+2. **A tool created during the task** (`create_tool`, or a manifest dropped in mid-task): a name on the full menu now that was not on it when the task was selected joins as `created`. Before this design a new tool appeared on the next call; this keeps that.
+
+**Kill switch: `AISH_MENU_ALL=1`, or `tool_menu = "all"` in `config.toml`.** Either restores the full menu with no selection at all — the pre-#444 path, byte for byte — and the `context` record says `menu.mode = "all"` and which knob did it. The config key exists because replay arms may not set `AISH_*` variables (`docs/replay.md`) but may overlay `config.toml`.
+
+**Catalog mode (`tool_menu = "catalog"`, arm C — built, small).** Core + `required` + `continuity` as full schemas, nothing ranked, and one more tool: `load_tool`, whose description is a catalog — one line per remaining tool, its name and the first sentence of its description (cut at `CATALOG_LINE_CHARS`, 100). Calling it with names puts those tools on the menu from the next call (category `loaded`) and executes nothing else; a name not on the full menu is reported as no such tool, and only-unknown names are an `ERROR` result. The catalog is built once per task, so its bytes are frozen with the menu. A tool called straight from the catalog without loading rides the off-menu net like any other. `load_tool` exists only in catalog mode: anywhere else it is an unknown tool. This tests what the epic's research says is unproven at this scale — whether the local model will call a meta-tool to fetch a capability — and is measured, not assumed.
+
+## What the selection would have done on recorded tasks (offline, 2026-10-10)
+
+`tool_menu.select` run over the 434 tasks in the newest 150 session logs on this machine, with the real embedder (embeddinggemma), today's full menu (59 tools, 78,916 characters as the brief serialises it), core, and the previous task's calls as continuity. Not modelled: rule-required tools, the skill gate, an open plan; a continuation's text is aish's note rather than the question it continues. The script lives outside the repo.
+
+| `RELEVANT_TOP_K` | tools on the menu (median / max) | characters (median / p90 / max) | tasks with ≥1 recorded call to an unselected tool | distinct (task, tool) misses / recorded calls |
+|---|---|---|---|---|
+| 12 (shipped) | 22 / 29 | 28,538 / 34,041 / 41,950 | 55 / 434 (12.7%) | 82 / 2,539 |
+| 16 | 26 / 33 | 34,570 / 39,869 / 47,147 | 43 / 434 (9.9%) | 61 / 2,539 |
+
+The most-missed at 12: obsidian_read (14 tasks), obsidian_find (9), remember (8), read_pdf (8), write_file (7), edit_file (6). **What this does NOT say:** those calls were made by a model that held the full menu. A model handed the smaller one may pick other tools, call the missed one anyway through the net, or fail — that is what the replay measures. The catalog arm on the same menu is 11 tools and 14,538 characters.
+
+## Invariants, and the bug each prevents
+
+**M1 · Selection narrows what is SENT, never what is CALLABLE.** The callable set is the full menu, computed by the code that computed it before (`_refresh_plugin_tools`: a mutating plugin is exposed only with a tool approver wired), and selection only filters a copy of it. `_known_capabilities` — what a rule's bind-time check reads — stays the full menu. Every gate (stop, skill, rule, approval, denylist, origin, egress) runs in `_dispatch` on the tool's name regardless of the menu. *Prevents:* a selection bug that makes a tool uncallable (the net would be the only path back), and the opposite — a mutating tool without an approver becoming reachable because something "added it to the menu"; the net admits only names already on the full menu, and that set never contains it.
+
+**M2 · Once per task, never recomputed mid-task.** *Prevents:* menu churn between calls of one task, which would throw away the server's prefix cache on every call (#404) and change what the model is holding under it mid-plan. Growth (the net, a created tool) is the only exception, and it is monotone.
+
+**M3 · Deterministic, and in the full menu's order.** Same message, context, tool set, bindings, history and vectors → same names; ties break by the full menu's order, and the sent list keeps that order. *Prevents:* two replay runs of one turn being handed different menus for no recorded reason, and a menu that is the same SET but different BYTES (a reordered list is a different prefix to every cache).
+
+**M4 · No dependency on the embedder.** An embedder that is down yields a lexical selection, never a failed task and never the full menu by accident. *Prevents:* the knowledge layer's L2 being broken by the one new consumer of the seam.
+
+**M5 · What was sent is what is recorded.** The `brief` is written from the list `_chat_turn` sends, so its digest, count and names — and therefore `aish tooluse`'s menu-size table and the replay report's context row — are the selected menu, not the full one. *Prevents:* a size experiment whose own instrument reports the size it was meant to change.
+
+**M6 · A miss is measured, not hidden.** The off-menu call is a counted outcome of its own, never `unknown` and never silently a normal call. *Prevents:* the experiment being blind to its main failure mode — with no `off_menu` column, a high miss rate would read as "the model used the tool normally".
+
+**M7 · The boundary trim estimates with the FULL menu.** The task-boundary trim runs before selection (it must: rules are seeded after it), so on `local:` its estimate counts the full menu — an over-count by the unselected schemas. Over-counting trims earlier than necessary; under-counting is the out-of-memory crash (`docs/agent-core.md`, #415). Mid-task estimates use the menu actually being sent.
+
+**M8 · claude-max is untouched.** The SDK owns that loop, `_run_task` never runs, no selection exists, and its MCP registration (`_current_tool_defs`) stays the full menu. `_admit_off_menu` is inert with no selection.
+
+## The tension this cannot remove: the prompt cache
+
+**Within a task the prefix stays stable** (M2): every call sends the same tools in the same order, as `TestPromptPrefixStability` requires.
+
+**Across tasks it does not, whenever the selected set changes.** On the local mlx-lm path the tools are part of the leading system checkpoint (`docs/agent-core.md`: "at the end of the leading system messages (tools + `messages[0]`)"); where they sit in the other providers' cache order was not checked for this design. mlx-lm saves cache checkpoints only at the end of the leading system messages, at the end of each prompt and after generation, and on Qwen3.6-35B-A3B reuses one beyond the common prefix only when the cache can be trimmed, which it cannot (`docs/agent-core.md`, *The prompt prefix must be stable*). A menu that differs from the previous task's diverges INSIDE the tools block — before every checkpoint — so the first call of such a task re-reads the whole request cold: tools, `messages[0]` and the entire conversation. Today a new task extends the previous request and pays only for what is new. The same holds across chats: `messages[0]` is byte-identical across chats so a new chat reuses the ~33k-token system checkpoint; a different menu forfeits that.
+
+What this costs is NOT known and is not estimated here. It is a function of how often consecutive tasks select different sets, how long the chats are, and the server — and it is exactly the trade-off the epic says must be measured on both backends rather than assumed. The replay report's per-call prompt tokens and wall seconds see it; `wall_s` is where it would show.
+
+Candidate mitigations, none built (each would be its own arm): keep the previous task's menu when the new selection is a subset of it; union with the previous menu up to a cap, re-selecting only when the cap is crossed; select per CHAT on its first task.
+
+## Records
+
+- **`context.menu`** (renderless, at seed, once per task — §3.10 of `docs/trace-contract.md`): `mode` (`semantic` | `lexical` | `all`), `count`, `full_count`, `names` per category, the ranked `relevant` rows with their score and rail, `top_k`, and `error` when the embedder failed. With the kill switch: `{mode: "all", via: "env" | "config"}` and nothing else.
+- **`brief.tools.selection`** (per model call, written when the stamp changes): the count per category plus `off_menu`, so the menu each call actually held is attributable without re-deriving the selection. Absent in `all` mode — the brief then has its pre-#444 shape.
+- **`tool.off_menu: true`** on the step of a call that was not on the menu sent. `aish tooluse` counts it per tool beside `unknown`.
+
+## What is not built, and why
+
+- **A similarity floor with a full-menu fallback** (the Less-is-More shape in the epic's arm b). No measured threshold exists for tool lines — the knowledge floors were each calibrated on the live corpus, and borrowing one would be a guess. `context.menu.relevant` records the scores, so the floor can be calibrated from data before it is built.
+- **Whether every backend can DELIVER an off-menu call** is not established. A server whose tool-call parser only recognises names it was handed would turn a would-be off-menu call into plain text; the net cannot catch what never arrives as a call. Not checked for mlx-lm, Ollama, Gemini or the Claude API.
+- **Whether every provider accepts a history holding calls to tools no longer on the menu** is not established either. A tool called three tasks ago and not selected now still appears in the history the request carries. Not checked against any provider.
+- **`plan` is core only while a plan is open**, as specified. The repeat nudge and the stall replan ask for a plan while `plan` may be off the menu; the call then rides the net and is counted as `off_menu`. That is a confound for any plan-usage reading of this arm, and it is stated here so it is not discovered later.
+- **Any mitigation of the cache tension** — the candidates are listed in that section; each would be its own arm.
+
+`TestToolMenuSelection`, `TestTheMenuIsFrozenPerTask`, `TestTheOffMenuNet`, `TestTheKillSwitch`, `TestTheCatalogArm`, `TestMenuRecords`, `TestTheEmbeddingSeam` (`tests/test_tool_menu.py`); `TestOffMenuCounted` (`tests/test_tooluse.py`). Tests whose subject assumes one menu for a whole task — prefix byte-identity, brief interning, plugin exposure — opt into the kill switch with the `full_menu` fixture and say so.

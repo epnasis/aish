@@ -316,6 +316,8 @@ Two joins are worth knowing about. A brief is written only when the menu or syst
 
 What it deliberately cannot say, stated in the report itself: whether the tool a model picked was the RIGHT one — no record captures intent. It measures only; nothing reads it to decide. The size fence on the other side is `tests/test_tool_menu_size.py`, which pins the serialized native menu and each description to a budget so the essays the shrink removed cannot grow back sentence by sentence. The `unknown` counter reads the recorded error's opening — `tools.UNKNOWN_TOOL_PREFIX`, one spelling the writer imports rather than respells, so rewording it cannot silently zero the count. `TestPerToolOutcomes`, `TestEmptyAndBrokenLogs`, `TestTheWindow`, `TestMenuSizes`, `TestTheReport`, `TestTheSubcommand`, `TestOneSpellingOfUnknown`.
 
+**A fifth counter, `off_menu` (#444 H1).** With the per-task menu (`docs/tool-menu.md`), a tool can exist and still not be on the menu a call was handed. Such a call RUNS — the off-menu net — and its `tool` step carries `off_menu: true`; it is counted in its own column and never as `unknown`, which keeps meaning "no such tool". The menu-size table needs no change: the brief is written from the list `_chat_turn` sends, so its digest and count are the selected menu, and the brief's `tools.selection` says per model call how many names came in under each category. `TestOffMenuCounted`.
+
 ## What is still missing
 
 The reader reports each of these as *not recorded* rather than guessing:

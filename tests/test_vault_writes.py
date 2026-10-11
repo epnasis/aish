@@ -578,7 +578,9 @@ def _triggered_agent(vault: Path, cwd: Path, responses, origin="email"):
     return agent, chat, bridge, log
 
 
-def test_a_triggered_session_creates_a_note_and_holds_a_replace(vault, tmp_path):
+def test_a_triggered_session_creates_a_note_and_holds_a_replace(
+    vault, tmp_path, full_menu
+):
     """The issue's acceptance case. A triggered session is offered
     `obsidian_write` (it carries the web approver, as every server session
     does — `server.open_session`), a licensed create RUNS with no card, and

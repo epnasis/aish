@@ -1618,21 +1618,37 @@ def unsatisfiable(rule: Rule, readers: list[str], capabilities: set[str] | None)
     every alternative and offer nothing."""
     if not capabilities:
         return []
-    missing = [reader for reader in readers if reader not in capabilities]
+    return [name for name in needed_capabilities(rule, readers) if name not in capabilities]
+
+
+def needed_capabilities(rule: Rule, readers) -> list[str]:
+    """Every capability this rule needs to be satisfiable, in order: the
+    routed readers, what `must_first` demands, and the tool that makes each
+    KIND real. ONE enumeration, read by the bind-time check above and by the
+    tool menu (`needed_tools`), so the menu can never omit a tool the
+    unsatisfiability check would have demanded (`docs/tool-menu.md`)."""
+    needed = [str(reader) for reader in readers]
     for obligation in rule.obligations:
         if (obligation["verb"] == VERB_MUST_FIRST
-                and obligation["capability"] != FIRST_ANSWER
-                and obligation["capability"] not in capabilities):
-            missing.append(str(obligation["capability"]))
+                and obligation["capability"] != FIRST_ANSWER):
+            needed.append(str(obligation["capability"]))
         # A KIND names something the reader sees, and every kind is made real
         # by a tool. If that tool is gone the rule can never be satisfied — so
         # it is caught here, in the tool's name, even though the rule file
         # never mentions it.
         for kind in obligation.get("kinds", ()):
-            needed = KIND_SPECS[kind]["needs"]
-            if needed not in capabilities:
-                missing.append(str(needed))
-    return missing
+            needed.append(str(KIND_SPECS[kind]["needs"]))
+    return needed
+
+
+def needed_tools(bindings: list[Binding]) -> list[str]:
+    """The capabilities this turn's bindings need, deduplicated in order.
+    Skill names are among them (a `<cap>` may be a skill); the caller keeps
+    only what is on its tool menu."""
+    return list(dict.fromkeys(
+        name for binding in bindings
+        for name in needed_capabilities(binding.rule, binding.readers)
+    ))
 
 
 def bind(

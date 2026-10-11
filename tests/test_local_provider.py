@@ -579,6 +579,7 @@ body
 """
 
 
+@pytest.mark.usefixtures("full_menu")
 class TestPromptPrefixStability:
     """mlx-lm reuses the KV cache for the longest common token PREFIX of an
     earlier request. Within one task every call must therefore send the same

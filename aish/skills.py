@@ -996,6 +996,16 @@ def _nearest_first(missed: list[tuple[float, dict]]) -> tuple[list[dict], int]:
     return rows[:PRELOAD_NEAR_MISS_MAX], max(0, len(rows) - PRELOAD_NEAR_MISS_MAX)
 
 
+def retrieval_query(task: str, context: str = "") -> str:
+    """The embedding query for a task: the message, with recent conversation
+    appended only when the message is short — a bare follow-up is a hopeless
+    query alone (#183). One function so preflight and the tool menu
+    (`docs/tool-menu.md`) rank against the same text."""
+    if context and len(task) < PREFLIGHT_CONTEXT_TASK_CHARS:
+        return f"{task}\n{context[:PREFLIGHT_CONTEXT_CHARS]}"
+    return task
+
+
 def preflight(
     cwd: str,
     lessons_path,
@@ -1048,9 +1058,7 @@ def preflight(
     # Pinned entries are standing rules: always rendered in the index,
     # never candidates for topical injection.
     entries = [e for e in load_entries(cwd, lessons_path) if not e.pinned]
-    query = task
-    if context and len(task) < PREFLIGHT_CONTEXT_TASK_CHARS:
-        query = f"{task}\n{context[:PREFLIGHT_CONTEXT_CHARS]}"
+    query = retrieval_query(task, context)
     sims = semantic(query, entries) if semantic is not None else None
     missed: list[tuple[float, dict]] = []
     if sims is not None:

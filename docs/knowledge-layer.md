@@ -164,6 +164,8 @@ Entries embed as a single **identity line** (`name: description (keywords: …)`
 
 Both entry points wire it identically — `Agent(semantic=SemanticIndex(state_dir))` — and the agent threads `scores` into preflight, recall and the dedup gate. `TestSemanticIndex`, `TestPreflightSemantic`.
 
+**A second corpus gets a second FILE, never a share of this one (#444 H1).** The per-task tool menu (`docs/tool-menu.md`) ranks tool identity lines on the same model and prefixes through `SemanticIndex.sibling`, cached in `tool-embeddings.json`. A shared file would thrash: `_save` keeps only the keys of the corpus it was just asked about, so knowledge and tools would evict each other's vectors on every save, and each process would re-embed both. The query both rank against is one helper, `skills.retrieval_query`, so a short follow-up carries the same recent turns into either.
+
 **Retrieval quality is regression-gated.** `tests/test_retrieval_quality.py` is a recall@3 harness over a fixture corpus with a deterministic concept-axis embedder injected at the `embed=` seam: semantic must score 1.0 on both preflight and recall including the Polish→English cases, and lexical-only floors of 0.6/0.3 are asserted. `TestSemanticRecallAtK`, `TestLexicalFloor`, `TestHarnessSeam`.
 
 ---
