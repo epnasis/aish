@@ -4336,6 +4336,15 @@ SCREEN_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 _SCREEN_ARGS = [
     "--no-first-run", "--no-default-browser-check",
     "--window-position=80,60", "--window-size=1280,900",
+    # The SAME cookie encryption as aish's own Chrome. Playwright launches
+    # every Chrome with these two by default, so its cookies are sealed with a
+    # mock key instead of the login Keychain's; a plain Chrome without them
+    # seals with the real key, and neither can read the other's. Measured on a
+    # throwaway profile: a cookie a plain Chrome wrote was on disk either way,
+    # and aish's Chrome read it only when these were passed. Without them his
+    # booksy.com sign-in here worked and aish still saw him signed out. Storage
+    # switches only — nothing a page can observe.
+    "--use-mock-keychain", "--password-store=basic",
 ]
 _SCREEN: Any = None   # the Popen of the owner's on-screen Chrome, if any
 SCREEN_HOLDS = (
