@@ -9794,7 +9794,10 @@ function handleSlash(text) {
       // browser with a settings panel; the name promises one thing and it did
       // another. Only the bookkeeping verbs stay as text.
       const verb = arg.split(/\s+/)[0].toLowerCase();
-      if (verb === "forget" || verb === "logout" || verb === "close") {
+      // `screen` opens a plain Chrome on the MAC's display (for Screen Sharing),
+      // not this sheet — so it answers as text like the bookkeeping verbs.
+      if (verb === "forget" || verb === "logout" || verb === "close" ||
+          verb === "screen") {
         openSheet("workspace-sheet");
         return send({ type: "browser", arg });
       }
@@ -16007,7 +16010,13 @@ function wireBrowserView() {
         const travelled = endY - wasDrag.y;
         if (Math.abs(travelled) > BV_TAP_SLOP) {
           // Finger up = page down, as everywhere else.
-          bvSend({ action: "scroll", dy: Math.round(-travelled * bvPageScale()) });
+          // Where the swipe STARTED, so the wheel scrolls what is under the
+          // finger — a widget's own panel — not whatever the last tap left
+          // the mouse over.
+          const at = browserViewPoint(img, wasDrag.x, wasDrag.y);
+          bvSend(Object.assign(
+            { action: "scroll", dy: Math.round(-travelled * bvPageScale()) },
+            at ? { at: [at.x, at.y] } : {}));
         }
       }
       return;

@@ -6,6 +6,7 @@ and conftest's `no_real_browser` makes any escape from that fail loudly.
 
 import asyncio
 import inspect
+import os
 import pathlib
 import time
 import urllib.error
@@ -1922,6 +1923,21 @@ class TestEveryActionActuallyRuns:
             ("move", 10.0, 20.0), ("down",),
             ("move", 30.0, 21.0), ("move", 60.0, 25.0), ("up",),
         ]
+
+    def test_a_scroll_wheels_where_the_finger_was(self, monkeypatch):
+        """A wheel lands on what is under the mouse, and the mouse sat where
+        the last tap left it — so a swipe over a widget's own scrolling panel
+        scrolled something else."""
+        owner = self._owner()
+        self._run(owner, monkeypatch, "scroll", dy=300, at=[210, 330])
+        mouse = [d for d in owner.view.did if d[0] in ("move", "wheel")]
+        assert mouse == [("move", 210.0, 330.0), ("wheel", 300.0)]
+
+    @pytest.mark.parametrize("at", [None, [1], ["1", "2"], [True, 2], [float("inf"), 1]])
+    def test_a_scroll_without_a_usable_point_does_not_move_the_mouse(self, at, monkeypatch):
+        owner = self._owner()
+        self._run(owner, monkeypatch, "scroll", dy=300, at=at)
+        assert [d for d in owner.view.did if d[0] == "move"] == []
 
     def test_a_drag_never_leaves_the_button_held(self, monkeypatch):
         """A down with no up makes every later tap part of the same drag."""
@@ -5283,3 +5299,128 @@ class TestWhatTheSiteRefused:
 
         asyncio.new_event_loop().run_until_complete(drive())
         assert owner.view_failures[0]["said"] == browser.WITHHELD_REPLY
+
+
+class TestAWidgetInsideAFrameIsNotInvisible:
+    """The probe watches the top document only, so a challenge widget's next
+    screen — inside its own iframe — moved nothing it could see, the watcher
+    let go, and the owner aimed at the previous screen (hCaptcha on booksy.com:
+    three `challenge-closed`). Reproduced with a cross-origin iframe whose step
+    changes 900 ms after its request ends; these pin the repair."""
+
+    def _step(self, **over):
+        args = dict(
+            moved=False, quiet_ms=9_999, ready=True, elapsed_ms=1_000,
+            since_capture_ms=9_999, captured=0,
+        )
+        args.update(over)
+        return browser.watch_step(**args)
+
+    def test_a_still_page_with_child_frames_is_looked_at_not_let_go(self):
+        assert self._step() == "stop"                 # no frames: unchanged
+        assert self._step(blind=True) == "capture"
+        assert self._step(blind=True, since_capture_ms=200) == "wait"
+
+    def test_looking_is_still_bounded_by_the_capture_cap_and_the_clock(self):
+        assert self._step(blind=True, captured=browser.WATCH_MAX_CAPTURES) == "stop"
+        assert self._step(blind=True, elapsed_ms=browser.WATCH_MAX_MS) == "stop"
+
+
+class TestTheOwnersOwnChromeOnTheScreen:
+    """`/browser screen`: a plain Chrome on aish's profile, on the Mac's display,
+    for Screen Sharing. booksy.com refused every sign-in through the automated
+    browser and accepted the same one in Safari."""
+
+    class FakeProc:
+        def __init__(self):
+            self.running, self.terminated = True, False
+
+        def poll(self):
+            return None if self.running else 0
+
+        def terminate(self):
+            self.terminated, self.running = True, False
+
+        def wait(self, timeout=None):
+            return 0
+
+    def _open(self, monkeypatch, url="booksy.com"):
+        spawned = []
+        proc = self.FakeProc()
+
+        def spawn(argv):
+            spawned.append(argv)
+            return proc
+
+        monkeypatch.setattr(browser, "_spawn_screen", spawn)
+        monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
+        monkeypatch.setattr(browser, "shutdown", lambda: browser.close_screen())
+        monkeypatch.setattr(browser, "SCREEN_CHROME", __file__)   # any existing path
+        return browser.command(f"screen {url}"), spawned, proc
+
+    def test_it_is_a_plain_chrome_on_aishs_profile_and_nothing_automates_it(
+        self, monkeypatch
+    ):
+        reply, spawned, _ = self._open(monkeypatch)
+        argv = spawned[0]
+        assert f"--user-data-dir={browser.profile_dir()}" in argv
+        assert argv[-1] == "https://booksy.com"
+        assert not any("automation" in a.lower() or "remote-debugging" in a for a in argv)
+        assert "Screen Sharing" in reply and "⌘Q" in reply
+
+    def test_aish_will_not_launch_on_the_profile_while_his_chrome_holds_it(
+        self, monkeypatch
+    ):
+        import asyncio
+
+        _, _, proc = self._open(monkeypatch)
+        assert browser.screen_holds_profile() == browser.SCREEN_HOLDS
+        with pytest.raises(browser.BrowserUnavailable, match="Chrome window on the Mac"):
+            asyncio.new_event_loop().run_until_complete(
+                browser._Owner()._open(browser.profile_dir())
+            )
+        proc.running = False   # he quit it
+        assert browser.screen_holds_profile() == ""
+
+    def test_close_quits_his_chrome_too(self, monkeypatch):
+        _, _, proc = self._open(monkeypatch)
+        assert "your Chrome window on the Mac" in browser.command("close")
+        assert proc.terminated and browser.screen_holds_profile() == ""
+
+    def test_a_second_screen_while_one_is_open_is_refused(self, monkeypatch):
+        self._open(monkeypatch)
+        assert browser.command("screen x.pl").startswith("cannot open Chrome on the Mac")
+
+
+class TestALiveChromesLockIsNeverCleared:
+    """Clearing a lock its holder still holds, then launching, is two Chromes on
+    one profile — the owner's logins. With `/browser screen` a live holder is
+    an ordinary state, not a crash."""
+
+    def test_liveness_reads_the_pid_in_the_lock(self):
+        import subprocess
+        import sys
+
+        assert browser.lock_holder_alive(f"mm-{os.getpid()}")
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        assert not browser.lock_holder_alive(f"mm-{dead.pid}")
+        assert browser.lock_holder_alive("garbage")      # unreadable errs alive
+
+    def test_a_live_holders_lock_is_left_alone_and_a_dead_ones_cleared(
+        self, monkeypatch, tmp_path
+    ):
+        import subprocess
+        import sys
+
+        monkeypatch.setattr(browser, "profile_dir", lambda: tmp_path)
+        error = RuntimeError("Failed to create a ProcessSingleton for your profile")
+        os.symlink(f"mm-{os.getpid()}", tmp_path / "SingletonLock")
+        assert browser._clear_stale_lock(error) is False
+        assert os.path.islink(tmp_path / "SingletonLock")
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        os.unlink(tmp_path / "SingletonLock")
+        os.symlink(f"mm-{dead.pid}", tmp_path / "SingletonLock")
+        assert browser._clear_stale_lock(error) is True
+        assert not os.path.lexists(tmp_path / "SingletonLock")

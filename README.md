@@ -267,6 +267,10 @@ looked up, the way your own browser's does. On the phone, tap to click, swipe
 to scroll, and **press and hold, then drag** for anything the page wants
 dragged — a slider, or a "drag the piece into place" check at sign-in; your
 finger's path is replayed in the browser when you let go.
+`/browser screen <url>` instead opens a plain Chrome — nothing automating it —
+on aish's profile, on the Mac's own screen, for you to use over Screen Sharing;
+a site that refuses aish's automated browser can be signed into there, and aish
+then reads it as you. aish's browser waits until you quit that Chrome (⌘Q).
 `/browser forget <host>` stops treating a site as signed in and
 `/browser close` shuts it down.
 

@@ -10071,6 +10071,24 @@ class TestBrowserCommand:
             ws.send_json({"type": "browser", "arg": "forget x.pl"})
             assert recv_until(ws, "job_list")["text"] == "forgot it"
 
+    def test_screen_answers_with_its_own_words_not_the_login_window_ack(
+        self, app_env, monkeypatch
+    ):
+        """`/browser screen` returns at once and says how to end it; the
+        login-window ack ("close the window when you are done") would be wrong
+        twice — it does not wait, and closing a window does not quit Chrome."""
+        from aish import browser as browser_module
+
+        seen = []
+        monkeypatch.setattr(
+            browser_module, "command", lambda arg: seen.append(arg) or "opened on the Mac"
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser", "arg": "screen booksy.com"})
+            assert recv_until(ws, "job_list")["text"] == "opened on the Mac"
+        assert seen == ["screen booksy.com"]
+
 
 class TestBrowserView:
     """The remote browser view (#221): the Mac is headless, so this sheet is
@@ -10549,6 +10567,48 @@ class TestBrowserView:
             while (event := recv_until(ws, "browser_view"))["action"] != "closed":
                 frames.append(event)
         assert [f.get("console") for f in frames[1:]] == [[line]]
+
+    def test_a_page_with_child_frames_is_looked_at_again_though_nothing_moved(
+        self, app_env, monkeypatch
+    ):
+        """The wiring of `blind`: the probe's frame count reaches the policy, so
+        a widget's next screen inside an iframe arrives without another tap."""
+        from aish import browser as browser_module
+
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        self._fast_watch(monkeypatch)
+        monkeypatch.setattr(browser_module, "WATCH_BLIND_LOOK_MS", 0)
+        monkeypatch.setattr(
+            browser_module, "view_activity",
+            lambda: {"gen": -1, "nav": 0, "quiet": 9_999, "ready": True, "frames": 3},
+        )
+        monkeypatch.setattr(
+            browser_module, "view_settled_frame",
+            lambda: browser_module.Frame(
+                jpeg=b"\xff\xd8step2", url="https://x.pl/after", title="After", gen=-1,
+            ),
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "click", "x": 5, "y": 5})
+            frames = [recv_until(ws, "browser_view")]
+            time.sleep(0.5)
+            ws.send_json({"type": "browser_view", "action": "close"})
+            while (event := recv_until(ws, "browser_view"))["action"] != "closed":
+                frames.append(event)
+        assert [base64.b64decode(f["jpeg"]) for f in frames[1:]] == [b"\xff\xd8step2"]
+
+    def test_a_scroll_carries_where_the_finger_was(self, app_env, monkeypatch):
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json(
+                {"type": "browser_view", "action": "scroll", "dy": 200, "at": [12, 34]}
+            )
+            recv_until(ws, "browser_view")
+        assert [kw["at"] for a, kw in calls if a == "scroll"] == [[12, 34]]
 
     def test_an_ordinary_frame_carries_no_failures_key(self, app_env, monkeypatch):
         calls = []
