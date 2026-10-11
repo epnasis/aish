@@ -192,6 +192,39 @@ class TestTheMenuIsFrozenPerTask:
         assert len(menus) == 1
         assert len(chat.calls[0]["tools"]) < len(agent._full_menu())
 
+    def test_one_brief_per_task_while_nothing_grows(self, tmp_path):
+        """The selected path's half of brief interning (the legacy half runs
+        under `full_menu` in test_explain): several calls on an unchanged
+        selected menu name it once."""
+        agent, chat, records = logged_agent(
+            [
+                model_says(tool_calls=[tool_call("recall", query="tea")]),
+                model_says(tool_calls=[tool_call("recall", query="coffee")]),
+                model_says("done"),
+            ],
+            tmp_path,
+        )
+        agent.run_task("what do I drink")
+        assert len(chat.calls) == 3
+        (brief,) = of_kind(records, "brief")
+        assert brief["tools"]["count"] == len(chat.calls[0]["tools"])
+        assert brief["tools"]["selection"]["off_menu"] == 0
+
+    def test_the_size_estimate_never_changes_the_menu(self, tmp_path):
+        """The estimate counts a tool created mid-task (it WILL be sent) but
+        admits nothing and says nothing: measuring is not sending."""
+        agent, _ = make_agent([model_says("done")], cwd=str(tmp_path))
+        agent.run_task("hello")
+        agent._select_menu("hello", "hello", plan_open=False)
+        assert agent._menu is not None
+        before = dict(agent._menu.category)
+        agent._plugin_defs = [*agent._plugin_defs, schema("brand_new", "new.")]
+        notes: list[str] = []
+        agent._note = notes.append
+        estimated = agent._sent_menu(refresh=False, admit=False)
+        assert "brand_new" in [s["function"]["name"] for s in estimated]
+        assert agent._menu.category == before and notes == []
+
     def test_the_next_task_selects_again_from_its_own_text(self, tmp_path, monkeypatch):
         monkeypatch.setattr(tool_menu, "RELEVANT_TOP_K", 1)
         index = FakeIndex({"alpha": {"create_rule": 0.9}, "beta": {"forget_memory": 0.9}})
@@ -258,6 +291,30 @@ class TestTheOffMenuNet:
         assert briefs[0]["tools"]["selection"]["off_menu"] == 0
         assert briefs[-1]["tools"]["selection"]["off_menu"] == 1
         assert briefs[-1]["tools"]["count"] == briefs[0]["tools"]["count"] + 1
+
+    def test_growth_breaks_the_prefix_inside_the_task_and_says_so(
+        self, tmp_path, read_docs_stub
+    ):
+        """The documented COST of the net (`docs/tool-menu.md`, the cache
+        tension): an admitted tool takes its place in the full menu's order,
+        so the growth call's tools differ from the call before at an early
+        position — on a cache that cannot be trimmed, a cold re-read of the
+        whole request inside the same task. Pinned so the doc cannot drift
+        back to claiming within-task stability unconditionally."""
+        agent, chat, _ = logged_agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("done")],
+            tmp_path,
+        )
+        agent.run_task("hello")
+        before, after = sent_names(chat, 0), sent_names(chat, 1)
+        # read_docs is the first native schema, so it lands at the very head.
+        assert after[0] == "read_docs" and before[0] != "read_docs"
+        common = 0
+        for a, b in zip(chat.calls[0]["tools"], chat.calls[1]["tools"], strict=False):
+            if json.dumps(a) != json.dumps(b):
+                break
+            common += 1
+        assert common == 0
 
     def test_a_tool_that_does_not_exist_stays_an_unknown_tool(self, tmp_path):
         agent, chat, records = logged_agent(
@@ -337,6 +394,37 @@ class TestTheKillSwitch:
         agent, chat = make_agent([model_says("done")], cwd=str(tmp_path))
         agent.run_task("hello")
         assert len(sent_names(chat)) < len(agent._full_menu())
+
+    def test_a_missing_config_or_key_means_not_asked(self):
+        assert not (config_home() / "config.toml").exists()
+        assert tool_menu.requested_mode() == ("", "")
+        config_home().mkdir(parents=True, exist_ok=True)
+        (config_home() / "config.toml").write_text('model = "x"\n')
+        assert tool_menu.requested_mode() == ("", "")
+
+    def test_an_unparseable_config_fails_closed_to_the_full_menu(self, tmp_path):
+        config_home().mkdir(parents=True, exist_ok=True)
+        (config_home() / "config.toml").write_text('tool_menu = "all\n')  # broken TOML
+        assert tool_menu.requested_mode() == ("all", tool_menu.VIA_CONFIG_UNREADABLE)
+        notes: list[str] = []
+        agent, chat, records = logged_agent([model_says("done")], tmp_path)
+        agent._note = notes.append
+        agent.run_task("hello")
+        assert len(sent_names(chat)) == len(agent._full_menu())
+        assert of_kind(records, "context")[0]["menu"] == {
+            "mode": "all", "via": tool_menu.VIA_CONFIG_UNREADABLE,
+        }
+        assert any("not usable" in n for n in notes)
+
+    def test_an_unreadable_config_fails_closed(self):
+        config_home().mkdir(parents=True, exist_ok=True)
+        (config_home() / "config.toml").mkdir()  # exists, cannot be read as a file
+        assert tool_menu.requested_mode() == ("all", tool_menu.VIA_CONFIG_UNREADABLE)
+
+    def test_an_unknown_value_fails_closed(self):
+        config_home().mkdir(parents=True, exist_ok=True)
+        (config_home() / "config.toml").write_text('tool_menu = "al"\n')
+        assert tool_menu.requested_mode() == ("all", tool_menu.VIA_CONFIG_UNKNOWN)
 
 
 class TestTheCatalogArm:

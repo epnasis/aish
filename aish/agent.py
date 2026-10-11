@@ -7282,18 +7282,26 @@ class Agent:
         can narrow what is sent and never widen what is callable (M1)."""
         return tools.TOOL_SCHEMAS + self._plugin_defs
 
-    def _sent_menu(self, refresh: bool = True) -> list[dict]:
+    def _sent_menu(self, refresh: bool = True, admit: bool = True) -> list[dict]:
         """The menu the next model call sends: the full one when no selection
         is in force, else the full one filtered to this task's names, in its
         own order (M3). A tool that appeared since the selection — created
-        mid-task — joins first, as a new tool always has (`docs/tool-menu.md`)."""
+        mid-task — joins first, as a new tool always has (`docs/tool-menu.md`).
+
+        `admit=False` is the size estimate's view: the same list, with the new
+        tools in it, but nothing admitted and nothing said — an estimate must
+        not change the menu it is measuring."""
         if refresh:
             self._refresh_plugin_tools()
         full = self._full_menu()
         if self._menu is None:
             return full
-        for name in _menu_names(full):
-            if name not in self._menu_full_names and self._menu.admit(name, tool_menu.CREATED):
+        new = [name for name in _menu_names(full) if name not in self._menu_full_names]
+        if not admit:
+            sent = tool_menu.menu_for(full, self._menu.names | set(new))
+            return [*sent, self._catalog_schema] if self._catalog_schema is not None else sent
+        for name in new:
+            if self._menu.admit(name, tool_menu.CREATED):
                 self._note(f"⚑ {name} is new since this task's menu was chosen; added it")
         sent = tool_menu.menu_for(full, self._menu.names)
         return [*sent, self._catalog_schema] if self._catalog_schema is not None else sent
@@ -7378,6 +7386,10 @@ class Agent:
         mode, via = tool_menu.requested_mode()
         if mode == tool_menu.MODE_ALL:
             self._menu = None
+            if via in (tool_menu.VIA_CONFIG_UNREADABLE, tool_menu.VIA_CONFIG_UNKNOWN):
+                # Said, not only recorded: the owner asked for nothing, and is
+                # getting the full menu because his config could not be used.
+                self._note(f"⚑ config.toml tool_menu not usable ({via}); sending the full menu")
             return {"mode": tool_menu.MODE_ALL, "via": via}
         core = [*tool_menu.CORE_TOOLS, *([checklist.PLAN_TOOL] if plan_open else [])]
         required = rules.needed_tools(self._bindings)
@@ -9198,7 +9210,7 @@ class Agent:
         crash (#415).
         """
         if menu is None:
-            menu = self._sent_menu(refresh=False)
+            menu = self._sent_menu(refresh=False, admit=False)
         chars = backends.request_chars(self.provider, self.messages, menu)
         key = f"{self.provider}:{self.model}"
         self._seed_ratio(key)

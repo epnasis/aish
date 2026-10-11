@@ -39,6 +39,10 @@ TOOL_EMBEDDINGS_FILE = "tool-embeddings.json"
 #: The kill switch: either restores the full menu, the pre-#444 path.
 MENU_ALL_ENV = "AISH_MENU_ALL"
 MENU_CONFIG_KEY = "tool_menu"
+#: Why the full menu was sent when the owner did not ask for it in so many
+#: words: the switch fails closed (`requested_mode`).
+VIA_CONFIG_UNREADABLE = "config_unreadable"
+VIA_CONFIG_UNKNOWN = "config_unknown"
 
 MODE_ALL = "all"
 MODE_SEMANTIC = "semantic"
@@ -142,19 +146,29 @@ def requested_mode() -> tuple[str, str]:
     `tool_menu`, else `("", "")` — select (arm B).
 
     Read at every task start, never cached: a replay arm overlays config.toml
-    and may not set AISH_* (`docs/replay.md`). An unreadable config, or a
-    value this module does not know, is "not asked"."""
+    and may not set AISH_* (`docs/replay.md`).
+
+    FAILS CLOSED. A config that exists but cannot be read or parsed, or a
+    `tool_menu` value this module does not know, gives the FULL menu
+    (`via` = `config_unreadable` / `config_unknown`): the switch is what an
+    owner reaches for in an incident, and a typo in it must not leave him on
+    the experiment he was trying to turn off. Only a missing file, or no
+    `tool_menu` key, means "not asked"."""
     if os.environ.get(MENU_ALL_ENV, "").strip() not in ("", "0"):
         return MODE_ALL, "env"
     path = Path(os.environ.get("AISH_CONFIG") or config_home() / "config.toml")
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
+    except FileNotFoundError:
         return "", ""
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return MODE_ALL, VIA_CONFIG_UNREADABLE
     value = str(data.get(MENU_CONFIG_KEY, "")).strip() if isinstance(data, dict) else ""
+    if not value:
+        return "", ""
     if value in (MODE_ALL, MODE_CATALOG):
         return value, "config"
-    return "", ""
+    return MODE_ALL, VIA_CONFIG_UNKNOWN
 
 
 def _first_sentence(text: str) -> str:
