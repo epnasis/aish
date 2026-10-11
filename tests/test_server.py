@@ -10086,8 +10086,11 @@ class TestBrowserCommand:
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "browser", "arg": "screen booksy.com"})
-            assert recv_until(ws, "job_list")["text"] == "opened on the Mac"
-        assert seen == ["screen booksy.com"]
+            reply = recv_until(ws, "job_list")
+            assert reply["text"] == "opened on the Mac" and reply["toast"] is True
+            ws.send_json({"type": "browser", "arg": "forget x.pl"})
+            assert "toast" not in recv_until(ws, "job_list")
+        assert seen == ["screen booksy.com", "forget x.pl"]
 
 
 class TestBrowserView:
