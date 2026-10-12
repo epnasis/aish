@@ -670,7 +670,9 @@ TOOL_SCHEMAS: list[dict] = [
                         "description": (
                             "true ONLY for a standing rule or preference that MUST "
                             "bind every future task; pinned memories never rotate "
-                            "out of your context. Ordinary facts MUST stay unpinned."
+                            "out by recency, but past the pin budget the last by "
+                            "name are cut and the result names them. Ordinary "
+                            "facts MUST stay unpinned."
                         ),
                     },
                     "expires": {

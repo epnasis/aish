@@ -56,7 +56,8 @@ INDEX_MEMORY_MAX = 15
 # render in EVERY index under their own budget, exempt from the mtime-recency
 # cap above — a behaviour rule ("never do X") must not silently rotate out of
 # the prompt because newer facts moved past it, and WHICH rules apply must
-# never depend on whose mtime moved last.
+# never depend on whose mtime moved last. Past this budget the last pins by
+# NAME are cut (pinned_cut); the cut is announced when a pin is saved (#442).
 INDEX_PINNED_MAX = 20
 
 # recall output caps — one call can never flood a small context window.
@@ -593,6 +594,42 @@ def list_skills(dirs: list[Path]) -> list[tuple[str, str]]:
     )
 
 
+def pinned_cut(memory: list[Entry]) -> tuple[list[Entry], list[Entry]]:
+    """(rendered, cut): the ONE answer to which pinned memories reach the
+    index's Standing rules section. Sorted by NAME and cut at
+    INDEX_PINNED_MAX — name order is arbitrary but stable, and the cut is
+    deliberate: it is announced when a pin is saved past it (#442) rather
+    than discovered by reading the index."""
+    pinned = sorted((e for e in memory if e.pinned), key=lambda e: e.name)
+    return pinned[:INDEX_PINNED_MAX], pinned[INDEX_PINNED_MAX:]
+
+
+def pinned_not_rendered(cwd: str = "", memory_dir=None) -> list[str]:
+    """Names of the active pinned memories the index cuts. Read from the same
+    dirs the index reads; a `memory_dir` outside them is judged on its own,
+    since the index would not show it at all."""
+    dirs = memory_dirs(cwd)
+    if memory_dir is not None and Path(memory_dir) not in dirs:
+        dirs = [Path(memory_dir)]
+    memory = [e for e in _merged(dirs, "memory") if entry_active(e)]
+    return [e.name for e in pinned_cut(memory)[1]]
+
+
+def pinned_cut_note(cut: list[str], name: str = "") -> str:
+    """Said where a pin is saved past the cap (#442), like the keyword-drop
+    note: a standing rule exists so it does not depend on retrieval, and one
+    the index cuts applies to no task — the owner chooses what to unpin."""
+    if not cut:
+        return ""
+    this_one = " — this one included" if name in cut else ""
+    return (
+        f"\nNOTE: more than {INDEX_PINNED_MAX} standing rules are pinned; the index "
+        f"shows the first {INDEX_PINNED_MAX} by name, so {len(cut)} are NOT applied "
+        f"to any task{this_one}: {', '.join(cut)}. To change which apply, unpin one "
+        "(remember with its name and pinned=false)."
+    )
+
+
 def knowledge_index(cwd: str, lessons_path=None, on_index=None) -> str:
     """The capped Skills + Memory sections of the system prompt, rebuilt
     every task so new entries appear without a restart. Empty string when
@@ -644,18 +681,19 @@ def knowledge_index(cwd: str, lessons_path=None, on_index=None) -> str:
     # Standing rules (#178 P1-7): pinned entries render under their own budget,
     # exempt from the recency cap, sorted by NAME — a touched file must never
     # change which rules apply, and a stable order keeps the index byte-stable.
-    pinned = sorted((e for e in memory if e.pinned), key=lambda e: e.name)
+    rendered_pinned, cut_pinned = pinned_cut(memory)
+    pinned = rendered_pinned + cut_pinned
     unpinned = [e for e in memory if not e.pinned]
     if pinned:
         selected += [
             {"label": e.name, "kind": e.kind, "slot": "pinned"}
-            for e in pinned[:INDEX_PINNED_MAX]
+            for e in rendered_pinned
         ]
-        lines = "\n".join(f"- {e.description}" for e in pinned[:INDEX_PINNED_MAX])
+        lines = "\n".join(f"- {e.description}" for e in rendered_pinned)
         note = (
-            f"\n(…and {len(pinned) - INDEX_PINNED_MAX} more standing rules — "
+            f"\n(…and {len(cut_pinned)} more standing rules — "
             "search them with recall(<topic>))"
-            if len(pinned) > INDEX_PINNED_MAX
+            if cut_pinned
             else ""
         )
         sections.append(
@@ -804,14 +842,39 @@ def _bundled_note(entry: Entry) -> str:
     )
 
 
+def _plural_variants(text: str) -> set[str]:
+    """`text` plus its trailing s/es folds, so "hotel" and "hotels" meet."""
+    variants = {text, text + "s"}
+    if text.endswith("s"):
+        variants.add(text[:-1])
+    if text.endswith("es"):
+        variants.add(text[:-2])
+    return variants
+
+
+def _whole_word_pattern(text: str) -> re.Pattern:
+    """`text` (a word or a phrase, s/es-folded) bounded by non-word characters
+    on both sides. A bare `in` is a substring test: the reply "Tak" sat inside
+    the keyword `kontakty` and injected an unrelated skill on 11 recorded
+    tasks (#445). Hyphens and punctuation count as boundaries, so "gmail"
+    still finds the name `gws-gmail`."""
+    alternatives = "|".join(
+        re.escape(v) for v in sorted(_plural_variants(text), key=len, reverse=True) if v
+    )
+    return re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)")
+
+
 def score_entries(entries: list[Entry], query: str) -> list[tuple[int, Entry]]:
     """Deterministic ranking, no LLM. Tiers: exact name, phrase in
     name/description/keywords, phrase in body, all words anywhere, fuzzy
-    (difflib). Ties keep corpus order (project skills first, then newest)."""
+    (difflib). Ties keep corpus order (project skills first, then newest).
+    Tiers 4–2 match whole words only (#445)."""
     query_cf = " ".join(query.split()).casefold()
     words = query_cf.split()
     if not words:
         return []
+    phrase = _whole_word_pattern(query_cf)
+    word_patterns = [_whole_word_pattern(word) for word in words]
     ranked = []
     for entry in entries:
         name_cf = entry.name.casefold()
@@ -821,11 +884,11 @@ def score_entries(entries: list[Entry], query: str) -> list[tuple[int, Entry]]:
         body_cf = entry.body.casefold()
         if name_cf == query_cf:
             score = 5
-        elif query_cf in head_cf:
+        elif phrase.search(head_cf):
             score = 4
-        elif query_cf in body_cf:
+        elif phrase.search(body_cf):
             score = 3
-        elif all(word in head_cf or word in body_cf for word in words):
+        elif all(p.search(head_cf) or p.search(body_cf) for p in word_patterns):
             score = 2
         elif all(
             difflib.get_close_matches(word, entry.words, n=1, cutoff=FUZZY_WORD_CUTOFF)
@@ -875,12 +938,7 @@ def rank_entries(entries: list[Entry], query: str, semantic=None) -> list[Entry]
 def _word_in(task_padded: str, word: str) -> bool:
     """Whole-word hit, insensitive to a trailing s/es: keyword "hotels" must
     fire on a task saying "hotel" and vice versa (issue #41)."""
-    variants = {word, word + "s"}
-    if word.endswith("s"):
-        variants.add(word[:-1])
-    if word.endswith("es"):
-        variants.add(word[:-2])
-    return any(f" {v} " in task_padded for v in variants)
+    return any(f" {v} " in task_padded for v in _plural_variants(word))
 
 
 def _content_words(text: str):
@@ -1450,9 +1508,10 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
             dropped_kw, written=False
         )
     state = " [disabled]" if disabled else ""
+    cut_note = pinned_cut_note(pinned_not_rendered(cwd, directory), slug) if pinned else ""
     return f"remembered ({slug}){state}: {text}" + dropped_keywords_note(
         dropped_kw, kept_existing=kept_existing
-    )
+    ) + cut_note
 
 
 def forget_memory(name: str, cwd: str = "") -> str:

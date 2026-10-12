@@ -85,7 +85,7 @@ A write approval card renders the plan's diff. For a rule that diff is YAML **th
 
 **A rule is not a file, to the person approving it.** The card said "Create file", showed a path, counted lines, and led with YAML — so the owner read it as aish having bypassed its own rule tools to hand-write the file. He was deciding about a behaviour and the card described a text edit. A rule write now titles itself by what it is (new rule / rule change / retire rule), names the RULE rather than the path, drops the line counts (nobody decides about a rule by how many lines it is), and folds the file behind one tap. Folded, not removed: the file is still the truth, it is just no longer the first thing. `tests/js/test_rule_card_note.js`.
 
-**Nothing acts on it.** No model reads it, it claims no control of the chat, and the comment never enters the conversation — making a feedback control steer the running session would turn it into a lever the model can be pointed at. It is evidence for the weekly pass (`curate.scan_ratings`, `TestRatingLedger`) and for the owner.
+**Nothing in the chat acts on it.** No chat model reads it, it claims no control of the chat, and the comment never enters the conversation — making a feedback control steer the running session would turn it into a lever the model can be pointed at. It is evidence for the weekly pass and for the owner: `curate.scan_ratings` (`TestRatingLedger`) feeds the curation ledger, and the offline judge sees the verdict and reason for the knowledge entries that were in the rated turn (`docs/knowledge-layer.md`, `TestRatingsFeedTheLedger`).
 
 ## Connection, identity, and painting a view
 

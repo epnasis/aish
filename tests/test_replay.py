@@ -988,12 +988,26 @@ class TestContextPerModelCall:
                 " · over 60,000: 2 of 6 · sys 1.2k/1.2k · menu 3.0k/3.0k · tools 26") in text
         assert ("candidate 2 runs, 6 calls · tokens median 30.0k p95 40.0k input_includes_cache"
                 " · over 60,000: 0 of 6 · sys 1.2k/1.2k · menu 1.0k/1.0k · tools 26") in text
-        # The evidence lines share the cap; the pointer to them stays whole.
-        assert text.rstrip().endswith("more evidence lines: report --full)") or \
-            text.rstrip().endswith(f"aish-replay report {batch} --full)")
+        # At the shipped cap the nine-check, two-arm report carries its evidence
+        # whole — what the 2,048 cap cut on real reports this program.
+        assert ("evidence (first failures):\ntrippy_party [b1,b2] 1 of 1 searches with another "
+                "party") in text
+        assert text.rstrip().splitlines()[-1].startswith("trippy_party [c1,c2] ")
+        assert "more evidence lines" not in text
         # The words of the report law still hold with the new rows in it.
         for word in ("%", "fixed", "improved", "better", "resolved", "rate"):
             assert word not in text.lower()
+
+    def test_evidence_past_the_cap_is_omitted_with_the_pointer_whole(self, tmp_path,
+                                                                    monkeypatch):
+        """The reserve logic, exercised at the cap it was first built under:
+        the evidence lines share the cap, and the pointer to them is never cut."""
+        monkeypatch.setattr(replay, "REPORT_CAP", 2048)
+        batch = self._batch(tmp_path)
+        text = replay.render_report(*replay.read_batch(batch), batch)
+        assert len(text) <= 2048
+        assert text.rstrip().endswith("more evidence lines: report --full)") or \
+            text.rstrip().endswith(f"aish-replay report {batch} --full)")
 
     def test_full_adds_every_run(self, tmp_path):
         batch = self._batch(tmp_path)
@@ -1001,11 +1015,34 @@ class TestContextPerModelCall:
         assert "  b2, 3 calls · tokens median 50.0k p95 70.0k" in text
         assert "  c1, 3 calls · tokens median 30.0k p95 40.0k" in text
 
+    def _timed_batch(self, tmp_path) -> Path:
+        def timed(name, menu):
+            return write_log(tmp_path / f"{name}.jsonl", [
+                TASK, brief([1000, 200], menu),
+                *[{"kind": "trace", "step": {**reasoning(n, 40_000)["step"],
+                                             "ms": 1000 * n, "first_chunk_ms": 300 * n}}
+                  for n in (1, 2, 3)],
+                WRONG_PARTY, result(1, "run_command"), answer("fine"), END])
+        return _batch(tmp_path, FakeLaunch(
+            {"baseline": timed("base", BIG_MENU), "candidate": timed("cand", SMALL_MENU)},
+            menus=(BIG_MENU, SMALL_MENU)))
+
+    def test_time_lines_fit_under_the_shipped_cap(self, tmp_path):
+        """The 'trippy time lines' a real report lost under the 2,048 cap."""
+        batch = self._timed_batch(tmp_path)
+        text = replay.render_report(*replay.read_batch(batch), batch)
+        assert len(text) <= replay.REPORT_CAP
+        assert replay.TIME_DROPPED not in text
+        assert ("  time median/p95 · first 2: 1.0s/1.0s, chunk 0.3s/0.3s · "
+                "later 4: 3.0s/3.0s, chunk 0.9s/0.9s") in text
+
     def test_time_lines_that_would_not_fit_under_the_cap_are_dropped_and_said(
-            self, tmp_path, capsys):
+            self, tmp_path, capsys, monkeypatch):
         """Call timing (#444) widens each arm's row; on a nine-check scenario
-        that would run the body into the hard cut. Dropped together, said in
-        a line, and still whole in --full and --json."""
+        under a tighter cap that would run the body into the hard cut. Dropped
+        together, said in a line, and still whole in --full and --json."""
+        monkeypatch.setattr(replay, "REPORT_CAP", 2048)
+
         def timed(name, menu):
             return write_log(tmp_path / f"{name}.jsonl", [
                 TASK, brief([1000, 200], menu),

@@ -3775,8 +3775,10 @@ class SessionLog:
         reason, keyed by the same turn id a redaction names (#202), so it is
         stable live AND on replay and needs no new identity scheme.
 
-        This is a RECORD, not a judgement: no model reads it, nothing acts on
-        it. It exists so two questions have answers instead of impressions —
+        This is a RECORD, not a judgement: no chat model reads it, nothing in
+        the chat acts on it (the weekly curation pass shows it to its offline
+        judge as evidence, #444). It exists so two questions have answers
+        instead of impressions —
         "is he still correcting turns that passed every rule they were subject
         to" (the metric that decides whether turn-end verification earns its
         place) and "which rules were governing the answer he disliked". The

@@ -38,7 +38,7 @@ from .usage import LOCAL_WINDOW_TOKENS, _percentile, human
 DEFAULT_MODEL = "local:mlx-community/Qwen3.6-35B-A3B-8bit"
 DEFAULT_RUNS = 3
 DEFAULT_TIMEOUT_S = 3600
-REPORT_CAP = 2048
+REPORT_CAP = 4096
 EVIDENCE_IN_REPORT = 160
 #: What a target failure seen in each arm means — and nothing stronger.
 _TARGET_FAILED = {"baseline": " (reproduced)", "candidate": " (the failure still occurs)"}

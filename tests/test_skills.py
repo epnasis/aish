@@ -338,6 +338,52 @@ class TestRankEntries:
         assert rank_entries(self._corpus(tmp_path), "  ") == []
 
 
+class TestLexicalTiersMatchWholeWords:
+    """#445: the reply "Tak" is a SUBSTRING of the keyword `kontakty`, and the
+    phrase/word tiers tested `in`, so lexical mode injected an unrelated skill
+    on 11 recorded tasks. Every path that shares score_entries is pinned:
+    the scorer itself, recall's ranking, and lexical preflight."""
+
+    def _contacts(self, tmp_path):
+        write_skill(
+            skills_module.GLOBAL_SKILLS_DIR,
+            "apple-contacts.md",
+            "---\nname: apple-contacts\ndescription: Look up a person in Apple Contacts\n"
+            "keywords: kontakty, address book\n---\nrun contacts-cli search",
+        )
+        return load_entries(str(tmp_path))
+
+    def test_tak_does_not_score_against_kontakty(self, tmp_path):
+        entries = self._contacts(tmp_path)
+        assert skills_module.score_entries(entries, "Tak") == []
+
+    def test_tak_does_not_reach_recall_or_lexical_preflight(self, tmp_path):
+        entries = self._contacts(tmp_path)
+        assert rank_entries(entries, "Tak") == []
+        assert preflight(str(tmp_path), None, "Tak").names == []
+
+    def test_the_whole_word_still_scores_its_tier(self, tmp_path):
+        entries = self._contacts(tmp_path)
+        assert [s for s, _ in skills_module.score_entries(entries, "kontakty")] == [4]
+        assert [s for s, _ in skills_module.score_entries(entries, "contacts-cli")] == [3]
+        assert [s for s, _ in skills_module.score_entries(entries, "person book")] == [2]
+
+    def test_plural_folding_and_hyphen_boundaries_are_kept(self, tmp_path):
+        entries = self._contacts(tmp_path)
+        assert [s for s, _ in skills_module.score_entries(entries, "address books")] == [4]
+        assert [s for s, _ in skills_module.score_entries(entries, "persons")] == [4]
+        # a hyphen is a word boundary: the name's parts are still words
+        assert [s for s, _ in skills_module.score_entries(entries, "contacts")] == [4]
+        assert [s for s, _ in skills_module.score_entries(entries, "cli")] == [3]
+
+    def test_a_word_fragment_falls_to_fuzzy_at_best(self, tmp_path):
+        """Below PREFLIGHT_MIN_SCORE, so a fragment can no longer inject."""
+        entries = self._contacts(tmp_path)
+        scores = [s for s, _ in skills_module.score_entries(entries, "kontakt")]
+        assert scores in ([], [1])
+        assert all(s < skills_module.PREFLIGHT_MIN_SCORE for s in scores)
+
+
 class TestRecallText:
     def test_two_phase_and_caps(self, tmp_path):
         d = skills_module.GLOBAL_SKILLS_DIR
@@ -1578,6 +1624,55 @@ class TestPinnedTier:
         assert "pinned: yes" in (d / "rule.md").read_text()
         save_memory("always confirm deletes v3", d, name="rule", pinned=False)
         assert "pinned" not in (d / "rule.md").read_text()
+
+
+class TestPinnedCutIsSaidAtAdmission:
+    """#442: the index cuts pinned rules past INDEX_PINNED_MAX by NAME order.
+    The cut stays (raising it or choosing by relevance is a separate
+    question), but a pin saved past it says, in the save's own result, which
+    rules the index no longer applies — the same set the index omits."""
+
+    def _fill(self, count):
+        for i in range(count):
+            write_skill(
+                skills_module.GLOBAL_MEMORY_DIR,
+                f"rule-{i:03d}.md",
+                f"---\nname: rule-{i:03d}\ndescription: standing rule {i}\npinned: yes\n---\n",
+            )
+
+    def _save(self, tmp_path, name, pinned=True):
+        return save_memory(f"a distinct fact for {name}", skills_module.GLOBAL_MEMORY_DIR,
+                           name=name, cwd=str(tmp_path), pinned=pinned, force=True)
+
+    def test_a_pin_past_the_cap_names_what_the_index_cuts(self, tmp_path):
+        from aish.skills import INDEX_PINNED_MAX
+
+        self._fill(INDEX_PINNED_MAX)
+        result = self._save(tmp_path, "zz-rule")
+        assert result.startswith("remembered (zz-rule)")
+        assert "1 are NOT applied to any task — this one included: zz-rule." in result
+
+        index_report = {}
+        text = knowledge_index(str(tmp_path), on_index=index_report.update)
+        assert "a distinct fact for zz-rule" not in text  # the note told the truth
+        assert index_report["omitted"]["pinned"] == 1
+
+    def test_a_pin_sorting_first_names_the_rule_it_pushed_out(self, tmp_path):
+        from aish.skills import INDEX_PINNED_MAX
+
+        self._fill(INDEX_PINNED_MAX)
+        result = self._save(tmp_path, "aa-rule")
+        last = f"rule-{INDEX_PINNED_MAX - 1:03d}"
+        assert f"NOT applied to any task: {last}." in result
+        assert "this one included" not in result
+        assert f"standing rule {INDEX_PINNED_MAX - 1}" not in knowledge_index(str(tmp_path))
+
+    def test_no_note_at_or_under_the_cap_or_for_an_unpinned_save(self, tmp_path):
+        from aish.skills import INDEX_PINNED_MAX
+
+        self._fill(INDEX_PINNED_MAX - 1)
+        assert "NOT applied" not in self._save(tmp_path, "at-cap")
+        assert "NOT applied" not in self._save(tmp_path, "plain-fact", pinned=None)
 
 
 class TestLifecycle:

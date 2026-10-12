@@ -317,6 +317,37 @@ class TestJudgeLoop:
                    notify_fn=lambda *a: None, env={}, state_dir=state, now=NOW)
         assert "pinned: yes" in path.read_text(encoding="utf-8")
 
+    def _actions(self, state):
+        lines = (state / "curation-actions.jsonl").read_text(encoding="utf-8").splitlines()
+        return [json.loads(line) for line in lines]
+
+    def test_a_pin_past_the_index_cap_records_what_the_index_cuts(self, tmp_path, monkeypatch):
+        """#442: 2 of the owner's 27 pins came from this judge. A pin that
+        pushes the standing rules past INDEX_PINNED_MAX says so in its record."""
+        from aish.skills import INDEX_PINNED_MAX
+
+        gm = self._corpus(monkeypatch, tmp_path)
+        for i in range(INDEX_PINNED_MAX):
+            make_entry(gm, f"a-rule-{i:02d}", f"rule {i}", extra="pinned: yes\n")
+        make_entry(gm, "noisy", "a standing rule")
+        state = tmp_path / "state"
+        self._dead_weight_logs(state)
+        run_curate(judge=lambda p: "VERDICT: pin\nREASON: rule", scores=lambda q, e: {},
+                   notify_fn=lambda *a: None, env={}, state_dir=state, now=NOW)
+        (record,) = self._actions(state)
+        assert record["action"] == "pin"
+        assert record["pinned_not_rendered"] == ["noisy"]
+
+    def test_a_pin_under_the_cap_records_no_cut(self, tmp_path, monkeypatch):
+        gm = self._corpus(monkeypatch, tmp_path)
+        make_entry(gm, "noisy", "a standing rule")
+        state = tmp_path / "state"
+        self._dead_weight_logs(state)
+        run_curate(judge=lambda p: "VERDICT: pin\nREASON: rule", scores=lambda q, e: {},
+                   notify_fn=lambda *a: None, env={}, state_dir=state, now=NOW)
+        (record,) = self._actions(state)
+        assert record["action"] == "pin" and "pinned_not_rendered" not in record
+
     def test_unparseable_reply_retries_once_then_skips(self, tmp_path, monkeypatch):
         gm = self._corpus(monkeypatch, tmp_path)
         path = make_entry(gm, "noisy", "desc", keywords="k")
@@ -1076,6 +1107,96 @@ class TestRatingLedger:
         ratings = scan_ratings(tmp_path, now=NOW)
         assert "t1" not in ratings
         assert ratings["t2"]["rating"] == "up"
+
+
+def rated_user(text, turn, ts="2026-07-28T10:00:01"):
+    return {**user(text, ts=ts), "turn": turn}
+
+
+class TestRatingsFeedTheLedger:
+    """#444: `scan_ratings` was tested and called by nothing, so the owner's
+    per-answer thumbs fed no decision. The weekly pass now attaches each rated
+    turn's verdict to the entries in that turn and shows it to the judge.
+    Additive: with no ratings, prompt and record are what they always were."""
+
+    def _corpus(self, monkeypatch, tmp_path):
+        import aish.skills as skills_module
+
+        gm = tmp_path / "gm"
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", gm)
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
+        make_entry(gm, "noisy", "generic thing", keywords="code, change")
+        return gm
+
+    def _logs(self, state, rate_turn=None, comment="it used the wrong mailbox"):
+        records = []
+        for i in range(MIN_INJECTIONS):
+            records += [
+                knowledge([{"label": "noisy", "kind": "memory", "sim": 0.29, "rail": 3}]),
+                rated_user(f"task {i}", turn=f"turn{i}"),
+            ]
+        if rate_turn is not None:
+            records.append(rating_rec(rate_turn, "down", comment))
+        write_log(state, "session-20260728-100000-000001.jsonl", records)
+
+    def _run(self, state):
+        prompts = []
+
+        def judge(prompt):
+            prompts.append(prompt)
+            return "VERDICT: skip\nREASON: fine"
+
+        run_curate(judge=judge, scores=lambda q, e: {}, notify_fn=lambda *a: None,
+                   env={}, state_dir=state, now=NOW)
+        lines = (state / "curation-actions.jsonl").read_text(encoding="utf-8").splitlines()
+        return prompts, [json.loads(line) for line in lines]
+
+    def test_a_rated_turn_attaches_to_the_entries_injected_and_read_in_it(self, tmp_path):
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            knowledge([{"label": "a-memory", "kind": "memory", "sim": 0.4}]),
+            rated_user("check mail", turn="t1"),
+            tool("read_skill", "a-skill"),
+            rating_rec("t1", "down", "wrong\nmailbox"),
+            knowledge([{"label": "a-memory", "kind": "memory", "sim": 0.4}]),
+            rated_user("unrated task", turn="t2"),
+        ])
+        ledger = scan_ledger(tmp_path, now=NOW, ratings=scan_ratings(tmp_path, now=NOW))
+        assert ledger.entries["a-memory"].rated == [("2026-07-28T10:05:00", "down",
+                                                     "wrong mailbox")]
+        assert ledger.entries["a-skill"].rating_counts() == {"up": 0, "down": 1}
+
+    def test_a_turn_id_from_another_session_does_not_attach(self, tmp_path):
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            knowledge([{"label": "a-memory", "kind": "memory", "sim": 0.4}]),
+            rated_user("check mail", turn="t1"),
+        ])
+        write_log(tmp_path, "session-20260728-110000-000002.jsonl", [rating_rec("t1", "down")])
+        ledger = scan_ledger(tmp_path, now=NOW, ratings=scan_ratings(tmp_path, now=NOW))
+        assert ledger.entries["a-memory"].rated == []
+
+    def test_the_judge_sees_the_rating_and_the_record_says_it_did(self, tmp_path, monkeypatch):
+        self._corpus(monkeypatch, tmp_path)
+        state = tmp_path / "state"
+        self._logs(state, rate_turn="turn2")
+        prompts, (record,) = self._run(state)
+        assert "OWNER RATINGS" in prompts[0]
+        assert "thumbs-up 0 and thumbs-down 1" in prompts[0]
+        assert '"it used the wrong mailbox"' in prompts[0]
+        assert record["ratings_shown"] == {"up": 0, "down": 1}
+
+    def test_without_ratings_prompt_and_record_are_unchanged(self, tmp_path, monkeypatch):
+        gm = self._corpus(monkeypatch, tmp_path)
+        state = tmp_path / "state"
+        self._logs(state)
+        prompts, (record,) = self._run(state)
+        assert "OWNER RATINGS" not in prompts[0]
+        assert "ratings_shown" not in record
+        # byte-identical to the prompt built from a ledger that never saw ratings
+        import aish.skills as skills_module
+
+        stat = scan_ledger(state, now=NOW).entries["noisy"]
+        entry = skills_module._parse(gm / "noisy.md", "memory")
+        assert prompts[0] == judge_prompt(entry, stat, "dead-weight")
 
 
 class TestContextScan:

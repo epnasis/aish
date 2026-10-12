@@ -502,8 +502,10 @@ thousands of entries without bloating the context.
   itself, so the approval card names the thing, not the token.
 - **Memory** — one fact per file (`~/.config/aish/memory/`), same format; the
   description line *is* the fact. Saved via `remember`. A standing rule
-  ("never push without asking") can be **pinned** (`pinned: yes`) — always in
-  context under its own budget, never rotated out by newer facts. A fact with
+  ("never push without asking") can be **pinned** (`pinned: yes`) — in
+  context under its own budget, never rotated out by newer facts. The budget
+  is 20 rules: past it the last ones by name are cut, and saving a pin while
+  over it says which rules no longer apply. A fact with
   a known end date can carry `expires: YYYY-MM-DD`, and `status: disabled`
   retires an entry without deleting it. Saving a near-duplicate of an
   existing memory is refused with the existing entry's name, so the corpus
