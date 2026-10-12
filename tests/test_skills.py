@@ -338,6 +338,52 @@ class TestRankEntries:
         assert rank_entries(self._corpus(tmp_path), "  ") == []
 
 
+class TestLexicalTiersMatchWholeWords:
+    """#445: the reply "Tak" is a SUBSTRING of the keyword `kontakty`, and the
+    phrase/word tiers tested `in`, so lexical mode injected an unrelated skill
+    on 11 recorded tasks. Every path that shares score_entries is pinned:
+    the scorer itself, recall's ranking, and lexical preflight."""
+
+    def _contacts(self, tmp_path):
+        write_skill(
+            skills_module.GLOBAL_SKILLS_DIR,
+            "apple-contacts.md",
+            "---\nname: apple-contacts\ndescription: Look up a person in Apple Contacts\n"
+            "keywords: kontakty, address book\n---\nrun contacts-cli search",
+        )
+        return load_entries(str(tmp_path))
+
+    def test_tak_does_not_score_against_kontakty(self, tmp_path):
+        entries = self._contacts(tmp_path)
+        assert skills_module.score_entries(entries, "Tak") == []
+
+    def test_tak_does_not_reach_recall_or_lexical_preflight(self, tmp_path):
+        entries = self._contacts(tmp_path)
+        assert rank_entries(entries, "Tak") == []
+        assert preflight(str(tmp_path), None, "Tak").names == []
+
+    def test_the_whole_word_still_scores_its_tier(self, tmp_path):
+        entries = self._contacts(tmp_path)
+        assert [s for s, _ in skills_module.score_entries(entries, "kontakty")] == [4]
+        assert [s for s, _ in skills_module.score_entries(entries, "contacts-cli")] == [3]
+        assert [s for s, _ in skills_module.score_entries(entries, "person book")] == [2]
+
+    def test_plural_folding_and_hyphen_boundaries_are_kept(self, tmp_path):
+        entries = self._contacts(tmp_path)
+        assert [s for s, _ in skills_module.score_entries(entries, "address books")] == [4]
+        assert [s for s, _ in skills_module.score_entries(entries, "persons")] == [4]
+        # a hyphen is a word boundary: the name's parts are still words
+        assert [s for s, _ in skills_module.score_entries(entries, "contacts")] == [4]
+        assert [s for s, _ in skills_module.score_entries(entries, "cli")] == [3]
+
+    def test_a_word_fragment_falls_to_fuzzy_at_best(self, tmp_path):
+        """Below PREFLIGHT_MIN_SCORE, so a fragment can no longer inject."""
+        entries = self._contacts(tmp_path)
+        scores = [s for s, _ in skills_module.score_entries(entries, "kontakt")]
+        assert scores in ([], [1])
+        assert all(s < skills_module.PREFLIGHT_MIN_SCORE for s in scores)
+
+
 class TestRecallText:
     def test_two_phase_and_caps(self, tmp_path):
         d = skills_module.GLOBAL_SKILLS_DIR

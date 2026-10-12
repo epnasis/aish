@@ -804,14 +804,39 @@ def _bundled_note(entry: Entry) -> str:
     )
 
 
+def _plural_variants(text: str) -> set[str]:
+    """`text` plus its trailing s/es folds, so "hotel" and "hotels" meet."""
+    variants = {text, text + "s"}
+    if text.endswith("s"):
+        variants.add(text[:-1])
+    if text.endswith("es"):
+        variants.add(text[:-2])
+    return variants
+
+
+def _whole_word_pattern(text: str) -> re.Pattern:
+    """`text` (a word or a phrase, s/es-folded) bounded by non-word characters
+    on both sides. A bare `in` is a substring test: the reply "Tak" sat inside
+    the keyword `kontakty` and injected an unrelated skill on 11 recorded
+    tasks (#445). Hyphens and punctuation count as boundaries, so "gmail"
+    still finds the name `gws-gmail`."""
+    alternatives = "|".join(
+        re.escape(v) for v in sorted(_plural_variants(text), key=len, reverse=True) if v
+    )
+    return re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)")
+
+
 def score_entries(entries: list[Entry], query: str) -> list[tuple[int, Entry]]:
     """Deterministic ranking, no LLM. Tiers: exact name, phrase in
     name/description/keywords, phrase in body, all words anywhere, fuzzy
-    (difflib). Ties keep corpus order (project skills first, then newest)."""
+    (difflib). Ties keep corpus order (project skills first, then newest).
+    Tiers 4–2 match whole words only (#445)."""
     query_cf = " ".join(query.split()).casefold()
     words = query_cf.split()
     if not words:
         return []
+    phrase = _whole_word_pattern(query_cf)
+    word_patterns = [_whole_word_pattern(word) for word in words]
     ranked = []
     for entry in entries:
         name_cf = entry.name.casefold()
@@ -821,11 +846,11 @@ def score_entries(entries: list[Entry], query: str) -> list[tuple[int, Entry]]:
         body_cf = entry.body.casefold()
         if name_cf == query_cf:
             score = 5
-        elif query_cf in head_cf:
+        elif phrase.search(head_cf):
             score = 4
-        elif query_cf in body_cf:
+        elif phrase.search(body_cf):
             score = 3
-        elif all(word in head_cf or word in body_cf for word in words):
+        elif all(p.search(head_cf) or p.search(body_cf) for p in word_patterns):
             score = 2
         elif all(
             difflib.get_close_matches(word, entry.words, n=1, cutoff=FUZZY_WORD_CUTOFF)
@@ -875,12 +900,7 @@ def rank_entries(entries: list[Entry], query: str, semantic=None) -> list[Entry]
 def _word_in(task_padded: str, word: str) -> bool:
     """Whole-word hit, insensitive to a trailing s/es: keyword "hotels" must
     fire on a task saying "hotel" and vice versa (issue #41)."""
-    variants = {word, word + "s"}
-    if word.endswith("s"):
-        variants.add(word[:-1])
-    if word.endswith("es"):
-        variants.add(word[:-2])
-    return any(f" {v} " in task_padded for v in variants)
+    return any(f" {v} " in task_padded for v in _plural_variants(word))
 
 
 def _content_words(text: str):
