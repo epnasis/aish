@@ -1823,21 +1823,6 @@ async def _view_eval(owner: Any, page: Any, js: str, *, quiet: bool = True) -> A
         return None
 
 
-def is_challenge_frame(url: str) -> bool:
-    """Is this frame a challenge widget's own (hCaptcha, reCAPTCHA, ...)?
-
-    EXPERIMENT (2026-10-11), not a design: `_focus_info` runs a script in
-    every frame after every capture, so on booksy.com aish was executing its
-    own JavaScript inside hCaptcha's iframe right after each tap on the
-    challenge — while the owner's own tab in the same Chrome, which nothing
-    probed, was never challenged. Skipping these frames tests that one
-    hypothesis while the owner can still type into the site's own sign-in
-    frame. If it holds, the method changes — focus read from Chrome's
-    accessibility data, no page script in any frame — and this list goes."""
-    host = host_of(url) or ""
-    return any(token in host for token, _ in signin_mod._CAPTCHA_TOKENS)
-
-
 async def _focus_info(
     page: Any, click: tuple[float, float] | None, main_eval: Any = None
 ) -> dict | None:
@@ -1854,8 +1839,6 @@ async def _focus_info(
     # as the answer only when no frame below it can say more.
     delegated: dict | None = None
     for frame in page.frames:
-        if frame is not page.main_frame and is_challenge_frame(getattr(frame, "url", "")):
-            continue
         try:
             if frame is page.main_frame and main_eval is not None:
                 info = await main_eval(_FOCUS_JS)
@@ -4706,16 +4689,12 @@ try {
 } catch (e) { /* a site that froze navigator keeps its passkeys; nothing to do */ }
 """
 
-# EXPERIMENT (2026-10-12): OFF. Suppressing passkey dialogs in the view's tab,
-# by either method, makes that tab tell pages this Mac has no passkey support
-# while every other tab of the same Chrome says it has — measured:
-# `isUserVerifyingPlatformAuthenticatorAvailable` and
-# `isConditionalMediationAvailable` true in a plain tab, false with the
-# WebAuthn switch. booksy.com refused every sign-in from a tab aish opened,
-# even driven by the owner's own mouse, and accepted it from a tab he opened
-# in the same window. Off, the Google passkey dead end can return; whether it
-# goes back on, and how, is decided by what booksy.com does without it.
-VIEW_SUPPRESS_PASSKEYS = False
+# ON. Turned off for one experiment (2026-10-12): with the switch, the view's
+# tab tells pages this Mac has no passkey support while the window's other
+# tabs say it has (measured), so it was a candidate for why booksy.com refused
+# every sign-in from aish's Chrome. With it off the sign-in was refused all
+# the same, and off is the Google passkey dead end — so it is back.
+VIEW_SUPPRESS_PASSKEYS = True
 
 
 async def _no_native_passkey_ui(owner: _Owner, page: Any) -> None:
