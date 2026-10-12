@@ -26,11 +26,18 @@ from .paths import config_home
 CORE_TOOLS = (
     "read_url", "web_search", "run_command", "browse", "browse_act", "recall",
     "show_image", "read_file", "read_skill", "read_tool_output",
+    # Widened after the off-menu live probe (#444): the model mostly does NOT
+    # attempt a tool it was not handed — it declares it missing and degrades,
+    # which no off_menu counter can see. These four were the offline
+    # simulation's most-missed, so their misses would be the silent kind.
+    "obsidian_read", "obsidian_find", "read_pdf", "show_video",
 )
 
 #: Tools admitted by ranking against the task, beyond core and the structural
-#: categories. Name hits are admitted even past it.
-RELEVANT_TOP_K = 12
+#: categories. Name hits are admitted even past it. 16, not 12, after the same
+#: probe: the measured miss rate at 12 was 12.7% of tasks and every unexpressed
+#: miss is invisible, so the selection errs wider.
+RELEVANT_TOP_K = 16
 
 #: Tool identity vectors, beside the knowledge ones but never in their file:
 #: `SemanticIndex._save` keeps only the keys of the corpus it was just asked

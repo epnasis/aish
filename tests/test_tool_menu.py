@@ -571,7 +571,10 @@ class TestTheEmbeddingSeam:
         assert (tmp_path / tool_menu.TOOL_EMBEDDINGS_FILE).is_file()
         menu = of_kind(records, "context")[0]["menu"]
         assert menu["mode"] == tool_menu.MODE_SEMANTIC
-        assert len(menu["relevant"]) == tool_menu.RELEVANT_TOP_K
+        # Capped at top-k; this fixture's non-core pool is smaller than k, so
+        # the cap shows as "everything rankable was admitted".
+        rankable = len(agent._full_menu()) - len(menu["names"]["core"])
+        assert len(menu["relevant"]) == min(tool_menu.RELEVANT_TOP_K, rankable)
         cached = json.loads((tmp_path / tool_menu.TOOL_EMBEDDINGS_FILE).read_text())
         assert len(cached) == len(agent._full_menu()) - len(menu["names"]["core"])
 
