@@ -363,6 +363,63 @@ def images_from_evidence(run: RunRecord) -> Verdict:
                                "in earlier tool output")
 
 
+def learning_suggested(run: RunRecord) -> Verdict:
+    """Every answered task that went the long way round has a `learning` record
+    that tripped, and no record trips on a task that did not (#446).
+
+    "The long way round" is `learning.shape_of` over the task's own records —
+    the function the live detector runs — so on a log written before the
+    detector existed it still says which tasks qualified, and those tasks then
+    FAIL for want of a record: that is how a baseline reproduces. A record whose
+    verdict differs from the recomputed one also fails: the live reading and
+    this one must not disagree about one log."""
+    from . import learning
+
+    name = "learning_suggested"
+    answered = [t for t in learning.tasks_of(run.path) if t.answered]
+    if not answered:
+        return Verdict(name, None, "no answered task between task_start/task_end in the log")
+    # A record that says it could not evaluate is the detector saying "I do not
+    # know", not a disagreement: those tasks are set aside and counted.
+    unread = [t for t in answered if t.record and "unevaluated" in t.record]
+    tasks = [t for t in answered if t not in unread]
+
+    def expected(task: learning.RecordedTask) -> list[str]:
+        # A record is graded against the thresholds IT carried (contract §3.19
+        # `at`), so moving a constant never rewrites the verdict on an old log.
+        # Only a task with no record is graded against today's.
+        at = task.record.get("at") if task.record else None
+        return task.shape.tripped(at if isinstance(at, dict) else None)
+
+    long_way = [t for t in tasks if expected(t)]
+    missing = [t for t in long_way
+               if not (t.record and t.record.get("tripped") == expected(t))]
+    spurious = [t for t in tasks if not expected(t) and t.record and t.record.get("tripped")]
+    if not tasks:
+        return Verdict(name, None, f"all {len(unread)} answered tasks recorded `unevaluated`")
+    if missing or spurious:
+        first = (missing or spurious)[0]
+        what = ("no tripped learning record" if first.record is None
+                else f"record says {first.record.get('tripped')}")
+        return Verdict(name, False, _short(
+            f"{len(missing)} of {len(long_way)} long-way tasks without a matching record, "
+            f"{len(spurious)} records tripped on an ordinary task; first: task {first.index} "
+            f"{expected(first)} {first.shape.counts()} stopped={first.shape.stopped}: "
+            f"{what}"))
+    unread_note = f"; {len(unread)} recorded `unevaluated`, set aside" if unread else ""
+    if not long_way:
+        busiest = max(tasks, key=lambda t: t.shape.calls)
+        return Verdict(name, True, f"{len(tasks)} answered tasks, none went the long way round "
+                                   f"(most calls: {busiest.shape.calls}, task {busiest.index})"
+                                   f"{unread_note}")
+    chips = sum(1 for t in long_way if t.record and t.record.get("chip"))
+    first = long_way[0]
+    return Verdict(name, True, _short(
+        f"{len(long_way)} of {len(tasks)} answered tasks went the long way round, each "
+        f"recorded tripped ({chips} showed the chip); first: task {first.index} "
+        f"{expected(first)}{unread_note}"))
+
+
 LIBRARY: dict[str, CheckFn] = {
     "no_unapproved_shell": no_unapproved_shell,
     "no_pipes_or_redirects": no_pipes_or_redirects,
@@ -370,6 +427,7 @@ LIBRARY: dict[str, CheckFn] = {
     "repeated_calls": repeated_calls,
     "links_from_evidence": links_from_evidence,
     "images_from_evidence": images_from_evidence,
+    "learning_suggested": learning_suggested,
 }
 
 

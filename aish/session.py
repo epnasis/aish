@@ -747,6 +747,12 @@ RENDERLESS_STEPS = frozenset(
         # about a line aish added (or chose not to add), read by `aish explain`.
         # The line itself is an ordinary `[aish: …]` message.
         "repeat_nudge",  # #433
+        # #446. The learning-suggestion detector's evaluation at an answer:
+        # counts, thresholds, what tripped, whether the chip was shown. Written
+        # by the surface through `logref.step`, never `on_step`. Its one visible
+        # effect — the chip — rides on the turn's `done`, which the replay
+        # re-derives from this record (`learning.with_chip`).
+        "learning",  # #446
     }
 )
 
@@ -2307,6 +2313,12 @@ class SessionLog:
         # turn (contract §3.17). `turn_ended` is what tells the two apart.
         held_notes: list[dict] = []
         turn_ended = False
+        # Whether this turn's `learning` record says its answer carried the
+        # chip (#446). Imported here: `learning` reads the log through this
+        # module, so a top-level import would be circular.
+        from . import learning
+
+        learning_chip = False
 
         def model_call_edge(event: dict) -> str | None:
             kind = event.get("kind") if event.get("type") == "step" else None
@@ -2336,7 +2348,7 @@ class SessionLog:
 
         def flush() -> None:
             nonlocal steps, answer, open_turn, running_steps, failure, deliveries
-            nonlocal delivery_ids, delivery_shown, answer_id
+            nonlocal delivery_ids, delivery_shown, answer_id, learning_chip
             if not open_turn:
                 return
             if deliveries and not failure:
@@ -2385,6 +2397,7 @@ class SessionLog:
                 events.append({"type": "error", "text": failure})
                 steps, answer, open_turn, running_steps, failure = [], "", False, 0, ""
                 answer_id = ""
+                learning_chip = False
                 return
             if running_steps > 0 and not answer:
                 # A step was still running and no final answer was reached — the
@@ -2394,7 +2407,10 @@ class SessionLog:
                 # answer is complete even if a trailing trace record was clipped.)
                 events.append({"type": "error", "text": INTERRUPTED_TASK})
             else:
-                done: dict = {"type": "done", "result": answer}
+                # The learning chip rode on this answer live (#446); its record
+                # says so, and the same function puts it back here.
+                delivered = learning.with_chip(answer) if learning_chip else answer
+                done: dict = {"type": "done", "result": delivered}
                 # Only when this turn really promoted an assistant record. A
                 # bang command's empty `done` names nothing, and a fork must
                 # refuse rather than guess at a cut point.
@@ -2406,6 +2422,7 @@ class SessionLog:
             answer_id = ""
             open_turn = False
             running_steps = 0
+            learning_chip = False
 
         def emit_command(step: dict) -> None:
             """Splice a run_command's terminal-block framing around its `tool`
@@ -2538,6 +2555,8 @@ class SessionLog:
                     running_steps += 1
                 elif sk in ("thinking", "thinking_cancel", "tool"):
                     running_steps = max(0, running_steps - 1)
+                if sk == learning.LEARNING_STEP and open_turn:
+                    learning_chip = bool(step.get("chip"))
                 if sk in RENDERLESS_STEPS:
                     # Diagnostic / governance evidence, not transcript content:
                     # the browser telling the server it could not display

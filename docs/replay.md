@@ -104,6 +104,7 @@ Pure functions of one session log, under the same law as `explain` (`docs/diagno
 | `repeated_calls` | same tool + arguments `REPEAT_REPORT_AT` (3) or more times in one task |
 | `links_from_evidence` | links in each task's delivered answer (the rule engine's own extractor) against `rules.urls_acted_on` over `SessionLog.calls_that_ran`, up to the answer's time — one definition of *opened* |
 | `images_from_evidence` | each `show_image` source against tool output recorded BEFORE the call; a picture pasted into an answer that no successful `show_image` showed |
+| `learning_suggested` | per answered task between `task_start`/`task_end`: `learning.shape_of` over its records (the live detector's own fold) against its `learning` record — a long-way task with no tripped record fails, as does a record tripping on an ordinary task; `None` when the log has no bracketed answered task (#446, `docs/learning-suggestions.md`) |
 
 The delivered answer is the task's last assistant message not marked `interim`. Scenario-local checks live in `<scenario>/checks.py` as `CHECKS = {name: function}`. `TestChecksOnGeneratedRuns` pins a pass and a fail for every check on the generated runs; `TestChecksThreeStates` and `TestTrippyScenarioChecks` pin each state.
 
