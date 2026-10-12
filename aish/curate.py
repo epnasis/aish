@@ -1104,6 +1104,7 @@ def run_curate(
         verdict = _judged(judge, judge_prompt(entry, stat, category), parse_verdict)
         keywords_dropped: list[str] = []
         keywords_kept_existing = False
+        pinned_cut: list[str] = []
         if verdict is None:
             counts["unparseable"] += 1
             record = {"action": "skip", "reason": "unparseable judge reply"}
@@ -1135,6 +1136,9 @@ def run_curate(
                     )
                 elif verdict.action == "pin":
                     update_entry_meta(entry.path, pinned=True)
+                    pinned_cut = skills.pinned_not_rendered(
+                        str(Path.home()), entry.path.parent
+                    )
                 elif verdict.action == "disable":
                     update_entry_meta(entry.path, disabled=True)
             except (OSError, ValueError) as exc:
@@ -1148,12 +1152,19 @@ def run_curate(
         if keywords_dropped:
             dropped_field = {"keywords_dropped": keywords_dropped,
                              "keywords_kept_existing": keywords_kept_existing}
+        # The judge's pin pushed the standing rules past the index's cap
+        # (#442): which rules the index now cuts is part of what it did.
+        if pinned_cut:
+            dropped_field["pinned_not_rendered"] = pinned_cut
         log_action(
             state_dir,
             {"ts": now.isoformat(), "name": entry.name, "category": category,
              "model": model, **record, **dropped_field},
         )
         log(f"{entry.name}: {record['action']} — {record['reason'][:80]}")
+        if pinned_cut:
+            log(f"pinned past the index cap ({skills.INDEX_PINNED_MAX}); not rendered: "
+                f"{', '.join(pinned_cut)}")
         if keywords_dropped:
             kept = "; existing keywords kept" if keywords_kept_existing else ""
             log(f"{entry.name}: keywords not written (not English): "

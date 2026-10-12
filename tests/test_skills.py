@@ -1626,6 +1626,55 @@ class TestPinnedTier:
         assert "pinned" not in (d / "rule.md").read_text()
 
 
+class TestPinnedCutIsSaidAtAdmission:
+    """#442: the index cuts pinned rules past INDEX_PINNED_MAX by NAME order.
+    The cut stays (raising it or choosing by relevance is a separate
+    question), but a pin saved past it says, in the save's own result, which
+    rules the index no longer applies — the same set the index omits."""
+
+    def _fill(self, count):
+        for i in range(count):
+            write_skill(
+                skills_module.GLOBAL_MEMORY_DIR,
+                f"rule-{i:03d}.md",
+                f"---\nname: rule-{i:03d}\ndescription: standing rule {i}\npinned: yes\n---\n",
+            )
+
+    def _save(self, tmp_path, name, pinned=True):
+        return save_memory(f"a distinct fact for {name}", skills_module.GLOBAL_MEMORY_DIR,
+                           name=name, cwd=str(tmp_path), pinned=pinned, force=True)
+
+    def test_a_pin_past_the_cap_names_what_the_index_cuts(self, tmp_path):
+        from aish.skills import INDEX_PINNED_MAX
+
+        self._fill(INDEX_PINNED_MAX)
+        result = self._save(tmp_path, "zz-rule")
+        assert result.startswith("remembered (zz-rule)")
+        assert "1 are NOT applied to any task — this one included: zz-rule." in result
+
+        index_report = {}
+        text = knowledge_index(str(tmp_path), on_index=index_report.update)
+        assert "a distinct fact for zz-rule" not in text  # the note told the truth
+        assert index_report["omitted"]["pinned"] == 1
+
+    def test_a_pin_sorting_first_names_the_rule_it_pushed_out(self, tmp_path):
+        from aish.skills import INDEX_PINNED_MAX
+
+        self._fill(INDEX_PINNED_MAX)
+        result = self._save(tmp_path, "aa-rule")
+        last = f"rule-{INDEX_PINNED_MAX - 1:03d}"
+        assert f"NOT applied to any task: {last}." in result
+        assert "this one included" not in result
+        assert f"standing rule {INDEX_PINNED_MAX - 1}" not in knowledge_index(str(tmp_path))
+
+    def test_no_note_at_or_under_the_cap_or_for_an_unpinned_save(self, tmp_path):
+        from aish.skills import INDEX_PINNED_MAX
+
+        self._fill(INDEX_PINNED_MAX - 1)
+        assert "NOT applied" not in self._save(tmp_path, "at-cap")
+        assert "NOT applied" not in self._save(tmp_path, "plain-fact", pinned=None)
+
+
 class TestLifecycle:
     """#178 P1-8 retire primitives: `status: disabled` and `expires:` exclude
     an entry everywhere without deleting the file."""

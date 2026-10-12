@@ -317,6 +317,37 @@ class TestJudgeLoop:
                    notify_fn=lambda *a: None, env={}, state_dir=state, now=NOW)
         assert "pinned: yes" in path.read_text(encoding="utf-8")
 
+    def _actions(self, state):
+        lines = (state / "curation-actions.jsonl").read_text(encoding="utf-8").splitlines()
+        return [json.loads(line) for line in lines]
+
+    def test_a_pin_past_the_index_cap_records_what_the_index_cuts(self, tmp_path, monkeypatch):
+        """#442: 2 of the owner's 27 pins came from this judge. A pin that
+        pushes the standing rules past INDEX_PINNED_MAX says so in its record."""
+        from aish.skills import INDEX_PINNED_MAX
+
+        gm = self._corpus(monkeypatch, tmp_path)
+        for i in range(INDEX_PINNED_MAX):
+            make_entry(gm, f"a-rule-{i:02d}", f"rule {i}", extra="pinned: yes\n")
+        make_entry(gm, "noisy", "a standing rule")
+        state = tmp_path / "state"
+        self._dead_weight_logs(state)
+        run_curate(judge=lambda p: "VERDICT: pin\nREASON: rule", scores=lambda q, e: {},
+                   notify_fn=lambda *a: None, env={}, state_dir=state, now=NOW)
+        (record,) = self._actions(state)
+        assert record["action"] == "pin"
+        assert record["pinned_not_rendered"] == ["noisy"]
+
+    def test_a_pin_under_the_cap_records_no_cut(self, tmp_path, monkeypatch):
+        gm = self._corpus(monkeypatch, tmp_path)
+        make_entry(gm, "noisy", "a standing rule")
+        state = tmp_path / "state"
+        self._dead_weight_logs(state)
+        run_curate(judge=lambda p: "VERDICT: pin\nREASON: rule", scores=lambda q, e: {},
+                   notify_fn=lambda *a: None, env={}, state_dir=state, now=NOW)
+        (record,) = self._actions(state)
+        assert record["action"] == "pin" and "pinned_not_rendered" not in record
+
     def test_unparseable_reply_retries_once_then_skips(self, tmp_path, monkeypatch):
         gm = self._corpus(monkeypatch, tmp_path)
         path = make_entry(gm, "noisy", "desc", keywords="k")

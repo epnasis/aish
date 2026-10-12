@@ -56,7 +56,8 @@ INDEX_MEMORY_MAX = 15
 # render in EVERY index under their own budget, exempt from the mtime-recency
 # cap above — a behaviour rule ("never do X") must not silently rotate out of
 # the prompt because newer facts moved past it, and WHICH rules apply must
-# never depend on whose mtime moved last.
+# never depend on whose mtime moved last. Past this budget the last pins by
+# NAME are cut (pinned_cut); the cut is announced when a pin is saved (#442).
 INDEX_PINNED_MAX = 20
 
 # recall output caps — one call can never flood a small context window.
@@ -593,6 +594,42 @@ def list_skills(dirs: list[Path]) -> list[tuple[str, str]]:
     )
 
 
+def pinned_cut(memory: list[Entry]) -> tuple[list[Entry], list[Entry]]:
+    """(rendered, cut): the ONE answer to which pinned memories reach the
+    index's Standing rules section. Sorted by NAME and cut at
+    INDEX_PINNED_MAX — name order is arbitrary but stable, and the cut is
+    deliberate: it is announced when a pin is saved past it (#442) rather
+    than discovered by reading the index."""
+    pinned = sorted((e for e in memory if e.pinned), key=lambda e: e.name)
+    return pinned[:INDEX_PINNED_MAX], pinned[INDEX_PINNED_MAX:]
+
+
+def pinned_not_rendered(cwd: str = "", memory_dir=None) -> list[str]:
+    """Names of the active pinned memories the index cuts. Read from the same
+    dirs the index reads; a `memory_dir` outside them is judged on its own,
+    since the index would not show it at all."""
+    dirs = memory_dirs(cwd)
+    if memory_dir is not None and Path(memory_dir) not in dirs:
+        dirs = [Path(memory_dir)]
+    memory = [e for e in _merged(dirs, "memory") if entry_active(e)]
+    return [e.name for e in pinned_cut(memory)[1]]
+
+
+def pinned_cut_note(cut: list[str], name: str = "") -> str:
+    """Said where a pin is saved past the cap (#442), like the keyword-drop
+    note: a standing rule exists so it does not depend on retrieval, and one
+    the index cuts applies to no task — the owner chooses what to unpin."""
+    if not cut:
+        return ""
+    this_one = " — this one included" if name in cut else ""
+    return (
+        f"\nNOTE: more than {INDEX_PINNED_MAX} standing rules are pinned; the index "
+        f"shows the first {INDEX_PINNED_MAX} by name, so {len(cut)} are NOT applied "
+        f"to any task{this_one}: {', '.join(cut)}. To change which apply, unpin one "
+        "(remember with its name and pinned=false)."
+    )
+
+
 def knowledge_index(cwd: str, lessons_path=None, on_index=None) -> str:
     """The capped Skills + Memory sections of the system prompt, rebuilt
     every task so new entries appear without a restart. Empty string when
@@ -644,18 +681,19 @@ def knowledge_index(cwd: str, lessons_path=None, on_index=None) -> str:
     # Standing rules (#178 P1-7): pinned entries render under their own budget,
     # exempt from the recency cap, sorted by NAME — a touched file must never
     # change which rules apply, and a stable order keeps the index byte-stable.
-    pinned = sorted((e for e in memory if e.pinned), key=lambda e: e.name)
+    rendered_pinned, cut_pinned = pinned_cut(memory)
+    pinned = rendered_pinned + cut_pinned
     unpinned = [e for e in memory if not e.pinned]
     if pinned:
         selected += [
             {"label": e.name, "kind": e.kind, "slot": "pinned"}
-            for e in pinned[:INDEX_PINNED_MAX]
+            for e in rendered_pinned
         ]
-        lines = "\n".join(f"- {e.description}" for e in pinned[:INDEX_PINNED_MAX])
+        lines = "\n".join(f"- {e.description}" for e in rendered_pinned)
         note = (
-            f"\n(…and {len(pinned) - INDEX_PINNED_MAX} more standing rules — "
+            f"\n(…and {len(cut_pinned)} more standing rules — "
             "search them with recall(<topic>))"
-            if len(pinned) > INDEX_PINNED_MAX
+            if cut_pinned
             else ""
         )
         sections.append(
@@ -1470,9 +1508,10 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
             dropped_kw, written=False
         )
     state = " [disabled]" if disabled else ""
+    cut_note = pinned_cut_note(pinned_not_rendered(cwd, directory), slug) if pinned else ""
     return f"remembered ({slug}){state}: {text}" + dropped_keywords_note(
         dropped_kw, kept_existing=kept_existing
-    )
+    ) + cut_note
 
 
 def forget_memory(name: str, cwd: str = "") -> str:
