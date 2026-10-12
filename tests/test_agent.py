@@ -4157,7 +4157,7 @@ class TestPluginTools:
         agent.run_task("go")
         assert any("invalid args for echoer" in m["content"] for m in tool_messages(agent.messages))
 
-    def test_new_tool_appears_on_next_task_via_rescan(self, tmp_path):
+    def test_new_tool_appears_on_next_task_via_rescan(self, tmp_path, full_menu):
         agent, chat = make_agent(
             [model_says("first"), model_says("second")], cwd=str(tmp_path)
         )
@@ -4171,7 +4171,7 @@ class TestPluginTools:
         self._write_tool(cwd, "writer", mutating="yes",
                          script=f"#!/bin/sh\ntouch {marker}\ncat\n")
 
-    def test_mutating_tool_offered_when_approver_wired(self, tmp_path):
+    def test_mutating_tool_offered_when_approver_wired(self, tmp_path, full_menu):
         self._write_tool(tmp_path, "writer", mutating="yes")
         agent, chat = make_agent(
             [model_says("done")], cwd=str(tmp_path), approve_tool=lambda n, a, p=None: True

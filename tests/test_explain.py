@@ -156,7 +156,7 @@ class TestBriefWriter:
         assert brief["options"]["system_role"] == "all_system"
         assert brief["options"]["provider"] == "ollama"
 
-    def test_written_once_per_task_not_once_per_model_call(self, tmp_path):
+    def test_written_once_per_task_not_once_per_model_call(self, tmp_path, full_menu):
         """Interning within a task: several model calls that were handed the
         same menu and the same system text name it once."""
         agent, _, log = make_logged_agent(
@@ -2782,7 +2782,9 @@ class TestTheContextBreakdownIsCheckedAgainstTheRealLoop:
             )
             return super().__call__(**kwargs)
 
-    def test_each_call_accounts_for_exactly_what_the_backend_was_handed(self, tmp_path):
+    def test_each_call_accounts_for_exactly_what_the_backend_was_handed(
+        self, tmp_path, full_menu
+    ):
         from aish.agent import Agent
 
         log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")

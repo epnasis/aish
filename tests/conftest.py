@@ -389,3 +389,17 @@ def isolated_token_ratios():
     token_ratio_module.reset()
     yield
     token_ratio_module.reset()
+
+
+@pytest.fixture
+def full_menu(monkeypatch, no_inherited_aish_env):
+    """The kill switch for one test: every call is handed the FULL tool menu,
+    as before #444 H1 (`docs/tool-menu.md`).
+
+    For tests of a property that assumes one menu for the whole task — prefix
+    byte-identity, brief interning, exposure of a plugin tool — and that call
+    a tool the task text would not select (`read_docs` is the usual one). The
+    selection's own behaviour, including what an off-menu call does to the
+    menu, is pinned in `tests/test_tool_menu.py`; nothing here hides it.
+    """
+    monkeypatch.setenv("AISH_MENU_ALL", "1")

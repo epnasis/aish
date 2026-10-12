@@ -57,6 +57,7 @@ from . import (
     skill_import,
     skills,
     token_ratio,
+    tool_menu,
     tool_plugins,
     tools,
     turns,
@@ -3972,6 +3973,15 @@ class Agent:
         self._plugin_tools: dict[str, tool_plugins.Tool] = {}
         self._plugin_defs: list[dict] = []
         self._plugin_warned: set[str] = set()
+        # This task's selected tool menu (#444 H1, `docs/tool-menu.md`). None
+        # means the full menu is sent: before selection runs, on claude-max,
+        # and under the kill switch. `_menu_full_names` is the full menu as it
+        # stood when the selection was made, so a tool created mid-task joins.
+        self._menu: tool_menu.Selection | None = None
+        self._menu_full_names: frozenset[str] = frozenset()
+        self._tool_index: Any = None
+        # Arm C's `load_tool` schema, built once per task (catalog mode only).
+        self._catalog_schema: dict | None = None
         # (command-prefix, tool-name) for exposed tools that declare
         # `prefer_over:` — lets the agent nudge the model toward a tool when it
         # runs a raw command the tool should be used instead of (issue #140).
@@ -4889,6 +4899,11 @@ class Agent:
         self._bindings = []
         self._binding_seq = itertools.count(1)
         self._turn_calls = []
+        # The menu is selected per task (`docs/tool-menu.md` M2). Until this
+        # task's selection runs, the full menu is what counts — which is why
+        # the boundary trim, which runs first, estimates with it (M7).
+        self._menu = None
+        self._catalog_schema = None
         self._said_something = False
         self._stall_nudged = False
         self._delivered = []
@@ -5324,6 +5339,14 @@ class Agent:
             if self.plan_triggers and self._previous_unfinished and checklist.open_tasks(plan_now)
             else ""
         )
+        # This task's tool menu (#444 H1): chosen once, here — after the rules
+        # are seeded and preflight armed its gates, before this task's reminder,
+        # so "the previous task" is still the newest reminder in history.
+        menu_record = self._select_menu(
+            seed,
+            skills.retrieval_query(seed, prior_user_text[-skills.PREFLIGHT_CONTEXT_CHARS:]),
+            plan_open=bool(checklist.open_tasks(plan_now)),
+        )
         reminder = task_reminder(
             index, knowledge_text, rules_prose, self.scratch_dir,
             supersedes=bool(earlier_reminders),
@@ -5388,6 +5411,8 @@ class Agent:
                 # Present whenever a selector ran, `items: []` included.
                 **({"near_misses": preload.near_miss_record()} if preload.mode else {}),
             },
+            # Which tools this task was handed, and why each (#444 H1).
+            menu=menu_record,
         )
         if preload.withheld:
             # Relayed, not only logged: the rule's usual refusal and its appeal
@@ -5961,8 +5986,7 @@ class Agent:
         absence-as-evidence failure `docs/trace-contract.md` §0 exists to stop.
         `docs/rate-limits.md`.
         """
-        self._refresh_plugin_tools()
-        menu = tools.TOOL_SCHEMAS + self._plugin_defs
+        menu = self._sent_menu()
         self._model_call += 1
         self._call_fill = None
         self._call_estimate = None
@@ -6008,6 +6032,9 @@ class Agent:
         while True:
             attempt += 1
             observed.clear()
+            # Per attempt, like `observed`: only the attempt that succeeded is
+            # timed on the record, and a failed one says its own `elapsed_s`.
+            timing = backends.CallTiming()
             if self._token_budgeted():
                 # Per attempt: an overflow retry sends a different request.
                 self._call_estimate = self._prompt_estimate(menu)
@@ -6018,7 +6045,9 @@ class Agent:
                 # adapted to the exact `ollama.chat` convention so this file
                 # never learns which provider it is on, and a keyword added for
                 # the governor's benefit would break that.
-                with backends.observe_sent(observed.append), ratelimit.hooks(
+                with backends.observe_sent(observed.append), backends.observe_timing(
+                    timing
+                ), ratelimit.hooks(
                     should_stop=self._cancel.is_set,
                     on_wait=self.status.note,
                     ceiling=self._wait_ceiling(),
@@ -6156,7 +6185,7 @@ class Agent:
                 # The ONE emit point for what the model produced, so no caller
                 # can forget it: _chat_turn is reached by the tool-call path,
                 # the text-only path and the final no-tools turn alike.
-                self._record_reasoning(turn)
+                self._record_reasoning(turn, timing.record())
                 # The COMPLETE response, stored whole beside the request (#355)
                 # — symmetric with _record_sent, so what came back is captured
                 # as completely as what went out, new content types included.
@@ -6311,8 +6340,10 @@ class Agent:
             ),
         ))
 
-    def _record_reasoning(self, turn: tuple) -> None:
-        """Everything the model produced on one call, in full (#240).
+    def _record_reasoning(self, turn: tuple, timing: dict | None = None) -> None:
+        """Everything the model produced on one call, in full (#240), and how
+        long it took (#444): `timing` is `backends.CallTiming.record()` of the
+        attempt that succeeded — empty where no seam observed the call.
 
         The rendered `thinking` step keeps a 120-character snippet for a live
         status ticker, and that fragment — 26 characters on average across a
@@ -6357,6 +6388,11 @@ class Agent:
         if meta.get("synthesized"):
             # The content is aish's sentence, not the model's.
             record["synthesized"] = True
+        # Measured at the backend seam, after any wait for rate-limit headroom
+        # (`backends.CallTiming`). Each key only where it was observed: a chat
+        # callable that is not `governed` reports nothing, and a call that did
+        # not stream has no first chunk — neither is ever written as 0.
+        record.update(timing or {})
         self._emit_record(**record)
 
     def _record_received(self, turn: tuple) -> None:
@@ -7249,6 +7285,172 @@ class Agent:
         they are left alone."""
         if self._token_budgeted():
             self._refresh_plugin_tools()
+
+    # ------------------------------------------------ the tool menu (#444 H1)
+
+    def _full_menu(self) -> list[dict]:
+        """Everything callable as a schema: native tools plus the EXPOSED
+        plugin tools. Selection filters a copy of this and nothing else, so it
+        can narrow what is sent and never widen what is callable (M1)."""
+        return tools.TOOL_SCHEMAS + self._plugin_defs
+
+    def _sent_menu(self, refresh: bool = True, admit: bool = True) -> list[dict]:
+        """The menu the next model call sends: the full one when no selection
+        is in force, else the full one filtered to this task's names, in its
+        own order (M3). A tool that appeared since the selection — created
+        mid-task — joins first, as a new tool always has (`docs/tool-menu.md`).
+
+        `admit=False` is the size estimate's view: the same list, with the new
+        tools in it, but nothing admitted and nothing said — an estimate must
+        not change the menu it is measuring."""
+        if refresh:
+            self._refresh_plugin_tools()
+        full = self._full_menu()
+        if self._menu is None:
+            return full
+        new = [name for name in _menu_names(full) if name not in self._menu_full_names]
+        if not admit:
+            sent = tool_menu.menu_for(full, self._menu.names | set(new))
+            return [*sent, self._catalog_schema] if self._catalog_schema is not None else sent
+        for name in new:
+            if self._menu.admit(name, tool_menu.CREATED):
+                self._note(f"⚑ {name} is new since this task's menu was chosen; added it")
+        sent = tool_menu.menu_for(full, self._menu.names)
+        return [*sent, self._catalog_schema] if self._catalog_schema is not None else sent
+
+    def _admit_off_menu(self, name: str) -> bool:
+        """The off-menu net (M6): a call to a tool that is on the full menu but
+        was not sent runs exactly as before — this only records it and adds it
+        to the menu for the rest of the task. A name on neither menu is left to
+        `_dispatch`, which answers it as an unknown tool, unchanged."""
+        if self._menu is None or name in self._menu.names:
+            return False
+        if name not in _menu_names(self._full_menu()):
+            return False
+        self._menu.admit(name, tool_menu.OFF_MENU)
+        self._note(f"⚑ {name} was not on this task's menu; ran it and added it")
+        return True
+
+    def _previous_task_tools(self) -> list[str]:
+        """Tools called since the previous task began — the continuity
+        category. The previous task begins at its reminder; a reopened chat
+        holds no reminders (they are never logged), so there it begins at the
+        newest message the owner typed. On a continuation (#387) that span is
+        the attempt being continued."""
+        start = None
+        for index in range(len(self.messages) - 1, 0, -1):
+            message = self.messages[index]
+            if message.get("role") == "system" and str(
+                message.get("content", "")
+            ).startswith(TASK_REMINDER_MARK):
+                start = index
+                break
+        if start is None:
+            for index in range(len(self.messages) - 1, 0, -1):
+                message = self.messages[index]
+                content = message.get("content")
+                if (
+                    message.get("role") == "user"
+                    and isinstance(content, str)
+                    and content.strip()
+                    and not content.lstrip().startswith(("[", "<"))
+                ):
+                    start = index
+                    break
+        if start is None:
+            return []
+        names = []
+        for message in self.messages[start:]:
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") if isinstance(call, dict) else None
+                if isinstance(function, dict) and function.get("name"):
+                    names.append(str(function["name"]))
+        return list(dict.fromkeys(names))
+
+    def _tool_scorer(self) -> tuple[Callable | None, Callable[[], str | None] | None]:
+        """Similarity over tool identity lines, on the embedding seam preflight
+        uses, in its own cache file. None when nothing real is wired: a test's
+        stand-in index has no `sibling`, and the lexical floor then ranks."""
+        if self._tool_index is None:
+            sibling = getattr(self.semantic, "sibling", None)
+            if not callable(sibling):
+                return None, None
+            self._tool_index = sibling(tool_menu.TOOL_EMBEDDINGS_FILE)
+        index = self._tool_index
+
+        def scores(query: str, lines: list) -> dict | None:
+            try:
+                return index.scores(query, lines)
+            except Exception as exc:  # noqa: BLE001 — the floor must hold (M4)
+                index.error = str(exc) or exc.__class__.__name__
+                return None
+
+        return scores, lambda: index.error
+
+    def _select_menu(self, task: str, query: str, plan_open: bool) -> dict:
+        """This task's menu, chosen once (M2), and the `context.menu` record.
+
+        Runs after the rules are seeded and preflight has armed its gates, so
+        the structural requirements are known: the tools the bindings need and
+        read_skill when the skill-read gate is armed."""
+        self._refresh_plugin_tools()
+        full = self._full_menu()
+        mode, via = tool_menu.requested_mode()
+        if mode == tool_menu.MODE_ALL:
+            self._menu = None
+            if via in (tool_menu.VIA_CONFIG_UNREADABLE, tool_menu.VIA_CONFIG_UNKNOWN):
+                # Said, not only recorded: the owner asked for nothing, and is
+                # getting the full menu because his config could not be used.
+                self._note(f"⚑ config.toml tool_menu not usable ({via}); sending the full menu")
+            return {"mode": tool_menu.MODE_ALL, "via": via}
+        core = [*tool_menu.CORE_TOOLS, *([checklist.PLAN_TOOL] if plan_open else [])]
+        required = rules.needed_tools(self._bindings)
+        if self._pending_skill_reads:
+            required.append("read_skill")
+        continuity = self._previous_task_tools()
+        if mode == tool_menu.MODE_CATALOG:
+            # Arm C: nothing is ranked; the rest is a catalog the model loads
+            # from. An empty task text means no name hit either.
+            self._menu = tool_menu.select(
+                full, "", "", core=core, required=required, continuity=continuity, top_k=0
+            )
+            self._menu.mode = tool_menu.MODE_CATALOG
+            self._catalog_schema = tool_menu.load_tool_schema(full, self._menu.names)
+        else:
+            scores, error = self._tool_scorer()
+            self._menu = tool_menu.select(
+                full, task, query,
+                core=core, required=required, continuity=continuity,
+                scores=scores, error=error,
+            )
+        self._menu_full_names = frozenset(_menu_names(full))
+        return {**self._menu.record(), **({"via": via} if via else {})}
+
+    def _load_tool(self, args: dict) -> str:
+        """Arm C's meta-tool: puts the named tools on this task's menu and
+        executes nothing. Only a name on the full menu can be loaded (M1)."""
+        raw = args.get("names")
+        items = [raw] if isinstance(raw, str) else list(raw or [])
+        names = [n.strip() for item in items for n in str(item).split(",") if n.strip()]
+        full = set(_menu_names(self._full_menu()))
+        loaded, already, missing = [], [], []
+        for name in dict.fromkeys(names):
+            if name not in full or self._menu is None:
+                missing.append(name)
+            elif self._menu.admit(name, tool_menu.LOADED):
+                loaded.append(name)
+            else:
+                already.append(name)
+        if not loaded and not already:
+            return f"ERROR: no such tool to load: {', '.join(missing) or '(no names given)'}."
+        parts = []
+        if loaded:
+            parts.append(f"Loaded: {', '.join(loaded)} — call them now.")
+        if already:
+            parts.append(f"Already loaded: {', '.join(already)}.")
+        if missing:
+            parts.append(f"No such tool: {', '.join(missing)}.")
+        return " ".join(parts)
 
     def _estimate_for_record(self) -> int | None:
         return self._history_size() if self._token_budgeted() else None
@@ -8154,6 +8356,9 @@ class Agent:
     ) -> str:
         args = args or {}
         self._run_meta = None
+        # The off-menu net (#444 H1): every call of every path passes here,
+        # the parallel read fan-out included, so none can miss it.
+        off_menu = {"off_menu": True} if self._admit_off_menu(name) else {}
         # Assigned per call and carried as a LOCAL, never read back off the
         # agent: read-only tools run in parallel, so an instance attribute
         # would hand two concurrent calls the same id — which is exactly the
@@ -8225,6 +8430,7 @@ class Agent:
                     verdict_by=tools.VERDICT_EXCEPTION,
                     summary="unavailable",
                     **({"model_call": model_call} if model_call else {}),
+                    **off_menu,
                 )
                 return result
             except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
@@ -8243,6 +8449,7 @@ class Agent:
                     verdict_by=tools.VERDICT_EXCEPTION,
                     summary="failed",
                     **({"model_call": model_call} if model_call else {}),
+                    **off_menu,
                 )
                 return result
             result = self._scrub_result(result)
@@ -8255,7 +8462,9 @@ class Agent:
             # it afterwards saw nothing at all.
             self._observe_for_rules(name, result)
             self._note_turn_call(name, args, result)
-            step = self._emit_tool_step(name, args, result, elapsed, call_no, model_call)
+            step = self._emit_tool_step(
+                name, args, result, elapsed, call_no, model_call, off_menu=bool(off_menu)
+            )
             # The denial trigger (#433): his comment is a hint about the action
             # in hand, never a task — but it may change the plan, so ONE line
             # asks the model to look. Applied here, the one funnel every
@@ -8289,6 +8498,7 @@ class Agent:
         secs: float,
         call_no: int = 0,
         model_call: int = 0,
+        off_menu: bool = False,
     ) -> dict | None:
         """The step as recorded — None when nothing records steps."""
         if self.on_step is None and self.step_log is None:
@@ -8335,6 +8545,10 @@ class Agent:
         # claude-max path, where no recorded model call issued it.
         if model_call:
             step["model_call"] = model_call
+        # Present only when true: a call to a tool this task's menu did not
+        # carry, which ran anyway (#444 H1). Never an unknown-tool outcome.
+        if off_menu:
+            step["off_menu"] = True
         _scrub_page_console(step)
         if not ok and self._run_meta is None:
             # Non-run_command failure (a read_url/web_search error, a gate
@@ -8462,7 +8676,17 @@ class Agent:
         blob = json.dumps(menu, sort_keys=True, ensure_ascii=False)
         digest = evidence.digest_of(blob)
         system = self._system_evidence()
-        stamp = (digest, tuple(part["digest"] for part in system))
+        # How each sent name got onto this task's menu (#444 H1). Absent when
+        # the full menu was sent — the brief then has its pre-#444 shape. In
+        # the stamp: the same names can arrive under different categories.
+        selection = (
+            {"mode": self._menu.mode, "full_count": self._menu.full_count,
+             **self._menu.counts()}
+            if self._menu is not None else {}
+        )
+        stamp = (
+            digest, tuple(part["digest"] for part in system), tuple(selection.items())
+        )
         if stamp == self._brief_stamp:
             return
         evidence.put(blob, self.state_dir)
@@ -8475,6 +8699,7 @@ class Agent:
                 "digest": digest,
                 "count": len(menu),
                 "names": sorted(_menu_names(menu)),
+                **({"selection": selection} if selection else {}),
             },
             options={
                 "model": self.model,
@@ -8997,7 +9222,7 @@ class Agent:
         crash (#415).
         """
         if menu is None:
-            menu = tools.TOOL_SCHEMAS + self._plugin_defs
+            menu = self._sent_menu(refresh=False, admit=False)
         chars = backends.request_chars(self.provider, self.messages, menu)
         key = f"{self.provider}:{self.model}"
         self._seed_ratio(key)
@@ -13596,6 +13821,10 @@ class Agent:
         if name == checklist.PLAN_TOOL and name in NATIVE_TOOL_NAMES:
             # Records the model's checklist and nothing else (#433).
             return self._plan_call(args)
+
+        if name == tool_menu.LOAD_TOOL and self._catalog_schema is not None:
+            # Arm C (#444 H1): changes what the next call is handed, runs nothing.
+            return self._load_tool(args)
 
         if name == "read_file":
             path = str(args.get("path", ""))

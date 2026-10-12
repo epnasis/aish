@@ -8,8 +8,9 @@ from the tool table as it is TODAY. Same shape as `vocab.scan` and
 Two things, both as RECORDED:
 
 - **Outcomes per tool** — calls, and how many the log marks failed, refused by
-  a gate, or aimed at a tool that did not exist. Each is a field the writer
-  set; none is re-derived here.
+  a gate, aimed at a tool that did not exist, or aimed at one that existed but
+  was not on the menu that call's task was handed (`off_menu`, #444 H1 —
+  `docs/tool-menu.md`). Each is a field the writer set; none is re-derived here.
 - **Menu size per model call** — the bytes of the menu the call was handed,
   looked up by the digest its `brief` recorded. A menu whose bytes were purged,
   or a call with no digest at all, is counted as such and never as 0.
@@ -49,6 +50,9 @@ class ToolCounters:
     failed: int = 0
     refused: int = 0
     unknown: int = 0
+    #: Ran, but was not on the menu its task was handed (#444 H1). Never an
+    #: unknown: the tool existed, and the call executed as any other did.
+    off_menu: int = 0
 
     @property
     def ok(self) -> int:
@@ -160,6 +164,8 @@ def _count_tool(
         counters.refused += 1
     if str(step.get("error") or "").startswith(UNKNOWN_TOOL_PREFIX):
         counters.unknown += 1
+    if step.get("off_menu") is True:
+        counters.off_menu += 1
 
 
 def _menu_of(
@@ -239,18 +245,23 @@ def render(report: Report, days: int | None) -> str:
     if not report.tools:
         lines.append("  no chat in this window recorded a tool call.")
     else:
-        lines.append(f"  {'':<28} {'calls':>7} {'failed':>7} {'refused':>8} {'unknown':>8}")
+        lines.append(
+            f"  {'':<28} {'calls':>7} {'failed':>7} {'refused':>8} {'unknown':>8}"
+            f" {'off-menu':>9}"
+        )
         ranked = sorted(report.tools.values(), key=lambda c: (-c.calls, c.tool))
         for c in ranked:
             lines.append(
                 f"  {c.tool:<28} {c.calls:>7} {c.failed:>7} {c.refused:>8} {c.unknown:>8}"
+                f" {c.off_menu:>9}"
             )
         from .rules import REFUSED_DECISIONS
 
         decisions = "/".join(sorted(REFUSED_DECISIONS))
         lines.append(
             f"{DIM}  refused = a gate's recorded decision ({decisions});"
-            f" unknown = a call to a tool that did not exist.{RESET}"
+            f" unknown = a call to a tool that did not exist;"
+            f" off-menu = it existed and ran, but its task's menu did not carry it.{RESET}"
         )
     lines += ["", f"  {BOLD}tool menu per model call{RESET}"]
     if not report.menu_days:
@@ -284,6 +295,7 @@ def json_report(report: Report, days: int | None) -> dict:
                 "failed": c.failed,
                 "refused": c.refused,
                 "unknown": c.unknown,
+                "off_menu": c.off_menu,
             }
             for name, c in sorted(report.tools.items())
         },

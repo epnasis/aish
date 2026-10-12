@@ -24,6 +24,7 @@ import math
 import mimetypes
 import os
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -88,6 +89,80 @@ def _report_sent(request: SentRequest) -> None:
     callback = getattr(_SENT, "current", None)
     if callback is not None:
         callback(request)
+
+
+# ------------------------------------------------------- the timing seam
+#
+# How long one model call took, measured where the request actually leaves:
+# AFTER the rate governor's wait for headroom (`governed`), so queueing is
+# never counted as the model's time, and — for the first chunk — on the RAW
+# stream an adapter reads, before it filters anything out. Thread-local and
+# observed, exactly like the sent seam, for the same reason: a keyword added
+# to the `ollama.chat` convention would break the backends' interchangeability.
+
+#: The keys the agent writes the timing under on a `reasoning` record
+#: (`docs/trace-contract.md` §3.13). One spelling, imported by every reader.
+CALL_MS = "ms"
+FIRST_CHUNK_MS = "first_chunk_ms"
+
+#: Every mark is read on this one monotonic clock, named so a test can drive it.
+_clock = time.perf_counter
+
+
+@dataclass
+class CallTiming:
+    """Clock readings for one attempt of one model call; None = not observed.
+
+    `started` is when the request was handed to the provider library, after
+    any wait for rate-limit headroom. `first_chunk` is the first chunk the
+    provider's STREAM delivered — the raw chunk, before an adapter drops an
+    empty delta or accumulates a tool-call fragment — and stays None on a call
+    that did not stream or received nothing. `ended` is when the response was
+    complete, or the stream was closed."""
+
+    started: float | None = None
+    first_chunk: float | None = None
+    ended: float | None = None
+
+    def record(self) -> dict[str, int]:
+        """The `reasoning` record's timing keys: milliseconds from `started`.
+        A figure that was not observed is ABSENT, never 0."""
+        if self.started is None:
+            return {}
+        out: dict[str, int] = {}
+        if self.ended is not None:
+            out[CALL_MS] = int((self.ended - self.started) * 1000)
+        if self.first_chunk is not None:
+            out[FIRST_CHUNK_MS] = int((self.first_chunk - self.started) * 1000)
+        return out
+
+
+_TIMING = threading.local()
+
+
+class observe_timing:  # noqa: N801 — used as a context manager, reads as one
+    """Collect the marks every backend on this thread makes into `timing`."""
+
+    def __init__(self, timing: CallTiming):
+        self._timing = timing
+        self._previous: CallTiming | None = None
+
+    def __enter__(self) -> CallTiming:
+        self._previous = getattr(_TIMING, "current", None)
+        _TIMING.current = self._timing
+        return self._timing
+
+    def __exit__(self, *_exc) -> None:
+        _TIMING.current = self._previous
+
+
+def _mark(name: str) -> None:
+    """Stamp `name` on the timing being observed; the earliest stamp wins, so
+    the governed wrapper's first-chunk mark never overwrites the RAW one an
+    adapter made before filtering."""
+    timing = getattr(_TIMING, "current", None)
+    if timing is not None and getattr(timing, name) is None:
+        setattr(timing, name, _clock())
 
 
 def passthrough_request(provider: str, kwargs: dict) -> SentRequest:
@@ -665,12 +740,16 @@ def governed(chat: Callable, provider: str) -> Callable:
     def call(*, model: str = "", messages: list | None = None, stream: bool = False, **kw):
         key = f"{provider}:{model}"
         ticket = ratelimit.reserve_for_call(key, messages)
+        # After the reservation: a wait for headroom is the governor's time,
+        # not the model's, and must not be read as a slow call.
+        _mark("started")
         try:
             result = chat(model=model, messages=messages, stream=stream, **kw)
         except Exception as exc:  # noqa: BLE001 — observed, then re-raised as-is
             _settle_failure(key, ticket, exc)
             raise
         if not stream:
+            _mark("ended")
             ticket.settle(getattr(result, "prompt_eval_count", 0) or 0)
             return result
         return _governed_stream(result, key, ticket)
@@ -686,12 +765,18 @@ def _governed_stream(chunks, key: str, ticket):
     try:
         last = None
         for chunk in chunks:
+            # Ollama's own chunks arrive here raw; an adapter that filters its
+            # stream has already stamped the raw first chunk, and that wins.
+            _mark("first_chunk")
             last = chunk
             yield chunk
     except Exception as exc:  # noqa: BLE001 — observed, then re-raised as-is
         _settle_failure(key, ticket, exc)
         raise
     finally:
+        # Read to the end, or closed early (a Stop, a repeating reply): either
+        # way the call is over for the model's clock here.
+        _mark("ended")
         # A consumer that stops early closes THIS generator; the close must
         # reach the adapter's stream too, or its connection stays open.
         _close(chunks)
@@ -994,6 +1079,9 @@ class OpenAICompatBackend:
         stop = ""
         received = 0
         for chunk in chunks:
+            # Raw, before the filtering below: a role-only first delta or a
+            # tool-call fragment yields nothing to the caller, but it arrived.
+            _mark("first_chunk")
             received += 1
             if getattr(chunk, "usage", None):
                 usage = (chunk.usage.prompt_tokens or 0, chunk.usage.completion_tokens or 0)
@@ -1343,8 +1431,14 @@ class AnthropicBackend:
 
     def _stream(self, kwargs: dict):
         with self.client.messages.stream(**kwargs) as stream:
-            for text in stream.text_stream:
-                yield ChatChunk(message=ChatMessage(content=text))
+            # Every EVENT, not `text_stream`: that filters to text deltas, so a
+            # reply that opens with thinking or a tool call would show no first
+            # chunk until its first word. The filter below is the one the SDK's
+            # own `text_stream` applies (`MessageStream.__stream_text__`).
+            for event in stream:
+                _mark("first_chunk")
+                if event.type == "content_block_delta" and event.delta.type == "text_delta":
+                    yield ChatChunk(message=ChatMessage(content=event.delta.text))
             final = stream.get_final_message()
         done = _from_anthropic(final)
         done.message.content = ""  # text already streamed above

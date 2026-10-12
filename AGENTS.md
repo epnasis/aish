@@ -82,6 +82,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `objective.py`, the tracker charter, the `objective` record, the objective strip, anything that reads or writes what a chat is FOR | `docs/objective.md` |
 | `plan.py`, the `plan` tool, the `plan` record, the plan on the objective strip, `/plan` | `docs/plan.md` |
 | `tool_plugins.py`, `secrets.py` | `docs/tools-layer.md` |
+| `tool_menu.py`, which tools a model call is HANDED (`_sent_menu`, the off-menu net) | `docs/tool-menu.md` |
 | `explain.py`, `evidence.py`, `turns.py`, `tooluse.py`, the `brief` and `sent` records | `docs/diagnostics.md` |
 | `ratelimit.py`, `_chat_turn`'s retry loop, anything that retries a model call | `docs/rate-limits.md` |
 | `usage.py`, `aish usage`, anything that reports or attributes token spend | `docs/token-accounting.md` |
@@ -177,6 +178,10 @@ Model execution is **stateless**: every `run_command` runs in the project direct
   size of the menu each model call was handed. A pure scan under the same reader law as
   `usage`; it measures only, and the size fence is `tests/test_tool_menu_size.py`. →
   `docs/diagnostics.md`
+- **`tool_menu.py`** — the per-task tool menu (#444 H1, a replay candidate): core + what the
+  task's structure needs + what ranks against it, frozen for the task. It narrows what is
+  SENT, never what is callable; a call to an unsent tool still runs and is counted
+  `off_menu`. `AISH_MENU_ALL=1` restores the full menu. → `docs/tool-menu.md`
 - **`usage.py`** — what was spent and what filled the context that made it cost that. A pure
   scan over the logs, under the same reader law as `explain`; it reports what was RECORDED
   and says plainly what it cannot know. → `docs/token-accounting.md`

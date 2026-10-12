@@ -137,6 +137,8 @@ Before this, the rendered `thinking` step kept a 120-character snippet for a liv
 
 **Malformed arguments are a fact about the model's output, not about execution.** A JSON decode failure becomes `{}` inside the backend adapter, which downstream is indistinguishable from a call the model deliberately made with no arguments — and the two route to completely different repairs. The raw string dies in the adapter, so the flag is set there and reported on the `reasoning` record for the call that emitted it.
 
+**How long the call took rides the same record (#444).** `ms` and, on a streamed call, `first_chunk_ms` — measured at the backend seam after any rate-limit wait, absent where nothing observed them. Before it only isolated role calls recorded `ms`; the acting loop's own calls had the rendered `thinking` step's live `secs` and nothing on the renderless record a reader joins by `model_call`. Shape and per-backend meaning: `docs/trace-contract.md` §3.13.
+
 **A synthesized sentence is marked.** The Anthropic path fabricates *"(the model declined this request for safety reasons)"* on a refusal and logs it as model content; unmarked, a dossier credits the harness's own words to the model.
 
 ---
@@ -315,6 +317,8 @@ Rows are collapsed per outcome rather than per rule — ten verify verdicts are 
 Two joins are worth knowing about. A brief is written only when the menu or system text CHANGES, so counting briefs would count changes, not calls: each `reasoning` step (one per recorded model call) is joined to the most recent brief before it in the same log, and a call with no brief before it counts as `missing`. And on logs written before the refusals-are-never-green rule, a denied shell command was recorded `ok: true`, so `refused ⊆ failed` holds only for logs written since — the reader counts what was recorded and does not restate it. claude-max writes neither briefs nor reasoning records (#242 above), so its calls do not appear in the menu section at all.
 
 What it deliberately cannot say, stated in the report itself: whether the tool a model picked was the RIGHT one — no record captures intent. It measures only; nothing reads it to decide. The size fence on the other side is `tests/test_tool_menu_size.py`, which pins the serialized native menu and each description to a budget so the essays the shrink removed cannot grow back sentence by sentence. The `unknown` counter reads the recorded error's opening — `tools.UNKNOWN_TOOL_PREFIX`, one spelling the writer imports rather than respells, so rewording it cannot silently zero the count. `TestPerToolOutcomes`, `TestEmptyAndBrokenLogs`, `TestTheWindow`, `TestMenuSizes`, `TestTheReport`, `TestTheSubcommand`, `TestOneSpellingOfUnknown`.
+
+**A fifth counter, `off_menu` (#444 H1).** With the per-task menu (`docs/tool-menu.md`), a tool can exist and still not be on the menu a call was handed. Such a call RUNS — the off-menu net — and its `tool` step carries `off_menu: true`; it is counted in its own column and never as `unknown`, which keeps meaning "no such tool". The menu-size table needs no change: the brief is written from the list `_chat_turn` sends, so its digest and count are the selected menu, and the brief's `tools.selection` says per model call how many names came in under each category. `TestOffMenuCounted`.
 
 ## What is still missing
 

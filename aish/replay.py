@@ -624,6 +624,25 @@ def context_summary(contexts: Sequence[RunContext], window: int) -> dict:
     out["tools"] = {"recorded": len(tools),
                     "not_recorded": sum(c.tools_absent for c in contexts),
                     **({"min": min(tools), "max": max(tools)} if tools else {})}
+    out["timing"] = _timing_summary(contexts)
+    return out
+
+
+def _timing_summary(contexts: Sequence[RunContext]) -> dict:
+    """Call duration and time to first chunk, in ms, for the FIRST model call of
+    each task apart from the LATER ones (#444): a per-task tool menu changes the
+    head of the request at a task boundary, so if it costs the server's prefix
+    cache, the first call is where it shows. Not-observed is counted, never 0."""
+    out: dict = {"position_not_recorded": sum(c.position_absent for c in contexts)}
+    for position in (replay_checks.FIRST, replay_checks.LATER):
+        calls = sum(c.calls_at[position] for c in contexts)
+        part: dict = {"calls": calls}
+        for key in ("ms", "first_chunk_ms"):
+            values = [v for c in contexts for v in getattr(c, key)[position]]
+            part[key] = {"recorded": len(values), "not_recorded": calls - len(values),
+                         **({"median": _percentile(values, 0.5),
+                             "p95": _percentile(values, 0.95)} if values else {})}
+        out[position] = part
     return out
 
 
@@ -637,7 +656,7 @@ _KV_REUSE_NOTE = ("input_excludes_kv_reuse leaves out the prefix served from the
                   "these counts, and the over-window count, are floors")
 
 
-def _context_line(label: str, summary: dict) -> list[str]:
+def _context_line(label: str, summary: dict, *, timing: bool = True) -> list[str]:
     """One arm (or one run) on one line, because the report is capped and the
     evidence lines share the cap. Every absent figure is said in words."""
     calls = summary["calls"]
@@ -677,11 +696,51 @@ def _context_line(label: str, summary: dict) -> list[str]:
     lines = [" · ".join(cells)]
     if backends.INPUT_EXCLUDES_KV_REUSE in prompt.get("semantics", []):
         lines.append(f"  {_KV_REUSE_NOTE}")
+    if timing and "timing" in summary:
+        lines.append(_timing_line(summary["timing"], calls))
     return lines
 
 
+#: Said in place of every arm's time line when they would not fit under
+#: REPORT_CAP beside the rest of the body (a scenario with many checks).
+TIME_DROPPED = "time per call: no room under the cap — report --full or --json"
+
+
+def _secs(ms: int) -> str:
+    return f"{ms / 1000:.1f}s"
+
+
+def _timing_line(timing: dict, calls: int) -> str:
+    """`  time median/p95 · first 2: 12.3s/20.1s, chunk 8.0s/15.2s · later 4: …`
+
+    FIRST is each task's first model call, LATER the rest. `chunk` is the
+    time to the stream's first chunk. A figure no call recorded is said in
+    words, and a partial one says how many calls it is missing."""
+    if not any(timing[p][key]["recorded"] for p in (replay_checks.FIRST, replay_checks.LATER)
+               for key in ("ms", "first_chunk_ms")):
+        return f"  time not recorded on any of {calls} calls"
+    cells = []
+    for position in (replay_checks.FIRST, replay_checks.LATER):
+        part = timing[position]
+        if not part["calls"]:
+            cells.append(f"{position} 0")
+            continue
+        figures = []
+        for key, name in (("ms", ""), ("first_chunk_ms", "chunk ")):
+            fig = part[key]
+            if "median" not in fig:
+                figures.append(f"{name or 'duration '}not recorded")
+            else:
+                gone = f" ({fig['not_recorded']} not recorded)" if fig["not_recorded"] else ""
+                figures.append(f"{name}{_secs(fig['median'])}/{_secs(fig['p95'])}{gone}")
+        cells.append(f"{position} {part['calls']}: " + ", ".join(figures))
+    if timing["position_not_recorded"]:
+        cells.append(f"{timing['position_not_recorded']} unplaced")
+    return "  time median/p95 · " + " · ".join(cells)
+
+
 def _context_rows(by_arm: dict[str, list[RunResult]], shown: Sequence[str], window: int,
-                  *, full: bool) -> list[str]:
+                  *, full: bool, timing: bool = True) -> list[str]:
     """Pooled over each arm's COMPLETE runs: a run that did not finish made
     fewer calls than the scenario asks for, and folding it in would move the
     arm's figures for a reason nobody could see. --full adds every run."""
@@ -692,7 +751,7 @@ def _context_rows(by_arm: dict[str, list[RunResult]], shown: Sequence[str], wind
             rows.append(f"{arm}: no complete run to read")
         else:
             label = f"{arm} {len(complete)} run{'s' * (len(complete) != 1)}"
-            rows += _context_line(label, context_summary(complete, window))
+            rows += _context_line(label, context_summary(complete, window), timing=timing)
         if full:
             for r in by_arm[arm]:
                 if r.context is None:
@@ -744,9 +803,14 @@ def render_report(scenario: Scenario, batch: dict, results: list[RunResult], bat
                 and r.arm in shown]
     if problems:
         rows.append("incomplete: " + "; ".join(problems))
-    rows += [""] + _context_rows(by_arm, shown, window, full=full)
-
-    body = "\n".join(head + [""] + rows)
+    context = _context_rows(by_arm, shown, window, full=full)
+    body = "\n".join(head + [""] + rows + [""] + context)
+    if not full and len(body) + _TAIL_ROOM > REPORT_CAP:
+        # The time lines are the newest and the widest; dropped together, and
+        # said, before the body could run into the hard cut below.
+        untimed = _context_rows(by_arm, shown, window, full=full, timing=False)
+        if untimed != context:
+            body = "\n".join(head + [""] + rows + [""] + untimed + [TIME_DROPPED])
     if full:
         evidence = [f"{r.arm[0]}{r.n} {v.check} ({v.label}): {v.evidence}" for r in results
                     if r.arm in shown for v in r.verdicts]
@@ -779,6 +843,12 @@ def render_report(scenario: Scenario, batch: dict, results: list[RunResult], bat
             note = _omitted_note(omitted, None)  # the pointer whole, without the path
         tail.append(note)
     return "\n".join([body] + tail)[:REPORT_CAP - 1] + "\n"
+
+
+#: What the body must leave under REPORT_CAP: the evidence header and the
+#: omission note in its short form, so the pointer to --full is never cut.
+_TAIL_ROOM = len("\n\nevidence (first failures):\n") + len("(9999 more evidence lines: "
+                                                            "report --full)") + 1
 
 
 def _omitted_note(omitted: int, batch_dir: Path | None) -> str:

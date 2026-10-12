@@ -211,8 +211,31 @@ class TestTheReport:
         write_log(tmp_path, [tool_step("read_file", ok=False, decision="denied")])
         report = tooluse.json_report(tooluse.scan(root=tmp_path), 30)
         assert json.loads(json.dumps(report))["tools"]["read_file"] == {
-            "calls": 1, "ok": 0, "failed": 1, "refused": 1, "unknown": 0,
+            "calls": 1, "ok": 0, "failed": 1, "refused": 1, "unknown": 0, "off_menu": 0,
         }
+
+
+class TestOffMenuCounted:
+    """A call to a tool that existed but was not on its task's menu ran
+    normally (#444 H1, `docs/tool-menu.md`); it is counted in its own column
+    and never as unknown — the miss rate is what the experiment measures."""
+
+    def test_an_off_menu_call_is_its_own_count_and_never_unknown(self, tmp_path):
+        write_log(tmp_path, [
+            tool_step("gmail_search", off_menu=True),
+            tool_step("gmail_search"),
+            tool_step("frobnicate", ok=False, error="ERROR: unknown tool 'frobnicate'"),
+        ])
+        tools = tooluse.scan(root=tmp_path).tools
+        assert (tools["gmail_search"].calls, tools["gmail_search"].off_menu) == (2, 1)
+        assert tools["gmail_search"].unknown == 0 and tools["gmail_search"].failed == 0
+        assert (tools["frobnicate"].unknown, tools["frobnicate"].off_menu) == (1, 0)
+
+    def test_the_report_names_the_column_and_the_json_carries_it(self, tmp_path):
+        write_log(tmp_path, [tool_step("drive_list", off_menu=True)])
+        report = tooluse.scan(root=tmp_path)
+        assert "off-menu" in tooluse.render(report, None)
+        assert tooluse.json_report(report, None)["tools"]["drive_list"]["off_menu"] == 1
 
 
 class TestTheSubcommand:

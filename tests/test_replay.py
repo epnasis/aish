@@ -824,7 +824,10 @@ class TestGuardScenarios:
         ("fix_withheld", _passing_log, _failing_log)])
     def test_the_fix_kind_report_is_unchanged(self, tmp_path, name, baseline, candidate):
         """Pinned from the report as rendered BEFORE guards existed: the default
-        kind's text is byte-identical; its JSON gained only the `kind` key."""
+        kind's text is byte-identical; its JSON gained only the `kind` key —
+        and, with the call-timing slice (#444), an additive `timing` in each
+        context summary (goldens regenerated; equal to the old ones with that
+        key stripped)."""
         batch = _batch(tmp_path, FakeLaunch({"baseline": baseline(tmp_path),
                                              "candidate": candidate(tmp_path)}))
         loaded = replay.read_batch(batch)
@@ -997,6 +1000,35 @@ class TestContextPerModelCall:
         text = replay.render_report(*replay.read_batch(batch), batch, full=True)
         assert "  b2, 3 calls · tokens median 50.0k p95 70.0k" in text
         assert "  c1, 3 calls · tokens median 30.0k p95 40.0k" in text
+
+    def test_time_lines_that_would_not_fit_under_the_cap_are_dropped_and_said(
+            self, tmp_path, capsys):
+        """Call timing (#444) widens each arm's row; on a nine-check scenario
+        that would run the body into the hard cut. Dropped together, said in
+        a line, and still whole in --full and --json."""
+        def timed(name, menu):
+            return write_log(tmp_path / f"{name}.jsonl", [
+                TASK, brief([1000, 200], menu),
+                *[{"kind": "trace", "step": {**reasoning(n, 40_000)["step"],
+                                             "ms": 1000 * n, "first_chunk_ms": 300 * n}}
+                  for n in (1, 2, 3)],
+                WRONG_PARTY, result(1, "run_command"), answer("fine"), END])
+        batch = _batch(tmp_path, FakeLaunch(
+            {"baseline": timed("base", BIG_MENU), "candidate": timed("cand", SMALL_MENU)},
+            menus=(BIG_MENU, SMALL_MENU)))
+        loaded = replay.read_batch(batch)
+        text = replay.render_report(*loaded, batch)
+        assert len(text) <= replay.REPORT_CAP
+        assert replay.TIME_DROPPED in text and "time median/p95" not in text
+        assert text.rstrip().endswith("--full)")
+        full = replay.render_report(*loaded, batch, full=True)
+        assert ("  time median/p95 · first 2: 1.0s/1.0s, chunk 0.3s/0.3s · "
+                "later 4: 3.0s/3.0s, chunk 0.9s/0.9s") in full
+        assert replay.TIME_DROPPED not in full
+        assert replay.main(["report", str(batch), "--json"]) == 0
+        timing = json.loads(capsys.readouterr().out)["arms"]["baseline"]["context"]["timing"]
+        assert timing["later"]["ms"] == {"recorded": 4, "not_recorded": 0,
+                                         "median": 3000, "p95": 3000}
 
     def test_json_carries_runs_and_arms_and_takes_the_window(self, tmp_path, capsys):
         batch = self._batch(tmp_path)
