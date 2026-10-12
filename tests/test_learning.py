@@ -564,8 +564,9 @@ class TestTheCheck:
         record that tripped `calls` at a threshold of 1 is right by its own `at`."""
         path = recorded(app_env, [model_says("Hello.")], ["hi"])
         lines = path.read_text().splitlines()
+        needle = f'"calls": {learning.LONG_TASK_CALLS}'
         older = [line.replace('"tripped": []', '"tripped": ["calls"]')
-                 .replace('"calls": 25', '"calls": 0') for line in lines]
+                 .replace(needle, '"calls": 0') for line in lines]
         out = tmp_path / "older.jsonl"
         out.write_text("\n".join(older) + "\n")
         verdict = replay_checks.learning_suggested(replay_checks.load_run(out))
