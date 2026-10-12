@@ -2,7 +2,7 @@
 
 The grown prompt was 28.6k chars plus 16.3k (web) / 12.3k (CLI) of usage notes,
 and it grew one helpful paragraph at a time because nothing measured it. The
-core replaces both with ~4.3k per surface; what it dropped moved to the gate's
+core replaces both with ~4k per surface; what it dropped moved to the gate's
 own just-in-time notes, the tool descriptions, or the two help skills §10 names.
 These tests are what stops it growing back: a total cap, a per-section cap, and
 the old usage-notes builders asserted GONE rather than shrunk.
@@ -35,24 +35,26 @@ REPO = Path(__file__).resolve().parent.parent
 HELP_SKILLS_DIR = REPO / "docs" / "shipped-skills"
 
 # The approved cap (h3a draft, "Deliberate decisions" 3). The render measured
-# after the review fixes: web 4,293 / CLI 4,336 without the identity line.
+# after the H3b wording compression (2026-10-12, macOS): web 4,071 / CLI 4,114
+# without the identity line, from 4,410 / 4,453.
 MAX_CORE_CHARS = 8_000
 
-# Per section, the rendered size at landing rounded up with ~100 chars of
-# room. A section that needs more is a decision with its own evidence — the
+# Per section, the rendered size after the H3b compression rounded up with
+# ~100 chars of room (SHELL's room also covers the longer Linux platform
+# note). A section that needs more is a decision with its own evidence — the
 # draft's rule is that no sentence ships without its enforcing line or its
 # measured failure — not a sentence that slipped in.
 SECTION_CAPS = {
     "You are aish": 200,
-    "WHO IS SPEAKING": 700,
+    "WHO IS SPEAKING": 625,
     "YOU PROPOSE, THE HARNESS DECIDES": 850,
-    "HONESTY ABOUT SOURCES": 600,
-    "WEB": 600,
-    "SHELL": 400,
-    "OUTPUT": 900,
-    "KNOWLEDGE": 600,
-    "WHAT RIDES EACH TASK": 400,
-    "ABOUT AISH": 250,
+    "HONESTY ABOUT SOURCES": 575,
+    "WEB": 525,
+    "SHELL": 350,
+    "OUTPUT": 850,
+    "KNOWLEDGE": 550,
+    "WHAT RIDES EACH TASK": 375,
+    "ABOUT AISH": 225,
 }
 
 # The longest identity any provider renders today rides inside the core, so
