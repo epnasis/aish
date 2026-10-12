@@ -4706,6 +4706,18 @@ try {
 } catch (e) { /* a site that froze navigator keeps its passkeys; nothing to do */ }
 """
 
+# EXPERIMENT (2026-10-12): OFF. Suppressing passkey dialogs in the view's tab,
+# by either method, makes that tab tell pages this Mac has no passkey support
+# while every other tab of the same Chrome says it has — measured:
+# `isUserVerifyingPlatformAuthenticatorAvailable` and
+# `isConditionalMediationAvailable` true in a plain tab, false with the
+# WebAuthn switch. booksy.com refused every sign-in from a tab aish opened,
+# even driven by the owner's own mouse, and accepted it from a tab he opened
+# in the same window. Off, the Google passkey dead end can return; whether it
+# goes back on, and how, is decided by what booksy.com does without it.
+VIEW_SUPPRESS_PASSKEYS = False
+
+
 async def _no_native_passkey_ui(owner: _Owner, page: Any) -> None:
     """Turn off the native passkey dialogs IN THE BROWSER, not in the page.
 
@@ -5296,7 +5308,8 @@ async def _open_view(
     page = await context.new_page()
     owner.navigations = 0
     page.on("framenavigated", lambda f: _count_navigation(owner, page, f))
-    await _no_native_passkey_ui(owner, page)
+    if VIEW_SUPPRESS_PASSKEYS:
+        await _no_native_passkey_ui(owner, page)
     # Native dialogs the owner cannot see either. Playwright DISMISSES these by
     # default, silently — so a login that asks "leave site?" or alerts an error
     # would vanish without trace. Accepting and reporting at least leaves the

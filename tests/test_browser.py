@@ -1352,9 +1352,15 @@ class TestNativeDialogsAreDeadEnds:
         import inspect
 
         source = inspect.getsource(browser._open_view)
+        assert "if VIEW_SUPPRESS_PASSKEYS:" in source
         assert "_no_native_passkey_ui(owner, page)" in source
         assert "add_init_script(_NO_NATIVE_CREDENTIAL_UI)" not in source
         assert source.index("_no_native_passkey_ui") < source.index("page.goto")
+
+    def test_suppression_is_off_while_the_booksy_experiment_runs(self):
+        """A suppressed tab answers "no passkey support" while the window's
+        other tabs answer yes — measured; see VIEW_SUPPRESS_PASSKEYS."""
+        assert browser.VIEW_SUPPRESS_PASSKEYS is False
 
     def test_a_native_dialog_is_reported_rather_than_silently_dismissed(self):
         """Playwright dismisses dialogs by DEFAULT, silently — so a login that
