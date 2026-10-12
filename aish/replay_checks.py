@@ -363,6 +363,48 @@ def images_from_evidence(run: RunRecord) -> Verdict:
                                "in earlier tool output")
 
 
+def learning_suggested(run: RunRecord) -> Verdict:
+    """Every answered task that went the long way round has a `learning` record
+    that tripped, and no record trips on a task that did not (#446).
+
+    "The long way round" is `learning.shape_of` over the task's own records —
+    the function the live detector runs — so on a log written before the
+    detector existed it still says which tasks qualified, and those tasks then
+    FAIL for want of a record: that is how a baseline reproduces. A record whose
+    verdict differs from the recomputed one also fails: the live reading and
+    this one must not disagree about one log."""
+    from . import learning
+
+    name = "learning_suggested"
+    tasks = [t for t in learning.tasks_of(run.path) if t.answered]
+    if not tasks:
+        return Verdict(name, None, "no answered task between task_start/task_end in the log")
+    long_way = [t for t in tasks if t.shape.tripped()]
+    missing = [t for t in long_way
+               if not (t.record and t.record.get("tripped") == t.shape.tripped())]
+    spurious = [t for t in tasks if not t.shape.tripped() and t.record
+                and t.record.get("tripped")]
+    if missing or spurious:
+        first = (missing or spurious)[0]
+        what = ("no tripped learning record" if first.record is None
+                else f"record says {first.record.get('tripped')}")
+        return Verdict(name, False, _short(
+            f"{len(missing)} of {len(long_way)} long-way tasks unsuggested, {len(spurious)} "
+            f"records tripped on an ordinary task; first: task {first.index} "
+            f"{first.shape.tripped()} {first.shape.counts()} stopped={first.shape.stopped}: "
+            f"{what}"))
+    if not long_way:
+        busiest = max(tasks, key=lambda t: t.shape.calls)
+        return Verdict(name, True, f"{len(tasks)} answered tasks, none went the long way round "
+                                   f"(most calls: {busiest.shape.calls}, task {busiest.index})")
+    chips = sum(1 for t in long_way if t.record and t.record.get("chip"))
+    first = long_way[0]
+    return Verdict(name, True, _short(
+        f"{len(long_way)} of {len(tasks)} answered tasks went the long way round, each "
+        f"recorded tripped ({chips} showed the chip); first: task {first.index} "
+        f"{first.shape.tripped()}"))
+
+
 LIBRARY: dict[str, CheckFn] = {
     "no_unapproved_shell": no_unapproved_shell,
     "no_pipes_or_redirects": no_pipes_or_redirects,
@@ -370,6 +412,7 @@ LIBRARY: dict[str, CheckFn] = {
     "repeated_calls": repeated_calls,
     "links_from_evidence": links_from_evidence,
     "images_from_evidence": images_from_evidence,
+    "learning_suggested": learning_suggested,
 }
 
 

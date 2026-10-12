@@ -19,6 +19,7 @@ from . import (
     aliases,
     backends,
     browser,
+    learning,
     objective,
     recipients,
     roles,
@@ -1045,6 +1046,24 @@ def print_chip_menu(chips: list[tuple[str, str]]) -> None:
     print(f"{DIM}Quick replies (type a number to send):{RESET}")
     for i, (label, _reply) in enumerate(chips, 1):
         print(f"{DIM}  {i}.{RESET} {_plain(label)}")
+
+
+def learning_chip_after(
+    agent, logref: LogRef, span_start: int, task: str, *, one_shot: bool = False
+) -> bool:
+    """The learning detector at a terminal answer (#446): it reads back what
+    the task wrote from `span_start`, writes its `learning` record, and says
+    whether "Save this as a lesson?" joins the quick-reply menu. Every task the
+    terminal runs was typed by the person at it, so it is always owner-sent."""
+    return learning.at_answer(
+        logref.log.path,
+        span_start,
+        int(getattr(getattr(agent, "inner", agent), "_turn", 0) or 0),
+        logref.step,
+        owner_sent=True,
+        learn_task=learning.is_learn_prompt(task),
+        one_shot=one_shot,
+    )
 
 
 def print_answer_images(agent, answer: str) -> None:
@@ -2840,11 +2859,14 @@ def main() -> int:
         resumed_chips = replay_history(history)
 
     if args.task:
+        span_start = learning.log_size(logref.log.path)
         try:
             result = agent.run_task(" ".join(args.task))
         except ModelUnavailable as exc:
             print(f"{RED}model unavailable:{RESET} {exc}{_backend_hint(agent)}")
             return 1
+        # Recorded, never offered: no prompt follows a one-shot run (#446).
+        learning_chip_after(agent, logref, span_start, " ".join(args.task), one_shot=True)
         if chip_stream is not None:
             chip_stream.close()
         clean, _chips = parse_reply_chips(result)
@@ -2903,7 +2925,11 @@ def main() -> int:
                         print(f"\n{YELLOW}(command interrupted){RESET}")
                 continue
             try:
+                span_start = learning.log_size(logref.log.path)
                 result = agent.run_task(task)
+                # Before the tracker starts writing beside it: the detector's
+                # record belongs to this task (#446).
+                offer_lesson = learning_chip_after(agent, logref, span_start, task)
                 # After a turn ends, the evidence store is swept to its budget
                 # (#352) — here as in the web server, never inside a tool call.
                 _sweep_turns(state_dir)
@@ -2911,6 +2937,8 @@ def main() -> int:
                 if chip_stream is not None:
                     chip_stream.close()
                 clean, pending_chips = parse_reply_chips(result)
+                if offer_lesson:
+                    pending_chips.append((learning.CHIP_LABEL, learning.CHIP_PAYLOAD))
                 if not stream_answers:
                     print(f"\n{GREEN}{_plain(clean)}{RESET}")
                 print_answer_images(agent, result)

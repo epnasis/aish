@@ -81,6 +81,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `roles.py`, `aish/charters/`, `web_search`'s rendering, anything a role reads or a charter declares | `docs/roles.md` |
 | `objective.py`, the tracker charter, the `objective` record, the objective strip, anything that reads or writes what a chat is FOR | `docs/objective.md` |
 | `plan.py`, the `plan` tool, the `plan` record, the plan on the objective strip, `/plan` | `docs/plan.md` |
+| `learning.py`, the `learning` record, the "Save this as a lesson?" chip | `docs/learning-suggestions.md` |
 | `tool_plugins.py`, `secrets.py` | `docs/tools-layer.md` |
 | `tool_menu.py`, which tools a model call is HANDED (`_sent_menu`, the off-menu net) | `docs/tool-menu.md` |
 | `explain.py`, `evidence.py`, `turns.py`, `tooluse.py`, the `brief` and `sent` records | `docs/diagnostics.md` |
@@ -159,6 +160,10 @@ Model execution is **stateless**: every `run_command` runs in the project direct
   acting model through the `plan` tool, which records and executes nothing. Done needs
   evidence that resolves to the chat's own records; a vanished task is kept as dropped;
   a task the owner dropped is final. Rides the reminder beside the objective. → `docs/plan.md`
+- **`learning.py`** — the lesson chip (#446): at each answer, the task's own records read back and
+  counted against named thresholds; a tripped task the owner sent gets one "Save this as a lesson?"
+  quick reply that sends `/learn`. Measured, never judged; it only ever adds, and every evaluation
+  is a `learning` record. → `docs/learning-suggestions.md`
 - **`rule_compiler.py`** — the owner's plain language → rule field values (#205). Isolated because it is more accurate; safe because code validates it and the owner approves it. The acting model never learns the grammar. → `docs/rules-engine.md`
 - **`tool_plugins.py`** — droppable `TOOL.md` plugin tools, indistinguishable from native ones to the model and gated by the same `_dispatch`. → `docs/tools-layer.md`
 - **`secrets.py`** — local secret store backed by the macOS login Keychain; structurally un-committable. → `docs/tools-layer.md`

@@ -572,7 +572,12 @@ thousands of entries without bloating the context.
   loaded in full.
 - **`/learn [hint]`** — distill the current conversation into skills/memory: it
   searches existing entries first, updates rather than duplicates, and you
-  approve every file diff.
+  approve every file diff. When a task you sent went the long way round — very
+  many tool calls, the same call repeated, steps refused, two or more of your
+  card comments, or a loop stop, all counted from the chat's own log — its
+  answer offers a **Save this as a lesson?** quick reply that sends `/learn`.
+  Never twice in a row; `AISH_LEARNING=0` turns it off
+  (`docs/learning-suggestions.md`).
 
 ---
 

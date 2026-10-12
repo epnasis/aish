@@ -38,6 +38,7 @@ How the aish web UI works, for answering the user's questions about it. Answer f
 
 ## Answers and exports
 - Every finished answer has a row of chips: copy, export that answer to PDF, and read-aloud where available.
+- When a task the user sent went the long way round — very many tool calls, the same call repeated, steps refused, two or more comments on its cards, or stopped for looping — its answer also offers **Save this as a lesson?**. One tap sends `/learn`; nothing is saved without it, and every file `/learn` writes is approved first. It is never offered twice in a row in one chat, nor on a chat aish started itself.
 - Both PDF exports render markdown locally and download the file. The whole-chat export holds only final answers, not thinking or steps, and is named after the chat; a single-answer PDF is titled after the ANSWER (aish writes that title when asked).
 - PDFs embed pictures: local images inside the chat's trusted folders, web images, Google Maps snapshots (needs GOOGLE_MAPS_API_KEY) and YouTube thumbnails; anything unavailable becomes a captioned link card.
 - Tool activity (thinking, recalled knowledge, commands and output) is grouped into one collapsible activity trace per turn.

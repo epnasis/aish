@@ -66,6 +66,7 @@ from . import (
     explain,
     export,
     files,
+    learning,
     notify,
     objective,
     recipients,
@@ -3050,7 +3051,10 @@ class WebServer:
             record=False,
         )
         session.busy = True
-        session.runner = asyncio.ensure_future(self._run_task(session, prompt))
+        # He pressed Retry: a task he sent, again (#446).
+        session.runner = asyncio.ensure_future(
+            self._run_task(session, prompt, owner_sent=True)
+        )
         # Superseding the turn may have taken the current objective revision
         # with it (L7), so the strip is re-read now rather than at the next
         # task end. AFTER the rerun owns the chat: nothing may start a turn
@@ -3118,7 +3122,9 @@ class WebServer:
             # so the row lands UNDER the note rather than ahead of it.
             session.bridge.emit({"type": "step", **pressed})
         session.runner = asyncio.ensure_future(
-            self._run_task(session, note, resume=True, carried=carried)
+            # A continuation he pressed Retry for is his; restart recovery's
+            # is aish's own (#446).
+            self._run_task(session, note, resume=True, carried=carried, owner_sent=bool(by))
         )
 
     async def _rate_turn(self, client: Client, message: dict) -> None:
@@ -3394,7 +3400,8 @@ class WebServer:
             session.pending_issue = None
             text += FEEDBACK_SWITCH_NOTE
         session.runner = asyncio.ensure_future(
-            self._run_task(session, text, images, documents)
+            # Typed or tapped by a person, here or queued while busy (#446).
+            self._run_task(session, text, images, documents, owner_sent=True)
         )
 
     async def _notify_done(self, session: "Session", result: str) -> None:
@@ -3435,7 +3442,16 @@ class WebServer:
         documents: list[str] | None = None,
         resume: bool = False,
         carried: CarriedWork | None = None,
+        *,
+        owner_sent: bool = False,
     ) -> None:
+        """`owner_sent`: a person sent this task — typed or tapped it, or pressed
+        Retry. False when aish started it itself (a trigger's prompt, restart
+        recovery). Only an answer to a task a person sent can carry the learning
+        chip (#446, `docs/learning-suggestions.md`)."""
+        # Where this turn's records begin (#446): the learning detector reads
+        # back exactly what the turn wrote, and nothing before it.
+        span_start = learning.log_size(getattr(session.logref.log, "path", None))
         # Bracket the run on disk (#164). Only a killed process leaves the
         # task_start unmatched, which is exactly what makes it the restart
         # signal — every ordinary ending (answer, error, cancel) reaches the
@@ -3493,6 +3509,23 @@ class WebServer:
             result, suffix = apply_quick_reply_net(result)
             if suffix is not None:
                 session.bridge.emit({"type": "token", "text": suffix})
+            # The push quotes the answer, never the suggestion chip on it.
+            pushed = result
+            # A task that went the long way round gets one more chip (#446):
+            # the detector reads this turn's records back and writes its own
+            # record whatever it decides. After the net, so the chip never
+            # stands in for the fallback replies an open question gets.
+            if await asyncio.to_thread(
+                learning.at_answer,
+                getattr(session.logref.log, "path", None),
+                span_start,
+                int(getattr(getattr(session.agent, "inner", session.agent), "_turn", 0) or 0),
+                session.logref.step,
+                owner_sent=owner_sent,
+                learn_task=learning.is_learn_prompt(text),
+            ):
+                result = learning.with_chip(result)
+                session.bridge.emit({"type": "token", "text": "\n\n" + learning.CHIP})
             done: dict[str, Any] = {"type": "done", "result": result}
             # WHICH answer this is (#229) — the id of the assistant record just
             # written, so a Fork tapped on a live answer names the same record a
@@ -3513,8 +3546,8 @@ class WebServer:
             # The titler's source is read here — synchronously, before
             # anything yields — because the moment busy clears the next turn
             # owns `agent.messages` (L2). A stopped turn named nothing.
-            titling = None if result == CANCELLED_RESULT else self._title_request(session)
-            finished = (result, titling)
+            titling = None if pushed == CANCELLED_RESULT else self._title_request(session)
+            finished = (pushed, titling)
         except ModelUnavailable as exc:
             failure = f"{MODEL_UNAVAILABLE_PREFIX}{exc}{_backend_hint(session.agent)}"
             session.bridge.emit({"type": "error", "text": failure})

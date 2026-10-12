@@ -17,6 +17,7 @@
 **#424 (2026-09-27) added `objective` as §3.14** — what the chat is FOR, as a ledger of goals and tasks, one revision per task end, written off the interactive path by the distiller role or the extractive floor. **#432 (2026-09-29) reshaped it** under the owner's three-level decision: one model-written statement of his objective with cites, a trail of earlier statements, and owner edits. The ledger and the floor are retired. It now reaches the model through the per-task reminder and the screen through a pinned strip.
 **#433 (2026-09-29) added `plan` as §3.15** — level two of the owner's model: aish's own checklist for the objective, written only by the acting model through a `plan` tool, with `done` accepted only on evidence that resolves to the chat's own records, and dropped or replanned by the owner through intercepted actions. Renderless; shown on the objective strip.
 **#423 (2026-09-30, tracker charter v2) widened what the tracker reads in §3.14**: besides the new messages, an `earlier` list of owner messages it already read (what the statement rests on, and his newest), which a cite may now name. The `role` record gains `input.earlier` and `input.earlier_omitted`; the `objective` record's shape is unchanged.
+**#446 (2026-10-12) added `learning` as §3.19** — the learning-suggestion detector's evaluation at every delivered answer: what the task's own records counted, the thresholds in force, what tripped, and whether the "Save this as a lesson?" chip was shown or why not. Renderless; written by the surface through `logref.step`; cold replay reads its `chip` to put the chip back on the turn's `done`.
 **The outcome row (2026-10-05) added `outcome` as §3.18** — the result of a decision made beside the acting model (the rules a turn bound, the answer's checks, a rule compiled from his words, the objective tracker's revision), rendered.
 **The harness row (2026-10-05) added `harness` as §3.17** — aish's own notes to the model drawn as trace rows from their message records, with no logged step of their own; slice 2 added `call` and `notes` to tool-role `message` records, and closed two more green refusals in §6.13 (the speak-first gate's, and a denied `create_rule`/`create_tool` write).
 **#352 slice 1 (2026-09-03) stamped `model_call` on the rendered `tool_start` and `tool` steps** — the second amendment to §2's fork 1(b), beside the `brief` one (`docs/diagnostics.md`). Additive; omitted rather than zeroed where no recorded model call issued the call (claude-max), matching the renderless `call` record it mirrors. The browser is built from rendered steps alone, so without it the trace card could fold its timeline into rounds only by counting rows. `thinking` is still untouched.
@@ -953,6 +954,35 @@ Paired by case: A→D, 35 cases stopped crediting the user and 10 started; A→B
 | chat titler (`server._model_session_title`) | the chat's title in the sidebar only; the call itself leaves no record |
 | export titler (`server._model_title`) | the PDF's title and filename only; no record |
 | curation judge and its duplicate search (`aish-curate`, weekly, outside any chat) | `curation-actions.jsonl` and its notification; no chat row |
+
+### 3.19 · `learning` — whether a task went the long way round, and the chip it earned (#446)
+
+**BUILT 2026-10-12.** Rationale, thresholds and their measurement: `docs/learning-suggestions.md`. At every delivered answer the surface (`server._run_task`, the CLI REPL and one-shot) reads back the records the task appended to the log since it started and folds them with `learning.shape_of` — the same function the replay check `learning_suggested` runs over a recorded log.
+
+**Who writes it.** The surface, through `logref.step` (the log's one lock, §8.4), inside the turn's `task_start`/`task_end` brackets on the web, after the answer and before `task_end`. One record per delivered answer, tripped or not (§0 corollary 2; it is also the consultation counter `docs/vocabularies.md` asks for). None for a turn that failed, a `!` command, `AISH_LEARNING=0`, or a session with no log. **Renderless**, in `RENDERLESS_STEPS`, and never handed to `on_step`. Not activity.
+
+```json
+{"kind": "learning", "turn": 12, "records": 214,
+ "counts": {"calls": 41, "repeats": 10, "refusals": 1, "corrections": 2},
+ "stopped": null,
+ "at": {"calls": 25, "repeats": 5, "refusals": 2, "corrections": 2},
+ "tripped": ["calls", "repeats", "corrections"],
+ "chip": true}
+```
+
+| field | why |
+|---|---|
+| `turn` | The agent's turn counter at the answer (§2), stamped by the surface. |
+| `records` | How many records the fold read. Zero counts with `records > 0` is a quiet task; with `records: 0` nothing was read. |
+| `counts` | `calls`: `call` records. `repeats`: calls whose `(tool, arguments)` equal an earlier call's, by `plan.call_key` (§3.16's K, from the recorded — capped — arguments). `refusals`: `gate` records with `at: "gate"`, `verdict: "refused"` and a non-empty `tool` (the stop gate's arming row names none). `corrections`: `tool` steps carrying `comment` (§3.4). |
+| `stopped` | The `source` of a note `_finish_stopped` wrote (`loop_stop`, `stall_stop`, `step_limit`, §3.17), or `null`. |
+| `at` | The thresholds in force when this was decided (corollary 1): a reader never needs the version of `learning.py` that wrote it. |
+| `tripped` | The signals at or over their threshold, in the order `stopped`, `calls`, `repeats`, `refusals`, `corrections`. Empty when none. |
+| `chip` | Whether the answer carried the chip. Cold replay reads THIS to re-add it to `done` (`learning.with_chip`), so hot and cold agree. |
+| `withheld` | Present only when `tripped` is non-empty and `chip` is false: `not_owner_sent` (a trigger or restart recovery started the task) \| `learn_task` (the task was `/learn`) \| `one_shot` (CLI argv run) \| `cooldown` (the chat's previous evaluated task showed it). Checked in that order; the first that holds is recorded. |
+| `unevaluated` | Instead of all the above when the evaluation raised: the exception's type name, `chip: false`. |
+
+**What it does NOT establish:** that the task actually went badly — it records what was counted and what was shown; or that a lesson was saved — that is the `/learn` turn's own records, if he tapped it.
 
 ---
 
