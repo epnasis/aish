@@ -35,7 +35,7 @@ REPO = Path(__file__).resolve().parent.parent
 HELP_SKILLS_DIR = REPO / "docs" / "shipped-skills"
 
 # The approved cap (h3a draft, "Deliberate decisions" 3). The render measured
-# after the H3b wording compression (2026-10-12, macOS): web 4,071 / CLI 4,114
+# after the H3b wording compression (2026-10-12, macOS): web 4,090 / CLI 4,133
 # without the identity line, from 4,410 / 4,453.
 MAX_CORE_CHARS = 8_000
 
