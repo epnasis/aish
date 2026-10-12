@@ -115,6 +115,15 @@ class EntryStats:
     rails: int = 0  # injections that entered on a name/keyword rail
     evidence: list[tuple[str, str, float | None]] = field(default_factory=list)
     # (ts, prompt head, sim) — newest kept, EVIDENCE_PER_ENTRY per entry
+    # The owner's 👍/👎 (#207) on answers given with this entry in context —
+    # injected or read in that turn. (ts, "up"|"down", comment head).
+    rated: list[tuple[str, str, str]] = field(default_factory=list)
+
+    def rating_counts(self) -> dict[str, int]:
+        return {
+            "up": sum(1 for _, r, _ in self.rated if r == "up"),
+            "down": sum(1 for _, r, _ in self.rated if r == "down"),
+        }
 
     @property
     def median_sim(self) -> float | None:
@@ -173,6 +182,9 @@ def _windows(path: Path):
                 yield current
             current = {
                 "ts": str(rec.get("ts", "")),
+                # The id a rating names (#202, #207): minted on every user
+                # record, so a rated turn is a lookup, not a position.
+                "turn": str(rec.get("turn") or ""),
                 "prompt": str(rec.get("content", ""))[:500],
                 "injected": pending or [],
                 "reads": [],
@@ -182,10 +194,16 @@ def _windows(path: Path):
         yield current
 
 
-def scan_ledger(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None) -> Ledger:
+def scan_ledger(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None,
+                ratings: Mapping[str, dict] | None = None) -> Ledger:
     """Aggregate every task window in the recent logs into per-entry stats.
     Session files are date-named (session-YYYYMMDD-…), so the age cut is a
-    filename comparison — no file is opened outside the window."""
+    filename comparison — no file is opened outside the window.
+
+    `ratings` is `scan_ratings`' output: a rated turn's verdict is attached to
+    every entry injected or read in that turn. It is evidence about the whole
+    ANSWER, not about one entry, so it feeds the judge's prompt and nothing
+    here selects or scores on it."""
     now = now or datetime.now()
     floor = f"session-{(now - timedelta(days=days)):%Y%m%d}"
     ledger = Ledger()
@@ -231,6 +249,15 @@ def scan_ledger(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None)
                         row.reads += 1
                     else:
                         row.miss_reads += 1
+                rating = (ratings or {}).get(window["turn"]) if window["turn"] else None
+                if rating is not None and rating.get("session") == path.name:
+                    comment = " ".join(str(rating.get("comment") or "").split())
+                    for name in sorted(injected_names | {r for r in window["reads"] if r}):
+                        ledger.stat(name).rated.append((
+                            str(rating.get("ts") or window["ts"]),
+                            str(rating.get("rating", "")),
+                            comment[:EVIDENCE_PROMPT_CHARS],
+                        ))
         except OSError:
             continue
     return ledger
@@ -717,6 +744,19 @@ def judge_prompt(entry, stat: EntryStats | None, category: str) -> str:
             f"surfaced it only {stat.injections} times — its description/"
             "keywords fail to match the tasks that need it.",
         ]
+    if stat is not None and stat.rated:
+        # Absent entirely when nothing was rated, so a rating-less corpus
+        # gets the prompt it always got.
+        counts = stat.rating_counts()
+        lines += [
+            "OWNER RATINGS (last two weeks): answers given with this entry in "
+            f"context were rated thumbs-up {counts['up']} and thumbs-down "
+            f"{counts['down']} times. A rating judges the WHOLE answer, not this "
+            "entry — weak evidence on its own. Ratings:",
+        ]
+        for ts, verdict, comment in stat.rated[-EVIDENCE_PER_ENTRY:]:
+            said = f': "{comment}"' if comment else " (no reason given)"
+            lines.append(f"- {ts[:16]} {verdict}{said}")
     lines += [
         "",
         "DECIDE exactly one action:",
@@ -1022,7 +1062,10 @@ def run_curate(
     if model is None:
         model = env.get("AISH_CURATE_MODEL", "").strip() or DEFAULT_MODEL
 
-    ledger = scan_ledger(state_dir, now=now)
+    # The owner's per-answer ratings (#207) join the ledger as evidence for
+    # the entries in each rated turn; before this they were recorded and read
+    # by nothing (#444).
+    ledger = scan_ledger(state_dir, now=now, ratings=scan_ratings(state_dir, now=now))
     entries = {
         e.name: e
         for e in skills.load_entries(str(Path.home()), None)
@@ -1078,7 +1121,12 @@ def run_curate(
             print(f"rule {rule_name}: {proposal}")
         print(f"suspects ({len(suspects)}):")
         for s, category in suspects:
-            print(f"  {s.name} [{category}] injections={s.injections} misses={s.miss_reads}")
+            rated = ""
+            if s.rated:
+                tally = s.rating_counts()
+                rated = f" rated=+{tally['up']}/-{tally['down']}"
+            print(f"  {s.name} [{category}] injections={s.injections} "
+                  f"misses={s.miss_reads}{rated}")
         print(f"duplicate candidates ({len(pairs)}):")
         for a, b, sim in pairs:
             print(f"  {a.name} <-> {b.name} ({sim:.2f})")
@@ -1148,18 +1196,23 @@ def run_curate(
         # The repair WROTE fewer keywords than the judge gave (#444): the
         # record says which, and whether the old line was kept because none
         # survived, so the entry's history explains its keyword line.
-        dropped_field: dict[str, object] = {}
+        extra_fields: dict[str, object] = {}
         if keywords_dropped:
-            dropped_field = {"keywords_dropped": keywords_dropped,
+            extra_fields = {"keywords_dropped": keywords_dropped,
                              "keywords_kept_existing": keywords_kept_existing}
         # The judge's pin pushed the standing rules past the index's cap
         # (#442): which rules the index now cuts is part of what it did.
         if pinned_cut:
-            dropped_field["pinned_not_rendered"] = pinned_cut
+            extra_fields["pinned_not_rendered"] = pinned_cut
+        # The verdict was reached with the owner's ratings in the judge's
+        # prompt. That they were SHOWN is recorded; whether they changed the
+        # verdict one model call cannot say.
+        if stat.rated:
+            extra_fields["ratings_shown"] = stat.rating_counts()
         log_action(
             state_dir,
             {"ts": now.isoformat(), "name": entry.name, "category": category,
-             "model": model, **record, **dropped_field},
+             "model": model, **record, **extra_fields},
         )
         log(f"{entry.name}: {record['action']} — {record['reason'][:80]}")
         if pinned_cut:
