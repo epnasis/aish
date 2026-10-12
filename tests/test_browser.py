@@ -1357,10 +1357,10 @@ class TestNativeDialogsAreDeadEnds:
         assert "add_init_script(_NO_NATIVE_CREDENTIAL_UI)" not in source
         assert source.index("_no_native_passkey_ui") < source.index("page.goto")
 
-    def test_suppression_is_off_while_the_booksy_experiment_runs(self):
-        """A suppressed tab answers "no passkey support" while the window's
-        other tabs answer yes — measured; see VIEW_SUPPRESS_PASSKEYS."""
-        assert browser.VIEW_SUPPRESS_PASSKEYS is False
+    def test_suppression_is_on(self):
+        """Off was an experiment; booksy.com refused the sign-in all the same,
+        and off is the Google passkey dead end."""
+        assert browser.VIEW_SUPPRESS_PASSKEYS is True
 
     def test_a_native_dialog_is_reported_rather_than_silently_dismissed(self):
         """Playwright dismisses dialogs by DEFAULT, silently — so a login that
@@ -5497,51 +5497,6 @@ class TestALiveChromesLockIsNeverCleared:
         os.symlink(f"mm-{dead.pid}", tmp_path / "SingletonLock")
         assert browser._clear_stale_lock(error) is True
         assert not os.path.lexists(tmp_path / "SingletonLock")
-
-
-class TestNoScriptRunsInsideAChallengeFrame:
-    """EXPERIMENT: aish evaluated its focus probe inside hCaptcha's iframe after
-    every capture; the owner's hand-driven tab in the same Chrome was never
-    challenged. The challenge frame is now left alone."""
-
-    def test_challenge_frames_are_recognised_by_their_host(self):
-        assert browser.is_challenge_frame("https://newassets.hcaptcha.com/captcha/v1/x/static/hcaptcha.html")
-        assert browser.is_challenge_frame("https://www.recaptcha.net/recaptcha/api2/anchor")
-        assert not browser.is_challenge_frame("https://pl.booksy.com/login")
-        assert not browser.is_challenge_frame("about:blank")
-
-    def test_the_focus_probe_skips_them_and_still_reads_the_sites_own_frame(self):
-        import asyncio
-
-        asked = []
-
-        class Frame:
-            def __init__(self, url, answer):
-                self.url, self.answer = url, answer
-
-            async def evaluate(self, js):
-                asked.append(self.url)
-                return self.answer
-
-            async def frame_element(self):
-                class E:
-                    async def bounding_box(self):
-                        return {"x": 0, "y": 0}
-                return E()
-
-        field = {"tag": "input", "editable": True, "rect": {"x": 1, "y": 2, "w": 3, "h": 4}}
-        main = Frame("https://booksy.com/", None)
-        captcha = Frame("https://newassets.hcaptcha.com/c/x", field)
-        login = Frame("https://pl.booksy.com/login", field)
-
-        class Page:
-            frames = [main, captcha, login]
-            main_frame = main
-
-        info = asyncio.new_event_loop().run_until_complete(browser._focus_info(Page(), None))
-        assert "https://newassets.hcaptcha.com/c/x" not in asked
-        assert info is not None and asked[-1] == "https://pl.booksy.com/login"
-
 
 class TestTheViewsProbesRunWhereThePageCannotSeeThem:
     """booksy.com challenged every sign-in made through the view and none made
