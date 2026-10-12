@@ -38,9 +38,16 @@ thresholds. Live, the surface captures the log's size before the task starts
 brackets (`tasks_of`) and runs the same fold. *The bug this prevents:* a live detector fed
 by in-memory counters and a replay reader fed by the log are two definitions of "the long
 way round", and they drift — the replay would then grade the live detector against a
-different question. Reading the task back costs little: over the owner's 1,605 bracketed
-tasks the span was 72 KB at the median and 2.4 MB at the worst, and the worst parsed in
-9 ms (2026-10-12).
+different question. Reading the task back costs little: over the 1,605 tasks whose
+`task_start` and `task_end` a byte scan could pair (of the 1,692 below), the span was
+72 KB at the median and 2.4 MB at the worst, and the worst parsed in 9 ms (2026-10-12).
+
+**This runs on the interactive path, which the issue did not ask for.** The issue placed
+the detector in the task-end slot the objective tracker uses, after the answer. The chip
+must ride on `done`, so the evaluation runs before it, on a worker thread, and the answer's
+closing event waits for it. Two reads are paid there: the span (above), and — only when
+the task trips — the cooldown's read of the log from its start, which on the owner's
+largest log (11 MB) took 65 ms (2026-10-12).
 
 **The signals — each one a record aish writes itself, never text matched by words:**
 
@@ -119,8 +126,14 @@ this and is not fixed here.
 **The chip goes only on an answer to a task a person sent.** On the web that is a task
 from a live socket (`_launch`, typed, tapped or queued), a Retry he pressed, or a
 continuation that Retry chose (`owner_sent=True`). A trigger's prompt and restart
-recovery are aish's own (`owner_sent=False`). In the terminal every task is typed. The
-record is written either way, with `withheld: "not_owner_sent"`.
+recovery are aish's own runs (`owner_sent=False`). In the terminal every task is typed.
+The record is written either way, with `withheld: "not_owner_sent"`.
+
+**`not_owner_sent` names who started THIS RUN, not who asked the question.** Restart
+recovery re-runs a task he may well have typed; its run records `not_owner_sent`, and the
+chip is not shown on it. And a resumed run's span is only the continuation's own records,
+so a question that went the long way across a restart can trip in neither half. Both are
+accepted: the accumulation bug below is worth more, and a restart mid-task is rare.
 
 *The bug this prevents:* an automated chat that loops the same way every night — a
 schedule, an e-mail trigger — would carry the same suggestion every morning, one per run,
@@ -133,13 +146,17 @@ exactly the long tasks he left running — the ones most likely to have gone the
 A triggered chat he later types into is his conversation from then on: his own tasks there
 are owner-sent and can carry the chip.
 
-**Withheld, in this order** (`learning.WITHHELD`, recorded on the record):
+**Withheld, in this order** (the order `learning.evaluate` tests them in, pinned by `TestTheDecision`; recorded on
+the record):
 
 1. `not_owner_sent` — above.
 2. `learn_task` — the task was `/learn` itself, told apart by aish's own template
    (`is_learn_prompt`: the text starts with `LEARN_PROMPT` or `LEARN_LESSONS_PROMPT` up to
    its first placeholder). A distillation reads recall, skills and memory and is long by
-   nature; a suggestion on the lesson would loop.
+   nature; a suggestion on the lesson would loop. A run that CONTINUES a `/learn` (a
+   Retry that chose to continue it) is judged by the question it continues
+   (`CarriedWork.prompt`), not by aish's resume note — read off the note, it was offered a
+   lesson on the lesson (found in review).
 3. `one_shot` — `aish "task"` exits after the answer; no prompt follows to take a chip.
 4. `cooldown` — the chat's most recent evaluated task already showed it. **Never twice in
    a row**: in the owner's logs 5 tripped tasks immediately followed a tripped task in the
@@ -166,6 +183,10 @@ activity, so it never marks a read chat unread.
 evaluate is recorded as `{"kind": "learning", "turn": …, "chip": false, "unevaluated":
 "<exception type>"}`, so the absence of a record never has to stand for it.
 
+**A turn he stopped is evaluated like any other.** Stop returns the cancelled-answer
+text through the ordinary path, so a task that was looping when he stopped it can carry
+the chip — arguably the best moment for it.
+
 **No record**, by design: a turn that FAILED (no answer to carry anything; its `task_end`
 says why), a `!` command (no model task), `AISH_LEARNING=0`, and a session with no log
 file. **The record is the consultation counter** the vocabulary doctrine asks for
@@ -176,13 +197,18 @@ how often each signal tripped is a scan over the logs.
 
 `replay_checks.learning_suggested` (in `LIBRARY`, so any scenario can `use` it): every
 answered task whose recomputed shape trips has a `learning` record that tripped the same
-signals, and no record trips on a task that does not. On a log written before the
+signals, and no record trips on a task that does not. **A record is graded against the
+thresholds it carries** (`at`), so moving a constant never rewrites the verdict on an old
+log; only a task with no record is graded against today's constants. A record that says
+`unevaluated` is the detector's "I could not read it", not a disagreement: such tasks are
+set aside and counted in the evidence, and a log holding nothing else says it could not
+tell (R5). On a log written before the
 detector, a long-way task FAILS for want of a record — that is how a baseline reproduces
 (R4). Against the #436 source log (`session-20260929-214924-097047`, read-only,
 2026-10-12):
 
 ```
-FAIL learning_suggested: 3 of 3 long-way tasks unsuggested … first: task 7 ['corrections']
+FAIL learning_suggested: 3 of 3 long-way tasks without a matching record … first: task 7 ['corrections']
      {'calls': 19, 'repeats': 1, 'refusals': 1, 'corrections': 3}
 ```
 
@@ -217,11 +243,18 @@ replay check on generated logs, with and without the records) and `TestTheRecord
   calls differing only past the cap count as a repeat there and not in the agent's own
   repeat nudge.
 - **claude-max**: its SDK owns the loop, so `stopped` never trips there; the other counts
-  are whatever its records hold.
+  are whatever its records hold. Its `turn` stamp does not move: the counter read is the
+  inner agent's, which only the native loop increments, so every record in a claude-max
+  chat carries the same value (as the objective boundary's does). Replay re-derives the
+  chip by position, not by `turn`.
+- **The replay check grades `tripped`, never `chip` or `withheld`**: a wrong `owner_sent`
+  classification is visible only to the unit tests.
+- **A CLI-written chat opened in the web UI** shows the chip as a button on the replayed
+  answer, where the terminal showed it as a menu entry.
 
 ## Retiring the two old homes
 
 Single home (#444's migration principle): once this ships, the pinned memory
 `proactively-propose-capturing-learnings` and the disabled rule
 `propose-learning-on-correction` are retired. Both live in the owner's config tree, which
-nothing in this repo edits; the edits are listed on the issue for him to apply.
+nothing in this repo edits; the edits were handed to him to apply.

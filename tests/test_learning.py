@@ -97,6 +97,12 @@ class TestTheShape:
     def test_other_notes_are_not_stops(self):
         assert learning.shape_of([note("repeat_nudge"), note("answer_check")]).tripped() == []
 
+    def test_tripped_can_grade_against_other_thresholds(self):
+        shape = learning.shape_of([call("x", n=1), call("x", n=2)])
+        assert shape.tripped() == []
+        assert shape.tripped({"calls": 2}) == ["calls"]
+        assert shape.tripped({}) == []  # a signal with no threshold never trips
+
     def test_superseded_records_are_not_read(self):
         dead = {**refusal(), "superseded": {"by": "owner"}}
         assert learning.shape_of([dead, dead]).refusals == 0
@@ -372,6 +378,28 @@ class TestOnTheWeb:
         (record,) = learning_records(path)
         assert record["withheld"] == learning.LEARN_TASK and record["chip"] is False
 
+    def test_a_continued_learn_is_still_a_learn_task(self, app_env, docs):
+        """Retry CONTINUES an attempt that died (#387): the run's own text is
+        aish's resume note, so whether it is /learn is read off the question it
+        continues. Found in review: read off the note, a continued distillation
+        tripped `calls` and was offered a lesson on the lesson."""
+        from tests.test_server import collect_until, flaky_client, recv_any
+
+        batch = [model_says(tool_calls=[tool_call("read_docs", command=f"c{i}")
+                                        for i in range(learning.LONG_TASK_CALLS)])]
+        client, chat = flaky_client(app_env, batch)
+        with client, connected(client) as (ws, hello, _):
+            path = app_env["state_dir"] / hello["session"]
+            ws.send_json({"type": "task", "text": "/learn"})
+            recv_any(ws, "error")
+            chat.down = False
+            chat.responses.extend(long_turn())
+            ws.send_json({"type": "retry", "text": "/learn"})
+            collect_until(ws, "done")
+        record = learning_records(path)[-1]
+        assert record["tripped"] == ["calls"]
+        assert record["withheld"] == learning.LEARN_TASK and record["chip"] is False
+
     def test_not_twice_in_a_row(self, app_env, docs):
         client, _ = make_client(app_env, [*long_turn(), *long_turn()])
         with client, connected(client) as (ws, hello, _):
@@ -530,6 +558,32 @@ class TestTheCheck:
         out.write_text("\n".join(forged) + "\n")
         verdict = replay_checks.learning_suggested(replay_checks.load_run(out))
         assert verdict.passed is False and "1 records tripped" in verdict.evidence
+
+    def test_a_record_is_graded_against_its_own_thresholds(self, app_env, tmp_path):
+        """Moving a constant must not rewrite the verdict on an old log: a
+        record that tripped `calls` at a threshold of 1 is right by its own `at`."""
+        path = recorded(app_env, [model_says("Hello.")], ["hi"])
+        lines = path.read_text().splitlines()
+        older = [line.replace('"tripped": []', '"tripped": ["calls"]')
+                 .replace('"calls": 25', '"calls": 0') for line in lines]
+        out = tmp_path / "older.jsonl"
+        out.write_text("\n".join(older) + "\n")
+        verdict = replay_checks.learning_suggested(replay_checks.load_run(out))
+        assert verdict.passed is True, verdict.evidence
+
+    def test_an_unevaluated_record_is_set_aside_not_failed(self, app_env, docs, tmp_path):
+        path = recorded(app_env, long_turn(), ["find it"])
+        kept = []
+        for line in path.read_text().splitlines():
+            record = json.loads(line)
+            if record.get("kind") == "trace" and record["step"].get("kind") == "learning":
+                record["step"] = {"kind": "learning", "turn": record["step"]["turn"],
+                                  "chip": False, "unevaluated": "OSError"}
+            kept.append(json.dumps(record))
+        out = tmp_path / "unread.jsonl"
+        out.write_text("\n".join(kept) + "\n")
+        verdict = replay_checks.learning_suggested(replay_checks.load_run(out))
+        assert verdict.passed is None and "unevaluated" in verdict.evidence
 
     def test_a_log_with_no_bracketed_task_cannot_tell(self, tmp_path):
         log = SessionLog(tmp_path / "cli.jsonl")

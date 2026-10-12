@@ -3522,7 +3522,11 @@ class WebServer:
                 int(getattr(getattr(session.agent, "inner", session.agent), "_turn", 0) or 0),
                 session.logref.step,
                 owner_sent=owner_sent,
-                learn_task=learning.is_learn_prompt(text),
+                # A continuation's own text is aish's note; whether it is a
+                # /learn is a fact about the question it continues.
+                learn_task=learning.is_learn_prompt(
+                    carried.prompt if carried is not None and carried.prompt else text
+                ),
             ):
                 result = learning.with_chip(result)
                 session.bridge.emit({"type": "token", "text": "\n\n" + learning.CHIP})

@@ -376,33 +376,48 @@ def learning_suggested(run: RunRecord) -> Verdict:
     from . import learning
 
     name = "learning_suggested"
-    tasks = [t for t in learning.tasks_of(run.path) if t.answered]
-    if not tasks:
+    answered = [t for t in learning.tasks_of(run.path) if t.answered]
+    if not answered:
         return Verdict(name, None, "no answered task between task_start/task_end in the log")
-    long_way = [t for t in tasks if t.shape.tripped()]
+    # A record that says it could not evaluate is the detector saying "I do not
+    # know", not a disagreement: those tasks are set aside and counted.
+    unread = [t for t in answered if t.record and "unevaluated" in t.record]
+    tasks = [t for t in answered if t not in unread]
+
+    def expected(task: learning.RecordedTask) -> list[str]:
+        # A record is graded against the thresholds IT carried (contract §3.19
+        # `at`), so moving a constant never rewrites the verdict on an old log.
+        # Only a task with no record is graded against today's.
+        at = task.record.get("at") if task.record else None
+        return task.shape.tripped(at if isinstance(at, dict) else None)
+
+    long_way = [t for t in tasks if expected(t)]
     missing = [t for t in long_way
-               if not (t.record and t.record.get("tripped") == t.shape.tripped())]
-    spurious = [t for t in tasks if not t.shape.tripped() and t.record
-                and t.record.get("tripped")]
+               if not (t.record and t.record.get("tripped") == expected(t))]
+    spurious = [t for t in tasks if not expected(t) and t.record and t.record.get("tripped")]
+    if not tasks:
+        return Verdict(name, None, f"all {len(unread)} answered tasks recorded `unevaluated`")
     if missing or spurious:
         first = (missing or spurious)[0]
         what = ("no tripped learning record" if first.record is None
                 else f"record says {first.record.get('tripped')}")
         return Verdict(name, False, _short(
-            f"{len(missing)} of {len(long_way)} long-way tasks unsuggested, {len(spurious)} "
-            f"records tripped on an ordinary task; first: task {first.index} "
-            f"{first.shape.tripped()} {first.shape.counts()} stopped={first.shape.stopped}: "
+            f"{len(missing)} of {len(long_way)} long-way tasks without a matching record, "
+            f"{len(spurious)} records tripped on an ordinary task; first: task {first.index} "
+            f"{expected(first)} {first.shape.counts()} stopped={first.shape.stopped}: "
             f"{what}"))
+    unread_note = f"; {len(unread)} recorded `unevaluated`, set aside" if unread else ""
     if not long_way:
         busiest = max(tasks, key=lambda t: t.shape.calls)
         return Verdict(name, True, f"{len(tasks)} answered tasks, none went the long way round "
-                                   f"(most calls: {busiest.shape.calls}, task {busiest.index})")
+                                   f"(most calls: {busiest.shape.calls}, task {busiest.index})"
+                                   f"{unread_note}")
     chips = sum(1 for t in long_way if t.record and t.record.get("chip"))
     first = long_way[0]
     return Verdict(name, True, _short(
         f"{len(long_way)} of {len(tasks)} answered tasks went the long way round, each "
         f"recorded tripped ({chips} showed the chip); first: task {first.index} "
-        f"{first.shape.tripped()}"))
+        f"{expected(first)}{unread_note}"))
 
 
 LIBRARY: dict[str, CheckFn] = {

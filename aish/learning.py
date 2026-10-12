@@ -48,8 +48,8 @@ LEARNING_STEP = "learning"
 # Through `tasks_of` itself: 55 of 1,575 answered tasks (3.5%) in 41 of 470
 # chats, 5 of them straight after another tripped task. The #436 source task
 # ("yes", 41 calls, 10 exact repeats, 2 card comments) trips three of them.
-#: A task with at least this many tool calls is long: above the owner's p99 (31)
-#: band's lower edge, about one task in fifty.
+#: A task with at least this many tool calls is long: between the owner's p95 (18)
+#: and p99 (31), about one task in fifty.
 LONG_TASK_CALLS = 25
 #: At least this many calls repeating an earlier call's (tool, arguments) exactly —
 #: the repeat nudge's K (`plan.Repeats`, contract §3.16), counted from the records.
@@ -74,8 +74,10 @@ CHIP_LABEL = "Save this as a lesson?"
 CHIP_PAYLOAD = "/learn"
 CHIP = f"[{CHIP_LABEL}](aish-reply://{CHIP_PAYLOAD})"
 
-# ── Why a tripped task got no chip — a closed vocabulary, checked in this order
-#: aish started the task itself: a trigger's prompt, or restart recovery.
+# ── Why a tripped task got no chip — a closed vocabulary, checked in the order
+# `evaluate` tests them (pinned by tests/test_learning.py::TestTheDecision).
+#: aish started the task itself: a trigger's prompt, or restart recovery — which
+#: restarts a task he may have typed, so this names who STARTED this run.
 NOT_OWNER_SENT = "not_owner_sent"
 #: The task WAS `/learn`: a distillation pass is long by nature, and offering a
 #: lesson on the lesson would loop.
@@ -84,7 +86,6 @@ LEARN_TASK = "learn_task"
 ONE_SHOT = "one_shot"
 #: The chat's previous evaluated task already showed the chip; never twice in a row.
 COOLDOWN = "cooldown"
-WITHHELD = (NOT_OWNER_SENT, LEARN_TASK, ONE_SHOT, COOLDOWN)
 
 #: `AISH_LEARNING=0` turns the whole mechanism off (no record, no chip).
 DISABLE_ENV = "AISH_LEARNING"
@@ -143,11 +144,15 @@ class TurnShape:
         elif step_kind == "tool" and step.get("comment"):
             self.corrections += 1
 
-    def tripped(self) -> list[str]:
-        """The signals over their threshold, in `SIGNALS` order."""
-        out = ["stopped"] if self.stopped else []
-        out += [name for name, at in THRESHOLDS.items() if getattr(self, name) >= at]
-        return out
+    def tripped(self, at: dict | None = None) -> list[str]:
+        """The signals at or over their threshold, in `SIGNALS` order. `at` grades
+        against other thresholds — a record's own, for a reader of an older log."""
+        limits = THRESHOLDS if at is None else at
+        return [
+            name for name in SIGNALS
+            if (bool(self.stopped) if name == "stopped"
+                else isinstance(limits.get(name), int) and getattr(self, name) >= limits[name])
+        ]
 
     def counts(self) -> dict[str, int]:
         return {name: getattr(self, name) for name in THRESHOLDS}
