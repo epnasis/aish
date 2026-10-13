@@ -5562,3 +5562,60 @@ class TestTheViewsProbesRunWhereThePageCannotSeeThem:
             source = inspect.getsource(fn)
             assert "_activity(page)" not in source
             assert "_view_eval(owner, page, _WATCH_JS)" in source
+
+
+class TestTheBareLaunchExperiment:
+    """booksy.com refuses the token from a challenge the owner solves in aish's
+    Chrome and accepts it in a plain Chrome on the same profile. The hook
+    launches without Playwright's optional, feature-disabling switches."""
+
+    def _launch(self, monkeypatch, tmp_path, spec):
+        import asyncio
+        import json
+
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        if spec is not None:
+            browser.launch_experiment_path().parent.mkdir(parents=True, exist_ok=True)
+            browser.launch_experiment_path().write_text(
+                spec if isinstance(spec, str) else json.dumps(spec)
+            )
+        seen = {}
+
+        class Chromium:
+            async def launch_persistent_context(self, profile, **kw):
+                seen.update(kw, profile=profile)
+                return object()
+
+        pw = type("PW", (), {"chromium": Chromium()})()
+        asyncio.new_event_loop().run_until_complete(
+            browser._launch(pw, args=["--window-position=-4000,-4000"])
+        )
+        return seen
+
+    def test_absent_means_the_launch_is_unchanged(self, monkeypatch, tmp_path):
+        seen = self._launch(monkeypatch, tmp_path, None)
+        assert seen["ignore_default_args"] is not True
+        assert "--remote-debugging-pipe" not in seen["args"]
+
+    def test_bare_keeps_the_profile_its_cookies_and_named_switches(self, monkeypatch, tmp_path):
+        seen = self._launch(
+            monkeypatch, tmp_path,
+            {"bare": True, "keep": ["--disable-features=ThirdPartyStoragePartitioning", "nope"]},
+        )
+        args = seen["args"]
+        assert seen["ignore_default_args"] is True
+        assert f"--user-data-dir={browser.profile_dir()}" in args
+        assert "--remote-debugging-pipe" in args
+        assert "--use-mock-keychain" in args and "--password-store=basic" in args
+        assert "--disable-features=ThirdPartyStoragePartitioning" in args
+        assert "nope" not in args and args[-1] == "about:blank"
+        assert "--window-position=-4000,-4000" in args
+
+    def test_a_broken_file_is_no_experiment(self, monkeypatch, tmp_path):
+        assert self._launch(monkeypatch, tmp_path, "{not json")["ignore_default_args"] is not True
+        assert self._launch(monkeypatch, tmp_path, {"bare": "yes"})["ignore_default_args"] is not True
+
+    def test_browser_status_says_when_it_is_on(self, monkeypatch, tmp_path):
+        self._launch(monkeypatch, tmp_path, {"bare": True})
+        monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
+        assert "launch experiment: ON" in browser.command("")

@@ -889,6 +889,36 @@ def _prefer_pdf_download(profile: Path) -> None:
         pass
 
 
+# EXPERIMENT hook (2026-10-13). booksy.com refuses the token from a challenge
+# the owner solves by hand in aish's Chrome, and accepts the same sign-in in a
+# plain Chrome on the same profile. Playwright adds ~25 optional switches that
+# DISABLE browser features (field trials, background networking, a list of
+# named features including ThirdPartyStoragePartitioning) — a challenge's
+# in-page work could run differently under them. This file, absent by
+# default, launches the owner's profile without them so that can be measured
+# one sign-in at a time: {"bare": true} drops them all; "keep" re-adds named
+# switches, which is how the list is halved. Shown by `/browser` while present.
+_BARE_REQUIRED = ["--use-mock-keychain", "--password-store=basic", "--no-first-run",
+                  "--no-default-browser-check"]
+
+
+def launch_experiment_path() -> Path:
+    return state_dir() / "browser" / "launch-experiment.json"
+
+
+def launch_experiment() -> list[str] | None:
+    """The switches to re-add in a bare launch, or None when no experiment
+    is on. An unreadable file is no experiment — the launch stays normal."""
+    try:
+        spec = json.loads(launch_experiment_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(spec, dict) or spec.get("bare") is not True:
+        return None
+    keep = spec.get("keep") or []
+    return [str(s) for s in keep if isinstance(s, str) and s.startswith("--")]
+
+
 async def _launch(
     playwright: Any,
     *,
@@ -901,10 +931,20 @@ async def _launch(
     profile.mkdir(parents=True, exist_ok=True)
     _prefer_pdf_download(profile)
     launch_args = list(args)
-    omit: list[str] = []
+    omit: list[str] | bool = []
     if stealth():
         launch_args += _STEALTH_ARGS
-        omit += _STEALTH_OMIT
+        omit = list(_STEALTH_OMIT)
+    experiment = launch_experiment() if profile == profile_dir() else None
+    if experiment is not None:
+        # Playwright's optional switches all go; the profile, the control
+        # connection and the cookie encryption the profile was written with
+        # stay, or the owner's sessions would become unreadable.
+        omit = True
+        launch_args = [
+            f"--user-data-dir={profile}", "--remote-debugging-pipe",
+            *_BARE_REQUIRED, *experiment, *launch_args, "about:blank",
+        ]
     return await playwright.chromium.launch_persistent_context(
         str(profile),
         channel="chrome",  # the real Chrome already on this Mac, not a bundled build
@@ -4564,6 +4604,11 @@ def command(arg: str) -> str:
             # actually been asked.
             *([line] if (line := browse_mod.CONSENT_TALLY.line()) else []),
             *_signin_lines(),
+            *(
+                [f"launch experiment: ON — {launch_experiment_path()} "
+                 f"(bare, re-adding {len(kept)} switch(es))"]
+                if (kept := launch_experiment()) is not None else []
+            ),
             "",
             "/browser <url>       open a real window there so you can sign in",
             "/browser forget <host>  forget a site: the record AND any saved sign-in",
