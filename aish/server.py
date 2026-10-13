@@ -1378,6 +1378,26 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     def known_prefixes() -> frozenset:
         return frozenset(load_prefixes(allow_path)) | session_prefixes()
 
+    def origin_now() -> str:
+        # Only a MISSING callable means "user" (the CLI-style wiring with no
+        # origin to report); a falsy value FROM a wired callable is an unknown
+        # origin and fails closed as non-user (L6), never inheriting the
+        # owner's allowlist.
+        if get_origin is None:
+            return "user"
+        return get_origin() or "unknown"
+
+    def consulted_prefixes() -> frozenset:
+        # What the shell gate CONSULTS is origin-scoped (L6, epic #142 hard
+        # requirement 1): an allow.txt entry was approved by the owner with
+        # himself at the keyboard, and that safety argument does not travel to
+        # a session nobody watches. A `user` session consults the persistent
+        # allowlist exactly as it always did; every other origin consults only
+        # the grants the owner made on THIS session's own cards.
+        if origin_now() != "user":
+            return frozenset(session_prefixes())
+        return known_prefixes()
+
     def intent() -> str:
         return (get_intent() if get_intent else "") or ""
 
@@ -1437,7 +1457,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
 
         cwd, roots = get_scope()
         if not ask_all and is_auto_approvable(
-            command, known_prefixes(), cwd=cwd, roots=roots
+            command, consulted_prefixes(), cwd=cwd, roots=roots
         ):
             bridge.emit({"type": "echo", "text": f"✓ auto-approved: {command}"})
             record(command, "auto", asked_by=ASKED_BY_SHELL)
@@ -1445,8 +1465,10 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
 
         # Empty when no prefix could ever silence this command — the frontend
         # then omits the Session/Always buttons rather than offering a rule the
-        # gate will not honour (#265).
-        suggestions = prefix_suggestions(command, known_prefixes())
+        # gate will not honour (#265). Computed against the CONSULTED set: in a
+        # triggered session a prefix sitting unconsulted in allow.txt must not
+        # hide the buttons that could actually silence the card.
+        suggestions = prefix_suggestions(command, consulted_prefixes())
         escapes = escaping_dirs(command, cwd, roots) if cwd and roots else []
         request: dict[str, Any] = {
             "type": "approval_request",
@@ -1492,6 +1514,13 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         if action == "approve_always":
             for prefix in suggestions:
                 save_prefix(allow_path, prefix)
+            if origin_now() != "user":
+                # In a `user` session "Always" takes effect at once because
+                # known_prefixes() re-reads allow.txt per call; here that file
+                # is no longer consulted, so the grant also arms the session
+                # set — otherwise the button saves a rule that visibly does
+                # nothing until the next attended session (#265).
+                session_prefixes().update(suggestions)
             bridge.emit(
                 {"type": "echo", "text": f"✓ always-allowed: {', '.join(suggestions)}"}
             )
@@ -1499,6 +1528,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
                 command,
                 tagged(f"approved+always:{','.join(suggestions)}"),
                 card=answer,
+                asked_by=ASKED_BY_SHELL,
             )
             resolve(request["id"], "approved", comment)
             return granted()
@@ -1585,7 +1615,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         # preview (#157), when the tool provides one, gives the human a legible
         # description of an otherwise-opaque (e.g. id-addressed) action. The one
         # way past the card is `_auto_safe` below, which names its own reason.
-        origin = get_origin() if get_origin else "user"
+        origin = origin_now()
         # A RULE that holds a call for the owner is asking HIM, so no policy
         # may answer for him: the owner's "ask me first" is a card, always.
         auto = None if gate() == ASKED_BY_RULE else _auto_safe(name, args, origin)
