@@ -5608,8 +5608,9 @@ class TestTheBareLaunchExperiment:
         assert "--window-position=-4000,-4000" in args
 
     def test_a_broken_file_is_no_experiment(self, monkeypatch, tmp_path):
-        assert self._launch(monkeypatch, tmp_path, "{not json")["ignore_default_args"] is not True
-        assert self._launch(monkeypatch, tmp_path, {"bare": "yes"})["ignore_default_args"] is not True
+        for spec in ("{not json", {"bare": "yes"}):
+            seen = self._launch(monkeypatch, tmp_path, spec)
+            assert seen["ignore_default_args"] is not True
 
     def test_browser_status_says_when_it_is_on(self, monkeypatch, tmp_path):
         self._launch(monkeypatch, tmp_path, {"bare": True})
