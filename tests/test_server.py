@@ -8310,6 +8310,81 @@ class TestApprovalIntentOnTheCard:
         assert "credit" not in body
 
 
+class TestUnattendedShellPolicy:
+    """The shell gate's allowlist is origin-scoped (epic #142 hard requirement
+    1, L6): a prefix in the persistent allow.txt was approved by the owner at
+    the keyboard, so it is consulted only where he is — origin `user`. Every
+    other origin consults the read-only classifier plus the grants he made on
+    THIS session's own cards, and nothing more."""
+
+    def _approver(self, origin, tmp_path, answer=None, live=None):
+        bridge, log = _FakeBridge(answer), _FakeLog()
+        allow = tmp_path / "allow.txt"
+        if not allow.exists():
+            allow.write_text("git commit\n")
+        prefixes = live if live is not None else set()
+        approvers = server_module.make_web_approvers(
+            bridge, log, allow, tmp_path / "deny.txt",
+            ask_all=False, get_scope=lambda: (str(tmp_path), [str(tmp_path)]),
+            trust_dir=lambda p: "", get_origin=lambda: origin,
+            get_session_prefixes=lambda: prefixes,
+        )
+        return approvers[0], bridge, allow, prefixes  # ask_approval
+
+    @pytest.mark.parametrize("origin", ["email", "schedule", "webhook"])
+    def test_allowlisted_mutating_prefix_holds_unattended(self, origin, tmp_path):
+        # The gap this class exists for: before the fix this auto-ran.
+        ask, bridge, _, _ = self._approver(origin, tmp_path,
+                                           answer={"action": "deny"})
+        ask("git commit -m 'overnight'")
+        assert len(bridge.asked) == 1 and bridge.asked[0]["kind"] == "command"
+
+    def test_a_falsy_origin_fails_closed(self, tmp_path):
+        # A wired callable answering "" is an UNKNOWN origin, not the owner's:
+        # the allowlist stays unconsulted (L6). Only a MISSING callable — the
+        # CLI-style wiring with no origin to report — defaults to `user`.
+        ask, bridge, _, _ = self._approver("", tmp_path,
+                                           answer={"action": "deny"})
+        ask("git commit -m 'x'")
+        assert len(bridge.asked) == 1
+
+    def test_user_origin_still_honours_the_allowlist(self, tmp_path):
+        # L6's other half: a `user` session behaves byte-identically.
+        ask, bridge, _, _ = self._approver("user", tmp_path)
+        assert ask("git commit -m 'mine'") == "git commit -m 'mine'"
+        assert bridge.asked == []
+
+    def test_read_only_classification_survives_unattended(self, tmp_path):
+        # Requirement 1 keeps read-only autonomy; only the allowlist is cut.
+        ask, bridge, _, _ = self._approver("email", tmp_path)
+        assert ask("ls -la") == "ls -la"
+        assert bridge.asked == []
+
+    def test_a_grant_made_on_this_sessions_own_card_is_honoured(self, tmp_path):
+        # "Allow this chat" is the owner's live act on this very session.
+        ask, bridge, _, _ = self._approver("email", tmp_path,
+                                           live={"git commit"})
+        assert ask("git commit -m 'he said so here'").startswith("git commit")
+        assert bridge.asked == []
+
+    def test_the_held_card_still_offers_rules_the_gate_honours(self, tmp_path):
+        # #265: suggestions come from the CONSULTED set, so a prefix sitting
+        # unconsulted in allow.txt does not hide the Session/Always buttons.
+        ask, bridge, _, _ = self._approver("email", tmp_path,
+                                           answer={"action": "deny"})
+        ask("git commit -m 'x'")
+        assert bridge.asked[0]["prefixes"] == ["git commit"]
+
+    def test_always_allow_takes_effect_in_this_session_too(self, tmp_path):
+        ask, bridge, allow, prefixes = self._approver(
+            "email", tmp_path, answer={"action": "approve_always"})
+        assert ask("git push origin main") == "git push origin main"
+        assert "git push" in allow.read_text()   # future attended sessions
+        assert "git push" in prefixes            # and THIS session, at once
+        assert ask("git push origin main") == "git push origin main"
+        assert len(bridge.asked) == 1            # the second call drew no card
+
+
 class TestTriggeredCapabilityPolicy:
     """The capability policy, unit-tested on approve_tool directly: the #160
     draft-and-hold half (origin-scoped) and the #377 half (consequence-scoped,
