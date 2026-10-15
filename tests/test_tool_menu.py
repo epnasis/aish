@@ -108,6 +108,15 @@ class TestToolMenuSelection:
         assert [s["function"]["name"] for s in sent] == ["read_url", "gmail_send", "drive_list"]
         assert json.dumps(sent) == json.dumps(tool_menu.menu_for(FULL, second.names))
 
+    def test_doing_something_later_never_depends_on_how_the_time_is_worded(self):
+        # Replay batch 20261015-222604: this turn ranked nothing time-shaped
+        # onto the menu, and the model wrote the call out as prose instead.
+        task = "Sprawdź po dwudziesty drugiej."
+        selection = tool_menu.select(
+            agent_module.tools.TOOL_SCHEMAS, task, task, scores=by_name({}), top_k=0,
+        )
+        assert selection.category.get("schedule_task") == "core"
+
     def test_each_name_is_recorded_under_the_first_category_that_wants_it(self):
         selection = tool_menu.select(
             FULL, "x", "x", core=("read_url",),
