@@ -941,7 +941,8 @@ same guards as `/trigger` and the same draft-and-hold policy — the commands
 and sites you approved on the card are the only things beyond read-only
 commands that run without a card, and your "Always allow" list is never used
 there. Only you create automations: an automated chat cannot schedule one, and
-aish refuses any other write into that folder. A run that comes due while
+aish refuses its own file and shell writes into that folder (a script or
+plugin you approved could still write there — see `docs/web-server.md`). A run that comes due while
 aish-web is down fires on the next start, late runs say both times, and a run
 that cannot start within 24 hours is given up — recorded, with one push (if
 Pushover is set up) saying what was observed.

@@ -227,6 +227,38 @@ class TestSchedulerRefusals:
         assert "eon-invoices:2026-10-15T22:05:00" in ledger(tmp_path)
 
 
+    def test_a_run_that_never_recovers_still_gets_the_terminal_push(self, tmp_path):
+        # "did not start, will try again" is not the last word: when the
+        # deadline passes the owner is told it will not run.
+        write_task(tmp_path / "automations", model="nope:missing")
+        clock = Clock(AT)
+        failed = TriggerOutcome(OPEN_FAILED, error="model unavailable: no such model")
+        sched, _, pushes = build(tmp_path, clock, failed)
+        tick(sched)
+        clock.now = AT + schedule.STALE_AFTER + timedelta(seconds=1)
+        tick(sched)
+        assert [title for title, _ in pushes] == [
+            "aish automation eon-invoices did not start",
+            "aish automation eon-invoices did not run",
+        ]
+        assert "model unavailable: no such model" in pushes[1][1]
+
+    def test_after_a_restart_the_expiry_names_the_refusal_an_earlier_process_saw(
+        self, tmp_path,
+    ):
+        write_task(tmp_path / "automations")
+        clock = Clock(AT)
+        failed = TriggerOutcome(OPEN_FAILED, error="directory does not exist: /gone")
+        before, _, _ = build(tmp_path, clock, failed)
+        tick(before)
+        clock.now = AT + schedule.STALE_AFTER + timedelta(seconds=1)
+        after, _, _ = build(tmp_path, clock)
+        tick(after)
+        assert records(tmp_path)[-1]["error"] == (
+            "it was last refused with: directory does not exist: /gone"
+        )
+
+
 class TestSchedulerMalfunctions:
     def test_an_expired_task_is_recorded_pushed_once_and_never_fired(self, tmp_path):
         write_task(tmp_path / "automations")

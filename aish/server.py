@@ -435,6 +435,11 @@ MAX_CONCURRENT_TRIGGERED = 3
 TRIGGER_RETRY_AFTER_S = 30      # Retry-After hint on either 429
 
 
+class RunProfileError(Exception):
+    """A scheduled run's profile could not be applied at open (its directory
+    is gone). The run does not start; the scheduler records what was seen."""
+
+
 class RunProfile(NamedTuple):
     """What a scheduled run may do without a card, as the owner approved it
     inside the automation's creation card (epic #142 W2). It enters the run as
@@ -5659,6 +5664,8 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return scheduling.TriggerOutcome(
                 scheduling.OPEN_FAILED, error=f"model unavailable: {exc}"
             )
+        except RunProfileError as exc:
+            return scheduling.TriggerOutcome(scheduling.OPEN_FAILED, error=str(exc))
         # NEVER the default (#178 P1-6): an overnight trigger must not become
         # the landing spot for the next bare connect (nor eviction-immune).
         self.add_session(session, default=False)
@@ -7099,9 +7106,15 @@ def create_app(
                 # /cd, which here nobody did. claude-max's wrapper always
                 # announces, so its inner Agent is moved directly.
                 mover = agent if isinstance(agent, Agent) else agent.inner
-                mover.rebase(profile.cwd, announce=False)
+                moved = mover.rebase(profile.cwd, announce=False)
+                if moved.startswith("ERROR"):
+                    # The prefixes were approved FOR that directory; running
+                    # them anywhere else is a grant he never gave. Raised
+                    # before any record is written, so no log is left behind.
+                    raise RunProfileError(moved.removeprefix("ERROR: "))
             for root in profile.roots:
-                agent.trust_root(root)
+                if agent.trust_root(root).startswith("ERROR"):
+                    raise RunProfileError(f"no such directory: {root}")
             agent.session_prefixes.update(profile.allow)
             agent.restore_site_grants(list(profile.sites))
         logref.model(model_spec(agent))  # record what this session actually runs

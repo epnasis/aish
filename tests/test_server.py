@@ -8985,6 +8985,21 @@ class TestScheduledRuns:
         # Never persisted: nothing in the run's log restores them on a reopen.
         assert not SessionLog.site_grants(scheduled.logref.log.path)
 
+    def test_a_profile_directory_that_is_gone_fails_closed_at_open(self, app_env):
+        # The prefixes were approved FOR that directory; the run must not
+        # start anywhere else with them.
+        client, _, server, _ = self._client(app_env, [])
+        with client:
+            logs_before = set(Path(app_env["state_dir"]).glob("session-*.jsonl"))
+            with pytest.raises(server_module.RunProfileError, match="no such directory"):
+                server.open_session(
+                    None, "schedule", {}, "",
+                    profile=server_module.RunProfile(
+                        allow=("touch",), cwd=str(Path(app_env["cwd"]) / "gone"),
+                    ),
+                )
+            assert set(Path(app_env["state_dir"]).glob("session-*.jsonl")) == logs_before
+
 
 class TestWorkerPool:
     """Agent workers run on the DEDICATED executor (#178 Gate 3): a parked

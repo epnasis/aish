@@ -229,8 +229,9 @@ class Scheduler:
         current = await asyncio.to_thread(schedule.signature, directory)
         if current == self._signature:
             return
+        # The deny list is a file read too, so it is read inside the thread.
         loaded = await asyncio.to_thread(
-            schedule.load_tasks, directory, deny_prefixes=list(self.deny_prefixes())
+            lambda: schedule.load_tasks(directory, deny_prefixes=list(self.deny_prefixes()))
         )
         self._signature = current
         self.tasks = loaded.tasks
@@ -270,7 +271,7 @@ class Scheduler:
         self._retry_open_at[task.key] = now + OPEN_RETRY_AFTER
         await self._record(task, "open_failed", now, error=outcome.error)
         await self._push_once(
-            task.key,
+            f"{task.key}:open_failed",
             f"aish automation {task.id} did not start",
             f"automation {task.id} did not start: {outcome.error}. aish will try again "
             f"until {task.deadline.strftime('%H:%M %a %Y-%m-%d')}.",
@@ -297,16 +298,24 @@ class Scheduler:
                                session=session)
 
     async def _expire(self, task: Task, now: datetime) -> None:
-        last = self._last_refusal.get(task.key)
+        assert self._state is not None
+        # A refusal this process saw, else one an earlier process RECORDED —
+        # only "no attempt was observed" when neither exists.
+        last = self._last_refusal.get(task.key) or next(
+            (r.get("error", "") for r in reversed(self._state.records)
+             if r.get("key") == task.key and r.get("kind") == "open_failed"),
+            "",
+        )
         observed = (
             f"it was last refused with: {last}" if last
             else "aish did not observe an attempt to start it"
         )
-        assert self._state is not None
         self._state.settled[task.key] = "expired"
         await self._record(task, "expired", now, error=observed)
+        # Its own key: the terminal sentence must reach him even when a
+        # "did not start, will try again" push already went out for this run.
         await self._push_once(
-            task.key,
+            f"{task.key}:expired",
             f"aish automation {task.id} did not run",
             f"automation {task.id} did not run: it was scheduled for "
             f"{task.at.strftime('%H:%M %a %Y-%m-%d')} and had not started "

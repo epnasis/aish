@@ -9,6 +9,7 @@ runs a real model or reaches the network.
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -169,7 +170,7 @@ class TestAutomationFence:
         ]
 
     @pytest.mark.parametrize("origin", ORIGINS)
-    def test_a_shell_write_is_blocked_in_every_spelling(self, origin, tmp_path, monkeypatch):
+    def test_a_shell_write_is_blocked_in_the_known_spellings(self, origin, tmp_path, monkeypatch):
         # Under the real home, so the `~` and `$HOME` spellings name it.
         home = Path.home() / f".aish-test-{tmp_path.name}"
         home.mkdir()
@@ -186,7 +187,7 @@ class TestAutomationFence:
             assert result.meta["decision"] == "blocked"
             assert not (home / "automations").exists()
         finally:
-            home.rmdir()
+            shutil.rmtree(home)
 
     def test_a_symlink_into_the_folder_is_the_folder(self, tmp_path):
         agent, asked = self._agent("user")
