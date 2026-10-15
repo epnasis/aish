@@ -33,7 +33,14 @@ from aish import tools
 # (33,516 -> 34,324), while the system prompt fell 45,351 -> 4,893 chars on the
 # web and 42,350 -> 5,001 in the terminal (gemini identity in place) — about
 # -40k for +0.8k, both paid on every call.
-MAX_MENU_CHARS = 34_400
+#
+# Raised 34,400 -> 35,600 on 2026-10-15 (epic #142 W2, S1) for ONE new tool,
+# schedule_task (+1,185 chars: 34,395 -> 35,580). It is a new capability rather
+# than an essay — the description is 365 chars, its MUST and one example — and
+# the alternative, making the model say "come back after 10pm", is the failure
+# the slice exists to remove. Under the per-task menu (#444 H1) it is sent only
+# to tasks that select it; the full-menu path pays it on every call.
+MAX_MENU_CHARS = 35_600
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.

@@ -416,7 +416,8 @@ class TestToolBudget:
     def test_warning_names_dominant_family(self):
         names = [f"reminders_{i}" for i in range(9)]
         names += [f"gmail_{i}" for i in range(5)]
-        names += [f"solo{i}" for i in range(13)]  # 27 total, no underscore family
+        # One over the budget whatever it is; the rest have no underscore family.
+        names += [f"solo{i}" for i in range(tp.TOOL_BUDGET + 1 - len(names))]
         warning = tp.budget_warning(names)
         assert warning is not None
         assert "9 reminders_*" in warning

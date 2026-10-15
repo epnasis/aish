@@ -31,6 +31,13 @@ CORE_TOOLS = (
     # which no off_menu counter can see. These four were the offline
     # simulation's most-missed, so their misses would be the silent kind.
     "obsidian_read", "obsidian_find", "read_pdf", "show_video",
+    # Epic #142 W2: "do this later" must not depend on how a time is worded.
+    # Measured (replay batch 20261015-222604, gemini-3.8-flash, 3 runs): on
+    # "Sprawdź po dwudziesty drugiej." ranking never selected it, and every
+    # run wrote the call out as prose and asked in text instead of calling it.
+    # Cost: +1,185 chars (compact; 1,246 as the brief records it) on every
+    # selected menu — the native core goes 12 schemas / 11,681 -> 13 / 12,866.
+    "schedule_task",
 )
 
 #: Tools admitted by ranking against the task, beyond core and the structural

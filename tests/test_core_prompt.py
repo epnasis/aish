@@ -54,6 +54,10 @@ SECTION_CAPS = {
     "OUTPUT": 850,
     "KNOWLEDGE": 550,
     "WHAT RIDES EACH TASK": 375,
+    # Epic #142 W2 (S1): the owner typed "check after 10pm" and aish set an
+    # Apple Reminder; MUST + one example, because capability phrasing in this
+    # prompt is measured to be ignored (docs/agent-core.md §Narration).
+    "LATER": 275,
     "ABOUT AISH": 225,
 }
 

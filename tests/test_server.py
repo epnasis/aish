@@ -31,6 +31,7 @@ import aish.backends as backends_module
 import aish.browse as browse_module
 import aish.browser as browser_module
 import aish.notify as notify_module
+import aish.schedule as schedule_module
 import aish.server as server_module
 import aish.session as session_module
 from aish.agent import DENIED_RESULT, WRITE_DENIED
@@ -8869,6 +8870,137 @@ class TestTriggerHardening:
             release.set()
 
 
+class TestScheduledRuns:
+    """A scheduled run is an ORDINARY triggered session (epic #142 W2, S1): it
+    enters through the same guarded seam as POST /trigger, runs with
+    origin="schedule" on the same web approver, and its approved profile is
+    the only thing besides the read-only classifier that runs without a card —
+    the persistent allowlist never (#449).
+
+    The scheduler's own loop is detached before startup and ticked by hand on
+    the server's loop, so each test decides exactly when a tick happens."""
+
+    AT = datetime.datetime(2026, 10, 15, 22, 5)
+
+    def _task(self, **extra):
+        directory = schedule_module.automations_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        body = {"id": "eon-invoices", "note": "E.ON invoices once the portal is back",
+                "prompt": "Download the October E.ON invoices.",
+                "schedule": {"at": self.AT.isoformat()}, **extra}
+        (directory / "eon-invoices.json").write_text(json.dumps(body), encoding="utf-8")
+
+    def _client(self, app_env, responses, **kwargs):
+        client, chat = make_client(app_env, responses, token="secret", **kwargs)
+        server = client.app.state.server
+        sched, server.scheduler = server.scheduler, None  # startup must not run it
+        sched.clock = lambda: self.AT + datetime.timedelta(minutes=2)
+        return client, chat, server, sched
+
+    def _scheduled(self, server):
+        return [s for s in server.sessions.values() if s.origin == "schedule"]
+
+    def _ledger(self, app_env):
+        return schedule_module.fired_ledger(Path(app_env["state_dir"])).read()
+
+    def test_a_due_automation_runs_as_an_ordinary_schedule_session(self, app_env):
+        self._task()
+        client, _, server, sched = self._client(app_env, [model_says("downloaded 2")])
+        with client:
+            client.portal.call(sched.tick)
+            [session] = self._scheduled(server)
+            drain_done(client, session.name, token="secret")
+            key = "eon-invoices:2026-10-15T22:05:00"
+            assert session.trigger_meta["dedup_key"] == key
+            assert session.custom_title == "Scheduled: E.ON invoices once the portal is back"
+            assert server._default is not session  # never the landing session
+            first = next(e for e in session.bridge.transcript if e["type"] == "user")
+            assert first.get("synthetic") == "trigger"
+            assert first["text"].startswith("[scheduled: eon-invoices]")
+            assert "fired at 2026-10-15 22:07:00" in first["text"]
+            assert self._ledger(app_env)[key]["session"] == session.name
+            client.portal.call(sched.tick)  # due again? no — the ledger says fired
+            assert len(self._scheduled(server)) == 1
+
+    def test_the_concurrency_cap_refuses_it_and_nothing_is_marked(self, app_env):
+        self._task()
+        client, _, server, sched = self._client(app_env, [], max_concurrent_triggered=0)
+        with client:
+            client.portal.call(sched.tick)
+            assert self._scheduled(server) == []
+            assert self._ledger(app_env) == {}
+
+    def test_an_unbuildable_model_fails_closed_and_leaves_no_session(self, app_env,
+                                                                    monkeypatch):
+        def broken(spec):
+            raise server_module.backends.BackendError("no such model")
+
+        monkeypatch.setattr(server_module.backends, "make_chat", broken)
+        self._task(model="nope:missing")
+        client, _, server, sched = self._client(app_env, [])
+        with client:
+            logs_before = set(Path(app_env["state_dir"]).glob("session-*.jsonl"))
+            client.portal.call(sched.tick)
+            assert self._scheduled(server) == []
+            assert set(Path(app_env["state_dir"]).glob("session-*.jsonl")) == logs_before
+            assert self._ledger(app_env) == {}
+            state = schedule_module.scheduler_state(Path(app_env["state_dir"])).read()
+            assert state["records"][0]["kind"] == "open_failed"
+            assert "model unavailable: no such model" in state["records"][0]["error"]
+
+    def test_the_profile_runs_cardless_and_the_allowlist_is_never_consulted(self, app_env):
+        # allow.txt grants mkdir to the owner's own sessions; the automation's
+        # profile grants touch. Unattended, only the profile counts.
+        app_env["allow_path"].write_text("ls\nmkdir\n", encoding="utf-8")
+        self._task(allow=["touch"])
+        cwd = Path(app_env["cwd"])
+        client, _, server, sched = self._client(app_env, [
+            model_says(tool_calls=[tool_call("run_command", command="touch from-run.txt")]),
+            model_says(tool_calls=[tool_call("run_command", command="mkdir held-dir")]),
+            model_says("touched one file; the mkdir is held for you"),
+        ])
+        with client:
+            client.portal.call(sched.tick)
+            [session] = self._scheduled(server)
+            with connected(client, f"/ws?token=secret&session={session.name}") as (ws, _, _):
+                request = recv_until(ws, "approval_request")
+                assert request["command"] == "mkdir held-dir"
+                ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
+                recv_until(ws, "done")
+        assert (cwd / "from-run.txt").exists()
+        assert not (cwd / "held-dir").exists()
+
+    def test_the_profile_enters_as_session_grants_only(self, app_env):
+        client, _, server, _ = self._client(app_env, [])
+        with client:
+            scheduled, _ = server.open_session(
+                None, "schedule", {}, "",
+                profile=server_module.RunProfile(allow=("touch",), sites=("eon.pl",)),
+            )
+            plain, _ = server.open_session(None, "schedule", {}, "")
+        assert scheduled.agent.session_prefixes == {"touch"}
+        assert scheduled.agent._approved_sites == {"eon.pl"}
+        assert plain.agent.session_prefixes == set()
+        assert plain.agent._approved_sites == set()
+        # Never persisted: nothing in the run's log restores them on a reopen.
+        assert not SessionLog.site_grants(scheduled.logref.log.path)
+
+    def test_a_profile_directory_that_is_gone_fails_closed_at_open(self, app_env):
+        # The prefixes were approved FOR that directory; the run must not
+        # start anywhere else with them.
+        client, _, server, _ = self._client(app_env, [])
+        with client:
+            logs_before = set(Path(app_env["state_dir"]).glob("session-*.jsonl"))
+            with pytest.raises(server_module.RunProfileError, match="no such directory"):
+                server.open_session(
+                    None, "schedule", {}, "",
+                    profile=server_module.RunProfile(
+                        allow=("touch",), cwd=str(Path(app_env["cwd"]) / "gone"),
+                    ),
+                )
+            assert set(Path(app_env["state_dir"]).glob("session-*.jsonl")) == logs_before
+
+
 class TestWorkerPool:
     """Agent workers run on the DEDICATED executor (#178 Gate 3): a parked
     approval holds a worker thread indefinitely, and on the shared default
@@ -9348,6 +9480,82 @@ class TestRestartResume:
         # replay renders the interrupted turn honestly instead of breaking.
         events = SessionLog.reconstruct_events(path)
         assert {"type": "error", "text": session_module.INTERRUPTED_TASK} in events
+
+    def _pushes(self, monkeypatch):
+        pushes: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            server_module.notify, "pushover",
+            lambda title, body, **_kw: pushes.append((title, body)) or True,
+        )
+        return pushes
+
+    def _interrupted_schedule_log(self, app_env, prompt):
+        state_dir = Path(app_env["state_dir"])
+        log = SessionLog(state_dir / "session-20260101-120000-000000.jsonl")
+        log.model("fake")
+        log.origin("schedule")
+        log.task_start(prompt)
+        log.message({"role": "user", "content": prompt})
+        log.step({"kind": "tool_start", "name": "browse", "url": "https://eon.pl"})
+        log.close()  # aish-web stopped mid-run (a `make ship`, say)
+        return log.path
+
+    def test_an_interrupted_scheduled_run_is_recorded_and_pushed_once(
+        self, app_env, monkeypatch,
+    ):
+        # Never resumed (#187) means never completed: a malfunction, not
+        # silence. The skip itself stays byte-identical — nothing appended.
+        pushes = self._pushes(monkeypatch)
+        path = self._interrupted_schedule_log(
+            app_env, "[scheduled: eon-invoices] An automation the owner approved has "
+            "fired.\n\nDownload the October E.ON invoices.",
+        )
+        before = path.read_bytes()
+        client, chat = make_client(app_env, [])
+        with client:
+            assert self._wait(lambda: len(pushes) == 1), "no push for the interruption"
+            assert path.name not in client.app.state.server.sessions
+        assert chat.calls == []
+        assert path.read_bytes() == before
+        title, body = pushes[0]
+        assert title == "aish automation eon-invoices was interrupted"
+        assert path.name in body and "not resumed" in body
+        state = schedule_module.scheduler_state(Path(app_env["state_dir"])).read()
+        [record] = [r for r in state["records"] if r["kind"] == "interrupted"]
+        assert record["session"] == path.name and record["task"] == "eon-invoices"
+        assert {"type": "error", "text": session_module.INTERRUPTED_TASK} in (
+            SessionLog.reconstruct_events(path)
+        )
+
+        # The resumer re-scans on every start; the same interruption is
+        # never pushed twice, because the dedupe is on disk.
+        again, _ = make_client(app_env, [])
+        with again:
+            resumer = again.app.state.server
+            assert self._wait(lambda: resumer.resumer is not None and resumer.resumer.done())
+        assert len(pushes) == 1
+
+    def test_a_scheduled_run_without_an_automation_id_says_so_plainly(
+        self, app_env, monkeypatch,
+    ):
+        pushes = self._pushes(monkeypatch)
+        self._interrupted_schedule_log(app_env, "weekly curation")
+        client, _ = make_client(app_env, [])
+        with client:
+            assert self._wait(lambda: len(pushes) == 1)
+        title, body = pushes[0]
+        assert title == "aish: a scheduled run was interrupted"
+        assert body.startswith("The scheduled run in chat session-20260101-120000-000000")
+
+    def test_an_interrupted_user_chat_pushes_no_interruption(self, app_env, monkeypatch):
+        pushes = self._pushes(monkeypatch)
+        path = self._interrupted_log(app_env, origin="user")
+        client, _ = make_client(app_env, [model_says("picked it back up")])
+        with client:
+            server = client.app.state.server
+            assert self._wait(lambda: path.name in server.sessions)
+            assert self._wait(lambda: not server.sessions[path.name].busy)
+        assert not [p for p in pushes if "interrupted" in p[0]]
 
     def test_user_origin_interrupted_task_still_resumes(self, app_env):
         # The schedule exception must not widen: a user chat has nothing else

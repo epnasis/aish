@@ -1773,6 +1773,44 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "schedule_task",
+            "description": (
+                "Do work LATER, once, unattended: when the user says 'check after 10pm', "
+                "'tonight', 'tomorrow morning', 'try again at 9'. The user approves it on a "
+                "card; at that time aish runs your prompt in a new chat, where any change "
+                "waits for their approval. MUST be a complete handoff: the goal, what you "
+                "already found, where to look. Never a reminder app or 'come back later'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "kebab-case, e.g. 'eon-invoices'."},
+                    "at": {
+                        "type": "string",
+                        "description": "Local date and time, e.g. '2026-10-15T22:05'.",
+                    },
+                    "prompt": {"type": "string", "description": "The whole instruction."},
+                    "note": {"type": "string", "description": "One line: what it is for."},
+                    "allow": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Command prefixes it may run without asking.",
+                    },
+                    "sites": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Hosts it may press things on as the user, e.g. 'eon.pl'.",
+                    },
+                    "model": {"type": "string", "description": "Only if the user names one."},
+                    "cwd": {"type": "string", "description": "Absolute working directory."},
+                },
+                "required": ["id", "at", "prompt", "note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "plan",
             "description": (
                 "Your own checklist for the owner's objective; he sees it. ONLY for work "

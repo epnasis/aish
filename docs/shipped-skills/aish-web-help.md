@@ -56,4 +56,9 @@ How the aish web UI works, for answering the user's questions about it. Answer f
 
 ## Chats and history
 - Every chat (conversation + command audit trail) is logged under `~/.local/state/aish/` in the same format as terminal aish, so a chat started here can be resumed in the terminal and vice versa.
+
+## Doing something later
+- "Check after 10pm" and the like become a one-shot automation: aish proposes it with schedule_task, and the user approves a card that states when it runs, the whole instruction, the commands that may run without asking and the sites it may act on as them.
+- At that time it runs once in a NEW automated chat (the automation glyph on the row); anything else that changes something waits there on a card, and the usual hold/finish pushes apply. A run that cannot start within 24 hours is given up and reported once.
+- Saved as a plain JSON file in `~/.config/aish/automations/`; editing its `at` re-arms it, deleting the file cancels it. Automated chats cannot create automations, and aish refuses its own file and shell writes into that folder.
 - Renaming and deleting happen in the chat menu above.
