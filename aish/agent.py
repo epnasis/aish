@@ -2609,6 +2609,13 @@ REMEMBER_DENIED = (
 # harness speaking rather than as a blue bubble the owner never typed.
 AISH_NOTE = "[aish: "
 
+
+def outside_note(heading: str, text: str) -> str:
+    """Outside content as aish delivers it (`Agent.add_outside_note`): aish's
+    heading, the untrusted banner, then the content with its markers disarmed
+    so it can neither speak in aish's voice nor close the frame early."""
+    return f"{AISH_NOTE}{heading}]\n{web.UNTRUSTED_NOTE}{provenance.disarm_markers(text)}"
+
 # How every `[aish: …]` note reaches the model (§3.17): inside the tag the
 # system prompt already names as aish's voice (rule 2e). `_append` applies it,
 # so no call site can forget it; the measure script's arm D is this string.
@@ -3692,6 +3699,10 @@ class Agent:
         self._tainted = False
         # WHAT raised it, for the card to say (READ_THE_WEB and friends).
         self._taint_reads: set[str] = set()
+        # Outside content aish delivered before the next task with no tool
+        # call to raise the taint for it (`add_outside_note`, #5 S3): the next
+        # task starts tainted. Survives `_reset_task_state` exactly once.
+        self._outside_note_pending = False
         # Links a PAGE (or any other tool result) actually offered this task,
         # recorded as whole addresses rather than re-derived by searching raw
         # text later. Read by _url_was_offered.
@@ -3998,6 +4009,10 @@ class Agent:
         # Lines naming each change that ran with NO card this task (AISH_LINE),
         # appended to the delivered answer the same way.
         self._cardless = _Cardless()
+        # How many ran this task. Kept after `_cardless` is taken into the
+        # answer, so a caller can still ask once the task is over: a monitor
+        # run that changed something without a card is never silent (#5 S3).
+        self.cardless_this_task = 0
         # The display lines show_image handed back this task, and how many
         # times an answer was sent back for its pictures (#430).
         self._shown_images: list[str] = []
@@ -4956,6 +4971,7 @@ class Agent:
         self._last_rejected = None
         self._not_followed = []
         self._cardless = _Cardless()
+        self.cardless_this_task = 0
         self._shown_images = []
         self._image_asks = 0
         self._image_removal = None
@@ -4986,6 +5002,11 @@ class Agent:
         # answering one question must not put a card in front of the next.
         self._tainted = False
         self._taint_reads = set()
+        if self._outside_note_pending:
+            # Delivered for THIS task by add_outside_note: it is in the context
+            # the first model call sees, so the task is tainted from its start.
+            self._outside_note_pending = False
+            self._mark_tainted("", None)
         # Offered links belong to the task that read them, exactly as taint
         # does: the gate that consults them only exists while a task is
         # tainted, and a link a page showed while answering one question is not
@@ -10204,6 +10225,21 @@ class Agent:
         (session.synthetic_kind, #171; contract §3.17)."""
         self._append({"role": "user", "content": text}, source=source)
 
+    def add_outside_note(self, heading: str, text: str, source: str) -> None:
+        """Deliver content aish did NOT author — a monitor's snapshot (#5 S3),
+        which a previous run distilled from whatever it read — as the next
+        task's context, and make that task tainted from its first model call.
+
+        Three properties, each because the alternative launders: markers are
+        disarmed, so the content cannot speak in aish's voice or close its
+        frame; it is wrapped in the untrusted banner; and its hosts are NEVER
+        folded into `_owner_hosts` (no `note_owner_hosts`, as `add_system_note`
+        for #178 P0-2) — a host a page named must not become one the egress gate
+        treats as the owner's. The taint is raised explicitly because no tool
+        call will raise it: the content arrives without one."""
+        self._append({"role": "user", "content": outside_note(heading, text)}, source=source)
+        self._outside_note_pending = True
+
     def _collect_source(self, call: dict, result: str) -> None:
         """Track pages actually fetched this task, so answers can cite them.
         Only read_url counts — web_search hits are found-but-maybe-unread."""
@@ -14293,6 +14329,7 @@ class Agent:
             # the runtime's own verdict says the wrapper succeeded.
             ran_ok = getattr(result, "meta", {}).get("status") == tools.STATUS_OK
             self._cardless.add(tool.name, args, licensed.policy, ran_ok=ran_ok)
+            self.cardless_this_task += 1
         return result
 
     _WRAPPER_META = {  # lang -> (filename, shebang)
@@ -15120,7 +15157,7 @@ class Agent:
             "enabled": True,
             "created": now.isoformat(),
         }
-        for key in ("model", "cwd"):
+        for key in ("model", "cwd", "kind", "notify"):
             if args.get(key):
                 raw[key] = args[key]
         for key in ("allow", "sites"):
@@ -15167,9 +15204,13 @@ class Agent:
             )
         else:
             when = f"for {task.one_shot_at().isoformat(sep=' ', timespec='minutes')}. At that time"
+        watching = (
+            " As a monitor, each run compares against the previous run's snapshot "
+            f"and notifies the user per notify={task.notify}." if task.monitor else ""
+        )
         return (
             f"Scheduled '{task.id}' {when} aish runs it in a new chat; anything that "
-            "needs approval will wait for the user there. Tell the user it is "
+            f"needs approval will wait for the user there.{watching} Tell the user it is "
             "scheduled — do not also set a reminder."
         )
 
