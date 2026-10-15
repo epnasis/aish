@@ -38,6 +38,7 @@ Tab completes them, and an unambiguous prefix works (`/res` for `/resume`).
 - "Check after 10pm" and the like become a one-shot automation: aish proposes it with schedule_task and the user approves a write prompt whose summary states when it runs, the whole instruction, and what it may do without asking.
 - It is RUN by aish-web (the always-on server), not by this terminal: at that time aish-web opens a new automated chat for it. If aish-web is not running, nothing fires until it starts; a run that cannot start within 24 hours is given up and reported once.
 - Recurring works too ("every weekday at 9"): the automation gets a cron schedule like `0 9 * * 1-5` (local time) and the prompt summary shows its next two runs; after downtime only the latest missed run fires.
+- "Tell me when X changes" becomes a monitor (`"kind": "monitor"`, cron only): each run compares against the previous run's snapshot and ends with a verdict; a change pushes its one-line summary, no change is silent (`"notify"`: `on_change` by default, or `always` / `never`), and a run aish cannot read keeps the old baseline and pushes once, then at most daily. Runs happen in aish-web.
 - Saved as a plain JSON file in `~/.config/aish/automations/`; editing its `at` or its cron expression re-arms it, deleting the file cancels it.
 
 ## Models
