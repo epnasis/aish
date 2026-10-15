@@ -9481,6 +9481,80 @@ class TestRestartResume:
         events = SessionLog.reconstruct_events(path)
         assert {"type": "error", "text": session_module.INTERRUPTED_TASK} in events
 
+    def _pushes(self, monkeypatch):
+        pushes: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            server_module.notify, "pushover",
+            lambda title, body, **_kw: pushes.append((title, body)) or True,
+        )
+        return pushes
+
+    def _interrupted_schedule_log(self, app_env, prompt):
+        state_dir = Path(app_env["state_dir"])
+        log = SessionLog(state_dir / "session-20260101-120000-000000.jsonl")
+        log.model("fake")
+        log.origin("schedule")
+        log.task_start(prompt)
+        log.message({"role": "user", "content": prompt})
+        log.step({"kind": "tool_start", "name": "browse", "url": "https://eon.pl"})
+        log.close()  # aish-web stopped mid-run (a `make ship`, say)
+        return log.path
+
+    def test_an_interrupted_scheduled_run_is_recorded_and_pushed_once(
+        self, app_env, monkeypatch,
+    ):
+        # Never resumed (#187) means never completed: a malfunction, not
+        # silence. The skip itself stays byte-identical — nothing appended.
+        pushes = self._pushes(monkeypatch)
+        path = self._interrupted_schedule_log(
+            app_env, "[scheduled: eon-invoices] An automation the owner approved has "
+            "fired.\n\nDownload the October E.ON invoices.",
+        )
+        before = path.read_bytes()
+        client, chat = make_client(app_env, [])
+        with client:
+            assert self._wait(lambda: len(pushes) == 1), "no push for the interruption"
+            assert path.name not in client.app.state.server.sessions
+        assert chat.calls == []
+        assert path.read_bytes() == before
+        title, body = pushes[0]
+        assert title == "aish automation eon-invoices was interrupted"
+        assert path.name in body and "not resumed" in body
+        state = schedule_module.scheduler_state(Path(app_env["state_dir"])).read()
+        [record] = [r for r in state["records"] if r["kind"] == "interrupted"]
+        assert record["session"] == path.name and record["task"] == "eon-invoices"
+        assert {"type": "error", "text": session_module.INTERRUPTED_TASK} in (
+            SessionLog.reconstruct_events(path)
+        )
+
+        # The resumer re-scans on every start; the same interruption is
+        # never pushed twice, because the dedupe is on disk.
+        again, _ = make_client(app_env, [])
+        with again:
+            resumer = again.app.state.server
+            assert self._wait(lambda: resumer.resumer is not None and resumer.resumer.done())
+        assert len(pushes) == 1
+
+    def test_a_scheduled_run_without_an_automation_id_says_so_plainly(
+        self, app_env, monkeypatch,
+    ):
+        pushes = self._pushes(monkeypatch)
+        self._interrupted_schedule_log(app_env, "weekly curation")
+        client, _ = make_client(app_env, [])
+        with client:
+            assert self._wait(lambda: len(pushes) == 1)
+        assert pushes[0][0] == "aish a scheduled run was interrupted"
+
+    def test_an_interrupted_user_chat_pushes_no_interruption(self, app_env, monkeypatch):
+        pushes = self._pushes(monkeypatch)
+        path = self._interrupted_log(app_env, origin="user")
+        client, _ = make_client(app_env, [model_says("picked it back up")])
+        with client:
+            server = client.app.state.server
+            assert self._wait(lambda: path.name in server.sessions)
+            assert self._wait(lambda: not server.sessions[path.name].busy)
+        assert not [p for p in pushes if "interrupted" in p[0]]
+
     def test_user_origin_interrupted_task_still_resumes(self, app_env):
         # The schedule exception must not widen: a user chat has nothing else
         # that would ever restart its task, so it resumes exactly as before.

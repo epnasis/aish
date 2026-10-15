@@ -22,6 +22,7 @@ Everything that touches the disk runs through `asyncio.to_thread`.
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field
@@ -77,6 +78,11 @@ class FireRequest:
     @property
     def dedup_key(self) -> str:
         return self.task.key
+
+
+# Reads back the prefix run_prompt writes — aish's own text in the recorded
+# task prompt, which is the only place the session log keeps the automation id.
+_SCHEDULED_PREFIX = re.compile(r"^\[scheduled: ([a-z0-9][a-z0-9-]{0,63})\]")
 
 
 def run_prompt(task: Task, fired_at: datetime) -> str:
@@ -162,6 +168,7 @@ class Scheduler:
         self._last_refusal: dict[str, str] = {}
         self._ledger_problem_pushed = False
         self._ticking = False
+        self._state_loading: asyncio.Future | None = None
 
     # -- the loop -------------------------------------------------------------
 
@@ -188,8 +195,7 @@ class Scheduler:
             self._ticking = False
 
     async def _tick(self) -> None:
-        if self._state is None:
-            self._state = await asyncio.to_thread(self._load_state)
+        state = await self._ensure_state()
         await self._reload_if_changed()
         try:
             ledger = await asyncio.to_thread(self.ledger.read)
@@ -198,7 +204,7 @@ class Scheduler:
             return
         fired = set(ledger) | self._fired_here
         for task in list(self.tasks):
-            if task.key in self._state.settled:
+            if task.key in state.settled:
                 continue
             now = self.clock()
             status = schedule.next_due(task, fired, now)
@@ -208,6 +214,46 @@ class Scheduler:
                 await self._fire(task, now)
 
     # -- loading --------------------------------------------------------------
+
+    async def _ensure_state(self) -> _State:
+        # The resumer reports into this state at startup while the first tick
+        # loads it; two independent loads would each hold a copy and the last
+        # save would drop the other's record. So the load is shared.
+        if self._state is None:
+            if self._state_loading is None:
+                self._state_loading = asyncio.ensure_future(
+                    asyncio.to_thread(self._load_state)
+                )
+            loaded = await self._state_loading
+            if self._state is None:
+                self._state = loaded
+        return self._state
+
+    async def report_interrupted(self, session: str, prompt: str, log_size: int) -> None:
+        """A schedule-origin run whose session aish-web found unfinished at
+        start: it will never be resumed (#187), so it is a run that did not
+        complete and must not end in silence. Recorded, and pushed once per
+        interruption — the key carries the log's size, which the skip leaves
+        untouched, so every rescan of the same interruption is the same key
+        while a later, new interruption of that chat is a new one."""
+        state = await self._ensure_state()
+        match = _SCHEDULED_PREFIX.match(prompt or "")
+        automation = match.group(1) if match else ""
+        which = f"automation {automation}" if automation else "a scheduled run"
+        key = f"interrupted:{session}:{log_size}"
+        if key in state.notified:
+            return
+        state.records.append({
+            "kind": "interrupted", "session": session, "task": automation,
+            "observed_at": _stamp(self.clock()),
+        })
+        await self._push_once(
+            key,
+            f"aish {which} was interrupted",
+            f"The run of {which} in chat {session} was interrupted: aish-web stopped "
+            "while it was running, and scheduled runs are not resumed. The chat's "
+            "transcript shows what it did and any approvals it was waiting on.",
+        )
 
     def _load_state(self) -> _State:
         try:

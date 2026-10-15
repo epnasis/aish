@@ -2088,6 +2088,9 @@ class WebServer:
                 # is appended, and cold replay renders the interrupted turn.
                 print(f"[resume] {path.name}: schedule-origin task left to its "
                       "own cadence (never resumed, #187)", file=sys.stderr)
+                # Observability BESIDE the skip, never part of it: the log is
+                # not touched, so the skip stays exactly what #187 made it.
+                await self._report_interrupted_schedule(path, info)
                 continue
             try:
                 # The same cold open a user's session-switch performs, so the
@@ -2121,6 +2124,22 @@ class WebServer:
             resumed += 1
             print(f"[resume] {path.name}: retrying an interrupted task "
                   f"(attempt {info['attempts'] + 1})", file=sys.stderr)
+
+    async def _report_interrupted_schedule(self, path: Path, info: dict) -> None:
+        """A scheduled run that will never be resumed did not complete, which
+        is a malfunction and not silence (epic #142 W2): hand it to the
+        scheduler, which records it and pushes once per interruption. Nothing
+        here may stop the resumer from going on to the next session."""
+        if self.scheduler is None:
+            return
+        try:
+            size = await asyncio.to_thread(lambda: path.stat().st_size)
+            await self.scheduler.report_interrupted(
+                path.name, str(info.get("prompt") or ""), size
+            )
+        except Exception as exc:  # noqa: BLE001 — a report is never worth a stalled resumer
+            print(f"[resume] {path.name}: could not report the interrupted "
+                  f"scheduled run: {exc!r}", file=sys.stderr)
 
     async def shutdown(self) -> None:
         """Unblock everything so Ctrl-C exits promptly: workers parked on an
