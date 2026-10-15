@@ -947,6 +947,12 @@ aish-web is down fires on the next start, late runs say both times, and a run
 that cannot start within 24 hours is given up — recorded, with one push (if
 Pushover is set up) saying what was observed.
 
+**Recurring.** *"Every weekday at 9"* works the same way: the automation gets
+a cron schedule (`0 9 * * 1-5`, local time) instead of a time, and the card
+shows the next two runs. After downtime only the latest missed run fires (the
+older ones are recorded as skipped); a run that cannot start pushes once, then
+at most daily while it keeps failing.
+
 Interrupted work is picked up again. If aish-web goes down mid-task — a
 deploy, a crash — the next start reopens that session and tells the model to
 continue from where it stopped instead of redoing what already succeeded.

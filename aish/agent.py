@@ -15114,7 +15114,9 @@ class Agent:
             "id": str(args.get("id", "") or "").strip(),
             "note": str(args.get("note", "") or "").strip(),
             "prompt": str(args.get("prompt", "") or ""),
-            "schedule": {"at": args.get("at")},
+            # Both or neither is passed through as-is: validate_task refuses
+            # anything but exactly one of the two.
+            "schedule": {k: args[k] for k in ("at", "cron") if args.get(k)},
             "enabled": True,
             "created": now.isoformat(),
         }
@@ -15157,11 +15159,18 @@ class Agent:
         result = files.commit(plan)
         if result.startswith("ERROR"):
             return result
+        if task.recurring:
+            when = (
+                f"on the schedule `{task.cron}` (next: "
+                f"{schedule.cron_next(task.cron, now).isoformat(sep=' ', timespec='minutes')})"
+                ". Each time"
+            )
+        else:
+            when = f"for {task.one_shot_at().isoformat(sep=' ', timespec='minutes')}. At that time"
         return (
-            f"Scheduled '{task.id}' for {task.at.isoformat(sep=' ', timespec='minutes')}. "
-            "At that time aish runs it in a new chat; anything that needs approval "
-            "will wait for the user there. Tell the user it is scheduled — do not "
-            "also set a reminder."
+            f"Scheduled '{task.id}' {when} aish runs it in a new chat; anything that "
+            "needs approval will wait for the user there. Tell the user it is "
+            "scheduled — do not also set a reminder."
         )
 
     def _parse_cd(self, command: str) -> str | None:
