@@ -74,7 +74,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `documents.py`, `read_pdf`, `workspace_roots` (where aish may read unasked) | `docs/documents-and-pdf.md` |
 | anything that emits or replays a trace record | `docs/trace-contract.md` (binding schema) + `docs/trace-records.md` (rationale) |
 | `session.py` | `docs/session-log.md` |
-| `server.py`, `pty_session.py`, `email_poll.py` | `docs/web-server.md` |
+| `server.py`, `pty_session.py`, `email_poll.py`, `schedule.py`, `scheduler.py`, `schedule_task` | `docs/web-server.md` |
 | `aish/static/` (`app.js`, `style.css`, `sw.js`) | `docs/web-frontend.md` |
 | `skills.py`, `embeddings.py`, `curate.py`, `skill_import.py` | `docs/knowledge-layer.md` |
 | `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
@@ -138,6 +138,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`pins.py`** — the pin ledger: which chats the OWNER has pinned, shared by every device. A toggle, so not monotonic — no client time is trusted at all (last-reconnect-wins in the server's clock), which is what makes sharing it safe. → `docs/web-server.md`
 - **`pty_session.py`** — the PTY behind the one global interactive console. The model has NO write path to it, by construction. → `docs/web-server.md`
 - **`email_poll.py`** — the Gmail→`/trigger` poller; every effectful edge (gws, HTTP, notifier, clock) is a parameter seam, so it tests with no subprocess, no network and no sleeps. → `docs/web-server.md`
+- **`schedule.py` + `scheduler.py`** — the owner's one-shot automations: inert JSON files written only through `schedule_task`'s card (never from a triggered session, never by any other write), fired by a loop inside aish-web through the SAME guarded seam `/trigger` uses. The fired ledger in the state tree is the one authority on what ran. → `docs/web-server.md`
 - **`skills.py`** — the knowledge store (skills + memory): progressive disclosure, pre-flight injection, lifecycle. → `docs/knowledge-layer.md`
 - **`embeddings.py`** — the semantic layer over retrieval. Lexical word-matching is the guaranteed floor; embeddings are an upgrade, never a dependency. → `docs/knowledge-layer.md`
 - **`curate.py`** — the retrieval self-curation loop; the orchestration lives in the script, not in a model session. → `docs/knowledge-layer.md`

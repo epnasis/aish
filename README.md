@@ -930,6 +930,22 @@ cannot chain "read everything ever discussed" into "ship it to a new host". A pu
 needs approval or finishes, with a deep link straight to it. This is how the
 same agent safely runs, say, an email assistant while you're asleep.
 
+**Later, once.** Ask for something at a time — *"check after 10pm"*, *"try
+the portal again tomorrow morning"* — and aish proposes a one-shot
+automation on an approval card that says, in words, when it runs, the whole
+instruction it will run, which commands may run without asking you and which
+sites it may press things on as you. Approve it and it is saved as a plain
+JSON file in `~/.config/aish/automations/` (hand-editable; change its `at` to
+re-arm it). At that time aish-web runs it in a new automated chat, through the
+same guards as `/trigger` and the same draft-and-hold policy — the commands
+and sites you approved on the card are the only things beyond read-only
+commands that run without a card, and your "Always allow" list is never used
+there. Only you create automations: an automated chat cannot schedule one, and
+aish refuses any other write into that folder. A run that comes due while
+aish-web is down fires on the next start, late runs say both times, and a run
+that cannot start within 24 hours is given up — recorded, with one push (if
+Pushover is set up) saying what was observed.
+
 Interrupted work is picked up again. If aish-web goes down mid-task — a
 deploy, a crash — the next start reopens that session and tells the model to
 continue from where it stopped instead of redoing what already succeeded.
