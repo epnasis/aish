@@ -7,12 +7,14 @@ writer the model has, through the diff-approval card. Code never writes the
 owner-authored directory — the only writer of what has FIRED is the ledger in
 the state tree, which is why an automation has no `fired` field to flip.
 
-S1 supports exactly one schedule shape, `{"at": "<ISO local datetime>"}`: a
-one-shot. Anything else is refused at load and at creation, never guessed at.
+Two schedule shapes, exactly one per task: `{"at": "<ISO local datetime>"}`, a
+one-shot (S1), and `{"cron": "<5-field expr>"}`, recurring (S2). Anything else
+is refused at load and at creation, never guessed at.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from collections.abc import Collection, Iterable
@@ -60,6 +62,159 @@ def automations_dir() -> Path:
 class InvalidTask(ValueError):
     """A task file or a `schedule_task` call that does not describe exactly one
     runnable automation. The message is shown to the model or logged as-is."""
+
+
+# -- cron ---------------------------------------------------------------------
+
+#: How far `cron_next`/`cron_prev` look before giving up. A syntactically valid
+#: expr can be impossible (`0 0 30 2 *`), and an unbounded scan for it would
+#: hang the tick. Four years covers every leap day except across 2100.
+CRON_HORIZON = timedelta(days=4 * 366)
+
+_CRON_FIELDS = (  # name, lowest, highest
+    ("minute", 0, 59),
+    ("hour", 0, 23),
+    ("day of month", 1, 31),
+    ("month", 1, 12),
+    ("day of week", 0, 7),
+)
+_CRON_ITEM = re.compile(r"^(?:\*|(\d+)(?:-(\d+))?)(?:/(\d+))?$")
+
+
+class NoOccurrence(InvalidTask):
+    """A cron expr with no occurrence inside `CRON_HORIZON` of the asked time."""
+
+
+@dataclass(frozen=True)
+class Cron:
+    """One parsed 5-field expr, vixie semantics, naive local wall-clock.
+
+    `dom_star`/`dow_star` are vixie's flags: the field's text begins with `*`.
+    When NEITHER is starred a day matches if EITHER field matches (the OR
+    rule); otherwise both must — which for a plain `*` is no restriction."""
+
+    expr: str
+    minutes: tuple[int, ...]
+    hours: tuple[int, ...]
+    doms: frozenset[int]
+    months: frozenset[int]
+    dows: frozenset[int]  # 0..6, Sunday = 0 (7 is folded into 0)
+    dom_star: bool
+    dow_star: bool
+
+    def day_matches(self, day: datetime) -> bool:
+        if day.month not in self.months:
+            return False
+        dom_ok = day.day in self.doms
+        dow_ok = (day.isoweekday() % 7) in self.dows
+        if self.dom_star or self.dow_star:
+            return dom_ok and dow_ok
+        return dom_ok or dow_ok
+
+
+def _cron_field(text: str, name: str, low: int, high: int) -> set[int]:
+    values: set[int] = set()
+    for item in text.split(","):
+        match = _CRON_ITEM.match(item)
+        if not match:
+            raise InvalidTask(
+                f"cron {name} field {text!r}: {item!r} is not supported — use numbers, "
+                "'*', '*/n', ranges 'a-b' and comma lists (no names like MON, no "
+                "@daily, no L, W, # or ?)"
+            )
+        start_s, end_s, step_s = match.groups()
+        if step_s and start_s is not None and end_s is None:
+            raise InvalidTask(
+                f"cron {name} field {text!r}: {item!r} is not supported — a step goes "
+                "after '*' or a range, e.g. '*/15' or '0-30/10'"
+            )
+        step = int(step_s) if step_s else 1
+        if step < 1:
+            raise InvalidTask(f"cron {name} field {text!r}: a step must be at least 1")
+        if start_s is None:
+            start, end = low, high
+        else:
+            start = int(start_s)
+            end = int(end_s) if end_s is not None else start
+        if not (low <= start <= high and low <= end <= high):
+            raise InvalidTask(f"cron {name} field {text!r}: values must be {low}-{high}")
+        if start > end:
+            raise InvalidTask(f"cron {name} field {text!r}: range {start}-{end} runs backwards")
+        values.update(range(start, end + 1, step))
+    return values
+
+
+@functools.lru_cache(maxsize=256)
+def parse_cron(expr: str) -> Cron:
+    """`expr` as a `Cron`, or InvalidTask. Says nothing about whether the expr
+    can ever occur — `cron_next` answers that, within its horizon."""
+    if not isinstance(expr, str) or _CONTROL_CHARS.search(expr.replace("\t", " ")):
+        raise InvalidTask(f"schedule.cron must be a 5-field cron expression, got {expr!r}")
+    parts = expr.split()
+    if len(parts) != 5:
+        raise InvalidTask(
+            f"schedule.cron {expr!r} must have exactly 5 fields: minute hour "
+            "day-of-month month day-of-week, e.g. '0 9 * * 1-5' (weekdays at 09:00)"
+        )
+    sets = [_cron_field(p, n, lo, hi) for p, (n, lo, hi) in zip(parts, _CRON_FIELDS, strict=True)]
+    minutes, hours, doms, months, dows = sets
+    return Cron(
+        expr=" ".join(parts),
+        minutes=tuple(sorted(minutes)),
+        hours=tuple(sorted(hours)),
+        doms=frozenset(doms),
+        months=frozenset(months),
+        dows=frozenset(d % 7 for d in dows),
+        dom_star=parts[2].startswith("*"),
+        dow_star=parts[4].startswith("*"),
+    )
+
+
+def _minute(when: datetime) -> datetime:
+    return when.replace(second=0, microsecond=0)
+
+
+def cron_next(expr: str, after: datetime) -> datetime:
+    """The first occurrence strictly after `after`. Raises NoOccurrence when
+    there is none within `CRON_HORIZON`, so an impossible expr costs one
+    bounded scan and never a hung tick."""
+    cron = parse_cron(expr)
+    start = _minute(after) + timedelta(minutes=1)
+    day = start.replace(hour=0, minute=0)
+    limit = after + CRON_HORIZON
+    while day <= limit:
+        if cron.day_matches(day):
+            for hour in cron.hours:
+                for minute in cron.minutes:
+                    candidate = day.replace(hour=hour, minute=minute)
+                    if candidate >= start:
+                        return candidate
+        day += timedelta(days=1)
+    raise NoOccurrence(
+        f"schedule.cron {cron.expr!r} has no occurrence within "
+        f"{CRON_HORIZON.days} days of {after.isoformat(timespec='minutes')}"
+    )
+
+
+def cron_prev(expr: str, at_or_before: datetime) -> datetime:
+    """The latest occurrence at or before `at_or_before` — the backward twin of
+    `cron_next`, under the same horizon bound."""
+    cron = parse_cron(expr)
+    end = _minute(at_or_before)
+    day = end.replace(hour=0, minute=0)
+    limit = at_or_before - CRON_HORIZON
+    while day >= limit.replace(hour=0, minute=0, second=0, microsecond=0):
+        if cron.day_matches(day):
+            for hour in reversed(cron.hours):
+                for minute in reversed(cron.minutes):
+                    candidate = day.replace(hour=hour, minute=minute)
+                    if candidate <= end:
+                        return candidate
+        day -= timedelta(days=1)
+    raise NoOccurrence(
+        f"schedule.cron {cron.expr!r} has no occurrence within "
+        f"{CRON_HORIZON.days} days before {at_or_before.isoformat(timespec='minutes')}"
+    )
 
 
 @dataclass(frozen=True)
