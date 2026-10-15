@@ -114,7 +114,7 @@ class TestAutomationStore:
         (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
         (tmp_path / "wrong.json").write_text(json.dumps(raw(id="other")), encoding="utf-8")
         (tmp_path / "shape.json").write_text(
-            json.dumps(raw(id="shape", schedule={"cron": "* * * * *"})), encoding="utf-8"
+            json.dumps(raw(id="shape", schedule={"every": "1d"})), encoding="utf-8"
         )
         loaded = schedule.load_tasks(tmp_path)
         assert [t.id for t in loaded.tasks] == ["good"]

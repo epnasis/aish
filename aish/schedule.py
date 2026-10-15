@@ -219,9 +219,12 @@ def cron_prev(expr: str, at_or_before: datetime) -> datetime:
 
 @dataclass(frozen=True)
 class Task:
+    """Exactly one of `at` (a one-shot) and `cron` (recurring) is set —
+    `validate_task` is the only constructor that guarantees it."""
+
     id: str
     prompt: str
-    at: datetime  # local wall-clock time, naive
+    at: datetime | None  # local wall-clock time, naive; None for a cron task
     note: str = ""
     enabled: bool = True
     created: str = ""
@@ -230,21 +233,41 @@ class Task:
     sites: tuple[str, ...] = ()
     cwd: str = ""
     roots: tuple[str, ...] = field(default=())
+    cron: str = ""  # normalised 5-field expr; "" for a one-shot
+
+    @property
+    def recurring(self) -> bool:
+        return bool(self.cron)
 
     @property
     def schedule(self) -> dict[str, str]:
-        return {"at": self.at.isoformat()}
+        if self.cron:
+            return {"cron": self.cron}
+        return {"at": self.one_shot_at().isoformat()}
+
+    def one_shot_at(self) -> datetime:
+        if self.at is None:
+            raise ValueError(f"automation {self.id!r} is recurring and has no single time")
+        return self.at
+
+    def key_for(self, occurrence: datetime) -> str:
+        """What the fired ledger is keyed by: the task and ONE occurrence. It
+        carries the time, so an owner who hand-edits `at` (or the cron expr)
+        has re-armed the task — the edited task is a new run, and nothing has
+        to clear an old flag for it to fire."""
+        return f"{self.id}:{occurrence.isoformat()}"
 
     @property
     def key(self) -> str:
-        """What the fired ledger is keyed by. It carries the time, so an owner
-        who hand-edits `at` has re-armed the task — the edited task is a new
-        run, and nothing has to clear an old flag for it to fire."""
-        return f"{self.id}:{self.at.isoformat()}"
+        """A one-shot's single ledger key. A cron task has one per occurrence
+        (`key_for`), so asking it for THE key is a bug, and raises."""
+        return self.key_for(self.one_shot_at())
 
     @property
-    def deadline(self) -> datetime:
-        return self.at + STALE_AFTER
+    def deadline(self) -> datetime | None:
+        """When a one-shot is given up. A cron task never is: it has no
+        deadline, only a next occurrence."""
+        return None if self.at is None else self.at + STALE_AFTER
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -345,13 +368,16 @@ def validate_task(
     *,
     deny_prefixes: Collection[str] = (),
     now: datetime | None = None,
+    as_of: datetime | None = None,
 ) -> Task:
     """One task from its JSON object, or InvalidTask. Fails CLOSED: an unknown
     key is refused rather than ignored, because a key the owner wrote that aish
     silently drops is a constraint he believes is in force.
 
     `now` is passed only at CREATION, where a time already in the past is an
-    error; a task file loaded later is legitimately in the past."""
+    error; a task file loaded later is legitimately in the past. A cron expr
+    must have a next occurrence after `now`, else `as_of` (the loader's clock),
+    else the wall clock — an expr that can never run is refused, never armed."""
     if not isinstance(raw, dict):
         raise InvalidTask("an automation must be a JSON object")
     unknown = sorted(set(raw) - set(FIELDS))
@@ -366,17 +392,25 @@ def validate_task(
     if not isinstance(prompt, str) or not prompt.strip():
         raise InvalidTask("prompt is required: the whole instruction the run starts from")
     schedule = raw.get("schedule")
-    if not isinstance(schedule, dict) or set(schedule) != {"at"}:
+    if not isinstance(schedule, dict) or set(schedule) not in ({"at"}, {"cron"}):
         raise InvalidTask(
-            'schedule must be exactly {"at": "<ISO local datetime>"} — one-shot runs '
-            "are the only kind aish supports so far"
+            'schedule must be exactly one of {"at": "<ISO local datetime>"} (once) '
+            'or {"cron": "<minute hour day-of-month month day-of-week>"} (recurring)'
         )
-    at = parse_at(schedule["at"])
-    if now is not None and at <= now:
-        raise InvalidTask(
-            f"schedule.at {at.isoformat(timespec='minutes')} is not in the future "
-            f"(it is now {now.isoformat(timespec='minutes')})"
-        )
+    at: datetime | None = None
+    cron = ""
+    if "at" in schedule:
+        at = parse_at(schedule["at"])
+        if now is not None and at <= now:
+            raise InvalidTask(
+                f"schedule.at {at.isoformat(timespec='minutes')} is not in the future "
+                f"(it is now {now.isoformat(timespec='minutes')})"
+            )
+    else:
+        if not isinstance(schedule["cron"], str):
+            raise InvalidTask(f"schedule.cron must be a string, got {schedule['cron']!r}")
+        cron = parse_cron(schedule["cron"]).expr
+        cron_next(cron, now or as_of or datetime.now())  # NoOccurrence is an InvalidTask
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise InvalidTask("enabled must be true or false")
@@ -402,6 +436,7 @@ def validate_task(
         sites=sites,
         cwd=_validate_dir(cwd, "cwd") if cwd else "",
         roots=roots,
+        cron=cron,
     )
 
 
@@ -421,7 +456,12 @@ class Loaded:
     problems: list[LoadProblem] = field(default_factory=list)
 
 
-def load_tasks(directory: Path, *, deny_prefixes: Collection[str] = ()) -> Loaded:
+def load_tasks(
+    directory: Path,
+    *,
+    deny_prefixes: Collection[str] = (),
+    as_of: datetime | None = None,
+) -> Loaded:
     """Every task in `directory`. Fails per FILE, never per directory: one
     unparseable file is a problem entry, and every other task still loads."""
     loaded = Loaded()
@@ -430,7 +470,7 @@ def load_tasks(directory: Path, *, deny_prefixes: Collection[str] = ()) -> Loade
     for path in sorted(directory.glob("*.json")):
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            task = validate_task(raw, deny_prefixes=deny_prefixes)
+            task = validate_task(raw, deny_prefixes=deny_prefixes, as_of=as_of)
             if task.id != path.stem:
                 raise InvalidTask(
                     f"id {task.id!r} does not match the file name {path.name!r}"
@@ -459,19 +499,150 @@ def signature(directory: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(sorted(out))
 
 
-def next_due(task: Task, fired: Collection[str], now: datetime) -> str:
+@dataclass(frozen=True)
+class Due:
+    """Where a task stands, and the ONE occurrence that answer is about — a
+    one-shot's `at`, a cron task's latest occurrence at or before now (None
+    when it has none inside the horizon)."""
+
+    status: str
+    occurrence: datetime | None
+
+
+def _occurrence_of(task_id: str, key: str) -> datetime | None:
+    head, sep, tail = key.partition(":")
+    if not sep or head != task_id:
+        return None
+    try:
+        return datetime.fromisoformat(tail)
+    except ValueError:
+        return None
+
+
+def last_fired(task_id: str, fired: Iterable[str]) -> datetime | None:
+    """The latest occurrence of `task_id` the ledger says fired. Exact id match:
+    ids hold no ':', so `eon` never reads `eon-invoices`' keys."""
+    found = [when for key in fired if (when := _occurrence_of(task_id, key)) is not None]
+    return max(found, default=None)
+
+
+def due(
+    task: Task, fired: Collection[str], now: datetime, *, since: datetime | None = None
+) -> Due:
     """Where this task stands at `now`: PENDING (not yet), DUE (fire it),
-    EXPIRED (past `STALE_AFTER` unfired — report it, never fire it), FIRED or
-    DISABLED. `fired` is the set of ledger keys — the one authority."""
+    EXPIRED (a one-shot past `STALE_AFTER` unfired — report it, never fire it),
+    FIRED or DISABLED. `fired` is the set of ledger keys — the one authority.
+
+    A cron task is DUE when its LATEST occurrence at or before `now` is unfired:
+    an older miss is never fired, so a daemon down over N slots fires the last
+    one, once. That occurrence must also be one the task could have missed —
+    at or after `since` (when this schedule began to exist; the scheduler
+    supplies it) and after the task's last fired occurrence. Without `since`,
+    nothing past is provably a miss, so nothing is due. A cron task never
+    expires and has no deadline."""
+    if not task.recurring:
+        return Due(_one_shot_status(task, fired, now), task.at)
+    try:
+        occurrence = cron_prev(task.cron, now)
+    except NoOccurrence:
+        return Due(PENDING, None)
+    if task.key_for(occurrence) in fired:
+        return Due(FIRED, occurrence)
+    if not task.enabled:
+        return Due(DISABLED, occurrence)
+    if since is None or occurrence < since:
+        return Due(PENDING, occurrence)
+    previous = last_fired(task.id, fired)
+    if previous is not None and occurrence <= previous:
+        # The clock went back (the fall-back hour): this occurrence's key may
+        # have been pruned, but a later one fired, so it is not a miss.
+        return Due(PENDING, occurrence)
+    return Due(DUE, occurrence)
+
+
+def _one_shot_status(task: Task, fired: Collection[str], now: datetime) -> str:
+    at = task.one_shot_at()
     if task.key in fired:
         return FIRED
     if not task.enabled:
         return DISABLED
-    if now < task.at:
+    if now < at:
         return PENDING
-    if now - task.at <= STALE_AFTER:
+    if now - at <= STALE_AFTER:
         return DUE
     return EXPIRED
+
+
+def next_due(
+    task: Task, fired: Collection[str], now: datetime, *, since: datetime | None = None
+) -> str:
+    """`due(...)`'s status alone."""
+    return due(task, fired, now, since=since).status
+
+
+#: Cap on how many skipped occurrences are counted one by one; past it the
+#: record says "at least" this many.
+SKIP_COUNT_CAP = 1000
+
+
+@dataclass(frozen=True)
+class Skipped:
+    """Occurrences of a cron task that will never fire because a later one is
+    now the latest. `count_capped` means `count` is a floor, not a total."""
+
+    first: datetime
+    last: datetime
+    count: int
+    count_capped: bool
+
+
+def skipped_before(
+    task: Task, occurrence: datetime, *, since: datetime, after: datetime | None
+) -> Skipped | None:
+    """The occurrences in [since, occurrence) that are also later than `after`
+    (the last one that fired or was already recorded as skipped). Bounded: the
+    scan starts at the floor, never further back."""
+    start = since - timedelta(microseconds=1)
+    if after is not None and after > start:
+        start = after
+    try:
+        first = cron_next(task.cron, start)
+        if first >= occurrence:
+            return None
+        last = cron_prev(task.cron, occurrence - timedelta(minutes=1))
+    except NoOccurrence:
+        return None
+    count, cursor = 1, first
+    while cursor < last and count < SKIP_COUNT_CAP:
+        cursor = cron_next(task.cron, cursor)
+        count += 1
+    return Skipped(first, last, count, count_capped=cursor < last)
+
+
+#: Occurrence keys kept per CRON task in the fired ledger. Once a later
+#: occurrence fired, older keys are never consulted (`due` refuses anything at
+#: or before the last fired one); more than one survives a clock that steps
+#: back, as in the fall-back hour.
+LEDGER_KEEP_PER_CRON_TASK = 4
+
+
+def prune_ledger(
+    data: dict[str, Any], task: Task, *, protected: Collection[str]
+) -> list[str]:
+    """Drop, in place, all but the newest `LEDGER_KEEP_PER_CRON_TASK` occurrence
+    keys of cron task `task`; returns what was dropped. A one-shot's key is
+    never dropped while its task file exists (`protected`): a pruned one-shot
+    key reads as never-fired, then EXPIRED, then pushes a false "did not run".
+    A one-shot task prunes nothing, and an unparseable key is left alone."""
+    if not task.recurring:
+        return []
+    mine = sorted(
+        (when, key) for key in data if (when := _occurrence_of(task.id, key)) is not None
+    )
+    dropped = [key for _when, key in mine[:-LEDGER_KEEP_PER_CRON_TASK] if key not in protected]
+    for key in dropped:
+        del data[key]
+    return dropped
 
 
 class LedgerUnreadable(Exception):
@@ -542,9 +713,21 @@ def describe(task: Task, now: datetime, *, replacing: bool = False) -> str:
     may run without asking and where it may act as him. The JSON diff stays
     underneath; this is what he is agreeing to."""
     verb = "Replaces automation" if replacing else "New automation"
+    if task.recurring:
+        first = cron_next(task.cron, now)
+        upcoming = (first, cron_next(task.cron, first))
+        when = (
+            f"Runs on the schedule `{task.cron}` — next: "
+            + ", ".join(o.strftime("%a %Y-%m-%d %H:%M") for o in upcoming)
+            + " — each time in a new chat with nobody watching."
+        )
+    else:
+        when = (
+            f"Runs ONCE, at {_when(task.one_shot_at(), now)}, in a new chat with nobody watching."
+        )
     lines = [
         f"{verb} '{task.id}'" + (f" — {task.note}" if task.note else ""),
-        f"Runs ONCE, at {_when(task.at, now)}, in a new chat with nobody watching.",
+        when,
         "",
         "The whole instruction it will run:",
         task.prompt,
@@ -570,10 +753,18 @@ def describe(task: Task, now: datetime, *, replacing: bool = False) -> str:
         lines.append(f"Working directory: {task.cwd}")
     if task.roots:
         lines.append(f"Also trusted for reading: {_listed(task.roots)}")
-    lines += [
-        "Everything else that changes something waits for you on a card.",
-        f"If it has not started by {task.deadline.strftime('%H:%M %a %Y-%m-%d')}, "
-        "aish gives it up and records that (and notifies you, if notifications "
-        "are set up).",
-    ]
+    lines.append("Everything else that changes something waits for you on a card.")
+    if task.deadline is None:
+        lines.append(
+            "A run that cannot start is retried until the next scheduled time, then "
+            "skipped and recorded; you are notified the first time runs fail to start, "
+            "then at most once a day while they keep failing (if notifications are set "
+            "up). After aish was down, only the latest missed run fires, late."
+        )
+    else:
+        lines.append(
+            f"If it has not started by {task.deadline.strftime('%H:%M %a %Y-%m-%d')}, "
+            "aish gives it up and records that (and notifies you, if notifications "
+            "are set up)."
+        )
     return "\n".join(lines)
