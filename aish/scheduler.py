@@ -128,6 +128,10 @@ def _parse_stamp(value: object) -> datetime | None:
         return None
 
 
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _task_of(key: str) -> str:
     return key.partition(":")[0]
 
@@ -264,7 +268,7 @@ class Scheduler:
     def _since(self, task: Task) -> datetime | None:
         assert self._state is not None
         entry = self._state.cron.get(task.id)
-        if not entry or entry.get("cron") != task.cron:
+        if not isinstance(entry, dict) or entry.get("cron") != task.cron:
             return None
         return _parse_stamp(entry.get("since"))
 
@@ -368,8 +372,8 @@ class Scheduler:
             settled=dict(data.get("settled") or {}),
             notified=list(data.get("notified") or []),
             problems=list(data.get("problems") or []),
-            cron=dict(data.get("cron") or {}),
-            streaks=dict(data.get("streaks") or {}),
+            cron=_mapping(data.get("cron")),
+            streaks=_mapping(data.get("streaks")),
         )
 
     async def _reload_if_changed(self) -> None:
@@ -410,16 +414,29 @@ class Scheduler:
         owner's edit that set this expr or re-enabled it — capped at now, so a
         task approved between two ticks still owns the occurrence in between.
         A disabled or deleted task forgets it, so re-enabling never fires an
-        occurrence that passed while it was off."""
+        occurrence that passed while it was off. A file that is only
+        transiently invalid (a typo mid-edit) keeps it: forgetting would re-seed
+        `since` at the fix and silently drop the slot the typo spanned."""
         assert self._state is not None
-        live = {t.id: t for t in self.tasks if t.recurring and t.enabled}
-        for task_id in [i for i in self._state.cron if i not in live]:
-            del self._state.cron[task_id]
-        for task_id in [i for i in self._state.streaks if i not in live]:
-            del self._state.streaks[task_id]
+        loaded = {t.id: t for t in self.tasks}
+        live = {i: t for i, t in loaded.items() if t.recurring and t.enabled}
+
+        def forgotten(task_id: str) -> bool:
+            if task_id in live:
+                return False
+            # Not loaded but its file is still there: a load problem, kept.
+            return task_id in loaded or f"{task_id}.json" not in mtimes
+
+        for store in (self._state.cron, self._state.streaks):
+            for task_id in [i for i, v in store.items()
+                            if not isinstance(v, dict) or forgotten(i)]:
+                del store[task_id]
         for task_id, task in live.items():
             entry = self._state.cron.get(task_id)
-            if entry and entry.get("cron") == task.cron:
+            # An unparseable `since` is treated as absent so it re-seeds, never
+            # leaving the task PENDING forever with nothing recorded.
+            if (entry and entry.get("cron") == task.cron
+                    and _parse_stamp(entry.get("since")) is not None):
                 continue
             mtime_ns = mtimes.get(f"{task_id}.json")
             began = datetime.fromtimestamp(mtime_ns / 1e9) if mtime_ns else now

@@ -508,3 +508,50 @@ def test_the_loop_survives_a_cron_task_in_a_full_tick(tmp_path):
     asyncio.run(sched.tick())
     assert sorted(fired_keys(seam)) == ["daily:2026-10-15T09:00:00",
                                         "eon-invoices:2026-10-15T09:00:00"]
+
+
+class TestRecurringStateRobustness:
+    def test_a_typo_window_spanning_a_slot_still_fires_it_after_the_fix(self, tmp_path):
+        write_cron(tmp_path)
+        clock = Clock(D(2026, 10, 15, 8, 58))
+        sched, seam, _ = build(tmp_path, clock)
+        tick(sched)
+        broken = tmp_path / "automations" / "daily.json"
+        broken.write_text("{ typo", encoding="utf-8")
+        stamp = D(2026, 10, 15, 8, 58, 30).timestamp()
+        os.utime(broken, (stamp, stamp))
+        clock.now = D(2026, 10, 15, 9, 1)
+        tick(sched)  # the broken window spans 09:00: a LoadProblem, not a deletion
+        assert schedule.scheduler_state(tmp_path / "state").read()["cron"]["daily"]
+        write_cron(tmp_path, began=D(2026, 10, 15, 9, 4))  # fixed at 09:04
+        clock.now = D(2026, 10, 15, 9, 4, 20)
+        tick(sched)
+        assert fired_keys(seam) == ["daily:2026-10-15T09:00:00"]
+
+    def test_a_deleted_task_still_forgets_its_since(self, tmp_path):
+        path = write_cron(tmp_path)
+        sched, _, _ = build(tmp_path, Clock(D(2026, 10, 15, 8, 58)))
+        tick(sched)
+        path.unlink()
+        tick(sched)
+        assert "daily" not in schedule.scheduler_state(tmp_path / "state").read()["cron"]
+
+    @pytest.mark.parametrize("entry", [
+        {"cron": DAILY, "since": "not a time"},
+        {"cron": DAILY},
+        "not a dict",
+        ["nor", "this"],
+    ])
+    def test_a_bad_cron_entry_re_seeds_instead_of_wedging(self, tmp_path, entry):
+        write_cron(tmp_path)
+        schedule.scheduler_state(tmp_path / "state").write({"cron": {"daily": entry}})
+        sched, seam, _ = build(tmp_path, Clock(D(2026, 10, 15, 9, 0, 10)))
+        tick(sched)
+        assert fired_keys(seam) == ["daily:2026-10-15T09:00:00"]
+
+    def test_a_non_dict_cron_map_does_not_break_loading(self, tmp_path):
+        write_cron(tmp_path)
+        schedule.scheduler_state(tmp_path / "state").write({"cron": [1], "streaks": "x"})
+        sched, seam, _ = build(tmp_path, Clock(D(2026, 10, 15, 9, 0, 10)))
+        tick(sched)
+        assert fired_keys(seam) == ["daily:2026-10-15T09:00:00"]
