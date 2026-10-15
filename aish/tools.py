@@ -1775,10 +1775,10 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "schedule_task",
             "description": (
-                "Do work LATER, once, unattended: when the user says 'check after 10pm', "
-                "'tonight', 'tomorrow morning', 'try again at 9'. The user approves it on a "
-                "card; at that time aish runs your prompt in a new chat, where any change "
-                "waits for their approval. MUST be a complete handoff: the goal, what you "
+                "Do work LATER, unattended: once (at: 'check after 10pm') or recurring "
+                "(cron: 'every weekday at 9'), not both. The user approves it on a "
+                "card; then aish runs your prompt in a new chat, where changes wait for "
+                "approval. MUST be a complete handoff: the goal, what you "
                 "already found, where to look. Never a reminder app or 'come back later'."
             ),
             "parameters": {
@@ -1787,7 +1787,11 @@ TOOL_SCHEMAS: list[dict] = [
                     "id": {"type": "string", "description": "kebab-case, e.g. 'eon-invoices'."},
                     "at": {
                         "type": "string",
-                        "description": "Local date and time, e.g. '2026-10-15T22:05'.",
+                        "description": "Local, e.g. '2026-10-15T22:05'.",
+                    },
+                    "cron": {
+                        "type": "string",
+                        "description": "Local, e.g. '0 9 * * 1-5'.",
                     },
                     "prompt": {"type": "string", "description": "The whole instruction."},
                     "note": {"type": "string", "description": "One line: what it is for."},
@@ -1804,7 +1808,7 @@ TOOL_SCHEMAS: list[dict] = [
                     "model": {"type": "string", "description": "Only if the user names one."},
                     "cwd": {"type": "string", "description": "Absolute working directory."},
                 },
-                "required": ["id", "at", "prompt", "note"],
+                "required": ["id", "prompt", "note"],
             },
         },
     },
