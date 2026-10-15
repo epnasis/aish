@@ -53,6 +53,7 @@ from . import (
     roles,
     rule_compiler,
     rules,
+    schedule,
     secrets,
     skill_import,
     skills,
@@ -67,7 +68,16 @@ from . import (
     web,
 )
 from . import plan as checklist
-from .approval import Approved, Blocked, Denied, Licensed, is_scratch_delete, path_within
+from .approval import (
+    Approved,
+    Blocked,
+    Denied,
+    Licensed,
+    default_denylist,
+    is_scratch_delete,
+    load_prefixes,
+    path_within,
+)
 from .session import (
     NOTE_MARKER,
     STOPPED_ANSWER,
@@ -227,6 +237,11 @@ The task reminder carries the current time, your scratch directory (writes there
 are auto-approved and die with the chat), the objective (aish's reading of why \
 the user is here; his latest message always outranks it) and your open plan — \
 context, not requests.
+
+LATER
+When the user asks for something later or at a time ("check after 10pm"), you \
+MUST propose schedule_task with a complete handoff prompt — never a reminder \
+app, never "come back later". It runs once, unattended, in a new chat.
 
 ABOUT AISH
 Questions about aish itself (UI, commands, limits): \
@@ -865,6 +880,8 @@ _GLOB_CHARS = "*?["
 # environment variables that RELOCATE them. Net 4 below fires on these alone
 # once any part of the command is something the shell will rewrite.
 _CHARTER_WORDS = ("charters", "roles", "AISH_CONFIG_HOME")
+# The same, for the automations folder (epic #142 W2).
+_AUTOMATION_WORDS = ("automations", "AISH_CONFIG_HOME")
 
 
 def _is_dynamic(text: str) -> bool:
@@ -1166,6 +1183,32 @@ CHARTER_COMMAND_REFUSED = (
     "work. A command touching them is refused whether it would read or write, "
     "because that cannot be told apart from the command text. There is nothing "
     "to approve here."
+)
+
+# The automations folder (epic #142 W2) holds the files that START unattended
+# runs, so it gets the charter fence's shape: unapprovable, in every origin, by
+# file tool and by shell. The one writer is schedule_task, whose card says in
+# words what the automation will do — a raw write would put a JSON diff on a
+# card he has said he does not read, or no card at all.
+AUTOMATION_NOT_WRITABLE = (
+    "NOT EXECUTED: {path} is inside aish's automations folder — the files that "
+    "start unattended runs. Only schedule_task writes there, on a card that shows "
+    "the user what the automation will do. There is nothing to approve here."
+)
+
+AUTOMATION_COMMAND_REFUSED = (
+    "NOT EXECUTED: this command names aish's automations folder ({where}) — the "
+    "files that start unattended runs. A command touching it is refused whether "
+    "it would read or write, because that cannot be told apart from the command "
+    "text; read_file can still read a task file. There is nothing to approve here."
+)
+
+# A triggered session must never author the thing that triggers sessions.
+SCHEDULE_ONLY_FROM_OWNER = (
+    "NOT EXECUTED: schedule_task works only in the user's own chat. This session "
+    "was started by an automation, and a run may not create or change the "
+    "automations that start runs. If more work should happen later, say so in "
+    "your answer so the user can schedule it."
 )
 
 BLOCKED_RESULT = (
@@ -12214,7 +12257,29 @@ class Agent:
         and are how a path is usually written. Nothing else is: a fence that
         evaluated `$(…)` would be running the command it is deciding about.
         """
-        stores = self._charter_dirs()
+        return self._command_names_a_store(command, self._charter_dirs(), _CHARTER_WORDS)
+
+    def _automation_dirs(self) -> list[Path]:
+        return [schedule.automations_dir()]
+
+    def _is_automation_file(self, path: str) -> bool:
+        """Does this path land inside the automations folder (epic #142 W2)?
+        Same containment function as the charter fence, for the same reason."""
+        return any(files.contains(store, path, self.cwd) for store in self._automation_dirs())
+
+    def _command_touches_automations(self, command: str) -> str:
+        """The automations folder this shell command names, or "" — the
+        charter fence's four nets, pointed at the files that start runs."""
+        return self._command_names_a_store(
+            command, self._automation_dirs(), _AUTOMATION_WORDS
+        )
+
+    def _command_names_a_store(
+        self, command: str, stores: list[Path], words: tuple[str, ...]
+    ) -> str:
+        """The fenced store `command` names, or "" — the four nets described
+        on `_command_touches_a_charter`, for any list of stores and the words
+        that name them."""
         for store in stores:
             # NET 1 — the literal spelling, anywhere in the text. It is what
             # catches a form no path extractor sees as a path:
@@ -12261,7 +12326,7 @@ class Agent:
         # under-refusing puts a governance write on an approval card, and the
         # owner has said he does not read them.
         if _is_dynamic(command):
-            for word in _CHARTER_WORDS:
+            for word in words:
                 if re.search(rf"(?<![A-Za-z0-9_]){re.escape(word)}(?![A-Za-z0-9_])", command):
                     return _display_path(stores[0])
         return ""
@@ -13972,6 +14037,9 @@ class Agent:
         if name == "retire_rule":
             return self._retire_rule(args)
 
+        if name == "schedule_task":
+            return self._schedule_task(args)
+
         if name == "run_command":
             # Expand any aish alias on the first word BEFORE the gate, so the
             # denylist/approval/cd-check all classify the real command.
@@ -13996,6 +14064,13 @@ class Agent:
             if where := self._command_touches_a_charter(command):
                 result = CHARTER_COMMAND_REFUSED.format(where=where)
                 self._note("✕ command names aish's own role charters")
+                self._run_meta = {"command": command, "decision": "blocked", "output": result}
+                return _gate_outcome(result, decision="blocked")
+            # The same fence for the files that start unattended runs (epic
+            # #142 W2), in every origin and before any card can be drawn.
+            if where := self._command_touches_automations(command):
+                result = AUTOMATION_COMMAND_REFUSED.format(where=where)
+                self._note("✕ command names aish's automations folder")
                 self._run_meta = {"command": command, "decision": "blocked", "output": result}
                 return _gate_outcome(result, decision="blocked")
 
@@ -14958,6 +15033,13 @@ class Agent:
                 CHARTER_NOT_WRITABLE.format(path=str(args.get("path", ""))),
                 decision="blocked",
             )
+        # The files that start unattended runs are written by schedule_task
+        # alone (epic #142 W2), whose card says what the run will do.
+        if self._is_automation_file(str(args.get("path", ""))):
+            return _gate_outcome(
+                AUTOMATION_NOT_WRITABLE.format(path=str(args.get("path", ""))),
+                decision="blocked",
+            )
         if name == "write_file":
             plan = files.plan_write(
                 str(args.get("path", "")), str(args.get("content", "")), self.cwd
@@ -15013,6 +15095,73 @@ class Agent:
         self.echo(result)
         self._run_meta = {"decision": "approved", **diff_meta}
         return result
+
+    def _schedule_task(self, args: dict) -> str | tools.ToolOutcome:
+        """Propose a one-shot automation (epic #142 W2). Validated, rendered by
+        aish (the model never writes the JSON), and written only through the
+        diff-approval card, whose note says in words when it runs, the whole
+        prompt, and what it may do without asking."""
+        if self.origin != "user":
+            # Early refusal, like the charter fence: no card exists to approve,
+            # because the property is that no triggered session ever authors
+            # the thing that triggers sessions.
+            return _gate_outcome(SCHEDULE_ONLY_FROM_OWNER, decision="blocked")
+        if self.approve_write is None:
+            return "ERROR: no write approver available; cannot schedule work."
+        now = datetime.datetime.now().replace(microsecond=0)
+        raw: dict[str, Any] = {
+            "id": str(args.get("id", "") or "").strip(),
+            "note": str(args.get("note", "") or "").strip(),
+            "prompt": str(args.get("prompt", "") or ""),
+            "schedule": {"at": args.get("at")},
+            "enabled": True,
+            "created": now.isoformat(),
+        }
+        for key in ("model", "cwd"):
+            if args.get(key):
+                raw[key] = args[key]
+        for key in ("allow", "sites"):
+            if args.get(key):
+                raw[key] = args[key]
+        deny_path = Path(os.environ.get("AISH_DENYLIST") or default_denylist())
+        try:
+            task = schedule.validate_task(
+                raw, deny_prefixes=load_prefixes(deny_path), now=now
+            )
+        except schedule.InvalidTask as exc:
+            return f"ERROR: {exc}. Fix it and call schedule_task again."
+        target = schedule.automations_dir() / f"{task.id}.json"
+        plan = files.plan_write(str(target), task.render(), self.cwd)
+        if plan.error:
+            return f"ERROR: {plan.error}"
+        plan = dataclasses.replace(
+            plan, note=schedule.describe(task, now, replacing=not plan.is_new)
+        )
+        decision = self.approve_write(plan)
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            return _gate_outcome(
+                _with_feedback(WRITE_DENIED, decision.comment, card_said=None),
+                decision="denied",
+                comment=decision.comment,
+            )
+        if isinstance(decision, Approved):
+            return _gate_outcome(
+                WRITE_HELD_FOR_ADJUSTMENT.format(comment=decision.comment),
+                decision="held",
+                comment=decision.comment,
+            )
+        if not decision:
+            return _gate_outcome(WRITE_DENIED, decision="denied")
+        result = files.commit(plan)
+        if result.startswith("ERROR"):
+            return result
+        return (
+            f"Scheduled '{task.id}' for {task.at.isoformat(sep=' ', timespec='minutes')}. "
+            "At that time aish runs it in a new chat; anything that needs approval "
+            "will wait for the user there. Tell the user it is scheduled — do not "
+            "also set a reminder."
+        )
 
     def _parse_cd(self, command: str) -> str | None:
         """Detect a bare `cd <dir>`. For the user (! prefix) it changes agent
