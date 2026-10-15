@@ -71,11 +71,13 @@ from . import (
     objective,
     recipients,
     roles,
+    schedule,
     tools,
     turns,
     vault_writes,
 )
 from . import plan as checklist
+from . import scheduler as scheduling
 from .agent import (
     ASKED_BY_IMPORT,
     ASKED_BY_READ,
@@ -431,6 +433,19 @@ TRIGGER_RATE_REFILL_S = 30.0    # seconds to earn one new token
 # poll instead of being lost.
 MAX_CONCURRENT_TRIGGERED = 3
 TRIGGER_RETRY_AFTER_S = 30      # Retry-After hint on either 429
+
+
+class RunProfile(NamedTuple):
+    """What a scheduled run may do without a card, as the owner approved it
+    inside the automation's creation card (epic #142 W2). It enters the run as
+    SESSION-scoped grants — the same sets an "Allow this session" answer and a
+    site card fill — and is never written anywhere: the persistent allowlist is
+    not consulted in a non-user origin at all (#449)."""
+
+    allow: tuple[str, ...] = ()
+    sites: tuple[str, ...] = ()
+    cwd: str = ""
+    roots: tuple[str, ...] = ()
 
 # Dedicated executor for AGENT WORKERS (#178 Gate 3) — the run_task /
 # run_user_command calls that can PARK indefinitely on an approval (Bridge.ask
@@ -1908,6 +1923,10 @@ class WebServer:
         self.dir_ignore = list(dir_ignore_patterns or dir_ignore.DEFAULT_IGNORE)
         self.loop: asyncio.AbstractEventLoop | None = None
         self.resumer: asyncio.Task | None = None  # startup restart-recovery (#164)
+        # The owner's one-shot automations (epic #142 W2); built by create_app,
+        # which knows the deny list and the state dir, and run from startup.
+        self.scheduler: scheduling.Scheduler | None = None
+        self.scheduler_task: asyncio.Task | None = None
         self.sessions: dict[str, Session] = {}
         # Per-name in-flight cold opens (#178 P1-5): concurrent callers racing
         # on the same name await ONE build instead of each constructing a
@@ -2004,6 +2023,11 @@ class WebServer:
         # shape: one listdir and a filename parse, off the startup path, and a
         # failure that can never keep the server from coming up.
         self.purger = asyncio.ensure_future(asyncio.to_thread(self._purge_trash))
+        # The automations loop, off the startup path like the resumer. Its
+        # first tick runs at once, so a one-shot that came due while the
+        # daemon was down (every `make ship` restarts it) fires on start.
+        if self.scheduler is not None:
+            self.scheduler_task = asyncio.ensure_future(self.scheduler.run())
 
     def _sweep_turns(self) -> None:
         """Evict whole chats' evidence, oldest first, when the store exceeds
@@ -2099,6 +2123,10 @@ class WebServer:
         alive. Denials are recorded in the audit log like any other deny."""
         if self.resumer is not None and not self.resumer.done():
             self.resumer.cancel()  # a restart mid-recovery just recovers again
+        if self.scheduler_task is not None and not self.scheduler_task.done():
+            # Nothing is lost: what fired is in the ledger, what has not is
+            # still due on the next start.
+            self.scheduler_task.cancel()
         for session in self.sessions.values():
             for uid in list(session.bridge.pending):
                 session.bridge.answer(uid, {"action": "deny"})
@@ -5561,47 +5589,75 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         title = str(body.get("title") or "").strip()
         model_override = str(body.get("model") or "").strip()
 
-        # Abuse guards (#178 P1-10), in this order: a dedup hit is an
-        # idempotent SUCCESS and consumes nothing (a retry storm re-sending
-        # one key must not burn rate tokens), and both 429s come BEFORE any
-        # session exists. No dedup_key → every POST fires (existing clients
-        # keep working unchanged).
-        dedup_key = str(meta.get("dedup_key") or "")
-        if dedup_key:
-            existing = self._dedup_hit(dedup_key)
-            if existing is not None:
-                return JSONResponse(
-                    {"session": existing, "origin": origin, "deduped": True}
-                )
-        retry_after = {"Retry-After": str(TRIGGER_RETRY_AFTER_S)}
-        if not self._trigger_rate_ok(origin):
+        outcome = await self.launch_triggered(
+            prompt, origin, meta, title=title, model_override=model_override
+        )
+        if outcome.status == scheduling.DEDUPED:
             return JSONResponse(
-                {"error": f"rate limit exceeded for origin {origin!r}"},
-                status_code=429,
-                headers=retry_after,
+                {"session": outcome.session, "origin": origin, "deduped": True}
             )
-        if self._running_triggered() >= self.max_concurrent_triggered:
+        if outcome.status in (scheduling.RATE_LIMITED, scheduling.AT_CAPACITY):
             # Refusal is safe by contract: the poller marks a message
             # processed only AFTER a successful trigger, so a 429'd delivery
             # retries on the next poll instead of being lost.
             return JSONResponse(
-                {"error": "too many concurrent triggered sessions"},
+                {"error": outcome.error},
                 status_code=429,
-                headers=retry_after,
+                headers={"Retry-After": str(TRIGGER_RETRY_AFTER_S)},
             )
-
-        self._evict_idle()
-        try:
-            session, _ = await asyncio.to_thread(
-                self.open_session, None, origin, meta, model_override
-            )
-        except backends.BackendError as exc:
+        if outcome.status == scheduling.OPEN_FAILED:
             # Fail CLOSED (#186): a privacy-scoped trigger asked for a model
             # this server cannot build — refusing beats silently running the
             # prompt (which may aggregate private-session excerpts) on the
             # cloud default. 503 so the caller retries after fixing the model.
-            return JSONResponse(
-                {"error": f"model unavailable: {exc}"}, status_code=503
+            return JSONResponse({"error": outcome.error}, status_code=503)
+        return JSONResponse({"session": outcome.session, "origin": origin})
+
+    async def launch_triggered(
+        self,
+        prompt: str,
+        origin: str,
+        meta: dict,
+        *,
+        title: str = "",
+        model_override: str = "",
+        profile: RunProfile | None = None,
+    ) -> scheduling.TriggerOutcome:
+        """THE ingress for a non-user session, past the token/origin gates.
+        `POST /trigger` and the scheduler both come through here, so a
+        scheduled run reaches a session by no path the guards do not stand in.
+        `profile` is the scheduler's alone: the grants the owner approved
+        inside the automation's creation card."""
+        # Abuse guards (#178 P1-10), in this order: a dedup hit is an
+        # idempotent SUCCESS and consumes nothing (a retry storm re-sending
+        # one key must not burn rate tokens), and both refusals come BEFORE
+        # any session exists. No dedup_key → every call fires (existing
+        # clients keep working unchanged).
+        dedup_key = str(meta.get("dedup_key") or "")
+        if dedup_key:
+            existing = self._dedup_hit(dedup_key)
+            if existing is not None:
+                return scheduling.TriggerOutcome(scheduling.DEDUPED, session=existing)
+        if not self._trigger_rate_ok(origin):
+            return scheduling.TriggerOutcome(
+                scheduling.RATE_LIMITED, error=f"rate limit exceeded for origin {origin!r}"
+            )
+        if self._running_triggered() >= self.max_concurrent_triggered:
+            return scheduling.TriggerOutcome(
+                scheduling.AT_CAPACITY, error="too many concurrent triggered sessions"
+            )
+
+        self._evict_idle()
+        # Passed only when present, so the HTTP path calls open_session with
+        # exactly the arguments it always did.
+        extra = {"profile": profile} if profile is not None else {}
+        try:
+            session, _ = await asyncio.to_thread(
+                self.open_session, None, origin, meta, model_override, **extra
+            )
+        except backends.BackendError as exc:
+            return scheduling.TriggerOutcome(
+                scheduling.OPEN_FAILED, error=f"model unavailable: {exc}"
             )
         # NEVER the default (#178 P1-6): an overnight trigger must not become
         # the landing spot for the next bare connect (nor eviction-immune).
@@ -5620,7 +5676,34 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             # Recorded only once the session actually exists, so a failed
             # open never poisons the key for the retry that would succeed.
             self._dedup_store(dedup_key, session.name)
-        return JSONResponse({"session": session.name, "origin": origin})
+        return scheduling.TriggerOutcome(scheduling.STARTED, session=session.name)
+
+    async def fire_scheduled(self, request: scheduling.FireRequest) -> scheduling.TriggerOutcome:
+        """The scheduler's way in: an ordinary `origin="schedule"` trigger
+        through `launch_triggered`, carrying the task's profile. A working
+        directory that is gone is an open failure the scheduler reports — the
+        run would otherwise start somewhere the owner never approved."""
+        task = request.task
+        missing = await asyncio.to_thread(
+            lambda: [d for d in (task.cwd, *task.roots) if d and not os.path.isdir(d)]
+        )
+        if missing:
+            return scheduling.TriggerOutcome(
+                scheduling.OPEN_FAILED, error=f"directory does not exist: {missing[0]}"
+            )
+        meta = {
+            "dedup_key": request.dedup_key,
+            "automation": task.id,
+            "scheduled_for": request.scheduled_for.isoformat(timespec="seconds"),
+            "fired_at": request.fired_at.isoformat(timespec="seconds"),
+        }
+        return await self.launch_triggered(
+            request.prompt, "schedule", meta,
+            title=f"Scheduled: {task.note or task.id}",
+            model_override=task.model,
+            profile=RunProfile(allow=task.allow, sites=task.sites,
+                               cwd=task.cwd, roots=task.roots),
+        )
 
     def _store_upload(self, name: str, body: bytes) -> Path:
         """Write `body` into the uploads dir under a name that is not already
@@ -6702,6 +6785,7 @@ def create_app(
         origin: str = "user",
         trigger_meta: dict | None = None,
         model_override: str = "",
+        profile: RunProfile | None = None,
     ) -> tuple[Session, list[dict]]:
         """Build one Session: fresh agent wired to its own bridge/log. For an
         existing path the conversation is reloaded into the agent (the file
@@ -7003,6 +7087,23 @@ def create_app(
         # added AFTER restore_workspace — which rebuilds roots to be exactly the
         # session's own workspace and would otherwise drop it (#176).
         agent.roots.append(uploads_dir.resolve())
+        if profile is not None and path is None:
+            # A scheduled run's grants, seeded into the very sets the owner's
+            # live answers fill (L4: they die with this session). The prefixes
+            # land in session_prefixes, the one set the shell gate consults in
+            # a non-user origin (#449); the sites in the press-grant set a site
+            # card fills, through the setter a cold reopen uses — memory only,
+            # so nothing about the run outlives it.
+            if profile.cwd:
+                # Unannounced: the note a rebase announces says the OWNER typed
+                # /cd, which here nobody did. claude-max's wrapper always
+                # announces, so its inner Agent is moved directly.
+                mover = agent if isinstance(agent, Agent) else agent.inner
+                mover.rebase(profile.cwd, announce=False)
+            for root in profile.roots:
+                agent.trust_root(root)
+            agent.session_prefixes.update(profile.allow)
+            agent.restore_site_grants(list(profile.sites))
         logref.model(model_spec(agent))  # record what this session actually runs
         if origin != "user" and path is None:
             # Persist provenance ONCE, when the session is created, so a
@@ -7046,6 +7147,15 @@ def create_app(
     server.trigger_rate_capacity = trigger_rate_capacity
     server.trigger_rate_refill_s = trigger_rate_refill_s
     server.max_concurrent_triggered = max_concurrent_triggered
+    # The owner's automations (epic #142 W2). The deny list is read per load,
+    # so an entry he adds also refuses a task file that names it.
+    server.scheduler = scheduling.Scheduler(
+        state_dir=state_dir,
+        fire=server.fire_scheduled,
+        notify=lambda title, body: notify.pushover(title, body, priority=0),
+        directory=schedule.automations_dir,
+        deny_prefixes=lambda: load_prefixes(deny_path),
+    )
     server_ref.append(server)
     first, _ = open_session(None)
     server.add_session(first, default=True)
