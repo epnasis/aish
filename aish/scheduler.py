@@ -239,7 +239,12 @@ class Scheduler:
         state = await self._ensure_state()
         match = _SCHEDULED_PREFIX.match(prompt or "")
         automation = match.group(1) if match else ""
-        which = f"automation {automation}" if automation else "a scheduled run"
+        if automation:
+            title = f"aish automation {automation} was interrupted"
+            subject = f"The run of automation {automation}"
+        else:
+            title = "aish: a scheduled run was interrupted"
+            subject = "The scheduled run"
         key = f"interrupted:{session}:{log_size}"
         if key in state.notified:
             return
@@ -249,8 +254,8 @@ class Scheduler:
         })
         await self._push_once(
             key,
-            f"aish {which} was interrupted",
-            f"The run of {which} in chat {session} was interrupted: aish-web stopped "
+            title,
+            f"{subject} in chat {session} was interrupted: aish-web stopped "
             "while it was running, and scheduled runs are not resumed. The chat's "
             "transcript shows what it did and any approvals it was waiting on.",
         )

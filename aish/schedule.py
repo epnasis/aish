@@ -328,7 +328,15 @@ class LedgerUnreadable(Exception):
 
 class JsonStore:
     """A small JSON object on disk, written whole through `atomic_write`.
-    One writer (the scheduler loop), so read-modify-write needs no lock."""
+
+    The fired ledger has one writer, the scheduler loop. The scheduler's state
+    file has two, both on the event loop: the loop's ticks and the resumer's
+    `report_interrupted`. Each save snapshots the in-memory state on the loop
+    and writes it in a thread, so two saves that overlap can land in either
+    order, and the older snapshot may be written last. That window is
+    milliseconds wide and is accepted rather than serialised: the worst it can
+    do is drop the newest record or notified key until the next save, which
+    can cost one duplicate push after a restart and can never cause a fire."""
 
     def __init__(self, path: Path) -> None:
         self.path = path

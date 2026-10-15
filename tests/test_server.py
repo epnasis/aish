@@ -9543,7 +9543,9 @@ class TestRestartResume:
         client, _ = make_client(app_env, [])
         with client:
             assert self._wait(lambda: len(pushes) == 1)
-        assert pushes[0][0] == "aish a scheduled run was interrupted"
+        title, body = pushes[0]
+        assert title == "aish: a scheduled run was interrupted"
+        assert body.startswith("The scheduled run in chat session-20260101-120000-000000")
 
     def test_an_interrupted_user_chat_pushes_no_interruption(self, app_env, monkeypatch):
         pushes = self._pushes(monkeypatch)

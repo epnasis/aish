@@ -203,8 +203,25 @@ class TestAutomationFence:
             link.unlink()
 
     def test_reading_a_task_file_with_read_file_is_not_fenced(self):
-        assert not Agent(model="fake", approve=lambda _c: True,
-                         client_chat=lambda **kw: {})._command_touches_automations("ls -la")
+        # The fence refuses writes and any shell mention; read_file is the
+        # carve-out that keeps a task file readable. Outside the session roots
+        # it draws the ordinary read card — asked, never blocked.
+        store = schedule.automations_dir()
+        store.mkdir(parents=True)
+        path = store / "eon-invoices.json"
+        path.write_text(schedule.validate_task({
+            "id": "eon-invoices", "prompt": "Download the October E.ON invoices.",
+            "schedule": {"at": AT.isoformat()},
+        }).render(), encoding="utf-8")
+        reads = []
+        agent, _ = make_agent(
+            [model_says("ok")],
+            approve_read=lambda p, reason: reads.append((p, reason)) or True,
+        )
+        result = agent._dispatch("read_file", {"path": str(path)})
+        assert "Download the October E.ON invoices." in str(result)
+        assert "NOT EXECUTED" not in str(result)
+        assert reads and reads[0][1] == "outside"
 
     def test_the_charter_fence_is_unchanged_by_the_shared_nets(self):
         agent, _ = self._agent("user")
