@@ -904,6 +904,13 @@ class SessionInfo:
     quiet_through: float = 0.0
 
 
+def silent_output(out: float, quiet_through: float) -> bool:
+    """Everything a chat has said belongs to a silent monitor run (#5 S4): its
+    newest `quiet` record covers its last output. The ONE definition — the
+    server's `silent` row fact and the terminal's `/runs` both ask this."""
+    return bool(out) and bool(quiet_through) and float(out) <= float(quiet_through)
+
+
 class Ranked(NamedTuple):
     """A ranked answer and WHAT KIND of answer it is. Approximate results are a
     different statement — "nothing you typed is in any chat, here are the

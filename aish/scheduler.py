@@ -602,6 +602,11 @@ class Scheduler:
     # -- outcomes -------------------------------------------------------------
 
     async def _fire(self, task: Task, occurrence: datetime, now: datetime) -> None:
+        # A tick iterates a snapshot of `self.tasks` across awaits, and
+        # `fire_now` can reload the folder in between (#5 S4): a task that
+        # reload found disabled, edited or deleted must not fire as it was.
+        if task not in self.tasks or not task.enabled:
+            return
         key = task.key_for(occurrence)
         retry_at = self._retry_open_at.get(key)
         if retry_at is not None and now < retry_at:

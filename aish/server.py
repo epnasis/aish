@@ -149,6 +149,7 @@ from .session import (
     purge_trash,
     real_attachments,
     restore_session,
+    silent_output,
     strip_attachment_notes,
     synthetic_kind,
     title_drifted,
@@ -777,7 +778,7 @@ def _silent(out: float, quiet_through: float) -> bool:
     (`needsYou`) consumes it and never derives it. Output newer than the
     record — the owner typing into the chat later, a run that went on — is
     not covered, so it asks for attention as any chat's would."""
-    return bool(out) and bool(quiet_through) and float(out) <= float(quiet_through)
+    return silent_output(out, quiet_through)
 
 
 def _user_event(text: str, synthetic: str = "") -> dict[str, Any]:

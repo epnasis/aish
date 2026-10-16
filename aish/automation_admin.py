@@ -36,7 +36,7 @@ from . import atomic_write, schedule
 from . import scheduler as scheduling
 from .seen import SeenLedger
 from .seen import ledger_path as seen_ledger_path
-from .session import SessionLog
+from .session import SessionLog, silent_output
 
 #: How many runs `/runs` shows, newest first.
 RUNS_SHOWN = 20
@@ -309,7 +309,7 @@ def _unseen(info: Any, seen: SeenLedger) -> bool:
 
 
 def _silent(info: Any) -> bool:
-    return bool(info.output) and bool(info.quiet_through) and info.output <= info.quiet_through
+    return silent_output(info.output, info.quiet_through)
 
 
 def recent_runs(state_dir: Path, *, limit: int = RUNS_SHOWN) -> tuple[list[Run], list[str]]:
