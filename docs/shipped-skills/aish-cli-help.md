@@ -40,6 +40,11 @@ Tab completes them, and an unambiguous prefix works (`/res` for `/resume`).
 - Recurring works too ("every weekday at 9"): the automation gets a cron schedule like `0 9 * * 1-5` (local time) and the prompt summary shows its next two runs; after downtime only the latest missed run fires.
 - "Tell me when X changes" becomes a monitor (`"kind": "monitor"`, cron only): each run compares against the previous run's snapshot and ends with a verdict; a change pushes its one-line summary, no change is silent (`"notify"`: `on_change` by default, or `always` / `never`), and a run aish cannot read keeps the old baseline and pushes once, then at most daily. Runs happen in aish-web.
 - Saved as a plain JSON file in `~/.config/aish/automations/`; editing its `at` or its cron expression re-arms it, deleting the file cancels it.
+- `/tasks` lists the automations: when each runs and runs next, enabled or not, its notify policy, and whether a one-shot is pending, fired or expired; a file aish cannot load is listed as a PROBLEM with its error.
+- `/tasks enable <id>` / `/tasks disable <id>` turn one on or off — the only field they change; what an automation does changes only on a new approval card. A file that does not load is refused (fix it in an editor, or delete it). `/tasks delete <id>` removes the file after a y/N (default No); there is no way back short of a new automation on its own card.
+- `/runs` lists recent scheduled runs newest first — what each did (a monitor's verdict, "ran for 09:00") or why it did not happen (expired, did not start, skipped) — and marks chats not opened yet. It names chats; scheduled chats are never resumed.
+- At startup aish says how many scheduled runs from the last 14 days have not been opened (silent monitor runs not counted).
+- Running an automation now, outside its schedule, is the web's `/run-now`.
 
 ## Models
 - The current model is named on aish's identity line. `--model`, `$AISH_MODEL` or the config's `model` key set the startup default; `/model <name> --save` persists a switch.

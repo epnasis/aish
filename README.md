@@ -959,7 +959,23 @@ against the snapshot the previous run saved and ends with a verdict aish reads
 itself: *changed* pushes the one-line summary, *unchanged* stays silent (the
 default `"notify": "on_change"`; `"always"` and `"never"` are honoured too). A
 run whose verdict aish cannot read, or that fails, keeps the old baseline and
-pushes once, then at most daily, naming how old the baseline is.
+pushes once, then at most daily, naming how old the baseline is. A monitor run
+that saved a baseline or found nothing changed does not light the web's
+"Needs you" badge — a changed, unreadable or failed one does, as does any run
+holding a card for you.
+
+**Seeing and managing them.** In the terminal, `/tasks` lists your automations
+— when each runs, when next, enabled or not, its notify policy, and whether a
+one-shot is pending, fired or expired; a file aish cannot load is listed as a
+problem with its error. `/tasks enable <id>` / `/tasks disable <id>` turn one
+on or off (the only field they change), and `/tasks delete <id>` removes one
+after a y/N — there is no way back short of a new one on its own card.
+`/runs` shows recent runs newest first, what each did or why it did not
+happen, and marks the chats you have not opened; aish's startup line counts
+those (silent monitor runs aside). In the web composer, `/run-now` on an
+automation's chat (or `/run-now <id>` anywhere) runs it right away in a new
+chat; its schedule is unchanged and the next scheduled run still happens.
+`/tasks` and `/runs` are terminal-only.
 
 Interrupted work is picked up again. If aish-web goes down mid-task — a
 deploy, a crash — the next start reopens that session and tells the model to

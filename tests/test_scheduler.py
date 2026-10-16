@@ -362,6 +362,22 @@ class TestSchedulerRestarts:
             "eon-invoices:2026-10-15T22:05:00", "eon-invoices:2026-10-16T22:05:00",
         ]
 
+    def test_a_task_a_mid_tick_reload_dropped_does_not_fire(self, tmp_path):
+        """#5 S4: `fire_now` can reload the folder while a tick holds its
+        snapshot of the tasks. The snapshot's copy of a task the reload found
+        disabled must not fire."""
+        path = write_task(tmp_path / "automations")
+        sched, seam, _ = build(tmp_path, Clock(AT))
+        asyncio.run(sched._ensure_state())
+        asyncio.run(sched._reload_if_changed())
+        [stale] = sched.tasks
+        write_task(tmp_path / "automations", enabled=False)
+        st = path.stat()
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+        asyncio.run(sched._reload_if_changed())
+        asyncio.run(sched._fire(stale, stale.one_shot_at(), AT))
+        assert seam.requests == []
+
     def test_code_never_writes_the_automations_folder(self, tmp_path):
         path = write_task(tmp_path / "automations")
         before = path.read_bytes()

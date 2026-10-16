@@ -63,4 +63,7 @@ How the aish web UI works, for answering the user's questions about it. Answer f
 - Recurring works too ("every weekday at 9"): the automation gets a cron schedule like `0 9 * * 1-5` (local time) and the card shows its next two runs; after downtime only the latest missed run fires.
 - "Tell me when X changes" becomes a monitor (`"kind": "monitor"`, cron only): each run compares against the previous run's snapshot and ends with a verdict; a change pushes its one-line summary, no change is silent (`"notify"`: `on_change` by default, or `always` / `never`), and a run aish cannot read keeps the old baseline and pushes once, then at most daily.
 - Saved as a plain JSON file in `~/.config/aish/automations/`; editing its `at` or its cron expression re-arms it, deleting the file cancels it. Automated chats cannot create automations, and aish refuses its own file and shell writes into that folder.
+- A monitor run that saved its baseline or found nothing changed does not count in "Needs you" and sits in the date list like a read chat; a changed, unreadable or failed run does, and so does any run holding a card.
+- `/run-now` in an automation's chat (or `/run-now <id>` anywhere) runs it now, in a new chat. Its schedule is unchanged and the next scheduled run still happens. Refused for a disabled automation and for a one-shot that expired.
+- Listing, enabling, disabling and deleting automations, and the list of recent runs, are the terminal's `/tasks` and `/runs`; typed here they answer "terminal-only".
 - Renaming and deleting happen in the chat menu above.

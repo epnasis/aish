@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from . import (
     aliases,
+    automation_admin,
     backends,
     browser,
     learning,
@@ -210,7 +211,8 @@ class ChipStream:
 SLASH_COMMANDS = (
     "/add-dir", "/aliases", "/browser", "/cd", "/chat", "/clear", "/delete",
     "/dir-add", "/exit", "/feedback", "/help", "/jobs", "/learn", "/model",
-    "/new", "/objective", "/plan", "/quit", "/rename", "/resume", "/session",
+    "/new", "/objective", "/plan", "/quit", "/rename", "/resume", "/runs", "/session",
+    "/tasks",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
@@ -237,6 +239,16 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  states, and the evidence each done rests on
   {CYAN}/plan drop <id>{RESET} drop a task; aish cannot bring it back
   {CYAN}/plan replan{RESET}   ask aish to revise the plan at its next task
+  {CYAN}/tasks{RESET}         list your automations: what each runs, when (and when
+                 next), whether it is enabled, its notify policy, and where a
+                 one-shot stands (pending, fired, expired); broken files are
+                 listed as problems with their error
+  {CYAN}/tasks enable|disable <id>{RESET} turn one on or off — the only field this
+                 changes; what an automation DOES changes only on a new card
+  {CYAN}/tasks delete <id>{RESET} remove one, after a y/N confirm; there is no way
+                 back short of a new automation on its own card
+  {CYAN}/runs{RESET}          recent scheduled runs, newest first — what each did or
+                 why it did not happen — marking chats you have not opened
   {CYAN}/new, /clear{RESET}   fresh conversation in a new chat (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
@@ -1697,6 +1709,12 @@ def handle_slash(
     if command == "/plan":
         show_or_change_plan(task, logref)
         return "handled"
+    if command == "/tasks":
+        show_or_change_tasks(task, state_dir)
+        return "handled"
+    if command == "/runs":
+        show_runs(state_dir)
+        return "handled"
     if command == "/rename":
         parts = task.split(maxsplit=1)
         title = parts[1].strip() if len(parts) > 1 else ""
@@ -1841,6 +1859,92 @@ def load_context_files(cwd: str) -> list[str]:
         except OSError:
             continue
     return parts
+
+
+def _deny_prefixes() -> list[str]:
+    """The deny list the scheduler validates task files against, so `/tasks`
+    calls a file a problem exactly when aish-web does."""
+    return load_prefixes(Path(os.environ.get("AISH_DENYLIST") or default_denylist()))
+
+
+TASKS_USAGE = "usage: /tasks · /tasks enable <id> · /tasks disable <id> · /tasks delete <id>"
+
+
+def show_or_change_tasks(task: str, state_dir: Path) -> None:
+    """`/tasks` (#5 S4). Listing reads; enable/disable/delete are the owner's
+    toggle and shredder (`automation_admin`) — never an author."""
+    words = task.split()[1:]
+    now = datetime.datetime.now()
+    if not words:
+        listing = automation_admin.read_listing(
+            state_dir, deny_prefixes=_deny_prefixes(), now=now
+        )
+        lines = automation_admin.task_lines(listing, now)
+        if not lines:
+            print(f"{DIM}no automations — ask aish for one (\"check the portal after "
+                  f"10pm\"); each comes on its own approval card{RESET}")
+        for line in lines:
+            color = RED if line.startswith("PROBLEM") else DIM
+            print(f"{color}{line}{RESET}")
+        return
+    if len(words) != 2 or words[0] not in ("enable", "disable", "delete"):
+        print(f"{DIM}{TASKS_USAGE}{RESET}")
+        return
+    verb, task_id = words
+    try:
+        if verb == "delete":
+            path = automation_admin.automation_file(task_id)
+            try:
+                answer = input(
+                    f"{YELLOW}delete automation '{task_id}'?{RESET} the file is removed "
+                    "for good — there is no trash for it, and no way back short of "
+                    "asking aish for a new one on its own approval card [y/N] "
+                ).strip().lower()
+            except EOFError:
+                answer = "n"
+            if answer not in ("y", "yes"):
+                print(f"{DIM}cancelled — {path.name} is untouched{RESET}")
+                return
+            automation_admin.delete(task_id)
+            print(f"{DIM}deleted {path.name}; aish-web drops its schedule state and any "
+                  f"monitor snapshot the next time it reads the folder{RESET}")
+            return
+        updated, wrote = automation_admin.set_enabled(
+            task_id, verb == "enable", deny_prefixes=_deny_prefixes(), now=now
+        )
+    except automation_admin.AdminError as exc:
+        print(f"{RED}{exc}{RESET}")
+        return
+    if not wrote:
+        print(f"{DIM}{task_id} is already {verb}d{RESET}")
+    elif verb == "disable":
+        print(f"{DIM}disabled {task_id} — it will not start again until /tasks enable "
+              f"{task_id}; a run already in progress is not stopped{RESET}")
+    else:
+        stands = automation_admin.enabled_words(updated, state_dir, now)
+        print(f"{DIM}enabled {task_id} — {stands}{RESET}")
+
+
+def show_runs(state_dir: Path) -> None:
+    """`/runs` (#5 S4): names chats, never offers to resume one — a scheduled
+    run's chat is the origin that is never resumed (#187)."""
+    runs, problems = automation_admin.recent_runs(state_dir)
+    lines = automation_admin.run_lines(runs, problems)
+    if not lines:
+        print(f"{DIM}no scheduled runs yet{RESET}")
+    for line in lines:
+        print(f"{YELLOW if '[not opened]' in line else DIM}{line}{RESET}")
+
+
+def print_runs_notice(state_dir: Path) -> None:
+    """The one startup line about scheduled runs he has not opened (#5 S4).
+    A failure to read is no reason not to come up, so it says nothing."""
+    try:
+        line = automation_admin.notice(state_dir, datetime.datetime.now())
+    except Exception:  # noqa: BLE001 — the prompt outranks a notice
+        return
+    if line:
+        print(f"{YELLOW}{line}{RESET}")
 
 
 def _purge_trash_at_launch(state_dir) -> None:
@@ -2878,6 +2982,7 @@ def main() -> int:
 
     if not history:  # a resumed session continues where it was — no big banner
         print(banner(f"model {args.model} · {log.path.name} · /help · Ctrl-D quits"))
+    print_runs_notice(state_dir)
     # quick-reply menu from the last answer; seeded from a resumed final answer (#167)
     pending_chips: list[tuple[str, str]] = resumed_chips
     while True:

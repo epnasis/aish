@@ -38,6 +38,7 @@ Written by `_write_line`, each stamped with an ISO timestamp — since the first
 | `title` | the chat's name, stamped `auto` or not |
 | `cwd` / `trust_dir` | the session's own workspace, replayed by `restore_workspace` |
 | `origin` | provenance for a non-`user` session |
+| `quiet` | `through` (epoch seconds), `automation`, `status`: the chat's output up to `through` is a silent monitor run's (#5 S4) — read back as `quiet_through` on `ParsedLog`, `SessionInfo`, the pager tuples and `SessionLog.quiet_through`, and never activity (`_is_activity`). The server's `silent` row fact (`docs/web-server.md` §Consumption surfaces) |
 | `model` | which model this chat runs |
 | `task_start` / `task_end` | the restart-recovery bracket |
 | `render_error` | a client-reported image failure |

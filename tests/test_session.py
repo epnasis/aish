@@ -60,7 +60,7 @@ def test_custom_title_wins_hot_and_cold(tmp_path):
     # since an undated page is discarded as a seed candidate. It comes from the
     # records, so it is whole seconds, and never later than the file itself.
     pages = SessionLog.pager_titles(tmp_path)
-    assert [(name, title, origin) for name, title, origin, _, _ in pages] == [
+    assert [(name, title, origin) for name, title, origin, *_ in pages] == [
         (log.path.name, "My Renamed Chat", "user")
     ]
     assert pages[0][3] == SessionLog.info(log.path).activity
@@ -736,7 +736,7 @@ def test_pager_cap_applies_after_skipping_blank_sessions(tmp_path):
     for i in range(5):  # newer blank files (pre-fix debris) must not crowd it out
         (tmp_path / f"session-20260102-00000{i}-000000.jsonl").touch()
     pages = SessionLog.pager_titles(tmp_path, limit=3)
-    assert [name for name, _, _, _, _ in pages] == [old.name]
+    assert [name for name, *_ in pages] == [old.name]
 
 
 def test_model_empty_for_sessions_without_record(tmp_path):
@@ -2042,7 +2042,7 @@ class TestOutputStamp:
         time.sleep(1.1)
         log.step({"kind": "tool", "name": "run_command"})
         log.close()
-        name, title, origin, ts, out = SessionLog.pager_titles(tmp_path)[0]
+        name, title, origin, ts, out, _quiet = SessionLog.pager_titles(tmp_path)[0]
         assert ts > out > 0, "the pager ages by activity and flags unread by output"
 
 

@@ -258,6 +258,7 @@ async function offlineSave(name, payload, events) {
     snippet: payload.snippet || "",
     ts: payload.ts || Date.now() / 1000,
     out: payload.out || 0, // last OUTPUT; 0 = fall back to `ts` (#203)
+    silent: Boolean(payload.silent), // the server's silent-monitor-run fact (#5 S4)
     origin: payload.origin || "user",
     pinned: Boolean(payload.pinned),
     openedAt: payload.openedAt || 0,
@@ -625,7 +626,11 @@ async function offlineSyncOnce() {
       const local = offlineMeta.get(info.name);
       // Second-resolution mtimes: only refetch on a strictly newer stamp, or
       // the current session would be refetched on every single pass.
-      if (local && local.ts >= info.ts && local.total) continue;
+      // …unless the silent fact differs (#5 S4): a meta mirrored before the
+      // server stated it would otherwise paint that chat into "Needs you" from
+      // the cache for ever, since its log never changes again.
+      if (local && local.ts >= info.ts && local.total
+        && Boolean(local.silent) === Boolean(info.silent)) continue;
       try {
         await offlineFetchSession(info.name, local);
       } catch {
@@ -1675,6 +1680,8 @@ function handle(event) {
     case "console_out": onConsoleOut(event.data); break;
     case "console_exit": onConsoleExit(event.code); break;
     case "console_shared": showToast("shared to context"); break;
+    // `/run-now` started a run (#5 S4): the new chat appears on the roster.
+    case "run_started": showToast(event.text || "started"); break;
     case "console_error": showToast(event.text); break;
   }
 }
@@ -9375,6 +9382,7 @@ const SLASH_COMMANDS = [
   ["/objective", "this chat's objective — aish's reading of your goal, its sources and history"],
   ["/objective edit", "set the objective in your own words"],
   ["/plan", "aish's own plan for the objective — drop a task or ask for a replan"],
+  ["/run-now", "run this chat's automation now (or /run-now <id>) — its schedule is unchanged"],
   ["/help", "about aish web"],
 ];
 
@@ -9751,7 +9759,8 @@ function submitCommand() {
 }
 
 // "/session" is the pre-#260 name for "/chat": off the menu, still dispatched.
-const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit", "/session"]);
+// "/tasks" and "/runs" are dispatched only to say they are terminal-only (#5 S4).
+const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit", "/session", "/tasks", "/runs"]);
 
 function handleSlash(text) {
   let [command, ...rest] = text.split(/\s+/);
@@ -9844,6 +9853,18 @@ function handleSlash(text) {
       else openObjectiveSheet();
       return true;
     case "/plan": openPlanSheet(); return true;
+    // Run an automation NOW (#5 S4) — the chat on screen's, or the one named.
+    // Typed only, like every slash: a chip can never reach handleSlash
+    // ([CHIP-NEVER-COMMANDS]), so model output cannot start a run. The server
+    // reads the WHAT from the owner's file; this message only says WHEN.
+    case "/run-now":
+      return act(arg ? { type: "run_now", task: arg } : { type: "run_now" },
+        { label: "starting that run" });
+    // The automation list and its runs are the terminal's (#5 S4). Said, not
+    // "unknown": the command exists, and saying where it lives is the answer.
+    case "/tasks": case "/runs":
+      showToast(`${command} is a terminal-only command — run it in aish in a terminal`);
+      return true;
     case "/help": openSheet("workspace-sheet"); return true;
     case "/quit": case "/exit": showToast("just close the tab — chats persist"); return true;
     case "/debug": reportViewport("manual"); showToast("viewport state sent to server log"); return true;
@@ -18229,9 +18250,18 @@ function forgetPin(name) {
 // is fixed where it belonged, in `sessionUnread`, which now reads the last
 // OUTPUT (#203). The guard below is no longer load-bearing against steps; it
 // stands on its own meaning.
+//
+// A SILENT row is not asking either (#5 S4). Every monitor run is a new chat
+// nobody opens, so an every-30-minutes monitor saying "unchanged" used to fill
+// this band for ever. `silent` is the SERVER's fact — it states it only when the
+// chat's whole output is a monitor run whose verdict asks nothing (baseline,
+// unchanged, stopped) — and this predicate only consumes it; nothing here
+// decides what a verdict means. It sits BELOW the waiting check: a monitor run
+// holding a card still needs you, whatever it concluded.
 function needsYou(info, state) {
   if (info.state === "waiting") return true;   // stopped; it cannot go on without you
   if (info.state === "running") return false;  // working; not asking for anything
+  if (info.silent) return false;               // a monitor run with nothing to say
   return sessionUnread(info, state);
 }
 
@@ -18336,6 +18366,10 @@ function noteAttention(pushed, at) {
   for (const field of ["title", "snippet", "origin", "cwd"]) {
     if (pushed[field]) known[field] = pushed[field];
   }
+  // Unlike the text fields, absence IS an opinion here: the server states
+  // `silent` on every row it holds true, so a row without it is a chat that
+  // has said something since (#5 S4). A stale `true` would hide that.
+  known.silent = Boolean(pushed.silent);
   const row = attentionRows.find((info) => info.name === name);
   if (row) Object.assign(row, known, stamps);
   else attentionRows.push({ name, ...known, ...stamps });
@@ -18382,6 +18416,8 @@ function railRows(cached, searching) {
       // with the turn rather than with the last sync.
       title: known.title || row.title || "",
       snippet: known.snippet || row.snippet || "",
+      // A band-deciding fact like `state`: the authoritative row's word wins.
+      silent: Boolean(known.silent),
     };
   });
   if (searching) return merged;
@@ -18445,6 +18481,7 @@ async function renderOfflineSessions(query) {
     snippet: offlineMatchLine(meta, found.words) || meta.snippet,
     ts: meta.ts,
     out: meta.out || 0, // last output as of the last sync (#203)
+    silent: Boolean(meta.silent), // as of the last sync, like `out` (#5 S4)
     state: "", // liveness is a server fact; a mirror can only lie about it
     cwd: "",
     origin: meta.origin,

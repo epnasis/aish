@@ -978,6 +978,15 @@ def _when(at: datetime, now: datetime) -> str:
     return f"{at.strftime('%H:%M')} {label} ({at.strftime('%a %Y-%m-%d')})"
 
 
+def when_words(task: Task, now: datetime) -> str:
+    """When a task runs, in the card's own words — shared by the creation card
+    (`describe`) and the terminal's `/tasks`, so the two can never describe
+    the same schedule differently."""
+    if task.recurring:
+        return f"on the schedule `{task.cron}`"
+    return f"ONCE, at {_when(task.one_shot_at(), now)}"
+
+
 def _listed(items: Iterable[str]) -> str:
     return ", ".join(f"`{item}`" for item in items)
 
@@ -1014,14 +1023,12 @@ def describe(task: Task, now: datetime, *, replacing: bool = False) -> str:
         first = cron_next(task.cron, now)
         upcoming = (first, cron_next(task.cron, first))
         when = (
-            f"Runs on the schedule `{task.cron}` — next: "
+            f"Runs {when_words(task, now)} — next: "
             + ", ".join(o.strftime("%a %Y-%m-%d %H:%M") for o in upcoming)
             + " — each time in a new chat with nobody watching."
         )
     else:
-        when = (
-            f"Runs ONCE, at {_when(task.one_shot_at(), now)}, in a new chat with nobody watching."
-        )
+        when = f"Runs {when_words(task, now)}, in a new chat with nobody watching."
     lines = [
         f"{verb} '{task.id}'" + (f" — {task.note}" if task.note else ""),
         when,
