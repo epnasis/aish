@@ -338,4 +338,43 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
     counted(fresh).length === 0);
 }
 
+// ---- 7. a silent monitor run asks nothing (#5 S4) ------------------------
+// Every monitor run is a new chat nobody opens, so an every-30-minutes monitor
+// saying "unchanged" filled "Needs you" permanently. The SERVER states `silent`
+// on such a row; the one predicate consumes it. The cases that matter: the fix
+// (silent, unseen → not counted), the ordinary case beside it (a user chat with
+// unseen output still counts), a held card in a monitor run still counts, and a
+// row that no longer says silent stops being silent — absence is an opinion.
+{
+  const w = badgeWorld();
+  const s = w.sandbox;
+  const silentRow = { ...row("watch.jsonl"), out: nowSec() - 30, silent: true };
+  const changed = { ...row("watch-changed.jsonl"), out: nowSec() - 30 };
+  const ordinary = { ...row("chat.jsonl"), out: nowSec() - 30 };
+  const held = { ...row("watch-held.jsonl", { state: "waiting" }), silent: true };
+  s.setAttentionRows([silentRow, changed, ordinary, held]);
+  ok("a silent monitor run with unseen output is not counted",
+    !counted(w).includes("watch.jsonl"));
+  ok("a monitor run that changed is counted", counted(w).includes("watch-changed.jsonl"));
+  ok("the ordinary case: a user chat with unseen output is still counted",
+    counted(w).includes("chat.jsonl"));
+  ok("a monitor run holding a card still needs you", counted(w).includes("watch-held.jsonl"));
+
+  const state = { seen: s.seenAt, since: s.seenSince, floor: s.seenFloor, current: null };
+  const band = s.partitionSessions(s.attentionRows, state).bands.needsYou.map((r) => r.name);
+  ok("the band and the count agree about the silent row",
+    !band.includes("watch.jsonl") && band.includes("chat.jsonl"));
+
+  s.noteAttention({ name: "watch.jsonl", state: "idle", out: nowSec() - 30, silent: true });
+  ok("a pushed silent row stays uncounted", !counted(w).includes("watch.jsonl"));
+  s.noteAttention({ name: "watch.jsonl", state: "idle", out: nowSec() });
+  ok("a pushed row WITHOUT silent is news again — a stale true would hide it",
+    counted(w).includes("watch.jsonl"));
+
+  // The mirror-painted rail: the authoritative row's word wins, both ways.
+  s.setAttentionRows([{ ...row("m.jsonl"), out: nowSec() - 30, silent: true }]);
+  const [merged] = s.railRows([{ name: "m.jsonl", ts: nowSec() - 60, out: nowSec() - 30 }], false);
+  ok("railRows lays the server's silent over a cached row", merged.silent === true);
+}
+
 report("test_attention_badge.js");

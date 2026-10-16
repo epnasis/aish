@@ -133,6 +133,7 @@ from .pins import PinLedger
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
 from .seen import SeenLedger
+from .seen import ledger_path as seen_ledger_path
 from .session import (
     RATINGS,
     RESUME_MARKER,
@@ -767,6 +768,16 @@ def _turn_event(text: str, files: list[dict] | None = None) -> dict[str, Any]:
     if files is not None:
         event["files"] = files
     return event
+
+
+def _silent(out: float, quiet_through: float) -> bool:
+    """The row fact `silent` (#5 S4): everything this chat has said belongs to
+    a silent monitor run — its log's newest `quiet` record covers its last
+    output. The SERVER states it; the client's one attention predicate
+    (`needsYou`) consumes it and never derives it. Output newer than the
+    record — the owner typing into the chat later, a run that went on — is
+    not covered, so it asks for attention as any chat's would."""
+    return bool(out) and bool(quiet_through) and float(out) <= float(quiet_through)
 
 
 def _user_event(text: str, synthetic: str = "") -> dict[str, Any]:
@@ -2004,7 +2015,7 @@ class WebServer:
         # it is a fact about them — held where every device can agree with it.
         # State, not config: `~/.config/aish` is auto-pushed to GitHub, and a
         # record of when the owner read what has no business there.
-        self.seen = SeenLedger(state_dir / "seen.json")
+        self.seen = SeenLedger(seen_ledger_path(state_dir))
         # Which chats the owner has PINNED — the same finding, for a toggle:
         # a pin is the owner's promise about a chat, not about one device's
         # copy of it, so it is held where every device can agree with it.
@@ -2385,7 +2396,7 @@ class WebServer:
     def _hello(
         self,
         session: Session,
-        pager: list[tuple[str, str, str, float, float]] | None = None,
+        pager: list[tuple[str, str, str, float, float, float]] | None = None,
         cmd_history: list[str] | None = None,
     ) -> dict:
         # The swipe pager pages through recent chats oldest→newest by last
@@ -2409,9 +2420,10 @@ class WebServer:
                 # omitted when there is none, so a client reading an older
                 # server falls back to `ts` exactly as it always did.
                 **({"out": out} if out else {}),
+                **({"silent": True} if _silent(out, quiet) else {}),
                 "state": open_states.get(name, ""),
             }
-            for name, title, origin, ts, out in pager or []
+            for name, title, origin, ts, out, quiet in pager or []
         ]
         if all(page["name"] != session.name for page in pages):
             pages.append(
@@ -2881,6 +2893,11 @@ class WebServer:
             # at. Claimed and dismissed are the same operation here; what
             # differs is only what the CLIENT does with it first.
             self._drop_share(str(message.get("id", "")))
+        elif kind == "run_now":
+            # A VIEW message too (#5 S4): it starts a NEW chat from an
+            # automation file and edits nothing in the one on screen, so it
+            # claims no control of it.
+            await self._run_now(client, message)
         elif kind == "dequeue":
             self._dequeue(client, str(message.get("text", "")))
         elif kind == "dequeue_cwd":
@@ -2983,6 +3000,59 @@ class WebServer:
         if name:
             payload["name"] = name
         await client.ws.send_json(payload)
+
+    async def _run_now(self, client: Client, message: dict) -> None:
+        """`run_now` (#5 S4): run an automation now, because the owner asked.
+
+        The message names WHICH automation — `task`, or the chat on screen
+        when it was started by one — and nothing else is read from it: the
+        prompt, the grants and the monitor handling all come from his file
+        through `Scheduler.fire_now`, so a forged message can choose only
+        when an approved automation runs. Only an authenticated socket reaches
+        here; the web sends it from a TYPED `/run-now`, which a chip can never
+        send ([CHIP-NEVER-COMMANDS]), and no model tool can."""
+        task_id = str(message.get("task") or "").strip()
+        viewed = client.viewing
+        if not task_id and viewed is not None and viewed.origin == "schedule":
+            task_id = self._automation_of(viewed)
+        if not task_id:
+            await self._refuse(
+                client, "this chat was not started by an automation — name one: "
+                "/run-now <id> (the terminal's /tasks lists them)",
+            )
+            return
+        if not schedule.TASK_ID_RE.fullmatch(task_id):
+            await self._refuse(client, f"{task_id!r} is not an automation id")
+            return
+        if self.scheduler is None:
+            await self._refuse(client, "no scheduler is running on this server")
+            return
+        outcome = await self.scheduler.fire_now(task_id)
+        if not outcome.opened:
+            await self._refuse(client, f"automation {task_id} was not started: "
+                               f"{outcome.error or outcome.status}")
+            return
+        await client.ws.send_json({
+            "type": "run_started",
+            "name": outcome.session,
+            "task": task_id,
+            "text": f"started {task_id} now, in a new chat; its schedule is unchanged "
+            "and its next scheduled run still happens",
+        })
+
+    def _automation_of(self, session: Session) -> str:
+        """The automation a schedule-origin chat was started by: its live meta,
+        else the `[scheduled: <id>]` prefix of its opening prompt — the meta is
+        not persisted, so a chat opened cold only has the prompt."""
+        meta_id = str(session.trigger_meta.get("automation") or "")
+        if meta_id:
+            return meta_id
+        first = next(
+            (m.get("content") for m in getattr(session.agent, "messages", [])
+             if m.get("role") == "user"),
+            "",
+        )
+        return scheduling.automation_of(first if isinstance(first, str) else "")
 
     async def _reject_busy(self, client: Client, session: Session) -> bool:
         if session.busy:
@@ -3713,6 +3783,8 @@ class WebServer:
                 ) or 0)
                 if monitored is not None and cardless:
                     monitored = dataclasses.replace(monitored, cardless=cardless)
+                if monitored is not None and scheduling.is_quiet(monitored):
+                    self._mark_quiet(session, monitor, monitored)
             finished = (pushed, titling)
         except ModelUnavailable as exc:
             failure = f"{MODEL_UNAVAILABLE_PREFIX}{exc}{_backend_hint(session.agent)}"
@@ -3766,6 +3838,21 @@ class WebServer:
         except Exception:  # noqa: BLE001 — a record is never worth the turn
             log.exception("monitor %s: recording the run failed", spec.task_id)
             return None
+
+    def _mark_quiet(
+        self, session: Session, spec: scheduling.MonitorSpec,
+        outcome: scheduling.MonitorOutcome,
+    ) -> None:
+        """Write the silent fact into the run's own log, before `_finish_turn`
+        publishes its idle row — so the first row that could badge it already
+        says it is silent. A failed write leaves the chat asking for attention,
+        which is the direction a mistake here is allowed to go."""
+        try:
+            session.logref.log.quiet(
+                through=session.output_at, automation=spec.task_id, status=outcome.status
+            )
+        except (OSError, SessionLogMoved):
+            log.exception("monitor %s: could not record the run as silent", spec.task_id)
 
     async def _report_monitor_failed(
         self, session: Session, spec: scheduling.MonitorSpec, failure: str
@@ -4285,6 +4372,8 @@ class WebServer:
         # republishes for it republishes with news.
         if session.output_at:
             row["out"] = session.output_at
+        if _silent(session.output_at, session.logref.log.quiet_through):
+            row["silent"] = True
         return row
 
     def _touch(self, session: Session, notice: str = "") -> None:
@@ -4491,6 +4580,7 @@ class WebServer:
                             open_cwds.get(info.path.name) or info.cwd
                         ),
                         "origin": info.origin,
+                        **({"silent": True} if _silent(info.output, info.quiet_through) else {}),
                     }
                     for info in infos
                 ],
@@ -5855,10 +5945,12 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             "automation": task.id,
             "scheduled_for": request.scheduled_for.isoformat(timespec="seconds"),
             "fired_at": request.fired_at.isoformat(timespec="seconds"),
+            **({"manual": True} if request.manual else {}),
         }
+        label = "Run by hand" if request.manual else "Scheduled"
         return await self.launch_triggered(
             request.prompt, "schedule", meta,
-            title=f"Scheduled: {task.note or task.id}",
+            title=f"{label}: {task.note or task.id}",
             model_override=task.model,
             profile=RunProfile(allow=task.allow, sites=task.sites,
                                cwd=task.cwd, roots=task.roots),
@@ -6787,6 +6879,8 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
                         "ts": info.activity,  # last activity, not file mtime (#201)
                         **({"out": info.output} if info.output else {}),  # #203
                         "origin": info.origin,
+                        # #5 S4: the mirror decides the rail's band too.
+                        **({"silent": True} if _silent(info.output, info.quiet_through) else {}),
                     }
                     for info in infos
                 ],
@@ -6852,6 +6946,8 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
                 # decides unread by (#203). Omitted when there is none, so a
                 # meta written by an older server keeps falling back to `ts`.
                 **({"out": float(parsed.output_ts)} if parsed.output_ts else {}),
+                **({"silent": True}
+                   if _silent(parsed.output_ts or 0, parsed.quiet_through or 0) else {}),
                 "base": base,       # index the returned events start at
                 "total": total,     # events the client should hold afterwards
                 "sig": _prefix_sig(events, total),
@@ -6969,6 +7065,7 @@ def create_app(
         title_auto = False
         override_chat = None
         output_ts: int | None = None
+        quiet_through: int | None = None
         if model_override and path is None:
             if provider == "claude-max":
                 raise backends.BackendError(
@@ -6984,11 +7081,13 @@ def create_app(
             history, recorded_spec = parsed.messages, parsed.model
             custom_title, origin, title_auto = parsed.title, parsed.origin, parsed.title_auto
             output_ts = parsed.output_ts
+            quiet_through = parsed.quiet_through
         log = SessionLog(path) if path is not None else SessionLog.new(state_dir)
         # Carry the chat's last-spoke stamp into memory from the parse that just
         # happened, so a reopened chat's roster row states the same fact the
         # listing does instead of starting at "never spoke" (#275).
         log.output_at = float(output_ts or 0)
+        log.quiet_through = float(quiet_through or 0)  # the same, for #5 S4's silent fact
         logref = LogRef(log)
         bridge = Bridge(get_loop, session=log.path.name)
 

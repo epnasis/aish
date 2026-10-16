@@ -59,6 +59,9 @@ DEDUPED = "deduped"
 RATE_LIMITED = "rate_limited"
 AT_CAPACITY = "at_capacity"
 OPEN_FAILED = "open_failed"
+#: `fire_now` would not start the run: the task is disabled, expired, missing
+#: or not a runnable file. Never reaches the seam.
+REFUSED = "refused"
 
 
 @dataclass(frozen=True)
@@ -90,9 +93,14 @@ class MonitorSpec:
     notify: str
     scheduled_for: datetime
     prior: schedule.Snapshot | None
+    #: Run by the owner through `fire_now` (#5 S4); `scheduled_for` is then
+    #: the moment he asked, not an occurrence of the schedule.
+    manual: bool = False
 
     @property
     def key(self) -> str:
+        if self.manual:
+            return manual_key(self.task_id, self.scheduled_for)
         return f"{self.task_id}:{self.scheduled_for.isoformat()}"
 
 
@@ -115,8 +123,30 @@ class MonitorOutcome:
 #: ending: the run never answered, so nothing was parsed.
 STOPPED = "stopped"
 
+#: The monitor endings that ask nothing of the owner (#5 S4): a baseline saved,
+#: nothing changed, or a run he stopped himself. `changed`, `unreadable` and a
+#: failed run are exactly the ones that need eyes, and stay out.
+QUIET_STATUSES = frozenset({schedule.BASELINE, schedule.UNCHANGED, STOPPED})
+
+
+def is_quiet(outcome: MonitorOutcome) -> bool:
+    """Whether a monitor run's chat may stay out of "Needs you". A run that
+    made changes without a card is never quiet: a verdict says nothing about
+    what the run DID, which is also why its push is not silent."""
+    return outcome.status in QUIET_STATUSES and not outcome.cardless
+
+
+def manual_key(task_id: str, asked_at: datetime) -> str:
+    """The dedup key of a run the owner started by hand: its own shape, so it
+    can never equal an occurrence's ledger key, and in the server's clock."""
+    return f"{task_id}:manual:{asked_at.isoformat(timespec='seconds')}"
+
+
 #: How much of an unreadable run's answer its record keeps.
 ANSWER_TAIL_CHARS = 600
+
+#: The record a run the owner started by hand leaves (`fire_now`).
+MANUAL_RUN = "manual_run"
 
 
 @dataclass(frozen=True)
@@ -126,9 +156,13 @@ class FireRequest:
     scheduled_for: datetime
     fired_at: datetime
     monitor: MonitorSpec | None = None
+    #: Started by the owner through `fire_now` (#5 S4), never by the schedule.
+    manual: bool = False
 
     @property
     def dedup_key(self) -> str:
+        if self.manual:
+            return manual_key(self.task.id, self.fired_at)
         return self.task.key_for(self.scheduled_for)
 
 
@@ -137,12 +171,20 @@ class FireRequest:
 _SCHEDULED_PREFIX = re.compile(r"^\[scheduled: ([a-z0-9][a-z0-9-]{0,63})\]")
 
 
+def automation_of(prompt: str) -> str:
+    """The automation id a run's prompt names, or "" — read back from the
+    prefix `run_prompt` writes, which is aish's own text."""
+    match = _SCHEDULED_PREFIX.match(prompt or "")
+    return match.group(1) if match else ""
+
+
 def run_prompt(
     task: Task,
     fired_at: datetime,
     scheduled_for: datetime | None = None,
     *,
     prior: schedule.Snapshot | None = None,
+    manual: bool = False,
 ) -> str:
     """The prompt a run starts from. Both times are stated because a late fire
     is something the run can OBSERVE and should not have to infer. The sites
@@ -155,17 +197,33 @@ def run_prompt(
     a snapshot here would let a page the previous run read name a host the
     next run may reach unattended without a card. The snapshot is delivered
     separately, as outside content (`Agent.add_outside_note`); only its stamp,
-    re-rendered from the parsed time, appears here."""
-    occurrence = scheduled_for or task.one_shot_at()
-    recurs = f" (recurring: `{task.cron}`)" if task.recurring else ""
-    lines = [
-        f"[scheduled: {task.id}] An automation the owner approved has fired.",
-        f"Scheduled for {occurrence.isoformat(sep=' ', timespec='minutes')}{recurs}; "
-        f"fired at {fired_at.isoformat(sep=' ', timespec='seconds')}.",
-        "Nobody is watching this run. Anything that changes state and needs approval "
-        "is held on a card until the owner answers it; a denial is final. When you "
-        "finish, report what you did, what you found, and what is held for approval.",
-    ]
+    re-rendered from the parsed time, appears here.
+
+    `manual` (#5 S4): the owner started this run himself, at `fired_at`. The
+    prompt says exactly that and when — never "scheduled for" a time nothing
+    scheduled — and keeps the `[scheduled: <id>]` prefix that
+    `report_interrupted` and the diagnostics read the automation from."""
+    if manual:
+        lines = [
+            f"[scheduled: {task.id}] The owner started this automation by hand, "
+            "outside its schedule.",
+            f"Run manually by the owner at {fired_at.isoformat(sep=' ', timespec='seconds')}. "
+            "It replaces no scheduled run: the schedule is unchanged.",
+            "This run is in a new chat. Anything that changes state and needs approval "
+            "is held on a card until the owner answers it; a denial is final. When you "
+            "finish, report what you did, what you found, and what is held for approval.",
+        ]
+    else:
+        occurrence = scheduled_for or task.one_shot_at()
+        recurs = f" (recurring: `{task.cron}`)" if task.recurring else ""
+        lines = [
+            f"[scheduled: {task.id}] An automation the owner approved has fired.",
+            f"Scheduled for {occurrence.isoformat(sep=' ', timespec='minutes')}{recurs}; "
+            f"fired at {fired_at.isoformat(sep=' ', timespec='seconds')}.",
+            "Nobody is watching this run. Anything that changes state and needs approval "
+            "is held on a card until the owner answers it; a denial is final. When you "
+            "finish, report what you did, what you found, and what is held for approval.",
+        ]
     if task.allow:
         lines.append("Commands approved for this run: " + ", ".join(task.allow) + ".")
     if task.sites:
@@ -434,8 +492,7 @@ class Scheduler:
         untouched, so every rescan of the same interruption is the same key
         while a later, new interruption of that chat is a new one."""
         state = await self._ensure_state()
-        match = _SCHEDULED_PREFIX.match(prompt or "")
-        automation = match.group(1) if match else ""
+        automation = automation_of(prompt)
         if automation:
             title = f"aish automation {automation} was interrupted"
             subject = f"The run of automation {automation}"
@@ -593,6 +650,76 @@ class Scheduler:
             f"until {deadline.strftime('%H:%M %a %Y-%m-%d')}.",
         )
 
+    async def fire_now(self, task_id: str) -> TriggerOutcome:
+        """Run one automation now, because the owner asked (#5 S4, `run_now`).
+
+        Everything about the run comes from his file, read fresh here — the
+        prompt, the profile, the monitor spec and its snapshot; the caller
+        chooses only WHEN. It enters the same guarded seam a fire does, under
+        its own dedup key (`manual_key`), and it NEVER marks the fired ledger:
+        the ledger states what the SCHEDULE did, so the occurrence that is due
+        still fires on time. Refused before the seam for a task that is
+        missing, unparseable, disabled, or a one-shot that expired — each with
+        the reason and the way on. A failure to open is answered to the owner,
+        who asked and is there to read it, so it is neither recorded nor
+        pushed; a run that opened leaves a `manual_run` record."""
+        state = await self._ensure_state()
+        # The scheduler's own reload, not a private read: the run's ending is
+        # recorded against `self.tasks` (a monitor writes its snapshot only for
+        # a task the scheduler knows), so the two must be the same read.
+        await self._reload_if_changed()
+        now = self.clock()
+        task = next((t for t in self.tasks if t.id == task_id), None)
+        if task is None:
+            problem = next(
+                (p for p in self.problems if Path(p.path).stem == task_id), None
+            )
+            if problem is not None:
+                return TriggerOutcome(
+                    REFUSED, error=f"{Path(problem.path).name} is not a runnable "
+                    f"automation, so it cannot be run: {problem.error}",
+                )
+            return TriggerOutcome(REFUSED, error=f"there is no automation {task_id!r}")
+        if not task.enabled:
+            return TriggerOutcome(
+                REFUSED, error=f"automation {task.id} is disabled; enable it first "
+                f"(/tasks enable {task.id}, in the terminal), then run it",
+            )
+        if not task.recurring:
+            try:
+                fired = set(await asyncio.to_thread(self.ledger.read)) | self._fired_here
+            except LedgerUnreadable:
+                fired = set(self._fired_here)
+            if task.key in state.settled or schedule.next_due(task, fired, now) == EXPIRED:
+                return TriggerOutcome(
+                    REFUSED, error=f"automation {task.id} was a one-shot for "
+                    f"{task.one_shot_at().strftime('%H:%M %a %Y-%m-%d')} that expired "
+                    "without running, so it will not run again; ask aish for a new "
+                    "automation, which comes on its own approval card",
+                )
+        monitor: MonitorSpec | None = None
+        if task.monitor:
+            try:
+                prior = await asyncio.to_thread(schedule.read_snapshot, self.state_dir, task.id)
+            except (schedule.SnapshotUnreadable, ValueError) as exc:
+                return TriggerOutcome(
+                    OPEN_FAILED, error=f"its monitor snapshot cannot be read ({exc})"
+                )
+            monitor = MonitorSpec(task.id, task.notify, now, prior, manual=True)
+        request = FireRequest(
+            task,
+            run_prompt(task, now, prior=monitor.prior if monitor else None, manual=True),
+            now, now, monitor=monitor, manual=True,
+        )
+        outcome = await self.fire(request)
+        if outcome.opened:
+            state.records.append({
+                "kind": MANUAL_RUN, "task": task.id, "key": request.dedup_key,
+                "session": outcome.session, "observed_at": _stamp(now),
+            })
+            await self._save_state()
+        return outcome
+
     async def _streak_failed(
         self, task: Task, occurrence: datetime, now: datetime, error: str
     ) -> None:
@@ -665,6 +792,8 @@ class Scheduler:
             "session": session,
             "prior_saved_at": _stamp(spec.prior.saved_at) if spec.prior else "",
         }
+        if spec.manual:
+            record["manual"] = True
         if stopped:
             record["status"] = STOPPED
             state.records.append(record)

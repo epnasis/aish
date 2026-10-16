@@ -56,6 +56,12 @@ from pathlib import Path
 SEEN_MAX = 300
 
 
+def ledger_path(state_dir: Path) -> Path:
+    """Where the ledger lives in a state tree — one spelling, shared by the
+    server that writes it and the terminal's `/runs`, which only reads it."""
+    return state_dir / "seen.json"
+
+
 class SeenLedger:
     """chat name → epoch seconds the owner last read it.
 

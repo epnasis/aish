@@ -667,6 +667,9 @@ class ParsedLog(NamedTuple):
     # Every model the chat ran on, each once, in order of its LAST model record —
     # so a chat that switched away still says what it used before (#412).
     models: tuple[str, ...] = ()
+    # The newest `kind:"quiet"` record's `through` (#5 S4): output at or before
+    # this epoch second is a silent monitor run's, and asks nothing of anyone.
+    quiet_through: int | None = None
 
 
 # Stat-keyed caches for the read-only listing paths (drawer, pager, offline
@@ -896,6 +899,9 @@ class SessionInfo:
     output: float = 0.0
     origin: str = "user"  # who started it: user | schedule | email | webhook (#160)
     cwd: str = ""  # last logged working directory; "" when the chat never moved
+    # Output at or before this epoch second belongs to a silent monitor run
+    # (#5 S4); 0.0 when the chat holds none. See `SessionLog.quiet`.
+    quiet_through: float = 0.0
 
 
 class Ranked(NamedTuple):
@@ -1369,6 +1375,9 @@ class SessionLog:
         # answer and the parsed one cannot drift. 0.0 until the chat speaks;
         # seeded from the parse when a session is opened cold.
         self.output_at: float = 0.0
+        # The newest `quiet` record's `through` (#5 S4), held for the roster
+        # row exactly as `output_at` is; seeded from the parse on a cold open.
+        self.quiet_through: float = 0.0
         # Serializes every write to the log file — and the shared write state
         # feeding it (_fh, _pending_model). Writers live on more than one
         # thread (the agent worker logs records while the event loop renames /
@@ -1430,6 +1439,7 @@ class SessionLog:
         user_cmds: list[str] = []
         activity_ts: int | None = None
         output_ts: int | None = None
+        quiet_through: int | None = None
         pending_cmd: str | None = None  # a user ! command awaiting its exit status
         # Beside `messages` rather than in them: the model call a message was
         # in front of, and the `call` records logged after each message. Both
@@ -1473,6 +1483,10 @@ class SessionLog:
                 origin = record.get("origin") or origin
             elif kind == "cwd":
                 cwd = record.get("cwd") or cwd
+            elif kind == "quiet":
+                through = record.get("through")
+                if isinstance(through, int) and not isinstance(through, bool):
+                    quiet_through = through
             elif kind == "command":
                 # Any command record resets the pending one, so a model command
                 # can never inherit a preceding user command's exit status.
@@ -1496,7 +1510,7 @@ class SessionLog:
         _pair_tool_calls(messages, issued_by, calls_after)
         return ParsedLog(
             messages, model, custom_title, origin, cwd, title_auto, user_cmds,
-            activity_ts, output_ts, tuple(models),
+            activity_ts, output_ts, tuple(models), quiet_through,
         )
 
     @staticmethod
@@ -1568,7 +1582,9 @@ class SessionLog:
         which model a chat runs, never that it ran.
         """
         kind = record.get("kind")
-        if kind == "model":
+        if kind in ("model", "quiet"):
+            # `quiet` says how the run's own output is to be read, after it
+            # was written — nothing happened in the chat because of it.
             return False
         if kind == "trace":
             step = record.get("step")
@@ -3201,7 +3217,7 @@ class SessionLog:
         return title
 
     @staticmethod
-    def _peek(path: Path) -> tuple[str | None, str, int | None, int | None]:
+    def _peek(path: Path) -> tuple[str | None, str, int | None, int | None, int | None]:
         """(title, origin, activity_ts) per session for the drawer/pager. A
         custom title (latest `kind:"title"` record) wins; else the first user
         message. A None title = no user input yet and never renamed (an empty
@@ -3211,7 +3227,7 @@ class SessionLog:
         try:
             parsed = SessionLog._cached_parse(path)
         except OSError:
-            return None, "user", None, None
+            return None, "user", None, None, None
         title = parsed.title
         if title is None:
             derived = SessionLog._derive_title(parsed.messages)
@@ -3221,6 +3237,7 @@ class SessionLog:
             parsed.origin,
             parsed.activity_ts,
             parsed.output_ts,
+            parsed.quiet_through,
         )
 
     @staticmethod
@@ -3258,8 +3275,8 @@ class SessionLog:
     @staticmethod
     def pager_titles(
         state_dir: Path, limit: int = 30
-    ) -> list[tuple[str, str, str, float, float]]:
-        """(name, title, origin, ts) pages for the web UI's swipe pager: the
+    ) -> list[tuple[str, str, str, float, float, float]]:
+        """(name, title, origin, ts, out, quiet_through) pages for the web UI's swipe pager: the
         `limit` most recent chats that have a title, same recency ordering as the
         rail, flipped oldest→newest. Chats with no user input yet are not rows —
         the cap applies after skipping them, so blank files can never crowd real
@@ -3273,7 +3290,7 @@ class SessionLog:
         what unread compares against; 0.0 when there is none to report."""
         pages = []
         for path in SessionLog._by_recency(state_dir):
-            title, origin, activity_ts, output_ts = SessionLog._peek(path)
+            title, origin, activity_ts, output_ts, quiet = SessionLog._peek(path)
             if title is not None:
                 try:
                     ts = float(activity_ts) if activity_ts else path.stat().st_mtime
@@ -3282,6 +3299,7 @@ class SessionLog:
                 pages.append((
                     path.name, title, origin, ts,
                     float(output_ts) if output_ts else 0.0,
+                    float(quiet or 0),
                 ))
                 if len(pages) == limit:
                     break
@@ -3306,6 +3324,7 @@ class SessionLog:
         cwd: str = "",
         activity_ts: int | None = None,
         output_ts: int | None = None,
+        quiet_through: int | None = None,
     ) -> SessionInfo:
         title = custom_title if custom_title else SessionLog._derive_title(messages)
         title = SessionLog._truncate_title(title)
@@ -3335,6 +3354,7 @@ class SessionLog:
             output=float(output_ts) if output_ts else 0.0,
             origin=origin,
             cwd=cwd,
+            quiet_through=float(quiet_through or 0),
         )
 
     @staticmethod
@@ -3345,7 +3365,7 @@ class SessionLog:
             return None
         return SessionLog._info_from(
             path, parsed.messages, parsed.model, parsed.title, parsed.origin,
-            parsed.cwd, parsed.activity_ts, parsed.output_ts,
+            parsed.cwd, parsed.activity_ts, parsed.output_ts, parsed.quiet_through,
         )
 
     @staticmethod
@@ -3423,6 +3443,7 @@ class SessionLog:
                 info=SessionLog._info_from(
                     path, messages, model, parsed.title, parsed.origin,
                     parsed.cwd, parsed.activity_ts, parsed.output_ts,
+                    parsed.quiet_through,
                 ),
                 title_cf=title_cf,
                 content_cf=content_cf,
@@ -3941,6 +3962,19 @@ class SessionLog:
         read back by _parse so a cold-loaded triggered session keeps its
         provenance and the drawer can group it under "Automated" (#160)."""
         self._record("origin", origin=origin)
+
+    def quiet(self, *, through: float, automation: str, status: str) -> None:
+        """Record that this chat's output up to `through` (epoch seconds) is
+        a SILENT monitor run's (#5 S4): a verdict the scheduler parsed as
+        baseline/unchanged, or a run the owner stopped. The web's attention
+        predicate reads it so a monitor nobody needs to open does not fill
+        "Needs you". Bounded by `through`, so anything the chat says LATER —
+        the owner typing into it, a held card — is news again. It lives here,
+        with the chat, and not in the scheduler's capped record list, so it
+        cannot be evicted while the chat exists."""
+        stamp = int(through)
+        self._record("quiet", through=stamp, automation=automation, status=status)
+        self.quiet_through = float(stamp)
 
     def task_start(self, prompt: str) -> None:
         """Mark a model task as IN FLIGHT (#164). Paired with task_end, this is
