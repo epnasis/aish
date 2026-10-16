@@ -280,7 +280,7 @@ class TestMonitorNotifyMatrix:
         title, body = server_module._monitor_push(
             self._spec("on_change"), outcome, default=("t", "b")
         )
-        assert "without a card" in title and "2 change(s)" in body
+        assert "without a card" in title and "attempted or made 2 change(s)" in body
         assert server_module._monitor_push(self._spec("never"), outcome, default=("t", "b")) is None
 
     def test_the_agent_counts_cardless_changes_per_task(self):

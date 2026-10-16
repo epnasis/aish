@@ -1274,8 +1274,9 @@ def _monitor_push(
             # not then sit unannounced behind a silent verdict.
             reported = "no change" if status == schedule.UNCHANGED else "its baseline"
             return (
-                f"{title}: {status}, with changes made without a card",
-                f"the run reported {reported} and made {outcome.cardless} change(s) "
+                f"{title}: {status}, with changes attempted without a card",
+                f"the run reported {reported} and attempted or made {outcome.cardless} "
+                "change(s) "
                 "without a card — the chat lists them",
             )
         return None  # on_change: unchanged, baseline, stopped and unreadable are silent here

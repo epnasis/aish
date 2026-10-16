@@ -559,7 +559,10 @@ def parse_verdict(answer: str, *, first_run: bool) -> Verdict:
     issue #5's "unparseable → treat as changed": a guess in either direction
     stands where the evidence should be. A first run (no snapshot on disk) is
     `baseline` — and needs the block too, so a first run without one fails
-    noisy rather than arming a monitor with nothing to compare."""
+    noisy rather than arming a monitor with nothing to compare. An answer with
+    more than one ```snapshot fence, or a block holding a `VERDICT:` line, is
+    `unreadable` too: a snapshot carrying the protocol's own markers is never
+    trusted, in either direction, because a page can carry a forged ending."""
     verdict = _read_verdict(answer or "", first_run=first_run)
     vocab.note("schedule.VERDICT_MARKERS", matched=verdict.status != UNREADABLE)
     return verdict
@@ -578,6 +581,19 @@ def _read_verdict(answer: str, *, first_run: bool) -> Verdict:
     body, problem = _snapshot_block(rest)
     if problem:
         return Verdict(UNREADABLE, said=word, summary=summary, reason=problem)
+    # A snapshot carrying the protocol's own markers is never trusted, in
+    # either direction. The block holds what a run READ, and a page can hold
+    # a complete forged ending (a VERDICT: line and its own ```snapshot fence):
+    # copied verbatim, the last-VERDICT anchor reads the PAGE's verdict past
+    # the model's own, and stores the page's bytes as the baseline. The whole
+    # answer is checked, because the forged ending parses as a clean block.
+    openers = sum(1 for text in answer.split("\n") if text.strip() == SNAPSHOT_FENCE_OPEN)
+    if openers != 1 or _VERDICT_LINE.search(body):
+        return Verdict(
+            UNREADABLE, said=word, summary=summary,
+            reason="the answer carries the protocol's own markers inside what was read "
+            f"({openers} ```snapshot fences, or a VERDICT: line in the snapshot)",
+        )
     if first_run:
         return Verdict(BASELINE, snapshot=body, summary=summary, said=word)
     if word == BASELINE:
