@@ -68,7 +68,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 |---|---|
 | `agent.py`, `claude_max.py`, `approval.py`, `tools.py`, `files.py`, `web.py`, `backends.py`, `provenance.py`, `vouches.py`, `recipients.py`, `vault_writes.py`, `repetition.py` | `docs/agent-core.md` |
 | `browser.py`, `browse.py`, `signin.py`, `_browser_read`, `_login_gate`, `_browse_gate`, anything that renders or drives a page in Chrome | `docs/browser.md` |
-| `cli.py`, `prompt.py`, `aliases.py`, `dir_ignore.py`, `notify.py` | `docs/cli.md` |
+| `cli.py`, `prompt.py`, `aliases.py`, `dir_ignore.py`, `notify.py`, `automation_admin.py` | `docs/cli.md` |
 | `media.py`, `show_image`, anything that renders an image | `docs/media-and-images.md` |
 | `recordings.py`, `read_media`, anything that reads a video or audio file | `docs/recordings-and-video.md` |
 | `documents.py`, `read_pdf`, `workspace_roots` (where aish may read unasked) | `docs/documents-and-pdf.md` |
@@ -131,6 +131,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`cli.py`** — the terminal client: REPL, argv, slash commands, model picker, rendering. Gates identically to the web; a terminal session dies with its terminal and is never resurrected. → `docs/cli.md`
 - **`prompt.py`** — the boxed input UI, a small prompt_toolkit `Application` (not `PromptSession`) because the footer-under-input layout requires it. → `docs/cli.md`
 - **`aliases.py`** — user aliases expanded BEFORE the approval gate, so the gate parses the real command and not an opaque name. → `docs/cli.md`
+- **`automation_admin.py`** — the terminal's `/tasks` and `/runs` (#5 S4): reads the automation stores, and writes only as a toggle (`enabled`, on an existing file) and a shredder (delete) — never an author; the approval card stays the only author of what an automation does. → `docs/cli.md`
 - **`notify.py`** — Pushover sending; unconfigured or failing is a silent no-op that never raises into the approval path. → `docs/cli.md`
 - **`server.py`** — `aish-web`: the same Agent behind a Starlette WebSocket instead of a TTY. The approval gate is unchanged; only the transport differs. → `docs/web-server.md`
 - **`aish/static/`** — the vanilla-JS frontend (no build step, iOS-styled). → `docs/web-frontend.md`
