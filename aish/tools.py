@@ -1807,6 +1807,12 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                     "model": {"type": "string", "description": "Only if the user names one."},
                     "cwd": {"type": "string", "description": "Absolute working directory."},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["task", "monitor"],
+                        "description": "monitor (cron only): 'tell me when X changes'.",
+                    },
+                    "notify": {"type": "string", "enum": ["always", "on_change", "never"]},
                 },
                 "required": ["id", "prompt", "note"],
             },

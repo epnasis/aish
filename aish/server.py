@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import hmac
@@ -1237,6 +1238,56 @@ def _host_arg(event: dict) -> str:
         return urlsplit(url).netloc
     except Exception:  # noqa: BLE001 — an unparseable url simply has no host
         return ""
+
+
+def _monitor_push(
+    spec: scheduling.MonitorSpec,
+    outcome: scheduling.MonitorOutcome | None,
+    *,
+    default: tuple[str, str],
+) -> tuple[str, str] | None:
+    """The completion push for a monitor run (#5 S3), or None for silence.
+
+    Silent for exactly: a PARSED unchanged/baseline under on_change (unless the
+    run changed something without a card), a stopped run under on_change, an
+    unreadable run whose push is the scheduler's streak push instead, and every
+    completion under never. A run the scheduler could not record (`outcome`
+    None) gets the plain completion push — noisy, never silent. `never`
+    suppresses completion pushes only; a held approval still pushes (#348's
+    asymmetry lives in `notify_hold`, untouched), and an unreadable or failed
+    run's streak push is the scheduler's, which no policy turns off."""
+    if outcome is None:
+        return default
+    status = outcome.status
+    if spec.notify == schedule.NOTIFY_NEVER:
+        return None
+    title = f"aish monitor {spec.task_id}"
+    if status == schedule.CHANGED:
+        return (
+            f"{title}: changed",
+            outcome.summary[:300] or "the run reported a change and gave no one-line summary",
+        )
+    if spec.notify != schedule.NOTIFY_ALWAYS:
+        if outcome.cardless and status in (schedule.UNCHANGED, schedule.BASELINE):
+            # A verdict says nothing about what the run DID: changes made
+            # without a card are announced in the answer, and the answer must
+            # not then sit unannounced behind a silent verdict.
+            reported = "no change" if status == schedule.UNCHANGED else "its baseline"
+            return (
+                f"{title}: {status}, with changes attempted without a card",
+                f"the run reported {reported} and attempted or made {outcome.cardless} "
+                "change(s) "
+                "without a card — the chat lists them",
+            )
+        return None  # on_change: unchanged, baseline, stopped and unreadable are silent here
+    if status == schedule.UNREADABLE:
+        # Already pushed on the streak: once is enough for the same run.
+        return None if outcome.malfunction_pushed else (f"{title}: no verdict", outcome.detail)
+    if status == schedule.UNCHANGED:
+        return (f"{title}: unchanged", "the run reported no change")
+    if status == schedule.BASELINE:
+        return (f"{title}: baseline saved", "the first run saved the baseline to compare against")
+    return default  # stopped
 
 
 def _describe_hold(event: dict, *, terse: bool = False) -> str:
@@ -3486,7 +3537,13 @@ class WebServer:
             self._run_task(session, text, images, documents, owner_sent=True)
         )
 
-    async def _notify_done(self, session: "Session", result: str) -> None:
+    async def _notify_done(
+        self,
+        session: "Session",
+        result: str,
+        *,
+        monitor: tuple[scheduling.MonitorSpec, scheduling.MonitorOutcome | None] | None = None,
+    ) -> None:
         """Ping the owner when a TRIGGERED session finishes (#163) — the
         'observe the outcome' half. The blocking Pushover POST is offloaded via
         to_thread so the event loop never stalls; a no-op for user sessions or
@@ -3509,10 +3566,15 @@ class WebServer:
         if session.origin == "user" or session.viewers or not notify.configured():
             return
         link = f"{self.public_url}/?session={session.name}" if self.public_url else None
-        title = session.custom_title or "automated chat"
+        title = f"aish finished — {session.custom_title or 'automated chat'}"
         body = (result or "done").strip()[:300] or "done"
+        if monitor is not None:
+            push = _monitor_push(*monitor, default=(title, body))
+            if push is None:
+                return
+            title, body = push
         await asyncio.to_thread(
-            notify.pushover, f"aish finished — {title}", body,
+            notify.pushover, title, body,
             url=link, url_title="Open chat", priority=0,
         )
 
@@ -3526,11 +3588,18 @@ class WebServer:
         carried: CarriedWork | None = None,
         *,
         owner_sent: bool = False,
+        monitor: scheduling.MonitorSpec | None = None,
     ) -> None:
         """`owner_sent`: a person sent this task — typed or tapped it, or pressed
         Retry. False when aish started it itself (a trigger's prompt, restart
         recovery). Only an answer to a task a person sent can carry the learning
-        chip (#446, `docs/learning-suggestions.md`)."""
+        chip (#446, `docs/learning-suggestions.md`).
+
+        `monitor` (#5 S3): handed ONLY by `launch_triggered` for a run the
+        scheduler fired. The answer is parsed as a monitor verdict iff it is
+        passed — never inferred from the session's origin or meta, because the
+        owner typing into the monitor's chat later enters here with the same
+        origin, and his words must never be parsed or replace the baseline."""
         # Where this turn's records begin (#446): the learning detector reads
         # back exactly what the turn wrote, and nothing before it.
         span_start = learning.log_size(getattr(session.logref.log, "path", None))
@@ -3561,6 +3630,7 @@ class WebServer:
         # session (#397); None until the answer has landed.
         finished: tuple[str, TitleRequest | None] | None = None
         boundary: objective.Boundary | None = None
+        monitored: scheduling.MonitorOutcome | None = None
         try:
             if resume and isinstance(session.agent, Agent):
                 # Keep the interrupted task's own tool output verbatim (#164):
@@ -3633,6 +3703,16 @@ class WebServer:
             # anything yields — because the moment busy clears the next turn
             # owns `agent.messages` (L2). A stopped turn named nothing.
             titling = None if pushed == CANCELLED_RESULT else self._title_request(session)
+            if monitor is not None:
+                # Here, where the answer is known to have landed — not in the
+                # push, which returns early for a viewer or no Pushover and is
+                # not awaited at shutdown, so a baseline written there is lost.
+                monitored = await self._report_monitor(session, monitor, pushed)
+                cardless = int(getattr(
+                    getattr(session.agent, "inner", session.agent), "cardless_this_task", 0
+                ) or 0)
+                if monitored is not None and cardless:
+                    monitored = dataclasses.replace(monitored, cardless=cardless)
             finished = (pushed, titling)
         except ModelUnavailable as exc:
             failure = f"{MODEL_UNAVAILABLE_PREFIX}{exc}{_backend_hint(session.agent)}"
@@ -3659,10 +3739,45 @@ class WebServer:
             # stood here.
             boundary = self._objective_boundary(session)
             await self._finish_turn(session)
+        if monitor is not None and failure:
+            await self._report_monitor_failed(session, monitor, failure)
         if finished is not None:
-            self._after_turn(session, *finished)
+            self._after_turn(
+                session, *finished,
+                monitor=(monitor, monitored) if monitor is not None else None,
+            )
         if boundary is not None:
             self._track_after_turn(session, boundary)
+
+    async def _report_monitor(
+        self, session: Session, spec: scheduling.MonitorSpec, answer: str
+    ) -> scheduling.MonitorOutcome | None:
+        """Hand a monitor run's answer to the scheduler, its one recorder. None
+        when nothing could record it — the push then falls back to the plain
+        completion push, so an unrecorded run is noisy, never silent."""
+        if self.scheduler is None:
+            log.error("monitor %s answered but no scheduler is running to record it",
+                      spec.task_id)
+            return None
+        try:
+            return await self.scheduler.report_monitor(
+                spec, session.name, answer, stopped=answer == CANCELLED_RESULT
+            )
+        except Exception:  # noqa: BLE001 — a record is never worth the turn
+            log.exception("monitor %s: recording the run failed", spec.task_id)
+            return None
+
+    async def _report_monitor_failed(
+        self, session: Session, spec: scheduling.MonitorSpec, failure: str
+    ) -> None:
+        if self.scheduler is None:
+            log.error("monitor %s failed (%s) and no scheduler is running to record it",
+                      spec.task_id, failure)
+            return
+        try:
+            await self.scheduler.report_monitor_failed(spec, session.name, failure)
+        except Exception:  # noqa: BLE001
+            log.exception("monitor %s: recording the failed run failed", spec.task_id)
 
     def _objective_boundary(self, session: Session) -> objective.Boundary | None:
         """Where this turn ended, for the tracker — or None when emission is
@@ -3794,7 +3909,12 @@ class WebServer:
         await self._announce_objective(session)
 
     def _after_turn(
-        self, session: Session, result: str, titling: TitleRequest | None
+        self,
+        session: Session,
+        result: str,
+        titling: TitleRequest | None,
+        *,
+        monitor: tuple[scheduling.MonitorSpec, scheduling.MonitorOutcome | None] | None = None,
     ) -> None:
         """Spawn the post-answer work — the completion push, then the titling
         call — as its own task, once the turn has ended (#397).
@@ -3808,7 +3928,7 @@ class WebServer:
 
         async def run() -> None:
             try:
-                await self._notify_done(session, result)
+                await self._notify_done(session, result, monitor=monitor)
                 if titling is not None:
                     await self._retitle(session, titling)
             except Exception:  # noqa: BLE001 — a push or a name is never worth a crash
@@ -5646,12 +5766,15 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         title: str = "",
         model_override: str = "",
         profile: RunProfile | None = None,
+        monitor: scheduling.MonitorSpec | None = None,
     ) -> scheduling.TriggerOutcome:
         """THE ingress for a non-user session, past the token/origin gates.
         `POST /trigger` and the scheduler both come through here, so a
         scheduled run reaches a session by no path the guards do not stand in.
         `profile` is the scheduler's alone: the grants the owner approved
-        inside the automation's creation card."""
+        inside the automation's creation card. So is `monitor` (#5 S3): a
+        keyword, never `meta`, because `handle_trigger` forwards `meta` from
+        any token holder verbatim and must not be able to mint a monitor run."""
         # Abuse guards (#178 P1-10), in this order: a dedup hit is an
         # idempotent SUCCESS and consumes nothing (a retry storm re-sending
         # one key must not burn rate tokens), and both refusals come BEFORE
@@ -5697,7 +5820,17 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         # replay identifies the same message by its position in a non-user
         # session, since it is always that session's opening turn.
         session.open_turn(_user_event(prompt, "trigger"))
-        session.runner = asyncio.ensure_future(self._run_task(session, prompt))
+        if monitor is not None and monitor.prior is not None:
+            # Never in the prompt: see `scheduling.run_prompt` for the laundering
+            # the task string's hosts fold would make of it.
+            saved = monitor.prior.saved_at.isoformat(sep=" ", timespec="minutes")
+            session.agent.add_outside_note(
+                f"the snapshot the previous run of monitor '{monitor.task_id}' saved at "
+                f"{saved} — what that run read, delivered as outside content",
+                monitor.prior.body,
+                source="monitor_snapshot",
+            )
+        session.runner = asyncio.ensure_future(self._run_task(session, prompt, monitor=monitor))
         if dedup_key:
             # Recorded only once the session actually exists, so a failed
             # open never poisons the key for the retry that would succeed.
@@ -5729,6 +5862,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             model_override=task.model,
             profile=RunProfile(allow=task.allow, sites=task.sites,
                                cwd=task.cwd, roots=task.roots),
+            **({"monitor": request.monitor} if request.monitor is not None else {}),
         )
 
     def _store_upload(self, name: str, body: bytes) -> Path:

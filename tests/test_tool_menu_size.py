@@ -40,7 +40,12 @@ from aish import tools
 # the alternative, making the model say "come back after 10pm", is the failure
 # the slice exists to remove. Under the per-task menu (#444 H1) it is sent only
 # to tasks that select it; the full-menu path pays it on every call.
-MAX_MENU_CHARS = 35_600
+#
+# Raised 35,600 -> 35,800 on 2026-10-16 (epic #142 W2, S3) for schedule_task's
+# `kind` and `notify` arguments (+179 chars: 35,600 -> 35,779) — two enums and a
+# 46-char description, no essay. The monitor protocol itself rides the run's
+# prompt, which only a monitor run pays for, never this menu.
+MAX_MENU_CHARS = 35_800
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.

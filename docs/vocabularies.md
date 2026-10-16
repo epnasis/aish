@@ -111,6 +111,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `approval._DESTRUCTIVE_COMMANDS` | program names | breaks | yes | none needed — the GATE is `check_denied` and the card, neither of which reads this | 12 |
 | `agent.REFUSAL_OPENINGS` | EN (aish's own words) | permits | yes | `_gate_outcome` / `ToolOutcome.meta`, checked FIRST | 6 |
 | `ratelimit._OVERFLOW_PHRASES` | EN (provider error text) | friction | yes | the 4xx status that already bounds it — these words only ever split `BAD_REQUEST`, never create a failure | 10 |
+| `schedule.VERDICT_MARKERS` | aish's own protocol words, matched against MODEL output | friction | yes | the parse's mandatory `unreadable` ending — no marker, no silence (`docs/web-server.md` §Monitors) | 3 |
 | `signin._SECOND_LEVEL` | public suffixes | friction | **no** | — | 10 |
 | `web._NOT_BUYABLE` | schema.org enum | breaks | **no** | subset of `web._AVAILABILITY`, tested at the same call site | 3 |
 

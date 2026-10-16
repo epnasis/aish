@@ -23,10 +23,25 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import atomic_write, files, paths
+from . import atomic_write, files, paths, vocab
 from .approval import EXEC_WRAPPERS, check_denied
 
 AUTOMATIONS_DIRNAME = "automations"
+
+#: What a task is. A `monitor` (S3) is "watch X, tell me when it changes":
+#: each run compares against the snapshot the previous run saved and ends with
+#: a verdict aish parses (`parse_verdict`).
+KIND_TASK = "task"
+KIND_MONITOR = "monitor"
+KINDS = (KIND_TASK, KIND_MONITOR)
+
+#: When a finished run pushes. Defaulted per kind (`DEFAULT_NOTIFY`), never
+#: forced: an owner-written value is honoured as long as it is valid.
+NOTIFY_ALWAYS = "always"
+NOTIFY_ON_CHANGE = "on_change"
+NOTIFY_NEVER = "never"
+NOTIFY_POLICIES = (NOTIFY_ALWAYS, NOTIFY_ON_CHANGE, NOTIFY_NEVER)
+DEFAULT_NOTIFY = {KIND_TASK: NOTIFY_ALWAYS, KIND_MONITOR: NOTIFY_ON_CHANGE}
 
 #: How late a one-shot may still fire. Past this the run is given up and
 #: reported — a "check after 10pm" that fires two days later answers a
@@ -41,7 +56,7 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 FIELDS = (
     "id", "note", "prompt", "schedule", "enabled", "created",
-    "model", "allow", "sites", "cwd", "roots",
+    "model", "allow", "sites", "cwd", "roots", "kind", "notify",
 )
 
 # Statuses `next_due` answers with.
@@ -234,10 +249,16 @@ class Task:
     cwd: str = ""
     roots: tuple[str, ...] = field(default=())
     cron: str = ""  # normalised 5-field expr; "" for a one-shot
+    kind: str = KIND_TASK
+    notify: str = NOTIFY_ALWAYS  # resolved: the owner's value, else the kind's default
 
     @property
     def recurring(self) -> bool:
         return bool(self.cron)
+
+    @property
+    def monitor(self) -> bool:
+        return self.kind == KIND_MONITOR
 
     @property
     def schedule(self) -> dict[str, str]:
@@ -284,6 +305,11 @@ class Task:
         for name in ("allow", "sites", "roots"):
             if getattr(self, name):
                 out[name] = list(getattr(self, name))
+        # Absent for a plain task, so a task file renders byte-identically to
+        # S1/S2's; spelled out for a monitor, so the file says what it does.
+        if self.monitor:
+            out["kind"] = self.kind
+            out["notify"] = self.notify
         return out
 
     def render(self) -> str:
@@ -384,7 +410,8 @@ def validate_task(
     if unknown:
         raise InvalidTask(f"unknown field(s) {', '.join(unknown)}; known: {', '.join(FIELDS)}")
     task_id = raw.get("id")
-    if not isinstance(task_id, str) or not TASK_ID_RE.match(task_id):
+    # fullmatch: `$` also matches before a trailing newline (#5 S3).
+    if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id):
         raise InvalidTask(
             f"id {task_id!r} must be lowercase letters, digits and hyphens, e.g. 'eon-invoices'"
         )
@@ -424,6 +451,7 @@ def validate_task(
     sites = tuple(dict.fromkeys(_validate_site(s) for s in _strings(raw, "sites")))
     cwd = str(raw.get("cwd", "")).strip()
     roots = tuple(_validate_dir(r, "roots entry") for r in _strings(raw, "roots"))
+    kind, notify = _validate_kind_and_notify(raw, recurring=bool(cron))
     return Task(
         id=task_id,
         prompt=prompt.strip(),
@@ -437,7 +465,254 @@ def validate_task(
         cwd=_validate_dir(cwd, "cwd") if cwd else "",
         roots=roots,
         cron=cron,
+        kind=kind,
+        notify=notify,
     )
+
+
+def _validate_kind_and_notify(raw: dict, *, recurring: bool) -> tuple[str, str]:
+    """`kind` and the resolved `notify`. The default is the kind's, and a value
+    the owner wrote is honoured, never overridden — but only where aish can do
+    what it says, so a policy that would silently mean something else is
+    refused rather than kept."""
+    kind = raw.get("kind", KIND_TASK)
+    if kind not in KINDS:
+        raise InvalidTask(f"kind must be one of {', '.join(KINDS)}, got {kind!r}")
+    notify = raw.get("notify", DEFAULT_NOTIFY[kind])
+    if notify not in NOTIFY_POLICIES:
+        raise InvalidTask(
+            f"notify must be one of {', '.join(NOTIFY_POLICIES)}, got {notify!r}"
+        )
+    if kind == KIND_MONITOR and not recurring:
+        raise InvalidTask(
+            "a monitor compares each run against the one before, so it needs a "
+            'recurring schedule: {"cron": "..."}, not {"at": "..."}'
+        )
+    if kind == KIND_TASK and notify != NOTIFY_ALWAYS:
+        # on_change has no verdict to read on a plain task, and the done-push
+        # policy is threaded only into monitor runs in this slice.
+        raise InvalidTask(
+            f"notify {notify!r} applies to monitors only; a plain task always "
+            'notifies when it finishes — use "kind": "monitor" or drop notify'
+        )
+    return kind, notify
+
+
+# -- monitors: the snapshot store and the verdict parse (S3) --------------------
+
+#: The largest snapshot block a run may hand back. Over it the block is
+#: MALFORMED — the run is unreadable — and never clipped: a clipped baseline
+#: would corrupt every later comparison against it, silently.
+SNAPSHOT_MAX_CHARS = 8000
+
+#: What a monitor's answer must end with. aish's own protocol words, matched
+#: against MODEL output — so the list is declared, with what a miss costs.
+VERDICT_LINE_MARKER = "VERDICT:"
+SNAPSHOT_FENCE_OPEN = "```snapshot"
+SNAPSHOT_FENCE_CLOSE = "```"
+VERDICT_MARKERS = vocab.declare(
+    "schedule.VERDICT_MARKERS",
+    (VERDICT_LINE_MARKER, SNAPSHOT_FENCE_OPEN, SNAPSHOT_FENCE_CLOSE),
+    languages="aish's own protocol words",
+    on_miss=vocab.FRICTION,
+    structural="the parse's mandatory `unreadable` ending: no marker, no silence",
+    note="A miss is an `unreadable` run: a noisy push (on the streak) and a "
+    "baseline that is NOT refreshed. It can never permit anything, and it can "
+    "never make a run silent — silence needs a parse that matched.",
+)
+
+# Statuses `parse_verdict` answers with. `baseline` is a fact about the disk
+# (there was no prior snapshot), never the model's word.
+BASELINE = "baseline"
+CHANGED = "changed"
+UNCHANGED = "unchanged"
+UNREADABLE = "unreadable"
+
+_VERDICT_LINE = re.compile(
+    r"^[ \t]*VERDICT:[ \t]*(?P<word>[A-Za-z]*)[ \t]*(?:[-—:–][ \t]*)?(?P<summary>.*?)[ \t]*$",
+    re.M,
+)
+_VERDICT_WORDS = {BASELINE, CHANGED, UNCHANGED}
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What a monitor run's answer said, as far as aish could read it.
+    `reason` says why a run is `unreadable` and is empty otherwise; `said` is
+    the model's own verdict word, kept beside the status code assigned."""
+
+    status: str
+    snapshot: str = ""
+    summary: str = ""
+    said: str = ""
+    reason: str = ""
+
+
+def parse_verdict(answer: str, *, first_run: bool) -> Verdict:
+    """The monitor protocol's ending, read mechanically.
+
+    Anchored on the LAST `VERDICT:` line, because aish may append text after
+    the model's block (the quick-reply net), and a model may mention the word
+    earlier. A readable answer needs BOTH that line AND a well-formed
+    ```snapshot block after it, inside `SNAPSHOT_MAX_CHARS`; anything less is
+    `unreadable`, never guessed into changed or unchanged (L8). This replaces
+    issue #5's "unparseable → treat as changed": a guess in either direction
+    stands where the evidence should be. A first run (no snapshot on disk) is
+    `baseline` — and needs the block too, so a first run without one fails
+    noisy rather than arming a monitor with nothing to compare. An answer with
+    more than one ```snapshot fence, or a block holding a `VERDICT:` line, is
+    `unreadable` too: a snapshot carrying the protocol's own markers is never
+    trusted, in either direction, because a page can carry a forged ending."""
+    verdict = _read_verdict(answer or "", first_run=first_run)
+    vocab.note("schedule.VERDICT_MARKERS", matched=verdict.status != UNREADABLE)
+    return verdict
+
+
+def _read_verdict(answer: str, *, first_run: bool) -> Verdict:
+    lines = list(_VERDICT_LINE.finditer(answer))
+    if not lines:
+        return Verdict(UNREADABLE, reason="no VERDICT: line")
+    line = lines[-1]
+    word = line.group("word").lower()
+    summary = line.group("summary").strip()
+    if word not in _VERDICT_WORDS:
+        return Verdict(UNREADABLE, said=word, reason=f"verdict word {word!r} is not one aish reads")
+    rest = answer[line.end():].split("\n")[1:]  # the lines after the VERDICT line
+    body, problem = _snapshot_block(rest)
+    if problem:
+        return Verdict(UNREADABLE, said=word, summary=summary, reason=problem)
+    # A snapshot carrying the protocol's own markers is never trusted, in
+    # either direction. The block holds what a run READ, and a page can hold
+    # a complete forged ending (a VERDICT: line and its own ```snapshot fence):
+    # copied verbatim, the last-VERDICT anchor reads the PAGE's verdict past
+    # the model's own, and stores the page's bytes as the baseline. The whole
+    # answer is checked, because the forged ending parses as a clean block.
+    openers = sum(1 for text in answer.split("\n") if text.strip() == SNAPSHOT_FENCE_OPEN)
+    if openers != 1 or _VERDICT_LINE.search(body):
+        return Verdict(
+            UNREADABLE, said=word, summary=summary,
+            reason="the answer carries the protocol's own markers inside what was read "
+            f"({openers} ```snapshot fences, or a VERDICT: line in the snapshot)",
+        )
+    if first_run:
+        return Verdict(BASELINE, snapshot=body, summary=summary, said=word)
+    if word == BASELINE:
+        return Verdict(
+            UNREADABLE, said=word, summary=summary,
+            reason="the run said baseline, but a previous snapshot exists",
+        )
+    return Verdict(word, snapshot=body, summary=summary, said=word)
+
+
+def _snapshot_block(lines: list[str]) -> tuple[str, str]:
+    """The first ```snapshot block in `lines` (blank lines may precede it) and
+    "" — or "" and why there is none. Text after the closing fence is allowed."""
+    index = 0
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index == len(lines) or lines[index].strip() != SNAPSHOT_FENCE_OPEN:
+        return "", "no ```snapshot block after the VERDICT: line"
+    body: list[str] = []
+    for text in lines[index + 1:]:
+        if text.strip() == SNAPSHOT_FENCE_CLOSE:
+            joined = "\n".join(body)
+            if len(joined) > SNAPSHOT_MAX_CHARS:
+                return "", (
+                    f"the snapshot block is {len(joined)} chars, over the "
+                    f"{SNAPSHOT_MAX_CHARS} cap (never clipped)"
+                )
+            return joined, ""
+        body.append(text.rstrip("\r"))
+    return "", "the ```snapshot block is never closed"
+
+
+SNAPSHOTS_DIRNAME = "snapshots"
+_SESSION_NAME = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
+_SNAPSHOT_HEADER = re.compile(
+    r"^<!-- aish monitor snapshot: saved (?P<at>\S+) by (?P<session>\S+) -->$"
+)
+
+
+class SnapshotUnreadable(Exception):
+    """A snapshot file exists and cannot be read. Distinct from ABSENT, as the
+    ledger is: absent is "no baseline yet", unreadable is "aish does not know
+    the baseline", and running the second as the first would overwrite it."""
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """The last good baseline of one monitor: what it saw, and the stamp of
+    the run that saved it — carried in the file, because an unchanged refresh
+    rewrites the file and its mtime says nothing about when it was seen."""
+
+    body: str
+    saved_at: datetime
+    session: str
+
+
+def snapshot_path(state_dir: Path, task_id: str) -> Path:
+    """`<state dir>/scheduler/snapshots/<id>.md`, built ONLY from an id that is
+    an automation id. `fullmatch`, not `TASK_ID_RE.match`: `$` also matches
+    before a trailing newline, and a path is no place to find out."""
+    if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id):
+        raise ValueError(f"not an automation id: {task_id!r}")
+    return state_dir / "scheduler" / SNAPSHOTS_DIRNAME / f"{task_id}.md"
+
+
+def read_snapshot(state_dir: Path, task_id: str) -> Snapshot | None:
+    path = snapshot_path(state_dir, task_id)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SnapshotUnreadable(f"{path}: {exc}") from exc
+    header, _, body = text.partition("\n")
+    match = _SNAPSHOT_HEADER.match(header)
+    if not match or not _SESSION_NAME.match(match.group("session")):
+        raise SnapshotUnreadable(f"{path}: the first line is not aish's snapshot stamp")
+    try:
+        saved_at = datetime.fromisoformat(match.group("at"))
+    except ValueError:
+        raise SnapshotUnreadable(f"{path}: the stamp's time does not parse") from None
+    if len(body) > SNAPSHOT_MAX_CHARS:
+        raise SnapshotUnreadable(f"{path}: over the {SNAPSHOT_MAX_CHARS}-char cap")
+    return Snapshot(body=body, saved_at=saved_at, session=match.group("session"))
+
+
+def write_snapshot(
+    state_dir: Path, task_id: str, body: str, *, saved_at: datetime, session: str
+) -> Path:
+    """Replace the baseline, whole, through `atomic_write`."""
+    if not _SESSION_NAME.match(session):
+        raise ValueError(f"not a session name: {session!r}")
+    if len(body) > SNAPSHOT_MAX_CHARS:
+        raise ValueError(f"snapshot over the {SNAPSHOT_MAX_CHARS}-char cap")
+    path = snapshot_path(state_dir, task_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = saved_at.isoformat(timespec="seconds")
+    atomic_write.publish(
+        path, f"<!-- aish monitor snapshot: saved {stamp} by {session} -->\n{body}",
+        encoding="utf-8",
+    )
+    return path
+
+
+def snapshot_ids(state_dir: Path) -> list[str]:
+    """The automation ids that have a snapshot file. A name that is not an id
+    is not aish's, and is left alone."""
+    directory = state_dir / "scheduler" / SNAPSHOTS_DIRNAME
+    if not directory.is_dir():
+        return []
+    return sorted(p.stem for p in directory.glob("*.md") if TASK_ID_RE.fullmatch(p.stem))
+
+
+def remove_snapshot(state_dir: Path, task_id: str) -> bool:
+    try:
+        snapshot_path(state_dir, task_id).unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -707,6 +982,28 @@ def _listed(items: Iterable[str]) -> str:
     return ", ".join(f"`{item}`" for item in items)
 
 
+_NOTIFY_WORDS = {
+    NOTIFY_ON_CHANGE: "You are notified only when a run reports a change.",
+    NOTIFY_ALWAYS: "You are notified every time a run finishes, changed or not.",
+    NOTIFY_NEVER: "You are not notified when a run finishes; the chat still holds "
+    "each run, and anything it waits on for approval still notifies you.",
+}
+
+
+def _monitor_lines(task: Task) -> list[str]:
+    if not task.monitor:
+        return []
+    return [
+        "It is a MONITOR: each run reads what it watches, compares it with the "
+        "snapshot the previous run saved, and ends with a verdict — changed or "
+        "unchanged — plus a new snapshot. The first run only saves the baseline.",
+        _NOTIFY_WORDS[task.notify],
+        "A run that ends without a verdict aish can read, or that fails, keeps the "
+        "old baseline and notifies you, if notifications are set up (the first "
+        "time, then at most once a day while it lasts).",
+    ]
+
+
 def describe(task: Task, now: datetime, *, replacing: bool = False) -> str:
     """The approval card's meaning, in words: when it runs, the WHOLE prompt
     (never truncated — it is exactly what will run with nobody watching), what
@@ -728,6 +1025,7 @@ def describe(task: Task, now: datetime, *, replacing: bool = False) -> str:
     lines = [
         f"{verb} '{task.id}'" + (f" — {task.note}" if task.note else ""),
         when,
+        *_monitor_lines(task),
         "",
         "The whole instruction it will run:",
         task.prompt,

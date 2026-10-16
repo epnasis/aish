@@ -31,6 +31,7 @@ from .agent import (
     compose_system_content,
     format_secs,
     identity_context,
+    outside_note,
 )
 from .session import harness_step
 
@@ -416,6 +417,14 @@ class ClaudeMaxAgent:
         dropped silently inside its `suppress` (found by the harness-row
         inventory)."""
         self._pending_notes.append((source or "", text))
+
+    def add_outside_note(self, heading: str, text: str, source: str) -> None:
+        """`Agent.add_outside_note` for this backend: the same disarmed, banner-
+        wrapped text in front of the next prompt, and the same taint, raised by
+        the inner reset this backend's `run_task` already calls. No hosts fold
+        here either."""
+        self._pending_notes.append((source, outside_note(heading, text)))
+        self.inner._outside_note_pending = True
 
     def run_task(self, task: str) -> str:
         # The SDK owns the loop, so the inner Agent's run_task — where per-task

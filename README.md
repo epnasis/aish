@@ -953,6 +953,14 @@ shows the next two runs. After downtime only the latest missed run fires (the
 older ones are recorded as skipped); a run that cannot start pushes once, then
 at most daily while it keeps failing.
 
+**Monitors.** *"Tell me when the price on this page changes"* becomes a
+recurring automation with `"kind": "monitor"`. Each run compares what it reads
+against the snapshot the previous run saved and ends with a verdict aish reads
+itself: *changed* pushes the one-line summary, *unchanged* stays silent (the
+default `"notify": "on_change"`; `"always"` and `"never"` are honoured too). A
+run whose verdict aish cannot read, or that fails, keeps the old baseline and
+pushes once, then at most daily, naming how old the baseline is.
+
 Interrupted work is picked up again. If aish-web goes down mid-task — a
 deploy, a crash — the next start reopens that session and tells the model to
 continue from where it stopped instead of redoing what already succeeded.
