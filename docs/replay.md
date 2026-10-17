@@ -31,7 +31,7 @@ The same rule binds fixtures — and a mined log cannot be made safe by scrubbin
 
 ## The laws
 
-**R1 · Deny by default.** Every approval card a replay raises is denied unless the scenario names it: a command prefix (and then only with no shell operator in it, `SHELL_META`) or a tool name. Write, read, import and every card kind added later are denied without a scenario being able to approve them. `TestCardPolicy`.
+**R1 · Deny by default.** Every approval card a replay raises is denied unless the scenario names it: a command prefix (and then only with no shell operator in it, `SHELL_META`) or a tool name. Write, read, import and every card kind added later are denied without a scenario being able to approve them. `TestCardPolicy`. A card may also be answered WITH the owner's comment (§ Cards answered with a comment). An approval with a comment HOLDS the action and never runs it, so this does not widen R1. The two policies above stay the only way anything is approved to run.
 
 **R2 · One process per run, one fresh corpus per run.** `AISH_STATE_DIR` is process-global and resolved at call time; the corpus directories under `AISH_CONFIG_HOME` are bound at import. Two runs in one process would share whichever was set first, and a `remember` in run 1 would be read by run 2. `TestRunnerIsolation`.
 
@@ -90,7 +90,7 @@ The prototype that preceded this (2026-10-01) copied the owner's vouches and his
 
 Each run is `python -P replay_driver.py spec.json` with `PYTHONPATH` = the code under test. `-P` matters: the script's own directory is `aish/`, which holds a `secrets.py` that would shadow the standard library's. The driver records which `aish` it actually imported, and `read_run` marks a run incomplete when that is not under the arm's code root — evidence instead of an assumption. The driver comes from the candidate tree for both arms, and imports nothing from the harness at load, so it runs against a baseline that predates it; the only aish API it relies on is `create_app` and the WebSocket protocol.
 
-Output: `~/.local/state/aish-replay/<scenario>/<stamp>/{baseline,candidate}/<n>/` — beside the owner's state tree, never inside it; `AISH_REPLAY_HOME` moves it. Each run keeps `manifest.json` (code, overlays with hashes, exit, timeout), `events.jsonl` (cards and how they were answered, each turn's `done`), `driver.log`, its `state/` and its `config/`. The batch keeps a copy of the scenario, so `report` re-reads a batch with the checks it ran with. `run` refuses when baseline and candidate would be the same commit with no overlay and no uncommitted change. `TestTheRunCommand` drives `run` end to end with only the subprocess stubbed.
+Output: `~/.local/state/aish-replay/<scenario>/<stamp>/{baseline,candidate}/<n>/` — beside the owner's state tree, never inside it; `AISH_REPLAY_HOME` moves it. Each run keeps `manifest.json` (code, overlays with hashes, exit, timeout), `events.jsonl` (cards and how they were answered: `action`, plus `comment` and the 1-based `rule` when a comment rule answered; each turn's `done`), `driver.log`, its `state/` and its `config/`. The batch keeps a copy of the scenario, so `report` re-reads a batch with the checks it ran with. `run` refuses when baseline and candidate would be the same commit with no overlay and no uncommitted change. `TestTheRunCommand` drives `run` end to end with only the subprocess stubbed.
 
 ## Checks
 
@@ -104,6 +104,7 @@ Pure functions of one session log, under the same law as `explain` (`docs/diagno
 | `repeated_calls` | same tool + arguments `REPEAT_REPORT_AT` (3) or more times in one task |
 | `links_from_evidence` | links in each task's delivered answer (the rule engine's own extractor) against `rules.urls_acted_on` over `SessionLog.calls_that_ran`, up to the answer's time — one definition of *opened* |
 | `images_from_evidence` | each `show_image` source against tool output recorded BEFORE the call; a picture pasted into an answer that no successful `show_image` showed |
+| `held_comment_answered` | each `tool` step recorded `held` WITH a comment (an approval the owner steered; a rule's unattended hold has none), answered by a call to the same tool from a LATER model call in the same task, or by aish's `HOLD_LINE` in the delivered answer together with its `hold.verify` `advised` record for that call (the text alone could be the model echoing an earlier line); the evidence splits them. FAIL otherwise, including when the only later call is a twin from the same model response: aish's `replaces` join closes the hold on the twin and says nothing, but no call came after the model could read the comment, and the evidence names the twin. A prose refusal with no line counts as unanswered, because the words are not graded. `None` when no commented hold was recorded (the evidence says whether any card was answered with a comment at all), when the task has no delivered answer, when the owner stopped it (`session.STOPPED_ANSWERS`), or when the loop detector, stall cap or step ceiling ended it; aish runs no hold check on those exits (`docs/agent-core.md`, *The hold check*) |
 | `learning_suggested` | per answered task between `task_start`/`task_end`: `learning.shape_of` over its records (the live detector's own fold) against its `learning` record — a long-way task with no tripped record fails, as does a record tripping on an ordinary task; `None` when the log has no bracketed answered task (#446, `docs/learning-suggestions.md`) |
 
 The delivered answer is the task's last assistant message not marked `interim`. Scenario-local checks live in `<scenario>/checks.py` as `CHECKS = {name: function}`. `TestChecksOnGeneratedRuns` pins a pass and a fail for every check on the generated runs; `TestChecksThreeStates` and `TestTrippyScenarioChecks` pin each state.
@@ -140,6 +141,31 @@ Under the reader law of `docs/token-accounting.md`, and reading through the same
 Medians and p95 are `usage._percentile`, `aish usage`'s own. R4 still governs: with no target failure reproduced, the candidate's context row is withheld like its other numbers. `TestContextPerModelCall`.
 
 **The cap is shared.** On `example-trippy` (nine checks) the header, check rows, counts and context rows took ~1.9k of the old 2,048 characters, leaving no room for evidence lines or time lines. At 4,096 the suite's two-arm batch carries both whole; a report that still runs past the cap drops the time lines first (`TIME_DROPPED`), then omits evidence lines and says how many, with the pointer to `--full` never cut — `test_evidence_past_the_cap_is_omitted_with_the_pointer_whole` and the time-drop test pin that path at the old cap. `--full` and `--json` carry everything.
+
+## Cards answered with a comment
+
+The owner steers a card by typing into it. Approving with a comment HOLDS the action: it is never run, and the model must re-propose. Denying with a comment STOPS the task (`docs/agent-core.md` L2). A replay that could only press approve or deny could not reproduce either case. So the hold check (d0e938e) had no faithful replay, and `scratch-mkdir-carded` had to send the owner's card comments as typed turns, a stated DEVIATION. A scenario now names the cards it answers that way:
+
+```toml
+[[cards.comment]]
+command_re = "/tmp/"        # exactly one of: command_re (re.search on a command card) or tool (exact name)
+action = "approve"          # "approve" or "deny"
+comment = "you have your own private dir for temp"   # the owner's words, verbatim from the source session
+times = 1                   # optional, default 1: how many cards this rule answers in one run
+```
+
+- **The comment comes from the scenario file only.** The driver sends the rule's string stripped, which is exactly what the server records, and nothing in the harness writes one.
+- **Only command and tool cards.** For those two kinds, every consumer of an approval carrying a comment holds the action (`agent.py`, each `isinstance(decision, Approved)` beside `_ask_owner` and in the shell path). A read card drops the comment, so an approve would RUN the read. The import consumer checks only `Denied` and truthiness, so an import approved with a comment installs the skill. `COMMENTABLE_KINDS` maps each answerable kind to its matcher and is the only place a kind is matched, so it fences both out; `test_only_command_and_tool_cards_are_ever_answered` and `test_the_fence_is_the_kinds_table` pin it. A `tool` rule naming a tool whose card is not a tool card (`run_command`, the writers, `read_file`, `import_skill`) is refused at load, saying which key or kind applies (`_NOT_A_TOOL_CARD`, a list known when written, not derived).
+- **The loader refuses a comment the server would not see.** The server reads `str(comment or "").strip()`. So `comment = 0`, `false`, or a string of Unicode whitespace would turn a commented approve into a plain approve that RUNS. The loader and the driver both apply Python's own strip (`comment_text`). The loader also refuses any `action` other than approve or deny, and the driver refuses it again for a hand-written spec, so `edit` and the session/always grants are unreachable.
+- **SHELL_META is not consulted for a comment rule,** because nothing it answers runs. `test_approve_with_a_comment_holds_then_the_policy_approves` drives a commented `trippy go; touch x` card through the real server and shows it never reached the run path.
+- **First time vs later: `times`, default 1.** The owner commented on the first proposal and approved the re-proposal, and text cannot tell the two apart. #368 makes a no-change re-proposal identical. So a rule answers at most `times` cards in a run, consulted in file order, and a card after that goes to the R1 policy. "Comment first, approve the re-proposal" is therefore a comment rule plus an `approve_commands` prefix. That keeps the approval-to-run under SHELL_META. An unlimited rule would hold every identical re-proposal, a loop the owner never produced. The count is per run, across turns.
+- **Record.** The driver's side is in `events.jsonl` (`action`, `comment`, `rule`). On a `card` event, `approved` keeps its meaning: sent as a plain approval, so it may run. A commented approve reads `approved: false, action: "approve"`. The server's side is in the session log, where checks read it: the `command` record `decision: "approved (feedback: …)"` and the held `tool` step's `decision: "held"` and `comment`. `ToolCall.decision`/`.comment` carry the step's fields.
+- **A deny with a comment fails `no_unapproved_shell`** by construction, because it is a denial.
+- **A rule that never fired is reported.** The report adds one row per rule, `cards answered by comment rule N`, with each run's count, and names any rule that answered no card in any run shown: its check then read a log in which the owner's comment was never given.
+- **Never against code before #81.** Before 7a6cc12, an approval with a comment RAN the action. `run` refuses a scenario with comment rules unless that commit is a git ancestor of both arms' commits (`require_comment_holds`, `HOLD_COMMIT`); a history that cannot say, such as a shallow clone, is refused too.
+- **A `!` turn is refused for every scenario.** The server runs a turn starting with `!` as the owner's own shell escape, with no card at all, so it would bypass R1. Slash-command turns are not fenced.
+
+`TestCommentRules`, `TestCommentRulesOverTheRealServer`, `TestHeldCommentAnswered`, `TestCommentRulesDeliveryReview`, `TestCommentRulesNeedTheHold`.
 
 ## The driver against the real server
 

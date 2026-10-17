@@ -319,6 +319,564 @@ class TestDriverOverTheRealServer:
         assert not [n for n in names if n and n.startswith("aish")]
 
 
+def _opening_socket(ws, hello):
+    """`connected` consumed hello+replay; a socket that replays them, so the
+    driver reads the same opening a fresh connection would."""
+    opening = iter([hello, {"type": "replay"}])
+
+    class Socket:
+        def receive_json(self):
+            return next(opening, None) or ws.receive_json()
+
+        def send_json(self, data):
+            ws.send_json(data)
+
+    return Socket()
+
+
+def _server_env(tmp_path, monkeypatch) -> dict:
+    monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path / "state"))
+    allow = tmp_path / "allow.txt"
+    allow.write_text("", encoding="utf-8")
+    return {"state_dir": tmp_path / "state", "allow_path": allow,
+            "deny_path": tmp_path / "deny.txt", "config_path": tmp_path / "config.toml",
+            "lessons_path": tmp_path / "lessons.md", "cwd": str(tmp_path)}
+
+
+def _records(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _held_steps(path: Path) -> list[dict]:
+    return [r["step"] for r in _records(path) if r.get("kind") == "trace"
+            and r["step"].get("kind") == "tool" and r["step"].get("decision") == "held"]
+
+
+class TestCommentRules:
+    """`[[cards.comment]]`: a card answered with the owner's comment, verbatim
+    from the scenario — the only way a replay can reproduce an approval he
+    steered (docs/replay.md, Cards answered with a comment)."""
+
+    TMP = {"command_re": "/tmp/", "action": "approve", "comment": "use your scratch dir"}
+
+    def test_the_first_matching_rule_with_uses_left_answers(self):
+        rules = [self.TMP, {"command_re": "&&", "action": "deny", "comment": "stop"}]
+        used = [0, 0]
+        card = {"kind": "command", "command": "mkdir /tmp/x && convert a b"}
+        assert replay_driver.comment_rule_for(card, rules, used) == 0
+        used[0] = 1  # rule 1 is spent: the same card now reaches rule 2
+        assert replay_driver.comment_rule_for(card, rules, used) == 1
+        used[1] = 1
+        assert replay_driver.comment_rule_for(card, rules, used) is None
+
+    def test_times_lets_a_rule_answer_more_than_once(self):
+        rule = {**self.TMP, "times": 2}
+        card = {"kind": "command", "command": "ls /tmp/"}
+        assert replay_driver.comment_rule_for(card, [rule], [1]) == 0
+        assert replay_driver.comment_rule_for(card, [rule], [2]) is None
+
+    def test_a_tool_rule_matches_the_tool_name_exactly(self):
+        rule = {"tool": "gmail_send", "action": "deny", "comment": "not now"}
+        assert replay_driver.comment_rule_for(
+            {"kind": "tool", "tool": "gmail_send"}, [rule], [0]) == 0
+        assert replay_driver.comment_rule_for(
+            {"kind": "tool", "tool": "gmail_send_all"}, [rule], [0]) is None
+        assert replay_driver.comment_rule_for(
+            {"kind": "command", "command": "gmail_send"}, [rule], [0]) is None
+
+    @pytest.mark.parametrize("kind", ["read", "import", "write", "something-new"])
+    def test_only_command_and_tool_cards_are_ever_answered(self, kind):
+        """A read card drops the comment and an approve RUNS the read; an
+        import approved with a comment installs the skill (agent.py checks only
+        `Denied` and truthiness there). Neither may be reachable."""
+        rules = [{"command_re": ".", "action": "approve", "comment": "c"},
+                 {"tool": "x", "action": "approve", "comment": "c"}]
+        card = {"kind": kind, "command": "anything", "tool": "x", "path": "/etc/passwd"}
+        assert replay_driver.comment_rule_for(card, rules, [0, 0]) is None
+
+    @pytest.mark.parametrize("comment", ["", "   ", "　 ", 0, False, None])
+    def test_a_comment_the_server_would_not_see_never_answers(self, comment):
+        """The server reads `str(comment or "").strip()`: any of these would
+        turn a commented approve into a plain approve that runs."""
+        rule = {"command_re": ".", "action": "approve", "comment": comment}
+        assert replay_driver.comment_rule_for(
+            {"kind": "command", "command": "rm x"}, [rule], [0]) is None
+
+    def _load(self, tmp_path, rules: str):
+        return replay.load_scenario(_scenario(tmp_path, extra="\n" + rules))
+
+    def test_the_loader_reads_rules_in_order_with_times_defaulting_to_one(self, tmp_path):
+        scenario = self._load(tmp_path, (
+            '[[cards.comment]]\ncommand_re = "/tmp/"\naction = "approve"\n'
+            'comment = "you have your own private dir for temp"\n'
+            '[[cards.comment]]\ntool = "gmail_send"\naction = "deny"\ncomment = "no"\n'
+            'times = 2\n'))
+        assert scenario.comment_rules == [
+            {"command_re": "/tmp/", "action": "approve",
+             "comment": "you have your own private dir for temp", "times": 1},
+            {"tool": "gmail_send", "action": "deny", "comment": "no", "times": 2}]
+
+    @pytest.mark.parametrize("rule, says", [
+        ('command_re = "x"\naction = "approve"\ncomment = 0', "non-empty string"),
+        ('command_re = "x"\naction = "approve"\ncomment = false', "non-empty string"),
+        ('command_re = "x"\naction = "approve"\ncomment = "　 "', "non-empty string"),
+        ('command_re = "x"\naction = "approve"', "non-empty string"),
+        ('command_re = "x"\naction = "edit"\ncomment = "c"', "approve"),
+        ('command_re = "x"\naction = "approve_session"\ncomment = "c"', "approve"),
+        ('command_re = "x"\ncomment = "c"', "approve"),
+        ('command_re = "x"\ntool = "t"\naction = "deny"\ncomment = "c"', "exactly one"),
+        ('action = "deny"\ncomment = "c"', "exactly one"),
+        ('command_re = "("\naction = "deny"\ncomment = "c"', "regular expression"),
+        ('command_re = ""\naction = "deny"\ncomment = "c"', "non-empty string"),
+        ('command_re = "x"\naction = "deny"\ncomment = "c"\ntimes = 0', "positive integer"),
+        ('command_re = "x"\naction = "deny"\ncomment = "c"\ntimes = true', "positive integer"),
+        ('command_re = "x"\naction = "deny"\ncomment = "c"\nkind = "read"', "unknown"),
+    ])
+    def test_the_loader_refuses_what_the_driver_could_misread(self, tmp_path, rule, says):
+        with pytest.raises(replay.ReplayError, match=says):
+            self._load(tmp_path, f"[[cards.comment]]\n{rule}\n")
+
+    def test_the_rules_reach_the_runs_spec(self, tmp_path):
+        rules = '[[cards.comment]]\ncommand_re = "/tmp/"\naction = "approve"\ncomment = "c"\n'
+        launch = FakeLaunch({"baseline": _failing_log(tmp_path),
+                             "candidate": _failing_log(tmp_path)})
+        _batch(tmp_path, launch, runs=1, extra="\n" + rules)
+        assert {c["arm"]: c["spec"]["comment_rules"] for c in launch.calls} == {
+            "baseline": [{"command_re": "/tmp/", "action": "approve", "comment": "c",
+                          "times": 1}],
+            "candidate": [{"command_re": "/tmp/", "action": "approve", "comment": "c",
+                           "times": 1}]}
+
+
+class TestCommentRulesOverTheRealServer:
+    """The driver's comment answers against the real `create_app`: an approval
+    WITH a comment is held and never reaches the run path; the rule, spent,
+    hands the re-proposal to the deny-by-default policy."""
+
+    def test_approve_with_a_comment_holds_then_the_policy_approves(self, tmp_path,
+                                                                   monkeypatch):
+        import aish.agent as agent_module
+        from tests.test_server import connected, make_client, model_says, tool_call
+
+        env = _server_env(tmp_path, monkeypatch)
+        ran: list[str] = []
+        monkeypatch.setattr(agent_module.tools, "run_command",
+                            lambda cmd, **_kw: ran.append(cmd) or "ok")
+        client, _ = make_client(env, [
+            model_says(tool_calls=[tool_call("run_command", command="trippy go; touch x")]),
+            model_says(tool_calls=[tool_call("run_command", command="trippy go")]),
+            model_says("done"),
+        ])
+        rules = [{"command_re": "^trippy", "action": "approve", "comment": "split it",
+                  "times": 1}]
+        events: list[dict] = []
+        with client, connected(client) as (ws, hello, _):
+            replay_driver.drive(_opening_socket(ws, hello), ["go"], ["trippy "], [],
+                                events.append, limit=400, comment_rules=rules)
+        cards = [e for e in events if e["type"] == "card"]
+        assert [(c["what"], c["action"], c.get("comment"), c.get("rule"), c["approved"])
+                for c in cards] == [
+            ("trippy go; touch x", "approve", "split it", 1, False),
+            ("trippy go", "approve", None, None, True)]
+        assert ran == ["trippy go"]  # the commented card never ran, shell operator and all
+        log = tmp_path / "state" / hello["session"]
+        decisions = [r["decision"] for r in _records(log) if r.get("kind") == "command"]
+        assert decisions[0] == "approved (feedback: split it)"
+        (held,) = _held_steps(log)
+        assert held["comment"] == "split it"
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+        assert verdict.passed is True and "1 re-proposed" in verdict.evidence
+
+    def test_deny_with_a_comment_arms_the_stop(self, tmp_path, monkeypatch):
+        import aish.agent as agent_module
+        from tests.test_server import connected, make_client, model_says, tool_call
+
+        env = _server_env(tmp_path, monkeypatch)
+        ran: list[str] = []
+        monkeypatch.setattr(agent_module.tools, "run_command",
+                            lambda cmd, **_kw: ran.append(cmd) or "ok")
+        client, _ = make_client(env, [
+            model_says(tool_calls=[tool_call("run_command", command="curl x")]),
+            model_says("Understood, stopping."),
+        ])
+        rules = [{"command_re": "curl", "action": "deny", "comment": "not that site",
+                  "times": 1}]
+        events: list[dict] = []
+        with client, connected(client) as (ws, hello, _):
+            replay_driver.drive(_opening_socket(ws, hello), ["go"], [], [], events.append,
+                                limit=400, comment_rules=rules)
+        assert ran == []
+        log = tmp_path / "state" / hello["session"]
+        decisions = [r["decision"] for r in _records(log) if r.get("kind") == "command"]
+        assert decisions == ["denied (feedback: not that site)"]
+
+    def test_a_tool_card_approved_with_a_comment_never_runs(self, tmp_path, monkeypatch,
+                                                            project_scope):
+        from tests.test_server import (
+            TestToolApproval,
+            connected,
+            make_client,
+            model_says,
+            tool_call,
+        )
+
+        env = _server_env(tmp_path, monkeypatch)
+        marker = tmp_path / "toolran"
+        TestToolApproval._write_tool(None, env["cwd"], "writer", marker)
+        client, _ = make_client(env, [
+            model_says(tool_calls=[tool_call("writer", text="hi")]),
+            model_says("Not going to, then."),
+            model_says("Not going to, then."),
+        ])
+        rules = [{"tool": "writer", "action": "approve", "comment": "shorter", "times": 1}]
+        events: list[dict] = []
+        with client, connected(client) as (ws, hello, _):
+            replay_driver.drive(_opening_socket(ws, hello), ["go"], [], [], events.append,
+                                limit=400, comment_rules=rules)
+        assert not marker.exists()
+        log = tmp_path / "state" / hello["session"]
+        (held,) = _held_steps(log)
+        assert held["name"] == "writer" and held["comment"] == "shorter"
+
+
+class TestHeldCommentAnswered:
+    """The hold check's behaviour, read off a log (d0e938e): a task must not
+    end with an action approved WITH a comment held and nothing said."""
+
+    HELD = {"decision": "held", "comment": "split it"}
+
+    def test_the_line_it_looks_for_is_the_line_aish_writes(self):
+        from aish import agent
+
+        assert agent.HOLD_UNANSWERED_NOTE.startswith(replay_checks.HOLD_LINE)
+
+    def test_a_hold_left_open_with_nothing_said_fails(self, tmp_path):
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, call(1, "run_command", {"command": "a && b"}),
+            result(1, "run_command", "failed", **self.HELD),
+            answer("Now step by step:"), END])
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+        assert verdict.passed is False
+        assert "1 left open" in verdict.evidence and "Now step by step:" in verdict.evidence
+
+    def test_a_re_proposal_answers_it(self, tmp_path):
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, call(1, "run_command", {"command": "a && b"}),
+            result(1, "run_command", "failed", **self.HELD),
+            call(2, "run_command", {"command": "a"}), result(2, "run_command"),
+            answer("done"), END])
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+        assert verdict.passed is True and "1 re-proposed" in verdict.evidence
+
+    ADVISED = {"kind": "trace", "step": {"kind": "gate", "gate": "hold.verify", "at": "verify",
+                                         "verdict": "advised", "turn": 1,
+                                         "evidence": {"held_call": 1, "tool": "run_command"}}}
+
+    def test_aishs_line_answers_it(self, tmp_path):
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, call(1, "run_command", {"command": "a && b"}),
+            result(1, "run_command", "failed", **self.HELD), self.ADVISED,
+            answer("I will not.\n\n" + replay_checks.HOLD_LINE + ", and no later call"), END])
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+        assert verdict.passed is True and "1 closed by aish's line" in verdict.evidence
+
+    def test_the_line_without_its_record_is_an_echo(self, tmp_path):
+        """A model can repeat an earlier task's line; only aish's own record
+        for THIS held call says aish wrote it."""
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, call(1, "run_command", {"command": "a && b"}),
+            result(1, "run_command", "failed", **self.HELD),
+            answer("Done. " + replay_checks.HOLD_LINE), END])
+        assert replay_checks.held_comment_answered(
+            replay_checks.load_run(log)).passed is False
+
+    def test_an_earlier_call_or_another_tool_does_not_answer_it(self, tmp_path):
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, call(1, "run_command", {"command": "ls"}), result(1, "run_command"),
+            call(2, "run_command", {"command": "a && b"}),
+            result(2, "run_command", "failed", **self.HELD),
+            call(3, "read_file", {"path": "x"}), result(3, "read_file"),
+            answer("Now:"), END])
+        assert replay_checks.held_comment_answered(
+            replay_checks.load_run(log)).passed is False
+
+    def test_a_call_in_the_next_task_does_not_answer_it(self, tmp_path):
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, call(1, "run_command", {"command": "a && b"}),
+            result(1, "run_command", "failed", **self.HELD), answer("Now:"), END,
+            {"kind": "task_start", "prompt": "why stopped?"},
+            call(1, "run_command", {"command": "a"}, turn=2), result(1, "run_command", turn=2),
+            answer("done"), END])
+        assert replay_checks.held_comment_answered(
+            replay_checks.load_run(log)).passed is False
+
+    def test_a_rules_hold_without_a_comment_is_not_his(self, tmp_path):
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, call(1, "run_command", {"command": "a"}),
+            result(1, "run_command", "failed", decision="held"), answer("ok"), END])
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+        assert verdict.passed is None and "never given" in verdict.evidence
+
+    def test_a_task_the_loop_detector_ended_could_not_tell(self, tmp_path):
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, call(1, "run_command", {"command": "a && b"}),
+            result(1, "run_command", "failed", **self.HELD),
+            {"kind": "message", "role": "user", "content": "[aish: stop]",
+             "source": "loop_stop"},
+            answer("Stopped."), END])
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+        assert verdict.passed is None and "loop_stop" in verdict.evidence
+
+    def test_no_delivered_answer_could_not_tell(self, tmp_path):
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, call(1, "run_command", {"command": "a && b"}),
+            result(1, "run_command", "failed", **self.HELD)])
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+        assert verdict.passed is None and "no delivered answer" in verdict.evidence
+
+    def test_the_agent_says_the_hold_and_the_check_reads_it(self, tmp_path, monkeypatch):
+        """End to end on the code under test: the model answers text-only
+        twice; aish asks once, then ships the answer with its line."""
+        import aish.agent as agent_module
+        from tests.test_server import connected, make_client, model_says, tool_call
+
+        env = _server_env(tmp_path, monkeypatch)
+        monkeypatch.setattr(agent_module.tools, "run_command", lambda cmd, **_kw: "ok")
+        client, _ = make_client(env, [
+            model_says(tool_calls=[tool_call("run_command", command="a && b")]),
+            model_says("Now step by step:"),
+            model_says("Now step by step:"),
+        ])
+        rules = [{"command_re": "&&", "action": "approve", "comment": "split it", "times": 1}]
+        events: list[dict] = []
+        with client, connected(client) as (ws, hello, _):
+            replay_driver.drive(_opening_socket(ws, hello), ["go"], [], [], events.append,
+                                limit=400, comment_rules=rules)
+        log = tmp_path / "state" / hello["session"]
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+        assert verdict.passed is True and "1 closed by aish's line" in verdict.evidence
+
+
+class TestCommentRulesDeliveryReview:
+    """Findings of the delivery review of 5176b92, each pinned."""
+
+    def test_a_twin_from_the_same_response_is_not_a_re_proposal(self, tmp_path, monkeypatch):
+        """Two identical calls in one model response: the first is held by the
+        rule, the twin runs through the policy. aish's join closes the hold on
+        the twin and says nothing, but no call came after the model could read
+        the comment — so the check FAILS and names the twin."""
+        import aish.agent as agent_module
+        from tests.test_server import connected, make_client, model_says, tool_call
+
+        env = _server_env(tmp_path, monkeypatch)
+        ran: list[str] = []
+        monkeypatch.setattr(agent_module.tools, "run_command",
+                            lambda cmd, **_kw: ran.append(cmd) or "ok")
+        client, _ = make_client(env, [
+            model_says(tool_calls=[tool_call("run_command", command="trippy go /tmp/x"),
+                                   tool_call("run_command", command="trippy go /tmp/x")]),
+            model_says("done"),
+        ])
+        rules = [{"command_re": "/tmp/", "action": "approve", "comment": "use scratch",
+                  "times": 1}]
+        events: list[dict] = []
+        with client, connected(client) as (ws, hello, _):
+            replay_driver.drive(_opening_socket(ws, hello), ["go"], ["trippy "], [],
+                                events.append, limit=400, comment_rules=rules)
+        assert ran == ["trippy go /tmp/x"]  # the twin, through the policy
+        log = tmp_path / "state" / hello["session"]
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+        assert verdict.passed is False, verdict.evidence
+        assert "same model response" in verdict.evidence
+
+    def test_a_call_from_a_later_model_call_still_answers(self, tmp_path):
+        log = write_log(tmp_path / "s.jsonl", [
+            TASK, _mc(call(1, "run_command", {"command": "a && b"}), 1),
+            result(1, "run_command", "failed", decision="held", comment="split"),
+            _mc(call(2, "run_command", {"command": "a"}), 1), result(2, "run_command"),
+            _mc(call(3, "run_command", {"command": "b"}), 2), result(3, "run_command"),
+            answer("done"), END])
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+        assert verdict.passed is True and "1 re-proposed" in verdict.evidence
+
+    def test_a_task_the_owner_stopped_could_not_tell(self, tmp_path):
+        from aish.session import STOPPED_ANSWERS
+
+        for stopped in STOPPED_ANSWERS:
+            log = write_log(tmp_path / "s.jsonl", [
+                TASK, call(1, "run_command", {"command": "a && b"}),
+                result(1, "run_command", "failed", decision="held", comment="split"),
+                answer(stopped), END])
+            verdict = replay_checks.held_comment_answered(replay_checks.load_run(log))
+            assert verdict.passed is None and "stopped by the owner" in verdict.evidence
+
+    def test_the_agents_stop_text_is_one_the_check_knows(self):
+        from aish import agent
+        from aish.session import STOPPED_ANSWERS
+
+        assert agent.CANCELLED_RESULT in STOPPED_ANSWERS
+
+    def test_no_hold_says_whether_any_comment_was_given(self, tmp_path):
+        never = write_log(tmp_path / "a.jsonl", [
+            TASK, {"kind": "command", "command": "x", "decision": "denied"},
+            answer("ok"), END])
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(never))
+        assert verdict.passed is None and "never given" in verdict.evidence
+        denied = write_log(tmp_path / "b.jsonl", [
+            TASK, {"kind": "command", "command": "x", "decision": "denied (feedback: no)"},
+            answer("ok"), END])
+        verdict = replay_checks.held_comment_answered(replay_checks.load_run(denied))
+        assert verdict.passed is None and "1 cards answered with a comment, none recorded held" \
+            in verdict.evidence
+
+    @pytest.mark.parametrize("tool, says", [
+        ("run_command", "use command_re"), ("write_file", "write card"),
+        ("schedule_task", "write card"), ("read_file", "read card"),
+        ("import_skill", "import card"),
+    ])
+    def test_a_tool_rule_that_could_never_match_is_refused(self, tmp_path, tool, says):
+        with pytest.raises(replay.ReplayError, match=says):
+            replay.load_scenario(_scenario(tmp_path, extra=(
+                f'\n[[cards.comment]]\ntool = "{tool}"\naction = "deny"\ncomment = "c"\n')))
+
+    def test_the_comment_is_recorded_as_the_server_records_it(self, tmp_path, monkeypatch):
+        import aish.agent as agent_module
+        from tests.test_server import connected, make_client, model_says, tool_call
+
+        env = _server_env(tmp_path, monkeypatch)
+        monkeypatch.setattr(agent_module.tools, "run_command", lambda cmd, **_kw: "ok")
+        client, _ = make_client(env, [
+            model_says(tool_calls=[tool_call("run_command", command="curl x")]),
+            model_says("Stopping."),
+        ])
+        rules = [{"command_re": "curl", "action": "deny", "comment": "  not that  ",
+                  "times": 1}]
+        events: list[dict] = []
+        with client, connected(client) as (ws, hello, _):
+            replay_driver.drive(_opening_socket(ws, hello), ["go"], [], [], events.append,
+                                limit=400, comment_rules=rules)
+        (card,) = [e for e in events if e["type"] == "card"]
+        log = tmp_path / "state" / hello["session"]
+        decisions = [r["decision"] for r in _records(log) if r.get("kind") == "command"]
+        assert card["comment"] == "not that"
+        assert decisions == [f"denied (feedback: {card['comment']})"]
+
+    def test_the_driver_never_sends_an_action_but_approve_or_deny(self):
+        """The loader refuses them; the driver refuses them again, in case a
+        spec was written by hand."""
+        card = {"kind": "command", "command": "rm x"}
+        for action in ("approve_always", "approve_session", "edit", None):
+            rule = {"command_re": ".", "action": action, "comment": "c"}
+            assert replay_driver.comment_rule_for(card, [rule], [0]) is None
+
+    def test_the_fence_is_the_kinds_table(self, monkeypatch):
+        """Removing a kind from COMMENTABLE_KINDS stops it being answered."""
+        rule = {"command_re": ".", "action": "approve", "comment": "c"}
+        card = {"kind": "command", "command": "x"}
+        assert replay_driver.comment_rule_for(card, [rule], [0]) == 0
+        monkeypatch.delitem(replay_driver.COMMENTABLE_KINDS, "command")
+        assert replay_driver.comment_rule_for(card, [rule], [0]) is None
+
+    def test_a_bang_turn_is_refused(self, tmp_path):
+        directory = _scenario(tmp_path)
+        text = (directory / "scenario.toml").read_text(encoding="utf-8")
+        (directory / "scenario.toml").write_text(text.replace(
+            'text = "Show prices in EUR please"', 'text = " !touch pwned"'), encoding="utf-8")
+        with pytest.raises(replay.ReplayError, match="no approval card"):
+            replay.load_scenario(directory)
+
+    def test_the_loader_keeps_the_comment_as_sent(self, tmp_path):
+        scenario = replay.load_scenario(_scenario(tmp_path, extra=(
+            '\n[[cards.comment]]\ncommand_re = "x"\naction = "deny"\ncomment = " c "\n')))
+        assert scenario.comment_rules[0]["comment"] == "c"
+
+    def test_the_report_counts_each_rule_and_names_one_that_never_fired(self, tmp_path):
+        rules = ('\n[[cards.comment]]\ncommand_re = "/tmp/"\naction = "approve"\ncomment = "a"\n'
+                 '[[cards.comment]]\ncommand_re = "&&"\naction = "approve"\ncomment = "b"\n')
+        launch = FakeLaunch({"baseline": _failing_log(tmp_path),
+                             "candidate": _failing_log(tmp_path)},
+                            card_rules=(1,))
+        batch = _batch(tmp_path, launch, runs=1, extra=rules)
+        text = replay.render_report(*replay.read_batch(batch), batch)
+        assert "cards answered by comment rule 1: baseline 1 · candidate 1" in text
+        assert "cards answered by comment rule 2: baseline 0 · candidate 0" in text
+        assert "comment rule 2 never fired in any run shown" in text
+
+
+class TestCommentRulesNeedTheHold:
+    """Before #81 (7a6cc12) an approval with a comment RAN the action. Comment
+    rules are refused against code without that commit — by git ancestry."""
+
+    @staticmethod
+    def _repo(tmp_path) -> tuple[Path, str, str]:
+        import subprocess
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        def git(*args: str) -> str:
+            return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                                  text=True, check=True).stdout.strip()
+
+        git("init", "-q")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+            "-m", "old")
+        old = git("rev-parse", "HEAD")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+            "-m", "hold")
+        return repo, old, git("rev-parse", "HEAD")
+
+    def test_code_with_the_hold_passes(self, tmp_path):
+        repo, _old, hold = self._repo(tmp_path)
+        replay.require_comment_holds(hold, "baseline", repo=repo, since=hold)
+
+    def test_code_before_the_hold_is_refused(self, tmp_path):
+        repo, old, hold = self._repo(tmp_path)
+        with pytest.raises(replay.ReplayError, match="still RAN the action"):
+            replay.require_comment_holds(old, "baseline", repo=repo, since=hold)
+
+    def test_a_history_that_cannot_say_is_refused(self, tmp_path):
+        repo, old, _hold = self._repo(tmp_path)
+        with pytest.raises(replay.ReplayError, match="cannot tell"):
+            replay.require_comment_holds(old, "baseline", repo=repo, since="f" * 40)
+
+    def test_run_checks_both_arms_only_when_the_scenario_has_rules(self, tmp_path,
+                                                                    monkeypatch):
+        corpus = _corpus(tmp_path)
+        monkeypatch.setattr(replay, "config_home", lambda: corpus)
+        monkeypatch.setattr(replay, "state_home", lambda: tmp_path / "no-state")
+        monkeypatch.setenv("AISH_REPLAY_HOME", str(tmp_path / "replays"))
+        checked: list[str] = []
+
+        def refuse(sha, arm, **_kw):
+            checked.append(arm)
+            raise replay.ReplayError(f"{arm} predates the hold")
+
+        monkeypatch.setattr(replay, "require_comment_holds", refuse)
+        launch = FakeLaunch({"baseline": _failing_log(tmp_path),
+                             "candidate": _failing_log(tmp_path)})
+        real = replay.run_batch
+        monkeypatch.setattr(replay, "run_batch", lambda *a, **kw: real(*a, **kw, launch=launch))
+        # An overlay, so the arms differ whether or not this tree is committed.
+        overlay = tmp_path / "new.md"
+        overlay.write_text("candidate", encoding="utf-8")
+        differ = ["--runs", "1", "--baseline-ref", "HEAD",
+                  "--candidate-overlay", f"skills/s.md={overlay}"]
+        plain = _scenario(tmp_path / "plain")
+        assert replay.main(["run", str(plain), *differ]) == 0
+        assert checked == []
+        ruled = _scenario(tmp_path / "ruled", extra=(
+            '\n[[cards.comment]]\ncommand_re = "x"\naction = "deny"\ncomment = "c"\n'))
+        assert replay.main(["run", str(ruled), *differ]) == 2
+        assert checked == ["baseline"]
+        assert not list((tmp_path / "replays").rglob(".*-baseline-code"))  # cleaned up
+
+
+def _mc(record: dict, model_call: int) -> dict:
+    record["step"]["model_call"] = model_call
+    return record
+
+
 # --- the runner ----------------------------------------------------------------
 
 def _corpus(root: Path) -> Path:
@@ -353,8 +911,10 @@ class FakeLaunch:
     run's artifacts the way the driver would."""
 
     def __init__(self, logs: dict[str, Path], mutate_corpus: bool = False,
-                 exit_code: int = 0, menus: tuple[str, ...] = ()):
+                 exit_code: int = 0, menus: tuple[str, ...] = (),
+                 card_rules: tuple[int, ...] = ()):
         self.logs, self.mutate, self.exit_code = logs, mutate_corpus, exit_code
+        self.card_rules = card_rules  # the comment rule each extra card was answered by
         self.menus = menus  # bytes the run's evidence store holds, as the agent puts them
         self.calls: list[dict] = []
 
@@ -371,7 +931,9 @@ class FakeLaunch:
             (run_dir / "config" / "memory" / "written-by-run.md").write_text("x")
         code_root = Path(env["PYTHONPATH"])
         events = [{"type": "start", "aish_file": str(code_root / "aish" / "__init__.py")},
-                  {"type": "card", "kind": "command"}, {"type": "end"}]
+                  {"type": "card", "kind": "command"},
+                  *({"type": "card", "kind": "command", "rule": n} for n in self.card_rules),
+                  {"type": "end"}]
         Path(spec["events_path"]).write_text(
             "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
         shutil.copyfile(self.logs[arm], Path(spec["state_dir"]) / "session-1.jsonl")
