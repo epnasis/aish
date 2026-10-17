@@ -100,21 +100,45 @@ def valid_name(name: str) -> bool:
     return bool(NAME_RE.match(name or ""))
 
 
-def _security(args: list[str], value: str | None = None) -> subprocess.CompletedProcess:
+# A lookup feeds a tool that runs without the secret if it must; a Keychain
+# call that never returns would hang that tool before its own timeout starts.
+LOOKUP_TIMEOUT_SECONDS = 15
+
+
+def _security(
+    args: list[str], value: str | None = None, timeout: float | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [_SECURITY, *args], input=value, text=True, capture_output=True
+        [_SECURITY, *args], input=value, text=True, capture_output=True, timeout=timeout
     )
 
 
 def get(name: str) -> str | None:
     """The secret's value, or None if unset. Trailing newline stripped."""
+    return lookup(name)[0]
+
+
+def lookup(name: str) -> tuple[str | None, str]:
+    """(value, "") or (None, what was observed). The observation is the
+    `security` exit code and its own stderr, never an interpretation: an
+    absent item and a locked or unreachable Keychain are told apart by that
+    text, not by aish."""
     if not valid_name(name):
-        return None
-    proc = _security(["find-generic-password", "-a", name, "-s", SERVICE, "-w"])
+        return None, f"{name!r} is not a valid secret name"
+    try:
+        proc = _security(
+            ["find-generic-password", "-a", name, "-s", SERVICE, "-w"],
+            timeout=LOOKUP_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"{_SECURITY} did not return within {LOOKUP_TIMEOUT_SECONDS} s"
+    except OSError as exc:
+        return None, f"{_SECURITY} could not be run: {exc}"
     if proc.returncode != 0:
-        return None
+        detail = (proc.stderr or "").strip() or "no message"
+        return None, f"{_SECURITY} exited {proc.returncode}: {detail}"
     # -w prints the value; a trailing newline is added by `security`, not stored.
-    return proc.stdout.rstrip("\n")
+    return proc.stdout.rstrip("\n"), ""
 
 
 def put(name: str, value: str) -> None:

@@ -137,6 +137,10 @@ class Tool:
     # not necessarily commands it wraps; alternatives count too.
     prefer_over: tuple[str, ...] = ()
     secrets: tuple[str, ...] = ()  # env-var names injected from the Keychain at exec
+    # Like `secrets`, but an unavailable one does not stop the tool: it runs
+    # without it and is told why in OPTIONAL_SECRETS_UNAVAILABLE — for a tool
+    # whose main job works offline and only one path needs the credential.
+    optional_secrets: tuple[str, ...] = ()
     preview: bool = False  # if set, resolve args to a human sentence before the gate (#157)
     # The declared output contract (#193), fed straight to classify_output's
     # `required`. None = `returns: none`, no contract beyond the exit code; ()
@@ -426,6 +430,34 @@ def _parse_fields(front: str) -> dict[str, str]:
     return fields
 
 
+def _secret_names(raw: str) -> tuple[str, ...]:
+    return tuple(s for s in re.split(r"[,\s]+", raw.strip()) if s)
+
+
+# The env var an optional secret's absence is reported in: a JSON object
+# {NAME: what was observed}, names and observations only — never a value.
+OPTIONAL_SECRETS_UNAVAILABLE = "AISH_SECRETS_UNAVAILABLE"
+
+
+def _inject_optional_secrets(tool: Tool, env: dict, get_secret) -> None:
+    env.pop(OPTIONAL_SECRETS_UNAVAILABLE, None)
+    unavailable: dict[str, str] = {}
+    for sec in tool.optional_secrets:
+        if get_secret is None:
+            from . import secrets as secrets_store
+
+            value, observed = secrets_store.lookup(sec)
+        else:
+            value = get_secret(sec)
+            observed = "" if value is not None else "the secret store returned no value"
+        if value is None:
+            unavailable[sec] = observed
+        else:
+            env[sec] = value
+    if unavailable:
+        env[OPTIONAL_SECRETS_UNAVAILABLE] = json.dumps(unavailable)
+
+
 def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
     """Parse+validate one TOOL.md. Returns (tool, errors); a non-empty errors
     list means the tool is skipped. The linter is deterministic and pure."""
@@ -503,13 +535,13 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
     returns, returns_errors = _parse_returns(manifest, fields)
     errors.extend(returns_errors)
 
-    secrets = tuple(re.split(r"[,\s]+", fields.get("secrets", "").strip())) if fields.get(
-        "secrets", ""
-    ).strip() else ()
-    secrets = tuple(s for s in secrets if s)
-    for s in secrets:
+    secrets = _secret_names(fields.get("secrets", ""))
+    optional_secrets = _secret_names(fields.get("optional_secrets", ""))
+    for s in (*secrets, *optional_secrets):
         if not _ENV_NAME_RE.match(s):
             errors.append(f"{manifest}: secret name {s!r} must be [A-Za-z_][A-Za-z0-9_]*")
+    for s in set(secrets) & set(optional_secrets):
+        errors.append(f"{manifest}: secret {s!r} is listed as both required and optional")
 
     if errors:
         return None, errors
@@ -528,6 +560,7 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
                 p.strip() for p in fields.get("prefer_over", "").split(",") if p.strip()
             ),
             secrets=secrets,
+            optional_secrets=optional_secrets,
             preview=preview,
             returns=returns,
             content_from=fields.get("content_from", "").strip().lower(),
@@ -701,7 +734,9 @@ def execute(
     Any secrets the manifest declares are resolved (default: the macOS Keychain
     via ``secrets.get``) and injected into ONLY this subprocess's environment —
     never into args, so a value can't leak into logs or the model's context. A
-    declared-but-unset secret is a hard error rather than a silent empty env."""
+    declared-but-unset secret is a hard error rather than a silent empty env;
+    an unavailable OPTIONAL secret is left out and named, with what the store
+    reported, in OPTIONAL_SECRETS_UNAVAILABLE."""
     exe = resolve_executable(tool.dir, tool.executable)
     if exe is None:
         return ToolOutcome(
@@ -741,6 +776,10 @@ def execute(
                     error="unset_secret",
                 )
             env[sec] = value
+    if tool.optional_secrets:
+        if env is None:
+            env = dict(os.environ)
+        _inject_optional_secrets(tool, env, get_secret)
     try:
         proc = subprocess.run(
             [exe],
@@ -915,6 +954,8 @@ def preview(tool: Tool, args: dict, cwd: str, get_secret=None) -> str | None:
             if value is None:
                 return None
             env[sec] = value
+    if tool.optional_secrets:
+        _inject_optional_secrets(tool, env, get_secret)
     try:
         proc = subprocess.run(
             [exe],
