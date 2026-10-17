@@ -70,6 +70,7 @@ from . import (
     learning,
     notify,
     objective,
+    owner_ua,
     recipients,
     roles,
     schedule,
@@ -1966,6 +1967,9 @@ class WebServer:
     ):
         self.open_session = open_session  # (path | None) -> Session
         self.state_dir = state_dir
+        # The last browser UA written to the state tree (owner_ua), so a typed
+        # message costs a string compare, not a file read.
+        self._remembered_ua: str | None = None
         # Here and not in startup(), deliberately (#258): a chat scratch
         # workspace is an orphan exactly when its session log is gone, and a
         # brand-new chat has no log until it records its first line — so the
@@ -2167,6 +2171,14 @@ class WebServer:
                 continue
             if session is None:
                 continue
+            # The owner's browser, as the interrupted turn recorded it: a turn
+            # he made is still his after a restart. None recorded (a background
+            # turn, or one from before the field) restores none.
+            psu_ua = owner_ua.clean(str(info.get("psu_ua") or ""))
+            if psu_ua:
+                session.agent.plugin_env[owner_ua.ENV_KEY] = psu_ua
+            else:
+                session.agent.plugin_env.pop(owner_ua.ENV_KEY, None)
             # A run that died before its own user message was logged left the
             # model nothing to continue FROM, so that one re-issues the recorded
             # prompt — the user's own words, a normal bubble; every other resume
@@ -3028,7 +3040,10 @@ class WebServer:
         if self.scheduler is None:
             await self._refuse(client, "no scheduler is running on this server")
             return
-        outcome = await self.scheduler.fire_now(task_id)
+        # He pressed it, from this browser: the run carries its UA (owner_ua)
+        # on the request only, never into the task file.
+        ua = owner_ua.clean(client.ws.headers.get("user-agent", ""))
+        outcome = await self.scheduler.fire_now(task_id, psu_ua=ua or None)
         if not outcome.opened:
             await self._refuse(client, f"automation {task_id} was not started: "
                                f"{outcome.error or outcome.status}")
@@ -3197,6 +3212,9 @@ class WebServer:
         session = client.viewing
         if session is None:
             return
+        # Pressing Retry is the owner asking again, from THIS browser — stamped
+        # before the busy check so a deferred rerun (pending_retry) carries it.
+        self._stamp_owner_ua(client, session)
         if session.busy:
             session.pending_retry = text
             await self._stop_task(client)
@@ -3499,6 +3517,24 @@ class WebServer:
                 )
                 return
 
+    def _stamp_owner_ua(self, client: Client, session: Session) -> str:
+        """Stamp the acting browser's UA on the session's agent and remember
+        it machine-wide for the terminal (owner_ua). Returns the cleaned UA, ""
+        when the socket sent none — which stamps nothing and leaves whatever
+        an earlier stamp of this chat set. Remembering is best-effort: a state
+        tree that cannot be written must never cost the owner his turn."""
+        ua = owner_ua.clean(client.ws.headers.get("user-agent", ""))
+        if not ua:
+            return ""
+        session.agent.plugin_env[owner_ua.ENV_KEY] = ua
+        if ua != self._remembered_ua:
+            try:
+                owner_ua.remember(self.state_dir, ua)
+                self._remembered_ua = ua
+            except OSError as exc:
+                print(f"[owner-ua] could not remember the browser: {exc}", file=sys.stderr)
+        return ua
+
     async def _start_task(
         self, client: Client, text: str, attachments: list[str] | None = None
     ) -> None:
@@ -3512,10 +3548,11 @@ class WebServer:
         # that distinguish attended from background access read it from their
         # subprocess env — the bank tools use it (with the home public IP) to
         # claim PSU-present access and lift the bank's unattended fetch cap.
-        # Triggered sessions never reach here, so their agent stays unstamped.
-        ua = client.ws.headers.get("user-agent", "").strip()
-        if ua:
-            session.agent.plugin_env["AISH_BANK_PSU_UA"] = ua
+        # Triggered sessions never reach here: what one carries is decided at
+        # launch_triggered, and only a one-shot or a Run now carries anything.
+        # Before the busy check: a queued message stamps too, so the latest
+        # stamping socket is the one a later turn of this chat carries.
+        self._stamp_owner_ua(client, session)
         if session.busy:
             if len(session.queue) >= MAX_QUEUE:
                 await self._refuse(client, f"queue full ({MAX_QUEUE} waiting)")
@@ -3684,7 +3721,13 @@ class WebServer:
         # every other device until something happened to ask.
         self._touch(session)
         try:
-            session.logref.task_start(text)
+            # The UA this turn carries rides on its start, so restart recovery
+            # can restore it (owner_ua) — and a continuation re-records it.
+            psu_ua = session.agent.plugin_env.get(owner_ua.ENV_KEY)
+            if psu_ua:
+                session.logref.task_start(text, psu_ua=psu_ua)
+            else:
+                session.logref.task_start(text)
         except SessionLogMoved as exc:
             # The chat was opened cold on a log that another client has since
             # trashed (#177): the write was refused rather than recreating the
@@ -5858,6 +5901,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         model_override: str = "",
         profile: RunProfile | None = None,
         monitor: scheduling.MonitorSpec | None = None,
+        psu_ua: str = "",
     ) -> scheduling.TriggerOutcome:
         """THE ingress for a non-user session, past the token/origin gates.
         `POST /trigger` and the scheduler both come through here, so a
@@ -5865,7 +5909,9 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         `profile` is the scheduler's alone: the grants the owner approved
         inside the automation's creation card. So is `monitor` (#5 S3): a
         keyword, never `meta`, because `handle_trigger` forwards `meta` from
-        any token holder verbatim and must not be able to mint a monitor run."""
+        any token holder verbatim and must not be able to mint a monitor run.
+        And so is `psu_ua` (owner_ua), for the same reason: a token holder
+        must not be able to claim the owner is present."""
         # Abuse guards (#178 P1-10), in this order: a dedup hit is an
         # idempotent SUCCESS and consumes nothing (a retry storm re-sending
         # one key must not burn rate tokens), and both refusals come BEFORE
@@ -5902,6 +5948,8 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         # NEVER the default (#178 P1-6): an overnight trigger must not become
         # the landing spot for the next bare connect (nor eviction-immune).
         self.add_session(session, default=False)
+        if psu_ua:
+            session.agent.plugin_env[owner_ua.ENV_KEY] = psu_ua
         if title:
             session.custom_title = title
             session.logref.log.set_title(title)
@@ -5955,6 +6003,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             model_override=task.model,
             profile=RunProfile(allow=task.allow, sites=task.sites,
                                cwd=task.cwd, roots=task.roots),
+            psu_ua=request.psu_ua,
             **({"monitor": request.monitor} if request.monitor is not None else {}),
         )
 

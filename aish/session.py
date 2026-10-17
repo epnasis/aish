@@ -1992,6 +1992,7 @@ class SessionLog:
             "attempts": scan["attempts"],
             "in_flight": scan["in_flight"],
             "origin": scan["origin"],
+            "psu_ua": scan["psu_ua"],
         }
 
     @staticmethod
@@ -2140,6 +2141,7 @@ class SessionLog:
             "origin": origin,
             "prompt": records[last].get("prompt") or "",
             "ts": records[last].get("ts") or "",
+            "psu_ua": str(records[last].get("psu_ua") or ""),
         }
 
     @staticmethod
@@ -2169,6 +2171,7 @@ class SessionLog:
                 "ended": "none", "closed": True, "error": "", "failure": None,
                 "in_flight": [], "attempts": 0, "chain_attempts": 0,
                 "typed_logged": False, "origin": "user", "prompt": "", "ts": "",
+                "psu_ua": "",
             }
         return scan
 
@@ -3983,7 +3986,7 @@ class SessionLog:
         self._record("quiet", through=stamp, automation=automation, status=status)
         self.quiet_through = float(stamp)
 
-    def task_start(self, prompt: str) -> None:
+    def task_start(self, prompt: str, psu_ua: str | None = None) -> None:
         """Mark a model task as IN FLIGHT (#164). Paired with task_end, this is
         the only durable trace that a task was running when the process died:
         the web server resumes any session whose log ends on an unmatched
@@ -3991,8 +3994,15 @@ class SessionLog:
         before the user message itself was logged.
 
         Written by the WEB server only — a CLI session dies with its terminal
-        and must never be resurrected by an unrelated aish-web start."""
-        self._record("task_start", prompt=prompt)
+        and must never be resurrected by an unrelated aish-web start.
+
+        `psu_ua` is the owner's browser UA this turn carried (owner_ua), so a
+        restart resumes it as his. Written only when set: every other start is
+        byte-identical to the shape before the field existed."""
+        if psu_ua:
+            self._record("task_start", prompt=prompt, psu_ua=psu_ua)
+        else:
+            self._record("task_start", prompt=prompt)
 
     def task_end(self, status: str = "ok", error: str = "") -> None:
         """The task reached its end — answered, errored, or cancelled. All three

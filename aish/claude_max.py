@@ -178,6 +178,12 @@ class ClaudeMaxAgent:
     def scratch_dir(self):
         return self.inner.scratch_dir
 
+    @property
+    def plugin_env(self) -> dict[str, str]:
+        # The inner Agent runs plugin tools (`_locked_dispatch`), so the
+        # owner's browser UA the server stamps here must land on ITS dict.
+        return self.inner.plugin_env
+
     def close(self) -> None:
         self.inner.close()
 

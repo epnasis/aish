@@ -158,6 +158,10 @@ class FireRequest:
     monitor: MonitorSpec | None = None
     #: Started by the owner through `fire_now` (#5 S4), never by the schedule.
     manual: bool = False
+    #: The owner's browser UA the run carries (owner_ua): a one-shot's own
+    #: `task.psu_ua`, or the pressing browser's for a run started by hand.
+    #: Never written to the task file from here.
+    psu_ua: str = ""
 
     @property
     def dedup_key(self) -> str:
@@ -629,6 +633,9 @@ class Scheduler:
             request = FireRequest(
                 task, run_prompt(task, now, occurrence, prior=prior), occurrence, now,
                 monitor=monitor,
+                # One-shots only, by construction: validate_task refuses a
+                # psu_ua on a cron task, so a recurring fire carries none.
+                psu_ua=task.psu_ua,
             )
             outcome = await self.fire(request)
         if outcome.opened:
@@ -655,7 +662,7 @@ class Scheduler:
             f"until {deadline.strftime('%H:%M %a %Y-%m-%d')}.",
         )
 
-    async def fire_now(self, task_id: str) -> TriggerOutcome:
+    async def fire_now(self, task_id: str, psu_ua: str | None = None) -> TriggerOutcome:
         """Run one automation now, because the owner asked (#5 S4, `run_now`).
 
         Everything about the run comes from his file, read fresh here — the
@@ -667,7 +674,11 @@ class Scheduler:
         missing, unparseable, disabled, or a one-shot that expired — each with
         the reason and the way on. A failure to open is answered to the owner,
         who asked and is there to read it, so it is neither recorded nor
-        pushed; a run that opened leaves a `manual_run` record."""
+        pushed; a run that opened leaves a `manual_run` record.
+
+        `psu_ua` is the browser of the owner who pressed Run now — he is there,
+        so this run is his, whatever kind of automation it is. It rides the
+        request only; the task file is never touched."""
         state = await self._ensure_state()
         # The scheduler's own reload, not a private read: the run's ending is
         # recorded against `self.tasks` (a monitor writes its snapshot only for
@@ -714,7 +725,7 @@ class Scheduler:
         request = FireRequest(
             task,
             run_prompt(task, now, prior=monitor.prior if monitor else None, manual=True),
-            now, now, monitor=monitor, manual=True,
+            now, now, monitor=monitor, manual=True, psu_ua=psu_ua or "",
         )
         outcome = await self.fire(request)
         if outcome.opened:

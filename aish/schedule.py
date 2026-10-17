@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import atomic_write, files, paths, vocab
+from . import atomic_write, files, owner_ua, paths, vocab
 from .approval import EXEC_WRAPPERS, check_denied
 
 AUTOMATIONS_DIRNAME = "automations"
@@ -56,7 +56,7 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 FIELDS = (
     "id", "note", "prompt", "schedule", "enabled", "created",
-    "model", "allow", "sites", "cwd", "roots", "kind", "notify",
+    "model", "allow", "sites", "cwd", "roots", "kind", "notify", "psu_ua",
 )
 
 # Statuses `next_due` answers with.
@@ -251,6 +251,9 @@ class Task:
     cron: str = ""  # normalised 5-field expr; "" for a one-shot
     kind: str = KIND_TASK
     notify: str = NOTIFY_ALWAYS  # resolved: the owner's value, else the kind's default
+    #: The browser UA of the owner who delegated this one-shot at a moment
+    #: (owner_ua); "" for every cron task, which validate_task enforces.
+    psu_ua: str = ""
 
     @property
     def recurring(self) -> bool:
@@ -310,6 +313,10 @@ class Task:
         if self.monitor:
             out["kind"] = self.kind
             out["notify"] = self.notify
+        # Only when set, so an owner-less task renders as it always did, and a
+        # rewrite (`/tasks enable|disable`) keeps what the card approved.
+        if self.psu_ua:
+            out["psu_ua"] = self.psu_ua
         return out
 
     def render(self) -> str:
@@ -452,6 +459,7 @@ def validate_task(
     cwd = str(raw.get("cwd", "")).strip()
     roots = tuple(_validate_dir(r, "roots entry") for r in _strings(raw, "roots"))
     kind, notify = _validate_kind_and_notify(raw, recurring=bool(cron))
+    psu_ua = _validate_psu_ua(raw, recurring=bool(cron))
     return Task(
         id=task_id,
         prompt=prompt.strip(),
@@ -467,7 +475,31 @@ def validate_task(
         cron=cron,
         kind=kind,
         notify=notify,
+        psu_ua=psu_ua,
     )
+
+
+def _validate_psu_ua(raw: dict, *, recurring: bool) -> str:
+    """The owner's browser UA a one-shot carries (owner_ua). Refused on a cron
+    task: a recurring run is background work by the owner's rule, and a UA
+    there would claim him present at every occurrence. It ends up in an HTTP
+    header, so control characters are refused rather than carried."""
+    value = raw.get("psu_ua", "")
+    if not isinstance(value, str):
+        raise InvalidTask("psu_ua must be a string")
+    value = value.strip()
+    if not value:
+        return ""
+    if recurring:
+        raise InvalidTask(
+            "psu_ua is for a one-shot only; a recurring automation runs in the "
+            "background and must not claim the owner is present"
+        )
+    if len(value) > owner_ua.MAX_UA_CHARS:
+        raise InvalidTask(f"psu_ua is longer than {owner_ua.MAX_UA_CHARS} characters")
+    if _CONTROL_CHARS.search(value):
+        raise InvalidTask("psu_ua contains a control character")
+    return value
 
 
 def _validate_kind_and_notify(raw: dict, *, recurring: bool) -> tuple[str, str]:

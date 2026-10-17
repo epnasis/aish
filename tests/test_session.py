@@ -2714,7 +2714,8 @@ class TestLastTask:
         log.step({"kind": "tool_start", "name": "gmail_send", "summary": "to pawel"})
         log.close()
         pending = SessionLog.pending_task(log.path)
-        assert set(pending) == {"prompt", "ts", "attempts", "in_flight", "origin"}
+        assert set(pending) == {"prompt", "ts", "attempts", "in_flight", "origin", "psu_ua"}
+        assert pending["psu_ua"] == ""
         assert pending["prompt"] == "answer the mail"
         assert pending["attempts"] == 1
         assert pending["in_flight"] == ["gmail_send: to pawel"]
