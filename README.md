@@ -161,7 +161,7 @@ unless you explicitly *Share* a selection.
 
 | Tool | What | Gate |
 |------|------|------|
-| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the project and in aish's own scratch/media/document dirs; scratch-workspace deletes auto-approve) |
+| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the project and in aish's own scratch/media/document dirs; `mkdir`/`touch`/`rm` inside the scratch workspace auto-approve) |
 | `write_file` / `edit_file` | create or edit files | **colored diff + y/N** |
 | `read_file` | read a file | auto inside the project; **prompts outside it and on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
 | `read_media` | look at a video or audio recording — a YouTube link, any media URL, or a file on disk. Returns a map (length, chapters, captions) and frames from any moment, each labelled with the time it actually came from | auto |
@@ -624,6 +624,9 @@ thousands of entries without bloating the context.
    Extend in `~/.config/aish/deny.txt`.
 3. **A private scratch workspace.** A per-chat directory the model may
    freely create, edit, delete **and read** throwaway files in without prompting
+   (file writes, and plain `mkdir`/`touch`/`rm` on scratch paths, chained at
+   most with `echo`/`true`; no globs, and never `rm -rf`. Any other command that
+   writes there, such as `convert`, still asks)
    — it belongs to the chat, survives reconnects and restarts, and is deleted
    when you delete the chat (it is throwaway by definition, so unlike the
    conversation it does not go to Recently deleted). The same applies to aish's other own

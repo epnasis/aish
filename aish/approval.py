@@ -193,9 +193,13 @@ _ARCH_SELECTORS = frozenset(
 # the command is `/bin/sh -c` (tools.run_command), so the shell's own rules are
 # the only ones that decide whether a character does anything: inside single
 # quotes every character is inert, inside double quotes only $ and ` still
-# expand, and a backslash-escaped character is literal text. '&' and '|' are
-# handled by the chain splitter, ';' stays forbidden unquoted.
-FORBIDDEN_CHARS = frozenset(";<>`$(){}\n")
+# expand, and a backslash-escaped character is literal text — except a
+# newline, which sh deletes with its backslash (split_chain refuses that pair). '&' and '|' are
+# handled by the chain splitter, ';' stays forbidden unquoted. A bare '#' is
+# a comment to sh but text to shlex, so `ls && echo # '<newline>rm x<newline>#'`
+# read as one echo while sh ran `rm x` on its own line (2026-10-17 review); it
+# fails closed wherever it stands, at the price of a card for `foo#bar`.
+FORBIDDEN_CHARS = frozenset(";<>`$(){}\n#")
 FORBIDDEN_IN_DOUBLE_QUOTES = frozenset("`$")
 
 # Bytes a terminal reads as an instruction rather than as text, judged on the
@@ -284,6 +288,12 @@ def split_chain(command: str) -> list[str] | None:
     start = index = 0
     while index < len(marks):
         position, ch, context = marks[index]
+        if context == _ESCAPED and ch == "\n":
+            # A line continuation: sh deletes backslash-newline outright, bare
+            # or in double quotes, while shlex keeps the newline in the word.
+            # `find sub \<newline>-delete` was read as an operand `\n-delete`
+            # and auto-approved; sh ran `find sub -delete` (2026-10-17 review).
+            return None
         if context == _DOUBLE and ch in FORBIDDEN_IN_DOUBLE_QUOTES:
             return None
         if context != _BARE:
@@ -589,23 +599,61 @@ def path_within(path: str, cwd: str, scratch_dir: Path) -> bool:
     return contains(scratch_dir, path, cwd, strict=True)
 
 
-def is_scratch_delete(command: str, cwd: str, scratch_dir: Path) -> bool:
-    """True iff `command` is a single `rm` invocation whose every path operand
-    resolves STRICTLY inside scratch_dir — a delete confined to the ephemeral
-    scratch workspace, safe to auto-approve. Fail closed on ANY ambiguity, so
-    the command otherwise drops through to the normal denylist + prompt path:
-    chained/piped commands or shell metacharacters, a verb that isn't a bare
-    `rm` (no sudo/wrappers), recursive+force together (that stays denylisted
-    even here), no operands, or any operand resolving onto or outside the
-    scratch dir."""
-    segments = split_chain(command)
-    if segments is None or len(segments) != 1:
-        return False
+# The verbs whose every operand is a path the command creates or removes, so
+# "all operands strictly inside scratch" is the whole of what they touch. A
+# verb whose output path depends on its own syntax (convert, tesseract, cp)
+# cannot be judged this way and stays carded.
+_SCRATCH_VERBS = frozenset({"rm", "mkdir", "touch"})
+
+# The only segments allowed to ride along with a scratch verb. They read and
+# write nothing, so skipping the approver (and with it --ask-all and deny.txt)
+# costs nothing. A read-only verb such as cat or grep would carry that skip to
+# reads anywhere in the roots, so it stays with the approver.
+_INERT_VERBS = frozenset({"echo", "true"})
+
+# The shell, not this check, decides what a glob names: `touch <scratch>/lin*`
+# resolves nothing here and then follows a symlink in scratch to wherever it
+# points. Quoted or not, a glob character fails closed.
+_GLOB_CHARS = frozenset("*?[")
+
+
+# The flags each scratch verb may carry, every one a switch that takes no
+# value. Anything else fails closed: `touch -r<path>` reads a file outside
+# scratch through an attached value the operand check never sees.
+_SCRATCH_FLAGS = {
+    "rm": frozenset("rRidvfI"),
+    "mkdir": frozenset("pv"),
+    "touch": frozenset("acm"),
+}
+_SCRATCH_LONG_FLAGS = {
+    "rm": frozenset({"--recursive", "--force", "--verbose", "--dir"}),
+    "mkdir": frozenset({"--parents", "--verbose"}),
+    "touch": frozenset(),
+}
+
+
+def _scratch_tokens(segment: str) -> list[str] | None:
+    """shlex tokens, or None when a token would be read differently by the
+    shell than by this check: a glob, or a leading `~` (the check expands a
+    QUOTED one, which sh leaves as a literal directory under the cwd)."""
     try:
-        tokens = shlex.split(segments[0])
+        tokens = shlex.split(segment)
     except ValueError:
-        return False
-    if not tokens or tokens[0].rsplit("/", 1)[-1] != "rm":
+        return None
+    if not tokens:
+        return None
+    if any(_GLOB_CHARS & set(token) or token.startswith("~") for token in tokens):
+        return None
+    return tokens
+
+
+def _is_scratch_segment(tokens: list[str], cwd: str, scratch_dir: Path) -> bool:
+    """One `rm`/`mkdir`/`touch` named BARE (a path such as `./mkdir` could be
+    any executable), carrying only the value-less flags in `_SCRATCH_FLAGS`,
+    whose every operand resolves STRICTLY inside scratch_dir. No wrappers
+    (sudo) are stripped."""
+    verb = tokens[0]
+    if verb not in _SCRATCH_VERBS:
         return False
     operands: list[str] = []
     flags: set[str] = set()
@@ -622,13 +670,44 @@ def is_scratch_delete(command: str, cwd: str, scratch_dir: Path) -> bool:
                 flags.update(tok[1:])
             continue
         operands.append(tok)
-    recursive = bool({"r", "R"} & flags) or "--recursive" in longs
-    force = "f" in flags or "--force" in longs
-    if recursive and force:  # rm -rf stays denylisted, even inside scratch
+    if not flags <= _SCRATCH_FLAGS[verb] or not longs <= _SCRATCH_LONG_FLAGS[verb]:
         return False
+    if verb == "rm":
+        recursive = bool({"r", "R"} & flags) or "--recursive" in longs
+        force = "f" in flags or "--force" in longs
+        if recursive and force:  # rm -rf stays denylisted, even inside scratch
+            return False
     if not operands:
         return False
     return all(path_within(operand, cwd, scratch_dir) for operand in operands)
+
+
+def is_scratch_housekeeping(command: str, cwd: str, scratch_dir: Path) -> bool:
+    """True iff `command` is a chain of bare `rm`/`mkdir`/`touch` (at least
+    one) whose every operand resolves STRICTLY inside the scratch workspace,
+    optionally with `echo`/`true` segments. Fail closed on ANY ambiguity, so
+    the command otherwise drops through to the normal denylist + prompt path:
+    anything `split_chain` does not model (redirects, subshells, `;`, `$`,
+    `#` …), control bytes, a glob character, a leading `~`, a verb given as a
+    path, a flag outside `_SCRATCH_FLAGS`, `rm -rf`, a missing operand, or any
+    operand resolving onto or outside the scratch dir. Operands resolve through
+    every symlink (`files.resolved`), and no allowed verb can create one
+    between the check and the run."""
+    if _CONTROL_BYTES.search(command):
+        return False
+    segments = split_chain(command)
+    if not segments:
+        return False
+    found = False
+    for segment in segments:
+        tokens = _scratch_tokens(segment)
+        if tokens is None:
+            return False
+        if _is_scratch_segment(tokens, cwd, scratch_dir):
+            found = True
+        elif tokens[0] not in _INERT_VERBS:
+            return False
+    return found
 
 
 def is_auto_approvable(

@@ -3455,8 +3455,8 @@ class TestCommandFraming:
 
 
 class TestScratchWorkspace:
-    """Issue #70: a per-session scratch dir where create AND delete are
-    auto-approved, scoped strictly to that dir; everything else still gated.
+    """Issue #70: a per-session scratch dir where file writes and shell
+    mkdir/touch/rm are auto-approved, scoped strictly to that dir; everything else still gated.
     scratch_dir is created per-Agent, so these build the agent first, then
     script responses that reference agent.scratch_dir."""
 
@@ -3471,7 +3471,7 @@ class TestScratchWorkspace:
         assert agent.scratch_dir.is_dir()
         assert "aish-scratch-" in agent.scratch_dir.name
         system = agent.messages[0]["content"]
-        assert "your scratch directory (writes there are auto-approved" in system
+        assert "your scratch directory (it dies with the chat;" in system
         # The per-chat path rides the reminder, never the cached system message.
         assert str(agent.scratch_dir) not in system
         chat.responses = [model_says("ok")]
@@ -3534,6 +3534,35 @@ class TestScratchWorkspace:
         ]
         agent.run_task("clean up scratch")
         assert not victim.exists()
+
+    def test_mkdir_inside_scratch_auto_approves(self, tmp_path):
+        """2026-10-17: `mkdir -p <scratch>/ocr_pages && echo …` raised a card
+        while the prompt told the model writes there were auto-approved."""
+        agent, chat = self._agent(
+            tmp_path, approve=lambda _cmd: pytest.fail("scratch mkdir must not prompt")
+        )
+        made = agent.scratch_dir / "ocr_pages"
+        chat.responses = [
+            model_says(tool_calls=[tool_call(
+                "run_command", command=f'mkdir -p {made} && echo "Folder gotowy"'
+            )]),
+            model_says("done"),
+        ]
+        agent.run_task("make a folder in scratch")
+        assert made.is_dir()
+
+    def test_mkdir_chained_with_a_writer_still_prompts(self, tmp_path):
+        seen = []
+        agent, chat = self._agent(tmp_path, approve=lambda cmd: (seen.append(cmd), False)[1])
+        pages = agent.scratch_dir / "pages"
+        command = f"mkdir -p {pages} && convert in.pdf {pages}/p.png"
+        chat.responses = [
+            model_says(tool_calls=[tool_call("run_command", command=command)]),
+            model_says("ok"),
+        ]
+        agent.run_task("convert")
+        assert seen == [command]
+        assert not pages.exists()  # denied → nothing ran
 
     def test_rm_outside_scratch_still_prompts(self, tmp_path):
         marker = tmp_path / "important"
