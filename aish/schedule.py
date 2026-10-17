@@ -1084,6 +1084,11 @@ def describe(task: Task, now: datetime, *, replacing: bool = False) -> str:
         )
     else:
         lines.append("Sites it may act on as you without asking: none.")
+    if task.psu_ua:
+        lines.append(
+            "Requests it makes to your bank will say you are present, with the "
+            "browser you are using now — this run is yours, delegated."
+        )
     if task.model:
         lines.append(f"Model: {task.model} (if it cannot be built, the run does not start).")
     if task.cwd:

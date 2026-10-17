@@ -264,6 +264,18 @@ class TestOneShotCarriesTheWritersUA:
         [task] = schedule.load_tasks(schedule.automations_dir()).tasks
         assert task.psu_ua == BROWSER_A
 
+    def test_the_card_says_in_words_that_the_bank_will_be_told(self):
+        import dataclasses
+        from datetime import datetime
+        agent, cards = card_agent()
+        agent.plugin_env[KEY] = BROWSER_A
+        agent._dispatch("schedule_task", schedule_args())
+        [task] = schedule.load_tasks(schedule.automations_dir()).tasks
+        words = schedule.describe(task, datetime(2026, 1, 1))
+        assert "say you are present" in words
+        unstamped = dataclasses.replace(task, psu_ua=None)
+        assert "say you are present" not in schedule.describe(unstamped, datetime(2026, 1, 1))
+
     def test_a_writer_with_no_ua_writes_none(self):
         agent, cards = card_agent()
         agent._dispatch("schedule_task", schedule_args())
