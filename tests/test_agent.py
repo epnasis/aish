@@ -176,6 +176,8 @@ class TestApprovalComment:
             [
                 model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
                 model_says("acknowledged"),
+                # The hold check sends that answer back once: the held action is outstanding.
+                model_says("acknowledged"),
             ],
             approve=lambda _cmd: Approved("run it verbosely instead"),
         )
@@ -197,6 +199,8 @@ class TestApprovalComment:
         agent, _ = make_agent(
             [
                 model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("acknowledged"),
+                # The hold check sends that answer back once: the held action is outstanding.
                 model_says("acknowledged"),
             ],
             approve=lambda _cmd: Approved("No reason to ask - it's read only"),
@@ -277,6 +281,8 @@ class TestApprovalComment:
                         tool_call("write_file", path=str(target), content="hi"),
                     ]
                 ),
+                model_says("acknowledged"),
+                # The hold check sends that answer back once: the held action is outstanding.
                 model_says("acknowledged"),
             ],
             approve_write=lambda _plan: Approved("keep future notes under docs/"),
@@ -4295,7 +4301,8 @@ class TestPluginTools:
         marker = tmp_path / "touched"
         self._mutating_tool(tmp_path, marker)
         agent, _ = make_agent(
-            [model_says(tool_calls=[tool_call("writer", text="x")]), model_says("reworked")],
+            [model_says(tool_calls=[tool_call("writer", text="x")]), model_says("reworked"),
+             model_says("reworked")],  # the hold check asks once
             cwd=str(tmp_path), approve_tool=lambda n, a, p=None: Approved("shorter please"),
         )
         agent.run_task("go")
@@ -5044,6 +5051,7 @@ class TestEgressGate:
             [
                 model_says(tool_calls=[tool_call("read_url", url="https://b.example/")]),
                 model_says("adjusting"),
+                model_says("adjusting"),  # the hold check asks once
             ],
             origin="email",
             approve_tool=lambda *a: Approved("use the mirror instead"),
@@ -5257,7 +5265,8 @@ class TestKnowledgeGate:
         assert "that came from the email body" in tool_messages(agent.messages)[0]["content"]
 
         held, _ = make_agent(
-            [model_says(tool_calls=[self._remember(name="second")]), model_says("reworking")],
+            [model_says(tool_calls=[self._remember(name="second")]), model_says("reworking"),
+             model_says("reworking")],  # the hold check asks once
             origin="email",
             cwd=str(tmp_path),
             approve_tool=lambda *a: Approved("name it after the sender"),
@@ -6351,6 +6360,7 @@ class TestRefusalsAreNotLoggedGreen:
             [
                 model_says(tool_calls=[tool_call("writer", text="hi")]),
                 model_says("understood"),
+                model_says("understood"),  # the hold check asks once on a hold
             ],
             cwd=str(tmp_path),
             approve_tool=lambda n, a, p=None: verdict,
@@ -6693,6 +6703,7 @@ class TestRunCommandRefusalsAreRedToo:
             [
                 model_says(tool_calls=[tool_call("run_command", command="rm -rf /tmp/x")]),
                 model_says("understood"),
+                model_says("understood"),  # the hold check asks once on a hold
             ],
             approve=approve,
             step_log=steps.append,
@@ -6793,6 +6804,8 @@ class TestApprovalCommentIsARecordedField:
         return self._steps(
             [
                 model_says(tool_calls=[tool_call("run_command", command="rm -rf /tmp/x")]),
+                model_says("understood"),
+                # The hold check sends that answer back once: the held action is outstanding.
                 model_says("understood"),
             ],
             approve=approve,
@@ -6935,6 +6948,8 @@ class TestApprovalCommentIsARecordedField:
             [
                 model_says(tool_calls=[tool_call("writer", text="hi")]),
                 model_says("understood"),
+                # The hold check sends that answer back once: the held action is outstanding.
+                model_says("understood"),
             ],
             cwd=str(tmp_path),
             approve_tool=lambda n, a, p=None: Approved("shorter, please"),
@@ -7025,6 +7040,8 @@ class TestApprovalCommentIsARecordedField:
             [
                 model_says(tool_calls=[tool_call("run_command", command="echo a")]),
                 model_says("done"),
+                # The hold check sends that answer back once: the held action is outstanding.
+                model_says("done"),
             ],
             approve=lambda _cmd: Approved("adjust it"),
         )
@@ -7038,6 +7055,8 @@ class TestApprovalCommentIsARecordedField:
         steps = self._steps(
             [
                 model_says(tool_calls=[tool_call("run_command", command=f"touch {original}")]),
+                model_says("understood"),
+                # The hold check sends that answer back once: the held action is outstanding.
                 model_says("understood"),
             ],
             approve=lambda _cmd: Approved("use the other path", command=f"touch {edited}"),
@@ -16592,7 +16611,7 @@ class TestKeywordsAreEnglish:
             [model_says(tool_calls=[self._call(
                 "create_skill", name="qr-payment", description="Use when paying by QR",
                 content="1. qrencode", keywords="qr, płatność")]),
-             model_says("ok")],
+             model_says("ok"), model_says("ok")],  # the hold check asks once
             cwd=str(tmp_path),
             approve_write=lambda plan: agent_module.Approved("make it shorter"),
         )
@@ -16640,3 +16659,315 @@ class TestKeywordsAreEnglish:
         assert manifest["content"] == installed
         assert "SKILL.md: keywords not English, not installed: płatność" in reviewed["flags"]
         assert "not installed: płatność" in tool_messages(agent.messages)[0]["content"]
+
+
+HOLD_NOTE_HEAD = "so each was HELD and NOT run"
+
+
+class TestTheHoldCheck:
+    """An answer while a held action is outstanding is sent back ONCE.
+
+    Observed (session-20261017-184727-510127): run_command approved with the
+    comment "sepearate commands to avoid approvals" was HELD; the local model
+    then answered text-only "Now step by step, without approval prompts:" and
+    proposed nothing. A text-only turn ends the task, so the owner's approval
+    was answered by nothing and he had to ask "why stopped?". aish knew: the
+    held call was still in `_held_calls`, never stood in for."""
+
+    COMMENT = "separate the commands"
+
+    def _run(self, responses, approve, **kwargs):
+        steps: list[dict] = []
+        records: list[dict] = []
+        tokens: list[str] = []
+        agent, chat = make_agent(
+            responses, approve=approve, step_log=steps.append,
+            on_message=records.append, on_token=tokens.append, **kwargs,
+        )
+        result = agent.run_task("make the pages")
+        return agent, chat, result, steps, records, "".join(tokens)
+
+    @staticmethod
+    def _hold_gates(steps):
+        return [s for s in steps if s.get("kind") == "gate" and s.get("gate") == "hold.verify"]
+
+    @staticmethod
+    def _notes(agent):
+        return [
+            unwrapped(m["content"]) for m in agent.messages
+            if m.get("role") == "user" and HOLD_NOTE_HEAD in unwrapped(m["content"])
+        ]
+
+    def test_held_then_text_only_is_asked_and_the_re_proposal_reaches_a_card(self, tmp_path):
+        original, first = tmp_path / "original", tmp_path / "first"
+        seen: list[str] = []
+
+        def approve(cmd):
+            seen.append(cmd)
+            return Approved(self.COMMENT) if cmd == f"touch {original}" else True
+
+        agent, chat, result, steps, records, streamed = self._run(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {original}")]),
+                model_says("Now step by step, without approval prompts:"),
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {first}")]),
+                model_says("done"),
+            ],
+            approve,
+        )
+        assert result == "done"
+        assert len(chat.calls) == 4
+        # The re-proposal drew its own card and ran; the original never did.
+        assert seen == [f"touch {original}", f"touch {first}"]
+        assert first.exists() and not original.exists()
+        # One ask, in aish's voice, naming the tool, the call and his comment.
+        (note,) = self._notes(agent)
+        assert "run_command (call 1)" in note and self.COMMENT in note
+        assert "tell the user plainly that you are not going to" in note
+        # The ask is a recorded answer-check ask, and it names this check.
+        (gate,) = self._hold_gates(steps)
+        assert gate["verdict"] == "refused" and gate["at"] == "verify"
+        assert gate["evidence"] == {"held_call": 1, "tool": "run_command"}
+        assert gate["round"] == 1 and gate["max_rounds"] == agent_module.HOLD_MAX_ASKS
+        # The stand-in joins the held call exactly as before.
+        tools = [s for s in steps if s.get("kind") == "tool"]
+        assert tools[0]["decision"] == "held" and tools[1]["replaces"] == tools[0]["call"]
+        # The sent-back draft was never shown and never logged.
+        assert "step by step" not in streamed
+        assert not any(
+            r.get("role") == "assistant" and "step by step" in (r.get("content") or "")
+            for r in records
+        )
+        assert "done" in streamed
+
+    def test_held_then_a_refusal_ends_the_task_after_one_ask(self):
+        refusal = "I am not going to split it: the second step needs the first one's output."
+        agent, chat, result, steps, records, streamed = self._run(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                model_says("Now step by step:"),
+                model_says(refusal),
+            ],
+            lambda _cmd: Approved(self.COMMENT),
+        )
+        # Exactly three model calls: the refusal is a complete ending, never
+        # asked about a second time.
+        assert len(chat.calls) == 3
+        assert len(self._notes(agent)) == 1
+        assert result.startswith(refusal)
+        # The delivering pass SAYS what aish observed, to the owner.
+        assert "held and not run, and no later call to it was made" in result
+        assert self.COMMENT in result.split(refusal, 1)[1]
+        verdicts = [g["verdict"] for g in self._hold_gates(steps)]
+        assert verdicts == ["refused", "advised"]
+        assert [g["round"] for g in self._hold_gates(steps)] == [1, 1]
+        # The ask does not end by ordering the text-only reply it is about.
+        (note,) = self._notes(agent)
+        assert agent_module.HOLD_WITHHELD in note
+        assert agent_module.ANSWER_WITHHELD not in note
+        # Live and log carry the same delivered text, line included.
+        assert refusal in streamed and "no later call to it was made" in streamed
+        logged = [r for r in records if r.get("role") == "assistant" and refusal in r["content"]]
+        assert len(logged) == 1 and "no later call to it was made" in logged[0]["content"]
+
+    def test_narration_on_the_re_proposal_turn_still_streams(self, tmp_path):
+        """The hold arms the answer buffer on an unbound turn; a reply that
+        ACTS hands its words over at once, as the live stream would have."""
+        first = tmp_path / "first"
+
+        def approve(cmd):
+            return True if cmd == f"touch {first}" else Approved(self.COMMENT)
+
+        *_, streamed = self._run(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                model_says(
+                    "Splitting it as asked.",
+                    tool_calls=[tool_call("run_command", command=f"touch {first}")],
+                ),
+                model_says("done"),
+            ],
+            approve,
+        )
+        assert "Splitting it as asked." in streamed
+
+    def test_no_hold_no_record_and_the_answer_streams(self):
+        agent, chat, result, steps, _records, streamed = self._run(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo a")]),
+                model_says("done"),
+            ],
+            lambda _cmd: True,
+        )
+        assert result == "done" and len(chat.calls) == 2
+        assert self._hold_gates(steps) == []
+        assert agent._held_answer is None
+
+    def test_a_stood_in_hold_is_not_asked_about(self, tmp_path):
+        target = tmp_path / "t"
+
+        def approve(cmd):
+            return Approved(self.COMMENT) if "&&" in cmd else True
+
+        agent, chat, result, steps, *_ = self._run(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {target}")]),
+                model_says("done"),
+            ],
+            approve,
+        )
+        assert result == "done" and len(chat.calls) == 3
+        assert self._hold_gates(steps) == []
+
+    def test_a_denial_after_the_hold_outranks_the_ask(self, tmp_path):
+        """Deny means STOP (#81 over this check, as over Verify): the reply that
+        lifts the stop gate is not sent back to drive the held tool."""
+        agent, chat, result, steps, *_ = self._run(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                model_says(tool_calls=[
+                    tool_call("write_file", path=str(tmp_path / "x.txt"), content="hi"),
+                ]),
+                model_says("Understood, I stopped."),
+            ],
+            lambda _cmd: Approved(self.COMMENT),
+            approve_write=lambda _plan: Denied("not there"),
+            cwd=str(tmp_path),
+        )
+        assert len(chat.calls) == 3
+        assert self._notes(agent) == []
+        assert [g["verdict"] for g in self._hold_gates(steps)] == ["advised"]
+        assert result.startswith("Understood, I stopped.")
+
+    def test_a_hold_does_not_follow_the_owner_into_his_next_task(self):
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                model_says("Now step by step:"),
+                model_says("ok, I will not."),
+                model_says("it was held and I did not re-propose it"),
+            ],
+            approve=lambda _cmd: Approved(self.COMMENT),
+        )
+        agent.run_task("make the pages")
+        assert agent.run_task("why stopped?") == "it was held and I did not re-propose it"
+        assert len(chat.calls) == 4
+
+    def test_a_rules_unattended_hold_is_not_one_he_approved(self, tmp_path):
+        """`ask_me_first` with nobody to ask holds the call with NO comment. The
+        ask says "the user APPROVED", which would be false there (L8)."""
+        logged: list[dict] = []
+        agent, chat = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("web_search", query="tar flags")]),
+                model_says("I need you to confirm the search first."),
+            ],
+            rule_texts=(HOLD_RULE,),
+            approve_tool=None,
+            step_log=logged.append,
+        )
+        result = agent.run_task(TASK)
+        (step,) = [s for s in logged if s.get("kind") == "tool"]
+        assert step["decision"] == "held" and "comment" not in step
+        assert len(chat.calls) == 2
+        assert result.startswith("I need you to confirm")
+        assert "no later call to it was made" not in result
+        assert self._hold_gates(logged) == []
+
+    def test_a_re_proposal_that_crashed_still_stands_in(self, monkeypatch):
+        """It CAME: "no later call to its tool was made" would be false (review
+        finding). The crash path joins the hold like the ordinary one."""
+        def boom(cmd, **_kw):
+            raise RuntimeError("tool bug")
+
+        monkeypatch.setattr(agent_module.tools, "run_command", boom)
+
+        def approve(cmd):
+            return Approved(self.COMMENT) if "&&" in cmd else True
+
+        agent, chat, result, steps, *_ = self._run(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                model_says(tool_calls=[tool_call("run_command", command="touch a")]),
+                model_says("it failed internally"),
+            ],
+            approve,
+        )
+        assert len(chat.calls) == 3 and result == "it failed internally"
+        assert self._hold_gates(steps) == []
+        crashed = [s for s in steps if s.get("kind") == "tool"][-1]
+        assert crashed["replaces"] == 1
+
+    def test_each_held_call_has_its_own_record_and_round(self, tmp_path):
+        agent, chat, result, steps, *_ = self._run(
+            [
+                model_says(tool_calls=[
+                    tool_call("run_command", command="touch a && touch b"),
+                    tool_call("write_file", path=str(tmp_path / "x.txt"), content="hi"),
+                ]),
+                model_says("Now step by step:"),
+                model_says("I will not, the steps depend on each other."),
+            ],
+            lambda _cmd: Approved(self.COMMENT),
+            approve_write=lambda _plan: Approved("other dir"),
+            cwd=str(tmp_path),
+        )
+        gates = [(g["verdict"], g["evidence"]["tool"], g["round"]) for g in self._hold_gates(steps)]
+        assert gates == [
+            ("refused", "run_command", 1), ("refused", "write_file", 1),
+            ("advised", "run_command", 1), ("advised", "write_file", 1),
+        ]
+        assert 'run_command ("separate the commands"); write_file ("other dir")' in result
+
+    def test_the_released_answer_names_its_model_call(self):
+        """A held answer is logged at release, outside `_append`; it carries
+        the stamp every other record does (#262)."""
+        *_, records, _streamed = self._run(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                model_says("Now step by step:"),
+                model_says("I will not."),
+            ],
+            lambda _cmd: Approved(self.COMMENT),
+        )
+        (answer,) = [
+            r for r in records if r.get("role") == "assistant" and "I will not" in r["content"]
+        ]
+        assert answer["model_call"] == 3
+
+    def test_a_stopped_task_says_its_stop_not_the_hold(self, monkeypatch):
+        """The wrap-up's own calls never run and never reach the join, so the
+        hold line could sit under a re-proposal it denies (review finding)."""
+        monkeypatch.setattr(agent_module.tools, "read_docs", lambda *a, **k: "same page")
+        repeat = model_says(tool_calls=[tool_call("read_docs", command="ls")])
+        agent, chat, result, steps, records, streamed = self._run(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                *[repeat] * 6,
+                model_says(
+                    "I will run it now.",
+                    tool_calls=[tool_call("run_command", command="touch a")],
+                ),
+            ],
+            lambda _cmd: Approved(self.COMMENT),
+        )
+        assert "no later call to it was made" not in result
+        assert self._hold_gates(steps) == []
+        assert "I will run it now." in result
+        assert "no later call to it was made" not in streamed
+
+    def test_claude_max_says_it_where_it_cannot_ask(self):
+        """The SDK owns the loop: verify_final is note-only, so an outstanding
+        hold is said on the answer and recorded, never asked about."""
+        steps: list[dict] = []
+        agent, _ = make_agent([], step_log=steps.append)
+        agent._reset_task_state()
+        agent._held_calls = {"run_command": 3}
+        agent._hold_comments = {3: self.COMMENT}
+        stamped = agent.verify_final("Now step by step:")
+        assert stamped.startswith("Now step by step:")
+        assert "held and not run, and no later call to it was made" in stamped
+        assert self.COMMENT in stamped
+        assert [g["verdict"] for g in self._hold_gates(steps)] == ["advised"]

@@ -116,7 +116,8 @@ class TestTheCardsReasonTravelsWithTheComment:
             script=PREVIEW_SCRIPT if preview else "#!/bin/sh\ncat\n", preview=preview,
         )
         agent, _ = make_agent(
-            [model_says(tool_calls=[tool_call("pv", text="x")]), model_says("ok")],
+            [model_says(tool_calls=[tool_call("pv", text="x")]), model_says("ok"),
+             model_says("ok")],  # the hold check asks once on a hold
             cwd=str(tmp_path), approve_tool=lambda n, a, p=None: verdict,
         )
         agent.run_task("go")
@@ -155,6 +156,7 @@ class TestTheCardsReasonTravelsWithTheComment:
                 [
                     model_says(tool_calls=[tool_call("read_url", url="https://b.example/")]),
                     model_says("ok"),
+                    model_says("ok"),  # the hold check asks once on a hold
                 ],
                 origin="email", approve_tool=approve_tool,
             )
@@ -167,6 +169,7 @@ class TestTheCardsReasonTravelsWithTheComment:
             [
                 model_says(tool_calls=[tool_call("run_command", command="touch x")]),
                 model_says("ok"),
+                model_says("ok"),  # the hold check asks once on a hold
             ],
             approve=lambda _cmd: Approved("why?"),
         )

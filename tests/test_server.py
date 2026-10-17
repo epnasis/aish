@@ -1031,7 +1031,9 @@ class TestCommandApproval:
         """#81: APPROVE + comment = continue but ADJUST — the original command
         is HELD (never run), and the model is told to adjust and re-propose."""
         marker = tmp_path / "ran43"
-        client, chat = make_client(app_env, self.responses(f"touch {marker}"))
+        client, chat = make_client(
+            app_env, self.responses(f"touch {marker}") + [model_says("finished")]
+        )  # the hold check asks once
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "task", "text": "run it"})
             request = recv_until(ws, "approval_request")
@@ -1135,7 +1137,9 @@ class TestCommandApproval:
         the model adjusts and re-proposes. (Edit WITHOUT a comment runs the
         edit — see test_edit_runs_edited_command.)"""
         original, edited = tmp_path / "orig43", tmp_path / "edited43"
-        client, chat = make_client(app_env, self.responses(f"touch {original}"))
+        client, chat = make_client(
+            app_env, self.responses(f"touch {original}") + [model_says("finished")]
+        )  # the hold check asks once
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "task", "text": "run it"})
             request = recv_until(ws, "approval_request")
@@ -1617,7 +1621,9 @@ class TestWriteApproval:
         """#81: APPROVE + comment holds the write — nothing lands; the model
         adjusts to the comment and re-proposes."""
         target = tmp_path / "note.txt"
-        client, chat = make_client(app_env, self.responses(str(target), "hello\n"))
+        client, chat = make_client(
+            app_env, self.responses(str(target), "hello\n") + [model_says("written")]
+        )  # the hold check asks once
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "task", "text": "write it"})
             request = recv_until(ws, "approval_request")
@@ -2734,6 +2740,7 @@ class TestSessions:
         client, _ = make_client(app_env, [
             model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/z")]),
             model_says("acknowledged"),
+            model_says("acknowledged"),  # the hold check asks once: hot and cold must still agree
         ])
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "task", "text": "make a file"})

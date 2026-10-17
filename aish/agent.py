@@ -387,7 +387,7 @@ ANSWER_WITHHELD_FOR_MESSAGES = (
 # and then no reply arrived at all.
 REJECTED_DRAFT_DELIVERED = (
     "[aish] the turn ended with no answer text; below is the answer the model "
-    "gave earlier in this turn, which a rule held back"
+    "gave earlier in this turn, which aish's answer check held back"
 )
 
 
@@ -650,6 +650,31 @@ TOOL_HELD_FOR_ADJUSTMENT = (
     'Example: comment "use the smaller size" → call {name} with the smaller '
     "size; comment \"no need to ask, it's read-only\" → call {name} with the "
     "same arguments unchanged."
+)
+
+# The hold check (answer check, `_check_holds`). A held action ordered a
+# re-proposal; a text-only answer while it is outstanding ends the task with
+# the owner's approval answered by nothing. Observed: "Now step by step,
+# without approval prompts:" and no call — he had to ask "why stopped?". Each
+# line states only what aish recorded; the refusal stays a complete ending.
+HOLD_MAX_ASKS = 1  # per held call: a new hold needs a new answer from the owner
+HOLD_ASK = (
+    "The user APPROVED each of these with a comment, so each was HELD and NOT "
+    "run, and no later call to its tool was made:\n{items}\n"
+    "A reply with no tool call is delivered as your answer. You MUST either "
+    "call the tool now as the comment asks, or tell the user plainly that you "
+    "are not going to, and why. Do NOT announce a step without taking it. "
+    "Example: comment \"split it into two steps\" → call the same tool with "
+    "the first step."
+)
+HOLD_ITEM = '- {tool} (call {call}), comment: "{comment}"'
+# The withheld line when the hold check is among the asks. ANSWER_WITHHELD's
+# "give the complete answer again" would be the last thing read, ordering the
+# very text-only reply the ask is about.
+HOLD_WITHHELD = "The user has not seen that reply — it was withheld."
+HOLD_UNANSWERED_NOTE = (
+    "[aish] Approved with your comment, but held and not run, and no later "
+    "call to it was made: {items}"
 )
 
 
@@ -4076,6 +4101,15 @@ class Agent:
         # tool name -> the call number of an action HELD for adjustment and not
         # yet stood in for (#323). Consumed by the next call to that tool.
         self._held_calls: dict[str, int] = {}
+        # The hold check's own state: each held call's owner comment (scrubbed,
+        # as the step records it), the calls already asked about, and an
+        # unanswered hold waiting for the pass that delivers.
+        self._hold_comments: dict[int, str] = {}
+        self._holds_asked: set[int] = set()
+        self._hold_advice: list[tuple[int, str]] | None = None
+        # Whether `_held_answer` was armed by an outstanding hold rather than
+        # by a verify rule — so it is disarmed again when the hold is gone.
+        self._hold_buffered = False
         self.base_context = context
         # The scratch workspace (issue #70): a private dir where the model may
         # create AND delete throwaway files without prompting.
@@ -5012,6 +5046,10 @@ class Agent:
         # A hold belongs to the turn it was proposed in — `call` numbers restart
         # here, so a stale entry would join a replacement to another turn's id.
         self._held_calls = {}
+        self._hold_comments = {}
+        self._holds_asked = set()
+        self._hold_advice = None
+        self._hold_buffered = False
         # Taint belongs to the task that acquired it. A page read while
         # answering one question must not put a card in front of the next.
         self._tainted = False
@@ -5577,6 +5615,7 @@ class Agent:
                 # words onto the delivered one — making the streamed text
                 # differ from what is returned and logged.
                 self._held_answer = []
+            self._arm_hold_buffer()
             self._emit_step(kind="thinking_start")
             self.status.start("thinking")
             try:
@@ -5585,6 +5624,8 @@ class Agent:
                 return self._finish_cancelled()
             finally:
                 self.status.stop()
+            if tool_calls:
+                self._flush_hold_buffer(content)
             turn_secs = time.perf_counter() - turn_start
             tokens_in += usage[0]
             tokens_out += usage[1]
@@ -5760,13 +5801,21 @@ class Agent:
                 stripped, image_ask = self._check_images(checked, may_ask=may_ask)
                 result = result[: len(result) - len(checked)] + stripped
                 checked = stripped
+                # The hold check: an action the owner approved with a comment
+                # is outstanding, and this answer would end the task over it.
+                hold_ask = self._check_holds(may_ask=may_ask)
                 asks = [
                     image_ask,
-                    self._verify_answer(checked, ask=may_ask, delivering=image_ask is None),
+                    hold_ask,
+                    self._verify_answer(
+                        checked, ask=may_ask,
+                        delivering=image_ask is None and hold_ask is None,
+                    ),
                 ]
                 unmet = "\n\n".join(a for a in asks if a) or None
                 if unmet is not None:
                     self._image_removal = None  # this draft is not delivered
+                    self._hold_advice = None
                     # Not delivered. The model is told what is missing and the
                     # turn goes on — the ask provokes the work, the work lands
                     # in the trace, and the trace is what the next check reads.
@@ -5792,8 +5841,9 @@ class Agent:
                     )
                     # Marked as aish's own words (#171), or replay renders the
                     # harness's question as a blue bubble the owner never typed.
+                    withheld_line = HOLD_WITHHELD if hold_ask else ANSWER_WITHHELD
                     ask = (
-                        unmet + ("\n" + ANSWER_WITHHELD if withheld else "")
+                        unmet + ("\n" + withheld_line if withheld else "")
                         + "\n" + ANSWER_CHECK_UNSAID
                     )
                     self._append(
@@ -5801,6 +5851,7 @@ class Agent:
                     )
                     continue
                 self._commit_image_removal()
+                self._commit_hold_advice()
                 was_held = self._held_answer is not None
                 # A released hold streams itself, notes included; an unbound
                 # silent turn streams its placeholder here, BEFORE the release
@@ -5959,6 +6010,12 @@ class Agent:
             # glued in front of the wrap-up text, so the owner saw something the
             # return value and the log did not contain.
             self._held_answer = []
+        # No hold check on this exit: the stop headline is what is said, and
+        # the wrap-up's own calls are never run, so "nothing ran in its place"
+        # could sit under a re-proposal (docs/agent-core.md, The hold check).
+        if self._hold_buffered:
+            self._held_answer = None
+            self._hold_buffered = False
         self.status.start("wrapping up")
         turn_start = time.perf_counter()
         usage = (0, 0)
@@ -8510,6 +8567,9 @@ class Agent:
                     "git+https://github.com/epnasis/aish.git) and restart."
                 )
                 self.echo(result)
+                # A call that crashed still CAME: it stands in for a hold, or
+                # the hold check would say no later call was made.
+                replaces = self._track_hold(name, call_no, result)
                 self._emit_step(
                     kind="tool",
                     name=name,
@@ -8520,6 +8580,7 @@ class Agent:
                     verdict_by=tools.VERDICT_EXCEPTION,
                     summary="unavailable",
                     **({"model_call": model_call} if model_call else {}),
+                    **({"replaces": replaces} if replaces else {}),
                     **off_menu,
                 )
                 return result
@@ -8529,6 +8590,7 @@ class Agent:
                 # can surface (tool_plugins.execute).
                 result = self._scrub_result(f"ERROR: tool '{name}' failed internally: {exc!r}")
                 self.echo(result)
+                replaces = self._track_hold(name, call_no, result)  # as above
                 self._emit_step(
                     kind="tool",
                     name=name,
@@ -8539,6 +8601,7 @@ class Agent:
                     verdict_by=tools.VERDICT_EXCEPTION,
                     summary="failed",
                     **({"model_call": model_call} if model_call else {}),
+                    **({"replaces": replaces} if replaces else {}),
                     **off_menu,
                 )
                 return result
@@ -8552,8 +8615,12 @@ class Agent:
             # it afterwards saw nothing at all.
             self._observe_for_rules(name, result)
             self._note_turn_call(name, args, result)
+            # Before the step, which consumes `_run_meta` — and whether or not
+            # anything records steps: the hold check acts on it.
+            replaces = self._track_hold(name, call_no, result)
             step = self._emit_tool_step(
-                name, args, result, elapsed, call_no, model_call, off_menu=bool(off_menu)
+                name, args, result, elapsed, call_no, model_call, off_menu=bool(off_menu),
+                replaces=replaces,
             )
             # The denial trigger (#433): his comment is a hint about the action
             # in hand, never a task — but it may change the plan, so ONE line
@@ -8580,6 +8647,28 @@ class Agent:
             # gate its own batch mate raised.
             self._capture_provenance(name, args, result)
 
+    def _track_hold(self, name: str, call_no: int, result: str) -> int:
+        """Join a call to the held action it stands in for (#323); returns the
+        held call's number, or 0.
+
+        What it ASSERTS is only what was observed: the first later call to the
+        SAME tool in this turn while a hold was outstanding. It is not a claim
+        that the model reworked anything — the held call's own args are
+        recorded, so whether it did is the reader's lookup. Read off the same
+        verdict the step records (`_run_meta` over the envelope, as the step
+        merges them), but here rather than in the recorder, because the hold
+        check acts on it and a behaviour must not depend on a log being wired.
+        Only a hold that carries the owner's comment is one he APPROVED (a
+        rule's unattended hold has none); the hold check asks about no other.
+        """
+        verdict = {**(getattr(result, "meta", None) or {}), **(self._run_meta or {})}
+        replaced = self._held_calls.pop(name, 0)
+        if verdict.get("decision") == "held":
+            self._held_calls[name] = call_no
+            if comment := verdict.get("comment"):
+                self._hold_comments[call_no] = _owner_comment(comment)
+        return replaced if replaced != call_no else 0
+
     def _emit_tool_step(
         self,
         name: str,
@@ -8589,6 +8678,7 @@ class Agent:
         call_no: int = 0,
         model_call: int = 0,
         off_menu: bool = False,
+        replaces: int = 0,
     ) -> dict | None:
         """The step as recorded — None when nothing records steps."""
         if self.on_step is None and self.step_log is None:
@@ -8667,17 +8757,9 @@ class Agent:
         comment = step.get("comment")
         if comment:
             step["comment"] = _owner_comment(comment)
-        # The action this one stands in place of (#323). Registered and read in
-        # the same funnel, so the join needs no plumbing through ~10 gates.
-        # What it ASSERTS is only what was observed: the first later call to
-        # the SAME tool in this turn while a hold was outstanding. It is not a
-        # claim that the model actually reworked anything — the held call's own
-        # args are recorded, so whether it did is the reader's lookup.
-        replaced = self._held_calls.pop(name, 0)
-        if replaced and replaced != call_no:
-            step["replaces"] = replaced
-        if step.get("decision") == "held":
-            self._held_calls[name] = call_no
+        # The action this one stands in place of (#323), joined by `_track_hold`.
+        if replaces:
+            step["replaces"] = replaces
         # ONE rule, applied last, over every path that can refuse: if the
         # action did not happen, the step is not green. This is wider than the
         # five plugin constants the contract enumerates (§6.13) — `run_command`
@@ -12929,6 +13011,105 @@ class Agent:
             **({"message": message[: rules.GATE_MESSAGE_CHARS]} if message else {}),
         )
 
+    def _arm_hold_buffer(self) -> None:
+        """Hold this model call's answer back while a held action is
+        outstanding, so the hold check can still send it back unseen.
+
+        The answer check can only rework an answer the owner has not read, and
+        an unbound turn streams its answer token by token. A turn a verify rule
+        binds is held already; this arms the same buffer for the rest, and
+        disarms it once no hold is outstanding."""
+        if self._open_holds():
+            if self._held_answer is None:
+                self._held_answer = []
+                self._hold_buffered = True
+        elif self._hold_buffered:
+            self._held_answer = None
+            self._hold_buffered = False
+
+    def _flush_hold_buffer(self, content: str) -> None:
+        """A reply that ACTED is not an answer, so a buffer armed only for the
+        hold check hands its words over now, exactly as the stream would have:
+        narration on an unbound turn streams whether or not a hold is open."""
+        if not self._hold_buffered:
+            return
+        self._held_answer = None
+        self._hold_buffered = False
+        if content and self.on_token:
+            self.on_token("\n" + content + "\n")
+
+    def _open_holds(self) -> list[tuple[int, str]]:
+        """(call, tool) of each action the owner approved WITH a comment that
+        is still held: never run, and no later call to its tool this turn."""
+        return sorted(
+            (call, tool) for tool, call in self._held_calls.items()
+            if call in self._hold_comments
+        )
+
+    def _check_holds(self, *, may_ask: bool) -> str | None:
+        """The hold check: the ask, or None. Armed only while an action the
+        owner approved WITH a comment is outstanding — held, never run, and no
+        later call to its tool in this turn (`_open_holds`, the same join that
+        writes `replaces`).
+
+        Asks once per held call; a further hold needs the owner to answer a
+        new card, so this cannot loop without him. Past that, or where asking
+        is not allowed (a denial's stop gate, a silent model, the SDK loop),
+        the answer ships and the delivering pass says the hold is unanswered
+        (`_commit_hold_advice`). An answer that says it will not do it is a
+        complete ending: nothing here grades the answer's words.
+        """
+        self._hold_advice = None
+        outstanding = self._open_holds()
+        if not outstanding:
+            return None
+        fresh = [(call, tool) for call, tool in outstanding if call not in self._holds_asked]
+        if may_ask and fresh:
+            items = []
+            for call, tool in fresh:
+                self._holds_asked.add(call)
+                items.append(HOLD_ITEM.format(
+                    tool=tool, call=call, comment=self._hold_comments[call]
+                ))
+            ask = HOLD_ASK.format(items="\n".join(items))
+            # An asking pass records only what it asked, like `_verify_answer`.
+            for call, tool in fresh:
+                self._record_hold_verify("refused", call, tool, message=ask)
+            self._note("⚖ held action: answer held for rework")
+            return ask
+        self._hold_advice = outstanding
+        return None
+
+    def _commit_hold_advice(self) -> None:
+        """The delivering pass: say which held actions went unanswered, and
+        record it. Pending until here, like the image removal: a rule may still
+        send the draft back, and a line about a draft never delivered would
+        stream with nothing to attach to."""
+        if self._hold_advice is None:
+            return
+        outstanding, self._hold_advice = self._hold_advice, None
+        for call, tool in outstanding:
+            self._record_hold_verify("advised", call, tool)
+        self._not_followed.append(HOLD_UNANSWERED_NOTE.format(items="; ".join(
+            f'{tool} ("{self._hold_comments[call]}")' for call, tool in outstanding
+        )))
+
+    def _record_hold_verify(
+        self, verdict: str, held_call: int, tool: str, *, message: str = ""
+    ) -> None:
+        """One `gate` record per held call at the verify point, logged only
+        when ARMED — that call's hold is open (trace contract §6.16). `round`
+        is the asks spent on THIS call, so it reads against `max_rounds` the
+        way every bounded gate's does."""
+        self._emit_record(
+            kind="gate", call=0, at="verify", gate="hold.verify", binding=None,
+            rule=None, tool="", action={}, verdict=verdict, tier=0,
+            evidence={"held_call": held_call, "tool": tool},
+            round=int(held_call in self._holds_asked), max_rounds=HOLD_MAX_ASKS,
+            escalated=False,
+            **({"message": message[: rules.GATE_MESSAGE_CHARS]} if message else {}),
+        )
+
     def _verify_answer(
         self, answer: str, ask: bool = True, delivering: bool = True
     ) -> str | None:
@@ -13062,6 +13243,10 @@ class Agent:
                 count=len(broken),
                 items=", ".join(f"{embed.target} ({reason})" for embed, reason in broken),
             )).strip()
+        # The SDK owns the loop, so a held action left unanswered cannot be
+        # asked about — it is said.
+        self._check_holds(may_ask=False)
+        self._commit_hold_advice()
         if self._bindings:
             self._verify_answer(answer, ask=False)
         notes, self._not_followed = self._not_followed, []
@@ -13282,7 +13467,13 @@ class Agent:
         # model's own words: the note is aish speaking to the owner, and
         # feeding it back as something the model said would have it defend or
         # repeat a line it never wrote.
-        self.on_message(_serialize({**entry, "content": text} if text else entry))
+        # Stamped as `_append` stamps every record (#262): a released answer
+        # left the log without it, so a held turn's answer joined to no call —
+        # unnoticed while only rule-bound turns were held. Released right
+        # after the call that wrote it, so the counter still names that call.
+        record = _serialize({**entry, "content": text} if text else entry)
+        record["model_call"] = self._model_call
+        self.on_message(record)
 
     def announce_cardless_apart(
         self,
