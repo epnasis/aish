@@ -22,6 +22,7 @@ from . import (
     browser,
     learning,
     objective,
+    owner_ua,
     recipients,
     roles,
     skills,
@@ -384,8 +385,8 @@ class LogRef:
     def step(self, step: dict) -> None:
         self.log.step(step)
 
-    def task_start(self, prompt: str) -> None:
-        self.log.task_start(prompt)
+    def task_start(self, prompt: str, psu_ua: str | None = None) -> None:
+        self.log.task_start(prompt, psu_ua=psu_ua)
 
     def task_end(self, status: str = "ok", error: str = "") -> None:
         self.log.task_end(status, error)
@@ -2146,6 +2147,24 @@ def track_in_background(agent, logref: LogRef, state_dir) -> threading.Thread | 
     return thread
 
 
+def stamp_terminal_owner_ua(agent, *, attended: bool | None = None) -> None:
+    """Before each task: a terminal the owner is typing at is him, so a task
+    carries the last browser UA aish-web saw (owner_ua) — read per task, from
+    the state tree resolved now, so a browser he used since is the one used.
+    Not a tty (a pipe, a script, a job) is background: the key is cleared, and
+    so it is when no UA was ever seen."""
+    env = getattr(agent, "plugin_env", None)
+    if env is None:
+        return
+    if attended is None:
+        attended = sys.stdin.isatty()
+    ua = owner_ua.last(state_home()) if attended else None
+    if ua:
+        env[owner_ua.ENV_KEY] = ua
+    else:
+        env.pop(owner_ua.ENV_KEY, None)
+
+
 def _sweep_turns(state_dir) -> None:
     """The evidence store's budget sweep (#352), after a turn. Never raises:
     a store that cannot be swept is a line on stderr, not a failed turn."""
@@ -2964,6 +2983,7 @@ def main() -> int:
 
     if args.task:
         span_start = learning.log_size(logref.log.path)
+        stamp_terminal_owner_ua(agent)
         try:
             result = agent.run_task(" ".join(args.task))
         except ModelUnavailable as exc:
@@ -3031,6 +3051,7 @@ def main() -> int:
                 continue
             try:
                 span_start = learning.log_size(logref.log.path)
+                stamp_terminal_owner_ua(agent)
                 result = agent.run_task(task)
                 # Before the tracker starts writing beside it: the detector's
                 # record belongs to this task (#446).

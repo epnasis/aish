@@ -14,6 +14,8 @@ This law reaches plugin tools too, and #377 is the case that proved it. `make_to
 
 **L2 · A terminal session dies with its terminal.** No restart recovery, no task markers, no resurrection — the web writes `task_start`/`task_end`, the CLI deliberately does not. There is nobody to watch a resumed run.
 
+**The terminal is the owner, so it carries his browser's identity (#360).** Before each task — the REPL's and `aish "task"`'s — `stamp_terminal_owner_ua` sets `AISH_BANK_PSU_UA` on the agent's `plugin_env` from `owner_ua.last()`: the last browser UA aish-web saw, read per task from the state dir resolved at call time (`AISH_STATE_DIR`), so a browser he used since is the one used. Only when stdin is a tty: a pipe or a script is background and the key is cleared, as it is when no browser was ever seen. One consequence of L2, accepted: the CLI writes no `task_start`, so `aish explain` cannot show a terminal turn's claim. The rule and the other surfaces: `docs/web-server.md`.
+
 **L3 · The gate must see the REAL command.** Aliases are expanded before approval, never after.
 
 **L4 · Launching from `$HOME` must not make the home tree a root.** `default_workspace` re-anchors to `~/aish`; every other cwd is respected as given. `TestDefaultWorkspace`.

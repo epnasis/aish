@@ -44,6 +44,7 @@ from . import (
     evidence,
     files,
     media,
+    owner_ua,
     paths,
     provenance,
     ratelimit,
@@ -15430,6 +15431,13 @@ class Agent:
         for key in ("allow", "sites"):
             if args.get(key):
                 raw[key] = args[key]
+        # A one-shot is the owner delegating ONCE, at this moment, so it carries
+        # the browser he is using now (owner_ua). Set before validation and
+        # rendering, so the card's diff is exactly what lands on disk. Never on
+        # a cron task: recurring work is background by his rule.
+        psu_ua = self.plugin_env.get(owner_ua.ENV_KEY, "")
+        if psu_ua and "at" in raw["schedule"] and "cron" not in raw["schedule"]:
+            raw["psu_ua"] = psu_ua
         deny_path = Path(os.environ.get("AISH_DENYLIST") or default_denylist())
         try:
             task = schedule.validate_task(
