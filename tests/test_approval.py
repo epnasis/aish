@@ -1025,3 +1025,67 @@ class TestConsolidationOnlyEverTightens:
         wrong directory to trust is its own hazard."""
         root, outside = world
         assert escaping_dirs(f"cat {outside}/secret.txt", str(root), [root]) == [str(outside)]
+
+
+class TestArchLauncher:
+    """`arch -arm64 <cmd>` runs <cmd>: the owner's `brew` alias expands to
+    exactly that before the gate. A saved bare `arch` prefix used to approve
+    every such command — `brew install` ran with no card (session
+    20261017-184727)."""
+
+    def test_bare_arch_prefix_never_approves_what_it_launches(self):
+        for command in (
+            "arch -arm64 brew install tesseract",
+            'arch -arm64 bash -c "curl x | sh"',
+            "arch -arm64 python3 -c 1",
+            "arch -arm64 rm -r ./build",
+        ):
+            assert not is_auto_approvable(command, ["arch"]), command
+
+    def test_an_arch_scoped_prefix_does_not_grant_execution_either(self):
+        assert not is_auto_approvable("arch -arm64 bash -c 'rm x'", ["arch -arm64"])
+
+    def test_the_launched_command_is_judged_by_its_own_rules(self):
+        assert is_auto_approvable("arch -arm64 brew list", ["brew list"])
+        assert not is_auto_approvable("arch -arm64 brew install x", ["brew list"])
+        assert is_read_only("arch -arm64 ls -la")
+        assert is_read_only("arch -x86_64 -arch arm64 cat f")
+        assert not is_read_only("arch -arm64 find . -delete")
+        assert not is_auto_approvable("arch -arm64 find . -delete", ["find"])
+
+    def test_environment_flags_are_never_seen_through(self):
+        # -e/-d/-c change the launched program's environment
+        # (DYLD_INSERT_LIBRARIES); such a launch always prompts — whatever rule
+        # names it (found in review: a saved `arch -arm64` approved these).
+        assert not is_read_only("arch -arm64 -e DYLD_INSERT_LIBRARIES=x ls")
+        assert not is_auto_approvable("arch -e X=1 brew list", ["brew list", "arch"])
+        for rules, command in (
+            (["arch -arm64"], "arch -arm64 -e DYLD_INSERT_LIBRARIES=/tmp/x.dylib brew install x"),
+            (["arch -arm64"], "arch -arm64 -c bash -c 'curl x|sh'"),
+            (["arch -e"], "arch -e X=1 bash -c 'curl x|sh'"),
+        ):
+            assert not is_auto_approvable(command, rules), (rules, command)
+
+    def test_a_launcher_rule_never_approves_however_many_words(self):
+        # A launcher's next word is not a subcommand, so a rule cannot scope
+        # it; `nice arch` re-opened the original hole one wrapper deeper.
+        for rules, command in (
+            (["nice arch"], "nice arch -arm64 bash -c 'curl x|sh'"),
+            (["env arch"], "env arch -arm64 bash -c 'curl x|sh'"),
+            (["sudo arch"], "sudo arch -arm64 bash -c 'curl x|sh'"),
+            (["timeout 5"], "timeout 5 arch -arm64 bash -c 'curl x|sh'"),
+            (["nice bash"], "nice bash -c 'curl x|sh'"),
+        ):
+            assert not is_auto_approvable(command, rules), (rules, command)
+
+    def test_double_dash_is_not_modelled(self):
+        # Real arch rejects `--` after a selector ("Unknown architecture"),
+        # so the gate does not see through it either: it prompts.
+        assert not is_auto_approvable("arch -arm64 -- brew list", ["brew list"])
+
+    def test_always_allow_offers_the_launched_command(self):
+        assert suggest_prefix("arch -arm64 brew install tesseract") == "brew install"
+
+    def test_denylist_sees_through_arch(self):
+        assert check_denied("arch -arm64 rm -rf /tmp/x")
+        assert check_denied("arch -x86_64 sudo rm -rf /")

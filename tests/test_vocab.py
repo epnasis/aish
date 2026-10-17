@@ -125,6 +125,10 @@ class TestTheCountingChangedNoMatching:
         # (contract §2). `outcome` (§3.18) is a rendered step a reader joins
         # to its turn, so it is stamped like the others.
         "aish/agent.py:TURN_STAMPED_STEPS": {"added": ["outcome"], "removed": []},
+        # `arch -arm64 <cmd>` runs <cmd>, and the `brew` alias expands to it:
+        # a saved bare `arch` rule auto-approved `brew install` (agent-core.md,
+        # "`arch` is a launcher"). Not a word list either — a command list.
+        "aish/approval.py:EXEC_WRAPPERS": {"added": ["arch"], "removed": []},
     }
 
     @staticmethod
