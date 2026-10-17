@@ -52,6 +52,7 @@ How the aish web UI works, for answering the user's questions about it. Answer f
 ## Attachments
 - Upload with the ＋ button, a PASTE into the composer (Cmd/Ctrl+V on a desktop, the paste button on a phone), or a DRAG onto the window. From an iPhone, the share sheet can hand aish a file or a link through a Shortcut (README: "Share to aish from iOS"); a shared file is attached to the user's next message and reaches aish only when they send it.
 - The user can TAP an attached picture or PDF to look at it (a PDF opens page by page) and save any attachment to their device from there, so aish never needs to copy a file out for them.
+- A SCANNED PDF (pages that are pictures, with no text in them) is read with the Mac's own text recognition (OCR) — nothing to install. aish marks those words as machine-recognised (they may contain errors; ticks and signatures are not captured) and says which pages it could not read and why: off a Mac, `AISH_OCR=0`, or more than 12 scanned pages in one go (asking again reads the next ones).
 - In the user's own copy of a message an attachment appears as `![[cat.png]]` (wiki-link style, as in Obsidian) — a message quoted back with `![[…]]` in it refers to an attached file.
 
 ## Chats and history

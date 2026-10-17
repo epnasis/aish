@@ -1967,6 +1967,19 @@ TOOL_MEDIA_PASTE_ANYWAY = (
     "paste that line exactly as written. Do NOT tell the user pictures cannot be "
     "shown, and do NOT replace the line with a raw image URL."
 )
+# show_image's own result on a backend that takes no pictures. It used to
+# say "it is attached to this turn, so look at it" on every backend, while
+# TOOL_MEDIA_UNDELIVERABLE said the opposite in the same turn.
+SHOW_IMAGE_UNSEEN = (
+    "{what} stored. YOU cannot see it — this model takes no picture input — so "
+    "do not describe what is in it. The user's chat DOES show it where you paste "
+    "the line below. "
+)
+# read_media's frame line on a backend that takes no pictures.
+FRAMES_UNSEEN = (
+    "{count} frame(s) were taken, but they are NOT attached for you — this model "
+    "takes no picture input, so do not describe what is in them."
+)
 TOOL_MEDIA_EXPIRED = (
     "[aish: picture(s) from an earlier task were dropped from view to save "
     "context. Call the tool again if you need to look at them.]"
@@ -6772,6 +6785,18 @@ class Agent:
             normalized["extra_content"] = extra
         return normalized
 
+    def _takes_pictures(self) -> bool:
+        """Whether a picture handed to this backend reaches the model at all.
+
+        The ONE authority every tool asks before it offers, promises or
+        delivers a picture: `_deliver_tool_media`, `show_image`'s result text,
+        `read_pdf`'s scan map and page images, and `read_media`'s frame line.
+        Two of those once disagreed in one turn — show_image said the picture
+        "is attached to this turn, so look at it" while the delivery note said
+        this model takes no picture input — and the model believed the one
+        that invited it to keep going (session-20261017-184727)."""
+        return "image" in backends.media_support(self.provider)
+
     def _deliver_tool_media(self, tool_calls: list[dict], results: list[str]) -> None:
         """Hand pictures a tool produced to the model as native image parts.
 
@@ -6799,7 +6824,7 @@ class Agent:
         if not paths:
             return
         tools_named = ", ".join(dict.fromkeys(names))
-        if "image" not in backends.media_support(self.provider):
+        if not self._takes_pictures():
             # An honest dead end beats a fluent guess (the same rule as an
             # unreadable scan page): the model must know it is answering
             # without having looked.
@@ -9566,8 +9591,13 @@ class Agent:
             # model wrote the picture and the link separately and the answer
             # opened with the same image twice, once playable (#217).
             return tools.ToolOutcome(
-                "Video still ready — it is attached to this turn, so look at it and "
-                "make sure it really is the video the user meant. The line below is "
+                (
+                    "Video still ready — it is attached to this turn, so look at it and "
+                    "make sure it really is the video the user meant. "
+                    if self._takes_pictures()
+                    else SHOW_IMAGE_UNSEEN.format(what="Video still")
+                )
+                + "The line below is "
                 "the picture AND the player in ONE card: include it in your answer "
                 "EXACTLY as written (do not alter the path or the link), and do NOT "
                 "write a separate link to the same video anywhere in the answer:\n\n"
@@ -9577,8 +9607,13 @@ class Agent:
                 images=(str(path),),
             )
         return tools.ToolOutcome(
-            "Image ready — it is attached to this turn, so look at it and make "
-            "sure it really shows what the user asked for. Include this line in "
+            (
+                "Image ready — it is attached to this turn, so look at it and make "
+                "sure it really shows what the user asked for. "
+                if self._takes_pictures()
+                else SHOW_IMAGE_UNSEEN.format(what="Image")
+            )
+            + "Include this line in "
             "your answer EXACTLY as written (do not alter the path):\n\n"
             + self._remember_shown(f"![{alt or 'image'}]({path})"),
             images=(str(path),),
@@ -9753,7 +9788,8 @@ class Agent:
             )
         if not stored:
             return "\n\n".join(header + lines)
-        text = "\n\n".join(header + [FRAMES_ATTACHED.format(count=len(stored))] + lines)
+        frames_line = FRAMES_ATTACHED if self._takes_pictures() else FRAMES_UNSEEN
+        text = "\n\n".join(header + [frames_line.format(count=len(stored))] + lines)
         # Built LAST — a ToolOutcome is a str subclass and the join above would
         # drop the envelope carrying the frames.
         return tools.ToolOutcome(text, images=tuple(stored))
@@ -9908,30 +9944,51 @@ class Agent:
         except Exception as exc:  # a corrupt PDF must not end the task
             return f"ERROR: {Path(path).name} could not be converted ({type(exc).__name__}: {exc})."
 
+        # Which pages were asked for is known before the scan pages are read,
+        # so the per-call OCR cap can never skip the very page asked for.
+        numbers: list[int] = []
+        entries: list[tuple[int, int, str]] = []
+        found: tuple[str, list[int]] | None = None
+        if section and not query:
+            entries = documents.outline(path)
+            if entries:
+                found = documents.outline_section(entries, section, rendition.total_pages)
+            if found is not None:
+                numbers = found[1]
+        if pages_spec and not section and not query:
+            try:
+                numbers = documents.parse_pages(pages_spec, rendition.total_pages)
+            except documents.DocumentError as exc:
+                return f"ERROR: {exc}"
+        try:
+            rendition = documents.recognise_scans(
+                rendition, path, numbers, should_stop=self._cancel.is_set
+            )
+        except Exception as exc:  # reading a scan's words must never end the task
+            rendition = dataclasses.replace(
+                rendition,
+                unread_reason=f"text recognition failed ({type(exc).__name__}: {exc})",
+            )
+
         header = [
-            documents.summary(rendition),
+            documents.summary(rendition, pictures=self._takes_pictures()),
             f"Full text: {rendition.path}\n"
             "(read_file it for any page, or grep it — it needs no approval, and "
             "re-calling read_pdf for another page or search is free.)",
         ]
         if query:
             return "\n\n".join(header + [self._pdf_search(rendition, query)])
-        numbers: list[int] = []
         if section:
             # The document's own declared outline is the addressing scheme
             # (#361 slice 6): a section resolves to its page range and is
             # served by the same pages mechanism. A miss is answered with the
             # index — never a guess — and a document with no outline says so
             # instead of pretending.
-            entries = documents.outline(path)
             if not entries:
                 return "\n\n".join(header + [
                     f"no section called {section!r} — this document declares "
                     "no outline. Use search= to find it, or pages=."
                 ])
-            found = documents.outline_section(
-                entries, section, rendition.total_pages
-            )
             if found is None:
                 return "\n\n".join(header + [
                     f"no section called {section!r} — the document's outline:\n"
@@ -9941,11 +9998,6 @@ class Agent:
             header.append(
                 f"[section: {title} — page(s) {documents.page_ranges(numbers)}]"
             )
-        if pages_spec and not numbers:
-            try:
-                numbers = documents.parse_pages(pages_spec, rendition.total_pages)
-            except documents.DocumentError as exc:
-                return f"ERROR: {exc}"
         if numbers:
             body = documents.pages_text(rendition, numbers)
             lines, page_images = self._pdf_page_images(path, rendition, numbers)
@@ -10053,19 +10105,27 @@ class Agent:
         )
 
     def _pdf_search(self, rendition: "documents.Rendition", query: str) -> str:
+        """Matching lines by page. A hit on a scan page is marked as OCR text,
+        and the scan pages whose words are not in the rendition are named on
+        EVERY result — a list of hits over part of a document otherwise reads
+        as a search of all of it."""
         hits = documents.search(rendition, query)
+        recognised = {p.number for p in rendition.pages if p.ocr == "text"}
+        unread = rendition.unread_scans
+        note = (
+            f" Scan page(s) {documents.page_ranges(list(unread))} were NOT searched — "
+            "their words are not in the text (see the map above)."
+            if unread
+            else ""
+        )
         if not hits:
-            unread = rendition.scans
-            note = (
-                f" Pages {', '.join(str(n) for n in unread)} are scans and were NOT "
-                "searched — their text does not exist. Ask for them with pages= to "
-                "look at them."
-                if unread
-                else ""
-            )
             return f"No line contains {query!r}.{note}"
         lines = [f"Lines containing {query!r}:"]
-        lines.extend(f"  p{page}: {text}" for page, text in hits)
+        lines.extend(
+            f"  p{page}{' (OCR page)' if page in recognised else ''}: {text}" for page, text in hits
+        )
+        if note:
+            lines.append(note.strip())
         return "\n".join(lines)
 
     def _pdf_opening(self, rendition: "documents.Rendition") -> str:
@@ -10109,6 +10169,12 @@ class Agent:
         readable — and delivered to the model as a file path, which no model
         can read. It is delivered now (`_deliver_tool_media`), and the second
         return value is what carries it."""
+        if not self._takes_pictures():
+            # Nothing rasterised is something nothing can deliver: on a model
+            # that takes no pictures this used to store the pages, say they
+            # were "attached to this turn", and then send the note saying they
+            # were not (session-20261017-184727). The map says what it can do.
+            return [], []
         facts = {page.number: page for page in rendition.pages}
         wanted = [n for n in numbers if n in facts and facts[n].is_scan]
         if not wanted:

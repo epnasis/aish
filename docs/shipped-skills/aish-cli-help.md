@@ -27,6 +27,9 @@ Tab completes them, and an unambiguous prefix works (`/res` for `/resume`).
 - `/cd <dir>` moves the project directory AND re-anchors the chat's root (user only; aish's own commands always run in the project directory). `/add-dir <dir>` (alias `/dir-add`) adds another directory tree to the chat's roots.
 - `/jobs` lists background jobs since aish launched; `/chat` shows this chat's log file (`/session` still works); `/objective` and `/plan` show or change what the chat is for and aish's plan; `/aliases` lists aliases and `/aliases import` pulls in the user's zsh aliases; `/learn` distils the conversation into saved skills/memory (after a task that went the long way round — very many tool calls, repeated calls, refused steps, several card comments, or a loop stop — the quick-reply menu offers "Save this as a lesson?", whose number sends `/learn`; never twice in a row); `/help` lists commands; `/quit` or `/exit` quits.
 
+## Documents
+- A SCANNED PDF (pages that are pictures, with no text in them) is read with the Mac's own text recognition (OCR) — nothing to install. aish marks those words as machine-recognised (they may contain errors; ticks and signatures are not captured) and says which pages it could not read and why: off a Mac, `AISH_OCR=0`, or more than 12 scanned pages in one go (asking again reads the next ones).
+
 ## Deleting, and the trash
 - A delete is NOT final: the chat moves to the trash and can be restored for **30 days**. `aish trash` lists it, `aish trash restore <name>` brings one back, `aish trash delete <name>` destroys one for good.
 - Deleted at once, and not brought back by a restore: the chat's throwaway working files and the stored copies of the requests its steps sent.

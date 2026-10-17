@@ -40,7 +40,9 @@ Layout handling, in the order it is applied to each page:
 3. **Figures** become a placeholder naming their size and page, so the model
    knows something visual is there rather than silently reading around it.
 4. **A page with no text layer is declared a scan**, never rendered as an empty
-   page — the caller escalates it to an image.
+   page. Its words are then read by OCR where the machine can (`ocr.py`,
+   `recognise_scans`) and labelled as machine-recognised text — never passed
+   off as the document's own — or the page says why they were not read.
 
 Tables that span pages are ANNOTATED, not silently merged: a continuation is
 marked at both ends and its repeated header suppressed. Merging across the page
@@ -51,18 +53,21 @@ scheme the whole design rests on.
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import hashlib
 import json
 import re
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import provenance
+from . import atomic_write, ocr, provenance
 
 # Bumped whenever conversion output changes. It is part of the cache key, so an
 # improvement to the layout logic invalidates old renditions instead of serving
 # a stale one that a test would then pass against.
-CONVERTER_VERSION = 2
+CONVERTER_VERSION = 3
 
 STORE_MAX_BYTES = 200 * 1024 * 1024
 STORE_MAX_FILES = 300
@@ -107,6 +112,42 @@ EDGE_FRACTION = 0.12
 # Table x-extents this close (fraction of page width) count as the same columns.
 COLUMN_MATCH_TOLERANCE = 0.03
 
+# Scan pages recognised in one read_pdf call. At the measured 0.5-1.0 s a page
+# that is ~10 s typically and, with the child's own deadline, under a minute in
+# the worst case; the rest wait for the next call, and the map SAYS so.
+OCR_PAGES_PER_CALL = 12
+# A page whose recognition failed is tried again on a later read — a deadline
+# or a crashed child is often transient — but not forever: past this many
+# attempts the failure is the page's final state and is stated as such.
+OCR_MAX_ATTEMPTS = 2
+
+# What a scanned page says in the rendition, by what became of its words.
+# Every note is about THIS page and backend-independent: the rendition is
+# shared by every model, so "look at it as an image" belongs to the read_pdf
+# result, which knows whether the model can.
+SCAN_NOT_READ = "*(scanned page — no usable text layer; its words have not been read)*"
+SCAN_OCR_TEXT = (
+    "*(scanned page — no usable text layer. Between the two OCR lines below is "
+    "aish's OCR of the page picture: machine-recognised words, which may contain "
+    "recognition errors; ticks, signatures and layout are not reproduced.)*"
+)
+SCAN_OCR_NONE = (
+    "*(scanned page — no usable text layer, and aish's OCR found no words on it. "
+    "It may be blank or a picture without words; aish has not established which.)*"
+)
+SCAN_OCR_FAILED = (
+    "*(scanned page — no usable text layer, and aish's OCR failed on it "
+    "{attempts} time(s), most recently: {error}. Its words have not been read.)*"
+)
+_OCR_OPEN = "--- OCR text, page {number} ---"
+_OCR_CLOSE = "--- end of OCR text, page {number} ---"
+# Lines a page's own content may not imitate: the page marker is the
+# addressing scheme, and the OCR delimiters are what say which words a machine
+# recognised. A scan can print either; such a line is altered, never trusted.
+_FORGEABLE_RE = re.compile(
+    r"^(\[page \d+ of \d+\]|--- (end of )?OCR text, page \d+ ---)$"
+)
+
 PAGE_RASTER_DPI = 150
 # Below this, a rasterised page is illegible to a vision model; above the byte
 # cap we re-render smaller rather than fail.
@@ -128,6 +169,22 @@ def page_marker(number: int, total: int) -> str:
     return f"[page {number} of {total}]"
 
 
+def defuse(text: str) -> str:
+    """`text` with any line that imitates a page marker or an OCR delimiter
+    wrapped in ‹ › so it no longer parses as one. Applied to everything a page
+    itself supplies — its text layer and its OCR alike — because a page that
+    prints `[page 5 of 12]` would otherwise move every page after it.
+
+    Split with `str.splitlines` — the same split every reader of the rendition
+    uses — and rejoined with plain newlines: splitting on "\\n" alone let a
+    U+2028 or a form feed carry a marker past this check and into the parser
+    (found in delivery review)."""
+    return "\n".join(
+        f"‹{line.strip()}›" if _FORGEABLE_RE.match(line.strip()) else line
+        for line in text.splitlines()
+    )
+
+
 @dataclass(frozen=True)
 class PageFacts:
     """What a page IS, decided before its text is read."""
@@ -142,10 +199,23 @@ class PageFacts:
     is_blank: bool = False
     continues_table: bool = False
     table_continues: bool = False
+    # What became of a scan page's words: "" not read, "text" recognised,
+    # "none" recognised nothing, "failed" (see ocr_error). Only a scan has one.
+    ocr: str = ""
+    ocr_chars: int = 0
+    ocr_attempts: int = 0
+    ocr_error: str = ""
 
     @property
     def readable(self) -> bool:
         return not self.is_scan and self.chars >= SCAN_CHAR_FLOOR
+
+    @property
+    def ocr_final(self) -> bool:
+        """Nothing more will come of recognising this page again."""
+        return self.ocr in ("text", "none") or (
+            self.ocr == "failed" and self.ocr_attempts >= OCR_MAX_ATTEMPTS
+        )
 
     def as_dict(self) -> dict:
         return {
@@ -159,16 +229,27 @@ class PageFacts:
             "is_blank": self.is_blank,
             "continues_table": self.continues_table,
             "table_continues": self.table_continues,
+            "ocr": self.ocr,
+            "ocr_chars": self.ocr_chars,
+            "ocr_attempts": self.ocr_attempts,
+            "ocr_error": self.ocr_error,
         }
 
 
 @dataclass(frozen=True)
 class Rendition:
-    """A converted document: the markdown file plus what each page is."""
+    """A converted document: the markdown file plus what each page is.
+
+    `ocr_engine` is recorded in the file (what recognised its scan pages);
+    `unread_reason` is NOT — it is this call's answer to why scan pages are
+    still unread (no recognizer here, the per-call cap, a Stop), which another
+    process or a later call may answer differently."""
 
     source: str
     path: Path
     pages: tuple[PageFacts, ...]
+    ocr_engine: str = ""
+    unread_reason: str = ""
 
     @property
     def total_pages(self) -> int:
@@ -177,6 +258,15 @@ class Rendition:
     @property
     def scans(self) -> tuple[int, ...]:
         return tuple(p.number for p in self.pages if p.is_scan)
+
+    @property
+    def unread_scans(self) -> tuple[int, ...]:
+        """Scan pages whose words, if any, are not in the rendition: not read,
+        or failed. A page where OCR ran and found no words is NOT one — it was
+        read, and the rendition says what was found there."""
+        return tuple(
+            p.number for p in self.pages if p.is_scan and p.ocr not in ("text", "none")
+        )
 
     def text(self) -> str:
         """The rendition body, without the machine-readable header line."""
@@ -516,20 +606,21 @@ def _convert_pages(doc) -> tuple[list[str], list[PageFacts]]:
             if is_scan:
                 # The note leads, and whatever stray characters the page does
                 # carry (a header stamp, an OCR-ed page number) still follow it.
-                # They are real, they are just not the page.
-                lines.append(
-                    "*(scanned page — no text layer, so it cannot be read as text; "
-                    "ask to see it as an image)*"
-                )
+                # They are real, they are just not the page. `recognise_scans`
+                # replaces exactly this paragraph, so it must stay one line.
+                lines.append(SCAN_NOT_READ)
             for item in ordered:
                 if item.kind == "text":
-                    lines.append(item.text)
+                    lines.append(defuse(item.text))
                 elif item.kind == "figure":
                     if is_scan:
                         continue  # the scan note above already IS this image
+                    # No "ask to see it as an image": pages= only ever returned
+                    # SCAN pages as pictures, so that hint was false on every
+                    # backend, and the rendition is shared by all of them.
                     lines.append(
                         f"*(figure on page {number}, {item.meta['w']}×{item.meta['h']} pt — "
-                        "not readable as text; ask to see this page as an image)*"
+                        "not readable as text)*"
                     )
                 else:
                     table = tables[item.meta["index"]]
@@ -568,8 +659,7 @@ def _convert_pages(doc) -> tuple[list[str], list[PageFacts]]:
             if has_diagram:
                 lines.append(
                     f"*(diagram on page {number}, covering about "
-                    f"{round(visual * 100)}% of it — not readable as text; ask to see "
-                    "this page as an image)*"
+                    f"{round(visual * 100)}% of it — not readable as text)*"
                 )
 
         if continues_here:
@@ -633,22 +723,68 @@ def _existing_path(store_dir: Path, digest: str) -> Path | None:
         return None
 
 
-def _read_cached(path: Path, source: str) -> Rendition | None:
+def _meta(path: Path) -> dict | None:
+    """The rendition's machine-readable header, or None when it is missing,
+    unreadable or from another converter version."""
     try:
-        head = path.open("r", encoding="utf-8", errors="replace").readline()
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            head = handle.readline()
     except OSError:
         return None
+    return _parse_header(head)
+
+
+def _parse_header(head: str) -> dict | None:
     if not head.startswith(_HEADER_PREFIX):
         return None
     try:
         meta = json.loads(head[len(_HEADER_PREFIX) :].rstrip().removesuffix(_HEADER_SUFFIX))
     except json.JSONDecodeError:
         return None
-    if meta.get("converter") != CONVERTER_VERSION:
+    if not isinstance(meta, dict) or meta.get("converter") != CONVERTER_VERSION:
+        return None
+    return meta
+
+
+def _read_cached(path: Path, source: str) -> Rendition | None:
+    meta = _meta(path)
+    if meta is None:
         return None
     path.touch()  # refresh recency; this is an LRU store
     pages = tuple(PageFacts(**page) for page in meta.get("pages", []))
-    return Rendition(source=source, path=path, pages=pages)
+    return Rendition(
+        source=source, path=path, pages=pages, ocr_engine=str(meta.get("ocr_engine") or "")
+    )
+
+
+def _write(path: Path, meta: dict, chunks: list[str]) -> None:
+    """The rendition file, whole: a reader never sees half of one (#395's
+    helper), which matters now that OCR rewrites a file other calls read."""
+    header = _HEADER_PREFIX + json.dumps(meta, separators=(",", ":")) + _HEADER_SUFFIX
+    atomic_write.publish(
+        path, header + "\n\n" + "\n\n".join(chunks) + "\n", encoding="utf-8"
+    )
+
+
+def _raw_file(path: Path) -> tuple[dict | None, list[str]]:
+    """(header, every page's chunk as stored) from ONE read of the file, so the
+    two can never come from different writers. NOT disarmed: this is for
+    rewriting the file, and `Rendition.text()` disarms at read time, never
+    into the file."""
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    head, _, body = raw.partition("\n")
+    chunks: list[str] = []
+    buffer: list[str] = []
+    for line in body.splitlines():
+        if _PAGE_MARKER_RE.match(line.strip()):
+            if buffer:
+                chunks.append("\n".join(buffer).strip())
+            buffer = [line]
+        elif buffer:
+            buffer.append(line)
+    if buffer:
+        chunks.append("\n".join(buffer).strip())
+    return _parse_header(head), chunks
 
 
 def prune(store_dir: Path) -> list[Path]:
@@ -748,10 +884,10 @@ def convert(
         "converter": CONVERTER_VERSION,
         "source": source.name,
         "digest": digest,
+        "ocr_engine": "",
         "pages": [page.as_dict() for page in pages],
     }
-    header = _HEADER_PREFIX + json.dumps(meta, separators=(",", ":")) + _HEADER_SUFFIX
-    path.write_text(header + "\n\n" + "\n\n".join(chunks) + "\n", encoding="utf-8")
+    _write(path, meta, chunks)
     if origin is not None:
         provenance.record_artefact(path, origin)
     prune(store)
@@ -795,6 +931,157 @@ def page_png(pdf_path: Path | str, number: int, dpi: int = PAGE_RASTER_DPI) -> b
             if len(data) <= PAGE_RASTER_MAX_BYTES or dpi <= PAGE_RASTER_MIN_DPI:
                 return data
             dpi = max(PAGE_RASTER_MIN_DPI, dpi // 2)
+
+
+# --------------------------------------------------- reading a scan's words
+
+
+# One read-recognise-write at a time PER RENDITION. read_pdf runs on the
+# parallel read path, and two calls on one scanned PDF (pages=1-3 and
+# pages=20-25) would otherwise each rewrite the whole file from their own copy
+# and the second would discard the first's pages. Per rendition, not per
+# process: one process-wide lock made a read of an unrelated text PDF wait
+# behind a scan's OCR (measured 2.8 s behind a 3 s recognition, in delivery
+# review). Across processes (the CLI beside aish-web) the write re-reads the
+# file first and does not downgrade a page another writer finished — a
+# best-effort merge, not a lock.
+_LOCKS_GUARD = threading.Lock()
+_RENDITION_LOCKS: dict[Path, threading.Lock] = {}
+
+
+def _rendition_lock(path: Path) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _RENDITION_LOCKS.setdefault(Path(path), threading.Lock())
+
+
+def _needs_recognition(rendition: Rendition) -> bool:
+    return any(p.is_scan and not p.ocr_final for p in rendition.pages)
+
+
+def recognise_scans(
+    rendition: Rendition,
+    pdf_path: Path | str,
+    priority: list[int] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> Rendition:
+    """Read the words of the rendition's unread scan pages by OCR, write them
+    into the rendition, and return it as now stored — with `unread_reason`
+    saying why any scan page is still unread after this call.
+
+    `priority` pages (the ones a pages=/section= call asked for) go first, so
+    the cap can never leave the very page that was asked for unread while
+    reading others. At most `OCR_PAGES_PER_CALL` pages per call."""
+    fresh = _read_cached(rendition.path, rendition.source) or rendition
+    if not _needs_recognition(fresh):
+        return fresh  # nothing to do takes no lock
+    with _rendition_lock(rendition.path):
+        current = _read_cached(rendition.path, rendition.source) or rendition
+        todo = [p.number for p in current.pages if p.is_scan and not p.ocr_final]
+        if not todo:
+            return current
+        if reason := ocr.unavailable_reason():
+            return dataclasses.replace(current, unread_reason=reason)
+        asked = [n for n in priority or [] if n in todo]
+        order = asked + [n for n in todo if n not in asked]
+        now, later = order[:OCR_PAGES_PER_CALL], order[OCR_PAGES_PER_CALL:]
+
+        pngs: dict[int, bytes] = {}
+        unrendered: dict[int, str] = {}
+        for number in now:
+            try:
+                pngs[number] = page_png(pdf_path, number, dpi=ocr.OCR_DPI)
+            except DocumentError as exc:
+                unrendered[number] = f"the page could not be rendered for recognition ({exc})"
+        try:
+            batch = ocr.recognise(pngs, should_stop)
+        except ocr.OcrUnavailable as exc:
+            return dataclasses.replace(current, unread_reason=str(exc))
+        batch = dataclasses.replace(batch, failed={**batch.failed, **unrendered})
+        stored = _store_recognised(current, batch)
+        if stored is None:
+            return dataclasses.replace(
+                current,
+                unread_reason=(
+                    "text recognition ran, but aish could not write its result into "
+                    "the rendition file, which no longer has one section per page"
+                ),
+            )
+
+        if batch.stopped:
+            reason = "text recognition was stopped before it finished"
+        elif later:
+            reason = (
+                f"aish's OCR reads at most {OCR_PAGES_PER_CALL} pages per call; call "
+                f'read_pdf again (e.g. pages="{_ranges(later[:OCR_PAGES_PER_CALL])}") to '
+                "read the next ones"
+            )
+        else:
+            reason = ""
+        return dataclasses.replace(stored, unread_reason=reason)
+
+
+def _scan_chunk(chunk: str, facts: PageFacts, text: str | None) -> str:
+    """`chunk` (a scan page as stored) with its note replaced to say what
+    recognition found. The note is always the paragraph right after the page
+    marker; whatever follows it — stray text-layer characters, a table
+    continuation note — is kept as it was."""
+    marker, _note, *rest = chunk.split("\n\n") + [""] * 2
+    rest = [part for part in rest if part]
+    if facts.ocr == "text" and text:
+        n = facts.number
+        body = [SCAN_OCR_TEXT, f"{_OCR_OPEN.format(number=n)}\n{defuse(text)}\n"
+                f"{_OCR_CLOSE.format(number=n)}"]
+    elif facts.ocr == "none":
+        body = [SCAN_OCR_NONE]
+    else:
+        body = [SCAN_OCR_FAILED.format(attempts=facts.ocr_attempts, error=facts.ocr_error)]
+    return "\n\n".join([marker, *body, *rest])
+
+
+def _store_recognised(current: Rendition, batch: ocr.Batch) -> Rendition | None:
+    """Merge `batch` into the rendition as it is on disk NOW and write it.
+    Returns the stored rendition, or None when nothing could be written.
+
+    Re-read rather than trusted from `current`: another process may have
+    written since, and a page it finished is never downgraded."""
+    try:
+        meta, chunks = _raw_file(current.path)
+    except OSError:
+        return None
+    if meta is None:
+        return None
+    pages = [PageFacts(**page) for page in meta.get("pages", [])]
+    if len(chunks) != len(pages):
+        return None  # not a file this module wrote whole; leave it alone
+    changed = False
+    for index, facts in enumerate(pages):
+        number = facts.number
+        if not facts.is_scan or facts.ocr_final:
+            continue
+        if number in batch.text:
+            text = batch.text[number].strip()
+            facts = dataclasses.replace(
+                facts, ocr="text" if text else "none", ocr_chars=len(text),
+                ocr_attempts=facts.ocr_attempts + 1, ocr_error="",
+            )
+        elif number in batch.failed:
+            text = ""
+            facts = dataclasses.replace(
+                facts, ocr="failed", ocr_attempts=facts.ocr_attempts + 1,
+                ocr_error=batch.failed[number],
+            )
+        else:
+            continue
+        pages[index] = facts
+        chunks[index] = _scan_chunk(chunks[index], facts, text)
+        changed = True
+    if not changed:
+        return _read_cached(current.path, current.source)
+    meta["pages"] = [page.as_dict() for page in pages]
+    if batch.engine:
+        meta["ocr_engine"] = batch.engine
+    _write(current.path, meta, chunks)
+    return _read_cached(current.path, current.source)
 
 
 def outline(pdf_path: Path | str) -> list[tuple[int, int, str]]:
@@ -960,17 +1247,24 @@ def _ranges(numbers: list[int]) -> str:
 page_ranges = _ranges
 
 
-def summary(rendition: Rendition) -> str:
+def summary(rendition: Rendition, *, pictures: bool) -> str:
     """The structural map: what this document IS, before any of it is read.
 
     Always emitted, and emitted FIRST, because it is the only thing standing
     between a partly-unreadable document and a confident summary of it.
+
+    `pictures` is whether the model reading it takes picture input — the
+    caller's to say (`Agent._takes_pictures`), because the same rendition
+    serves every backend and "look at it as an image" is only an offer when
+    the pictures can actually reach the model.
     """
     pages = rendition.pages
     total = len(pages)
     chars = sum(p.chars for p in pages)
+    recognised = sum(p.ocr_chars for p in pages)
     lines = [f"{rendition.source} — {total} page{'s' if total != 1 else ''}, "
-             f"{chars:,} characters of text."]
+             f"{chars:,} characters of text"
+             + (f" plus {recognised:,} recognised by OCR." if recognised else ".")]
 
     scans = [p.number for p in pages if p.is_scan]
     blanks = [p.number for p in pages if p.is_blank]
@@ -998,8 +1292,64 @@ def summary(rendition: Rendition) -> str:
     if blanks:
         lines.append(f"  blank: page(s) {_ranges(blanks)}")
     if scans:
-        lines.append(
-            f"  SCANNED, no text layer: page(s) {_ranges(scans)} — these are NOT in the "
-            "text below and cannot be read as text. Use pages= to see them as images."
-        )
+        lines.extend(_scan_lines(rendition, pictures))
     return "\n".join(lines)
+
+
+def _scan_lines(rendition: Rendition, pictures: bool) -> list[str]:
+    """The map's account of the scanned pages: which have words aish's OCR
+    read, which it found empty, which failed, which are not read — and, by
+    whether the model takes pictures, what it can and must not do next."""
+    scan_pages = [p for p in rendition.pages if p.is_scan]
+    read = [p.number for p in scan_pages if p.ocr == "text"]
+    empty = [p.number for p in scan_pages if p.ocr == "none"]
+    failed = [p for p in scan_pages if p.ocr == "failed"]
+    unread = [p.number for p in scan_pages if p.ocr == ""]
+    lines = [
+        f"  SCANNED, no usable text layer: page(s) {_ranges([p.number for p in scan_pages])}"
+    ]
+    if read:
+        lines.append(
+            "    words read by aish's OCR (machine-recognised, may contain errors; "
+            f"in the text between OCR lines): page(s) {_ranges(read)}"
+        )
+    if empty:
+        lines.append(
+            f"    aish's OCR found no words: page(s) {_ranges(empty)} — blank, or a "
+            "picture without words; aish has not established which"
+        )
+    by_error: dict[tuple[str, bool], list[int]] = {}
+    for page in failed:
+        by_error.setdefault((page.ocr_error, page.ocr_final), []).append(page.number)
+    for (error, final), numbers in by_error.items():
+        lines.append(
+            f"    OCR FAILED: page(s) {_ranges(numbers)} — {error}"
+            + (" (not tried again)" if final else " (tried again on the next read)")
+        )
+    if unread:
+        lines.append(
+            f"    NOT READ: page(s) {_ranges(unread)} — "
+            f"{rendition.unread_reason or 'text recognition was not run in this read'}"
+        )
+    if pictures:
+        lines.append(
+            "    To look at a scanned page yourself, ask for it with pages= — it comes "
+            "back as a picture."
+        )
+    if failed or unread:
+        # On EVERY backend, not only a no-vision one: a text-only Ollama model
+        # is declared picture-capable by MEDIA_SUPPORT (docs: "Not built"), and
+        # a dead end without this line is where the shell OCR started.
+        lines.append(
+            "    The words of the OCR FAILED / NOT READ pages are NOT in the text below."
+            + (
+                ""
+                if pictures
+                else " This model takes no picture input, so pages= cannot show them "
+                "to you either."
+            )
+            + " You MUST NOT try to read them another way — no tesseract, no brew "
+            "install, no convert or any other shell OCR. Tell the user which pages "
+            "could not be read, and why."
+        )
+    return lines
