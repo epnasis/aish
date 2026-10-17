@@ -16958,6 +16958,93 @@ class TestTheHoldCheck:
         assert "I will run it now." in result
         assert "no later call to it was made" not in streamed
 
+    def test_a_dropped_attempt_leaves_nothing_in_the_answer(self, monkeypatch):
+        """Delivery review E1: a retry after a partial stream glued the dead
+        attempt's text onto the held answer live, while the log kept it clean."""
+        monkeypatch.setattr(agent_module.time, "sleep", lambda s: None, raising=False)
+        script = [
+            model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+            model_says("I asked once."),
+            "partial",
+            model_says("FINAL ANSWER"),
+        ]
+
+        def chat(**kwargs):
+            item = script.pop(0)
+            if item == "partial":
+                def dropped():
+                    yield model_says("PARTIAL-")
+                    raise ConnectionError("connection reset mid-stream")
+                return dropped()
+            return iter([item]) if kwargs.get("stream") else item
+
+        tokens: list[str] = []
+        agent = Agent(
+            model="fake", approve=lambda _c: Approved(self.COMMENT), client_chat=chat,
+            on_token=tokens.append,
+        )
+        result = agent.run_task("go")
+        assert result.startswith("FINAL ANSWER")
+        assert "PARTIAL-" not in "".join(tokens)
+
+    def test_a_later_narration_still_streams_past_the_delivery_cap(self, tmp_path):
+        """Delivery review E2: only the flush streams narration past the first
+        delivery while the hold buffer is armed."""
+        def approve(cmd):
+            return Approved(self.COMMENT) if "&&" in cmd else True
+
+        *_, streamed = self._run(
+            [
+                model_says("On it.", tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                model_says(
+                    "Splitting it now.",
+                    tool_calls=[tool_call("run_command", command=f"touch {tmp_path / 'a'}")],
+                ),
+                model_says("done"),
+            ],
+            approve,
+        )
+        assert "Splitting it now." in streamed
+
+    def test_an_unavailable_re_proposal_still_stands_in(self, monkeypatch):
+        def missing(cmd, **_kw):
+            raise ModuleNotFoundError("no module", name="somepkg")
+
+        monkeypatch.setattr(agent_module.tools, "run_command", missing)
+
+        def approve(cmd):
+            return Approved(self.COMMENT) if "&&" in cmd else True
+
+        agent, chat, result, steps, *_ = self._run(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                model_says(tool_calls=[tool_call("run_command", command="touch a")]),
+                model_says("the tool is unavailable"),
+            ],
+            approve,
+        )
+        assert len(chat.calls) == 3
+        assert self._hold_gates(steps) == []
+
+    def test_the_next_tasks_own_hold_is_asked_about(self):
+        """Call numbers restart per task, so a hold asked about in task 1 must
+        not mark task 2's hold at the same number as already asked."""
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch a && touch b")]),
+                model_says("Now step by step:"),
+                model_says("I will not."),
+                model_says(tool_calls=[tool_call("run_command", command="touch c && touch d")]),
+                model_says("Now step by step:"),
+                model_says("I will not either."),
+            ],
+            approve=lambda _cmd: Approved(self.COMMENT),
+        )
+        agent.run_task("make the pages")
+        assert agent.run_task("again").startswith("I will not either.")
+        assert len(chat.calls) == 6
+
     def test_claude_max_says_it_where_it_cannot_ask(self):
         """The SDK owns the loop: verify_final is note-only, so an outstanding
         hold is said on the answer and recorded, never asked about."""

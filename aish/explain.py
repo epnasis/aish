@@ -1337,9 +1337,10 @@ def _context_cost(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
                 chars = len(str(record.get("content") or ""))
                 if here and "model_call" not in record:
                     # A message in THIS turn with no stamp cannot be placed.
-                    # `agent._log_held_entry` writes one: it calls `on_message`
-                    # directly rather than going through `_append`, so the stamp
-                    # is never attached. Reading the absent key as 0 would put a
+                    # Logs written before 2026-10-17 hold such records: a
+                    # released hold's answer was written by `on_message`
+                    # directly rather than through `_append`, with no stamp
+                    # (both release sites stamp it now). Reading the absent key as 0 would put a
                     # released hold's answer in front of every call of its turn
                     # — including calls made before it existed, which is
                     # verbatim the failure this reader's own docstring warns

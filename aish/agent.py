@@ -661,7 +661,7 @@ HOLD_MAX_ASKS = 1  # per held call: a new hold needs a new answer from the owner
 HOLD_ASK = (
     "The user APPROVED each of these with a comment, so each was HELD and NOT "
     "run, and no later call to its tool was made:\n{items}\n"
-    "A reply with no tool call is delivered as your answer. You MUST either "
+    "A reply with no tool call leaves the action unrun. You MUST either "
     "call the tool now as the comment asks, or tell the user plainly that you "
     "are not going to, and why. Do NOT announce a step without taking it. "
     "Example: comment \"split it into two steps\" → call the same tool with "
@@ -6088,7 +6088,10 @@ class Agent:
             # The wrap-up said nothing at all, so there is no entry to stamp —
             # but the note still has to reach the log, or the only record of a
             # rule that was not followed is a token stream nobody kept.
-            self.on_message(_serialize({"role": "assistant", "content": content}))
+            self.on_message({
+                **_serialize({"role": "assistant", "content": content}),
+                "model_call": self._model_call,  # as `_log_held_entry` stamps it
+            })
         if not content and self.on_token:
             self.on_token(headline + "\n")
         return f"{headline}\n\n{content}" if content else headline
@@ -6167,6 +6170,11 @@ class Agent:
         while True:
             attempt += 1
             observed.clear()
+            if self._held_answer is not None:
+                # Per attempt too: a held answer is what the owner will read,
+                # and a dropped attempt's partial text left in the buffer was
+                # streamed glued in front of the answer the log kept.
+                self._held_answer = []
             # Per attempt, like `observed`: only the attempt that succeeded is
             # timed on the record, and a failed one says its own `elapsed_s`.
             timing = backends.CallTiming()
