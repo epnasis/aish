@@ -100,9 +100,16 @@ def valid_name(name: str) -> bool:
     return bool(NAME_RE.match(name or ""))
 
 
-def _security(args: list[str], value: str | None = None) -> subprocess.CompletedProcess:
+# A lookup feeds a tool that runs without the secret if it must; a Keychain
+# call that never returns would hang that tool before its own timeout starts.
+LOOKUP_TIMEOUT_SECONDS = 15
+
+
+def _security(
+    args: list[str], value: str | None = None, timeout: float | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [_SECURITY, *args], input=value, text=True, capture_output=True
+        [_SECURITY, *args], input=value, text=True, capture_output=True, timeout=timeout
     )
 
 
@@ -118,7 +125,15 @@ def lookup(name: str) -> tuple[str | None, str]:
     text, not by aish."""
     if not valid_name(name):
         return None, f"{name!r} is not a valid secret name"
-    proc = _security(["find-generic-password", "-a", name, "-s", SERVICE, "-w"])
+    try:
+        proc = _security(
+            ["find-generic-password", "-a", name, "-s", SERVICE, "-w"],
+            timeout=LOOKUP_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"{_SECURITY} did not return within {LOOKUP_TIMEOUT_SECONDS} s"
+    except OSError as exc:
+        return None, f"{_SECURITY} could not be run: {exc}"
     if proc.returncode != 0:
         detail = (proc.stderr or "").strip() or "no message"
         return None, f"{_SECURITY} exited {proc.returncode}: {detail}"

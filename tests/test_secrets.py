@@ -14,7 +14,7 @@ from aish import secrets
 def store(tmp_path, monkeypatch):
     kc: dict[str, str] = {}
 
-    def fake_security(args, value=None):
+    def fake_security(args, value=None, timeout=None):
         cmd = args[0]
         if cmd == "add-generic-password":
             kc[args[args.index("-a") + 1]] = args[args.index("-w") + 1]
@@ -79,7 +79,7 @@ def personal(tmp_path, monkeypatch):
     `aish` from `aish-personal` cannot check the fence between them."""
     kc: dict[tuple[str, str], str] = {}
 
-    def fake_security(args, value=None):
+    def fake_security(args, value=None, timeout=None):
         cmd = args[0]
         key = (args[args.index("-s") + 1], args[args.index("-a") + 1])
         if cmd == "add-generic-password":
@@ -337,3 +337,20 @@ class TestLookup:
 
     def test_invalid_name_is_said_so(self, store):
         assert secrets.lookup("bad-name")[0] is None
+
+    def test_a_keychain_call_that_never_returns_is_bounded(self, monkeypatch):
+        def hangs(args, value=None, timeout=None):
+            assert timeout == secrets.LOOKUP_TIMEOUT_SECONDS
+            raise subprocess.TimeoutExpired(args, timeout)
+
+        monkeypatch.setattr(secrets, "_security", hangs)
+        value, observed = secrets.lookup("FASTMAIL_TOKEN")
+        assert value is None and "did not return within 15 s" in observed
+
+    def test_a_missing_security_binary_is_an_observation(self, monkeypatch):
+        def missing(args, value=None, timeout=None):
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(secrets, "_security", missing)
+        value, observed = secrets.lookup("FASTMAIL_TOKEN")
+        assert value is None and "could not be run" in observed
