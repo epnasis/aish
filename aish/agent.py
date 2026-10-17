@@ -44,6 +44,7 @@ from . import (
     evidence,
     files,
     media,
+    ocr,
     owner_ua,
     paths,
     provenance,
@@ -1991,15 +1992,18 @@ TOOL_MEDIA_PASTE_ANYWAY = (
     " That limit is YOURS ONLY: the user's chat DOES display pictures, and the "
     "user sees each one where you paste the line show_image returned. You MUST "
     "paste that line exactly as written. Do NOT tell the user pictures cannot be "
-    "shown, and do NOT replace the line with a raw image URL."
+    "shown, and do NOT replace the line with a raw image URL. If you need the "
+    "WORDS in a picture, the read_file call show_image named returns aish's OCR "
+    "of them — never shell OCR."
 )
 # show_image's own result on a backend that takes no pictures. It used to
 # say "it is attached to this turn, so look at it" on every backend, while
 # TOOL_MEDIA_UNDELIVERABLE said the opposite in the same turn.
 SHOW_IMAGE_UNSEEN = (
     "{what} stored. YOU cannot see it — this model takes no picture input — so "
-    "do not describe what is in it. The user's chat DOES show it where you paste "
-    "the line below. "
+    "do not describe what is in it. If you need the WORDS in it, call "
+    "read_file(path=\"{path}\"): aish reads them by OCR. The user's chat DOES "
+    "show it where you paste the line below. "
 )
 # read_media's frame line on a backend that takes no pictures.
 FRAMES_UNSEEN = (
@@ -9664,6 +9668,26 @@ class Agent:
             return "ERROR: those bytes are not a displayable image (png/jpg/gif/webp only)."
         except OSError as exc:
             return f"ERROR: could not store the image ({exc})."
+        # The copy is readable (read_file returns a picture's OCR), so it says
+        # what it is: a fetched picture, or a mail attachment's copy, is
+        # outside content wherever it is read back from (#319's rule).
+        fetched = source.lower().startswith(("http://", "https://"))
+        outside = self._brings_outside_content("show_image", {"source": source})
+        provenance.record_artefact(
+            path,
+            provenance.ArtefactSource(
+                tool="show_image",
+                outside=outside,
+                source=source if fetched else "",
+                what=(
+                    "a picture from outside this machine" if outside
+                    else "a picture on this machine"
+                ),
+            ),
+        )
+        # Where the WORDS are read from, for a model that cannot look: the
+        # file it named when that is local, else the stored copy.
+        ocr_from = path if fetched else (files.resolved(source, self.cwd) or path)
         # We build the line rather than trusting the model to: a caption with a
         # bracket or a newline in it silently breaks the markdown image parser,
         # which used to be worked around by a memory (#188 layer 3).
@@ -9686,7 +9710,7 @@ class Agent:
                     "Video still ready — it is attached to this turn, so look at it and "
                     "make sure it really is the video the user meant. "
                     if self._takes_pictures()
-                    else SHOW_IMAGE_UNSEEN.format(what="Video still")
+                    else SHOW_IMAGE_UNSEEN.format(what="Video still", path=ocr_from)
                 )
                 + "The line below is "
                 "the picture AND the player in ONE card: include it in your answer "
@@ -9702,7 +9726,7 @@ class Agent:
                 "Image ready — it is attached to this turn, so look at it and make "
                 "sure it really shows what the user asked for. "
                 if self._takes_pictures()
-                else SHOW_IMAGE_UNSEEN.format(what="Image")
+                else SHOW_IMAGE_UNSEEN.format(what="Image", path=ocr_from)
             )
             + "Include this line in "
             "your answer EXACTLY as written (do not alter the path):\n\n"
@@ -10028,6 +10052,17 @@ class Agent:
         path, problem = self._resolve_pdf(source)
         if problem is not None:
             return f"ERROR: {problem}"
+        # read_file refuses these two before it opens anything; read_pdf must
+        # too, now that it reads pictures (design review: an evidence frame
+        # went straight to OCR here, reopening #318).
+        if self._is_evidence_frame(str(path)):
+            return EVIDENCE_FRAME_NOT_A_FILE.format(path=path)
+        if self._is_tool_output_cache(str(path)):
+            return TOOL_OUTPUT_NOT_A_FILE.format(path=path)
+        if (picture := self._picture_at(str(path))) is not None:
+            # A photographed or screenshotted document is read the same way
+            # as one scanned page; "not a PDF" would be a dead end.
+            return self._read_picture(picture)
         try:
             rendition = documents.convert(path, self.documents_dir, self._pdf_origin(source, path))
         except documents.DocumentError as exc:
@@ -10107,6 +10142,106 @@ class Agent:
                 documents.outline_lines(entries)
             ))
         return "\n\n".join(header + opening)
+
+    def _read_file_or_picture(self, path: str, offset: int, limit: int, section: str) -> str:
+        """read_file's body. A picture's bytes decoded as text are what a
+        no-vision model got five times in one replay, before it described a
+        photo it never read and tried `sips` (docs/documents-and-pdf.md,
+        "Pictures"); the same door now returns aish's OCR of it, and a PDF's
+        bytes — the same failure — its read_pdf map and text.
+
+        Decided HERE, when the read runs, and never while the call is being
+        prepared: the file is not opened before the read gate has had its say."""
+        target = files.resolve(path, self.cwd)
+        head = self._head_of(target)
+        if head.startswith(b"%PDF"):
+            return self._read_pdf(str(target), "", "", "")
+        if ocr.picture_format(head) is not None:
+            asked = [
+                name for name, given in
+                (("offset", offset > 1), ("limit", limit != files.READ_MAX_LINES),
+                 ("section", bool(section)))
+                if given
+            ]
+            return self._read_picture(target, ignored=asked)
+        return files.read_file(path, self.cwd, offset=offset, limit=limit, section=section)
+
+    @staticmethod
+    def _head_of(target: Path) -> bytes:
+        """The first bytes of a file — enough to tell what it IS — or b"" when
+        it cannot be opened (the ordinary read then says why)."""
+        try:
+            with target.open("rb") as handle:
+                return handle.read(16)
+        except OSError:
+            return b""
+
+    def _picture_at(self, path: str) -> Path | None:
+        """The file at `path` when its BYTES are a picture aish's OCR reads
+        (`ocr.picture_format` — magic bytes, never the extension), else None."""
+        target = files.resolve(path, self.cwd)
+        return target if ocr.picture_format(self._head_of(target)) is not None else None
+
+    def _read_picture(self, path: Path, ignored: list[str] | None = None) -> str:
+        """A picture file's words, read by aish's OCR: the map first, then the
+        text — the picture counterpart of `_read_pdf`, through the same
+        rendition store, recognizer and labels."""
+        try:
+            rendition = documents.convert_picture(
+                path, self.documents_dir, self._picture_origin(path)
+            )
+        except documents.DocumentError as exc:
+            # The file's name is sender-chosen for an attachment, and an
+            # ERROR result is passed on without the outside banner.
+            return (
+                f"ERROR: {provenance.disarm_markers(str(exc))}."
+                + documents.NO_SHELL_OCR.format(what="picture")
+            )
+        try:
+            rendition = documents.recognise_scans(
+                rendition, path, [1], should_stop=self._cancel.is_set
+            )
+        except Exception as exc:  # reading a picture's words must never end the task
+            rendition = dataclasses.replace(
+                rendition,
+                unread_reason=f"text recognition failed ({type(exc).__name__}: {exc})",
+            )
+        head = self._head_of(path)
+        try:
+            small_enough = path.stat().st_size <= media.IMAGE_MAX_BYTES
+        except OSError:
+            small_enough = False
+        parts = [
+            documents.picture_summary(
+                rendition,
+                pictures=self._takes_pictures(),
+                showable=media.sniff(head) is not None and small_enough,
+            ),
+            f"Text: {rendition.path}\n(re-reading this picture is free: its words are "
+            "cached by its content.)",
+        ]
+        if ignored:
+            parts.append(
+                f"({', '.join(ignored)} do(es) not apply to a picture: this is all of it.)"
+            )
+        parts.append(documents.pages_text(rendition, [1]))
+        return "\n\n".join(parts)
+
+    def _picture_origin(self, path: Path) -> "provenance.ArtefactSource":
+        """What a picture's rendition IS, recorded beside it (#319): outside
+        content exactly when the picture itself reads as outside content (a
+        mail attachment, a download), so its words cannot come back through
+        the document store as this machine's own."""
+        outside = self._reads_outside_content(str(path))
+        return provenance.ArtefactSource(
+            tool="read_file",
+            outside=outside,
+            what=(
+                "aish's OCR of a picture that came from outside this machine"
+                if outside
+                else "aish's OCR of a picture on this machine"
+            ),
+        )
 
     def _resolve_pdf(self, source: str) -> tuple[Path, str | None]:
         """A local PDF path for `source`, fetching it first when it is a URL.
@@ -12542,10 +12677,17 @@ class Agent:
         construction, and the fallback covers it today. A write site added later
         makes the attribution SPECIFIC; it is not what makes it safe.
 
-        The media store is deliberately absent — a picture is not text read back
-        into context, and #318 settled it separately.
+        The media store used to be absent on the argument that a picture is not
+        text read back into context. That stopped being true when `read_file`
+        began returning a picture's OCR (docs/documents-and-pdf.md, "Pictures"):
+        a fetched picture's words came back through its media copy unbannered and
+        untainted, in a later chat as easily as this one (found in design
+        review). So it is here, record-reading: `show_image` records what each
+        copy is, and a copy with no record — every one stored before this, and
+        every rasterised PDF page — reads as outside, the safe direction.
         """
         return [
+            self.media_dir,
             self.documents_dir,
             self.transcripts_dir,
             browser.downloads_dir(),
@@ -12628,10 +12770,7 @@ class Agent:
             if section
             else (f" (from line {offset})" if offset > 1 else "")
         )
-        read = partial(
-            files.read_file, path, self.cwd, offset=offset, limit=limit,
-            section=section,
-        )
+        read = partial(self._read_file_or_picture, path, offset, limit, section)
         # Wrapped HERE rather than in `_dispatch`, because read_file also runs on
         # the parallel read-only path and a marking only the sequential door
         # applied would be a marking that depends on how many tools the model

@@ -62,12 +62,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import atomic_write, ocr, provenance
+from . import atomic_write, media, ocr, provenance
 
 # Bumped whenever conversion output changes. It is part of the cache key, so an
 # improvement to the layout logic invalidates old renditions instead of serving
 # a stale one that a test would then pass against.
-CONVERTER_VERSION = 3
+CONVERTER_VERSION = 4
 
 STORE_MAX_BYTES = 200 * 1024 * 1024
 STORE_MAX_FILES = 300
@@ -126,10 +126,20 @@ OCR_MAX_ATTEMPTS = 2
 # shared by every model, so "look at it as an image" belongs to the read_pdf
 # result, which knows whether the model can.
 SCAN_NOT_READ = "*(scanned page — no usable text layer; its words have not been read)*"
+# What OCR text IS, said where it is read. Each clause is a measured property
+# of macOS Vision's output (docs/documents-and-pdf.md, "Pictures"): it lists a
+# table column by column, it can interleave side-by-side columns, and a tick
+# box comes out as a stray letter ("7", "E", "Z") or a bullet.
+_OCR_CAVEATS = (
+    "machine-recognised words, which may contain recognition errors. They are in "
+    "the recognizer's reading order, so a value in a table or form may be listed "
+    "apart from its label, and side-by-side columns may be interleaved. A tick "
+    "box may come out as a stray letter or a bullet, so whether a box is ticked "
+    "cannot be read from this text; signatures and layout are not reproduced."
+)
 SCAN_OCR_TEXT = (
     "*(scanned page — no usable text layer. Between the two OCR lines below is "
-    "aish's OCR of the page picture: machine-recognised words, which may contain "
-    "recognition errors; ticks, signatures and layout are not reproduced.)*"
+    f"aish's OCR of the page picture: {_OCR_CAVEATS})*"
 )
 SCAN_OCR_NONE = (
     "*(scanned page — no usable text layer, and aish's OCR found no words on it. "
@@ -139,6 +149,33 @@ SCAN_OCR_FAILED = (
     "*(scanned page — no usable text layer, and aish's OCR failed on it "
     "{attempts} time(s), most recently: {error}. Its words have not been read.)*"
 )
+# The same four notes for a picture FILE (a photo, a screenshot): one page,
+# and no text layer to be missing.
+PICTURE_NOT_READ = "*(picture — its words have not been read)*"
+PICTURE_OCR_TEXT = (
+    f"*(picture. Between the two OCR lines below is aish's OCR of it: {_OCR_CAVEATS})*"
+)
+PICTURE_OCR_NONE = (
+    "*(picture — aish's OCR found no words in it. It may have none, or words the "
+    "recognizer could not find; aish has not established which.)*"
+)
+PICTURE_OCR_FAILED = (
+    "*(picture — aish's OCR failed on it {attempts} time(s), most recently: "
+    "{error}. Its words have not been read.)*"
+)
+_NOTES = {
+    "pdf": (SCAN_NOT_READ, SCAN_OCR_TEXT, SCAN_OCR_NONE, SCAN_OCR_FAILED),
+    "picture": (PICTURE_NOT_READ, PICTURE_OCR_TEXT, PICTURE_OCR_NONE, PICTURE_OCR_FAILED),
+}
+# A picture larger than this is not read. Not measured against a failure: the
+# largest picture measured was a 2.9 MB 12-megapixel JPEG (0.5 s); this only
+# keeps an arbitrary file from being loaded whole to be hashed.
+PICTURE_MAX_BYTES = 50 * 1024 * 1024
+# The long side up to which a picture was measured to be read whole. On a test
+# picture 1200 px wide with 30 lines of ~36 px text, Vision read 30/30 at 3,000,
+# 5,000 and 6,000 px tall, then 20/30 at 8,000, 13/30 at 10,000 and 11/30 at
+# 12,000, with no error. Why is not established; tiling is not built.
+OCR_COMPLETE_PIXELS = 6000
 _OCR_OPEN = "--- OCR text, page {number} ---"
 _OCR_CLOSE = "--- end of OCR text, page {number} ---"
 # Lines a page's own content may not imitate: the page marker is the
@@ -205,6 +242,11 @@ class PageFacts:
     ocr_chars: int = 0
     ocr_attempts: int = 0
     ocr_error: str = ""
+    # What macOS decoded the recognised picture as (0 = not known): its size
+    # as seen, and how many frames it holds. Only a picture file's map uses it.
+    width: int = 0
+    height: int = 0
+    frames: int = 0
 
     @property
     def readable(self) -> bool:
@@ -233,6 +275,9 @@ class PageFacts:
             "ocr_chars": self.ocr_chars,
             "ocr_attempts": self.ocr_attempts,
             "ocr_error": self.ocr_error,
+            "width": self.width,
+            "height": self.height,
+            "frames": self.frames,
         }
 
 
@@ -250,6 +295,17 @@ class Rendition:
     pages: tuple[PageFacts, ...]
     ocr_engine: str = ""
     unread_reason: str = ""
+    # "pdf", or "picture" for a picture file read as one scanned page; for a
+    # picture, what its bytes are ("JPEG") and their digest, which is checked
+    # again before recognition so a file changed on disk is never recognised
+    # into the old bytes' rendition.
+    kind: str = "pdf"
+    picture_format: str = ""
+    digest: str = ""
+    # A picture file whose bytes stop before the format's end marker: macOS
+    # decodes what is there, so its words may be partial (design review: a
+    # JPEG cut to a third gave 492 of ~3,000 characters, with no error).
+    incomplete: bool = False
 
     @property
     def total_pages(self) -> int:
@@ -753,7 +809,14 @@ def _read_cached(path: Path, source: str) -> Rendition | None:
     path.touch()  # refresh recency; this is an LRU store
     pages = tuple(PageFacts(**page) for page in meta.get("pages", []))
     return Rendition(
-        source=source, path=path, pages=pages, ocr_engine=str(meta.get("ocr_engine") or "")
+        source=source,
+        path=path,
+        pages=pages,
+        ocr_engine=str(meta.get("ocr_engine") or ""),
+        kind=str(meta.get("kind") or "pdf"),
+        picture_format=str(meta.get("format") or ""),
+        digest=str(meta.get("digest") or ""),
+        incomplete=bool(meta.get("incomplete")),
     )
 
 
@@ -894,6 +957,83 @@ def convert(
     return Rendition(source=source.name, path=path, pages=tuple(pages))
 
 
+def convert_picture(
+    picture_path: Path | str,
+    store_dir: Path | str,
+    origin: provenance.ArtefactSource | None = None,
+) -> Rendition:
+    """A picture file (a photo, a screenshot) as a one-page rendition whose
+    page is a scan: its words come only from OCR (`recognise_scans`), with the
+    same cache, cap, retries, lock and labels as a scanned PDF page — one
+    implementation, not two.
+
+    Keyed on the picture's BYTES in the same store as PDF renditions, and
+    `origin` recorded beside it for the same reason as `convert`'s (#319): the
+    store is inside the workspace boundary, and a picture from outside must not
+    come back through its rendition as this machine's own words."""
+    source = Path(picture_path)
+    try:
+        size = source.stat().st_size
+    except OSError as exc:
+        raise DocumentError(f"could not read {source}: {exc}") from exc
+    if size > PICTURE_MAX_BYTES:
+        raise DocumentError(
+            f"{source.name} is larger than {PICTURE_MAX_BYTES // (1024 * 1024)} MB, so "
+            "aish does not read its words"
+        )
+    try:
+        data = source.read_bytes()
+    except OSError as exc:
+        raise DocumentError(f"could not read {source}: {exc}") from exc
+    found = ocr.picture_format(data)
+    if found is None:
+        raise DocumentError(f"{source.name} is not a picture aish can read")
+    store = Path(store_dir)
+    store.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(data).hexdigest()[:16]
+    existing = _existing_path(store, digest)
+    if existing is not None:
+        cached = _read_cached(existing, source.name)
+        if cached is not None and cached.kind == "picture":
+            if origin is not None:
+                provenance.record_artefact(existing, origin)
+            return cached
+    path = existing or _cache_path(store, digest, source.name)
+    page = PageFacts(number=1, chars=0, is_scan=True)
+    meta = {
+        "converter": CONVERTER_VERSION,
+        "kind": "picture",
+        "format": found[0],
+        "incomplete": _cut_short(data, found[0]),
+        "source": source.name,
+        "digest": digest,
+        "ocr_engine": "",
+        "pages": [page.as_dict()],
+    }
+    _write(path, meta, [f"{page_marker(1, 1)}\n\n{PICTURE_NOT_READ}"])
+    if origin is not None:
+        provenance.record_artefact(path, origin)
+    prune(store)
+    return Rendition(
+        source=source.name, path=path, pages=(page,), kind="picture",
+        picture_format=found[0], digest=digest, incomplete=bool(meta["incomplete"]),
+    )
+
+
+def _cut_short(data: bytes, picture_format: str) -> bool:
+    """Whether a picture's bytes stop before its format's end marker. Only
+    the formats whose end is a fixed marker are judged; for the rest this
+    says nothing, rather than guessing."""
+    tail = data[-64:]
+    if picture_format == "JPEG":
+        return b"\xff\xd9" not in tail
+    if picture_format == "PNG":
+        return b"IEND" not in tail
+    if picture_format == "GIF":
+        return not data.rstrip(b"\x00").endswith(b";")
+    return False
+
+
 def _open(pdf_path: Path | str):
     """The document, or a DocumentError naming the file. Every caller that
     touches the PDF itself comes through here, so "PyMuPDF is missing" and
@@ -985,15 +1125,15 @@ def recognise_scans(
         order = asked + [n for n in todo if n not in asked]
         now, later = order[:OCR_PAGES_PER_CALL], order[OCR_PAGES_PER_CALL:]
 
-        pngs: dict[int, bytes] = {}
+        pictures: dict[int, bytes] = {}
         unrendered: dict[int, str] = {}
         for number in now:
             try:
-                pngs[number] = page_png(pdf_path, number, dpi=ocr.OCR_DPI)
+                pictures[number] = _page_picture(current, pdf_path, number)
             except DocumentError as exc:
                 unrendered[number] = f"the page could not be rendered for recognition ({exc})"
         try:
-            batch = ocr.recognise(pngs, should_stop)
+            batch = ocr.recognise(pictures, should_stop)
         except ocr.OcrUnavailable as exc:
             return dataclasses.replace(current, unread_reason=str(exc))
         batch = dataclasses.replace(batch, failed={**batch.failed, **unrendered})
@@ -1020,21 +1160,36 @@ def recognise_scans(
         return dataclasses.replace(stored, unread_reason=reason)
 
 
-def _scan_chunk(chunk: str, facts: PageFacts, text: str | None) -> str:
+def _page_picture(rendition: Rendition, source: Path | str, number: int) -> bytes:
+    """The picture to recognise for one page: a PDF page rasterised, or a
+    picture file's own bytes — handed over as they are, never re-encoded."""
+    if rendition.kind != "picture":
+        return page_png(source, number, dpi=ocr.OCR_DPI)
+    try:
+        data = Path(source).read_bytes()
+    except OSError as exc:
+        raise DocumentError(f"could not read {Path(source).name}: {exc}") from exc
+    if hashlib.sha256(data).hexdigest()[:16] != rendition.digest:
+        raise DocumentError(f"{Path(source).name} changed on disk while aish was reading it")
+    return data
+
+
+def _scan_chunk(chunk: str, facts: PageFacts, text: str | None, kind: str = "pdf") -> str:
     """`chunk` (a scan page as stored) with its note replaced to say what
     recognition found. The note is always the paragraph right after the page
     marker; whatever follows it — stray text-layer characters, a table
     continuation note — is kept as it was."""
+    _unread, said_text, said_none, said_failed = _NOTES.get(kind, _NOTES["pdf"])
     marker, _note, *rest = chunk.split("\n\n") + [""] * 2
     rest = [part for part in rest if part]
     if facts.ocr == "text" and text:
         n = facts.number
-        body = [SCAN_OCR_TEXT, f"{_OCR_OPEN.format(number=n)}\n{defuse(text)}\n"
+        body = [said_text, f"{_OCR_OPEN.format(number=n)}\n{defuse(text)}\n"
                 f"{_OCR_CLOSE.format(number=n)}"]
     elif facts.ocr == "none":
-        body = [SCAN_OCR_NONE]
+        body = [said_none]
     else:
-        body = [SCAN_OCR_FAILED.format(attempts=facts.ocr_attempts, error=facts.ocr_error)]
+        body = [said_failed.format(attempts=facts.ocr_attempts, error=facts.ocr_error)]
     return "\n\n".join([marker, *body, *rest])
 
 
@@ -1067,13 +1222,22 @@ def _store_recognised(current: Rendition, batch: ocr.Batch) -> Rendition | None:
         elif number in batch.failed:
             text = ""
             facts = dataclasses.replace(
-                facts, ocr="failed", ocr_attempts=facts.ocr_attempts + 1,
+                facts, ocr="failed",
+                # A file macOS cannot decode fails the same way every time.
+                ocr_attempts=(
+                    OCR_MAX_ATTEMPTS if number in batch.final else facts.ocr_attempts + 1
+                ),
                 ocr_error=batch.failed[number],
             )
         else:
             continue
+        if shape := batch.shape.get(number):
+            facts = dataclasses.replace(
+                facts, width=shape.get("width", 0), height=shape.get("height", 0),
+                frames=shape.get("frames", 0),
+            )
         pages[index] = facts
-        chunks[index] = _scan_chunk(chunks[index], facts, text)
+        chunks[index] = _scan_chunk(chunks[index], facts, text, str(meta.get("kind") or "pdf"))
         changed = True
     if not changed:
         return _read_cached(current.path, current.source)
@@ -1296,6 +1460,105 @@ def summary(rendition: Rendition, *, pictures: bool) -> str:
     return "\n".join(lines)
 
 
+# The dead end's instruction, on every backend: a text-only Ollama model is
+# declared picture-capable by MEDIA_SUPPORT (docs: "Not built"), and a dead end
+# without it is where the shell OCR started — tesseract and brew install for a
+# scanned PDF, `sips` for a photo.
+NO_SHELL_OCR = (
+    " You MUST NOT try to read them another way — no tesseract, no brew "
+    "install, no sips, no convert or any other shell OCR. Tell the user which {what} "
+    "could not be read, and why."
+)
+
+
+def picture_summary(rendition: Rendition, *, pictures: bool, showable: bool = True) -> str:
+    """The map of a picture file: what it is and what became of its words —
+    read, none found, failed (with the error) or not read (with this call's
+    reason) — and anything known to make a read incomplete. The picture
+    counterpart of `summary`, emitted first for the same reason: it is what
+    tells a complete read from a partial one.
+
+    `pictures` is whether the model reading it takes picture input (the
+    caller's `Agent._takes_pictures`), and `showable` whether show_image can
+    hand this file over at all (its format and size): looking at the picture
+    is offered only when both hold; otherwise the map says what that leaves
+    unknowable."""
+    page = rendition.pages[0]
+    kind = rendition.picture_format or "image"
+    if page.width and page.height:
+        kind += f", {page.width}×{page.height} pixels"
+    what = f"{rendition.source} — a picture ({kind})"
+    if page.ocr == "text":
+        lines = [
+            f"{what}, {page.ocr_chars:,} characters recognised by aish's OCR.",
+            "  words read by aish's OCR (machine-recognised, may contain errors; in "
+            "the text between the OCR lines). Do NOT pair a value with a label by "
+            "its position in that text: the order is the recognizer's, not the page's.",
+        ]
+    elif page.ocr == "none":
+        lines = [
+            f"{what}.",
+            "  aish's OCR found no words in it — it may have none, or words the "
+            "recognizer could not find; aish has not established which",
+        ]
+    elif page.ocr == "failed":
+        lines = [
+            f"{what}.",
+            f"  OCR FAILED — {page.ocr_error}"
+            + (" (not tried again)" if page.ocr_final else " (tried again on the next read)"),
+        ]
+    else:
+        lines = [
+            f"{what}.",
+            "  NOT READ — "
+            + (rendition.unread_reason or "text recognition was not run in this read"),
+        ]
+    if page.ocr in ("text", "none"):
+        if max(page.width, page.height) > OCR_COMPLETE_PIXELS:
+            lines.append(
+                f"  INCOMPLETE READ LIKELY: this picture is over {OCR_COMPLETE_PIXELS:,} "
+                "pixels on its long side. On a test picture 1200 pixels wide, aish "
+                f"measured every line read up to {OCR_COMPLETE_PIXELS:,} pixels tall and "
+                "only 20 of 30 lines at 8,000, with no error — words may be missing here."
+            )
+        if page.frames > 1:
+            lines.append(
+                f"  It holds {page.frames} frames; aish's OCR read only the first."
+            )
+        if rendition.incomplete:
+            lines.append(
+                "  The file is cut short (it stops before its end marker), so its "
+                "words may be partial."
+            )
+    if pictures and showable:
+        lines.append(
+            "  To look at the picture itself (tick boxes, signatures, layout), call "
+            "show_image on it."
+        )
+    elif pictures:
+        lines.append(
+            "  show_image cannot hand this file to you (it takes PNG, JPEG, GIF or "
+            f"WebP up to {media.IMAGE_MAX_BYTES // (1024 * 1024)} MB), so tick "
+            "boxes, signatures and layout cannot be checked from here: if the "
+            "answer depends on them, say so."
+        )
+    elif page.ocr == "text":
+        lines.append(
+            "  This model takes no picture input, so tick boxes, signatures and layout "
+            "cannot be checked from here: if the answer depends on them, say so."
+        )
+    else:
+        lines.append(
+            "  This model takes no picture input, so what the picture shows cannot be "
+            "known from here: do NOT describe it."
+        )
+    if page.ocr == "failed" or not page.ocr:
+        lines.append(
+            "  Its words are NOT in the text below." + NO_SHELL_OCR.format(what="picture")
+        )
+    return "\n".join(lines)
+
+
 def _scan_lines(rendition: Rendition, pictures: bool) -> list[str]:
     """The map's account of the scanned pages: which have words aish's OCR
     read, which it found empty, which failed, which are not read — and, by
@@ -1337,9 +1600,7 @@ def _scan_lines(rendition: Rendition, pictures: bool) -> list[str]:
             "back as a picture."
         )
     if failed or unread:
-        # On EVERY backend, not only a no-vision one: a text-only Ollama model
-        # is declared picture-capable by MEDIA_SUPPORT (docs: "Not built"), and
-        # a dead end without this line is where the shell OCR started.
+        # On EVERY backend, not only a no-vision one (see NO_SHELL_OCR).
         lines.append(
             "    The words of the OCR FAILED / NOT READ pages are NOT in the text below."
             + (
@@ -1348,8 +1609,6 @@ def _scan_lines(rendition: Rendition, pictures: bool) -> list[str]:
                 else " This model takes no picture input, so pages= cannot show them "
                 "to you either."
             )
-            + " You MUST NOT try to read them another way — no tesseract, no brew "
-            "install, no convert or any other shell OCR. Tell the user which pages "
-            "could not be read, and why."
+            + NO_SHELL_OCR.format(what="pages")
         )
     return lines

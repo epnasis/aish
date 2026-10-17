@@ -38,6 +38,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import provenance
+
 # Exactly the formats the web UI serves (server.IMAGE_TYPES) and the terminal
 # renderer accepts (backends.IMAGE_SUFFIXES). SVG is deliberately absent: it
 # executes scripts when opened full-size.
@@ -150,7 +152,12 @@ def prune(
     max_bytes = MEDIA_MAX_BYTES if max_bytes is None else max_bytes
     max_files = MEDIA_MAX_FILES if max_files is None else max_files
     try:
-        files = [p for p in Path(media_dir).iterdir() if p.is_file()]
+        # A provenance record is part of the picture it describes, never an
+        # entry of its own (documents.prune's rule, #314): counting one would
+        # halve the store, and evicting one alone would un-attribute a picture.
+        files = [
+            p for p in Path(media_dir).iterdir() if p.is_file() and not provenance.is_record(p)
+        ]
     except OSError:
         return []
     entries = []
@@ -170,6 +177,7 @@ def prune(
             path.unlink()
         except OSError:
             continue
+        provenance.forget_artefact(path)
         total -= size
         removed.append(path)
     return removed

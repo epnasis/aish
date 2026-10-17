@@ -5382,6 +5382,12 @@ class TestThinkingStatus:
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 
 
+def _pictures_in(store):
+    """The pictures in a media store, without the provenance record beside
+    each one."""
+    return (p for p in sorted(store.iterdir()) if not p.name.endswith(".src"))
+
+
 class TestShowImage:
     """#188: displaying a picture is a capability, not five primitives the model
     reassembles blind. Every failure comes back DURING the turn as a sentence the
@@ -5426,7 +5432,7 @@ class TestShowImage:
     ):
         agent, result, asked = self._run(tmp_path, monkeypatch, (PNG_BYTES, "image/png"))
         assert asked == ["https://ex.com/a.jpg"]
-        stored = list((tmp_path / "media").iterdir())
+        stored = list(_pictures_in(tmp_path / "media"))
         assert len(stored) == 1 and stored[0].read_bytes() == PNG_BYTES
         assert f"![a phone]({stored[0]})" in result
 
@@ -5442,7 +5448,7 @@ class TestShowImage:
             source="https://i.ytimg.com/vi/lqltp2QaT30/hqdefault.jpg",
             caption="Ukraine hit Wildberries again",
         )
-        stored = next((tmp_path / "media").iterdir())
+        stored = next(_pictures_in(tmp_path / "media"))
         assert (
             f"[![Ukraine hit Wildberries again]({stored})]"
             "(https://www.youtube.com/watch?v=lqltp2QaT30)"
@@ -5458,7 +5464,7 @@ class TestShowImage:
             tmp_path, monkeypatch, (PNG_BYTES, "image/png"),
             source="https://example.com/vi/lqltp2QaT30/hqdefault.jpg",
         )
-        stored = next((tmp_path / "media").iterdir())
+        stored = next(_pictures_in(tmp_path / "media"))
         assert result.endswith(f"![a phone]({stored})")
         assert "youtube.com" not in result
 
@@ -5466,7 +5472,7 @@ class TestShowImage:
         """A store that put the file somewhere no renderer serves from would just
         move the silent failure to render time."""
         agent, result, _ = self._run(tmp_path, monkeypatch, (PNG_BYTES, "image/png"))
-        stored = next((tmp_path / "media").iterdir())
+        stored = next(_pictures_in(tmp_path / "media"))
         roots = [Path(r).resolve() for r in agent.workspace_roots()]
         assert any(stored.resolve().is_relative_to(r) for r in roots)
 
@@ -5691,7 +5697,7 @@ class TestToolMedia:
         thing that was asked for."""
         agent = self._fetching_agent(tmp_path, monkeypatch)
         agent.run_task("show me")
-        stored = next((tmp_path / "media").iterdir())
+        stored = next(_pictures_in(tmp_path / "media"))
         delivered = self._delivered(agent)
         assert len(delivered) == 1
         assert delivered[0]["images"] == [str(stored)]
@@ -10352,6 +10358,203 @@ class TestReadPdfScansByModel:
         assert agent._egress_novel_hosts("read_pdf", {"source": "https://x.test/a.pdf"}) == [
             "x.test"
         ]
+
+
+class TestReadPicture:
+    """A replay of the BMW-insurance task on the no-vision local model: the
+    policy arrived as four iPhone JPEGs, read_file returned each as 72 KB of
+    decoded binary five times, the model then described a photo it never read
+    and tried `sips`. read_file on a picture now returns aish's OCR of it,
+    through the same rendition store and recognizer as a scanned PDF page."""
+
+    JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + bytes(range(256)) * 4
+
+    @pytest.fixture
+    def recognised(self, monkeypatch):
+        from aish import ocr
+
+        handed = []
+
+        def fake(pictures, should_stop=None):
+            handed.append(dict(pictures))
+            return ocr.Batch(text={n: "PZU Auto OC\nSkładka łączna 3 091,00 zł" for n in pictures})
+
+        monkeypatch.setattr(agent_module.documents.ocr, "unavailable_reason", lambda: None)
+        monkeypatch.setattr(agent_module.documents.ocr, "recognise", fake)
+        return handed
+
+    def _run(self, tmp_path, calls, provider="no-vision-backend", **kwargs):
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call(name, **args)]) for name, args in calls]
+            + [model_says("ok")],
+            state_dir=tmp_path / "state",
+            cwd=str(tmp_path),
+            **kwargs,
+        )
+        agent.provider = provider
+        agent.run_task("read it")
+        return agent, [m["content"] for m in tool_messages(agent.messages)]
+
+    def _photo(self, tmp_path, name="IMG_6231.jpg"):
+        path = tmp_path / name
+        path.write_bytes(self.JPEG)
+        return path
+
+    def test_read_file_on_a_photo_returns_its_ocr_not_its_bytes(self, tmp_path, recognised):
+        photo = self._photo(tmp_path)
+        _agent, [result] = self._run(
+            tmp_path,
+            [("read_file", {"path": str(photo)})],
+            approve_read=lambda _p, _r: pytest.fail("a picture in the project must not prompt"),
+        )
+        assert result.startswith("IMG_6231.jpg — a picture (JPEG), ")
+        assert "--- OCR text, page 1 ---\nPZU Auto OC\nSkładka łączna 3 091,00 zł\n" in result
+        assert "JFIF" not in result and "�" not in result
+        assert recognised == [{1: self.JPEG}]
+
+    def test_the_bytes_decide_not_the_name(self, tmp_path, recognised):
+        disguised = self._photo(tmp_path, "scan.txt")
+        text = tmp_path / "notes.jpg"
+        text.write_text("just words\n")
+        _agent, [picture, plain] = self._run(
+            tmp_path,
+            [("read_file", {"path": str(disguised)}), ("read_file", {"path": str(text)})],
+        )
+        assert "aish's OCR" in picture
+        assert plain.strip() == "1  just words"
+
+    def test_no_recognizer_is_a_stated_dead_end_that_forbids_sips(self, tmp_path):
+        photo = self._photo(tmp_path)
+        _agent, [result] = self._run(tmp_path, [("read_file", {"path": str(photo)})])
+        assert "NOT READ — text recognition is turned off here (AISH_OCR=0)" in result
+        assert "You MUST NOT try to read them another way" in result and "no sips" in result
+        assert "JFIF" not in result
+
+    def test_what_follows_depends_on_whether_the_model_can_look(self, tmp_path, recognised):
+        photo = self._photo(tmp_path)
+        _agent, [blind] = self._run(tmp_path, [("read_file", {"path": str(photo)})])
+        _agent, [sighted] = self._run(
+            tmp_path / "v", [("read_file", {"path": str(photo)})], provider="ollama"
+        )
+        assert "takes no picture input" in blind and "show_image" not in blind
+        assert "call show_image on it" in sighted and "takes no picture input" not in sighted
+
+    def test_a_mail_photo_is_bannered_and_so_is_its_rendition(self, tmp_path, recognised):
+        """#319's laundering guard: the words of a picture from outside must
+        not come back through the document store as this machine's own."""
+        agent, chat = make_agent([], cwd=str(tmp_path), state_dir=tmp_path / "state")
+        agent.provider = "no-vision-backend"
+        agent.tool_downloads_dir.mkdir(parents=True, exist_ok=True)
+        photo = agent.tool_downloads_dir / "IMG_6230.jpg"
+        photo.write_bytes(self.JPEG)
+        chat.responses = [
+            model_says(tool_calls=[tool_call("read_file", path=str(photo))]),
+            model_says("ok"),
+        ]
+        agent.run_task("read the attachment")
+        served = tool_messages(agent.messages)[-1]["content"]
+        assert agent_module.web.UNTRUSTED_NOTE in served and "PZU Auto OC" in served
+        rendition = next(agent.documents_dir.glob("*.md"))
+        assert agent._reads_outside_content(str(rendition)) is True
+
+    def test_a_local_photo_rendition_is_not_outside_content(self, tmp_path, recognised):
+        photo = self._photo(tmp_path)
+        agent, _ = self._run(tmp_path, [("read_file", {"path": str(photo)})])
+        rendition = next(agent.documents_dir.glob("*.md"))
+        assert agent._reads_outside_content(str(rendition)) is False
+
+    def test_a_denied_read_never_opens_the_file(self, tmp_path, recognised, monkeypatch):
+        """Whether the bytes are a picture is decided when the read RUNS, after
+        the read gate — never while the call is prepared."""
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        photo = self._photo(outside)
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.setattr(
+            agent_module.Agent, "_picture_at",
+            lambda self, path: pytest.fail("opened before the read gate answered"),
+        )
+        _agent, [result] = self._run(
+            project, [("read_file", {"path": str(photo)})],
+            approve_read=lambda _p, _r: False,
+        )
+        assert result == agent_module.READ_DENIED
+        assert recognised == []
+
+    def test_read_pdf_on_a_photo_reads_it_instead_of_refusing(self, tmp_path, recognised):
+        photo = self._photo(tmp_path)
+        _agent, [result] = self._run(tmp_path, [("read_pdf", {"source": str(photo)})])
+        assert "not a PDF" not in result
+        assert "Składka łączna 3 091,00 zł" in result
+
+    def test_show_image_on_a_blind_model_names_the_read_that_gets_the_words(
+        self, tmp_path, monkeypatch
+    ):
+        """The file the model named, when it is local — not the media copy."""
+        photo = self._photo(tmp_path)
+        _agent, [result] = self._run(tmp_path, [("show_image", {"source": str(photo)})])
+        assert f'read_file(path="{photo}")' in result
+        assert "YOU cannot see it" in result
+
+    def test_a_fetched_pictures_media_copy_is_outside_content(
+        self, tmp_path, monkeypatch, recognised
+    ):
+        """Design review, blocker 1: once read_file OCRs pictures, a fetched
+        picture's copy in the media store was a door for its words to come
+        back unbannered, in a later chat as easily as this one."""
+        monkeypatch.setattr(
+            agent_module.web, "fetch_binary", lambda url, max_bytes: (self.JPEG, "image/jpeg")
+        )
+        agent, [shown] = self._run(
+            tmp_path, [("show_image", {"source": "https://ex.test/policy.jpg"})]
+        )
+        copy = next(p for p in agent.media_dir.iterdir() if p.suffix == ".jpg")
+        assert f'read_file(path="{copy}")' in shown
+        assert agent._reads_outside_content(str(copy)) is True
+        later, chat = make_agent([], cwd=str(tmp_path), state_dir=tmp_path / "state")
+        later.provider = "no-vision-backend"
+        chat.responses = [
+            model_says(tool_calls=[tool_call("read_file", path=str(copy))]), model_says("ok")
+        ]
+        later.run_task("what does it say")
+        served = tool_messages(later.messages)[-1]["content"]
+        assert agent_module.web.UNTRUSTED_NOTE in served and "PZU Auto OC" in served
+        assert later._tainted is True
+
+    def test_a_local_pictures_media_copy_stays_local(self, tmp_path, recognised):
+        photo = self._photo(tmp_path)
+        agent, _ = self._run(tmp_path, [("show_image", {"source": str(photo)})])
+        copy = next(p for p in agent.media_dir.iterdir() if p.suffix == ".jpg")
+        assert agent._reads_outside_content(str(copy)) is False
+
+    def test_read_pdf_refuses_an_evidence_frame_before_reading_it(
+        self, tmp_path, recognised, monkeypatch
+    ):
+        """Design review, blocker 2: read_pdf became a picture door, and a
+        frame went straight to OCR, reopening #318."""
+        agent, _ = make_agent([], cwd=str(tmp_path), state_dir=tmp_path / "state")
+        frame = tmp_path / "frame.png"
+        frame.write_bytes(PNG_BYTES)
+        monkeypatch.setattr(agent, "_is_evidence_frame", lambda path: path == str(frame))
+        result = agent._read_pdf(str(frame), "", "")
+        assert result.startswith("NOT EXECUTED") and "evidence-frame store" in result
+        assert recognised == []
+
+    def test_offset_and_limit_are_said_not_to_apply(self, tmp_path, recognised):
+        photo = self._photo(tmp_path)
+        _agent, [result] = self._run(
+            tmp_path, [("read_file", {"path": str(photo), "offset": 1, "limit": 50})]
+        )
+        assert "limit do(es) not apply to a picture" in result
+        assert "PZU Auto OC" in result
+
+    def test_read_file_on_a_pdf_returns_its_map_not_its_bytes(self, tmp_path):
+        """The same failure for a PDF: decoded bytes in place of the document."""
+        pdf = TestReadPdf._pdf(None, tmp_path, name="policy.bin")
+        _agent, [result] = self._run(tmp_path, [("read_file", {"path": str(pdf)})])
+        assert result.startswith("policy.bin — 1 page,")
+        assert "badgers" in result and "%PDF" not in result
 
 
 class TestThePressedLabelIsScrubbed:
@@ -16337,7 +16540,7 @@ class TestImageCheck:
 
     @staticmethod
     def _stored(tmp_path):
-        return next((tmp_path / "media").iterdir())
+        return next(_pictures_in(tmp_path / "media"))
 
     @staticmethod
     def _asks(agent):

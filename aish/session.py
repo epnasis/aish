@@ -547,8 +547,8 @@ ATTACHMENT_HINTS = {
         "search or a scanned page"
     ),
     "": (
-        " — NOT delivered to you: read text with read_file, binaries with shell "
-        "tools; you cannot see an image sent this way, so say so if asked to "
+        " — NOT delivered to you: read_file reads text, and a picture's words by "
+        "OCR; you cannot see an image sent this way, so say so if asked to "
         "describe it"
     ),
 }
