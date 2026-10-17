@@ -174,13 +174,13 @@ The PDF path had OCR. A picture had none.
 **The door is the one the model already used: `read_file`.** If a file's BYTES are a picture, `read_file` now returns aish's OCR of it, map first, instead of decoded binary.
 - Recognised formats: PNG, JPEG, GIF, WebP, HEIC/HEIF/AVIF and TIFF (`ocr.picture_format`, by magic bytes, never the extension). BMP is left out on purpose: its magic is `BM`, which a text file about a BMW also starts with. Across 413 picture files on this machine the check had no false hits.
 - There is no new tool. The menu grows by one clause in `read_file`'s description.
-- `read_file` on a PDF's bytes, which was the same failure, now returns `read_pdf`'s map and text.
+- `read_file` on a PDF's bytes, which was the same failure, now returns `read_pdf`'s map and text. It passes `section=` through, says that `offset`/`limit` do not apply, and does not ask the roots question a second time: the read gate already answered it, so an approved read of a PDF outside the roots is served (delivery review: it came back as an ERROR).
 - The decision is made when the read runs, after the read gate, so a file is never opened before the owner has said yes to reading it (`test_a_denied_read_never_opens_the_file`).
 - `read_pdf` given a local picture serves the same read instead of "not a PDF", which was a dead end. Like `read_file`, it first refuses an evidence frame and the tool-output cache. The design review showed a frame going straight to OCR there, which reopened #318.
 - `show_image` on a model that takes no pictures names the exact `read_file` call that gets the words (`SHOW_IMAGE_UNSEEN`): the path the model passed when it was local, otherwise the stored copy. It does not OCR inline, because most `show_image` calls are product photos and charts and each one would pay for a recognition.
 - The two other sentences that a no-vision model reads about pictures say the same thing:
   - the note sent after `show_image` (`TOOL_MEDIA_PASTE_ANYWAY`);
-  - the hint on an image the owner uploads to such a backend (`session.ATTACHMENT_HINTS[""]`), which used to say "binaries with shell tools".
+  - the hint on an image the owner uploads to such a backend (`session.ATTACHMENT_HINTS[""]`), which used to say "binaries with shell tools". The old text is kept in `_RETIRED_HINTS` so it still strips: a stored `task_start` prompt carries it, and restart recovery re-issues that prompt.
 
 `TestPictureFormat`, `TestReadPicture`.
 
@@ -197,9 +197,9 @@ Before recognition the bytes are hashed again. A file changed on disk since conv
 - NOT READ, with this call's reason.
 
 It also says what it knows can make a read incomplete. The child probes each file with ImageIO before recognising it, and reports:
-- **the pixel size.** Above 6000 pixels on the long side (`OCR_COMPLETE_PIXELS`), the map says INCOMPLETE READ LIKELY. On a generated picture 1,200 px wide with 30 lines of ~36 px text, Vision read 30/30 lines at 3,000, 5,000 and 6,000 px tall, then 20/30 at 8,000, 13/30 at 10,000 and 11/30 at 12,000, with no error.
-- **the frame count.** An animation is read from its first frame only, and the map says so.
-- **a file macOS cannot decode at all.** Vision called such a file a "zero-dimensioned image", which reads like a transient fault. It is now a final failure ("macOS could not decode this file as a picture"), not retried.
+- **the pixel size.** A picture more than 1.5 times as tall as it is wide is read in square bands that overlap by a fifth, top to bottom (`ocr.bands_for`), each line kept by the one band whose own stretch holds its centre. Read whole, generated pages 1,200 px wide lost lines with no error: 30 lines of 14 px text came back 30/30 at 1,500 px tall and 0/30 at 3,000; 36 px text 8/30 at 8,000 and 3/30 at 24,000. The same set read whole was not even repeatable (one 1,200×6,000 page gave 30/30 in one layout and 0/30 in another). Banded, through the real worker: 30/30 at every size tried (14 px at 1,500, 3,000 and 6,000; 22 px at 3,500 and 5,000; 36 px at 6,000, 8,000, 12,000 and 24,000), no line duplicated, in order; 11.7 s for the 24,000 px page. Wide pictures are NOT banded, because a band edge would cut a line in two, and generated wide pages lost lines read whole (36 px text: 30/30 at 2,000×1,200, 29/30 at 4,000, 0/30 at 8,000; 14 px: 26/30 at 2,000, 0/30 at 4,000), so the map says WORDS MAY BE MISSING on a picture more than 1.5 times as wide as tall. Past `MAX_BANDS` (40) the bands grow taller than square, which is not measured. `TestBands`.
+- **the image count.** A file holding more than one image is read from the first only, and the map says so. The count includes the same picture stored at other sizes (multi-resolution TIFFs, a dynamic HEIC wallpaper), so the sentence names both.
+- **a file macOS cannot open as a picture.** Vision called such a file a "zero-dimensioned image", which reads like a transient fault. When ImageIO reports no picture size, it is a failure that is final after its ONE attempt (`PageFacts.ocr_permanent`) and says one attempt: the first version set the attempt count to the maximum and the page then claimed two failures after one try.
 
 A JPEG, PNG or GIF whose bytes stop before the format's end marker is "cut short", and its words may be partial. In review, a JPEG cut to a third gave 492 of about 3,000 characters with no error. None of the 413 pictures on this machine was flagged.
 
@@ -210,7 +210,7 @@ What follows depends on whether the model can look, and on whether `show_image` 
 - **It can look, but `show_image` cannot take the file:** the map says those cannot be checked from here.
 - **It cannot look:** the map says the same. If no words were found, it also says not to describe the picture.
 
-**Provenance.** The rendition's `.src` record says `outside` exactly when the picture itself reads as outside content (`_picture_origin`). The media store is now an outside-populated, record-reading store, and `show_image` records what each copy is. Without that, a fetched picture's words came back through its media copy unbannered and untainted, in a later chat as easily as this one (design review, blocker 1). A copy with no record reads as outside, which is the safe direction. That covers every copy stored before this change and every rasterised PDF page. `media.prune` treats a record as part of its picture. `test_a_fetched_pictures_media_copy_is_outside_content`, `test_a_mail_photo_is_bannered_and_so_is_its_rendition`.
+**Provenance.** The rendition's `.src` record says `outside` exactly when the picture itself reads as outside content (`_picture_origin`). The media store is now an outside-populated, record-reading store, and every write site records what each copy is (`Agent._record_picture`): `show_image` (outside when its source was), `read_media` frames (outside when the recording was), and `read_pdf`'s page pictures (outside when the PDF was). Without that, a fetched picture's words came back through its media copy unbannered and untainted, in a later chat as easily as this one (design review, blocker 1). A copy with no record — every one stored before this change — reads as outside, the safe direction, and is described as "a picture aish stored; where its bytes came from was not recorded" (`UNRECORDED_PICTURE`) rather than as something read elsewhere, which nothing established. `media.prune` treats a record as part of its picture. `test_a_fetched_pictures_media_copy_is_outside_content`, `test_a_mail_photo_is_bannered_and_so_is_its_rendition`.
 
 ### How the words are laid out: the recognizer's order, and why rows were rejected
 
@@ -260,7 +260,7 @@ Also rejected:
 ### Bounds, and not built
 
 - **The 50 MB cap** (`PICTURE_MAX_BYTES`) is not measured against a failure. The largest picture measured was 2.9 MB. The bound only keeps an arbitrary file from being loaded whole to be hashed.
-- **No tiling.** A picture past 6,000 px is read partly, and the map says so. Cutting it into overlapping bands would read it whole, but is not built.
+- **Wide pictures are not banded.** The map warns instead; cutting a wide picture into columns would cut lines of text, and is not built.
 - **`offset`, `limit` and `section`.** They do not apply to a picture, and the result says so. The largest OCR text measured was 4,216 characters (a dense A4 scan page), and the result names the rendition for grep.
 - **Other binary files.** `read_file` on any binary file that is neither a picture nor a PDF still returns its bytes decoded as text. That is not addressed.
 - **Rules still assume an attachment was received.** `rules.reader_for_source` counts an owner's attached image as already in the model's context (`READER_PRESENT`) even on a backend that never received it. Not changed here.

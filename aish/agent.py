@@ -2010,6 +2010,15 @@ FRAMES_UNSEEN = (
     "{count} frame(s) were taken, but they are NOT attached for you — this model "
     "takes no picture input, so do not describe what is in them."
 )
+# A picture in the media store with no record beside it: stored before records
+# were written there, or by a path that writes none. Treated as outside — the
+# safe direction — without claiming a source nobody established.
+UNRECORDED_PICTURE = provenance.ArtefactSource(
+    tool="",
+    outside=True,
+    source="",
+    what="a picture aish stored; where its bytes came from was not recorded",
+)
 TOOL_MEDIA_EXPIRED = (
     "[aish: picture(s) from an earlier task were dropped from view to save "
     "context. Call the tool again if you need to look at them.]"
@@ -9672,18 +9681,9 @@ class Agent:
         # what it is: a fetched picture, or a mail attachment's copy, is
         # outside content wherever it is read back from (#319's rule).
         fetched = source.lower().startswith(("http://", "https://"))
-        outside = self._brings_outside_content("show_image", {"source": source})
-        provenance.record_artefact(
-            path,
-            provenance.ArtefactSource(
-                tool="show_image",
-                outside=outside,
-                source=source if fetched else "",
-                what=(
-                    "a picture from outside this machine" if outside
-                    else "a picture on this machine"
-                ),
-            ),
+        self._record_picture(
+            path, "show_image", self._brings_outside_content("show_image", {"source": source}),
+            source if fetched else "",
         )
         # Where the WORDS are read from, for a model that cannot look: the
         # file it named when that is local, else the stored copy.
@@ -9732,6 +9732,26 @@ class Agent:
             "your answer EXACTLY as written (do not alter the path):\n\n"
             + self._remember_shown(f"![{alt or 'image'}]({path})"),
             images=(str(path),),
+        )
+
+    @staticmethod
+    def _record_picture(path: Path, tool: str, outside: bool, source: str = "") -> None:
+        """Say beside a picture in the media store what it is. The store is
+        readable — read_file returns a picture's OCR — so a copy of outside
+        content must read as outside wherever it is read back from (#319's
+        rule), and a copy of the owner's own must not be bannered as foreign.
+        Every write site records; a copy with no record reads as outside."""
+        provenance.record_artefact(
+            path,
+            provenance.ArtefactSource(
+                tool=tool,
+                outside=outside,
+                source=source,
+                what=(
+                    "a picture from outside this machine" if outside
+                    else "a picture made on this machine"
+                ),
+            ),
         )
 
     def _remember_shown(self, line: str) -> str:
@@ -9889,6 +9909,9 @@ class Agent:
             except (ValueError, OSError) as exc:
                 lines.append(f"*(the frame at {stamp} could not be stored: {exc})*")
                 continue
+            self._record_picture(
+                path, "read_media", self._brings_outside_content("read_media", {"source": source})
+            )
             stored.append(str(path))
             # What is being SAID at that moment, when there are captions to
             # say it: a picture plus its line is what makes a moment legible,
@@ -10036,7 +10059,8 @@ class Agent:
     # --------------------------------------------------------------- PDFs (#219)
 
     def _read_pdf(
-        self, source: str, pages_spec: str, query: str, section: str = ""
+        self, source: str, pages_spec: str, query: str, section: str = "",
+        resolved: Path | None = None,
     ) -> str:
         """Read a PDF as text, with what the document IS stated before any of it.
 
@@ -10049,7 +10073,9 @@ class Agent:
         source = source.strip()
         if not source:
             return "ERROR: read_pdf needs a source (a path to a PDF, or its URL)."
-        path, problem = self._resolve_pdf(source)
+        # `resolved` is read_file's: its own gate has already decided this
+        # path may be read, so the roots check is not asked twice.
+        path, problem = (resolved, None) if resolved is not None else self._resolve_pdf(source)
         if problem is not None:
             return f"ERROR: {problem}"
         # read_file refuses these two before it opens anything; read_pdf must
@@ -10154,16 +10180,24 @@ class Agent:
         prepared: the file is not opened before the read gate has had its say."""
         target = files.resolve(path, self.cwd)
         head = self._head_of(target)
+        lines_asked = [
+            name for name, given in
+            (("offset", offset > 1), ("limit", limit != files.READ_MAX_LINES))
+            if given
+        ]
         if head.startswith(b"%PDF"):
-            return self._read_pdf(str(target), "", "", "")
+            served = self._read_pdf(str(target), "", "", section, resolved=target)
+            if lines_asked:
+                served += (
+                    f"\n\n({' and '.join(lines_asked)} do(es) not apply to a PDF: read "
+                    "it by page with read_pdf(pages=…), or read_file the rendition named "
+                    "above.)"
+                )
+            return served
         if ocr.picture_format(head) is not None:
-            asked = [
-                name for name, given in
-                (("offset", offset > 1), ("limit", limit != files.READ_MAX_LINES),
-                 ("section", bool(section)))
-                if given
-            ]
-            return self._read_picture(target, ignored=asked)
+            return self._read_picture(
+                target, ignored=lines_asked + (["section"] if section else [])
+            )
         return files.read_file(path, self.cwd, offset=offset, limit=limit, section=section)
 
     @staticmethod
@@ -10411,6 +10445,9 @@ class Agent:
             try:
                 data = documents.page_png(path, number)
                 stored = media.store(data, self.media_dir, f"{rendition.source} p{number}")
+                self._record_picture(
+                    stored, "read_pdf", self._reads_outside_content(str(path))
+                )
             except (documents.DocumentError, ValueError, OSError) as exc:
                 out.append(f"*(page {number} could not be rendered as an image: {exc})*")
                 continue
@@ -12731,6 +12768,10 @@ class Agent:
                     return provenance.UNKNOWN_ARTEFACT
                 target = files.resolved(path, self.cwd)
                 found = provenance.artefact_source(target) if target else None
+                if found is None and store == self.media_dir:
+                    # Outside by default, but not said to come from anywhere:
+                    # nothing recorded where an unrecorded picture came from.
+                    return UNRECORDED_PICTURE
                 return found or provenance.UNKNOWN_ARTEFACT
         return None
 

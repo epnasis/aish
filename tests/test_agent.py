@@ -10549,6 +10549,45 @@ class TestReadPicture:
         assert "limit do(es) not apply to a picture" in result
         assert "PZU Auto OC" in result
 
+    def test_an_approved_read_of_a_pdf_outside_the_roots_is_served(self, tmp_path):
+        """Delivery review: read_file's own gate already said yes; read_pdf's
+        roots check must not then refuse the same file."""
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        pdf = TestReadPdf._pdf(None, outside, name="policy.pdf")
+        project = tmp_path / "project"
+        project.mkdir()
+        _agent, [result] = self._run(
+            project, [("read_file", {"path": str(pdf)})], approve_read=lambda _p, _r: True
+        )
+        assert result.startswith("policy.pdf — 1 page,") and "badgers" in result
+
+    def test_read_file_on_a_pdf_passes_section_and_says_what_does_not_apply(self, tmp_path):
+        pdf = TestReadPdf._pdf(None, tmp_path, name="policy.pdf")
+        _agent, [offset, section] = self._run(tmp_path, [
+            ("read_file", {"path": str(pdf), "offset": 40}),
+            ("read_file", {"path": str(pdf), "section": "Terms"}),
+        ])
+        assert "offset do(es) not apply to a PDF" in offset
+        assert "no section called 'Terms'" in section
+
+    def test_an_unrecorded_media_picture_claims_no_source(self, tmp_path):
+        agent, _ = make_agent([], cwd=str(tmp_path), state_dir=tmp_path / "state")
+        agent.media_dir.mkdir(parents=True, exist_ok=True)
+        old = agent.media_dir / "0123456789ab-old.png"
+        old.write_bytes(PNG_BYTES)
+        record = agent._artefact_source(str(old))
+        assert record.outside is True
+        assert "was not recorded" in record.what and "elsewhere" not in record.what
+
+    def test_a_local_pdfs_page_picture_is_recorded_local(self, tmp_path, monkeypatch):
+        pdf = TestReadPdf._pdf(None, tmp_path, scan_page=True)
+        agent, _ = self._run(
+            tmp_path, [("read_pdf", {"source": str(pdf), "pages": "2"})], provider="ollama"
+        )
+        page = next(p for p in agent.media_dir.iterdir() if p.suffix == ".png")
+        assert agent._reads_outside_content(str(page)) is False
+
     def test_read_file_on_a_pdf_returns_its_map_not_its_bytes(self, tmp_path):
         """The same failure for a PDF: decoded bytes in place of the document."""
         pdf = TestReadPdf._pdf(None, tmp_path, name="policy.bin")

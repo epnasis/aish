@@ -83,7 +83,9 @@ _HEIF_BRANDS: dict[bytes, tuple[str, str]] = {
 }
 
 
-UNDECODABLE = "macOS could not decode this file as a picture"
+UNDECODABLE = (
+    "macOS could not open this file as a picture (it reported no picture size)"
+)
 
 
 class OcrUnavailable(Exception):
@@ -260,6 +262,42 @@ def _parse(
     return text, failed, engine, shape, final
 
 
+# A picture taller than this many times its width is read in bands. Read whole,
+# generated pages 1,200 px wide lost lines with no error: 30 lines of 14 px text
+# read 30/30 at 1,500 px tall and 0/30 at 3,000; of 36 px text, 8/30 at 8,000
+# and 3/30 at 24,000. Read in square bands overlapping by a fifth, the same
+# pages gave 30/30, 30/30 and 30/30 (docs/documents-and-pdf.md, "Pictures").
+BAND_ASPECT = 1.5
+BAND_OVERLAP = 0.2
+MAX_BANDS = 40
+
+
+def bands_for(width: int, height: int) -> list[tuple[float, float, float, float]]:
+    """(top, size, keep_from, keep_to) for each band of a picture, as
+    fractions of its height from the top. One band covering everything unless
+    the picture is tall; then square bands, each overlapping the next by
+    BAND_OVERLAP, each keeping the lines centred in its own stretch so a line
+    in an overlap is kept exactly once. Pure, so it is tested on any platform."""
+    if width <= 0 or height <= width * BAND_ASPECT:
+        return [(0.0, 1.0, 0.0, 1.0)]
+    # Past MAX_BANDS square bands, bands grow taller instead (not measured).
+    size = max(width / height, 1.0 / (1.0 + (MAX_BANDS - 1) * (1.0 - BAND_OVERLAP)) + 1e-9)
+    step = size * (1.0 - BAND_OVERLAP)
+    tops: list[float] = []
+    top = 0.0
+    while True:
+        tops.append(min(top, 1.0 - size))
+        if top + size >= 1.0:
+            break
+        top += step
+    bands = []
+    for index, start in enumerate(tops):
+        keep_from = 0.0 if index == 0 else (tops[index - 1] + size + start) / 2
+        keep_to = 1.0 if index == len(tops) - 1 else (start + size + tops[index + 1]) / 2
+        bands.append((start, size, keep_from, keep_to))
+    return bands
+
+
 # ------------------------------------------------------------------ the child
 
 
@@ -307,18 +345,32 @@ def _worker() -> None:
                 "height": height,
                 "frames": int(Quartz.CGImageSourceGetCount(source)),
             }
-            request = Vision.VNRecognizeTextRequest.alloc().init()
-            request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-            request.setUsesLanguageCorrection_(True)
-            handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
-            ok, error = handler.performRequests_error_([request], None)
-            if not ok:
-                raise RuntimeError(str(error))
+            bands = bands_for(width, height)
+            shape["bands"] = len(bands)
             lines = []
-            for observation in request.results() or []:
-                candidates = observation.topCandidates_(1)
-                if candidates:
-                    lines.append(str(candidates[0].string()))
+            for top, size, keep_from, keep_to in bands:
+                request = Vision.VNRecognizeTextRequest.alloc().init()
+                request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+                request.setUsesLanguageCorrection_(True)
+                # Vision's rectangles start at the BOTTOM left.
+                # Clamped: float steps can land a hair outside [0, 1], which
+                # Vision refuses as a whole-page error.
+                bottom = min(max(0.0, 1.0 - top - size), 1.0 - size)
+                request.setRegionOfInterest_(((0.0, bottom), (1.0, size)))
+                handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
+                ok, error = handler.performRequests_error_([request], None)
+                if not ok:
+                    raise RuntimeError(str(error))
+                for observation in request.results() or []:
+                    # Boxes are relative to the region; a line is kept by the
+                    # one band whose own stretch holds its centre.
+                    box = observation.boundingBox()
+                    centre = top + (1.0 - box.origin.y - box.size.height / 2) * size
+                    if not keep_from <= centre < keep_to:
+                        continue
+                    candidates = observation.topCandidates_(1)
+                    if candidates:
+                        lines.append(str(candidates[0].string()))
             row = {"page": int(number), "text": "\n".join(lines), **shape}
         except Exception as exc:  # one bad page must not cost the others
             row = {"page": int(number), "error": f"{type(exc).__name__}: {exc}"}

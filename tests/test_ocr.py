@@ -188,6 +188,30 @@ def test_the_shape_and_an_undecodable_file_come_back(monkeypatch):
     assert batch.failed == {2: ocr.UNDECODABLE} and batch.final == {2}
 
 
+class TestBands:
+    """A tall picture is read in overlapping square bands; each line is kept
+    by exactly one band. Measured: whole-read generated pages lost up to all
+    30 lines; banded, 30/30 (docs/documents-and-pdf.md, "Pictures")."""
+
+    def test_an_ordinary_picture_is_one_band(self):
+        assert ocr.bands_for(3024, 4032) == [(0.0, 1.0, 0.0, 1.0)]
+        assert ocr.bands_for(4000, 1200) == [(0.0, 1.0, 0.0, 1.0)]  # wide: not banded
+
+    @pytest.mark.parametrize(("width", "height"), [(1200, 1801), (1200, 6000), (1320, 2868),
+                                                   (1200, 24000), (100, 100000)])
+    def test_bands_cover_the_picture_and_keep_each_line_once(self, width, height):
+        bands = ocr.bands_for(width, height)
+        assert 1 < len(bands) <= ocr.MAX_BANDS
+        assert bands[0][2] == 0.0 and bands[-1][3] == 1.0
+        pairs = zip(bands, bands[1:] + [None], strict=True)
+        for (top, size, keep_from, keep_to), following in pairs:
+            assert 0.0 <= top and top + size <= 1.0 + 1e-9
+            assert top <= keep_from < keep_to <= top + size + 1e-9  # keeps only what it saw
+            if following is not None:
+                assert keep_to == following[2]  # no gap, no double keep
+                assert following[0] < top + size  # the bands overlap
+
+
 class TestPictureFormat:
     """What the recognizer is handed is judged by its bytes, never its name."""
 

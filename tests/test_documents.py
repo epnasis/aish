@@ -1005,22 +1005,23 @@ class TestPictures:
         monkeypatch.setattr(documents.ocr, "recognise", lambda pictures, should_stop=None: batch)
         return documents.recognise_scans(documents.convert_picture(photo, store), photo)
 
-    def test_a_picture_too_large_to_be_read_whole_says_so(self, photo, store, monkeypatch):
-        """Measured: 30/30 lines up to 6,000 px tall, 20/30 at 8,000, no error."""
+    def test_a_wide_picture_says_words_may_be_missing(self, photo, store, monkeypatch):
+        """Measured: generated wide pictures, read whole, lost lines with no
+        error. Tall ones are read in bands and say nothing of the kind."""
         read = self._read_with(photo, store, monkeypatch, ocr.Batch(
-            text={1: "LINE 01"}, shape={1: {"width": 1200, "height": 8000, "frames": 1}},
+            text={1: "LINE 01"}, shape={1: {"width": 8000, "height": 1200, "frames": 1}},
         ))
         summary = documents.picture_summary(read, pictures=False)
-        assert "a picture (JPEG, 1200×8000 pixels)" in summary
-        assert "INCOMPLETE READ LIKELY" in summary
-        small = dataclasses_replace_page(read, height=documents.OCR_COMPLETE_PIXELS)
-        assert "INCOMPLETE" not in documents.picture_summary(small, pictures=False)
+        assert "a picture (JPEG, 8000×1200 pixels), 7 characters" in summary
+        assert "WORDS MAY BE MISSING" in summary
+        tall = dataclasses_replace_page(read, width=1200, height=8000)
+        assert "MISSING" not in documents.picture_summary(tall, pictures=False)
 
     def test_an_animation_says_only_its_first_frame_was_read(self, photo, store, monkeypatch):
         read = self._read_with(photo, store, monkeypatch, ocr.Batch(
             text={1: "FIRST FRAME"}, shape={1: {"width": 400, "height": 300, "frames": 2}},
         ))
-        assert "It holds 2 frames; aish's OCR read only the first." in documents.picture_summary(
+        assert "aish's OCR read only the first" in documents.picture_summary(
             read, pictures=False
         )
 
@@ -1041,7 +1042,9 @@ class TestPictures:
             failed={1: ocr.UNDECODABLE}, final=frozenset({1}),
         ))
         assert read.pages[0].ocr_final
-        assert "could not decode this file as a picture (not tried again)" in (
+        assert read.pages[0].ocr_attempts == 1  # final after one try, and says one
+        assert "failed on it 1 time(s)" in documents.pages_text(read, [1])
+        assert "reported no picture size) (not tried again)" in (
             documents.picture_summary(read, pictures=False)
         )
 

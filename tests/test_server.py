@@ -6027,6 +6027,17 @@ class TestAttachmentNoteFormat:
                 self.PLAIN.format(path=outside),
             ]
 
+    def test_a_retired_hint_still_comes_off(self):
+        """A stored task_start prompt can carry the hint as it was then, and
+        restart recovery re-issues it: the old words must still strip, or the
+        hint is read as part of the path (delivery review)."""
+        old = (
+            "[attached file: /tmp/x.jpg — NOT delivered to you: read text with "
+            "read_file, binaries with shell tools; you cannot see an image sent "
+            "this way, so say so if asked to describe it]"
+        )
+        assert session_module._without_hint(old) == "[attached file: /tmp/x.jpg]"
+
     def test_the_document_shape_is_pinned_too(self, app_env):
         """The test provider has no pdf support, so this shape is asserted
         against the builder directly rather than through a live turn."""

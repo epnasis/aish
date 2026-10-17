@@ -171,11 +171,12 @@ _NOTES = {
 # largest picture measured was a 2.9 MB 12-megapixel JPEG (0.5 s); this only
 # keeps an arbitrary file from being loaded whole to be hashed.
 PICTURE_MAX_BYTES = 50 * 1024 * 1024
-# The long side up to which a picture was measured to be read whole. On a test
-# picture 1200 px wide with 30 lines of ~36 px text, Vision read 30/30 at 3,000,
-# 5,000 and 6,000 px tall, then 20/30 at 8,000, 13/30 at 10,000 and 11/30 at
-# 12,000, with no error. Why is not established; tiling is not built.
-OCR_COMPLETE_PIXELS = 6000
+# A picture wider than this many times its height is read whole, and on
+# generated wide pictures (1200 px tall, 30 phrases in a grid) that lost lines
+# with no error: 36 px text 30/30 at 2000 wide, 0/30 at 8000; 14 px text 26/30
+# at 2000, 0/30 at 4000. Tall pictures are read in bands (`ocr.bands_for`);
+# wide ones are not, because a band edge would cut a line of text in two.
+WIDE_ASPECT = 1.5
 _OCR_OPEN = "--- OCR text, page {number} ---"
 _OCR_CLOSE = "--- end of OCR text, page {number} ---"
 # Lines a page's own content may not imitate: the page marker is the
@@ -247,6 +248,9 @@ class PageFacts:
     width: int = 0
     height: int = 0
     frames: int = 0
+    # The failure will repeat on every try (macOS could not open the file as
+    # a picture), so it is final after ONE attempt — and says one attempt.
+    ocr_permanent: bool = False
 
     @property
     def readable(self) -> bool:
@@ -256,7 +260,8 @@ class PageFacts:
     def ocr_final(self) -> bool:
         """Nothing more will come of recognising this page again."""
         return self.ocr in ("text", "none") or (
-            self.ocr == "failed" and self.ocr_attempts >= OCR_MAX_ATTEMPTS
+            self.ocr == "failed"
+            and (self.ocr_attempts >= OCR_MAX_ATTEMPTS or self.ocr_permanent)
         )
 
     def as_dict(self) -> dict:
@@ -278,6 +283,7 @@ class PageFacts:
             "width": self.width,
             "height": self.height,
             "frames": self.frames,
+            "ocr_permanent": self.ocr_permanent,
         }
 
 
@@ -1223,10 +1229,9 @@ def _store_recognised(current: Rendition, batch: ocr.Batch) -> Rendition | None:
             text = ""
             facts = dataclasses.replace(
                 facts, ocr="failed",
-                # A file macOS cannot decode fails the same way every time.
-                ocr_attempts=(
-                    OCR_MAX_ATTEMPTS if number in batch.final else facts.ocr_attempts + 1
-                ),
+                ocr_attempts=facts.ocr_attempts + 1,
+                # A file macOS cannot open fails the same way every time.
+                ocr_permanent=number in batch.final,
                 ocr_error=batch.failed[number],
             )
         else:
@@ -1490,7 +1495,8 @@ def picture_summary(rendition: Rendition, *, pictures: bool, showable: bool = Tr
     what = f"{rendition.source} — a picture ({kind})"
     if page.ocr == "text":
         lines = [
-            f"{what}, {page.ocr_chars:,} characters recognised by aish's OCR.",
+            f"{what}, {page.ocr_chars:,} character{'s' if page.ocr_chars != 1 else ''} "
+            "recognised by aish's OCR.",
             "  words read by aish's OCR (machine-recognised, may contain errors; in "
             "the text between the OCR lines). Do NOT pair a value with a label by "
             "its position in that text: the order is the recognizer's, not the page's.",
@@ -1514,16 +1520,16 @@ def picture_summary(rendition: Rendition, *, pictures: bool, showable: bool = Tr
             + (rendition.unread_reason or "text recognition was not run in this read"),
         ]
     if page.ocr in ("text", "none"):
-        if max(page.width, page.height) > OCR_COMPLETE_PIXELS:
+        if page.height and page.width > page.height * WIDE_ASPECT:
             lines.append(
-                f"  INCOMPLETE READ LIKELY: this picture is over {OCR_COMPLETE_PIXELS:,} "
-                "pixels on its long side. On a test picture 1200 pixels wide, aish "
-                f"measured every line read up to {OCR_COMPLETE_PIXELS:,} pixels tall and "
-                "only 20 of 30 lines at 8,000, with no error — words may be missing here."
+                "  WORDS MAY BE MISSING: this is a wide picture, read whole. On generated "
+                "wide pictures aish measured lines lost with no error (0 of 30 lines of "
+                "36-pixel text at 8000×1200 pixels)."
             )
         if page.frames > 1:
             lines.append(
-                f"  It holds {page.frames} frames; aish's OCR read only the first."
+                f"  The file holds {page.frames} images (frames, or the same picture at "
+                "other sizes); aish's OCR read only the first."
             )
         if rendition.incomplete:
             lines.append(
