@@ -323,3 +323,17 @@ class TestThePersonalCommand:
         secrets._invalidate_personal()
         assert cli._personal_cli(["list"]) == 0
         assert "NOT fenced" in capsys.readouterr().out
+
+
+class TestLookup:
+    def test_found_has_no_observation(self, store):
+        secrets.put("FASTMAIL_TOKEN", "abc123")
+        assert secrets.lookup("FASTMAIL_TOKEN") == ("abc123", "")
+
+    def test_missing_reports_what_security_said(self, store):
+        value, observed = secrets.lookup("NOPE")
+        assert value is None
+        assert observed.endswith("exited 1: not found")
+
+    def test_invalid_name_is_said_so(self, store):
+        assert secrets.lookup("bad-name")[0] is None

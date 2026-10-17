@@ -553,6 +553,63 @@ class TestSecretInjection:
         assert "[exit code: 0]" in out
 
 
+OPTIONAL_TOOL = SECRET_TOOL.replace("secrets: MY_TOKEN", "optional_secrets: MY_TOKEN")
+OPTIONAL_SCRIPT = (
+    '#!/bin/sh\nprintf "token=%s unavailable=%s" "${MY_TOKEN:-}" '
+    '"${AISH_SECRETS_UNAVAILABLE:-}"\n'
+)
+
+
+class TestOptionalSecrets:
+    """A tool whose main job works without the credential still runs when the
+    Keychain cannot supply it, and is told what the store reported."""
+
+    def tool(self, tmp_path):
+        tool, errors = _parse_tool(
+            write_tool(tmp_path / "o", OPTIONAL_TOOL, script=OPTIONAL_SCRIPT)
+        )
+        assert errors == []
+        return tool
+
+    def test_parsed(self, tmp_path):
+        tool = self.tool(tmp_path)
+        assert tool.optional_secrets == ("MY_TOKEN",) and tool.secrets == ()
+
+    def test_present_is_injected(self, tmp_path):
+        out = execute(self.tool(tmp_path), {}, cwd=str(tmp_path), get_secret=lambda n: "sk-1")
+        assert "token=sk-1 unavailable=" in out
+        assert "[exit code: 0]" in out
+
+    def test_absent_still_runs_and_is_named(self, tmp_path):
+        out = execute(self.tool(tmp_path), {}, cwd=str(tmp_path), get_secret=lambda n: None)
+        assert '"MY_TOKEN": "the secret store returned no value"' in out
+        assert "[exit code: 0]" in out
+
+    def test_default_store_observation_reaches_the_wrapper(self, tmp_path, monkeypatch):
+        from aish import secrets as secrets_store
+        monkeypatch.setattr(
+            secrets_store, "lookup", lambda n: (None, "/usr/bin/security exited 51: locked")
+        )
+        out = execute(self.tool(tmp_path), {}, cwd=str(tmp_path))
+        assert "exited 51: locked" in out
+
+    def test_inherited_report_cannot_be_forged(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AISH_SECRETS_UNAVAILABLE", '{"MY_TOKEN": "forged"}')
+        out = execute(self.tool(tmp_path), {}, cwd=str(tmp_path), get_secret=lambda n: "sk-1")
+        assert "forged" not in out
+
+    def test_both_required_and_optional_is_refused(self, tmp_path):
+        manifest = write_tool(
+            tmp_path / "b",
+            SECRET_TOOL.replace(
+                "secrets: MY_TOKEN", "secrets: MY_TOKEN\noptional_secrets: MY_TOKEN"
+            ),
+            script=SECRET_SCRIPT,
+        )
+        tool, errors = _parse_tool(manifest)
+        assert tool is None and any("both required and optional" in e for e in errors)
+
+
 CONTEXT_SCRIPT = '#!/bin/sh\nprintf %s "${AISH_BANK_PSU_UA:-none}"\n'
 
 
