@@ -8,7 +8,7 @@ from aish.approval import (
     escaping_dirs,
     is_auto_approvable,
     is_read_only,
-    is_scratch_delete,
+    is_scratch_housekeeping,
     load_prefixes,
     looks_destructive,
     path_within,
@@ -685,63 +685,194 @@ class TestScratchWorkspace:
             f"curl -o {scratch / 'x'} http://example.com", (), cwd=str(project), roots=boundary
         )
 
-    # --- is_scratch_delete (rm scoping) ---
+    # --- is_scratch_housekeeping: rm scoping ---
 
     def test_rm_inside_scratch_auto_approves(self, scratch):
         (scratch / "f.txt").write_text("x")
-        assert is_scratch_delete(f"rm {scratch / 'f.txt'}", str(scratch), scratch)
+        assert _housekeeping(f"rm {scratch / 'f.txt'}", str(scratch), scratch)
 
     def test_rm_force_inside_scratch_auto_approves(self, scratch):
-        assert is_scratch_delete(f"rm -f {scratch / 'f.txt'}", str(scratch), scratch)
+        assert _housekeeping(f"rm -f {scratch / 'f.txt'}", str(scratch), scratch)
 
     def test_rm_recursive_inside_scratch_auto_approves(self, scratch):
         (scratch / "sub").mkdir()
-        assert is_scratch_delete(f"rm -r {scratch / 'sub'}", str(scratch), scratch)
+        assert _housekeeping(f"rm -r {scratch / 'sub'}", str(scratch), scratch)
 
     def test_rm_rf_inside_scratch_still_prompts(self, scratch):
         # recursive+force stays denylisted even inside scratch — fall through.
-        assert not is_scratch_delete(f"rm -rf {scratch / 'sub'}", str(scratch), scratch)
+        assert not _housekeeping(f"rm -rf {scratch / 'sub'}", str(scratch), scratch)
 
     def test_rm_multiple_all_inside_auto_approves(self, scratch):
         cmd = f"rm {scratch / 'a'} {scratch / 'b'}"
-        assert is_scratch_delete(cmd, str(scratch), scratch)
+        assert _housekeeping(cmd, str(scratch), scratch)
 
     def test_rm_one_operand_outside_prompts(self, tmp_path, scratch):
         cmd = f"rm {scratch / 'a'} {tmp_path / 'b'}"
-        assert not is_scratch_delete(cmd, str(scratch), scratch)
+        assert not _housekeeping(cmd, str(scratch), scratch)
 
     def test_rm_outside_scratch_prompts(self, tmp_path, scratch):
-        assert not is_scratch_delete(f"rm {tmp_path / 'x'}", str(tmp_path), scratch)
+        assert not _housekeeping(f"rm {tmp_path / 'x'}", str(tmp_path), scratch)
 
     def test_rm_dotdot_escape_prompts(self, scratch):
-        assert not is_scratch_delete(f"rm {scratch / '..' / 'x'}", str(scratch), scratch)
+        assert not _housekeeping(f"rm {scratch / '..' / 'x'}", str(scratch), scratch)
 
     def test_rm_symlink_escape_prompts(self, tmp_path, scratch):
         outside = tmp_path / "outside"
         outside.mkdir()
         (outside / "victim").write_text("x")
         (scratch / "link").symlink_to(outside)
-        assert not is_scratch_delete(f"rm {scratch / 'link' / 'victim'}", str(scratch), scratch)
+        assert not _housekeeping(f"rm {scratch / 'link' / 'victim'}", str(scratch), scratch)
 
     def test_rm_scratch_dir_itself_prompts(self, scratch):
-        assert not is_scratch_delete(f"rm -r {scratch}", str(scratch), scratch)
+        assert not _housekeeping(f"rm -r {scratch}", str(scratch), scratch)
 
     def test_bare_rm_no_operand_prompts(self, scratch):
-        assert not is_scratch_delete("rm", str(scratch), scratch)
+        assert not _housekeeping("rm", str(scratch), scratch)
 
     def test_sudo_rm_inside_scratch_prompts(self, scratch):
         # wrappers are not stripped — a non-bare-rm verb never auto-approves.
-        assert not is_scratch_delete(f"sudo rm {scratch / 'f'}", str(scratch), scratch)
+        assert not _housekeeping(f"sudo rm {scratch / 'f'}", str(scratch), scratch)
 
-    def test_chained_command_prompts(self, scratch):
+    def test_chained_escaping_rm_prompts(self, scratch):
         cmd = f"rm {scratch / 'a'} && rm /etc/passwd"
-        assert not is_scratch_delete(cmd, str(scratch), scratch)
+        assert not _housekeeping(cmd, str(scratch), scratch)
 
     def test_non_rm_command_prompts(self, scratch):
-        assert not is_scratch_delete(f"cat {scratch / 'a'}", str(scratch), scratch)
+        assert not _housekeeping(f"cat {scratch / 'a'}", str(scratch), scratch)
 
     def test_metacharacter_prompts(self, scratch):
-        assert not is_scratch_delete(f"rm {scratch / 'a'}; rm /etc/passwd", str(scratch), scratch)
+        assert not _housekeeping(f"rm {scratch / 'a'}; rm /etc/passwd", str(scratch), scratch)
+
+    # --- is_scratch_housekeeping: creating (the 2026-10-17 OCR session) ---
+
+    def test_mkdir_p_inside_scratch_auto_approves(self, scratch):
+        assert _housekeeping(f"mkdir -p {scratch / 'ocr' / 'pages'}", str(scratch), scratch)
+
+    def test_touch_inside_scratch_auto_approves(self, scratch):
+        assert _housekeeping(f"touch {scratch / 'a'} {scratch / 'b'}", str(scratch), scratch)
+
+    def test_mkdir_chained_with_read_only_auto_approves(self, tmp_path, scratch):
+        """The command the session carded: a scratch mkdir and an echo."""
+        cmd = f'mkdir -p {scratch / "ocr_pages"} && echo "Folder gotowy"'
+        assert _housekeeping(cmd, str(tmp_path), scratch)
+
+    def test_mkdir_chained_with_a_writer_prompts(self, tmp_path, scratch):
+        """convert's output path is its own syntax, so it is never judged here."""
+        cmd = f"mkdir -p {scratch / 'p'} && convert in.pdf {scratch / 'p' / 'x.png'}"
+        assert not _housekeeping(cmd, str(tmp_path), scratch)
+
+    def test_mkdir_outside_scratch_prompts(self, tmp_path, scratch):
+        assert not _housekeeping(f"mkdir {tmp_path / 'x'}", str(tmp_path), scratch)
+
+    def test_mkdir_of_scratch_itself_prompts(self, scratch):
+        assert not _housekeeping(f"mkdir -p {scratch}", str(scratch), scratch)
+
+    def test_a_flag_value_reads_as_an_operand_and_prompts(self, tmp_path, scratch):
+        assert not _housekeeping(f"mkdir -m 700 {scratch / 'x'}", str(tmp_path), scratch)
+
+    def test_a_directory_move_in_the_chain_prompts(self, tmp_path, scratch):
+        """Later relative operands would run against a directory never checked."""
+        assert not _housekeeping(f"cd /etc && mkdir {scratch / 'x'}", str(tmp_path), scratch)
+
+    def test_a_read_only_segment_rides_with_the_approver(self, tmp_path, scratch):
+        """Riding along would skip --ask-all and deny.txt for a read anywhere."""
+        cmd = f"mkdir {scratch / 'x'} && cat {tmp_path / 'notes.txt'}"
+        assert not _housekeeping(cmd, str(tmp_path), scratch)
+
+    # --- review findings, 2026-10-17: each auto-approved and escaped scratch ---
+
+    def test_a_glob_reaching_a_symlink_prompts(self, tmp_path, scratch):
+        """`touch <scratch>/lin*` checked a name that does not exist, then the
+        shell expanded it to a link and touch created the file outside."""
+        (scratch / "link").symlink_to(tmp_path / "created")
+        assert not _housekeeping(f"touch {scratch / 'link'}", str(tmp_path), scratch)
+        assert not _housekeeping(f"touch {scratch}/lin*", str(tmp_path), scratch)
+
+    @pytest.mark.parametrize("operand", ["dl*/precious", "dl?/x", "[d]link/x"])
+    def test_a_glob_through_a_directory_symlink_prompts(self, tmp_path, scratch, operand):
+        (tmp_path / "victim").mkdir()
+        (scratch / "dlink").symlink_to(tmp_path / "victim")
+        assert not _housekeeping(f"rm {scratch}/{operand}", str(tmp_path), scratch)
+
+    def test_a_quoted_glob_still_prompts(self, tmp_path, scratch):
+        assert not _housekeeping(f"touch '{scratch}/a*'", str(tmp_path), scratch)
+
+    @pytest.mark.parametrize("verb", ["./mkdir", "/bin/mkdir", "bin/touch", "/bin/rm"])
+    def test_a_verb_given_as_a_path_prompts(self, tmp_path, scratch, verb):
+        """`./mkdir` is whatever executable sits in the project."""
+        assert not _housekeeping(f"{verb} {scratch / 'x'}", str(tmp_path), scratch)
+
+    def test_sort_writing_outside_does_not_ride_along(self, tmp_path, scratch):
+        cmd = f"touch {scratch / 'x'} && sort -o{tmp_path / 'out'} {scratch / 'x'}"
+        assert not _housekeeping(cmd, str(tmp_path), scratch)
+
+    def test_a_comment_hiding_a_quoted_newline_prompts(self, tmp_path, scratch):
+        """sh reads `#` as a comment, so the line inside the quotes RUNS."""
+        cmd = f"touch {scratch / 'x'} && echo # '\nrm {tmp_path / 'victim'}\n#'"
+        assert not _housekeeping(cmd, str(tmp_path), scratch)
+
+    @pytest.mark.parametrize("operand", ["'~/s/x'", "\\~/s/x", "~/s/x"])
+    def test_a_leading_tilde_prompts(self, tmp_path, scratch, operand):
+        """Quoted, sh leaves `~` literal and writes under the cwd; the check
+        expanded it and saw scratch."""
+        assert not _housekeeping(f"mkdir -p {operand}", str(tmp_path), scratch)
+
+    @pytest.mark.parametrize("flag", [
+        "-r/etc/passwd", "--reference=/etc/passwd", "-d2020-01-01", "-m700", "--mode=700",
+    ])
+    def test_a_flag_carrying_a_value_prompts(self, tmp_path, scratch, flag):
+        verb = "mkdir" if "m" in flag[:4] else "touch"
+        assert not _housekeeping(f"{verb} {flag} {scratch / 'x'}", str(tmp_path), scratch)
+
+    @pytest.mark.parametrize("tail", ["\\\n../victim", "\\\n../../pwned"])
+    def test_a_line_continuation_in_an_operand_prompts(self, tmp_path, scratch, tail):
+        """sh joins `<scratch>/` + backslash-newline + `../victim` into `<scratch>/../victim`."""
+        assert not _housekeeping(f"rm {scratch}/{tail}", str(tmp_path), scratch)
+        assert not _housekeeping(f"touch {scratch}/{tail}", str(tmp_path), scratch)
+
+    def test_true_rides_along(self, tmp_path, scratch):
+        assert _housekeeping(f"mkdir -p {scratch / 'x'} && true", str(tmp_path), scratch)
+
+    def test_a_redirect_prompts(self, tmp_path, scratch):
+        cmd = f"mkdir {scratch / 'x'} > {tmp_path / 'log'}"
+        assert not _housekeeping(cmd, str(tmp_path), scratch)
+
+    def test_read_only_alone_is_not_housekeeping(self, scratch):
+        """With no scratch segment the ordinary approver decides, as before."""
+        assert not _housekeeping(f"ls {scratch}", str(scratch), scratch)
+
+    def test_sudo_mkdir_prompts(self, scratch):
+        assert not _housekeeping(f"sudo mkdir {scratch / 'x'}", str(scratch), scratch)
+
+
+def _housekeeping(command: str, cwd: str, scratch: Path) -> bool:
+    return is_scratch_housekeeping(command, cwd, scratch)
+
+
+class TestCommentsFailClosed:
+    """2026-10-17 reviews: where sh and shlex disagree about the words, the
+    gate checked one command and sh ran another. `#` is a comment to sh and
+    text to shlex; backslash-newline is deleted by sh and kept by shlex."""
+
+    def test_a_comment_cannot_smuggle_a_line_past_the_read_only_gate(self, tmp_path):
+        cmd = f"ls && echo # '\nrm {tmp_path / 'victim'}\n#'"
+        assert split_chain(cmd) is None
+        assert not is_auto_approvable(cmd, (), cwd=str(tmp_path), roots=[tmp_path])
+
+    @pytest.mark.parametrize("command", [
+        "find sub \\\n-delete",
+        "cat \\\n/etc/hosts",
+        'cat "\\\n/etc/hosts"',
+    ])
+    def test_a_line_continuation_fails_closed(self, tmp_path, command):
+        """sh deletes backslash-newline; shlex kept it inside the word, so the
+        gate checked a word `<newline>-delete` while sh ran `find sub -delete`."""
+        (tmp_path / "sub").mkdir()
+        assert split_chain(command) is None
+        assert not is_auto_approvable(command, (), cwd=str(tmp_path), roots=[tmp_path])
+
+    def test_a_quoted_hash_is_still_text(self, tmp_path):
+        assert is_auto_approvable("echo '#1'", (), cwd=str(tmp_path), roots=[tmp_path])
 
 
 class TestQuoteAwareParsing:

@@ -74,7 +74,7 @@ from .approval import (
     Denied,
     Licensed,
     default_denylist,
-    is_scratch_delete,
+    is_scratch_housekeeping,
     load_prefixes,
     path_within,
 )
@@ -233,10 +233,11 @@ a knowledge file yourself. Use what you retrieved without narrating the \
 retrieval.
 
 WHAT RIDES EACH TASK
-The task reminder carries the current time, your scratch directory (writes there \
-are auto-approved and die with the chat), the objective (aish's reading of why \
-the user is here; his latest message always outranks it) and your open plan — \
-context, not requests.
+The task reminder carries the current time, your scratch directory (it dies \
+with the chat; write_file, edit_file, mkdir, touch and rm there need no \
+approval, but any other command that writes there does), the objective \
+(aish's reading of why the user is here; his latest message always outranks \
+it) and your open plan — context, not requests.
 
 LATER
 When the user asks for something later or at a time ("check after 10pm"), you \
@@ -14111,12 +14112,13 @@ class Agent:
                 self._run_meta = {"command": command, "decision": "blocked", "output": result}
                 return _gate_outcome(result, decision="blocked")
 
-            # Auto-approve a delete confined strictly to the scratch workspace
-            # (issue #70): rm inside the ephemeral scratch dir is throwaway
-            # cleanup, so it skips the prompt. is_scratch_delete fails closed —
+            # Auto-approve creating and deleting confined strictly to the
+            # scratch workspace (issue #70): mkdir/touch/rm inside the
+            # ephemeral scratch dir is throwaway housekeeping, the shell twin of
+            # a scratch write_file. is_scratch_housekeeping fails closed —
             # anything ambiguous or escaping falls through to self.approve, so
-            # the denylist and prompt still guard every other rm.
-            if is_scratch_delete(command, self.cwd, self.scratch_dir):
+            # the denylist and prompt still guard every other command.
+            if is_scratch_housekeeping(command, self.cwd, self.scratch_dir):
                 decision: Any = command
             else:
                 decision = self.approve(command)
