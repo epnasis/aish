@@ -163,7 +163,29 @@ EXEC_WRAPPERS = frozenset(
         "python", "python2", "python3", "bash", "sh", "zsh", "fish", "dash", "ksh",
         "perl", "ruby", "node", "deno", "bun", "php", "lua", "awk", "gawk",
         "xargs", "env", "eval", "exec", "nice", "timeout", "watch", "ssh", "make",
+        "arch",
     }
+)
+
+# `arch` runs its argument under another CPU architecture, and the owner's
+# `brew` alias expands to `arch -arm64 brew` before the gate. A saved bare
+# `arch` prefix therefore approved every brew command — `brew install` ran with
+# no card. The launched command is what gets judged; only the flags that pick
+# an architecture are seen through. `-c`/`-d`/`-e` rewrite the launched
+# program's environment (DYLD_INSERT_LIBRARIES), so an `arch` carrying them is
+# never seen through and always prompts.
+# Commands whose arguments are ANOTHER command, never a subcommand of their
+# own. A rule starting with one cannot be scoped by its next word —
+# `timeout 5`, `nice arch` and `sudo arch` each grant everything after them —
+# so no such rule ever approves; the launch prompts (an `arch` launch is first
+# reduced to what it launches, see `_canonical_tokens`).
+_LAUNCHERS = frozenset(
+    {"env", "xargs", "nice", "timeout", "watch", "nohup", "time", "command", "sudo",
+     "stdbuf", "exec", "eval", "arch"}
+)
+
+_ARCH_SELECTORS = frozenset(
+    {"-32", "-64", "-arm64", "-arm64e", "-x86_64", "-x86_64h", "-i386"}
 )
 
 # Anything enabling redirection, substitution, expansion, or sequencing we
@@ -343,6 +365,34 @@ def _resolves_to_path_binary(abs_path: str, name: str) -> bool:
 
 
 def _canonical_tokens(tokens: list[str]) -> list[str]:
+    """The command as the gate judges it: an absolute path back to its bare
+    name (`_bare_name`), and an `arch` launch reduced to what it launches."""
+    tokens = _bare_name(tokens)
+    while len(tokens) > 1 and tokens[0] == "arch":
+        launched = _arch_launched(tokens[1:])
+        if not launched:
+            return tokens
+        tokens = _bare_name(launched)
+    return tokens
+
+
+def _arch_launched(args: list[str]) -> list[str] | None:
+    """What `arch <args>` runs, or None when a flag beyond architecture
+    selection is present (or nothing is launched)."""
+    i = 0
+    while i < len(args):
+        if args[i] in _ARCH_SELECTORS:
+            i += 1
+        elif args[i] == "-arch" and i + 1 < len(args):
+            i += 2
+        elif args[i].startswith("-"):
+            return None
+        else:
+            break
+    return args[i:] or None
+
+
+def _bare_name(tokens: list[str]) -> list[str]:
     """Rewrite an absolute-path command back to its bare name so SAFE_COMMANDS
     and saved allowlist prefixes match either spelling — but only when the path
     can be trusted to name the expected binary: it lives in a trusted system bin
@@ -397,15 +447,21 @@ def _prefix_approves(segment: str, prefixes: Collection[str]) -> bool:
         return False
     if not tokens:
         return False
+    launcher = tokens[0].rsplit("/", 1)[-1] == "arch"
     tokens = _canonical_tokens(tokens)
     # Match the raw segment first (preserves exact-string rules), then the
     # canonical spelling, so '/opt/homebrew/bin/gh pr list' still matches a
     # saved 'gh pr list' — but only because _canonical_tokens proved the path
-    # is the same binary PATH would run.
-    match = _matched_prefix(segment, prefixes) or _matched_prefix(shlex.join(tokens), prefixes)
+    # is the same binary PATH would run. An `arch` launch is matched ONLY as
+    # what it launches: a rule naming `arch` would grant every command.
+    match = (None if launcher else _matched_prefix(segment, prefixes)) or _matched_prefix(
+        shlex.join(tokens), prefixes
+    )
     if match is None:
         return False
     name = tokens[0].rsplit("/", 1)[-1]
+    if name in _LAUNCHERS or match.split()[0].rsplit("/", 1)[-1] in _LAUNCHERS:
+        return False
     if _has_unsafe_flag(name, tokens) or _has_unsafe_flag(tokens[0], tokens):
         return False
     # A bare-binary prefix cannot authorize an interpreter/exec wrapper; require
@@ -729,6 +785,11 @@ def _unwrap_exec(segment: str) -> list[str]:
         return [tokens[idx + 1]] if idx + 1 < len(tokens) else []
     if name == "find":
         return _find_exec_commands(tokens)
+    if name == "arch":  # every flag skipped, so -e/-d cannot hide the verb
+        rest = tokens[1:]
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in ("-arch", "-e", "-d") else rest[1:]
+        return [shlex.join(rest)] if rest else []
     if name in _CMD_WRAPPERS:
         rest = tokens[1:]
         while rest and (rest[0].startswith("-") or (name == "env" and "=" in rest[0])):
@@ -884,6 +945,12 @@ def suggest_prefix(segment: str) -> str:
         quoted_tokens = [(word, False) for word in segment.split()]
     if not quoted_tokens:
         return segment.strip()
+    if quoted_tokens[0][0].rsplit("/", 1)[-1] == "arch":
+        # Offer the launched command, the only spelling the gate matches.
+        plain = [token for token, _ in quoted_tokens]
+        launched = len(_canonical_tokens(plain))
+        if launched < len(plain):
+            quoted_tokens = quoted_tokens[len(plain) - launched :]
     binary = quoted_tokens[0][0].rsplit("/", 1)[-1]
     parts = [binary]
     for token, was_quoted in quoted_tokens[1 : 1 + SUBCOMMAND_DEPTH.get(binary, 1)]:
