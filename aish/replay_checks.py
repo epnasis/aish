@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import rules
-from .session import SessionLog, _is_superseded, _record_or_none, record_epoch
+from .session import STOPPED_ANSWERS, SessionLog, _is_superseded, _record_or_none, record_epoch
 
 #: `tools.truncate`'s marker, and `web`'s page cut stamped on the tool record.
 _CUT_MARKER = re.compile(r"\[\.\.\. [\d,]+ characters omitted")
@@ -70,6 +70,9 @@ class ToolCall:
     #: recorded (contract §3.4) — `held` with a comment is an approval he
     #: answered with a comment, which was not run.
     decision: str | None = None
+    #: The model call that proposed it: calls sharing one were proposed together.
+    model_call: int | None = None
+    key: tuple[int, int] | None = None  # (turn, call), the trace contract's join
     comment: str | None = None
 
 
@@ -104,6 +107,9 @@ class RunRecord:
     ran: list[tuple[dict, int]] = field(default_factory=list)  # SessionLog.calls_that_ran
     cut_at: list[int] = field(default_factory=list)  # seqs of tool steps whose output was cut
     unpaired_shell: int = 0  # cmd_start/cmd_end that could not be paired by order
+    #: (turn, held call) of each `gate{gate:"hold.verify", verdict:"advised"}`:
+    #: aish appended its unanswered-hold line for that call (contract §6.16).
+    hold_advised: set[tuple[int, int]] = field(default_factory=set)
     first_at: int | None = None
     last_at: int | None = None
 
@@ -190,9 +196,17 @@ def _read_step(run: RunRecord, step: object, seq: int, current: int,
     key = (turn, number) if isinstance(turn, int) and isinstance(number, int) else None
     if step.get("kind") == "call":
         call = ToolCall(seq, current, str(step.get("name") or ""), dict(step.get("args") or {}))
+        if isinstance(step.get("model_call"), int):
+            call.model_call = step["model_call"]
+        call.key = key
         run.calls.append(call)
         if key is not None:
             by_id[key] = call
+    elif (step.get("kind") == "gate" and step.get("gate") == "hold.verify"
+          and step.get("verdict") == "advised"):
+        held = (step.get("evidence") or {}).get("held_call")
+        if isinstance(turn, int) and isinstance(held, int):
+            run.hold_advised.add((turn, held))
     elif step.get("kind") == "tool":
         joined = by_id.pop(key, None) if key is not None else None
         if joined is not None:
@@ -437,7 +451,21 @@ def learning_suggested(run: RunRecord) -> Verdict:
 #: the owner approved WITH a comment is still held (agent.HOLD_UNANSWERED_NOTE).
 #: Written out, not imported: the check reads what the owner was shown, and
 #: `TestHeldCommentAnswered` fails the suite if the agent's line drifts from it.
+#: Counted only beside its `hold.verify` `advised` record for the same call.
 HOLD_LINE = "[aish] Approved with your comment, but held and not run"
+
+
+def _answers_hold(call: ToolCall, held: ToolCall) -> bool:
+    """A call that could be the model's reply to the owner's comment: the same
+    tool, later in the same task, and proposed by a LATER model call. A twin
+    proposed in the same response as the held call was written before the
+    comment existed, so it answers nothing. Logs without `model_call` fall back
+    to order alone."""
+    if call.task != held.task or call.name != held.name or call.seq <= held.seq:
+        return False
+    if call.model_call is None or held.model_call is None:
+        return True
+    return call.model_call != held.model_call
 
 
 def held_comment_answered(run: RunRecord) -> Verdict:
@@ -446,46 +474,70 @@ def held_comment_answered(run: RunRecord) -> Verdict:
 
     A commented hold is a `tool` step recorded `held` with the owner's comment
     (a rule's unattended hold carries none — the agent's own filter). It is
-    answered by a LATER call to the same tool in the same task — the join the
-    agent uses (`replaces`), so any later call counts, even one then denied —
-    or by aish's line saying it went unanswered in the delivered answer. The
-    model's own words are not graded: a refusal in prose with no such line
-    reads as unanswered, because nothing recorded says the owner was told.
-    Could not tell: no commented hold in the log; a task with an open hold and
-    no delivered answer; or one the loop detector, stall cap or step ceiling
-    ended, where aish runs no hold check by design (docs/agent-core.md)."""
+    answered by a call to the same tool from a LATER model call in the same
+    task (`_answers_hold`) — any such call counts, even one then denied — or by
+    aish's line saying it went unanswered: `HOLD_LINE` in the delivered answer
+    AND the `hold.verify` `advised` record for that very call. The text alone
+    could be a model echoing an earlier task's line.
+
+    FAIL when neither happened. That includes a hold whose only later call is a
+    twin from the same model response: aish's own join (`replaces`) closes the
+    hold on the twin, so it says nothing, yet no call was made after the model
+    could read the comment. That is what was observed, so it is a failure, and
+    the evidence names the twin. The model's own words are not graded: a
+    refusal in prose with no line reads as unanswered, because nothing recorded
+    says the owner was told.
+
+    Could not tell: no commented hold in the log (the evidence says whether any
+    card was answered with a comment at all); a task with an open hold and no
+    delivered answer; one the owner stopped (`session.STOPPED_ANSWERS`); or one
+    the loop detector, stall cap or step ceiling ended. aish runs no hold check
+    on those exits by design (docs/agent-core.md, The hold check)."""
     from . import learning
 
     name = "held_comment_answered"
     tasks = {t.index: t for t in run.tasks}
     holds = [c for c in run.calls if c.decision == "held" and c.comment]
     if not holds:
-        return Verdict(name, None, "no action approved with a comment was held in the log")
+        commented = [d for _, _, d in run.decisions if "(feedback:" in d]
+        if not commented:
+            return Verdict(name, None, "no card in the log was answered with a comment, so "
+                                       "the owner's comment was never given")
+        return Verdict(name, None, f"{len(commented)} cards answered with a comment, none "
+                                   "recorded held")
     reproposed = told = 0
-    open_holds: list[tuple[ToolCall, Task]] = []
+    open_holds: list[tuple[ToolCall, Task, list[ToolCall]]] = []
     unknown: list[str] = []
     for held in holds:
         task = tasks.get(held.task)
-        if any(c.task == held.task and c.name == held.name and c.seq > held.seq
-               for c in run.calls):
+        twins = [c for c in run.calls if c.task == held.task and c.name == held.name
+                 and c.seq > held.seq and not _answers_hold(c, held)]
+        if any(_answers_hold(c, held) for c in run.calls):
             reproposed += 1
-        elif task is not None and HOLD_LINE in (task.answer or ""):
+        elif (task is not None and HOLD_LINE in (task.answer or "")
+              and held.key in run.hold_advised):
             told += 1
         elif task is None or task.answer is None:
             unknown.append(f"task {held.task} has no delivered answer")
+        elif task.answer.strip() in STOPPED_ANSWERS:
+            unknown.append(f"task {held.task} was stopped by the owner, where aish runs no "
+                           "hold check")
         elif task.sources & learning.STOP_SOURCES:
             unknown.append(f"task {held.task} ended at "
                            f"{sorted(task.sources & learning.STOP_SOURCES)[0]}, where aish "
                            "runs no hold check")
         else:
-            open_holds.append((held, task))
+            open_holds.append((held, task, twins))
     tally = (f"{len(holds)} held with a comment: {reproposed} re-proposed, {told} closed by "
              f"aish's line, {len(open_holds)} left open")
     if open_holds:
-        held, task = open_holds[0]
+        held, task, twins = open_holds[0]
+        twin = (f" (its only later {held.name} call came in the same model response, "
+                "before the comment)" if twins else "")
         return Verdict(name, False, _short(
             f"{tally}; first: task {task.index} {held.name} ({held.comment!r}) — no later "
-            f"{held.name} call and no hold line; answer: {task.answer}"))
+            f"{held.name} call from a later model call{twin} and no hold line; answer: "
+            f"{task.answer}"))
     if unknown:
         return Verdict(name, None, _short(f"{tally}; could not tell: {unknown[0]}"))
     return Verdict(name, True, tally)

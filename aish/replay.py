@@ -134,6 +134,18 @@ def _local_checks(directory: Path) -> dict[str, CheckFn]:
 
 
 _COMMENT_RULE_KEYS = {"command_re", "tool", "action", "comment", "times"}
+_WRITE_CARD = "raises a write card, which a comment rule never answers"
+#: Tools whose card is NOT a tool card, so a `tool` rule naming one could never
+#: match (agent.py `_dispatch`). Known when written, not derived: a name added
+#: later is caught by the report's per-rule fired counts instead.
+_NOT_A_TOOL_CARD = {
+    "run_command": "raises a command card: use command_re",
+    "write_file": _WRITE_CARD, "edit_file": _WRITE_CARD, "create_skill": _WRITE_CARD,
+    "create_tool": _WRITE_CARD, "create_rule": _WRITE_CARD, "retire_rule": _WRITE_CARD,
+    "schedule_task": _WRITE_CARD,
+    "read_file": "raises a read card, which a comment rule never answers",
+    "import_skill": "raises an import card, which a comment rule never answers",
+}
 
 
 def _comment_rules(entries: object) -> list[dict]:
@@ -162,6 +174,9 @@ def _comment_rules(entries: object) -> list[dict]:
         target = entry[matcher]
         if not isinstance(target, str) or not target:
             raise ReplayError(f"{where}.{matcher} must be a non-empty string")
+        if matcher == "tool" and target in _NOT_A_TOOL_CARD:
+            raise ReplayError(f"{where}.tool = {target!r} could never match: it "
+                              f"{_NOT_A_TOOL_CARD[target]}")
         if matcher == "command_re":
             try:
                 re.compile(target)
@@ -177,7 +192,7 @@ def _comment_rules(entries: object) -> list[dict]:
         if not isinstance(times, int) or isinstance(times, bool) or times < 1:
             raise ReplayError(f"{where}.times must be a positive integer")
         rules.append({matcher: target, "action": entry["action"],
-                      "comment": entry["comment"], "times": times})
+                      "comment": replay_driver.comment_text(entry), "times": times})
     return rules
 
 
@@ -237,6 +252,12 @@ def load_scenario(directory: Path) -> Scenario:
              for t in data.get("turns") or []]
     if not turns:
         raise ReplayError("a scenario needs at least one [[turns]] entry")
+    banged = [n for n, t in enumerate(turns, 1) if t.text.lstrip().startswith("!")]
+    if banged:
+        # A `!` turn is the owner's own shell escape: the server runs it with
+        # no card at all, so it would bypass R1 entirely.
+        raise ReplayError(f"turn {banged[0]} starts with '!', which runs a shell command with "
+                          "no approval card — a replay may not send one")
     env = {str(k): str(v) for k, v in (data.get("env") or {}).items()}
     if any(k.startswith("AISH_") or k == "PYTHONPATH" for k in env):
         raise ReplayError("scenario env may not set AISH_* or PYTHONPATH — the runner owns "
@@ -370,6 +391,28 @@ def baseline_code(ref: str, dest: Path, repo: Path = REPO_ROOT) -> str:
     with tarfile.open(fileobj=io.BytesIO(blob)) as archive:
         archive.extractall(dest, filter="data")
     return sha.stdout.strip()
+
+
+#: #81 (7a6cc12): from this commit on, an approval WITH a comment HOLDS the
+#: action. Before it, the same answer RAN it — so a comment rule replayed
+#: against older code would execute what the scenario never approved to run.
+HOLD_COMMIT = "7a6cc12bc8d53ea26e5ce35e781ec78f2f5d2eb4"
+
+
+def require_comment_holds(sha: str, arm: str, repo: Path = REPO_ROOT,
+                          since: str = HOLD_COMMIT) -> None:
+    """Refuse comment rules against code that does not contain `since`: the
+    check is git ancestry, nothing inferred. A history that cannot answer (the
+    commit absent, e.g. a shallow clone) is refused too, saying so."""
+    found = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", since, sha],
+                           capture_output=True, text=True, check=False)
+    if found.returncode == 1:
+        raise ReplayError(f"the {arm} ({sha[:12]}) predates {since[:7]} (#81), where an "
+                          "approval with a comment still RAN the action: a scenario with "
+                          "[[cards.comment]] rules cannot run against it")
+    if found.returncode != 0:
+        raise ReplayError(f"cannot tell whether the {arm} ({sha[:12]}) contains {since[:7]} "
+                          f"(#81): {found.stderr.strip()} — refusing [[cards.comment]] rules")
 
 
 def candidate_code(repo: Path = REPO_ROOT) -> str:
@@ -523,6 +566,12 @@ def read_run(run_dir: Path, arm: str, n: int, checks: dict[str, CheckFn]) -> Run
                     f"({problem}); {v.evidence}") for v in verdicts]
     counts = replay_checks.counts(record)
     counts["cards_raised"] = sum(1 for e in events if e.get("type") == "card")
+    # Which `[[cards.comment]]` rule answered how many cards: a rule that never
+    # fired leaves its check with nothing to read, and the report must say so.
+    for event in events:
+        if event.get("type") == "card" and isinstance(event.get("rule"), int):
+            key = f"comment_rule_{event['rule']}"
+            counts[key] = (counts.get(key) or 0) + 1
     return RunResult(arm, n, verdicts, counts, problem, replay_checks.read_context(sessions[0]))
 
 
@@ -814,6 +863,30 @@ def _context_rows(by_arm: dict[str, list[RunResult]], shown: Sequence[str], wind
     return rows
 
 
+def _comment_rule_rows(scenario: Scenario, by_arm: dict[str, list[RunResult]],
+                       shown: Sequence[str]) -> list[str]:
+    """Cards each `[[cards.comment]]` rule answered, per run, and the rules that
+    answered none in any shown run — whose checks then read a log in which the
+    owner's comment was never given, which no verdict line says by itself."""
+    rows: list[str] = []
+    idle: list[str] = []
+    for number in range(1, len(scenario.comment_rules) + 1):
+        key = f"comment_rule_{number}"
+
+        def used(r: RunResult, key: str = key) -> int | None:
+            return (r.counts.get(key) or 0) if r.counts else None
+
+        rows.append(f"cards answered by comment rule {number}: " + " · ".join(
+            f"{a} " + ",".join("?" if used(r) is None else str(used(r)) for r in by_arm[a])
+            for a in shown))
+        if not any(used(r) for a in shown for r in by_arm[a]):
+            idle.append(str(number))
+    if idle:
+        rows.append(f"comment rule {', '.join(idle)} never fired in any run shown: the "
+                    "owner's comment was never given, so no check saw it")
+    return rows
+
+
 def render_report(scenario: Scenario, batch: dict, results: list[RunResult], batch_dir: Path,
                   *, full: bool = False, window: int = LOCAL_WINDOW_TOKENS) -> str:
     by_arm = {arm: [r for r in results if r.arm == arm] for arm in ARMS}
@@ -851,7 +924,8 @@ def render_report(scenario: Scenario, batch: dict, results: list[RunResult], bat
         rows.append(f"{key}: " + " · ".join(
             f"{a} " + ",".join("?" if r.counts.get(key) is None else str(r.counts[key])
                                for r in by_arm[a]) for a in shown))
-    problems = [f"{r.arm[0]}{r.n}: {r.problem}" for r in results if r.problem
+    rows += _comment_rule_rows(scenario, by_arm, shown)
+    problems =[f"{r.arm[0]}{r.n}: {r.problem}" for r in results if r.problem
                 and r.arm in shown]
     if problems:
         rows.append("incomplete: " + "; ".join(problems))
@@ -995,6 +1069,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     tool_differs = (candidate.env, candidate.path_first) != (base_env, base_path)
     base_root = batch_dir.parent / f".{stamp}-baseline-code"
     sha = baseline_code(args.baseline_ref, base_root)
+    if scenario.comment_rules:
+        try:
+            require_comment_holds(sha, "baseline")
+            require_comment_holds(candidate_code().split()[0], "candidate")
+        except ReplayError:
+            shutil.rmtree(base_root)
+            raise
     if (sha == candidate_code().split()[0] and not overlays and not tool_differs
             and "uncommitted" not in candidate.code):
         shutil.rmtree(base_root)

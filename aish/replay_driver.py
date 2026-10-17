@@ -60,7 +60,14 @@ def card_decision(event: dict, approve_commands: Sequence[str],
 #: a read card drops the comment and an approve RUNS the read, and an import
 #: approved with a comment installs the skill. A write is held, but no owner
 #: session that needed one has been mined; it is added when one is.
-COMMENTABLE_KINDS = ("command", "tool")
+#: card kind -> (the rule key that matches it, how): the ONE fence. A kind
+#: missing here is never answered, whatever a rule says.
+COMMENTABLE_KINDS: dict[str, tuple[str, Callable[[str, dict], bool]]] = {
+    "command": ("command_re",
+                lambda pattern, card: re.search(pattern, str(card.get("command") or ""))
+                is not None),
+    "tool": ("tool", lambda name, card: name == str(card.get("tool") or "")),
+}
 COMMENT_ACTIONS = ("approve", "deny")
 
 
@@ -69,11 +76,13 @@ def comment_text(rule: dict) -> str | None:
 
     The server reads `str(answer.get("comment") or "").strip()`: a comment that
     is not a string, or is empty after Python's own strip, turns a commented
-    approve into a PLAIN approve that runs. So such a rule never answers."""
+    approve into a PLAIN approve that runs. So such a rule never answers.
+    Returned stripped, so what is sent, what `events.jsonl` records and what
+    the server records are one string."""
     comment = rule.get("comment")
     if not isinstance(comment, str) or not comment.strip():
         return None
-    return comment
+    return comment.strip()
 
 
 def comment_rule_for(event: dict, rules: Sequence[dict], used: list[int]) -> int | None:
@@ -86,21 +95,18 @@ def comment_rule_for(event: dict, rules: Sequence[dict], used: list[int]) -> int
     change) and the owner typed each comment once; after that the card falls
     through to the deny-by-default policy, which stays the ONLY way anything
     is approved to run."""
-    kind = event.get("kind")
-    if kind not in COMMENTABLE_KINDS:
+    fence = COMMENTABLE_KINDS.get(str(event.get("kind")))
+    if fence is None:
         return None
+    key, matches = fence
     for index, rule in enumerate(rules):
         times = rule.get("times", 1)
         if not isinstance(times, int) or isinstance(times, bool) or used[index] >= times:
             continue
         if rule.get("action") not in COMMENT_ACTIONS or comment_text(rule) is None:
             continue
-        if kind == "command" and isinstance(rule.get("command_re"), str):
-            if re.search(rule["command_re"], str(event.get("command") or "")):
-                return index
-        elif kind == "tool" and isinstance(rule.get("tool"), str):
-            if rule["tool"] == str(event.get("tool") or ""):
-                return index
+        if isinstance(rule.get(key), str) and matches(rule[key], event):
+            return index
     return None
 
 
