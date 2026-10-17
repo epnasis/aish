@@ -190,7 +190,8 @@ statement.pdf — 14 pages, 38,402 characters of text.
   tables: 9 on page(s) 3-11
   a table spans pages 7-8
   multi-column: page(s) 2
-  SCANNED, no text layer: page(s) 12 — these are NOT in the text below…
+  SCANNED, no usable text layer: page(s) 12
+    words read by aish's OCR (machine-recognised, may contain errors; …): page(s) 12
 ```
 
 That header comes first on every call, including when you asked for one page.
@@ -203,9 +204,13 @@ again. Tables come back as real markdown tables; one that runs across a page
 break is marked at both ends rather than silently stitched, because a merged
 table would make the page numbers lie.
 
-A page with no text layer is **rasterised and handed back as an image**, so a
-vision-capable model simply looks at it. On a text-only local model it cannot,
-and it says which pages it could not read rather than answering around them.
+A page with no text layer — a scan — is **read with the Mac's own text
+recognition** (macOS Vision, nothing to install), and those words are marked as
+machine-recognised in the text, never passed off as the document's own. A
+vision-capable model can also ask for the page as a picture, since OCR drops
+ticks, signatures and layout. A page that could not be read — off a Mac, with
+`AISH_OCR=0`, past the 12-pages-per-call cap, or where recognition failed — is
+named in the map with the reason, rather than answered around.
 
 On Claude and OpenAI an attached PDF still goes to the model natively — best
 fidelity. `read_pdf` covers everything else: a local model, a file already on

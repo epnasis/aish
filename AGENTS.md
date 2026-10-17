@@ -71,7 +71,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `cli.py`, `prompt.py`, `aliases.py`, `dir_ignore.py`, `notify.py`, `automation_admin.py` | `docs/cli.md` |
 | `media.py`, `show_image`, anything that renders an image | `docs/media-and-images.md` |
 | `recordings.py`, `read_media`, anything that reads a video or audio file | `docs/recordings-and-video.md` |
-| `documents.py`, `read_pdf`, `workspace_roots` (where aish may read unasked) | `docs/documents-and-pdf.md` |
+| `documents.py`, `ocr.py`, `read_pdf`, `workspace_roots` (where aish may read unasked) | `docs/documents-and-pdf.md` |
 | anything that emits or replays a trace record | `docs/trace-contract.md` (binding schema) + `docs/trace-records.md` (rationale) |
 | `session.py` | `docs/session-log.md` |
 | `server.py`, `pty_session.py`, `email_poll.py`, `schedule.py`, `scheduler.py`, `schedule_task` | `docs/web-server.md` |
@@ -127,6 +127,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`media.py`** — the content-addressed, bounded-LRU media store behind `show_image`. → `docs/media-and-images.md`
 - **`recordings.py`** — video and audio read by TIME: probe once, then seek. Frames come from a range-seek into the stream, never a download, and each is stamped with the timestamp it was actually decoded at. → `docs/recordings-and-video.md`
 - **`documents.py`** — PDF → a page-marked markdown rendition behind `read_pdf`: convert once, then read it like a file. Every page is classified (text / columns / table / scan / figure) BEFORE it is read, so a hollow extraction can never pass as a complete one. → `docs/documents-and-pdf.md`
+- **`ocr.py`** — a scanned page's words, read by macOS Vision in a one-at-a-time child process; labelled as OCR in the rendition, and off a Mac (or `AISH_OCR=0`) a stated NOT READ, never silence. → `docs/documents-and-pdf.md`
 - **`session.py`** — append-only JSONL per session in `~/.local/state/aish/`: conversation, audit trail, trace records, and the replay that makes a cold session render identically to a live one. → `docs/session-log.md`
 - **`cli.py`** — the terminal client: REPL, argv, slash commands, model picker, rendering. Gates identically to the web; a terminal session dies with its terminal and is never resurrected. → `docs/cli.md`
 - **`prompt.py`** — the boxed input UI, a small prompt_toolkit `Application` (not `PromptSession`) because the footer-under-input layout requires it. → `docs/cli.md`

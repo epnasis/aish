@@ -176,6 +176,18 @@ def no_real_notifications(monkeypatch, no_inherited_aish_env):
 
 
 @pytest.fixture(autouse=True)
+def no_real_ocr(monkeypatch, no_inherited_aish_env):
+    """No test starts macOS's text recognizer unless it asks for it.
+
+    On a Mac every read_pdf of a scanned fixture would otherwise spawn a
+    Vision child (~1 s and ~150 MB a page), and the suite would read scans
+    differently on the developer's Mac than on Linux CI. With the kill switch
+    every platform takes the "recognition unavailable" path; tests of OCR
+    itself either inject a recogniser or (macOS only) clear the variable."""
+    monkeypatch.setenv("AISH_OCR", "0")
+
+
+@pytest.fixture(autouse=True)
 def no_background_objective(monkeypatch, no_inherited_aish_env):
     """No Objective distill runs after a task unless the test asks for one (#424).
 

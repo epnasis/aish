@@ -10138,7 +10138,7 @@ class TestReadPdf:
         that part of it was unreadable."""
         path = self._pdf(tmp_path, scan_page=True)
         _agent, result = self._run(tmp_path, {"source": str(path)})
-        assert "SCANNED, no text layer: page(s) 2" in result
+        assert "SCANNED, no usable text layer: page(s) 2" in result
 
     def test_asking_again_reuses_the_conversion(self, tmp_path, monkeypatch):
         """Convert once, read many: the second call is what makes paging and
@@ -10226,6 +10226,102 @@ class TestReadPdf:
 
         assert "read_pdf" in READ_ONLY_TOOLS
         assert "read_pdf" in EGRESS_TOOLS
+
+
+class TestReadPdfScansByModel:
+    """session-20261017-184727: a 12-page scan on a model that takes no
+    pictures. The map offered images it could not receive, the pages were
+    rasterised and "attached", show_image said "look at it" while the note
+    said it could not — and the model installed tesseract through the shell.
+    What a scan page offers now depends on `Agent._takes_pictures`, and its
+    words are read by OCR where the machine can."""
+
+    _pdf = TestReadPdf._pdf
+
+    def _run(self, tmp_path, calls, provider="no-vision-backend"):
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("read_pdf", **args)]) for args in calls]
+            + [model_says("ok")],
+            state_dir=tmp_path,
+            cwd=str(tmp_path),
+        )
+        agent.provider = provider
+        agent.run_task("read it")
+        return agent, [m["content"] for m in tool_messages(agent.messages)]
+
+    @pytest.fixture
+    def recognised(self, monkeypatch):
+        from aish import ocr
+
+        monkeypatch.setattr(agent_module.documents.ocr, "unavailable_reason", lambda: None)
+        monkeypatch.setattr(
+            agent_module.documents.ocr,
+            "recognise",
+            lambda pngs, should_stop=None: ocr.Batch(
+                text={n: f"Policy number PZU-{n} for the car" for n in pngs}
+            ),
+        )
+
+    def test_no_vision_and_no_ocr_offers_nothing_it_cannot_do(self, tmp_path):
+        path = self._pdf(tmp_path, scan_page=True)
+        agent, [result] = self._run(tmp_path, [{"source": str(path), "pages": "2"}])
+        assert "NOT READ: page(s) 2" in result
+        assert "You MUST NOT try to read them another way" in result
+        assert "comes back as a picture" not in result
+        assert "attached to this turn" not in result
+        assert not [m for m in agent.messages if m.get("images")]
+        assert not [m for m in agent.messages if "produced" in str(m.get("content"))
+                    and "picture(s)" in str(m.get("content"))]  # no undeliverable note
+        assert not agent.media_dir.exists() or not list(agent.media_dir.iterdir())
+
+    def test_no_vision_reads_the_scan_as_labelled_ocr_text(self, tmp_path, recognised):
+        path = self._pdf(tmp_path, scan_page=True)
+        _agent, [result, searched] = self._run(
+            tmp_path,
+            [{"source": str(path), "pages": "2"}, {"source": str(path), "search": "PZU"}],
+        )
+        assert "Policy number PZU-2 for the car" in result
+        assert "aish's OCR of the page picture" in result
+        assert "words read by aish's OCR" in result
+        assert "MUST NOT" not in result
+        assert "p2 (OCR page): Policy number PZU-2" in searched
+
+    def test_a_vision_model_still_gets_the_page_as_a_picture(self, tmp_path, recognised):
+        """OCR keeps the words and drops ticks, stamps and layout, so a model
+        that can look keeps the picture as well."""
+        path = self._pdf(tmp_path, scan_page=True)
+        agent, [result] = self._run(
+            tmp_path, [{"source": str(path), "pages": "2"}], provider="ollama"
+        )
+        assert "Policy number PZU-2" in result
+        assert "comes back as a picture" in result
+        assert len([m for m in agent.messages if m.get("images")]) == 1
+
+    def test_a_search_names_the_scan_pages_it_could_not_search(self, tmp_path):
+        path = self._pdf(tmp_path, scan_page=True)
+        _agent, [result] = self._run(tmp_path, [{"source": str(path), "search": "badgers"}])
+        assert "Lines containing 'badgers'" in result
+        assert "Scan page(s) 2 were NOT searched" in result
+
+    def test_show_image_never_claims_an_attachment_the_model_cannot_receive(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            agent_module.web, "fetch_binary", lambda url, max_bytes: (PNG_BYTES, "image/png")
+        )
+        results = {}
+        for provider in ("no-vision-backend", "ollama"):
+            agent, _ = make_agent([
+                model_says(tool_calls=[tool_call("show_image", source="https://ex.com/a.png")]),
+                model_says("done"),
+            ], state_dir=tmp_path / provider)
+            agent.provider = provider
+            agent.run_task("show me")
+            results[provider] = tool_messages(agent.messages)[0]["content"]
+        blind = results["no-vision-backend"]
+        assert "attached to this turn" not in blind
+        assert "YOU cannot see it" in blind and "![" in blind
+        assert "attached to this turn" in results["ollama"]
 
     def test_a_local_path_is_never_egress_gated(self, tmp_path):
         """A path reaches no host. Gating it would make an attached PDF

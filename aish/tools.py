@@ -846,9 +846,9 @@ TOOL_SCHEMAS: list[dict] = [
                 "numbers intact. Converts ONCE (cached — another page or search "
                 "is cheap) and returns a map of the document, then the text. "
                 "E.g. read_pdf(source=\"…/statement.pdf\") for the map, then "
-                "search=\"total\", then pages=\"4\". A SCANNED page's words are "
-                "NOT in the text: ask for it with pages= to get it as an image, "
-                "and NEVER answer from a scanned page you have not been shown."
+                "search=\"total\", then pages=\"4\". SCANNED pages are read by "
+                "aish's OCR, marked as such; the map names any NOT read. NEVER "
+                "answer from an unread page or OCR one in the shell."
             ),
             "parameters": {
                 "type": "object",

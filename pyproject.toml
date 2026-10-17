@@ -30,6 +30,13 @@ dependencies = [
     # safe_load so a rule file can never construct an object. Already present
     # transitively; declared because we import it — same reasoning as certifi.
     "pymupdf>=1.28.2",
+    # macOS's own text recognizer (Vision) for scanned PDF pages, through its
+    # binding: wheels only (~14 MB with pyobjc-core and the Cocoa, Quartz and
+    # CoreML bindings it pulls in), no toolchain and no Homebrew. A Swift
+    # helper would need Xcode's command-line tools to compile — the silent
+    # prerequisite poppler was rejected for (docs/documents-and-pdf.md). MIT.
+    # Mac-only: elsewhere a scan page says recognition is unavailable.
+    "pyobjc-framework-Vision>=11; sys_platform == 'darwin'",
     "pyyaml>=6.0",
     "starlette>=0.40",
     # Resolves a directly-seekable stream URL (and the metadata map) for a

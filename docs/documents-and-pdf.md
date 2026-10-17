@@ -64,11 +64,100 @@ They are deliberately **not merged into one table**: merging across the page mar
 
 ## The escalation: a scan is a picture
 
-A page that cannot be read as text is not silence, it is an image — and aish already has a content-addressed store and three renderers for images. So `Agent._read_pdf` rasterises the requested unreadable pages into the media store, returns the markdown lines for display, and **delivers the pages themselves** to the model. No OCR dependency: a modern vision model reads a rasterised page better than Tesseract does, for zero extra install.
+A page that cannot be read as text is not silence, it is an image — and aish already has a content-addressed store and three renderers for images. So `Agent._read_pdf` rasterises the requested unreadable pages into the media store, returns the markdown lines for display, and **delivers the pages themselves** to the model. This was once the ONLY way into a scan, on the argument that a vision model reads a rasterised page better than Tesseract does. That argument says nothing about a model that cannot look, such as the owner's `local:` model. Scans are now also read by OCR (next section).
 
 **The delivery half was missing until #215, and this doc asserted it anyway.** "On a vision-capable backend the model simply sees them" was the design; what shipped rasterised the page, stored it, described it as readable, and handed the model a **file path**, because a tool result is text on every provider. The escalation therefore turned a page that read as silence into a page that read as a filename — arguably worse, since the first is visibly empty and the second looks like an answer. The pages now ride the result envelope and are delivered as native image parts; the mechanism, its cap and its one gap are in `docs/media-and-images.md`. A doc that describes an intended pipeline in the present tense is how a hole stays invisible for five months.
 
-Capped at `PDF_MAX_PAGE_IMAGES`, and **the cap is always stated** — a 200-page scan must not silently become a partial answer. On a text-only local backend the escalation cannot complete, and the result says which pages could not be read. An honest dead end beats a fluent hallucination.
+Capped at `PDF_MAX_PAGE_IMAGES`, and **the cap is always stated** — a 200-page scan must not silently become a partial answer.
+
+**The picture escalation is offered only to a model that can take it.** It used to be offered to every model, and on 2026-10-17 (`session-20261017-184727-510127`) that cost the owner ten minutes. The backend was the text-only local model, and the document was a 12-page scanned insurance policy. The map said *"Use pages= to see them as images"*. The model asked for pages 1-3. They were rasterised and *"attached to this turn"*, and then the delivery note said this model takes no picture input. The model then called `show_image` on a page, whose result again said *"it is attached to this turn, so look at it"*, beside a note saying the opposite. Two sentences in one turn contradicted each other, and the model followed the one that let it keep going. It ran `which tesseract`, then `brew install` tesseract, ImageMagick and Ghostscript, and raised ten approval cards. The task was still unfinished when the owner stopped watching.
+
+So every offer, promise or delivery of a picture now asks one authority, `Agent._takes_pictures()`, which is `backends.media_support(provider)`, the same test `_deliver_tool_media` always used. On a model that takes no pictures:
+- the map does not offer `pages=` as a way to look;
+- `_pdf_page_images` rasterises nothing;
+- `show_image` says the model cannot see the picture (`SHOW_IMAGE_UNSEEN`);
+- `read_media` says the frames are not attached (`FRAMES_UNSEEN`).
+
+`TestReadPdfScansByModel`.
+
+**The figure and diagram notes lost their "ask to see this page as an image" too.** That hint was false on every backend, because `pages=` only ever rasterised SCAN pages. The rendition is shared by every backend, so a backend-dependent offer must not live in it.
+
+---
+
+## A scan's words: OCR by the Mac itself
+
+Text is cheaper in context than a picture, and it can be searched and grepped. A text-only model also has no other way in. So a page classified as a scan is read by **OCR**, with macOS's own recognizer: Vision's `VNRecognizeTextRequest` at the accurate level, with language correction on. This happens in `documents.recognise_scans` and `ocr.py`.
+
+**It runs for every scan, on every backend.** That includes vision models, which also keep the picture escalation. Two reasons. The rendition is backend-independent and content-addressed, so it cannot hold one answer for some models and another for the rest. And OCR keeps only the words: ticks, signatures and layout are lost, and a ticked box is exactly what an insurance form turns on. So a model that can look still gets the picture.
+
+**Labelled, never passed off as the document's own.** A recognised page reads like this:
+
+```
+[page 3 of 12]
+
+*(scanned page — no usable text layer. Between the two OCR lines below is aish's OCR of the page picture: machine-recognised words, which may contain recognition errors; ticks, signatures and layout are not reproduced.)*
+
+--- OCR text, page 3 ---
+…
+--- end of OCR text, page 3 ---
+```
+
+The map then says which scan pages fall into each of these groups:
+- words read by aish's OCR;
+- OCR found no words ("blank, or a picture without words; aish has not established which" — the recognizer cannot tell them apart, so neither does the sentence);
+- OCR FAILED, with the reason;
+- NOT READ, with the reason.
+
+Search hits on a recognised page are marked `(OCR page)`. The mark is per page, not per line, so a stray text-layer line on that page carries it too. Every search result names the scan pages it could not search, whether it found hits or not. Before, only a search with no hits said so, and a list of hits over part of a document read as a search of all of it. `TestScanOcr`.
+
+**A page cannot forge the structure around it.** The page marker is the addressing scheme, and the OCR delimiters say which words a machine recognised. A scan can print either. `defuse` wraps any line of page content that would parse as one in `‹ ›`. It matches only the exact, case-sensitive forms this module writes, so a footer reading `[Page 3 of 10]` is left alone. It is applied to the text layer as well, which had the same hole: a page printing `[page 5 of 12]` moved every page after it. It splits with `str.splitlines`, the same split every reader uses. The first version split on `\n` alone, and the delivery review showed a U+2028 or a form feed carrying a marker past it. The rendition then had more sections than pages, and a successful recognition was thrown away while the map said it had never run. If a result still cannot be written, the map now says that recognition ran and could not be stored. OCR text is otherwise outside content exactly like a text layer. It lives in the same `.md`, so `Rendition.text()` disarms `[aish:` markers at read time and the `.src` sidecar's outside-content banner applies unchanged.
+
+**A dead end that cannot be acted on invites improvising, so the dead end says what not to do.** A page can stay unread for three reasons: recognition is unavailable here, the per-call cap was hit, or the page failed for good. On every backend, the map then says, imperatively, that it MUST NOT try another way ("no tesseract, no brew install, no convert or any other shell OCR"), and that it must tell the user which pages could not be read and why. The `read_pdf` description says the same once, in one line.
+
+### The cache, and who may write it
+
+A fresh conversion writes every scan page as `SCAN_NOT_READ`. Recognition fills pages in afterwards. Each page's state is held in the rendition's own header (`PageFacts.ocr`, `ocr_chars`, `ocr_attempts`, `ocr_error`), and the header names what produced the text (`ocr_engine`: macOS version, request revision). That makes a result from an older recognizer visible, even though nothing re-runs it.
+
+- **`text` and `none` are final.** A re-read costs nothing.
+- **`failed` is retried** on the next read, because a deadline or a crashed child is often transient. After `OCR_MAX_ATTEMPTS` (2) attempts it becomes final, and the page says so. Without that limit, a page that reliably crashed Vision would cost its full deadline on every read, forever.
+- **Why a page is NOT READ is never stored.** It is this call's answer (`Rendition.unread_reason`): recognition is unavailable here, the cap was hit, or Stop was pressed. Another process, for example the test suite with `AISH_OCR=0`, answers differently, and a cached reason would be someone else's.
+
+**One read-recognise-write at a time per rendition.** `read_pdf` runs on the parallel read path. Two calls on one scan, such as `pages=1-3` beside `pages=20-25`, each rewrote the whole file from their own copy, and the second discarded the first's pages. This was found in design review. `test_two_parallel_reads_both_keep_their_pages` forces the interleaving and fails without the lock, which was checked by removing it. The lock is per rendition, not per process: the first version used one process-wide lock, and the delivery review measured an unrelated document's read waiting 2.8 s behind a 3 s recognition (`test_a_scan_being_recognised_does_not_hold_up_another_document`, checked to fail under a single lock). A rendition with nothing left to recognise takes no lock at all. Across processes there is no lock. Instead the write re-reads the file just before it publishes, with header and sections taken from that one read, and does not downgrade a page another writer finished (`test_a_stale_writer_never_downgrades_a_finished_page`). This is a best-effort merge, not a guarantee: a writer that publishes between that read and this publish is overwritten. The file is written through `atomic_write.publish`, so a reader never sees half of one.
+
+### What it costs, and the bounds
+
+All figures below were measured on the owner's Mac (M-series, macOS 26.6), on the 12-page Polish scan that motivated this:
+
+| | measured |
+|---|---|
+| rasterise one page (pymupdf) | 86 ms at 150 dpi, 97 ms at 200, 241 ms at 300 |
+| recognise one page | 0.5–1.0 s; ~0.1 s for a blank page |
+| the whole 12-page scan, end to end through the child | 10.9 s on the first run after install, 5.1 s after |
+| characters recognised, 150 vs 200 vs 300 dpi | within ±5% of each other, so `OCR_DPI` = 200 |
+| peak memory of one recognition | ~150 MB resident |
+
+Polish diacritics came out identical with Vision's default language list (en-US only), with pl-PL/en-US, and with en-US/pl-PL. Automatic language detection lost two on one page. So no language list is set. A list built from the user's locale was in the first design and was cut in review: nothing measured stood behind it.
+
+**At most `OCR_PAGES_PER_CALL` (12) pages per call.** Pages the call asked for (`pages=`, `section=`) go first, so the cap can never leave the very page asked for unread. The rest wait for the next call, and the map says so and names the next range. The child's deadline is `STARTUP_SECONDS` (20, which covers the first import after install, measured at 13.8 s once) plus `SECONDS_PER_PAGE` (3) per page: 56 s at the cap in the worst case, against about 10 s typical. Stop ends the child: the running child is polled against the agent's cancel event every 0.25 s.
+
+### Why a child process, and why pyobjc
+
+`ocr.recognise` writes the page pictures to a temp directory and runs `python -P -m aish.ocr`, which prints one JSON line per page as it finishes. A deadline, a crash or a Stop therefore keeps every page already read.
+
+- **Not in-process.** aish-web is one long-lived process on a memory-tight machine, and one recognition peaks around 150 MB. In a child that memory goes back on exit, and a crash inside Vision ends the child, not the server. Children run one at a time per process (`_ONE_AT_A_TIME`), so two scans read in parallel cannot double the peak. The import costs ~0.15 s per call, once for all pages.
+- **pyobjc-framework-Vision**, declared with `sys_platform == 'darwin'`. It is the binding to the framework, and it follows the rule this doc's dependency section already set: wheels only (about 14 MB with pyobjc-core and the Cocoa, Quartz and CoreML bindings it pulls in), no toolchain, no Homebrew. Its output was byte-identical to a compiled Swift helper on the same page (78 of 78 lines), at the same request revision (3).
+
+Rejected:
+- **A Swift helper.** Compiled once with `swiftc -O`, it takes 3.6 s and runs with about 10 ms of overhead. Run as a script with `swift`, it adds 0.23 s per call warm and 1.6 s cold. Both need Xcode's command-line tools at run time, which makes them a silent toolchain prerequisite: the argument that rejected poppler. A precompiled binary committed to a public repo is unreviewable.
+- **Tesseract.** It is a Homebrew install, and its output measured worse: on the same scan it read `@` as `Q` in every e-mail address.
+- **pyobjc in-process.** Rejected for the resident memory and the crash blast radius described above.
+
+**Off a Mac, or without the binding, it degrades and says so.** `ocr.unavailable_reason()` covers three cases: this machine is not a Mac, the package is missing, or `AISH_OCR=0` (the kill switch). The reason appears in the map's NOT READ line. The test suite sets `AISH_OCR=0` for every test (`no_real_ocr` in `tests/conftest.py`), so macOS and Linux CI take the same path. `TestTheProtocol` drives the parent half with a FAKE worker on every platform: streaming, a per-page error, a crash, the deadline, Stop, garbage on stdout. `TestAvailability` pins each reason. `TestMacOSVision` runs the real recognizer on a generated page, and skips wherever the framework is absent.
+
+### Not built, and known
+
+- **Ollama is assumed to take pictures, model by model.** Because of this, the map's MUST NOT line is shown on every backend, not only on a no-vision one. `MEDIA_SUPPORT["ollama"]` says `image` for every Ollama model, and the comment beside it says text-only models ignore the images. On a text-only Ollama model, `_takes_pictures()` is therefore wrong. That model is offered `pages=` pictures, and `_deliver_tool_media` tells it to look at pictures it never receives. Ollama reports per-model capabilities (`/api/show`), and the fix belongs in the one authority, not in `read_pdf`. It has not been made. The backend in the motivating session was `local:`, which is correctly no-vision.
+- **There is no per-machine lock.** The CLI and aish-web are two processes, so two recognitions can run at once across them. The write merge keeps the results correct. The memory peak can still double.
 
 ---
 
@@ -123,7 +212,7 @@ The rule the rename encodes: **every read-side consumer takes this one list**, s
 
 ## Dependency
 
-**PyMuPDF**, and only PyMuPDF. It is the one library covering layout-aware text, table detection and page rasterization in a single binary wheel with no system libraries, and its AGPL licence matches aish's own.
+**PyMuPDF**, and only PyMuPDF, for the PDF itself. It is the one library covering layout-aware text, table detection and page rasterization in a single binary wheel with no system libraries, and its AGPL licence matches aish's own. The one addition is the Vision binding for OCR on macOS, which reads pictures PyMuPDF has already rasterised (above).
 
 Rejected: `pypdf` (no tables, cannot render, so the scan case stays broken); `pdfplumber` (good tables, cannot render); shelling out to poppler (makes a Homebrew install a silent prerequisite — and the whole point is to stop shelling out); `pymupdf4llm` (does all of this well, but drags in `onnxruntime`, `numpy` and `networkx` — a ~100 MB ML runtime for a PDF reader).
 
