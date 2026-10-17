@@ -30,7 +30,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import backends, files, replay_checks
+from . import backends, files, replay_checks, replay_driver
 from .paths import config_home, state_home
 from .replay_checks import CheckFn, RunContext, RunRecord, Verdict
 from .usage import LOCAL_WINDOW_TOKENS, _percentile, human
@@ -71,7 +71,7 @@ _SCENARIO_KEYS: dict[str, set[str]] = {
     "name": set(), "kind": set(), "description": set(), "model": set(), "runs": set(),
     "timeout_s": set(), "max_steps": set(), "num_ctx": set(), "source": set(), "turns": set(),
     "env": set(),
-    "corpus": {"tools"}, "cards": {"approve_commands", "approve_tools"},
+    "corpus": {"tools"}, "cards": {"approve_commands", "approve_tools", "comment"},
     "checks": {"use", "target"}, "candidate": {"overlays"},
 }
 
@@ -114,6 +114,8 @@ class Scenario:
     num_ctx: int | None = None
     source: dict = field(default_factory=dict)
     kind: str = "fix"
+    #: `[[cards.comment]]`: cards answered with the owner's comment, in order.
+    comment_rules: list[dict] = field(default_factory=list)
 
 
 def _local_checks(directory: Path) -> dict[str, CheckFn]:
@@ -129,6 +131,54 @@ def _local_checks(directory: Path) -> dict[str, CheckFn]:
     if not isinstance(checks, dict):
         raise ReplayError(f"{path} must define CHECKS = {{name: function}}")
     return dict(checks)
+
+
+_COMMENT_RULE_KEYS = {"command_re", "tool", "action", "comment", "times"}
+
+
+def _comment_rules(entries: object) -> list[dict]:
+    """`[[cards.comment]]`, validated so the driver can never send what the
+    scenario did not say. The comment must be a string that survives Python's
+    own strip — the server's normalisation — or the server would read no
+    comment and a commented approve would become a plain approve that RUNS."""
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        raise ReplayError("cards.comment must be an array of tables: [[cards.comment]]")
+    rules: list[dict] = []
+    for number, entry in enumerate(entries, 1):
+        where = f"cards.comment #{number}"
+        if not isinstance(entry, dict):
+            raise ReplayError(f"{where} must be a table")
+        unknown = sorted(set(entry) - _COMMENT_RULE_KEYS)
+        if unknown:
+            raise ReplayError("unknown scenario keys: "
+                              + ", ".join(f"{where}.{key}" for key in unknown))
+        matchers = [key for key in ("command_re", "tool") if key in entry]
+        if len(matchers) != 1:
+            raise ReplayError(f"{where} needs exactly one of command_re (a command card) or "
+                              "tool (a tool card)")
+        matcher = matchers[0]
+        target = entry[matcher]
+        if not isinstance(target, str) or not target:
+            raise ReplayError(f"{where}.{matcher} must be a non-empty string")
+        if matcher == "command_re":
+            try:
+                re.compile(target)
+            except re.error as error:
+                raise ReplayError(f"{where}.command_re is not a regular expression: "
+                                  f"{error}") from None
+        if entry.get("action") not in replay_driver.COMMENT_ACTIONS:
+            raise ReplayError(f'{where}.action must be "approve" or "deny"')
+        if replay_driver.comment_text(entry) is None:
+            raise ReplayError(f"{where}.comment must be a non-empty string — the server "
+                              "reads an empty one as no comment, and approve would then run")
+        times = entry.get("times", 1)
+        if not isinstance(times, int) or isinstance(times, bool) or times < 1:
+            raise ReplayError(f"{where}.times must be a positive integer")
+        rules.append({matcher: target, "action": entry["action"],
+                      "comment": entry["comment"], "times": times})
+    return rules
 
 
 def unisolated_commands(scenario: Scenario) -> list[str]:
@@ -216,6 +266,7 @@ def load_scenario(directory: Path) -> Scenario:
         env=env, checks={n: available[n] for n in names}, targets=targets,
         overlays=overlays, max_steps=data.get("max_steps"), num_ctx=data.get("num_ctx"),
         source=dict(data.get("source") or {}), kind=kind,
+        comment_rules=_comment_rules(cards.get("comment")),
     )
 
 
@@ -388,6 +439,7 @@ def _one_run(scenario: Scenario, arm: Arm, run_dir: Path, snapshot: Path,
     spec = {
         "model": scenario.model, "turns": [t.text for t in scenario.turns],
         "approve_commands": scenario.approve_commands, "approve_tools": scenario.approve_tools,
+        "comment_rules": scenario.comment_rules,
         "max_steps": scenario.max_steps, "num_ctx": scenario.num_ctx,
         "state_dir": str(run_dir / "state"), "cwd": str(run_dir / "cwd"),
         "allow_path": str(allow), "deny_path": str(run_dir / "config" / "deny.txt"),

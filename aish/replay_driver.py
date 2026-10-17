@@ -10,8 +10,10 @@ process would share whichever was set first.
 
 It drives the real `create_app` over the same WebSocket the browser uses and
 answers every approval card from the scenario's policy, which DENIES by
-default. It imports nothing from `aish.replay*` at module level, so it also
-runs against a baseline tree that predates the harness; the only aish API it
+default — or, for a card a `[[cards.comment]]` rule matches, with that rule's
+approve-or-deny and the owner's comment, verbatim from the scenario file.
+It imports nothing from `aish.replay*` at module level, so it also runs
+against a baseline tree that predates the harness; the only aish API it
 relies on is `create_app` and the wire protocol.
 """
 
@@ -52,6 +54,56 @@ def card_decision(event: dict, approve_commands: Sequence[str],
     return False, f"card kind {kind!r} is never approved by a replay"
 
 
+#: The only card kinds a comment rule may answer. The server reads a comment on
+#: command, tool, write and import cards, but only on the first two does every
+#: consumer HOLD an approval that carries one (agent.py, docs/agent-core.md L2):
+#: a read card drops the comment and an approve RUNS the read, and an import
+#: approved with a comment installs the skill. A write is held, but no owner
+#: session that needed one has been mined; it is added when one is.
+COMMENTABLE_KINDS = ("command", "tool")
+COMMENT_ACTIONS = ("approve", "deny")
+
+
+def comment_text(rule: dict) -> str | None:
+    """The comment a rule sends, or None when the server would not see one.
+
+    The server reads `str(answer.get("comment") or "").strip()`: a comment that
+    is not a string, or is empty after Python's own strip, turns a commented
+    approve into a PLAIN approve that runs. So such a rule never answers."""
+    comment = rule.get("comment")
+    if not isinstance(comment, str) or not comment.strip():
+        return None
+    return comment
+
+
+def comment_rule_for(event: dict, rules: Sequence[dict], used: list[int]) -> int | None:
+    """Index of the first rule, in file order, that still has uses left and
+    matches this card — or None, and the card goes to `card_decision`.
+
+    `used[i]` counts the cards rule i answered in this run. A rule answers at
+    most `times` cards (default 1), because text cannot tell a first proposal
+    from its re-proposal (#368 makes them identical when the comment asks no
+    change) and the owner typed each comment once; after that the card falls
+    through to the deny-by-default policy, which stays the ONLY way anything
+    is approved to run."""
+    kind = event.get("kind")
+    if kind not in COMMENTABLE_KINDS:
+        return None
+    for index, rule in enumerate(rules):
+        times = rule.get("times", 1)
+        if not isinstance(times, int) or isinstance(times, bool) or used[index] >= times:
+            continue
+        if rule.get("action") not in COMMENT_ACTIONS or comment_text(rule) is None:
+            continue
+        if kind == "command" and isinstance(rule.get("command_re"), str):
+            if re.search(rule["command_re"], str(event.get("command") or "")):
+                return index
+        elif kind == "tool" and isinstance(rule.get("tool"), str):
+            if rule["tool"] == str(event.get("tool") or ""):
+                return index
+    return None
+
+
 def card_summary(event: dict) -> str:
     for key in ("command", "tool", "target", "path", "skill"):
         if event.get(key):
@@ -61,11 +113,14 @@ def card_summary(event: dict) -> str:
 
 def drive(ws: Any, turns: Sequence[str], approve_commands: Sequence[str],
           approve_tools: Sequence[str], emit: Callable[[dict], None],
-          limit: int | None = None) -> None:
+          limit: int | None = None, comment_rules: Sequence[dict] = ()) -> None:
     """Send each turn, answer its cards, and wait for its `done`.
 
+    A card a comment rule matches is answered with that rule's action and
+    comment (`comment_rule_for`); every other card by `card_decision`.
     `limit` bounds the events read per turn so a test that waits for a card can
     FAIL instead of hanging; a real run is bounded by the runner's timeout."""
+    used = [0] * len(comment_rules)
     hello = ws.receive_json()
     emit({"type": "session", "session": hello.get("session"), "hello": hello.get("type")})
     ws.receive_json()  # the replay of the (empty) new session
@@ -81,9 +136,24 @@ def drive(ws: Any, turns: Sequence[str], approve_commands: Sequence[str],
             event = ws.receive_json()
             kind = event.get("type")
             if kind == "approval_request":
+                ruled = comment_rule_for(event, comment_rules, used)
+                if ruled is not None:
+                    rule = comment_rules[ruled]
+                    used[ruled] += 1
+                    action, comment = str(rule["action"]), comment_text(rule)
+                    # `approved` keeps its meaning — sent as a plain approval,
+                    # so it may run. A commented approve is held, never run.
+                    emit({"type": "card", "turn": index, "kind": event.get("kind"),
+                          "what": card_summary(event), "approved": False,
+                          "action": action, "comment": comment, "rule": ruled + 1,
+                          "why": f"comment rule {ruled + 1}, use {used[ruled]}"})
+                    ws.send_json({"type": "approval", "id": event["id"],
+                                  "action": action, "comment": comment})
+                    continue
                 approve, why = card_decision(event, approve_commands, approve_tools)
                 emit({"type": "card", "turn": index, "kind": event.get("kind"),
-                      "what": card_summary(event), "approved": approve, "why": why})
+                      "what": card_summary(event), "approved": approve,
+                      "action": "approve" if approve else "deny", "why": why})
                 ws.send_json({"type": "approval", "id": event["id"],
                               "action": "approve" if approve else "deny"})
             elif kind == "error":
@@ -124,7 +194,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         aliases=config.get("aliases"),
     )
     with TestClient(app) as client, client.websocket_connect("/ws?token=replay") as ws:
-        drive(ws, spec["turns"], spec["approve_commands"], spec["approve_tools"], emit)
+        drive(ws, spec["turns"], spec["approve_commands"], spec["approve_tools"], emit,
+              comment_rules=spec.get("comment_rules") or [])
     emit({"type": "end"})
     return 0
 
