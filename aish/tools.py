@@ -806,8 +806,9 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "read_file",
             "description": (
-                "Read a text file with line numbers, optionally a specific line range. "
-                "Prefer this over `cat`/`sed -n`/`head`/`tail` — it needs no approval."
+                "Read a file with line numbers, optionally a line range. "
+                "Prefer this over `cat`/`sed -n`/`head`/`tail` — it needs no approval. "
+                "A photo/screenshot returns its OCR text."
             ),
             "parameters": {
                 "type": "object",

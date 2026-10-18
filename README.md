@@ -212,6 +212,14 @@ ticks, signatures and layout. A page that could not be read — off a Mac, with
 `AISH_OCR=0`, past the 12-pages-per-call cap, or where recognition failed — is
 named in the map with the reason, rather than answered around.
 
+A **picture** — a photo of a letter, a screenshot, a mail attachment saved as
+JPEG or HEIC — is read the same way: `read_file` on it returns the recognised
+words, marked as machine-recognised and led by the same kind of map, instead of
+the file's bytes. The words come in the recognizer's own reading order, so a
+value in a table can sit apart from its label, and a ticked box can come out as
+a stray letter; aish says so rather than rebuilding a layout it would have to
+guess (measurements in `docs/documents-and-pdf.md`).
+
 On Claude and OpenAI an attached PDF still goes to the model natively — best
 fidelity. `read_pdf` covers everything else: a local model, a file already on
 disk, a link, or any document long enough that you want one page of it.

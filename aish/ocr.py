@@ -1,4 +1,5 @@
-"""Text recognition for scanned PDF pages — macOS Vision, in a child process.
+"""Text recognition for scanned PDF pages and picture files — macOS Vision, in
+a child process.
 
 A scanned page has no text layer, so the only way to its words is to read the
 picture. A vision model can do that itself; a text-only model (the owner's
@@ -31,6 +32,7 @@ Run as `python -P -m aish.ocr` with a JSON request on stdin; the parent half is
 
 from __future__ import annotations
 
+import difflib
 import importlib.util
 import json
 import os
@@ -61,6 +63,31 @@ _POLL_SECONDS = 0.25
 
 _ONE_AT_A_TIME = threading.Lock()
 
+# Pictures the recognizer reads (macOS ImageIO decodes each; Vision applies a
+# photo's EXIF orientation itself — measured on an iPhone JPEG stored rotated).
+_PICTURE_MAGIC: tuple[tuple[bytes, str, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "PNG", ".png"),
+    (b"\xff\xd8\xff", "JPEG", ".jpg"),
+    (b"GIF87a", "GIF", ".gif"),
+    (b"GIF89a", "GIF", ".gif"),
+    (b"II*\x00", "TIFF", ".tif"),
+    (b"MM\x00*", "TIFF", ".tif"),
+)
+# The ISO base-media brands of a HEIF-family still picture.
+_HEIF_BRANDS: dict[bytes, tuple[str, str]] = {
+    **{
+        brand: ("HEIC", ".heic")
+        for brand in (b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis")
+    },
+    **{brand: ("HEIF", ".heif") for brand in (b"mif1", b"msf1")},
+    **{brand: ("AVIF", ".avif") for brand in (b"avif", b"avis")},
+}
+
+
+UNDECODABLE = (
+    "macOS could not open this file as a picture (it reported no picture size)"
+)
+
 
 class OcrUnavailable(Exception):
     """Text recognition cannot run here; the message says why."""
@@ -77,6 +104,12 @@ class Batch:
     failed: dict[int, str] = field(default_factory=dict)
     engine: str = ""
     stopped: bool = False
+    # What macOS decoded each picture as, as it will be seen (EXIF orientation
+    # applied): {"width", "height", "frames"}. Only for pictures it decoded.
+    shape: dict[int, dict[str, int]] = field(default_factory=dict)
+    # Failed pages that will fail the same way every time (macOS could not
+    # decode the file at all): no retry is owed.
+    final: frozenset[int] = frozenset()
 
 
 def unavailable_reason() -> str | None:
@@ -99,10 +132,31 @@ def worker_command() -> list[str]:
     return [sys.executable, "-P", "-m", "aish.ocr"]
 
 
+def picture_format(data: bytes) -> tuple[str, str] | None:
+    """(name, file suffix) of a picture the recognizer reads, judged by its
+    magic bytes and never by a file name — or None when these bytes are not
+    one. Wider than `media.sniff`, which answers what a BROWSER can display:
+    a HEIC photo cannot be shown in every browser and can still be read.
+
+    BMP is absent on purpose: its two-byte magic is "BM", which a text file
+    about a BMW also starts with."""
+    for magic, name, suffix in _PICTURE_MAGIC:
+        if data.startswith(magic):
+            return name, suffix
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "WebP", ".webp"
+    if data[4:8] == b"ftyp" and (brand := _HEIF_BRANDS.get(data[8:12])):
+        return brand
+    return None
+
+
 def recognise(
-    pngs: dict[int, bytes], should_stop: Callable[[], bool] | None = None
+    pictures: dict[int, bytes],
+    should_stop: Callable[[], bool] | None = None,
+    seconds_each: float | None = None,
 ) -> Batch:
-    """Recognise the text on each page picture (page number -> PNG bytes).
+    """Recognise the text on each picture (page number -> picture bytes: a
+    rasterised PDF page, or a picture file's own bytes).
 
     Raises OcrUnavailable when recognition cannot run at all. A failure on one
     page, a crashed child or the deadline lands in `Batch.failed` for exactly
@@ -110,13 +164,16 @@ def recognise(
     sets `stopped`."""
     if reason := unavailable_reason():
         raise OcrUnavailable(reason)
-    if not pngs:
+    if not pictures:
         return Batch()
-    deadline = STARTUP_SECONDS + SECONDS_PER_PAGE * len(pngs)
+    each = SECONDS_PER_PAGE if seconds_each is None else seconds_each
+    deadline = STARTUP_SECONDS + each * len(pictures)
     with _ONE_AT_A_TIME, tempfile.TemporaryDirectory(prefix="aish-ocr-") as scratch:
         request: dict[str, str] = {}
-        for number, data in pngs.items():
-            path = Path(scratch) / f"p{number}.png"
+        for number, data in pictures.items():
+            # Named by what the bytes ARE: a JPEG is handed over as a JPEG.
+            suffix = (picture_format(data) or ("", ".png"))[1]
+            path = Path(scratch) / f"p{number}{suffix}"
             path.write_bytes(data)
             request[str(number)] = str(path)
         return run_child(request, deadline, should_stop)
@@ -158,7 +215,7 @@ def run_child(
             child.kill()
             out, err = child.communicate()
             break
-    text, failed, engine = _parse(out)
+    text, failed, engine, shape, final = _parse(out)
     pending = [int(n) for n in request if int(n) not in text and int(n) not in failed]
     if pending and ended != "stopped":
         if ended == "deadline":
@@ -167,13 +224,20 @@ def run_child(
             tail = (err or "").strip().splitlines()[-1:] or [f"exit status {child.returncode}"]
             why = f"text recognition stopped before reaching this page ({tail[0][:200]})"
         failed.update({number: why for number in pending})
-    return Batch(text=text, failed=failed, engine=engine, stopped=ended == "stopped")
+    return Batch(
+        text=text, failed=failed, engine=engine, stopped=ended == "stopped",
+        shape=shape, final=frozenset(final),
+    )
 
 
-def _parse(out: str) -> tuple[dict[int, str], dict[int, str], str]:
+def _parse(
+    out: str,
+) -> tuple[dict[int, str], dict[int, str], str, dict[int, dict[str, int]], set[int]]:
     text: dict[int, str] = {}
     failed: dict[int, str] = {}
     engine = ""
+    shape: dict[int, dict[str, int]] = {}
+    final: set[int] = set()
     for line in (out or "").splitlines():
         try:
             row = json.loads(line)
@@ -188,11 +252,74 @@ def _parse(out: str) -> tuple[dict[int, str], dict[int, str], str]:
             number = int(row["page"])
         except (KeyError, TypeError, ValueError):
             continue
-        if "error" in row:
+        if row.get("undecodable"):
+            failed[number] = UNDECODABLE
+            final.add(number)
+        elif "error" in row:
             failed[number] = f"text recognition failed on this page ({str(row['error'])[:200]})"
         else:
             text[number] = str(row.get("text") or "")
-    return text, failed, engine
+        try:
+            shape[number] = {k: max(0, int(row[k])) for k in ("width", "height", "frames")}
+        except (KeyError, TypeError, ValueError):
+            pass
+    return text, failed, engine, shape, final
+
+
+# A picture taller than this many times its width is read in bands. Read whole,
+# generated pages 1,200 px wide lost lines with no error: 30 lines of 14 px text
+# read 30/30 at 1,500 px tall and 0/30 at 3,000; of 36 px text, 8/30 at 8,000
+# and 3/30 at 24,000. Read in square bands overlapping by a fifth, the same
+# pages gave 30/30, 30/30 and 30/30 (docs/documents-and-pdf.md, "Pictures").
+BAND_ASPECT = 1.5
+BAND_OVERLAP = 0.2
+MAX_BANDS = 40
+# A picture FILE may be banded, so its deadline covers the most bands it can
+# get: dense text measured about 1 s a band (a 20-band 1290x20000 page took
+# 19.4 s), and the page allowance alone (23 s) failed a 40-band page whole.
+SECONDS_PER_BAND = 2.5
+PICTURE_SECONDS = SECONDS_PER_PAGE + SECONDS_PER_BAND * MAX_BANDS
+# Vision places a line's centre a pixel or so differently in two overlapping
+# bands, so a line centred on a seam was kept twice or by neither (delivery
+# review). Each band keeps a margin past its seam, and a line the band before
+# already kept there — same words, same place — is dropped.
+SEAM_MARGIN = 0.05  # of a band
+
+
+def bands_for(width: int, height: int) -> list[tuple[float, float, float, float]]:
+    """(top, size, keep_from, keep_to) for each band of a picture, as
+    fractions of its height from the top. One band covering everything unless
+    the picture is tall; then square bands, each overlapping the next by
+    BAND_OVERLAP, each keeping the lines centred in its own stretch. The
+    worker widens that by SEAM_MARGIN and drops a line the band before kept,
+    because Vision places a seam line differently in two crops; measured on
+    dense pages, a line can still be kept twice or missed (docs). Pure, so it
+    is tested on any platform."""
+    if width <= 0 or height <= width * BAND_ASPECT:
+        return [(0.0, 1.0, 0.0, 1.0)]
+    # Past MAX_BANDS square bands, bands grow taller instead (not measured).
+    size = max(width / height, 1.0 / (1.0 + (MAX_BANDS - 1) * (1.0 - BAND_OVERLAP)) + 1e-9)
+    step = size * (1.0 - BAND_OVERLAP)
+    tops: list[float] = []
+    top = 0.0
+    while True:
+        tops.append(min(top, 1.0 - size))
+        if top + size >= 1.0:
+            break
+        top += step
+    bands = []
+    for index, start in enumerate(tops):
+        keep_from = 0.0 if index == 0 else (tops[index - 1] + size + start) / 2
+        keep_to = 1.0 if index == len(tops) - 1 else (start + size + tops[index + 1]) / 2
+        bands.append((start, size, keep_from, keep_to))
+    return bands
+
+
+def _same_line(one: str, other: str) -> bool:
+    """Whether two bands read the same line: the same place (asked by the
+    caller) and nearly the same words — Vision's reading of a line differs a
+    little between two crops of it, which exact equality let through."""
+    return difflib.SequenceMatcher(None, one, other).ratio() >= 0.8
 
 
 # ------------------------------------------------------------------ the child
@@ -205,6 +332,7 @@ def _worker() -> None:
     pl-PL/en-US and en-US/pl-PL recognised identical text with every
     diacritic, and automatic language detection lost two on one page — so a
     list would be plumbing with nothing measured behind it."""
+    import Quartz
     import Vision
     from Foundation import NSURL
 
@@ -221,21 +349,67 @@ def _worker() -> None:
     )
     for number, path in pages.items():
         try:
-            request = Vision.VNRecognizeTextRequest.alloc().init()
-            request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-            request.setUsesLanguageCorrection_(True)
-            handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(
-                NSURL.fileURLWithPath_(path), None
+            # Probed first: Vision reports a file it cannot decode as a
+            # "zero-dimensioned image", which reads like a transient failure
+            # and is not one (design review). The size and frame count are
+            # what the map needs to say how complete a read can be.
+            url = NSURL.fileURLWithPath_(path)
+            source = Quartz.CGImageSourceCreateWithURL(url, None)
+            props = (
+                Quartz.CGImageSourceCopyPropertiesAtIndex(source, 0, None) if source else None
             )
-            ok, error = handler.performRequests_error_([request], None)
-            if not ok:
-                raise RuntimeError(str(error))
+            if not props or not props.get("PixelWidth") or not props.get("PixelHeight"):
+                print(json.dumps({"page": int(number), "undecodable": True}), flush=True)
+                continue
+            width, height = int(props["PixelWidth"]), int(props["PixelHeight"])
+            if int(props.get("Orientation") or 1) >= 5:  # stored rotated a quarter turn
+                width, height = height, width
+            shape = {
+                "width": width,
+                "height": height,
+                "frames": int(Quartz.CGImageSourceGetCount(source)),
+            }
+            bands = bands_for(width, height)
+            shape["bands"] = len(bands)
             lines = []
-            for observation in request.results() or []:
-                candidates = observation.topCandidates_(1)
-                if candidates:
-                    lines.append(str(candidates[0].string()))
-            row = {"page": int(number), "text": "\n".join(lines)}
+            near_seam: list[tuple[float, str]] = []  # the previous band's
+            for top, size, keep_from, keep_to in bands:
+                margin = SEAM_MARGIN * size if len(bands) > 1 else 0.0
+                seam_lines: list[tuple[float, str]] = []
+                request = Vision.VNRecognizeTextRequest.alloc().init()
+                request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+                request.setUsesLanguageCorrection_(True)
+                # Vision's rectangles start at the BOTTOM left.
+                # Clamped: float steps can land a hair outside [0, 1], which
+                # Vision refuses as a whole-page error.
+                bottom = min(max(0.0, 1.0 - top - size), 1.0 - size)
+                request.setRegionOfInterest_(((0.0, bottom), (1.0, size)))
+                handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
+                ok, error = handler.performRequests_error_([request], None)
+                if not ok:
+                    raise RuntimeError(str(error))
+                for observation in request.results() or []:
+                    # Boxes are relative to the region; a line is kept by the
+                    # band whose own stretch holds its centre, give or take
+                    # the seam margin.
+                    box = observation.boundingBox()
+                    centre = top + (1.0 - box.origin.y - box.size.height / 2) * size
+                    if not keep_from - margin <= centre < keep_to + margin:
+                        continue
+                    candidates = observation.topCandidates_(1)
+                    if not candidates:
+                        continue
+                    words = str(candidates[0].string())
+                    if centre < keep_from + margin and any(
+                        abs(at - centre) <= 2 * margin and _same_line(said, words)
+                        for at, said in near_seam
+                    ):
+                        continue  # the band before already kept this line
+                    lines.append(words)
+                    if centre >= keep_to - margin:
+                        seam_lines.append((centre, words))
+                near_seam = seam_lines
+            row = {"page": int(number), "text": "\n".join(lines), **shape}
         except Exception as exc:  # one bad page must not cost the others
             row = {"page": int(number), "error": f"{type(exc).__name__}: {exc}"}
         print(json.dumps(row, ensure_ascii=False), flush=True)

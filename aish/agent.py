@@ -44,6 +44,7 @@ from . import (
     evidence,
     files,
     media,
+    ocr,
     owner_ua,
     paths,
     provenance,
@@ -1993,18 +1994,38 @@ TOOL_MEDIA_PASTE_ANYWAY = (
     "paste that line exactly as written. Do NOT tell the user pictures cannot be "
     "shown, and do NOT replace the line with a raw image URL."
 )
+# Said only where aish's OCR runs (`ocr.unavailable_reason()` is None): with
+# AISH_OCR=0, off a Mac or without the binding, read_file says NOT READ, and a
+# promise of words would be a claim the code did not keep (delivery review).
+TOOL_MEDIA_WORDS = (
+    " If you need the WORDS in a picture, the read_file call show_image named "
+    "returns aish's OCR of them — never shell OCR."
+)
 # show_image's own result on a backend that takes no pictures. It used to
 # say "it is attached to this turn, so look at it" on every backend, while
 # TOOL_MEDIA_UNDELIVERABLE said the opposite in the same turn.
 SHOW_IMAGE_UNSEEN = (
     "{what} stored. YOU cannot see it — this model takes no picture input — so "
-    "do not describe what is in it. The user's chat DOES show it where you paste "
-    "the line below. "
+    "do not describe what is in it. {words}The user's chat DOES show it where "
+    "you paste the line below. "
+)
+SHOW_IMAGE_WORDS = (
+    "If you need the WORDS in it, call read_file(path=\"{path}\"): aish reads "
+    "them by OCR. "
 )
 # read_media's frame line on a backend that takes no pictures.
 FRAMES_UNSEEN = (
     "{count} frame(s) were taken, but they are NOT attached for you — this model "
     "takes no picture input, so do not describe what is in them."
+)
+# A picture in the media store with no record beside it: stored before records
+# were written there, or by a path that writes none. Treated as outside — the
+# safe direction — without claiming a source nobody established.
+UNRECORDED_PICTURE = provenance.ArtefactSource(
+    tool="",
+    outside=True,
+    source="",
+    what="a picture aish stored; where its bytes came from was not recorded",
 )
 TOOL_MEDIA_EXPIRED = (
     "[aish: picture(s) from an earlier task were dropped from view to save "
@@ -6899,7 +6920,11 @@ class Agent:
                     "role": "user",
                     "content": TOOL_MEDIA_UNDELIVERABLE.format(
                         tools=tools_named, count=len(paths),
-                        paste=TOOL_MEDIA_PASTE_ANYWAY if "show_image" in names else "",
+                        paste=(
+                            TOOL_MEDIA_PASTE_ANYWAY
+                            + (TOOL_MEDIA_WORDS if ocr.unavailable_reason() is None else "")
+                            if "show_image" in names else ""
+                        ),
                     ),
                 },
                 source="tool_media",
@@ -9657,13 +9682,24 @@ class Agent:
             # renderer serves and costs the user an approval prompt for nothing.
             return f"ERROR: {problem} {SHOW_IMAGE_NO_CURL}"
         try:
-            path = media.store(data, self.media_dir, caption or source.rsplit("/", 1)[-1])
+            fetched = source.lower().startswith(("http://", "https://"))
+            path = self._store_picture(
+                data, caption or source.rsplit("/", 1)[-1], "show_image",
+                self._brings_outside_content("show_image", {"source": source}),
+                source if fetched else "",
+            )
         except ValueError:
             # Reached only for a local file that sniffed fine and changed under
             # us; the fetch paths already classify non-image bytes themselves.
             return "ERROR: those bytes are not a displayable image (png/jpg/gif/webp only)."
         except OSError as exc:
             return f"ERROR: could not store the image ({exc})."
+        # Where the WORDS are read from, for a model that cannot look: the
+        # file it named when that is local, else the stored copy.
+        ocr_from = path if fetched else (files.resolved(source, self.cwd) or path)
+        words = (
+            SHOW_IMAGE_WORDS.format(path=ocr_from) if ocr.unavailable_reason() is None else ""
+        )
         # We build the line rather than trusting the model to: a caption with a
         # bracket or a newline in it silently breaks the markdown image parser,
         # which used to be worked around by a memory (#188 layer 3).
@@ -9686,7 +9722,7 @@ class Agent:
                     "Video still ready — it is attached to this turn, so look at it and "
                     "make sure it really is the video the user meant. "
                     if self._takes_pictures()
-                    else SHOW_IMAGE_UNSEEN.format(what="Video still")
+                    else SHOW_IMAGE_UNSEEN.format(what="Video still", words=words)
                 )
                 + "The line below is "
                 "the picture AND the player in ONE card: include it in your answer "
@@ -9702,13 +9738,45 @@ class Agent:
                 "Image ready — it is attached to this turn, so look at it and make "
                 "sure it really shows what the user asked for. "
                 if self._takes_pictures()
-                else SHOW_IMAGE_UNSEEN.format(what="Image")
+                else SHOW_IMAGE_UNSEEN.format(what="Image", words=words)
             )
             + "Include this line in "
             "your answer EXACTLY as written (do not alter the path):\n\n"
             + self._remember_shown(f"![{alt or 'image'}]({path})"),
             images=(str(path),),
         )
+
+    def _store_picture(
+        self, data: bytes, hint: str, tool: str, outside: bool, source: str = ""
+    ) -> Path:
+        """Store a picture in the media store and say beside it what it is.
+
+        The store is readable — read_file returns a picture's OCR — so a copy
+        of outside content must read as outside wherever it is read back from
+        (#319's rule), and a copy of the owner's own must not be bannered as
+        foreign. Every write site comes through here. A copy that was already
+        in the store with NO record (stored before records were written)
+        stays unattributed-and-outside: the bytes may first have come from
+        elsewhere, and a later local look must not relax that (delivery
+        review). Raises what `media.store` raises."""
+        already = media.stored(data, self.media_dir)
+        path = media.store(data, self.media_dir, hint)
+        if already is not None and provenance.artefact_source(path) is None:
+            provenance.record_artefact(path, UNRECORDED_PICTURE)
+            return path
+        provenance.record_artefact(
+            path,
+            provenance.ArtefactSource(
+                tool=tool,
+                outside=outside,
+                source=source,
+                what=(
+                    "a picture from outside this machine" if outside
+                    else "a picture made on this machine"
+                ),
+            ),
+        )
+        return path
 
     def _remember_shown(self, line: str) -> str:
         """Keep a display line show_image handed over, for the image check to
@@ -9861,7 +9929,10 @@ class Agent:
                 continue
             stamp = recordings.format_time(actual)
             try:
-                path = media.store(data, self.media_dir, f"{recording.identity} at {stamp}")
+                path = self._store_picture(
+                    data, f"{recording.identity} at {stamp}", "read_media",
+                    self._brings_outside_content("read_media", {"source": source}),
+                )
             except (ValueError, OSError) as exc:
                 lines.append(f"*(the frame at {stamp} could not be stored: {exc})*")
                 continue
@@ -10012,7 +10083,8 @@ class Agent:
     # --------------------------------------------------------------- PDFs (#219)
 
     def _read_pdf(
-        self, source: str, pages_spec: str, query: str, section: str = ""
+        self, source: str, pages_spec: str, query: str, section: str = "",
+        resolved: Path | None = None,
     ) -> str:
         """Read a PDF as text, with what the document IS stated before any of it.
 
@@ -10025,9 +10097,22 @@ class Agent:
         source = source.strip()
         if not source:
             return "ERROR: read_pdf needs a source (a path to a PDF, or its URL)."
-        path, problem = self._resolve_pdf(source)
+        # `resolved` is read_file's: its own gate has already decided this
+        # path may be read, so the roots check is not asked twice.
+        path, problem = (resolved, None) if resolved is not None else self._resolve_pdf(source)
         if problem is not None:
             return f"ERROR: {problem}"
+        # read_file refuses these two before it opens anything; read_pdf must
+        # too, now that it reads pictures (design review: an evidence frame
+        # went straight to OCR here, reopening #318).
+        if self._is_evidence_frame(str(path)):
+            return EVIDENCE_FRAME_NOT_A_FILE.format(path=path)
+        if self._is_tool_output_cache(str(path)):
+            return TOOL_OUTPUT_NOT_A_FILE.format(path=path)
+        if (picture := self._picture_at(str(path))) is not None:
+            # A photographed or screenshotted document is read the same way
+            # as one scanned page; "not a PDF" would be a dead end.
+            return self._read_picture(picture)
         try:
             rendition = documents.convert(path, self.documents_dir, self._pdf_origin(source, path))
         except documents.DocumentError as exc:
@@ -10107,6 +10192,114 @@ class Agent:
                 documents.outline_lines(entries)
             ))
         return "\n\n".join(header + opening)
+
+    def _read_file_or_picture(self, path: str, offset: int, limit: int, section: str) -> str:
+        """read_file's body. A picture's bytes decoded as text are what a
+        no-vision model got five times in one replay, before it described a
+        photo it never read and tried `sips` (docs/documents-and-pdf.md,
+        "Pictures"); the same door now returns aish's OCR of it, and a PDF's
+        bytes — the same failure — its read_pdf map and text.
+
+        Decided HERE, when the read runs, and never while the call is being
+        prepared: the file is not opened before the read gate has had its say."""
+        target = files.resolve(path, self.cwd)
+        head = self._head_of(target)
+        lines_asked = [
+            name for name, given in
+            (("offset", offset > 1), ("limit", limit != files.READ_MAX_LINES))
+            if given
+        ]
+        if head.startswith(b"%PDF"):
+            served = self._read_pdf(str(target), "", "", section, resolved=target)
+            if lines_asked:
+                served += (
+                    f"\n\n({' and '.join(lines_asked)} do(es) not apply to a PDF: read "
+                    "it by page with read_pdf(pages=…), or read_file the rendition named "
+                    "above.)"
+                )
+            return served
+        if ocr.picture_format(head) is not None:
+            return self._read_picture(
+                target, ignored=lines_asked + (["section"] if section else [])
+            )
+        return files.read_file(path, self.cwd, offset=offset, limit=limit, section=section)
+
+    @staticmethod
+    def _head_of(target: Path) -> bytes:
+        """The first bytes of a file — enough to tell what it IS — or b"" when
+        it cannot be opened (the ordinary read then says why)."""
+        try:
+            with target.open("rb") as handle:
+                return handle.read(16)
+        except OSError:
+            return b""
+
+    def _picture_at(self, path: str) -> Path | None:
+        """The file at `path` when its BYTES are a picture aish's OCR reads
+        (`ocr.picture_format` — magic bytes, never the extension), else None."""
+        target = files.resolve(path, self.cwd)
+        return target if ocr.picture_format(self._head_of(target)) is not None else None
+
+    def _read_picture(self, path: Path, ignored: list[str] | None = None) -> str:
+        """A picture file's words, read by aish's OCR: the map first, then the
+        text — the picture counterpart of `_read_pdf`, through the same
+        rendition store, recognizer and labels."""
+        try:
+            rendition = documents.convert_picture(
+                path, self.documents_dir, self._picture_origin(path)
+            )
+        except documents.DocumentError as exc:
+            # The file's name is sender-chosen for an attachment, and an
+            # ERROR result is passed on without the outside banner.
+            return (
+                f"ERROR: {provenance.disarm_markers(str(exc))}."
+                + documents.NO_SHELL_OCR.format(what="picture")
+            )
+        try:
+            rendition = documents.recognise_scans(
+                rendition, path, [1], should_stop=self._cancel.is_set
+            )
+        except Exception as exc:  # reading a picture's words must never end the task
+            rendition = dataclasses.replace(
+                rendition,
+                unread_reason=f"text recognition failed ({type(exc).__name__}: {exc})",
+            )
+        head = self._head_of(path)
+        try:
+            small_enough = path.stat().st_size <= media.IMAGE_MAX_BYTES
+        except OSError:
+            small_enough = False
+        parts = [
+            documents.picture_summary(
+                rendition,
+                pictures=self._takes_pictures(),
+                showable=media.sniff(head) is not None and small_enough,
+            ),
+            f"Text: {rendition.path}\n(re-reading this picture is free: its words are "
+            "cached by its content.)",
+        ]
+        if ignored:
+            parts.append(
+                f"({', '.join(ignored)} do(es) not apply to a picture: this is all of it.)"
+            )
+        parts.append(documents.pages_text(rendition, [1]))
+        return "\n\n".join(parts)
+
+    def _picture_origin(self, path: Path) -> "provenance.ArtefactSource":
+        """What a picture's rendition IS, recorded beside it (#319): outside
+        content exactly when the picture itself reads as outside content (a
+        mail attachment, a download), so its words cannot come back through
+        the document store as this machine's own."""
+        outside = self._reads_outside_content(str(path))
+        return provenance.ArtefactSource(
+            tool="read_file",
+            outside=outside,
+            what=(
+                "aish's OCR of a picture that came from outside this machine"
+                if outside
+                else "aish's OCR of a picture on this machine"
+            ),
+        )
 
     def _resolve_pdf(self, source: str) -> tuple[Path, str | None]:
         """A local PDF path for `source`, fetching it first when it is a URL.
@@ -10275,7 +10468,10 @@ class Agent:
         for number in wanted[:PDF_MAX_PAGE_IMAGES]:
             try:
                 data = documents.page_png(path, number)
-                stored = media.store(data, self.media_dir, f"{rendition.source} p{number}")
+                stored = self._store_picture(
+                    data, f"{rendition.source} p{number}", "read_pdf",
+                    self._reads_outside_content(str(path)),
+                )
             except (documents.DocumentError, ValueError, OSError) as exc:
                 out.append(f"*(page {number} could not be rendered as an image: {exc})*")
                 continue
@@ -12542,10 +12738,17 @@ class Agent:
         construction, and the fallback covers it today. A write site added later
         makes the attribution SPECIFIC; it is not what makes it safe.
 
-        The media store is deliberately absent — a picture is not text read back
-        into context, and #318 settled it separately.
+        The media store used to be absent on the argument that a picture is not
+        text read back into context. That stopped being true when `read_file`
+        began returning a picture's OCR (docs/documents-and-pdf.md, "Pictures"):
+        a fetched picture's words came back through its media copy unbannered and
+        untainted, in a later chat as easily as this one (found in design
+        review). So it is here, record-reading: every write site records what
+        each copy is (`_store_picture`), and a copy with no record — every one
+        stored before this — reads as outside, the safe direction.
         """
         return [
+            self.media_dir,
             self.documents_dir,
             self.transcripts_dir,
             browser.downloads_dir(),
@@ -12589,6 +12792,10 @@ class Agent:
                     return provenance.UNKNOWN_ARTEFACT
                 target = files.resolved(path, self.cwd)
                 found = provenance.artefact_source(target) if target else None
+                if found is None and store == self.media_dir:
+                    # Outside by default, but not said to come from anywhere:
+                    # nothing recorded where an unrecorded picture came from.
+                    return UNRECORDED_PICTURE
                 return found or provenance.UNKNOWN_ARTEFACT
         return None
 
@@ -12628,10 +12835,7 @@ class Agent:
             if section
             else (f" (from line {offset})" if offset > 1 else "")
         )
-        read = partial(
-            files.read_file, path, self.cwd, offset=offset, limit=limit,
-            section=section,
-        )
+        read = partial(self._read_file_or_picture, path, offset, limit, section)
         # Wrapped HERE rather than in `_dispatch`, because read_file also runs on
         # the parallel read-only path and a marking only the sequential door
         # applied would be a marking that depends on how many tools the model

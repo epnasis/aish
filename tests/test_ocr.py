@@ -7,6 +7,7 @@ class needs macOS's own recognizer, and skips anywhere it is absent.
 """
 
 import json
+import re
 import sys
 import textwrap
 import threading
@@ -138,6 +139,39 @@ class TestMacOSVision:
         assert "INVOICE 4721 PAID" in batch.text[1]
         assert "Vision" in batch.engine
 
+    def test_a_line_on_a_band_seam_is_kept_once(self, monkeypatch):
+        """Delivery review: Vision placed a seam line a pixel apart in two
+        crops, and it was kept twice or by neither band."""
+        pymupdf = pytest.importorskip("pymupdf")
+        monkeypatch.delenv("AISH_OCR", raising=False)
+        width, height, size = 1200, 6000, 22
+        seams = [keep_to * height for _top, _size, _from, keep_to in ocr.bands_for(width, height)]
+        doc = pymupdf.open()
+        page = doc.new_page(width=width, height=height)
+        for number, y in enumerate(seams[:-1], 1):
+            page.insert_text((60, y + size / 3), f"SEAM {number:02d} words here", fontsize=size)
+        png = page.get_pixmap(dpi=72).tobytes("png")
+        doc.close()
+        text = ocr.recognise({1: png}, seconds_each=ocr.PICTURE_SECONDS).text[1]
+        found = [int(n) for n in re.findall(r"SEAM (\d+)", text)]
+        assert found == list(range(1, len(seams))), text
+
+    def test_a_jpeg_picture_is_read_as_it_is(self, monkeypatch):
+        """A picture file goes over in its own format, not re-encoded."""
+        pymupdf = pytest.importorskip("pymupdf")
+        monkeypatch.delenv("AISH_OCR", raising=False)
+        doc = pymupdf.open()
+        page = doc.new_page(width=600, height=300)
+        page.insert_text((40, 120), "RECEIPT 5530 CARD", fontsize=36)
+        jpeg = page.get_pixmap(dpi=ocr.OCR_DPI).tobytes("jpeg")
+        doc.close()
+        assert ocr.picture_format(jpeg) == ("JPEG", ".jpg")
+        batch = ocr.recognise({1: jpeg, 2: b"\x89PNG\r\n\x1a\n" + b"garbage" * 40})
+        assert "RECEIPT 5530 CARD" in batch.text[1]
+        # 600x300 pt at 200 dpi
+        assert batch.shape[1] == {"width": 1667, "height": 834, "frames": 1}
+        assert batch.failed[2] == ocr.UNDECODABLE and 2 in batch.final
+
 
 def test_the_request_names_each_page_once(monkeypatch, tmp_path):
     """What the parent writes is what the worker reads: one picture per page,
@@ -153,3 +187,93 @@ def test_the_request_names_each_page_once(monkeypatch, tmp_path):
     batch = ocr.recognise({3: b"three", 7: b"seven"})
     assert batch.text == {3: "three", 7: "seven"}
     assert sorted(json.loads(seen.read_text())["pages"]) == ["3", "7"]
+
+
+JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"x" * 32
+HEIC = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"x" * 32
+
+
+def test_the_shape_and_an_undecodable_file_come_back(monkeypatch):
+    """The worker probes each file first: what it decoded as, or that macOS
+    could not decode it at all — a failure no retry will change."""
+    _fake_worker(monkeypatch, """
+        print(json.dumps({"page": 1, "text": "hi", "width": 1200, "height": 8000,
+                          "frames": 1}), flush=True)
+        print(json.dumps({"page": 2, "undecodable": True}), flush=True)
+    """)
+    batch = ocr.run_child(REQUEST, deadline=30)
+    assert batch.shape == {1: {"width": 1200, "height": 8000, "frames": 1}}
+    assert batch.failed == {2: ocr.UNDECODABLE} and batch.final == {2}
+
+
+class TestBands:
+    """A tall picture is read in overlapping square bands; each line is kept
+    by exactly one band. Measured: whole-read generated pages lost up to all
+    30 lines; banded, 30/30 (docs/documents-and-pdf.md, "Pictures")."""
+
+    def test_an_ordinary_picture_is_one_band(self):
+        assert ocr.bands_for(3024, 4032) == [(0.0, 1.0, 0.0, 1.0)]
+        assert ocr.bands_for(4000, 1200) == [(0.0, 1.0, 0.0, 1.0)]  # wide: not banded
+
+    @pytest.mark.parametrize(("width", "height"), [(1200, 1801), (1200, 6000), (1320, 2868),
+                                                   (1200, 24000), (100, 100000)])
+    def test_bands_cover_the_picture_and_keep_each_line_once(self, width, height):
+        bands = ocr.bands_for(width, height)
+        assert 1 < len(bands) <= ocr.MAX_BANDS
+        assert bands[0][2] == 0.0 and bands[-1][3] == 1.0
+        pairs = zip(bands, bands[1:] + [None], strict=True)
+        for (top, size, keep_from, keep_to), following in pairs:
+            assert 0.0 <= top and top + size <= 1.0 + 1e-9
+            assert top <= keep_from < keep_to <= top + size + 1e-9  # keeps only what it saw
+            if following is not None:
+                assert keep_to == following[2]  # no gap, no double keep
+                assert following[0] < top + size  # the bands overlap
+
+
+class TestPictureFormat:
+    """What the recognizer is handed is judged by its bytes, never its name."""
+
+    @pytest.mark.parametrize(
+        ("data", "expected"),
+        [
+            (b"\x89PNG\r\n\x1a\n" + b"x" * 8, ("PNG", ".png")),
+            (JPEG, ("JPEG", ".jpg")),
+            (b"GIF89a" + b"x" * 8, ("GIF", ".gif")),
+            (b"RIFF\x00\x00\x00\x00WEBPVP8 ", ("WebP", ".webp")),
+            (HEIC, ("HEIC", ".heic")),
+            (b"\x00\x00\x00\x1cftypmif1\x00\x00\x00\x00", ("HEIF", ".heif")),
+            (b"II*\x00" + b"x" * 8, ("TIFF", ".tif")),
+            (b"MM\x00*" + b"x" * 8, ("TIFF", ".tif")),
+        ],
+    )
+    def test_pictures_are_named_by_their_magic(self, data, expected):
+        assert ocr.picture_format(data) == expected
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            b"",
+            b"BMW i3 premium 3 091 zl",
+            b"%PDF-1.7",
+            b"\x00\x00\x00\x18ftypmp42",  # a video
+            b"BM" + b"\x00" * 60,
+        ],
+    )
+    def test_anything_else_is_not_a_picture(self, data):
+        """BMP is out on purpose: its magic is "BM", which a note about a BMW
+        starts with too."""
+        assert ocr.picture_format(data) is None
+
+
+def test_each_picture_is_handed_over_under_the_suffix_its_bytes_say(monkeypatch, tmp_path):
+    seen = tmp_path / "seen.json"
+    _fake_worker(monkeypatch, f"""
+        open({str(seen)!r}, "w").write(json.dumps(req))
+        for n in req["pages"]:
+            print(json.dumps({{"page": int(n), "text": "ok"}}))
+    """)
+    monkeypatch.setattr(ocr, "unavailable_reason", lambda: None)
+    ocr.recognise({1: JPEG, 2: HEIC, 3: b"not a picture at all"})
+    paths = json.loads(seen.read_text())["pages"]
+    assert paths["1"].endswith("p1.jpg") and paths["2"].endswith("p2.heic")
+    assert paths["3"].endswith("p3.png")  # a rasterised page has always gone as PNG

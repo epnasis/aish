@@ -547,17 +547,26 @@ ATTACHMENT_HINTS = {
         "search or a scanned page"
     ),
     "": (
-        " — NOT delivered to you: read text with read_file, binaries with shell "
-        "tools; you cannot see an image sent this way, so say so if asked to "
-        "describe it"
+        " — NOT delivered to you: read_file reads text, and a picture's words "
+        "where aish's OCR runs; shell tools other files; you cannot see an image "
+        "sent this way, so say so if asked to describe it"
     ),
 }
+
+# Hints that were once given and may still be in a stored prompt — a
+# `task_start` record's prompt is re-issued by restart recovery — so they must
+# still come off by exact text, or the hint is read as part of the path.
+_RETIRED_HINTS = (
+    " — NOT delivered to you: read text with read_file, binaries with shell "
+    "tools; you cannot see an image sent this way, so say so if asked to "
+    "describe it",
+)
 
 
 def _without_hint(line: str) -> str:
     """A guidance line with its hint removed, by exact text; any other line
     unchanged."""
-    for hint in ATTACHMENT_HINTS.values():
+    for hint in (*ATTACHMENT_HINTS.values(), *_RETIRED_HINTS):
         if line.endswith(hint + "]"):
             return line[: -len(hint) - 1] + "]"
     return line

@@ -161,6 +161,114 @@ Rejected:
 
 ---
 
+## Pictures: a photo or a screenshot is one scanned page
+
+**Observed in a replay, not in an owner session.** The run is `~/.local/state/aish-replay/scan-pdf-no-vision/20261017-195352/candidate/2`: the no-vision local model on the BMW-insurance task. The policy arrived as four iPhone JPEGs through `tuta_attachments`. In that run, the model:
+1. called `read_file` on them five times, and each result was about 72,000 characters of JPEG bytes decoded as text;
+2. then stated what a photo said ("Z obrazów widzę, że Polisa nr …"), with a number that came from an earlier file name;
+3. called `show_image` and was told it could not see the picture;
+4. proposed `sips` on the JPEG, "to extract the text by OCR".
+
+The PDF path had OCR. A picture had none.
+
+**The door is the one the model already used: `read_file`.** If a file's BYTES are a picture, `read_file` now returns aish's OCR of it, map first, instead of decoded binary.
+- Recognised formats: PNG, JPEG, GIF, WebP, HEIC/HEIF/AVIF and TIFF (`ocr.picture_format`, by magic bytes, never the extension). BMP is left out on purpose: its magic is `BM`, which a text file about a BMW also starts with. Across 413 picture files on this machine the check had no false hits.
+- There is no new tool. The menu grows by one clause in `read_file`'s description.
+- `read_file` on a PDF's bytes, which was the same failure, now returns `read_pdf`'s map and text. It passes `section=` through, says that `offset`/`limit` do not apply, and does not ask the roots question a second time: the read gate already answered it, so an approved read of a PDF outside the roots is served (delivery review: it came back as an ERROR).
+- The decision is made when the read runs, after the read gate, so a file is never opened before the owner has said yes to reading it (`test_a_denied_read_never_opens_the_file`).
+- `read_pdf` given a local picture serves the same read instead of "not a PDF", which was a dead end. Like `read_file`, it first refuses an evidence frame and the tool-output cache. The design review showed a frame going straight to OCR there, which reopened #318.
+- `show_image` on a model that takes no pictures names the exact `read_file` call that gets the words (`SHOW_IMAGE_UNSEEN`): the path the model passed when it was local, otherwise the stored copy. It does not OCR inline, because most `show_image` calls are product photos and charts and each one would pay for a recognition.
+- The two other sentences that a no-vision model reads about pictures say the same thing:
+  - the note sent after `show_image` (`TOOL_MEDIA_PASTE_ANYWAY`);
+  - the hint on an image the owner uploads to such a backend (`session.ATTACHMENT_HINTS[""]`), which used to say "binaries with shell tools". The old text is kept in `_RETIRED_HINTS` so it still strips: a stored `task_start` prompt carries it, and restart recovery re-issues that prompt.
+
+`TestPictureFormat`, `TestReadPicture`.
+
+**One OCR implementation.** `documents.convert_picture` makes a one-page rendition whose page is a scan. It lives in the same content-addressed store as PDF renditions, keyed on the picture's bytes, with `"kind": "picture"` in its header. `recognise_scans` reads it exactly as it reads a PDF's scan pages: same child process, deadline, Stop, per-rendition lock, stale-writer merge, retries, `defuse`, and the same four states. The only difference is where the picture comes from (`_page_picture`):
+- for a PDF page, it is rasterised;
+- for a picture file, it is the file's own bytes, handed over as they are and never re-encoded.
+
+Before recognition the bytes are hashed again. A file changed on disk since conversion becomes a failed page ("changed on disk"), never the new picture's words stored under the old one's identity. `ocr.recognise` names each temporary file by what its bytes are. This is only tidiness: the review measured the same 3,015 characters from a JPEG and a HEIC each saved under a `.png` name, so Vision does not need it. `TestPictures`.
+
+**The map.** It says one of four things:
+- words read, with the count;
+- no words found ("it may have none, or words the recognizer could not find; aish has not established which");
+- OCR FAILED, with the error;
+- NOT READ, with this call's reason.
+
+It also says what it knows can make a read incomplete. The child probes each file with ImageIO before recognising it, and reports:
+- **the pixel size.** A picture more than 1.5 times as tall as it is wide is read in square bands that overlap by a fifth, top to bottom (`ocr.bands_for`), each line kept by the band whose own stretch holds its centre, give or take a seam margin (`SEAM_MARGIN`, a twentieth of a band), and dropped when the band before already kept nearly the same words in the same place. The margin exists because the second delivery review placed lines exactly on the seams and showed Vision putting one line's centre a pixel apart in two crops: kept twice, or by neither band. With the margin, the same placements came back 18/18, 37/37, 20/20, 18/18 and 74/74, none twice (`test_a_line_on_a_band_seam_is_kept_once`, which fails with the margin set to zero). Read whole, generated pages 1,200 px wide lost lines with no error: 30 lines of 14 px text came back 30/30 at 1,500 px tall and 0/30 at 3,000; 36 px text 8/30 at 8,000 and 3/30 at 24,000. The same set read whole was not even repeatable (one 1,200×6,000 page gave 30/30 in one layout and 0/30 in another). Banded, through the real worker: 30/30 at every size tried (14 px at 1,500, 3,000 and 6,000; 22 px at 3,500 and 5,000; 36 px at 6,000, 8,000, 12,000 and 24,000), no line duplicated, in order; 11.7 s for the 24,000 px page. Those pages were sparse. On dense generated pages (a line every 1.5 line heights) the review measured about 1 s per band: 1290×20,000 px (20 bands) 18.3 s with 475/475 lines and 1 kept twice; 1000×40,000 (40 bands) 39.9 s, 1110/1110 and 1 twice; 1170×60,000 (40 bands, so taller than square) 79.7 s, 1330 of 1332 and none twice. The page allowance alone (23 s) had failed the 40-band page whole, so a picture file's deadline now allows for its most bands (`PICTURE_SECONDS`, 2.5 s a band); a scanned PDF page keeps the page allowance. Wide pictures are NOT banded, because a band edge would cut a line in two, and generated wide pages lost lines read whole (36 px text: 30/30 at 2,000×1,200, 29/30 at 4,000, 0/30 at 8,000; 14 px: 26/30 at 2,000, 0/30 at 4,000), so the map says WORDS MAY BE MISSING on a picture more than 1.5 times as wide as tall. Past `MAX_BANDS` (40) the bands grow taller than square, which is not measured. `TestBands`.
+- **the image count.** A file holding more than one image is read from the first only, and the map says so. The count includes the same picture stored at other sizes (multi-resolution TIFFs, a dynamic HEIC wallpaper), so the sentence names both.
+- **a file macOS cannot open as a picture.** Vision called such a file a "zero-dimensioned image", which reads like a transient fault. When ImageIO reports no picture size, it is a failure that is final after its ONE attempt (`PageFacts.ocr_permanent`) and says one attempt: the first version set the attempt count to the maximum and the page then claimed two failures after one try.
+
+A JPEG, PNG or GIF whose bytes stop before the format's end marker is "cut short", and its words may be partial. In review, a JPEG cut to a third gave 492 of about 3,000 characters with no error. None of the 413 pictures on this machine was flagged.
+
+On a failed or unread picture the map carries the scan's MUST NOT line, now naming `sips` too.
+
+What follows depends on whether the model can look, and on whether `show_image` can hand this file over (PNG, JPEG, GIF or WebP up to 20 MB):
+- **It can look, and `show_image` takes the file:** the map tells it to call `show_image` for the picture itself (tick boxes, signatures, layout).
+- **It can look, but `show_image` cannot take the file:** the map says those cannot be checked from here.
+- **It cannot look:** the map says the same. If no words were found, it also says not to describe the picture.
+
+**Provenance.** The rendition's `.src` record says `outside` exactly when the picture itself reads as outside content (`_picture_origin`). The media store is now an outside-populated, record-reading store, and every write site stores through `Agent._store_picture`, which records what each copy is: `show_image` (outside when its source was), `read_media` frames (outside when the recording was), and `read_pdf`'s page pictures (outside when the PDF was). Without that, a fetched picture's words came back through its media copy unbannered and untainted, in a later chat as easily as this one (design review, blocker 1). A copy with no record — every one stored before this change — reads as outside, the safe direction, stays that way when the same bytes are later stored from a local source, and is described as "a picture aish stored; where its bytes came from was not recorded" (`UNRECORDED_PICTURE`) rather than as something read elsewhere, which nothing established. `media.prune` treats a record as part of its picture. `test_a_fetched_pictures_media_copy_is_outside_content`, `test_a_mail_photo_is_bannered_and_so_is_its_rendition`.
+
+### How the words are laid out: the recognizer's order, and why rows were rejected
+
+Measured on this Mac (macOS 26.6, `VNRecognizeTextRequest` exactly as `ocr.py` configures it), on:
+- 24 pictures already on this machine: phone screenshots, chat captures, product and landscape photos, four iPhone photos of an insurance offer, and a HEIC copy of one;
+- the 12 pages of the motivating scan, rasterised at 200 dpi;
+- two generated pages.
+
+| | measured |
+|---|---|
+| one picture | 0.03-0.68 s; a 12 MP iPhone JPEG 0.42-0.53 s; its HEIC copy 0.59 s |
+| EXIF orientation | applied by Vision itself: the iPhone JPEGs are stored rotated (orientation 6) and read upright |
+| HEIC vs JPEG of the same photo | 2,929 vs 2,930 characters recognised |
+| a photo with no words | 0 observations, 0.04-0.06 s |
+
+**Vision's order lists a form's table column by column.** Page 3 of the motivating scan is an insurance offer with ten premium label/value pairs. They are:
+- OC posiadacza pojazdu 790
+- Ochrona Zniżki 63
+- NNWK 40
+- Autocasco 1559
+- AutoAssistance 199
+- AutoSzyby 99
+- Składka członkowska 10
+- Wpisowe 10
+- Udziały 10
+- Łączna kwota do zapłaty 2 789
+
+None of the ten has its value on its label's line. The values come out as runs, "40 1559 199" and "99 10 10 10 2 789". With a narrow gutter, Vision also interleaves two prose columns line by line, and on both generated pages it merged the first lines of two columns into one observation.
+
+**Rows rebuilt from the boxes were tried and rejected.** The method grouped observations whose vertical centres are within half a line height, after deskewing: a search from −4° to +4° for the angle that lines up the most side-by-side pieces.
+- **On the flat scan page,** it put 6 of the 10 values on their label's line and 2 more on the label's second line, and joined none to a wrong label.
+- **On photo IMG_6231,** the four premium rows came out right, but 3 other amounts were joined to the wrong line. For example, "Wykluczenie szkody z OC | 29 876 400 zł" — that sum belongs to the OC row's cell.
+- **On a photo of a curved page (IMG_6233),** 2 of 4 premiums were joined to the WRONG label. For example, "Wykluczenie szkody z OC | 910,00 zł", where the 910 belongs to "PZU Auto OC". These wrong joins sat 0.09 and 0.16 line heights off. That is inside the 0.02–0.38 range of the correct joins checked, so no threshold separates them.
+- **Without deskew,** IMG_6231 got two premium joins wrong as well.
+- **A stability filter fails too.** Keeping only joins that survive ±1° of angle kept 3/26, 6/22 and 12/60 joins (IMG_6231, IMG_6233, scan page 3) and removed nearly every correct one.
+
+So the text stays in the recognizer's order. The label states what that order does, from these measurements: a value may be listed apart from its label, and columns may be interleaved. The map adds: "Do NOT pair a value with a label by its position in that text."
+
+Choosing order over rows is argued, not measured. The argument is that rows invent an association a model will repeat. The cost is that, in the recognizer's order, a weak model may still zip a run of values onto a run of labels by position. No replay has yet compared the two.
+
+Also rejected:
+- **Rectifying the photo first.** VNDetectDocumentSegmentationRequest with CIPerspectiveCorrection found the wrong outline on IMG_6233 (confidence 0.46) and gave a cropped, distorted page.
+- **VNRecognizeDocumentsRequest (macOS 26).** It can be driven from pyobjc (0.36–0.44 s). But its result is a private, undocumented class (VNDocumentObservation: `getBlocks`, `getTranscript`), and its transcript also interleaved the prose columns and listed the generated table column by column.
+
+**Tick boxes come out as letters.** On the photographed PZU form IMG_6231 there are 10 ticked boxes. Nine came out as "7", "E", "Z", "IZ" or "EZ" glued to their label. One came out as "•", the same character as an empty box, and also the same as an ordinary bullet in prose. So the label says that whether a box is ticked cannot be read from the text. Nothing may treat "•" as unticked. The old label said ticks "are not reproduced", which understated the problem: they ARE reproduced, as characters that read like part of the words. The scan-page label shares this sentence (`_OCR_CAVEATS`), and the converter version was bumped (`CONVERTER_VERSION`) so that cached scans get it too.
+
+### Bounds, and not built
+
+- **The 50 MB cap** (`PICTURE_MAX_BYTES`) is not measured against a failure. The largest picture measured was 2.9 MB. The bound only keeps an arbitrary file from being loaded whole to be hashed.
+- **Wide pictures are not banded.** The map warns instead; cutting a wide picture into columns would cut lines of text, and is not built.
+- **`offset`, `limit` and `section`.** They do not apply to a picture, and the result says so. The largest OCR text measured was 4,216 characters (a dense A4 scan page), and the result names the rendition for grep.
+- **Promising words only where OCR runs.** `SHOW_IMAGE_WORDS` and `TOOL_MEDIA_WORDS` are said only when `ocr.unavailable_reason()` is None; the upload hint, which is static, says "where aish's OCR runs".
+- **Seams on dense pages.** A line can still be kept twice or missed at a seam on dense text (measured above: at most 1 twice and 2 missed, on pages of 475 to 1,332 lines). Nothing in the map says so per page.
+- **Other binary files.** `read_file` on any binary file that is neither a picture nor a PDF still returns its bytes decoded as text. That is not addressed.
+- **Rules still assume an attachment was received.** `rules.reader_for_source` counts an owner's attached image as already in the model's context (`READER_PRESENT`) even on a backend that never received it. Not changed here.
+
+---
+
 ## The tool
 
 `read_pdf` is native, not a droppable plugin: it needs the media store, the document store and the backend-sized output budget, which a subprocess cannot reach. It is in `READ_ONLY_TOOLS` (its only write is into aish's own store — the same argument as `show_image`, and content-addressed writes make it thread-safe on the parallel read path) and in `EGRESS_TOOLS` (its URL form is an outbound GET at a model-chosen host; its local-path form reaches none and is never gated). `TestReadPdf`.
