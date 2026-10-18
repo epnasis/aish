@@ -139,6 +139,19 @@ def store(
     return path
 
 
+def stored(data: bytes, media_dir: Path) -> Path | None:
+    """The file these bytes are already stored as, or None. A lookup only:
+    content addressing means the digest names the file whatever its slug."""
+    digest = hashlib.sha256(data).hexdigest()[:12]
+    try:
+        return next(
+            (p for p in Path(media_dir).glob(f"{digest}*") if not p.name.endswith(".src")),
+            None,
+        )
+    except OSError:
+        return None
+
+
 def prune(
     media_dir: Path, *, max_bytes: int | None = None, max_files: int | None = None
 ) -> list[Path]:

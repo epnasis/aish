@@ -32,6 +32,7 @@ Run as `python -P -m aish.ocr` with a JSON request on stdin; the parent half is
 
 from __future__ import annotations
 
+import difflib
 import importlib.util
 import json
 import os
@@ -150,7 +151,9 @@ def picture_format(data: bytes) -> tuple[str, str] | None:
 
 
 def recognise(
-    pictures: dict[int, bytes], should_stop: Callable[[], bool] | None = None
+    pictures: dict[int, bytes],
+    should_stop: Callable[[], bool] | None = None,
+    seconds_each: float | None = None,
 ) -> Batch:
     """Recognise the text on each picture (page number -> picture bytes: a
     rasterised PDF page, or a picture file's own bytes).
@@ -163,7 +166,8 @@ def recognise(
         raise OcrUnavailable(reason)
     if not pictures:
         return Batch()
-    deadline = STARTUP_SECONDS + SECONDS_PER_PAGE * len(pictures)
+    each = SECONDS_PER_PAGE if seconds_each is None else seconds_each
+    deadline = STARTUP_SECONDS + each * len(pictures)
     with _ONE_AT_A_TIME, tempfile.TemporaryDirectory(prefix="aish-ocr-") as scratch:
         request: dict[str, str] = {}
         for number, data in pictures.items():
@@ -270,14 +274,27 @@ def _parse(
 BAND_ASPECT = 1.5
 BAND_OVERLAP = 0.2
 MAX_BANDS = 40
+# A picture FILE may be banded, so its deadline covers the most bands it can
+# get: dense text measured about 1 s a band (a 20-band 1290x20000 page took
+# 19.4 s), and the page allowance alone (23 s) failed a 40-band page whole.
+SECONDS_PER_BAND = 2.5
+PICTURE_SECONDS = SECONDS_PER_PAGE + SECONDS_PER_BAND * MAX_BANDS
+# Vision places a line's centre a pixel or so differently in two overlapping
+# bands, so a line centred on a seam was kept twice or by neither (delivery
+# review). Each band keeps a margin past its seam, and a line the band before
+# already kept there — same words, same place — is dropped.
+SEAM_MARGIN = 0.05  # of a band
 
 
 def bands_for(width: int, height: int) -> list[tuple[float, float, float, float]]:
     """(top, size, keep_from, keep_to) for each band of a picture, as
     fractions of its height from the top. One band covering everything unless
     the picture is tall; then square bands, each overlapping the next by
-    BAND_OVERLAP, each keeping the lines centred in its own stretch so a line
-    in an overlap is kept exactly once. Pure, so it is tested on any platform."""
+    BAND_OVERLAP, each keeping the lines centred in its own stretch. The
+    worker widens that by SEAM_MARGIN and drops a line the band before kept,
+    because Vision places a seam line differently in two crops; measured on
+    dense pages, a line can still be kept twice or missed (docs). Pure, so it
+    is tested on any platform."""
     if width <= 0 or height <= width * BAND_ASPECT:
         return [(0.0, 1.0, 0.0, 1.0)]
     # Past MAX_BANDS square bands, bands grow taller instead (not measured).
@@ -296,6 +313,13 @@ def bands_for(width: int, height: int) -> list[tuple[float, float, float, float]
         keep_to = 1.0 if index == len(tops) - 1 else (start + size + tops[index + 1]) / 2
         bands.append((start, size, keep_from, keep_to))
     return bands
+
+
+def _same_line(one: str, other: str) -> bool:
+    """Whether two bands read the same line: the same place (asked by the
+    caller) and nearly the same words — Vision's reading of a line differs a
+    little between two crops of it, which exact equality let through."""
+    return difflib.SequenceMatcher(None, one, other).ratio() >= 0.8
 
 
 # ------------------------------------------------------------------ the child
@@ -348,7 +372,10 @@ def _worker() -> None:
             bands = bands_for(width, height)
             shape["bands"] = len(bands)
             lines = []
+            near_seam: list[tuple[float, str]] = []  # the previous band's
             for top, size, keep_from, keep_to in bands:
+                margin = SEAM_MARGIN * size if len(bands) > 1 else 0.0
+                seam_lines: list[tuple[float, str]] = []
                 request = Vision.VNRecognizeTextRequest.alloc().init()
                 request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
                 request.setUsesLanguageCorrection_(True)
@@ -363,14 +390,25 @@ def _worker() -> None:
                     raise RuntimeError(str(error))
                 for observation in request.results() or []:
                     # Boxes are relative to the region; a line is kept by the
-                    # one band whose own stretch holds its centre.
+                    # band whose own stretch holds its centre, give or take
+                    # the seam margin.
                     box = observation.boundingBox()
                     centre = top + (1.0 - box.origin.y - box.size.height / 2) * size
-                    if not keep_from <= centre < keep_to:
+                    if not keep_from - margin <= centre < keep_to + margin:
                         continue
                     candidates = observation.topCandidates_(1)
-                    if candidates:
-                        lines.append(str(candidates[0].string()))
+                    if not candidates:
+                        continue
+                    words = str(candidates[0].string())
+                    if centre < keep_from + margin and any(
+                        abs(at - centre) <= 2 * margin and _same_line(said, words)
+                        for at, said in near_seam
+                    ):
+                        continue  # the band before already kept this line
+                    lines.append(words)
+                    if centre >= keep_to - margin:
+                        seam_lines.append((centre, words))
+                near_seam = seam_lines
             row = {"page": int(number), "text": "\n".join(lines), **shape}
         except Exception as exc:  # one bad page must not cost the others
             row = {"page": int(number), "error": f"{type(exc).__name__}: {exc}"}

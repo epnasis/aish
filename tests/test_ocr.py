@@ -7,6 +7,7 @@ class needs macOS's own recognizer, and skips anywhere it is absent.
 """
 
 import json
+import re
 import sys
 import textwrap
 import threading
@@ -137,6 +138,23 @@ class TestMacOSVision:
         assert batch.failed == {}
         assert "INVOICE 4721 PAID" in batch.text[1]
         assert "Vision" in batch.engine
+
+    def test_a_line_on_a_band_seam_is_kept_once(self, monkeypatch):
+        """Delivery review: Vision placed a seam line a pixel apart in two
+        crops, and it was kept twice or by neither band."""
+        pymupdf = pytest.importorskip("pymupdf")
+        monkeypatch.delenv("AISH_OCR", raising=False)
+        width, height, size = 1200, 6000, 22
+        seams = [keep_to * height for _top, _size, _from, keep_to in ocr.bands_for(width, height)]
+        doc = pymupdf.open()
+        page = doc.new_page(width=width, height=height)
+        for number, y in enumerate(seams[:-1], 1):
+            page.insert_text((60, y + size / 3), f"SEAM {number:02d} words here", fontsize=size)
+        png = page.get_pixmap(dpi=72).tobytes("png")
+        doc.close()
+        text = ocr.recognise({1: png}, seconds_each=ocr.PICTURE_SECONDS).text[1]
+        found = [int(n) for n in re.findall(r"SEAM (\d+)", text)]
+        assert found == list(range(1, len(seams))), text
 
     def test_a_jpeg_picture_is_read_as_it_is(self, monkeypatch):
         """A picture file goes over in its own format, not re-encoded."""

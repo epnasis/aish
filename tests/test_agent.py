@@ -10375,7 +10375,7 @@ class TestReadPicture:
 
         handed = []
 
-        def fake(pictures, should_stop=None):
+        def fake(pictures, should_stop=None, **_):
             handed.append(dict(pictures))
             return ocr.Batch(text={n: "PZU Auto OC\nSkładka łączna 3 091,00 zł" for n in pictures})
 
@@ -10489,13 +10489,33 @@ class TestReadPicture:
         assert "Składka łączna 3 091,00 zł" in result
 
     def test_show_image_on_a_blind_model_names_the_read_that_gets_the_words(
-        self, tmp_path, monkeypatch
+        self, tmp_path, recognised
     ):
         """The file the model named, when it is local — not the media copy."""
         photo = self._photo(tmp_path)
         _agent, [result] = self._run(tmp_path, [("show_image", {"source": str(photo)})])
         assert f'read_file(path="{photo}")' in result
         assert "YOU cannot see it" in result
+
+    def test_no_words_are_promised_where_ocr_does_not_run(self, tmp_path):
+        """Delivery review: with AISH_OCR=0 (the suite's setting), off a Mac or
+        without the binding, read_file says NOT READ — so nothing may promise
+        the words."""
+        photo = self._photo(tmp_path)
+        agent, [result] = self._run(tmp_path, [("show_image", {"source": str(photo)})])
+        assert "OCR" not in result and "YOU cannot see it" in result
+        notes = [str(m.get("content")) for m in agent.messages if m.get("role") == "user"]
+        assert not any("returns aish's OCR" in note for note in notes)
+
+    def test_a_copy_stored_before_records_stays_unattributed(self, tmp_path):
+        """A later local look at the same bytes must not relax a copy whose
+        first source nobody recorded."""
+        photo = self._photo(tmp_path)
+        agent, _ = make_agent([], cwd=str(tmp_path), state_dir=tmp_path / "state")
+        legacy = agent_module.media.store(self.JPEG, agent.media_dir, "old")
+        agent._show_image(str(photo), "again")
+        record = agent._artefact_source(str(legacy))
+        assert record.outside is True and "was not recorded" in record.what
 
     def test_a_fetched_pictures_media_copy_is_outside_content(
         self, tmp_path, monkeypatch, recognised

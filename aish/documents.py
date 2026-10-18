@@ -1139,7 +1139,9 @@ def recognise_scans(
             except DocumentError as exc:
                 unrendered[number] = f"the page could not be rendered for recognition ({exc})"
         try:
-            batch = ocr.recognise(pictures, should_stop)
+            # A picture file may be read in bands, so it gets their time.
+            more = {"seconds_each": ocr.PICTURE_SECONDS} if current.kind == "picture" else {}
+            batch = ocr.recognise(pictures, should_stop, **more)
         except ocr.OcrUnavailable as exc:
             return dataclasses.replace(current, unread_reason=str(exc))
         batch = dataclasses.replace(batch, failed={**batch.failed, **unrendered})

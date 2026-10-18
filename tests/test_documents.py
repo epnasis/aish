@@ -857,7 +857,7 @@ class _PictureRecogniser:
         self.failed = failed or {}
         self.handed: list[dict[int, bytes]] = []
 
-    def __call__(self, pictures, should_stop=None):
+    def __call__(self, pictures, should_stop=None, **_):
         self.handed.append(dict(pictures))
         return ocr.Batch(
             text={n: self.texts[n] for n in pictures if n in self.texts},
@@ -1002,7 +1002,9 @@ class TestPictures:
 
     def _read_with(self, photo, store, monkeypatch, batch):
         monkeypatch.setattr(documents.ocr, "unavailable_reason", lambda: None)
-        monkeypatch.setattr(documents.ocr, "recognise", lambda pictures, should_stop=None: batch)
+        monkeypatch.setattr(
+            documents.ocr, "recognise", lambda pictures, should_stop=None, **_: batch
+        )
         return documents.recognise_scans(documents.convert_picture(photo, store), photo)
 
     def test_a_wide_picture_says_words_may_be_missing(self, photo, store, monkeypatch):

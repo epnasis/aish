@@ -1992,18 +1992,26 @@ TOOL_MEDIA_PASTE_ANYWAY = (
     " That limit is YOURS ONLY: the user's chat DOES display pictures, and the "
     "user sees each one where you paste the line show_image returned. You MUST "
     "paste that line exactly as written. Do NOT tell the user pictures cannot be "
-    "shown, and do NOT replace the line with a raw image URL. If you need the "
-    "WORDS in a picture, the read_file call show_image named returns aish's OCR "
-    "of them — never shell OCR."
+    "shown, and do NOT replace the line with a raw image URL."
+)
+# Said only where aish's OCR runs (`ocr.unavailable_reason()` is None): with
+# AISH_OCR=0, off a Mac or without the binding, read_file says NOT READ, and a
+# promise of words would be a claim the code did not keep (delivery review).
+TOOL_MEDIA_WORDS = (
+    " If you need the WORDS in a picture, the read_file call show_image named "
+    "returns aish's OCR of them — never shell OCR."
 )
 # show_image's own result on a backend that takes no pictures. It used to
 # say "it is attached to this turn, so look at it" on every backend, while
 # TOOL_MEDIA_UNDELIVERABLE said the opposite in the same turn.
 SHOW_IMAGE_UNSEEN = (
     "{what} stored. YOU cannot see it — this model takes no picture input — so "
-    "do not describe what is in it. If you need the WORDS in it, call "
-    "read_file(path=\"{path}\"): aish reads them by OCR. The user's chat DOES "
-    "show it where you paste the line below. "
+    "do not describe what is in it. {words}The user's chat DOES show it where "
+    "you paste the line below. "
+)
+SHOW_IMAGE_WORDS = (
+    "If you need the WORDS in it, call read_file(path=\"{path}\"): aish reads "
+    "them by OCR. "
 )
 # read_media's frame line on a backend that takes no pictures.
 FRAMES_UNSEEN = (
@@ -6912,7 +6920,11 @@ class Agent:
                     "role": "user",
                     "content": TOOL_MEDIA_UNDELIVERABLE.format(
                         tools=tools_named, count=len(paths),
-                        paste=TOOL_MEDIA_PASTE_ANYWAY if "show_image" in names else "",
+                        paste=(
+                            TOOL_MEDIA_PASTE_ANYWAY
+                            + (TOOL_MEDIA_WORDS if ocr.unavailable_reason() is None else "")
+                            if "show_image" in names else ""
+                        ),
                     ),
                 },
                 source="tool_media",
@@ -9670,24 +9682,24 @@ class Agent:
             # renderer serves and costs the user an approval prompt for nothing.
             return f"ERROR: {problem} {SHOW_IMAGE_NO_CURL}"
         try:
-            path = media.store(data, self.media_dir, caption or source.rsplit("/", 1)[-1])
+            fetched = source.lower().startswith(("http://", "https://"))
+            path = self._store_picture(
+                data, caption or source.rsplit("/", 1)[-1], "show_image",
+                self._brings_outside_content("show_image", {"source": source}),
+                source if fetched else "",
+            )
         except ValueError:
             # Reached only for a local file that sniffed fine and changed under
             # us; the fetch paths already classify non-image bytes themselves.
             return "ERROR: those bytes are not a displayable image (png/jpg/gif/webp only)."
         except OSError as exc:
             return f"ERROR: could not store the image ({exc})."
-        # The copy is readable (read_file returns a picture's OCR), so it says
-        # what it is: a fetched picture, or a mail attachment's copy, is
-        # outside content wherever it is read back from (#319's rule).
-        fetched = source.lower().startswith(("http://", "https://"))
-        self._record_picture(
-            path, "show_image", self._brings_outside_content("show_image", {"source": source}),
-            source if fetched else "",
-        )
         # Where the WORDS are read from, for a model that cannot look: the
         # file it named when that is local, else the stored copy.
         ocr_from = path if fetched else (files.resolved(source, self.cwd) or path)
+        words = (
+            SHOW_IMAGE_WORDS.format(path=ocr_from) if ocr.unavailable_reason() is None else ""
+        )
         # We build the line rather than trusting the model to: a caption with a
         # bracket or a newline in it silently breaks the markdown image parser,
         # which used to be worked around by a memory (#188 layer 3).
@@ -9710,7 +9722,7 @@ class Agent:
                     "Video still ready — it is attached to this turn, so look at it and "
                     "make sure it really is the video the user meant. "
                     if self._takes_pictures()
-                    else SHOW_IMAGE_UNSEEN.format(what="Video still", path=ocr_from)
+                    else SHOW_IMAGE_UNSEEN.format(what="Video still", words=words)
                 )
                 + "The line below is "
                 "the picture AND the player in ONE card: include it in your answer "
@@ -9726,7 +9738,7 @@ class Agent:
                 "Image ready — it is attached to this turn, so look at it and make "
                 "sure it really shows what the user asked for. "
                 if self._takes_pictures()
-                else SHOW_IMAGE_UNSEEN.format(what="Image", path=ocr_from)
+                else SHOW_IMAGE_UNSEEN.format(what="Image", words=words)
             )
             + "Include this line in "
             "your answer EXACTLY as written (do not alter the path):\n\n"
@@ -9734,13 +9746,24 @@ class Agent:
             images=(str(path),),
         )
 
-    @staticmethod
-    def _record_picture(path: Path, tool: str, outside: bool, source: str = "") -> None:
-        """Say beside a picture in the media store what it is. The store is
-        readable — read_file returns a picture's OCR — so a copy of outside
-        content must read as outside wherever it is read back from (#319's
-        rule), and a copy of the owner's own must not be bannered as foreign.
-        Every write site records; a copy with no record reads as outside."""
+    def _store_picture(
+        self, data: bytes, hint: str, tool: str, outside: bool, source: str = ""
+    ) -> Path:
+        """Store a picture in the media store and say beside it what it is.
+
+        The store is readable — read_file returns a picture's OCR — so a copy
+        of outside content must read as outside wherever it is read back from
+        (#319's rule), and a copy of the owner's own must not be bannered as
+        foreign. Every write site comes through here. A copy that was already
+        in the store with NO record (stored before records were written)
+        stays unattributed-and-outside: the bytes may first have come from
+        elsewhere, and a later local look must not relax that (delivery
+        review). Raises what `media.store` raises."""
+        already = media.stored(data, self.media_dir)
+        path = media.store(data, self.media_dir, hint)
+        if already is not None and provenance.artefact_source(path) is None:
+            provenance.record_artefact(path, UNRECORDED_PICTURE)
+            return path
         provenance.record_artefact(
             path,
             provenance.ArtefactSource(
@@ -9753,6 +9776,7 @@ class Agent:
                 ),
             ),
         )
+        return path
 
     def _remember_shown(self, line: str) -> str:
         """Keep a display line show_image handed over, for the image check to
@@ -9905,13 +9929,13 @@ class Agent:
                 continue
             stamp = recordings.format_time(actual)
             try:
-                path = media.store(data, self.media_dir, f"{recording.identity} at {stamp}")
+                path = self._store_picture(
+                    data, f"{recording.identity} at {stamp}", "read_media",
+                    self._brings_outside_content("read_media", {"source": source}),
+                )
             except (ValueError, OSError) as exc:
                 lines.append(f"*(the frame at {stamp} could not be stored: {exc})*")
                 continue
-            self._record_picture(
-                path, "read_media", self._brings_outside_content("read_media", {"source": source})
-            )
             stored.append(str(path))
             # What is being SAID at that moment, when there are captions to
             # say it: a picture plus its line is what makes a moment legible,
@@ -10444,9 +10468,9 @@ class Agent:
         for number in wanted[:PDF_MAX_PAGE_IMAGES]:
             try:
                 data = documents.page_png(path, number)
-                stored = media.store(data, self.media_dir, f"{rendition.source} p{number}")
-                self._record_picture(
-                    stored, "read_pdf", self._reads_outside_content(str(path))
+                stored = self._store_picture(
+                    data, f"{rendition.source} p{number}", "read_pdf",
+                    self._reads_outside_content(str(path)),
                 )
             except (documents.DocumentError, ValueError, OSError) as exc:
                 out.append(f"*(page {number} could not be rendered as an image: {exc})*")
@@ -12719,9 +12743,9 @@ class Agent:
         began returning a picture's OCR (docs/documents-and-pdf.md, "Pictures"):
         a fetched picture's words came back through its media copy unbannered and
         untainted, in a later chat as easily as this one (found in design
-        review). So it is here, record-reading: `show_image` records what each
-        copy is, and a copy with no record — every one stored before this, and
-        every rasterised PDF page — reads as outside, the safe direction.
+        review). So it is here, record-reading: every write site records what
+        each copy is (`_store_picture`), and a copy with no record — every one
+        stored before this — reads as outside, the safe direction.
         """
         return [
             self.media_dir,
