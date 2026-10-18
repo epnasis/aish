@@ -325,6 +325,9 @@ class _FakeResponse:
     def read(self, n: int) -> bytes:
         return self._data[:n]
 
+    def geturl(self) -> str:
+        return "https://example.com/x.png"
+
     def __enter__(self) -> "_FakeResponse":
         return self
 

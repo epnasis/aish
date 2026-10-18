@@ -1025,6 +1025,9 @@ class _TextExtractor(HTMLParser):
         self._chrome_depth = 0
         self._in_title = False
         self._anchor: tuple[int, str] | None = None
+        # The document's own `<base href>`, the FIRST one, as a browser takes
+        # it: what every relative link on the page is written against.
+        self.base_href = ""
         # Whether the current table row has already emitted a cell — the
         # separator goes BETWEEN cells, never before the first.
         self._cell_seen = False
@@ -1036,6 +1039,8 @@ class _TextExtractor(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag == "title":
             self._in_title = True
+        if tag == "base" and not self.base_href:
+            self.base_href = (dict(attrs).get("href") or "").strip()
         # Attributes used to be dropped wholesale, so read_url handed back an
         # article's text with every picture stripped out — and a model told by
         # a rule to show one had nothing to give show_image but a GUESS. It
@@ -1139,6 +1144,12 @@ def _extract(html: str, base_url: str = "") -> tuple[str, str, list[str]]:
     Image URLs are absolutised against `base_url`, because `og:image` is
     routinely a site-relative path and a relative URL is exactly as useless to
     show_image as no URL at all.
+
+    `base_url` must be the address the page was SERVED from, and a `<base
+    href>` in the page overrides it exactly as it does in a browser — that is
+    what the page's relative links were written against. A base that does not
+    resolve to http(s) is ignored rather than followed, so it can only fail to
+    absolutise a link, never point one somewhere new.
     """
     extractor = _TextExtractor()
     try:
@@ -1146,6 +1157,10 @@ def _extract(html: str, base_url: str = "") -> tuple[str, str, list[str]]:
         extractor.close()
     except Exception:  # noqa: BLE001 — real-world HTML is hostile; keep what we got
         pass
+    if base_url and extractor.base_href:
+        declared_base = urllib.parse.urljoin(base_url, extractor.base_href)
+        if declared_base.startswith(("http://", "https://")):
+            base_url = declared_base
     lines = [" ".join(line.split()) for line in "".join(extractor.parts).splitlines()]
     out: list[str] = []
     for line in lines:
@@ -2363,7 +2378,7 @@ def _read_url(
         anonymous_why = why
 
     try:
-        text, content_type = _fetch(url)
+        text, content_type, landed = _fetch(url)
     except BlockedURLError as exc:
         return (
             f"ERROR: {exc} — read_url only fetches public internet hosts. "
@@ -2416,7 +2431,14 @@ def _read_url(
         # would SEE, and an input is not text.
         declared = declared_data(text)
         login_form = browser.asks_to_sign_in(text)
-        text, title, images = _extract(text, base_url=url)
+        # Resolved against where the page LANDED, never the address asked for.
+        # A redirect (`google.com/goto?url=…` → tanie-loty.com.pl) left the
+        # page's own `/okazje/` link reading as `www.google.com/okazje/`: a
+        # 404 to follow, and an address at the requested host that the page
+        # never offered, written into the offered-links record as if it had.
+        # Only resolution moves; the source header and the title stay keyed
+        # by the address the call named, which is what they are lookups of.
+        text, title, images = _extract(text, base_url=landed or url)
         _remember_title(url, title)
     elif content_type == "application/pdf":
         # Not a dead end any more (#219): this was the one content type aish
@@ -3988,8 +4010,13 @@ _opener = urllib.request.build_opener(
 
 def _guarded_fetch(
     url: str, *, max_bytes: int, timeout: float, user_agent: str
-) -> tuple[bytes, str, str]:
-    """THE outbound HTTP fetch (#308). Body bytes, content type, charset.
+) -> tuple[bytes, str, str, str]:
+    """THE outbound HTTP fetch (#308). Body bytes, content type, charset, and
+    the address the response actually came from.
+
+    The last one is not the address asked for whenever a redirect was
+    followed, and the page's relative links are written against where it
+    LIVES — see `read_url`.
 
     Four properties travel together here and none of them is separable: the
     wire encoding (#213), the public-address requirement (`_require_public`,
@@ -4013,15 +4040,17 @@ def _guarded_fetch(
             response.read(max_bytes),
             response.headers.get_content_type(),
             response.headers.get_content_charset() or "utf-8",
+            response.geturl(),
         )
 
 
-def _fetch(url: str) -> tuple[str, str]:
-    """Decoded body text and its content type, size-capped. Public hosts only."""
-    raw, content_type, charset = _guarded_fetch(
+def _fetch(url: str) -> tuple[str, str, str]:
+    """Decoded body text, its content type, and the address it LANDED on after
+    any redirects. Size-capped. Public hosts only."""
+    raw, content_type, charset, landed = _guarded_fetch(
         url, max_bytes=FETCH_MAX_BYTES, timeout=FETCH_TIMEOUT, user_agent=USER_AGENT
     )
-    return raw.decode(charset, errors="replace"), content_type
+    return raw.decode(charset, errors="replace"), content_type, landed
 
 
 def fetch_binary(
@@ -4038,7 +4067,7 @@ def fetch_binary(
     Reads one byte past the cap so the caller can tell "at the limit" from
     "over it". Raises BlockedURLError / urllib.error.* / OSError — the caller
     turns those into a message the model can act on."""
-    data, content_type, _ = _guarded_fetch(
+    data, content_type, _, _ = _guarded_fetch(
         url, max_bytes=max_bytes + 1, timeout=timeout, user_agent=user_agent
     )
     return data, content_type

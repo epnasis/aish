@@ -218,7 +218,7 @@ class TestReadUrlEscalation:
         """The commonest win by far: the fetch SUCCEEDS and returns an empty
         shell, which used to be a dead end ('returned no readable text')."""
         monkeypatch.setattr(
-            web_module, "_fetch", lambda url: ("<html><body></body></html>", "text/html")
+            web_module, "_fetch", lambda url: ("<html><body></body></html>", "text/html", url)
         )
         monkeypatch.setattr(
             browser,
@@ -308,7 +308,7 @@ class TestReadUrlEscalation:
         monkeypatch.setattr(
             web_module,
             "_fetch",
-            lambda url: ("<html><body>​</body></html>", "text/html"),
+            lambda url: ("<html><body>​</body></html>", "text/html", url),
         )
         monkeypatch.setattr(
             browser,
@@ -329,7 +329,8 @@ class TestReadUrlEscalation:
         calls = []
         monkeypatch.setattr(web_module, "BROWSER_HOSTS", set())
         monkeypatch.setattr(
-            web_module, "_fetch", lambda url: ("<html><body>Loading…</body></html>", "text/html")
+            web_module, "_fetch",
+            lambda url: ("<html><body>Loading…</body></html>", "text/html", url),
         )
         monkeypatch.setattr(browser, "read", lambda url, **kw: calls.append(url))
         assert "Loading" in web_module.read_url("https://thin.example/x")
@@ -636,7 +637,7 @@ class TestKnownBlockingHostsSkipTheDoomedFetch:
 
     def test_an_ordinary_host_is_never_remembered(self, monkeypatch):
         monkeypatch.setattr(web_module, "BROWSER_HOSTS", set())
-        monkeypatch.setattr(web_module, "_fetch", lambda url: ("<p>hello</p>", "text/html"))
+        monkeypatch.setattr(web_module, "_fetch", lambda url: ("<p>hello</p>", "text/html", url))
         web_module.read_url("https://example.com/x")
         assert web_module.BROWSER_HOSTS == set()
 
@@ -915,7 +916,7 @@ class TestASignedInHostIsReadAsTheOwner:
 
         def fetch(url):
             fetched.append(url)
-            return (self.LOGIN_HTML, "text/html")
+            return (self.LOGIN_HTML, "text/html", url)
 
         monkeypatch.setattr(web_module, "_fetch", fetch)
         return fetched
@@ -953,7 +954,7 @@ class TestASignedInHostIsReadAsTheOwner:
         browser.note_signed_in("https://eon.pl/")
         launched = []
         monkeypatch.setattr(
-            web_module, "_fetch", lambda url: ("<html><body>news</body></html>", "text/html")
+            web_module, "_fetch", lambda url: ("<html><body>news</body></html>", "text/html", url)
         )
         monkeypatch.setattr(browser, "read", lambda url, **kw: launched.append(url))
         assert "news" in web_module.read_url("https://example.com/article")
@@ -1047,7 +1048,7 @@ class TestASignedInHostIsReadAsTheOwner:
         monkeypatch.setattr(
             web_module,
             "_fetch",
-            lambda url: ("<html><body>public tariff page</body></html>", "text/html"),
+            lambda url: ("<html><body>public tariff page</body></html>", "text/html", url),
         )
 
         def unavailable(url, **kw):
@@ -1067,7 +1068,7 @@ class TestASignedInHostIsReadAsTheOwner:
         the model must not mine it for one."""
         browser.note_signed_in("https://eon.pl/")
         monkeypatch.setattr(
-            web_module, "_fetch", lambda url: (self.LOGIN_HTML, "text/html")
+            web_module, "_fetch", lambda url: (self.LOGIN_HTML, "text/html", url)
         )
 
         def unavailable(url, **kw):
@@ -3512,6 +3513,7 @@ class TestWhatCountsAsEvidenceOfASession:
                 + "<p>Wpisz haslo aby kontynuowac.</p>" * 40
                 + '<form><input type="password"></form></body></html>',
                 "text/html",
+                url,
             ),
         )
 
