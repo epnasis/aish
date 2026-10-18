@@ -80,7 +80,7 @@ class TestHtmlToText:
 
     def test_read_url_stores_page_title(self, monkeypatch):
         page = "<html><head><title>Widget Manual</title></head><body><p>hi</p></body></html>"
-        monkeypatch.setattr(web, "_fetch", lambda url: (page, "text/html"))
+        monkeypatch.setattr(web, "_fetch", lambda url: (page, "text/html", url))
         monkeypatch.setattr(web, "PAGE_TITLES", {})
         web.read_url("https://example.com/manual")
         assert web.PAGE_TITLES["https://example.com/manual"] == "Widget Manual"
@@ -372,7 +372,7 @@ class TestReadUrl:
             assert web.read_url(url).startswith("ERROR"), url
 
     def test_html_page_extracted_and_truncated_with_hint(self, monkeypatch):
-        monkeypatch.setattr(web, "_fetch", lambda url: (PAGE, "text/html"))
+        monkeypatch.setattr(web, "_fetch", lambda url: (PAGE, "text/html", url))
         result = web.read_url("https://example.com/manual")
         assert "[https://example.com/manual]" in result
         assert "Widgets frob nicely" in result
@@ -382,27 +382,27 @@ class TestReadUrl:
         assert len(result) < web.PAGE_MAX_CHARS + 300 + len(web.UNTRUSTED_NOTE)
 
     def test_topic_reaches_past_truncation(self, monkeypatch):
-        monkeypatch.setattr(web, "_fetch", lambda url: (PAGE, "text/html"))
+        monkeypatch.setattr(web, "_fetch", lambda url: (PAGE, "text/html", url))
         result = web.read_url("https://example.com/manual", topic="frobnicate")
         assert "--frobnicate" in result
         assert "lines matching 'frobnicate'" in result
 
     def test_topic_no_match_falls_back_to_head(self, monkeypatch):
-        monkeypatch.setattr(web, "_fetch", lambda url: (PAGE, "text/html"))
+        monkeypatch.setattr(web, "_fetch", lambda url: (PAGE, "text/html", url))
         result = web.read_url("https://example.com/manual", topic="zzznope")
         assert "NO LINES MATCH" in result
         assert "Widget Manual" in result
 
     def test_plain_text_passed_through(self, monkeypatch):
-        monkeypatch.setattr(web, "_fetch", lambda url: ("raw text body", "text/plain"))
+        monkeypatch.setattr(web, "_fetch", lambda url: ("raw text body", "text/plain", url))
         assert "raw text body" in web.read_url("https://example.com/robots.txt")
 
     def test_json_passed_through(self, monkeypatch):
-        monkeypatch.setattr(web, "_fetch", lambda url: ('{"ok": true}', "application/json"))
+        monkeypatch.setattr(web, "_fetch", lambda url: ('{"ok": true}', "application/json", url))
         assert '"ok"' in web.read_url("https://api.example.com/status")
 
     def test_binary_content_refused(self, monkeypatch):
-        monkeypatch.setattr(web, "_fetch", lambda url: (b"\x00\x01", "application/zip"))
+        monkeypatch.setattr(web, "_fetch", lambda url: (b"\x00\x01", "application/zip", url))
         result = web.read_url("https://example.com/bundle.zip")
         assert result.startswith("ERROR")
         assert "application/zip" in result
@@ -411,7 +411,7 @@ class TestReadUrl:
         """#219: this was the one content type aish routinely met on the web and
         could do nothing at all with. A refusal that names no alternative is
         where the model starts improvising with curl."""
-        monkeypatch.setattr(web, "_fetch", lambda url: ("%PDF-1.4", "application/pdf"))
+        monkeypatch.setattr(web, "_fetch", lambda url: ("%PDF-1.4", "application/pdf", url))
         result = web.read_url("https://example.com/paper.pdf")
         assert result.startswith("ERROR")
         assert 'read_pdf(source="https://example.com/paper.pdf")' in result
@@ -426,7 +426,7 @@ class TestReadUrl:
         assert "connection refused" in result
 
     def test_empty_page_reported(self, monkeypatch, no_browser):
-        monkeypatch.setattr(web, "_fetch", lambda url: ("<html></html>", "text/html"))
+        monkeypatch.setattr(web, "_fetch", lambda url: ("<html></html>", "text/html", url))
         assert web.read_url("https://example.com/blank").startswith("ERROR")
 
 
@@ -504,7 +504,7 @@ class TestBlockedPageAdvice:
     def test_empty_page_is_reported_without_a_third_party_detour(
         self, monkeypatch, no_browser
     ):
-        monkeypatch.setattr(web, "_fetch", lambda url: ("<html></html>", "text/html"))
+        monkeypatch.setattr(web, "_fetch", lambda url: ("<html></html>", "text/html", url))
         result = web.read_url("https://spa.example.com/app")
         assert result.startswith("ERROR")
         assert "Do NOT retry through r.jina.ai" in result
@@ -517,7 +517,7 @@ class TestBlockedPageAdvice:
             "please make sure you are authorized to access this page.\n\n"
             "Markdown Content:\n"
         )
-        monkeypatch.setattr(web, "_fetch", lambda u: (stub, "text/plain"))
+        monkeypatch.setattr(web, "_fetch", lambda u: (stub, "text/plain", u))
         result = web.read_url("https://r.jina.ai/https://allegro.pl/oferta/x")
         assert result.startswith("ERROR")
         assert "reader stub" in result
@@ -700,6 +700,9 @@ class TestWireUrl:
 class _FakeTextResponse:
     headers = email.message.Message()
 
+    def __init__(self, landed="https://example.com/"):
+        self._landed = landed
+
     def __enter__(self):
         return self
 
@@ -708,6 +711,96 @@ class _FakeTextResponse:
 
     def read(self, size=None):
         return b"ok"
+
+    def geturl(self):
+        return self._landed
+
+
+class TestLinksResolveWhereThePageLanded:
+    """Session 20261018-150119: `read_url` of a `google.com/goto?url=…`
+    redirect landed on tanie-loty.com.pl, and the page's own relative links
+    were resolved against the address aish ASKED for — `Okazje →
+    https://www.google.com/okazje/`, pagination at `www.google.com/okazje/…
+    ?flight_page=2`. The model followed one, got a 404, rebuilt the right host
+    by hand, and that composed address drew an egress card for a link the page
+    had in fact offered. A relative link is written against where the page
+    LIVES, so that is what it is resolved against."""
+
+    REQUESTED = "https://www.google.com/goto?url=CAESjAEB6zswFffav4qU"
+    LANDED = "https://www.tanie-loty.com.pl/okazje/loty-z-warszawy"
+    PAGE = (
+        "<html><head><title>Okazje</title></head><body>"
+        "<a href='/okazje/'>Okazje</a>"
+        "<p>Lot do Pragi 399 zł</p>"
+        "<a href='?flight_page=2'>Następna strona</a>"
+        "</body></html>"
+    )
+
+    def _read(self, monkeypatch, page=None, landed=None):
+        landed = self.LANDED if landed is None else landed
+        monkeypatch.setattr(
+            web, "_fetch", lambda url: (page or self.PAGE, "text/html", landed)
+        )
+        monkeypatch.setattr(web, "PAGE_TITLES", {})
+        return web.read_url(self.REQUESTED)
+
+    def test_relative_links_resolve_against_the_landed_address(self, monkeypatch):
+        out = self._read(monkeypatch)
+        assert "Okazje → https://www.tanie-loty.com.pl/okazje/" in out
+        assert (
+            "Następna strona → "
+            "https://www.tanie-loty.com.pl/okazje/loty-z-warszawy?flight_page=2"
+        ) in out
+        assert "www.google.com/okazje" not in out
+
+    def test_the_source_header_and_title_stay_keyed_by_the_requested_address(
+        self, monkeypatch
+    ):
+        """Only resolution moves. The header echoes the call and the title is
+        looked up later by the address the model fetched — neither is a link."""
+        out = self._read(monkeypatch)
+        assert f"[{self.REQUESTED}]" in out
+        assert web.PAGE_TITLES == {self.REQUESTED: "Okazje"}
+
+    def test_a_page_with_no_redirect_resolves_exactly_as_before(self, monkeypatch):
+        out = self._read(monkeypatch, landed=self.REQUESTED)
+        assert "Okazje → https://www.google.com/okazje/" in out
+
+    def test_a_base_href_overrides_the_address(self, monkeypatch):
+        page = self.PAGE.replace(
+            "<head>", "<head><base href='https://cdn.tanie-loty.com.pl/pl/'>"
+        )
+        out = self._read(monkeypatch, page=page)
+        assert "Okazje → https://cdn.tanie-loty.com.pl/okazje/" in out
+        assert (
+            "Następna strona → https://cdn.tanie-loty.com.pl/pl/?flight_page=2"
+        ) in out
+
+    def test_a_relative_base_href_resolves_against_the_landed_address(self):
+        text, _, _ = web._extract(
+            "<head><base href='/en/'></head><a href='deals'>Deals</a>",
+            base_url="https://landed.example/pl/x",
+        )
+        assert "Deals → https://landed.example/en/deals" in text
+
+    def test_only_the_first_base_counts_and_a_non_http_one_is_ignored(self):
+        text, _, _ = web._extract(
+            "<head><base href='javascript:alert(1)//'>"
+            "<base href='https://second.example/'></head>"
+            "<a href='/deals'>Deals</a>",
+            base_url="https://landed.example/x",
+        )
+        assert "Deals → https://landed.example/deals" in text
+
+    def test_the_fetch_reports_where_the_response_came_from(self, monkeypatch):
+        """The landed address is the RESPONSE's, which urllib sets to the last
+        hop of the redirect chain. Read off the response, never re-derived."""
+        monkeypatch.setattr(web, "_require_public", lambda url: None)
+        monkeypatch.setattr(
+            web._opener, "open",
+            lambda request, timeout=None: _FakeTextResponse(landed=self.LANDED),
+        )
+        assert web._fetch(self.REQUESTED)[2] == self.LANDED
 
 
 class TestTrustStore:
@@ -831,7 +924,7 @@ class TestPageImages:
         """The image URLs are the POINT of the read on a "show me" task, so the
         page cap must not be able to cut the one thing that ends the guessing."""
         big = self.PAGE.replace("The phone folds.", "x " * 200_000)
-        monkeypatch.setattr(web, "_fetch", lambda _u: (big, "text/html"))
+        monkeypatch.setattr(web, "_fetch", lambda _u: (big, "text/html", _u))
         out = web.read_url("https://site.test/a")
         assert web.CUT_MARKER in out, "expected this fixture to exceed the cap"
         assert "https://site.test/img/hero.jpg" in out
@@ -1016,7 +1109,7 @@ class TestTileStrips:
     def test_the_pages_own_price_survives_the_read(self, monkeypatch):
         """The bug, end to end. 63,19 zl is what the offer actually cost; the
         answer said 49,49, which was never on the page at all."""
-        monkeypatch.setattr(web, "_fetch", lambda _u: (self.OFFER, "text/plain"))
+        monkeypatch.setattr(web, "_fetch", lambda _u: (self.OFFER, "text/plain", _u))
         # Not the real host: allegro.pl is in BROWSER_HOSTS, and a test must
         # never reach the renderer. The PAGE is what is under test.
         out = web.read_url("https://shop.test/oferta/karabinek-15960083405")
@@ -1226,7 +1319,7 @@ class TestWhatThePageDeclares:
         html = (f'<html><head><script type="application/ld+json">'
                 f'{self.DECLARED[0]}</script></head><body>'
                 + "<p>filler paragraph</p>" * 2000 + "</body></html>")
-        monkeypatch.setattr(web, "_fetch", lambda _u: (html, "text/html"))
+        monkeypatch.setattr(web, "_fetch", lambda _u: (html, "text/html", _u))
         out = web.read_url("https://shop.test/oferta/karabinek-15960083405")
         assert web.CUT_MARKER in out, "expected this fixture to exceed the cap"
         assert "63.19 PLN" in out
@@ -1536,6 +1629,9 @@ class _FakeBinaryResponse:
 
     def read(self, size=None):
         return self._data if size is None else self._data[:size]
+
+    def geturl(self):
+        return "https://example.com/x.png"
 
 
 class TestGuardedFetchArguments:

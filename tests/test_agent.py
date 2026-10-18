@@ -11413,6 +11413,56 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         agent.run_task(f"read {requested}")
         assert agent._offered_links == {linked}
 
+    def test_a_redirected_page_offers_its_links_at_the_host_it_landed_on(
+        self, monkeypatch
+    ):
+        """Session 20261018-150119, end to end through the REAL `read_url`.
+
+        A `google.com/goto?url=…` redirect landed on tanie-loty.com.pl, and
+        the page's relative pagination link was resolved against the address
+        aish asked for: `www.google.com/okazje/…?flight_page=2` went into the
+        record as offered, the model followed it into a 404, rebuilt the right
+        host by hand, and that composed address drew an egress card. Resolved
+        against where the page landed, page 2 is the link the page offered —
+        followed with no card — and no address at the requested host is
+        recorded that the page never wrote."""
+        import aish.agent as agent_module
+
+        requested = "https://www.google.com/goto?url=CAESjAEB6zswFffav4qU"
+        landed = "https://www.tanie-loty.com.pl/okazje/loty-z-warszawy"
+        page_two = landed + "?flight_page=2"
+        pages = {
+            requested: (
+                "<html><body><p>Lot do Pragi 399 zł</p>"
+                "<p><a href='?flight_page=2'>Następna strona</a></p>"
+                "</body></html>",
+                "text/html", landed,
+            ),
+            page_two: ("<html><body><p>Lot do Rzymu 450 zł</p></body></html>",
+                       "text/html", page_two),
+        }
+        fetched: list = []
+        monkeypatch.setattr(
+            agent_module.web, "_fetch",
+            lambda url: fetched.append(url) or pages[url],
+        )
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_url", url=requested)]),
+                model_says(tool_calls=[
+                    tool_call("read_url", url=page_two + "#occ-results")
+                ]),
+                model_says("read both"),
+            ],
+            approve_tool=lambda name, args, preview=None: asked.append(preview) or True,
+        )
+        agent.run_task(f"read {requested}")
+        assert page_two in agent._offered_links
+        assert not any("www.google.com/okazje" in u for u in agent._offered_links)
+        assert asked == []
+        assert fetched == [requested, page_two]
+
     def test_a_note_aish_wrote_is_not_something_a_page_offered(self, monkeypatch):
         """#313. `STALE_SESSION_NOTE` is aish's own sentence, sits above the
         untrusted banner, and tells the user to run `/browser https://<host>`
@@ -14345,7 +14395,7 @@ class TestTheDrivenTwinOfTheComposedAddress:
         assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
         assert len(asked) == 1
         assert "send data to drop.example" in asked[0]
-        assert "1 value(s) aish typed into the page" in asked[0]
+        assert "1 value(s) aish typed this task" in asked[0]
         assert "you have never agreed to send anything there" in asked[0]
 
     def test_the_identical_batch_at_a_vouched_host_is_free(self):
@@ -14379,7 +14429,7 @@ class TestTheDrivenTwinOfTheComposedAddress:
         agent._browse_gate("browse_fill", {"steps": list(self.STEPS)})
         assert len(asked) == 1
         assert "never agreed" not in asked[0]
-        assert "1 value(s) aish typed into the page" in asked[0]
+        assert "1 value(s) aish typed this task" in asked[0]
 
     def test_the_two_call_shape_gets_the_same_answer(self):
         """Fill in one call, submit in another — the shape the model reaches for
@@ -14477,7 +14527,7 @@ class TestTheDrivenTwinOfTheComposedAddress:
         glance, which is the only condition P2 lets a card exist under."""
         agent, asked, _ = self._agent()
         agent._browse_gate("browse_fill", {"steps": list(self.STEPS)})
-        assert "aish would send what it typed:" in asked[0]
+        assert agent_module.DRIVEN_NOTE_HEADER in asked[0]
         assert "Search: " in asked[0]
 
     def test_a_post_submit_is_covered_too(self):
@@ -14573,7 +14623,7 @@ class TestTheDrivenTwinOfTheComposedAddress:
         assert agent._browse_gate("browse_fill", {"steps": list(self.STEPS)}) is None
         assert len(asked) == 1
         assert "send data to collector.example" in asked[0]
-        assert "drop.example" not in asked[0].split("aish would send")[0]
+        assert "drop.example" not in asked[0].split(agent_module.DRIVEN_NOTE_HEADER)[0]
 
     def test_the_composed_twin_of_that_address_fires_identically(self):
         """**Parity, asserted in BOTH directions**, because that is what the
@@ -14717,6 +14767,69 @@ class TestTheDrivenTwinOfTheComposedAddress:
         assert len(asked) == 1
         assert "send data to collector.example" in asked[0]
         assert "1 value(s)" in asked[0]
+
+    def test_the_card_lists_exactly_the_values_it_counts(self):
+        """The count and the list are ONE computation, or they drift.
+
+        Session 20261018-150119, lot.com: a script-submitted search field
+        (no `<form>`, so the destination is `UNREADABLE_DESTINATION`) drew
+        *"would send 7 value(s)"* and listed one — `Lot do:: Praga` — and
+        later *"8"* over one. The count asked the ledger under the page aish
+        typed AT; the list asked it under the DESTINATION, which for an
+        unreadable or cross-origin form holds nothing, so only this call's own
+        value showed. A count the owner cannot check against the lines below it
+        is the card the M3 clause exists to avoid. Denied, so no machine-wide
+        vouch leaks from one destination to the next."""
+        earlier = [("Lot do:", "Kopenhaga"), ("Wylot", "12-11-2026"),
+                   ("Dorośli", "4")]
+        for sends_to in ("", self.ELSEWHERE):
+            seen: list = []
+            agent, _, _ = self._agent(
+                sends_to=sends_to,
+                approve_tool=lambda n, a, p=None, s=seen: s.append(p) or False,
+            )
+            for target, value in earlier:
+                agent._note_typed_values("browse_act", {
+                    "action": "type", "target": target, "text": value,
+                })
+            agent._browse_gate("browse_act", {
+                "target": "Search", "action": "type", "text": "Praga",
+                "submit": True,
+            })
+            assert len(seen) == 1, sends_to
+            card = seen[0]
+            counted = int(re.search(r"(\d+) value\(s\)", card).group(1))
+            listed = [line for line in card.splitlines() if line.startswith("  ")]
+            assert counted == len(listed) == 4, (sends_to, card)
+            for target, value in [*earlier, ("Search", "Praga")]:
+                assert f"  {target}: {value}" in listed, (sends_to, card)
+
+    def test_a_stored_secret_typed_earlier_is_named_on_the_card_never_printed(
+        self, monkeypatch
+    ):
+        """Listing what was counted puts EARLIER-typed values on the card, and
+        the card is the approval record. A stored secret among them is shown
+        by the name `secrets.scrub` gives it — still counted, never verbatim."""
+        monkeypatch.setattr(
+            agent_module.secrets, "_matchable",
+            lambda: [("lot-password", "hunter2-correct-horse")],
+        )
+        seen: list = []
+        agent, _, _ = self._agent(
+            sends_to="",
+            approve_tool=lambda n, a, p=None, s=seen: s.append(p) or False,
+        )
+        agent._note_typed_values("browse_act", {
+            "action": "type", "target": "Hasło", "text": "hunter2-correct-horse",
+        })
+        agent._browse_gate("browse_act", {
+            "target": "Search", "action": "type", "text": "Praga", "submit": True,
+        })
+        assert len(seen) == 1
+        assert "carries one of your stored secrets" in seen[0]
+        assert "hunter2-correct-horse" not in seen[0]
+        assert "Hasło: [secret lot-password" in seen[0]
+        assert "Search: Praga" in seen[0]
 
     def test_the_host_is_read_with_the_composed_twins_own_parser(self):
         """One vocabulary, or a yes on one channel fails to answer the other. A
@@ -15648,7 +15761,7 @@ class TestTheOwnersDeclaredValues:
         agent._note_typed_values("browse_fill", args)
         assert agent._browse_gate("browse_act", {"target": "Go"}) is None
         assert len(asked) == 2
-        assert "would send 1 value(s)" in asked[1]
+        assert "could send 1 value(s)" in asked[1]
         assert "[your home address]" in asked[1]
         for card in asked:
             assert value not in card

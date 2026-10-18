@@ -2215,15 +2215,29 @@ PERSONAL_NO_HOST = (
 # about to ride an address to somewhere the owner has never agreed to send
 # anything. `{n}` is counted, never estimated — the values are the ones aish
 # composed, so there is nothing to guess about.
+#
+# "COULD send … typed this task", never "would send … into the page": the count
+# is every value aish typed at this page's host this task (plus any carried
+# over a restart), and nothing checks which of them this press actually sends.
+# Session 20261018-150119 said *"would send 7"* on lot.com where one of the
+# seven, `Kopenhaga`, had already been overwritten in the same field by the
+# value being typed, and the destination was a script nobody can read. The
+# sentence states what was counted; the list below it is exactly that count.
 DRIVEN_CARRIES = (
-    "would send {n} value(s) aish typed into the page, and you have never "
+    "could send {n} value(s) aish typed this task, and you have never "
     "agreed to send anything there"
 )
 
 # The same finding in a triggered session, minus the clause about a vouch: the
 # strict unattended rule gates a payload at a host the owner DID name, so
 # saying "you have never agreed" there would state something no line checked.
-DRIVEN_UNATTENDED_CARRIES = "would send {n} value(s) aish typed into the page"
+DRIVEN_UNATTENDED_CARRIES = "could send {n} value(s) aish typed this task"
+
+# The header over the values that finding counted. It names them as THE COUNT,
+# which is true by construction, rather than as "what was typed this task" (the
+# ledger is per page host, so that would claim a completeness it does not have)
+# or as "what this sends" (nothing checks that).
+DRIVEN_NOTE_HEADER = "the values counted:"
 
 # What the send clause names when the form's own destination could not be read
 # (#346). It is a DESTINATION for the card to name and never a host: it can
@@ -11438,8 +11452,25 @@ class Agent:
         ]
 
     def _driven_finding(self, name: str, args: dict) -> str:
+        """The finding alone, for the callers that only DECIDE — see
+        `_driven_send`, which is where it is computed."""
+        return self._driven_send(name, args)[0]
+
+    def _driven_send(
+        self, name: str, args: dict
+    ) -> tuple[str, list[tuple[str, str]]]:
         """WHAT pressing this would send, in the owner's own words — or "" when
-        it would send nothing (#295 M3).
+        it would send nothing (#295 M3) — together with the values that
+        sentence counted.
+
+        **The count and the list are ONE reading, returned together.** The card
+        used to count here and list in a second lookup keyed by the
+        DESTINATION, while this one is keyed by the page aish typed AT (#346).
+        For a script-submitted field (`UNREADABLE_DESTINATION`) or a
+        cross-origin form the second lookup found nothing, so session
+        20261018-150119 showed *"would send 7 value(s)"* above one listed line.
+        Two computations that are meant to agree are how they stop agreeing;
+        the card now renders exactly the list this counted.
 
         **The driven twin of the composed address, and it exists because the
         composed address is not the only way to build one.** A later slice
@@ -11500,45 +11531,53 @@ class Agent:
         # both questions.
         destination = self._driven_host(name, args)
         if not destination:
-            return ""
+            return "", []
         carried = self._values_riding_this_press(
             name, args, self._typed_at_host(name, args)
         )
         if not carried:
-            return ""
+            return "", []
         for value in (v for _, v in carried):
             # Both forms, exactly as `_value_finding` asks it: a secret holding
             # a '%' would survive only one of them.
             if secrets.contains(value) or secrets.contains(
                 urllib.parse.unquote(value)
             ):
-                return "carries one of your stored secrets"
+                return "carries one of your stored secrets", carried
         for value in (v for _, v in carried):
             # A value about to become a query chunk at somebody's host is where
             # `_forwards_elsewhere` looks; here the value IS that chunk, one
             # step before the address exists.
             if _addresses_in_text(urllib.parse.unquote(value)):
-                return "has a second address written inside it"
+                return "has a second address written inside it", carried
         attended = self.origin == "user"
         # The DESTINATION is what a vouch answers for. `UNREADABLE_DESTINATION`
         # is in no vouch set, so a submit aish cannot read the destination of
         # asks — fail closed, by the value it carries rather than by a branch.
         if attended and destination in self._approved_hosts:
-            return ""
+            return "", []
         template = DRIVEN_CARRIES if attended else DRIVEN_UNATTENDED_CARRIES
-        return template.format(n=len(carried))
+        return template.format(n=len(carried)), carried
 
-    def _driven_note(self, name: str, args: dict, host: str) -> str:
-        """The values themselves, as the card shows them.
+    @staticmethod
+    def _driven_note(carried: list[tuple[str, str]]) -> str:
+        """The values themselves, as the card shows them — exactly the list
+        `_driven_send` counted, never a second lookup.
 
         A count is the finding; the values are what makes it checkable at a
         glance, which is the only condition under which epic #295 P2 lets a card
         exist at all. Rendered by the same bounded renderer the form card
         already uses, so a paragraph pasted into a search box cannot push the
-        rest of the card off the screen."""
+        rest of the card off the screen.
+
+        A stored secret is NAMED, never printed: the card is the approval
+        record, and `form_note` masks only declared personal values. Counting
+        and listing from one reading put earlier-typed values on cards that
+        used to list only this call's own, so a secret typed in an earlier call
+        would otherwise have reached the record verbatim."""
         return browse.form_note(
-            self._values_riding_this_press(name, args, host),
-            header="aish would send what it typed:",
+            [(target, secrets.scrub(value)) for target, value in carried],
+            header=DRIVEN_NOTE_HEADER,
         )
 
     def _mail_link_url(self, name: str, args: dict) -> str:
@@ -12189,7 +12228,7 @@ class Agent:
         already a block, and running the grant onto the end of its last value
         would read as part of that value."""
         granted = self._site_granted(host)
-        sending = self._driven_finding(name, args)
+        sending, sent_values = self._driven_send(name, args)
         # The EXACT host the FORM would send to, never `host` — which is the
         # page the button sits on, and says nothing about where it posts
         # (#346). The send vouch is also exact-matched where the press grant is
@@ -12227,7 +12266,7 @@ class Agent:
                     host=send_host, finding=sending
                 )
             )
-            if note := self._driven_note(name, args, send_host):
+            if note := self._driven_note(sent_values):
                 clauses.append(note)
         if typing:
             # Named on the card and NEVER quoted: the class and the host are
