@@ -989,17 +989,31 @@ class Scheduler:
         `_expire`-shaped record and its sentence in the push: what was
         observed, never a cause."""
         assert self._state is not None and task.until is not None
+        # `fire_now` can reload the folder mid-tick (#5 S4): an `until` the
+        # owner just extended must not end under its old value.
+        if task not in self.tasks:
+            return
         key = f"{task.id}:ended:{task.until.isoformat()}"
         refusals = {k: v for k, v in self._last_refusal.items() if _task_of(k) == task.id}
-        # Nothing of this task can be due again, so its retry memory is dead.
+        # Nothing of this task can be due again, so its retry memory is dead,
+        # and any streak ends with the ending.
         for store in (self._retry_open_at, self._last_refusal):
             for stale in [k for k in store if _task_of(k) == task.id]:
                 del store[stale]
+        if self._state.streaks.pop(task.id, None) is not None:
+            await self._save_state()
+        self._state.monitor_streaks.pop(task.id, None)
         if key in self._state.notified:
             return
-        # Retries stopped at the grace edge; any streak ends with the ending.
-        self._state.streaks.pop(task.id, None)
-        self._state.monitor_streaks.pop(task.id, None)
+        if any(r.get("key") == key for r in self._state.records):
+            # The notified list (capped) evicted the key while the record
+            # survived: the push may repeat once (stated), the records never.
+            await self._push_once(
+                key, f"aish automation {task.id} ended",
+                f"automation {task.id} ended as scheduled: its until "
+                f"({task.until.strftime('%H:%M %a %Y-%m-%d')}) has passed.",
+            )
+            return
         until_words = task.until.strftime("%H:%M %a %Y-%m-%d")
         final_sentence = ""
         if verdict.final_missed and verdict.occurrence is not None:

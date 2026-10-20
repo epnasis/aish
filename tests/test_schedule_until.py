@@ -319,6 +319,34 @@ class TestTheEnding:
         assert "(23:59 Mon 2026-11-30)" in ended_pushes(pushes)[1][1]
 
 
+    def test_a_notified_eviction_may_repeat_the_push_but_never_the_records(self, tmp_path):
+        write_file(tmp_path)
+        seed(tmp_path, D(2026, 11, 13, 9, 0))
+        clock = Clock(UNTIL + STALE_AFTER + timedelta(hours=1))
+        sched, _seam, pushes = build(tmp_path, clock)
+        tick(sched)
+        assert sched._state is not None
+        sched._state.notified.clear()  # what MAX_RECORDS churn does to the key
+        tick(sched)
+        assert len(ended_pushes(pushes)) == 2  # the stated, bounded repeat
+        kinds = [r["kind"] for r in records(tmp_path)]
+        assert kinds.count("ended") == 1 and kinds.count("final_not_started") == 1
+
+    def test_a_task_a_reload_replaced_does_not_end_under_its_old_until(self, tmp_path):
+        write_file(tmp_path)
+        seed(tmp_path, FINAL)
+        sched, _seam, pushes = build(tmp_path, Clock(UNTIL + timedelta(hours=2)))
+        tick(sched)  # loads the folder
+        stale = sched.tasks[0]
+        sched.tasks = []  # what fire_now's reload does when the file changed
+        verdict = schedule.due(stale, {key(FINAL)}, UNTIL + timedelta(hours=2), since=BEGAN)
+        pushes.clear()
+        assert sched._state is not None
+        sched._state.notified.clear()
+        asyncio.run(sched._ended(stale, verdict, UNTIL + timedelta(hours=2)))
+        assert pushes == []
+
+
 class TestRunNowPastTheEnd:
     def test_refused_whenever_now_is_past_until_even_inside_the_grace(self, tmp_path):
         write_file(tmp_path)
