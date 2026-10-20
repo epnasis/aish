@@ -120,7 +120,9 @@ def _final_may_still_run(task: schedule.Task, listing: Listing, now: datetime) -
     """Past `until`, the one arm of `schedule.due` that is not ENDED whatever
     the scheduler's `since` says: enabled, inside the grace, the final
     occurrence unfired. Whether it IS due there depends on `since`, which
-    only aish-web holds — so the listing says "may", never "will"."""
+    only aish-web holds — so the listing says "may", never "will". A final
+    occurrence before `from` (S6) is no final run — `final_occurrence` returns
+    None for it, exactly as `due()` never fires it."""
     assert task.until is not None
     final = schedule.final_occurrence(task)
     return (
@@ -167,8 +169,12 @@ def task_lines(listing: Listing, now: datetime) -> list[str]:
                           f"late, until {grace}")
             lines.append(f"    {stands}{_ran_words(task, listing)}")
         elif task.recurring:
-            coming = schedule.upcoming(task, now, 1)  # clipped at `until`
-            if coming:
+            coming = schedule.upcoming(task, now, 1)  # clipped to [from, until]
+            if coming and task.before_start(now):
+                # Not yet started: a bare "next <date>" would read as live.
+                upcoming = (f"starts {_clock(coming[0])}" if task.enabled
+                            else f"would start {_clock(coming[0])} if enabled")
+            elif coming:
                 upcoming = (f"next {_clock(coming[0])}" if task.enabled
                             else f"would next run at {_clock(coming[0])} if enabled")
             elif task.until is not None:
@@ -250,11 +256,14 @@ def enabled_words(task: schedule.Task, state_dir: Path, now: datetime) -> str:
     after `/tasks enable`, because a one-shot whose time has passed does not
     simply resume."""
     if task.recurring:
-        coming = schedule.upcoming(task, now, 1)  # clipped at `until`
+        coming = schedule.upcoming(task, now, 1)  # clipped to [from, until]
         final = schedule.final_occurrence(task)
         if coming:
             ends = (f"; it ends {_clock(task.until)}, after its last run, for {_clock(final)}"
                     if task.until is not None and final is not None else "")
+            if task.before_start(now):
+                return (f"it starts {_clock(coming[0])}, the first scheduled time in its "
+                        f"window{ends}")
             return f"its next scheduled time is {_clock(coming[0])}{ends}"
         if task.until is not None:
             return (f"no scheduled time is left before its until ({_clock(task.until)}), "

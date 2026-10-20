@@ -15664,7 +15664,11 @@ class Agent:
             "prompt": str(args.get("prompt", "") or ""),
             # Both or neither is passed through as-is: validate_task refuses
             # anything but exactly one of the two.
-            "schedule": {k: args[k] for k in ("at", "cron", "until") if args.get(k)},
+            # An empty string drops silently, as for the others: the card then
+            # shows no start (or end) line, so what is approved is what exists.
+            "schedule": {
+                k: args[k] for k in ("at", "cron", "from", "until") if args.get(k)
+            },
             "enabled": True,
             "created": now.isoformat(),
         }
@@ -15715,15 +15719,23 @@ class Agent:
         if result.startswith("ERROR"):
             return result
         if task.recurring:
+            begins = (
+                f"; it starts at {task.start.isoformat(sep=' ', timespec='minutes')}, and no "
+                "occurrence before that ever runs"
+                if task.start is not None and task.start > now else ""
+            )
             ends = (
                 f"; it ends at {task.until.isoformat(sep=' ', timespec='minutes')}, and no "
                 "occurrence after that ever runs" if task.until is not None else ""
             )
-            when = (
-                f"on the schedule `{task.cron}` (next: "
-                f"{schedule.cron_next(task.cron, now).isoformat(sep=' ', timespec='minutes')}"
-                f"{ends}). Each time"
+            # The clipped helper, never `cron_next` raw: a raw next would name a
+            # run before `from` (or after `until`) that will never start.
+            coming = schedule.upcoming(task, now, 1)
+            nxt = (
+                f"next: {coming[0].isoformat(sep=' ', timespec='minutes')}" if coming
+                else "no run is left in its window"
             )
+            when = f"on the schedule `{task.cron}` ({nxt}{begins}{ends}). Each time"
         else:
             when = f"for {task.one_shot_at().isoformat(sep=' ', timespec='minutes')}. At that time"
         watching = (
