@@ -980,6 +980,18 @@ notify setting; `/tasks` lists it as ended, enabling it or running it by hand
 is refused, and you can delete it. Extending `until` in the file restarts it:
 one catch-up run fires, and the gap is recorded as skipped.
 
+**A start date.** *"Every day from November 7th"* gets
+`"from": "2026-11-07T00:00"` beside the cron schedule — the same kind of
+enforced field, and it can sit beside `until`. No occurrence before it ever
+runs (one exactly at it is the first); the card shows the first run (*"Its
+first run is Sat 2026-11-07 09:00: no occurrence before Sat 2026-11-07 00:00
+is ever run"*), so a misread date is visible before you approve. Until then
+`/tasks` says *starts <first run>*, and running it by hand is refused — its
+card only covered runs from the start on; ask aish in a chat instead, or ask
+it to re-save the automation with an earlier start. A start already in the past
+is allowed and changes nothing. Moving `from` earlier in the file works like
+extending `until`: one catch-up run fires, and the gap is recorded as skipped.
+
 **Monitors.** *"Tell me when the price on this page changes"* becomes a
 recurring automation with `"kind": "monitor"`. Each run compares what it reads
 against the snapshot the previous run saved and ends with a verdict aish reads
