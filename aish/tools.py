@@ -1794,6 +1794,11 @@ TOOL_SCHEMAS: list[dict] = [
                         "type": "string",
                         "description": "Local, e.g. '0 9 * * 1-5'.",
                     },
+                    "from": {
+                        "type": "string",
+                        "description": "cron only: the start, local, e.g. '2026-11-07T00:00'. "
+                        "MUST set it when the user names a start; no occurrence before it runs.",
+                    },
                     "until": {
                         "type": "string",
                         "description": "cron only: the end, local, e.g. '2026-11-14T23:59'. "

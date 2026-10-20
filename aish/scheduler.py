@@ -219,9 +219,11 @@ def run_prompt(
         ]
     else:
         occurrence = scheduled_for or task.one_shot_at()
+        begin = (f", from {task.start.isoformat(sep=' ', timespec='minutes')}"
+                 if task.start is not None else "")
         end = (f", until {task.until.isoformat(sep=' ', timespec='minutes')}"
                if task.until is not None else "")
-        recurs = f" (recurring: `{task.cron}`{end})" if task.recurring else ""
+        recurs = f" (recurring: `{task.cron}`{begin}{end})" if task.recurring else ""
         lines = [
             f"[scheduled: {task.id}] An automation the owner approved has fired.",
             f"Scheduled for {occurrence.isoformat(sep=' ', timespec='minutes')}{recurs}; "
@@ -676,8 +678,8 @@ class Scheduler:
         its own dedup key (`manual_key`), and it NEVER marks the fired ledger:
         the ledger states what the SCHEDULE did, so the occurrence that is due
         still fires on time. Refused before the seam for a task that is
-        missing, unparseable, past its `until` (S5), disabled, or a one-shot
-        that expired — each with
+        missing, unparseable, past its `until` (S5), before its `from` (S6),
+        disabled, or a one-shot that expired — each with
         the reason and the way on. A failure to open is answered to the owner,
         who asked and is there to read it, so it is neither recorded nor
         pushed; a run that opened leaves a `manual_run` record.
@@ -711,6 +713,21 @@ class Scheduler:
                 f"({task.until.strftime('%H:%M %a %Y-%m-%d')}) has passed, and aish "
                 "starts no run of it by hand after that; ask aish for a new automation, "
                 "which comes on its own approval card",
+            )
+        if task.before_start(now):
+            # One rule with the end: a run by hand is chosen only inside the
+            # task's own window [from, until]. A manual fire runs the task's
+            # PROFILE (cardless prefixes, site grants) at a time its card never
+            # described, and aish cannot tell a harmless early check from
+            # "start emailing them from Nov 7" run early.
+            assert task.start is not None
+            return TriggerOutcome(
+                REFUSED, error=f"automation {task.id} has not started: it starts "
+                f"{task.start.strftime('%H:%M %a %Y-%m-%d')} (its from), and aish starts "
+                "no run of it by hand before that, because its approval card covers "
+                "only runs from then on; to do it now, ask aish in a chat, where every "
+                "change gets its own card, or ask aish to re-save it with an earlier "
+                "start, which comes on its own approval card",
             )
         if not task.enabled:
             return TriggerOutcome(

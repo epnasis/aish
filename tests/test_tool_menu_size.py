@@ -51,7 +51,12 @@ from aish import tools
 # and its MUST. The alternative is the defect the slice removes: with no field
 # to put an end in, the model wrote "expires after Nov 14" into the card's prose
 # and the prompt, where nothing enforces it.
-MAX_MENU_CHARS = 36_000
+#
+# Raised 36,000 -> 36,200 on 2026-10-20 (epic #142 W2, S6, #457) for
+# schedule_task's `from` argument (+166 chars: 35,957 -> 36,123) — until's
+# mirror, one string and its MUST. Without it a named start ("od 7 listopada")
+# had nowhere to go but the prompt's prose, the same defect at the other edge.
+MAX_MENU_CHARS = 36_200
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.
