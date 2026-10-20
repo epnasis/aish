@@ -15664,7 +15664,7 @@ class Agent:
             "prompt": str(args.get("prompt", "") or ""),
             # Both or neither is passed through as-is: validate_task refuses
             # anything but exactly one of the two.
-            "schedule": {k: args[k] for k in ("at", "cron") if args.get(k)},
+            "schedule": {k: args[k] for k in ("at", "cron", "until") if args.get(k)},
             "enabled": True,
             "created": now.isoformat(),
         }
@@ -15715,10 +15715,14 @@ class Agent:
         if result.startswith("ERROR"):
             return result
         if task.recurring:
+            ends = (
+                f"; it ends at {task.until.isoformat(sep=' ', timespec='minutes')}, and no "
+                "occurrence after that ever runs" if task.until is not None else ""
+            )
             when = (
                 f"on the schedule `{task.cron}` (next: "
-                f"{schedule.cron_next(task.cron, now).isoformat(sep=' ', timespec='minutes')})"
-                ". Each time"
+                f"{schedule.cron_next(task.cron, now).isoformat(sep=' ', timespec='minutes')}"
+                f"{ends}). Each time"
             )
         else:
             when = f"for {task.one_shot_at().isoformat(sep=' ', timespec='minutes')}. At that time"

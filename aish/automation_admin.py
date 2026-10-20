@@ -116,29 +116,66 @@ def _one_shot_state(task: schedule.Task, listing: Listing, now: datetime) -> str
             "recorded — aish-web records it as expired on its next tick")
 
 
+def _final_may_still_run(task: schedule.Task, listing: Listing, now: datetime) -> bool:
+    """Past `until`, the one arm of `schedule.due` that is not ENDED whatever
+    the scheduler's `since` says: enabled, inside the grace, the final
+    occurrence unfired. Whether it IS due there depends on `since`, which
+    only aish-web holds — so the listing says "may", never "will"."""
+    assert task.until is not None
+    final = schedule.final_occurrence(task)
+    return (
+        final is not None and task.enabled
+        and now - task.until <= schedule.STALE_AFTER
+        and task.key_for(final) not in listing.fired
+    )
+
+
+def _ran_words(task: schedule.Task, listing: Listing) -> str:
+    if listing.ledger_error:
+        return " · whether it ran is unknown (the record of fired runs cannot be read)"
+    last = schedule.last_fired(task.id, listing.fired)
+    return f" · last ran for {_clock(last)}" if last is not None else ""
+
+
 def task_lines(listing: Listing, now: datetime) -> list[str]:
     """The `/tasks` listing as plain lines: one header per task, then where it
     stands. Problem files come last, AS problems, with their error."""
     lines: list[str] = []
     for task in listing.tasks:
-        state = "enabled" if task.enabled else "DISABLED"
+        ended = (task.past_until(now) and not listing.ledger_error
+                 and not _final_may_still_run(task, listing, now))
+        # ENDED outranks DISABLED: a disabled task past its end will not run
+        # again whatever is done to the toggle.
+        state = "ENDED" if ended else "enabled" if task.enabled else "DISABLED"
         note = f" — {task.note}" if task.note else ""
         lines.append(
             f"{task.id}{note}\n    {task.kind} · runs {schedule.when_words(task, now)} · "
             f"{state} · notify {task.notify}"
         )
-        if task.recurring:
-            try:
-                upcoming = _clock(schedule.cron_next(task.cron, now))
-                upcoming = (f"next {upcoming}" if task.enabled
-                            else f"would next run at {upcoming} if enabled")
-            except schedule.NoOccurrence:
+        if task.recurring and task.past_until(now):
+            assert task.until is not None
+            final = schedule.final_occurrence(task)
+            if ended:
+                stands = f"ended {_clock(task.until)}"
+            elif listing.ledger_error:
+                stands = f"past its until ({_clock(task.until)})"
+            else:
+                assert final is not None
+                grace = _clock(task.until + schedule.STALE_AFTER)
+                stands = (f"past its until ({_clock(task.until)}); its final run, for "
+                          f"{_clock(final)}, has not fired — aish-web may still start it, "
+                          f"late, until {grace}")
+            lines.append(f"    {stands}{_ran_words(task, listing)}")
+        elif task.recurring:
+            coming = schedule.upcoming(task, now, 1)  # clipped at `until`
+            if coming:
+                upcoming = (f"next {_clock(coming[0])}" if task.enabled
+                            else f"would next run at {_clock(coming[0])} if enabled")
+            elif task.until is not None:
+                upcoming = f"no run is left before its until ({_clock(task.until)})"
+            else:
                 upcoming = "no next occurrence within the horizon"
-            last = schedule.last_fired(task.id, listing.fired)
-            ran = f" · last ran for {_clock(last)}" if last is not None else ""
-            if listing.ledger_error:
-                ran = " · whether it ran is unknown (the record of fired runs cannot be read)"
-            lines.append(f"    {upcoming}{ran}")
+            lines.append(f"    {upcoming}{_ran_words(task, listing)}")
         else:
             lines.append(f"    {_one_shot_state(task, listing, now)}")
     for problem in listing.problems:
@@ -189,6 +226,18 @@ def set_enabled(
             f"{path.name} is not a runnable automation ({exc}), so aish will not "
             f"rewrite one field of it; fix it in an editor, or /tasks delete {task_id}"
         ) from None
+    if task.until is not None and task.past_until(now):
+        until = _clock(task.until)
+        # Enabling past the end is provably useless: the scheduler re-seeds
+        # `since` at the enable, after the final occurrence, so nothing is
+        # ever due again. Disabling stays possible through the grace, where it
+        # still stops a late final run; past the grace there is nothing to stop.
+        if enabled or now - task.until > schedule.STALE_AFTER:
+            raise AdminError(
+                f"automation {task_id} has ended: its until ({until}) has passed — ask "
+                f"aish for a new automation, which comes on its own approval card "
+                f"(or /tasks delete {task_id})"
+            )
     if task.enabled == enabled:
         return task, False
     updated = dataclasses.replace(task, enabled=enabled)
@@ -201,10 +250,16 @@ def enabled_words(task: schedule.Task, state_dir: Path, now: datetime) -> str:
     after `/tasks enable`, because a one-shot whose time has passed does not
     simply resume."""
     if task.recurring:
-        try:
-            return f"its next scheduled time is {_clock(schedule.cron_next(task.cron, now))}"
-        except schedule.NoOccurrence:
-            return "it has no next occurrence within the horizon"
+        coming = schedule.upcoming(task, now, 1)  # clipped at `until`
+        final = schedule.final_occurrence(task)
+        if coming:
+            ends = (f"; it ends {_clock(task.until)}, after its last run, for {_clock(final)}"
+                    if task.until is not None and final is not None else "")
+            return f"its next scheduled time is {_clock(coming[0])}{ends}"
+        if task.until is not None:
+            return (f"no scheduled time is left before its until ({_clock(task.until)}), "
+                    "so it will not run again")
+        return "it has no next occurrence within the horizon"
     return _one_shot_state(task, _with_stores(Listing(), state_dir), now)
 
 
@@ -282,6 +337,12 @@ def _record_words(record: dict) -> str:
                 f"when {str(record.get('latest', '?')).replace('T', ' ')} came due")
     if kind == "expired":
         return f"did not run: {record.get('error', '')}"
+    if kind == "ended":
+        return (f"ended as scheduled: its until "
+                f"({str(record.get('until', '?')).replace('T', ' ')}) had passed")
+    if kind == "final_not_started":
+        return (f"final run, for {str(record.get('scheduled_for', '?')).replace('T', ' ')}, "
+                f"did not start: {record.get('error', '')}")
     if kind == "open_failed":
         return f"did not start: {record.get('error', '')}"
     return str(kind)
@@ -337,7 +398,9 @@ def recent_runs(state_dir: Path, *, limit: int = RUNS_SHOWN) -> tuple[list[Run],
         name = record.get("session")
         if name:
             by_session.setdefault(str(name), []).append(record)
-        elif record.get("kind") in ("skipped", "expired", "open_failed"):
+        elif record.get("kind") in (
+            "skipped", "expired", "open_failed", "ended", "final_not_started"
+        ):
             sessionless.append(record)
     fired_for = {
         str(entry.get("session")): (key, entry) for key, entry in ledger.items()

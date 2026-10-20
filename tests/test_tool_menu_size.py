@@ -45,7 +45,13 @@ from aish import tools
 # `kind` and `notify` arguments (+179 chars: 35,600 -> 35,779) — two enums and a
 # 46-char description, no essay. The monitor protocol itself rides the run's
 # prompt, which only a monitor run pays for, never this menu.
-MAX_MENU_CHARS = 35_800
+#
+# Raised 35,800 -> 36,000 on 2026-10-20 (epic #142 W2, S5, #456) for
+# schedule_task's `until` argument (+163 chars: 35,794 -> 35,957) — one string
+# and its MUST. The alternative is the defect the slice removes: with no field
+# to put an end in, the model wrote "expires after Nov 14" into the card's prose
+# and the prompt, where nothing enforces it.
+MAX_MENU_CHARS = 36_000
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.
