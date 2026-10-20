@@ -8,7 +8,8 @@ owner-authored directory — the only writer of what has FIRED is the ledger in
 the state tree, which is why an automation has no `fired` field to flip.
 
 Two schedule shapes, exactly one per task: `{"at": "<ISO local datetime>"}`, a
-one-shot (S1), and `{"cron": "<5-field expr>"}`, recurring (S2). Anything else
+one-shot (S1), and `{"cron": "<5-field expr>"}`, recurring (S2), which may also
+carry `"until": "<ISO local datetime>"`, its structural end (S5). Anything else
 is refused at load and at creation, never guessed at.
 """
 
@@ -65,6 +66,10 @@ DUE = "due"
 EXPIRED = "expired"
 FIRED = "fired"
 DISABLED = "disabled"
+#: A cron task past its `until` with nothing left to fire (S5). DERIVED from the
+#: file, the ledger and the clock every time, never stored: `settled` stays
+#: one-shot keys only, and a cron task still never settles.
+ENDED = "ended"
 
 
 def automations_dir() -> Path:
@@ -254,6 +259,9 @@ class Task:
     #: The browser UA of the owner who delegated this one-shot at a moment
     #: (owner_ua); "" for every cron task, which validate_task enforces.
     psu_ua: str = ""
+    #: A cron task's structural end (S5), local wall-clock, inclusive: no
+    #: occurrence after it is ever due. None for no end, and for every one-shot.
+    until: datetime | None = None
 
     @property
     def recurring(self) -> bool:
@@ -265,9 +273,18 @@ class Task:
 
     @property
     def schedule(self) -> dict[str, str]:
+        # Every field of the schedule, or a rewrite through `to_dict` (`/tasks
+        # disable` then `enable`) silently strips the one left out.
         if self.cron:
-            return {"cron": self.cron}
+            out = {"cron": self.cron}
+            if self.until is not None:
+                out["until"] = self.until.isoformat()
+            return out
         return {"at": self.one_shot_at().isoformat()}
+
+    def past_until(self, now: datetime) -> bool:
+        """Whether `now` is after this task's structural end (never, without one)."""
+        return self.until is not None and now > self.until
 
     def one_shot_at(self) -> datetime:
         if self.at is None:
@@ -289,8 +306,11 @@ class Task:
 
     @property
     def deadline(self) -> datetime | None:
-        """When a one-shot is given up. A cron task never is: it has no
-        deadline, only a next occurrence."""
+        """When a one-shot is given up; None for every cron task, whose
+        occurrences are given up one at a time as the next one arrives. A cron
+        task WITH an `until` does end: its final occurrence (the last at or
+        before `until`) stays due through `until + STALE_AFTER` and no later —
+        `due()` derives that ending each time; nothing stores it here."""
         return None if self.at is None else self.at + STALE_AFTER
 
     def to_dict(self) -> dict[str, Any]:
@@ -323,20 +343,21 @@ class Task:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False) + "\n"
 
 
-def parse_at(value: object) -> datetime:
+def parse_at(value: object, name: str = "schedule.at") -> datetime:
     """An ISO datetime as LOCAL wall-clock time. One with an offset is
     converted to local time (unambiguous); a bare date is refused, because
-    "2026-10-15" says when, not what time."""
+    "2026-10-15" says when, not what time. `name` is the field it came from:
+    `schedule.until` is read by the same rule."""
     if not isinstance(value, str) or "T" not in value and " " not in value.strip():
         raise InvalidTask(
-            f"schedule.at must be an ISO local date and time like "
+            f"{name} must be an ISO local date and time like "
             f"'2026-10-15T22:05', got {value!r}"
         )
     try:
         when = datetime.fromisoformat(value.strip())
     except ValueError:
         raise InvalidTask(
-            f"schedule.at {value!r} is not an ISO date and time like '2026-10-15T22:05'"
+            f"{name} {value!r} is not an ISO date and time like '2026-10-15T22:05'"
         ) from None
     if when.tzinfo is not None:
         when = when.astimezone().replace(tzinfo=None)
@@ -410,7 +431,12 @@ def validate_task(
     `now` is passed only at CREATION, where a time already in the past is an
     error; a task file loaded later is legitimately in the past. A cron expr
     must have a next occurrence after `now`, else `as_of` (the loader's clock),
-    else the wall clock — an expr that can never run is refused, never armed."""
+    else the wall clock — an expr that can never run is refused, never armed.
+
+    `until` (cron only) is checked against the clock at CREATION only, exactly
+    as `at` is: an end already past, or one before the expr's next occurrence,
+    is a card that could never run. A loaded file past its `until` is not a
+    problem — it is an automation that ended, and `due()` says so."""
     if not isinstance(raw, dict):
         raise InvalidTask("an automation must be a JSON object")
     unknown = sorted(set(raw) - set(FIELDS))
@@ -426,12 +452,20 @@ def validate_task(
     if not isinstance(prompt, str) or not prompt.strip():
         raise InvalidTask("prompt is required: the whole instruction the run starts from")
     schedule = raw.get("schedule")
-    if not isinstance(schedule, dict) or set(schedule) not in ({"at"}, {"cron"}):
+    if isinstance(schedule, dict) and "until" in schedule and "cron" not in schedule:
+        raise InvalidTask(
+            "schedule.until ends a recurring schedule and goes with cron only; "
+            'a one-shot already runs once, at "at"'
+        )
+    if not isinstance(schedule, dict) or set(schedule) not in (
+        {"at"}, {"cron"}, {"cron", "until"}
+    ):
         raise InvalidTask(
             'schedule must be exactly one of {"at": "<ISO local datetime>"} (once) '
             'or {"cron": "<minute hour day-of-month month day-of-week>"} (recurring)'
         )
     at: datetime | None = None
+    until: datetime | None = None
     cron = ""
     if "at" in schedule:
         at = parse_at(schedule["at"])
@@ -444,7 +478,20 @@ def validate_task(
         if not isinstance(schedule["cron"], str):
             raise InvalidTask(f"schedule.cron must be a string, got {schedule['cron']!r}")
         cron = parse_cron(schedule["cron"]).expr
-        cron_next(cron, now or as_of or datetime.now())  # NoOccurrence is an InvalidTask
+        upcoming = cron_next(cron, now or as_of or datetime.now())  # NoOccurrence: InvalidTask
+        if "until" in schedule:
+            until = parse_at(schedule["until"], "schedule.until")
+            if now is not None and until <= now:
+                raise InvalidTask(
+                    f"schedule.until {until.isoformat(timespec='minutes')} is not in the "
+                    f"future (it is now {now.isoformat(timespec='minutes')})"
+                )
+            if now is not None and upcoming > until:
+                raise InvalidTask(
+                    f"schedule.cron {cron!r} has no occurrence after now and at or before "
+                    f"schedule.until {until.isoformat(timespec='minutes')} (its next is "
+                    f"{upcoming.isoformat(timespec='minutes')}), so it would never run"
+                )
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise InvalidTask("enabled must be true or false")
@@ -476,6 +523,7 @@ def validate_task(
         kind=kind,
         notify=notify,
         psu_ua=psu_ua,
+        until=until,
     )
 
 
@@ -814,6 +862,10 @@ class Due:
 
     status: str
     occurrence: datetime | None
+    #: ENDED only: the final occurrence was one the task could have missed and
+    #: it never fired before its grace ran out — a run that did not happen,
+    #: which the scheduler records (S5). False for every other arm.
+    final_missed: bool = False
 
 
 def _occurrence_of(task_id: str, key: str) -> datetime | None:
@@ -845,10 +897,19 @@ def due(
     one, once. That occurrence must also be one the task could have missed —
     at or after `since` (when this schedule began to exist; the scheduler
     supplies it) and after the task's last fired occurrence. Without `since`,
-    nothing past is provably a miss, so nothing is due. A cron task never
-    expires and has no deadline."""
+    nothing past is provably a miss, so nothing is due. A cron task without
+    an `until` never expires and has no deadline.
+
+    With an `until` (S5) the search runs at or before `min(now, until)`, so an
+    occurrence strictly after `until` is never the answer, and one exactly at
+    it is. Once `now` is past `until` the task is ENDED — outranking DISABLED
+    and every PENDING-shaped arm, which would read as alive — except that the
+    final occurrence, if it is still a provable miss, keeps the one-shot's
+    grace: DUE through `until + STALE_AFTER`, then ENDED with `final_missed`."""
     if not task.recurring:
         return Due(_one_shot_status(task, fired, now), task.at)
+    if task.until is not None and now > task.until:
+        return _ended_or_final(task, fired, now, since)
     try:
         occurrence = cron_prev(task.cron, now)
     except NoOccurrence:
@@ -857,14 +918,40 @@ def due(
         return Due(FIRED, occurrence)
     if not task.enabled:
         return Due(DISABLED, occurrence)
-    if since is None or occurrence < since:
-        return Due(PENDING, occurrence)
-    previous = last_fired(task.id, fired)
-    if previous is not None and occurrence <= previous:
-        # The clock went back (the fall-back hour): this occurrence's key may
-        # have been pruned, but a later one fired, so it is not a miss.
+    if not _a_provable_miss(task, occurrence, fired, since):
         return Due(PENDING, occurrence)
     return Due(DUE, occurrence)
+
+
+def _a_provable_miss(
+    task: Task, occurrence: datetime, fired: Collection[str], since: datetime | None
+) -> bool:
+    if since is None or occurrence < since:
+        return False
+    previous = last_fired(task.id, fired)
+    # The clock went back (the fall-back hour): this occurrence's key may have
+    # been pruned, but a later one fired, so it is not a miss.
+    return previous is None or occurrence > previous
+
+
+def _ended_or_final(
+    task: Task, fired: Collection[str], now: datetime, since: datetime | None
+) -> Due:
+    """`now` is past `until`: every arm but one is ENDED. The one is the final
+    occurrence still within its grace, unfired and a provable miss — the
+    covered period's work is still wanted, late, as a one-shot's would be."""
+    assert task.until is not None
+    try:
+        final = cron_prev(task.cron, task.until)
+    except NoOccurrence:
+        return Due(ENDED, None)
+    if task.key_for(final) in fired or not task.enabled:
+        return Due(ENDED, final)
+    if not _a_provable_miss(task, final, fired, since):
+        return Due(ENDED, final)
+    if now - task.until <= STALE_AFTER:
+        return Due(DUE, final)
+    return Due(ENDED, final, final_missed=True)
 
 
 def _one_shot_status(task: Task, fired: Collection[str], now: datetime) -> str:
@@ -1015,8 +1102,56 @@ def when_words(task: Task, now: datetime) -> str:
     (`describe`) and the terminal's `/tasks`, so the two can never describe
     the same schedule differently."""
     if task.recurring:
-        return f"on the schedule `{task.cron}`"
+        end = f" until {day_time(task.until)}" if task.until is not None else ""
+        return f"on the schedule `{task.cron}`{end}"
     return f"ONCE, at {_when(task.one_shot_at(), now)}"
+
+
+def day_time(when: datetime) -> str:
+    return when.strftime("%a %Y-%m-%d %H:%M")
+
+
+def upcoming(task: Task, now: datetime, count: int) -> list[datetime]:
+    """A cron task's next `count` occurrences after `now`, CLIPPED at its
+    `until` — every surface that lists what is coming reads this, so none can
+    show a run the schedule will never start. Fewer (or none) near the end."""
+    out: list[datetime] = []
+    cursor = now
+    while len(out) < count:
+        try:
+            cursor = cron_next(task.cron, cursor)
+        except NoOccurrence:
+            break
+        if task.until is not None and cursor > task.until:
+            break
+        out.append(cursor)
+    return out
+
+
+def final_occurrence(task: Task) -> datetime | None:
+    """The last occurrence at or before `until`; None without an `until`, or
+    when there is none inside the horizon."""
+    if task.until is None:
+        return None
+    try:
+        return cron_prev(task.cron, task.until)
+    except NoOccurrence:
+        return None
+
+
+def _ending_line(task: Task) -> str:
+    """What the `until` means, from the field, said on the card — so a wrong
+    reading of "after I'm back" shows as a wrong date the owner can deny."""
+    assert task.until is not None
+    final = final_occurrence(task)
+    grace = (task.until + STALE_AFTER).strftime("%H:%M %a %Y-%m-%d")
+    last = f"Its last run is {day_time(final)}, then it ends" if final else "It ends"
+    return (
+        f"{last}: no occurrence after {day_time(task.until)} is ever run. If that last "
+        f"run cannot start on time (or aish is down), it may still start late, until "
+        f"{grace}, and never after. When it has ended you are notified once, whatever "
+        "the notify setting (if notifications are set up)."
+    )
 
 
 def _listed(items: Iterable[str]) -> str:
@@ -1051,19 +1186,25 @@ def describe(task: Task, now: datetime, *, replacing: bool = False) -> str:
     may run without asking and where it may act as him. The JSON diff stays
     underneath; this is what he is agreeing to."""
     verb = "Replaces automation" if replacing else "New automation"
+    ending: list[str] = []
     if task.recurring:
-        first = cron_next(task.cron, now)
-        upcoming = (first, cron_next(task.cron, first))
-        when = (
-            f"Runs {when_words(task, now)} — next: "
-            + ", ".join(o.strftime("%a %Y-%m-%d %H:%M") for o in upcoming)
-            + " — each time in a new chat with nobody watching."
+        coming = upcoming(task, now, 2)
+        nexts = (
+            "next: " + ", ".join(day_time(o) for o in coming) if coming
+            else "no run is left before its end"
         )
+        when = (
+            f"Runs {when_words(task, now)} — {nexts} — each time in a new chat with "
+            "nobody watching."
+        )
+        if task.until is not None:
+            ending.append(_ending_line(task))
     else:
         when = f"Runs {when_words(task, now)}, in a new chat with nobody watching."
     lines = [
         f"{verb} '{task.id}'" + (f" — {task.note}" if task.note else ""),
         when,
+        *ending,
         *_monitor_lines(task),
         "",
         "The whole instruction it will run:",

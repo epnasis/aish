@@ -219,7 +219,9 @@ def run_prompt(
         ]
     else:
         occurrence = scheduled_for or task.one_shot_at()
-        recurs = f" (recurring: `{task.cron}`)" if task.recurring else ""
+        end = (f", until {task.until.isoformat(sep=' ', timespec='minutes')}"
+               if task.until is not None else "")
+        recurs = f" (recurring: `{task.cron}`{end})" if task.recurring else ""
         lines = [
             f"[scheduled: {task.id}] An automation the owner approved has fired.",
             f"Scheduled for {occurrence.isoformat(sep=' ', timespec='minutes')}{recurs}; "
@@ -420,6 +422,9 @@ class Scheduler:
         verdict = schedule.due(task, fired, now, since=since)
         if verdict.occurrence is not None:
             self._forget_superseded(task, verdict.occurrence)
+        if verdict.status == schedule.ENDED:
+            await self._ended(task, verdict, now)
+            return
         if verdict.status != DUE or verdict.occurrence is None or since is None:
             return
         await self._record_skipped(task, verdict.occurrence, since, fired, now)
@@ -671,7 +676,8 @@ class Scheduler:
         its own dedup key (`manual_key`), and it NEVER marks the fired ledger:
         the ledger states what the SCHEDULE did, so the occurrence that is due
         still fires on time. Refused before the seam for a task that is
-        missing, unparseable, disabled, or a one-shot that expired — each with
+        missing, unparseable, past its `until` (S5), disabled, or a one-shot
+        that expired — each with
         the reason and the way on. A failure to open is answered to the owner,
         who asked and is there to read it, so it is neither recorded nor
         pushed; a run that opened leaves a `manual_run` record.
@@ -696,6 +702,16 @@ class Scheduler:
                     f"automation, so it cannot be run: {problem.error}",
                 )
             return TriggerOutcome(REFUSED, error=f"there is no automation {task_id!r}")
+        if task.past_until(now):
+            # Whenever now is past the end, not only once ENDED: the end is the
+            # owner's own bound, and a run by hand would cross it.
+            assert task.until is not None
+            return TriggerOutcome(
+                REFUSED, error=f"automation {task.id} has ended: its until "
+                f"({task.until.strftime('%H:%M %a %Y-%m-%d')}) has passed, and aish "
+                "starts no run of it by hand after that; ask aish for a new automation, "
+                "which comes on its own approval card",
+            )
         if not task.enabled:
             return TriggerOutcome(
                 REFUSED, error=f"automation {task.id} is disabled; enable it first "
@@ -756,10 +772,14 @@ class Scheduler:
         # notifier costs one no-op a day, not one per failure.
         streak["pushed_at"] = _stamp(now)
         await self._save_state()
-        try:
-            upcoming = schedule.cron_next(task.cron, occurrence).strftime("%H:%M %a %Y-%m-%d")
-            until = f"until its next scheduled time, {upcoming}"
-        except schedule.NoOccurrence:
+        coming = schedule.upcoming(task, occurrence, 1)  # clipped at the task's `until`
+        if coming:
+            until = f"until its next scheduled time, {coming[0].strftime('%H:%M %a %Y-%m-%d')}"
+        elif task.until is not None:
+            grace = (task.until + schedule.STALE_AFTER).strftime("%H:%M %a %Y-%m-%d")
+            until = (f"until {grace}: it is the last run before this automation's end, "
+                     "and it is not tried after that")
+        else:
             until = "for now; aish found no next scheduled time"
         failures = streak["failures"]
         history = (
@@ -955,6 +975,79 @@ class Scheduler:
             f"{task.one_shot_at().strftime('%H:%M %a %Y-%m-%d')} and had not started "
             f"{int(schedule.STALE_AFTER.total_seconds() // 3600)} h later; {observed}. "
             "It will not run.",
+        )
+
+    async def _ended(self, task: Task, verdict: schedule.Due, now: datetime) -> None:
+        """A cron task past its `until` with nothing left to fire (S5). Pushed
+        ONCE and unconditionally of `notify`: it is a lifecycle event like an
+        expiry, and for an `on_change` monitor lawful silence and stopped-for-
+        good would otherwise look the same. The key carries the `until`, so a
+        later extension that ends again is a new ending and pushes again.
+        Nothing is settled — the ending is derived from the file each time.
+
+        A final run that never fired before its grace ran out leaves the
+        `_expire`-shaped record and its sentence in the push: what was
+        observed, never a cause."""
+        assert self._state is not None and task.until is not None
+        # `fire_now` can reload the folder mid-tick (#5 S4): an `until` the
+        # owner just extended must not end under its old value.
+        if task not in self.tasks:
+            return
+        key = f"{task.id}:ended:{task.until.isoformat()}"
+        refusals = {k: v for k, v in self._last_refusal.items() if _task_of(k) == task.id}
+        # Nothing of this task can be due again, so its retry memory is dead,
+        # and any streak ends with the ending.
+        for store in (self._retry_open_at, self._last_refusal):
+            for stale in [k for k in store if _task_of(k) == task.id]:
+                del store[stale]
+        if self._state.streaks.pop(task.id, None) is not None:
+            await self._save_state()
+        self._state.monitor_streaks.pop(task.id, None)
+        if key in self._state.notified:
+            return
+        if any(r.get("key") == key for r in self._state.records):
+            # The notified list (capped) evicted the key while the record
+            # survived: the push may repeat once (stated), the records never.
+            await self._push_once(
+                key, f"aish automation {task.id} ended",
+                f"automation {task.id} ended as scheduled: its until "
+                f"({task.until.strftime('%H:%M %a %Y-%m-%d')}) has passed.",
+            )
+            return
+        until_words = task.until.strftime("%H:%M %a %Y-%m-%d")
+        final_sentence = ""
+        if verdict.final_missed and verdict.occurrence is not None:
+            occurrence_key = task.key_for(verdict.occurrence)
+            last = refusals.get(occurrence_key) or next(
+                (r.get("error", "") for r in reversed(self._state.records)
+                 if r.get("key") == occurrence_key and r.get("kind") == "open_failed"),
+                "",
+            )
+            observed = (
+                f"it was last refused with: {last}" if last
+                else "aish did not observe an attempt to start it"
+            )
+            self._state.records.append({
+                "kind": "final_not_started", "task": task.id, "key": occurrence_key,
+                "scheduled_for": _stamp(verdict.occurrence), "observed_at": _stamp(now),
+                "error": observed,
+            })
+            final_sentence = (
+                f" Its final run, scheduled for "
+                f"{verdict.occurrence.strftime('%H:%M %a %Y-%m-%d')}, did not start: "
+                f"{observed}."
+            )
+        self._state.records.append({
+            "kind": "ended", "task": task.id, "key": key,
+            "until": _stamp(task.until), "observed_at": _stamp(now),
+            "final": _stamp(verdict.occurrence) if verdict.occurrence else "",
+            "final_missed": verdict.final_missed,
+        })
+        await self._push_once(
+            key,
+            f"aish automation {task.id} ended",
+            f"automation {task.id} ended as scheduled: its until ({until_words}) has "
+            f"passed.{final_sentence}",
         )
 
     async def _ledger_unreadable(self, error: str) -> None:

@@ -969,6 +969,17 @@ shows the next two runs. After downtime only the latest missed run fires (the
 older ones are recorded as skipped); a run that cannot start pushes once, then
 at most daily while it keeps failing.
 
+**An end date.** *"Every day until we're back on the 14th"* gets
+`"until": "2026-11-14T23:59"` beside the cron schedule — a field aish enforces,
+not a sentence in the prompt. No occurrence after it ever runs; the card shows
+the end and the last run (*"Its last run is Sat 2026-11-14 09:00, then it
+ends"*), so a misread date is visible before you approve. If that last run
+could not start on time it may still start up to 24 hours late, never later.
+When it has ended you get one push (if Pushover is set up), whatever its
+notify setting; `/tasks` lists it as ended, enabling it or running it by hand
+is refused, and you can delete it. Extending `until` in the file restarts it:
+one catch-up run fires, and the gap is recorded as skipped.
+
 **Monitors.** *"Tell me when the price on this page changes"* becomes a
 recurring automation with `"kind": "monitor"`. Each run compares what it reads
 against the snapshot the previous run saved and ends with a verdict aish reads
