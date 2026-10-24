@@ -1195,6 +1195,21 @@ def upcoming(task: Task, now: datetime, count: int) -> list[datetime]:
     return out
 
 
+#: How many coming runs a card, the model's result and `automations` list. The
+#: dates are the cron expression EVALUATED — the same `upcoming` the scheduler's
+#: window is clipped by — so they cannot disagree with what will run, which a
+#: translation of the expression into words could (#459).
+NEXT_SHOWN = 5
+
+
+def next_runs_words(task: Task, now: datetime) -> str:
+    """A cron task's next `NEXT_SHOWN` runs, or that none is left."""
+    coming = upcoming(task, now, NEXT_SHOWN)
+    if not coming:
+        return "no run is left before its end"
+    return "next: " + ", ".join(day_time(o) for o in coming)
+
+
 def final_occurrence(task: Task) -> datetime | None:
     """The last occurrence at or before `until`; None without an `until`, when
     there is none inside the horizon, or when it falls before `from` (S6) — a
@@ -1276,11 +1291,7 @@ def describe(task: Task, now: datetime, *, replacing: bool = False) -> str:
     verb = "Replaces automation" if replacing else "New automation"
     ending: list[str] = []
     if task.recurring:
-        coming = upcoming(task, now, 2)
-        nexts = (
-            "next: " + ", ".join(day_time(o) for o in coming) if coming
-            else "no run is left before its end"
-        )
+        nexts = next_runs_words(task, now)
         when = (
             f"Runs {when_words(task, now)} — {nexts} — each time in a new chat with "
             "nobody watching."

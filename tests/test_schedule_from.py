@@ -320,9 +320,11 @@ class TestRendering:
         assert schedule.when_words(task(until=None), BEGAN) == (
             "on the schedule `0 9 * * *` from Sat 2026-11-07 00:00")
 
-    def test_the_card_says_the_first_run_and_clips_the_next_two(self):
+    def test_the_card_says_the_first_run_and_clips_the_next_runs(self):
         note = schedule.describe(task(), BEGAN)
-        assert "— next: Sat 2026-11-07 09:00, Sun 2026-11-08 09:00 — each time" in note
+        # schedule.NEXT_SHOWN (5) runs, the first at `from` — never one before it.
+        assert ("— next: Sat 2026-11-07 09:00, Sun 2026-11-08 09:00, Mon 2026-11-09 09:00, "
+                "Tue 2026-11-10 09:00, Wed 2026-11-11 09:00 — each time") in note
         assert ("Its first run is Sat 2026-11-07 09:00: no occurrence before Sat "
                 "2026-11-07 00:00 is ever run.") in note
         assert "Its last run is Sat 2026-11-14 09:00, then it ends" in note
@@ -418,7 +420,8 @@ class TestScheduleTaskFrom:
         first = start.replace(hour=9)
         assert f"Its first run is {schedule.day_time(first)}" in plan.note
         # Never `cron_next(now)` raw, which would name tomorrow's 09:00.
-        assert f"(next: {first.isoformat(sep=' ', timespec='minutes')}; it starts at" in result
+        assert f"(next: {schedule.day_time(first)}, " in result
+        assert "; it starts at" in result
         assert "no occurrence before that ever runs" in result
 
     def test_from_beside_at_is_an_error_to_the_model(self):

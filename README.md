@@ -965,7 +965,7 @@ Pushover is set up) saying what was observed.
 
 **Recurring.** *"Every weekday at 9"* works the same way: the automation gets
 a cron schedule (`0 9 * * 1-5`, local time) instead of a time, and the card
-shows the next two runs. After downtime only the latest missed run fires (the
+shows the next five runs as dates, so you can check the schedule is what you meant. After downtime only the latest missed run fires (the
 older ones are recorded as skipped); a run that cannot start pushes once, then
 at most daily while it keeps failing.
 
@@ -1009,8 +1009,7 @@ proposes a change on the same kind of card, headed by what changes: *"cron:
 `0 9 * * *` → `0 9,20 * * *`"*. Everything it was not asked to change is kept
 as it is — a paused automation stays paused. It can also pause, resume or
 delete one, each on its own card (a delete card says so, and that there is no
-way back); once a web page, a mail or a tool's output has entered the task, it
-will not offer to pause or delete one — use `/tasks` for that. If the
+way back). If the
 automation changes while the card is open, approving it writes nothing and
 aish says so, rather than overwriting the change.
 

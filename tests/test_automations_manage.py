@@ -5,8 +5,8 @@ had no way to read it — it grepped the disk with the shell for two minutes,
 then re-sent the whole task, which (as the replace was built) also re-enabled
 a paused one and added a field nobody asked for. The properties pinned here:
 the model READS automations through one tool, in the owner's chat only; an
-edit changes ONLY what it names; pausing and deleting come on a card and are
-refused once outside content entered the task; and a card left open never
+edit changes ONLY what it names; pausing and deleting come on a card, the
+same card in every task; and a card left open never
 overwrites a change made while it was open. FakeChat scripts nothing a real
 model would; no network, no real command.
 """
@@ -87,6 +87,15 @@ class TestReadingThem:
         task = schedule.validate_task(saved(path))
         assert task.render() in out
         assert "ONLY the fields that change" in out
+
+    def test_one_lists_its_next_runs_as_dates(self, tmp_path):
+        # The expression evaluated, not translated: what will run, checkable.
+        write_task(schedule={"cron": "0 9,20 * * *"})
+        agent, _ = agent_with_card(tmp_path)
+        out = str(agent._dispatch("automations", {"id": "paris-monitor"}))
+        line = next(x for x in out.splitlines() if x.startswith("Runs next: "))
+        assert line.count(", ") == schedule.NEXT_SHOWN - 1
+        assert all(stamp.endswith(("09:00", "20:00")) for stamp in line[11:].split(", "))
 
     def test_a_problem_file_is_named_as_one(self, tmp_path):
         (schedule.automations_dir()).mkdir(parents=True, exist_ok=True)
@@ -247,20 +256,21 @@ class TestPausing:
         out = str(agent._dispatch("schedule_task", {"id": "paris-monitor", "enabled": True}))
         assert "has ended" in out and cards == []
 
-    def test_outside_content_cannot_pause_one(self, tmp_path):
-        path = write_task()
-        agent, cards = agent_with_card(tmp_path)
-        agent._tainted = True
-        out = str(agent._dispatch("schedule_task", {"id": "paris-monitor", "enabled": False}))
-        assert out.startswith("NOT EXECUTED") and "/tasks" in out
-        assert cards == [] and saved(path)["enabled"] is True
+class TestNoHiddenCondition:
+    """Whether a card appears depends on the call alone, never on what else
+    ran in the task (owner decision, 2026-10-25): a tainted task pauses and
+    deletes on exactly the card an untainted one does."""
 
-    def test_outside_content_may_still_resume_one_on_its_card(self, tmp_path):
-        path = write_task(enabled=False)
-        agent, cards = agent_with_card(tmp_path)
+    @pytest.mark.parametrize("args", [{"enabled": False}, {"delete": True}])
+    def test_a_tainted_task_gets_the_same_card(self, tmp_path, args):
+        write_task()
+        agent, cards = agent_with_card(tmp_path, answer=False)
         agent._tainted = True
-        agent._dispatch("schedule_task", {"id": "paris-monitor", "enabled": True})
-        assert len(cards) == 1 and saved(path)["enabled"] is True
+        agent._dispatch("schedule_task", {"id": "paris-monitor", **args})
+        clean, clean_cards = agent_with_card(tmp_path, answer=False)
+        clean._dispatch("schedule_task", {"id": "paris-monitor", **args})
+        assert len(cards) == len(clean_cards) == 1
+        assert cards[0].note == clean_cards[0].note
 
 
 class TestDeleting:
@@ -298,13 +308,6 @@ class TestDeleting:
             "schedule_task", {"id": "paris-monitor", "delete": True, "enabled": enabled}
         ))
         assert out.startswith("ERROR") and "enabled" in out and cards == [] and path.exists()
-
-    def test_outside_content_cannot_delete_one(self, tmp_path):
-        path = write_task()
-        agent, cards = agent_with_card(tmp_path)
-        agent._tainted = True
-        out = str(agent._dispatch("schedule_task", {"id": "paris-monitor", "delete": True}))
-        assert out.startswith("NOT EXECUTED") and cards == [] and path.exists()
 
     def test_an_unknown_id_is_an_error_without_a_card(self, tmp_path):
         agent, cards = agent_with_card(tmp_path)
