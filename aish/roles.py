@@ -1191,6 +1191,7 @@ def run(
     model_name: str = "",
     state_dir: os.PathLike | str | None = None,
     check_admission: bool = True,
+    admission_state_dir: os.PathLike | str | None = None,
     should_stop: Callable[[], bool] | None = None,
     on_wait: Callable[[str], None] | None = None,
     wait_ceiling: float | None = None,
@@ -1206,6 +1207,11 @@ def run(
     parallel read fan-out, whose worker threads have no wiring of their own —
     without this, a cancelled task can leave an uncancellable rate-limit wait
     sitting on a worker.
+
+    `admission_state_dir` names the ledger `admitted` reads when it differs from
+    `state_dir` (default: the same). Admission is machine-level; a caller that keeps
+    its own stores in a scratch tree (the mail backtest) must still be judged against
+    the real ledger, or every call reads an empty one and ends `unadmitted`.
     """
     digest = ""
     chars = 0
@@ -1233,7 +1239,8 @@ def run(
             Status.UNAVAILABLE,
             "this session's backend has no stateless chat seam for a role to use",
         )
-    if check_admission and (why := admitted(charter, model_spec, state_dir)):
+    ledger = state_dir if admission_state_dir is None else admission_state_dir
+    if check_admission and (why := admitted(charter, model_spec, ledger)):
         return outcome(Status.UNADMITTED, why, model=model_spec)
 
     if chat is None:

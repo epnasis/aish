@@ -195,6 +195,7 @@ def assess(
     observation: mailcases.Observation | None = None,
     propose: bool = True,
     check_admission: bool = True,
+    admission_state_dir: Any = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Gate → Reader → the `mail_verdict` record, for one inbound mail."""
@@ -209,6 +210,7 @@ def assess(
         reading = mailreader.read(
             charter, index, store, header, facts, model_spec=model_spec, chat=chat,
             state_dir=state_dir, check_admission=check_admission,
+            admission_state_dir=admission_state_dir,
         )
     verdict = reading.verdict
     code_coordinates = mailcases.extract_coordinates(f"{header.subject}\n{body}")

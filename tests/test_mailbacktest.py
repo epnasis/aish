@@ -60,14 +60,64 @@ def careful(bundle):
 
 
 def backtest(tmp_path, arms, reader_max=50):
+    """Admission lives in the machine's ledger (a fake real state home here),
+    never the run's scratch tree."""
     charter = reader_charter()
-    state = tmp_path / "run" / "state"
+    ledger = tmp_path / "real-state"
     for spec in arms:
-        admit(state, charter, spec)
+        admit(ledger, charter, spec)
     return mailbacktest.run_backtest(
         mailbox=history(), owner_addresses=frozenset({OWNER}), arms=arms, charter=charter,
         out_dir=tmp_path / "run", days=90, reader_max=reader_max, now=NOW,
+        admission_state_dir=ledger,
     )
+
+
+def endings(run_dir) -> list[str]:
+    records = []
+    for path in sorted((run_dir / "state" / "mail" / "verdicts").rglob("*.json")):
+        records += json.loads(path.read_text())["by_model"].values()
+    return [r["ending"] for r in records]
+
+
+class TestAdmissionLedger:
+    """The run's stores are scratch; the admission it is judged by is the real
+    ledger. Conflating the two ended 170 of 300 real Reader calls `unadmitted`
+    on a run whose model had just been admitted."""
+
+    def run(self, tmp_path, *, real_has: bool, scratch_has: bool, explicit: bool = True):
+        charter = reader_charter()
+        ledger = tmp_path / "real-state"
+        ledger.mkdir()
+        if real_has:
+            admit(ledger, charter, ARM_A)
+        if scratch_has:
+            admit(tmp_path / "run" / "state", charter, ARM_A)
+        reader = ScriptedReader(careful)
+        mailbacktest.run_backtest(
+            mailbox=history(), owner_addresses=frozenset({OWNER}), arms={ARM_A: reader},
+            charter=charter, out_dir=tmp_path / "run", days=90, now=NOW,
+            **({"admission_state_dir": ledger} if explicit else {}),
+        )
+        return reader, endings(tmp_path / "run")
+
+    def test_admission_in_the_real_ledger_runs_the_role_from_an_empty_scratch(self, tmp_path):
+        reader, ended = self.run(tmp_path, real_has=True, scratch_has=False)
+        assert reader.calls > 0
+        assert "unadmitted" not in ended
+        assert not (tmp_path / "run" / "state" / "roles" / "admission.json").exists()
+
+    def test_nothing_in_scratch_can_mint_admission(self, tmp_path):
+        reader, ended = self.run(tmp_path, real_has=False, scratch_has=True)
+        assert reader.calls == 0
+        assert ended and set(ended) <= {"unadmitted", "gated"}
+        assert "unadmitted" in ended
+
+    def test_the_default_ledger_is_the_state_home(self, tmp_path, monkeypatch):
+        """The CLI passes no ledger: it must resolve to the real state home."""
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path / "real-state"))
+        reader, ended = self.run(tmp_path, real_has=True, scratch_has=False, explicit=False)
+        assert reader.calls > 0 and "unadmitted" not in ended
 
 
 class TestTruth:

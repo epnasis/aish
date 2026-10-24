@@ -564,6 +564,7 @@ def read(
     chat: Callable[..., Any] | None = None,
     state_dir: Any = None,
     check_admission: bool = True,
+    admission_state_dir: Any = None,
 ) -> Reading:
     """Gate-aware reading of one mail: no call for a newsletter-gated mail;
     otherwise one role call, plus at most `READER_ASK_ROUNDS` re-invocations when the
@@ -578,6 +579,7 @@ def read(
         result = roles.run(
             charter, {BUNDLE_INPUT: bundle.text}, (), model_spec=model_spec, chat=chat,
             state_dir=state_dir, check_admission=check_admission,
+            admission_state_dir=admission_state_dir,
         )
         reading.calls.append(result)
         reading.status, reading.why = result.status, result.why
