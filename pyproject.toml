@@ -59,6 +59,8 @@ aish-web = "aish.server:main"
 aish-email-poll = "aish.email_poll:main"
 aish-curate = "aish.curate:main"
 aish-replay = "aish.replay:main"
+aish-mailwatch = "aish.mailwatch:main"
+aish-mailbacktest = "aish.mailbacktest:main"
 
 [dependency-groups]
 dev = [
