@@ -15690,8 +15690,10 @@ class Agent:
         for task in listing.tasks:
             if task.id == task_id:
                 one = dataclasses.replace(listing, tasks=[task], problems=[])
+                # Only while a run is left: the status line above already says
+                # an ended task has ended.
                 coming = (f"\nRuns {schedule.next_runs_words(task, now)}"
-                          if task.recurring else "")
+                          if task.recurring and schedule.upcoming(task, now, 1) else "")
                 return (
                     "\n".join(automation_admin.task_lines(one, now)) + coming
                     + "\n\nIts stored file — to change it, call schedule_task with this "

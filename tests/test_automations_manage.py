@@ -97,6 +97,13 @@ class TestReadingThem:
         assert line.count(", ") == schedule.NEXT_SHOWN - 1
         assert all(stamp.endswith(("09:00", "20:00")) for stamp in line[11:].split(", "))
 
+    def test_an_ended_one_lists_no_runs_line(self, tmp_path):
+        past = (datetime.now() - timedelta(days=3)).replace(second=0, microsecond=0)
+        write_task(schedule={"cron": "0 9 * * *", "until": past.isoformat()})
+        agent, _ = agent_with_card(tmp_path)
+        out = str(agent._dispatch("automations", {"id": "paris-monitor"}))
+        assert "Runs no run" not in out and "\nRuns " not in out
+
     def test_a_problem_file_is_named_as_one(self, tmp_path):
         (schedule.automations_dir()).mkdir(parents=True, exist_ok=True)
         (schedule.automations_dir() / "broken.json").write_text("{nope", encoding="utf-8")

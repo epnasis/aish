@@ -1196,9 +1196,10 @@ def upcoming(task: Task, now: datetime, count: int) -> list[datetime]:
 
 
 #: How many coming runs a card, the model's result and `automations` list. The
-#: dates are the cron expression EVALUATED — the same `upcoming` the scheduler's
-#: window is clipped by — so they cannot disagree with what will run, which a
-#: translation of the expression into words could (#459).
+#: dates are the cron expression EVALUATED, through `upcoming` — the one clip
+#: every listing surface reads — rather than translated into words, which is a
+#: second rendering that could disagree with it (#459). Firing is decided
+#: separately (`due`); the two agree on from/until today but are parallel code.
 NEXT_SHOWN = 5
 
 
@@ -1206,7 +1207,8 @@ def next_runs_words(task: Task, now: datetime) -> str:
     """A cron task's next `NEXT_SHOWN` runs, or that none is left."""
     coming = upcoming(task, now, NEXT_SHOWN)
     if not coming:
-        return "no run is left before its end"
+        return ("no run is left before its end" if task.until is not None
+                else "no next run within the horizon")
     return "next: " + ", ".join(day_time(o) for o in coming)
 
 
