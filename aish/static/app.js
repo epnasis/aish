@@ -9759,8 +9759,9 @@ function submitCommand() {
 }
 
 // "/session" is the pre-#260 name for "/chat": off the menu, still dispatched.
-// "/tasks" and "/runs" are dispatched only to say they are terminal-only (#5 S4).
-const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit", "/session", "/tasks", "/runs"]);
+// "/tasks", "/runs" (#5 S4) and "/mail" (#142 W5 S1.5) are dispatched only to
+// say they are terminal-only.
+const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit", "/session", "/tasks", "/runs", "/mail"]);
 
 function handleSlash(text) {
   let [command, ...rest] = text.split(/\s+/);
@@ -9860,9 +9861,10 @@ function handleSlash(text) {
     case "/run-now":
       return act(arg ? { type: "run_now", task: arg } : { type: "run_now" },
         { label: "starting that run" });
-    // The automation list and its runs are the terminal's (#5 S4). Said, not
-    // "unknown": the command exists, and saying where it lives is the answer.
-    case "/tasks": case "/runs":
+    // The automation list and its runs (#5 S4) and the inbox assistant's
+    // shadow results (#142 W5 S1.5) are the terminal's. Said, not "unknown":
+    // the command exists, and saying where it lives is the answer.
+    case "/tasks": case "/runs": case "/mail":
       showToast(`${command} is a terminal-only command — run it in aish in a terminal`);
       return true;
     case "/help": openSheet("workspace-sheet"); return true;
