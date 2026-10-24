@@ -132,11 +132,60 @@ def _final_may_still_run(task: schedule.Task, listing: Listing, now: datetime) -
     )
 
 
-def _ran_words(task: schedule.Task, listing: Listing) -> str:
+def _ran(task: schedule.Task, listing: Listing) -> str:
+    """When a cron task last ran, from the fired ledger — "" when it never has."""
     if listing.ledger_error:
-        return " · whether it ran is unknown (the record of fired runs cannot be read)"
+        return "whether it ran is unknown (the record of fired runs cannot be read)"
     last = schedule.last_fired(task.id, listing.fired)
-    return f" · last ran for {_clock(last)}" if last is not None else ""
+    return f"last ran for {_clock(last)}" if last is not None else ""
+
+
+def _ran_words(task: schedule.Task, listing: Listing) -> str:
+    ran = _ran(task, listing)
+    return f" · {ran}" if ran else ""
+
+
+def _state(task: schedule.Task, listing: Listing, now: datetime) -> str:
+    ended = (task.past_until(now) and not listing.ledger_error
+             and not _final_may_still_run(task, listing, now))
+    # ENDED outranks DISABLED: a disabled task past its end will not run
+    # again whatever is done to the toggle.
+    return "ENDED" if ended else "enabled" if task.enabled else "DISABLED"
+
+
+def _stands(task: schedule.Task, listing: Listing, now: datetime, state: str) -> str:
+    """Where a task stands, the line under its header (without when it last
+    ran, which `_ran` says)."""
+    if task.recurring and task.past_until(now):
+        assert task.until is not None
+        final = schedule.final_occurrence(task)
+        if state == "ENDED":
+            return f"ended {_clock(task.until)}"
+        if listing.ledger_error:
+            return f"past its until ({_clock(task.until)})"
+        assert final is not None
+        grace = _clock(task.until + schedule.STALE_AFTER)
+        return (f"past its until ({_clock(task.until)}); its final run, for "
+                f"{_clock(final)}, has not fired — aish-web may still start it, "
+                f"late, until {grace}")
+    if task.recurring:
+        coming = schedule.upcoming(task, now, 1)  # clipped to [from, until]
+        if coming and task.before_start(now):
+            # Not yet started: a bare "next <date>" would read as live.
+            return (f"starts {_clock(coming[0])}" if task.enabled
+                    else f"would start {_clock(coming[0])} if enabled")
+        if coming:
+            return (f"next {_clock(coming[0])}" if task.enabled
+                    else f"would next run at {_clock(coming[0])} if enabled")
+        if task.until is not None:
+            return f"no run is left before its until ({_clock(task.until)})"
+        return "no next occurrence within the horizon"
+    return _one_shot_state(task, listing, now)
+
+
+def _scheduler_state_words(listing: Listing) -> str:
+    return (f"aish cannot read its scheduler state: {listing.state_error}"
+            if listing.state_error else "")
 
 
 def task_lines(listing: Listing, now: datetime) -> list[str]:
@@ -144,54 +193,53 @@ def task_lines(listing: Listing, now: datetime) -> list[str]:
     stands. Problem files come last, AS problems, with their error."""
     lines: list[str] = []
     for task in listing.tasks:
-        ended = (task.past_until(now) and not listing.ledger_error
-                 and not _final_may_still_run(task, listing, now))
-        # ENDED outranks DISABLED: a disabled task past its end will not run
-        # again whatever is done to the toggle.
-        state = "ENDED" if ended else "enabled" if task.enabled else "DISABLED"
+        state = _state(task, listing, now)
         note = f" — {task.note}" if task.note else ""
         lines.append(
             f"{task.id}{note}\n    {task.kind} · runs {schedule.when_words(task, now)} · "
             f"{state} · notify {task.notify}"
         )
-        if task.recurring and task.past_until(now):
-            assert task.until is not None
-            final = schedule.final_occurrence(task)
-            if ended:
-                stands = f"ended {_clock(task.until)}"
-            elif listing.ledger_error:
-                stands = f"past its until ({_clock(task.until)})"
-            else:
-                assert final is not None
-                grace = _clock(task.until + schedule.STALE_AFTER)
-                stands = (f"past its until ({_clock(task.until)}); its final run, for "
-                          f"{_clock(final)}, has not fired — aish-web may still start it, "
-                          f"late, until {grace}")
-            lines.append(f"    {stands}{_ran_words(task, listing)}")
-        elif task.recurring:
-            coming = schedule.upcoming(task, now, 1)  # clipped to [from, until]
-            if coming and task.before_start(now):
-                # Not yet started: a bare "next <date>" would read as live.
-                upcoming = (f"starts {_clock(coming[0])}" if task.enabled
-                            else f"would start {_clock(coming[0])} if enabled")
-            elif coming:
-                upcoming = (f"next {_clock(coming[0])}" if task.enabled
-                            else f"would next run at {_clock(coming[0])} if enabled")
-            elif task.until is not None:
-                upcoming = f"no run is left before its until ({_clock(task.until)})"
-            else:
-                upcoming = "no next occurrence within the horizon"
-            lines.append(f"    {upcoming}{_ran_words(task, listing)}")
-        else:
-            lines.append(f"    {_one_shot_state(task, listing, now)}")
+        ran = _ran_words(task, listing) if task.recurring else ""
+        lines.append(f"    {_stands(task, listing, now, state)}{ran}")
     for problem in listing.problems:
         lines.append(
             f"PROBLEM {Path(problem.path).name} — not a runnable automation, so it "
             f"will not run:\n    {problem.error}"
         )
     if listing.state_error:
-        lines.append(f"(aish cannot read its scheduler state: {listing.state_error})")
+        lines.append(f"({_scheduler_state_words(listing)})")
     return lines
+
+
+def task_rows(listing: Listing, now: datetime) -> dict[str, Any]:
+    """The same listing as `task_lines`, as STRUCTURED rows for the web's
+    Automations sheet — built from the same helpers, so the two surfaces
+    cannot describe one task differently, and the client derives nothing.
+    `allow` and `sites` are on the row because resuming re-arms unattended
+    runs that carry them."""
+    rows = []
+    for task in listing.tasks:
+        state = _state(task, listing, now)
+        rows.append({
+            "id": task.id,
+            "note": task.note,
+            "kind": task.kind,
+            "when": f"runs {schedule.when_words(task, now)}",
+            "state": state,
+            "stands": _stands(task, listing, now, state),
+            "ran": _ran(task, listing) if task.recurring else "",
+            "notify": task.notify,
+            "allow": list(task.allow),
+            "sites": list(task.sites),
+        })
+    # A problem file is named for delete by its stem, as `/tasks delete` is.
+    problems = [
+        {"file": Path(problem.path).name, "id": Path(problem.path).stem,
+         "error": problem.error}
+        for problem in listing.problems
+    ]
+    notes = [_scheduler_state_words(listing)] if listing.state_error else []
+    return {"rows": rows, "problems": problems, "notes": notes}
 
 
 # -- writing: the toggle and the shredder ------------------------------------

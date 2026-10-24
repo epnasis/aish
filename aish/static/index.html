@@ -618,6 +618,18 @@
   </div>
 </div>
 
+<!-- the owner's automations (/tasks): the terminal's listing, toggle and
+     shredder; rows are the server's, built by the helpers /tasks prints with -->
+<div id="automations-sheet" class="sheet" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <strong class="grow">Automations</strong>
+    <button class="close" aria-label="close" data-close="automations-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
+  </div>
+  <p id="automations-status" class="auto-status" hidden></p>
+  <div id="automations-list" class="sheet-list"></div>
+</div>
+
 <!-- workspace panel -->
 <div id="workspace-sheet" class="sheet" hidden>
   <div class="grabber"></div>
@@ -634,6 +646,10 @@
     <div class="ws-label">Trusted folders <span class="ws-note">(auto-approval allowed in these trees)</span></div>
     <div id="ws-roots" class="mono"></div>
     <div class="ws-row"><input id="root-input" placeholder="/another/tree"><button id="root-add">Add</button></div>
+  </div>
+  <div class="ws-section">
+    <div class="ws-label">Automations <span class="ws-note">(what aish runs on a schedule)</span></div>
+    <div class="ws-row"><button id="ws-automations">Show automations…</button></div>
   </div>
   <div class="ws-section">
     <div class="ws-label">Background jobs</div>

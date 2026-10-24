@@ -731,8 +731,9 @@ class Scheduler:
             )
         if not task.enabled:
             return TriggerOutcome(
-                REFUSED, error=f"automation {task.id} is disabled; enable it first "
-                f"(/tasks enable {task.id}, in the terminal), then run it",
+                REFUSED, error=f"automation {task.id} is disabled; enable it first — "
+                f"Resume in /tasks on the web, or /tasks enable {task.id} in the "
+                "terminal — then run it",
             )
         if not task.recurring:
             try:
