@@ -288,6 +288,17 @@ class TestDeleting:
         ))
         assert out.startswith("ERROR") and "cron" in out and cards == [] and path.exists()
 
+    @pytest.mark.parametrize("enabled", [False, True, "false"])
+    def test_a_pause_beside_a_delete_is_refused_not_deleted(self, tmp_path, enabled):
+        # Fable delivery review F1: `enabled: false` was read as empty and the
+        # delete went ahead — a pause intent landing on a Delete card.
+        path = write_task()
+        agent, cards = agent_with_card(tmp_path)
+        out = str(agent._dispatch(
+            "schedule_task", {"id": "paris-monitor", "delete": True, "enabled": enabled}
+        ))
+        assert out.startswith("ERROR") and "enabled" in out and cards == [] and path.exists()
+
     def test_outside_content_cannot_delete_one(self, tmp_path):
         path = write_task()
         agent, cards = agent_with_card(tmp_path)

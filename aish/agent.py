@@ -15921,7 +15921,9 @@ class Agent:
         may be deleted too — that is the way on for one."""
         others = sorted(
             key for key, value in args.items()
-            if key not in ("id", "delete") and value not in (None, "", [], False)
+            # `False` is NOT empty here: `enabled: false` beside delete=true is
+            # a pause intent, and must not reach a Delete card unremarked.
+            if key not in ("id", "delete") and value not in (None, "", [])
         )
         if others:
             return (f"ERROR: delete=true takes only id; also passed: {', '.join(others)}. "
