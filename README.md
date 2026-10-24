@@ -1022,10 +1022,17 @@ on or off (the only field they change), and `/tasks delete <id>` removes one
 after a y/N — there is no way back short of a new one on its own card.
 `/runs` shows recent runs newest first, what each did or why it did not
 happen, and marks the chats you have not opened; aish's startup line counts
-those (silent monitor runs aside). In the web composer, `/run-now` on an
+those (silent monitor runs aside). On the web, `/tasks` (or **Show
+automations…** in the workspace sheet) opens an **Automations** sheet with the
+same listing — including the commands and sites each automation may use
+without asking, since resuming one re-arms them — and per automation
+**Pause** / **Resume** (no question asked: it is reversible), **Run now**, and
+**Delete** (asks first, and says there is no way back). The sheet fetches the
+list when it opens and after each action; a change made elsewhere while it is
+open shows the next time it is opened. In the web composer, `/run-now` on an
 automation's chat (or `/run-now <id>` anywhere) runs it right away in a new
 chat; its schedule is unchanged and the next scheduled run still happens.
-`/tasks` and `/runs` are terminal-only.
+`/runs` is terminal-only.
 
 Interrupted work is picked up again. If aish-web goes down mid-task — a
 deploy, a crash — the next start reopens that session and tells the model to

@@ -8,6 +8,7 @@ scheduler loop is detached and ticked by hand on the server's loop.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import json
 import os
@@ -17,6 +18,7 @@ import pytest
 from test_server import connected, model_says, recv_until, recv_until_refusal
 from test_server_monitor import BEGAN, DAY1, Harness, verdict, write_monitor
 
+from aish import automation_admin
 from aish import schedule as schedule_module
 from aish import scheduler as scheduling
 from aish import server as server_module
@@ -240,6 +242,8 @@ class TestRunNow:
             answer = self._run_now(h, {"task": "daily"})
             assert answer["type"] == "error" and answer["code"] == "refused"
             assert "disabled" in answer["text"] and "/tasks enable daily" in answer["text"]
+            # The web's own way on is named too, now that it has one.
+            assert "Resume in /tasks on the web" in answer["text"]
 
     def test_an_expired_one_shot_is_refused_and_says_why(self, app_env, monkeypatch):
         directory = schedule_module.automations_dir()
@@ -269,3 +273,185 @@ class TestRunNow:
             assert record["key"].startswith("shop-price:manual:")
             assert h.snapshot().body == "price 100"
             assert schedule_module.fired_ledger(h.state_dir).read() == {}
+
+
+def write_problem(name="broken"):
+    directory = schedule_module.automations_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.json"
+    path.write_text("{not json", encoding="utf-8")
+    return path
+
+
+def folder():
+    """The automations folder, byte for byte: what a writer must not create."""
+    directory = schedule_module.automations_dir()
+    return {p.name: p.read_bytes() for p in sorted(directory.glob("*"))} \
+        if directory.exists() else {}
+
+
+class TestAutomationsSheet:
+    """The web's Automations sheet: the terminal's `/tasks` listing, toggle and
+    shredder behind three WS view messages. Rows are built server-side by the
+    SAME helpers `task_lines` uses; the writers are the terminal's own."""
+
+    def _ask(self, h, message):
+        with connected(h.client, "/ws?token=secret") as (ws, _, _):
+            ws.send_json(message)
+            return recv_until(ws, "automations")
+
+    def test_the_listing_is_task_rows_of_the_terminals_listing(self, app_env, monkeypatch):
+        write_cron(sites=["eon.pl"])
+        write_monitor()
+        write_problem()
+        with Harness(app_env, monkeypatch, []) as h:
+            reply = self._ask(h, {"type": "automations"})
+            listing = automation_admin.read_listing(
+                h.state_dir, deny_prefixes=["rm -rf"], now=h.now
+            )
+            expected = automation_admin.task_rows(listing, h.now)
+            assert {k: reply[k] for k in ("rows", "problems", "notes")} == expected
+            assert "error" not in reply and "outcome" not in reply
+            daily = next(r for r in reply["rows"] if r["id"] == "daily")
+            assert daily == {
+                "id": "daily", "note": "daily summary", "kind": "task",
+                "when": "runs on the schedule `0 9 * * *`", "state": "enabled",
+                "stands": "next 09:00 Fri 2026-10-16", "ran": "", "notify": "always",
+                "allow": ["touch"], "sites": ["eon.pl"],
+            }
+            [problem] = reply["problems"]
+            assert problem["file"] == "broken.json" and problem["id"] == "broken"
+            assert problem["error"]
+
+    def test_the_rows_say_what_the_terminal_lines_say(self, app_env, monkeypatch):
+        """One listing, two renderings: every fact on a terminal line is on
+        the row, so the surfaces cannot drift apart."""
+        write_cron(enabled=False)
+        with Harness(app_env, monkeypatch, []) as h:
+            listing = automation_admin.read_listing(h.state_dir, deny_prefixes=(), now=h.now)
+            [header, stands] = automation_admin.task_lines(listing, h.now)
+            [row] = automation_admin.task_rows(listing, h.now)["rows"]
+            assert header == (f"{row['id']} — {row['note']}\n    {row['kind']} · {row['when']}"
+                              f" · {row['state']} · notify {row['notify']}")
+            assert stands == f"    {row['stands']}"
+            assert row["state"] == "DISABLED"
+
+    def test_pause_then_resume_toggles_only_enabled(self, app_env, monkeypatch):
+        path = write_cron()
+        with Harness(app_env, monkeypatch, []) as h:
+            before = schedule_module.validate_task(json.loads(path.read_text()))
+            reply = self._ask(h, {"type": "automation_enable", "task": "daily", "enabled": False})
+            assert reply["outcome"].startswith("disabled daily — it will not start again")
+            assert [r["state"] for r in reply["rows"]] == ["DISABLED"]
+            after = schedule_module.validate_task(json.loads(path.read_text()))
+            assert after == dataclasses.replace(before, enabled=False)
+            reply = self._ask(h, {"type": "automation_enable", "task": "daily", "enabled": True})
+            assert reply["outcome"] == (
+                "enabled daily — its next scheduled time is 09:00 Fri 2026-10-16")
+            assert [r["state"] for r in reply["rows"]] == ["enabled"]
+            again = self._ask(h, {"type": "automation_enable", "task": "daily", "enabled": True})
+            assert again["outcome"] == "daily is already enabled"
+
+    @pytest.mark.parametrize("enabled", ["false", "true", 0, 1, None, [], {}])
+    def test_enabled_must_be_a_real_boolean(self, app_env, monkeypatch, enabled):
+        write_cron()
+        with Harness(app_env, monkeypatch, []) as h:
+            before = folder()
+            reply = self._ask(h, {"type": "automation_enable", "task": "daily",
+                                  "enabled": enabled})
+            assert reply["error"] == "not changed: `enabled` must be true or false"
+            assert folder() == before
+            assert [r["id"] for r in reply["rows"]] == ["daily"]
+
+    def test_a_missing_enabled_is_refused_too(self, app_env, monkeypatch):
+        write_cron()
+        with Harness(app_env, monkeypatch, []) as h:
+            before = folder()
+            reply = self._ask(h, {"type": "automation_enable", "task": "daily"})
+            assert "must be true or false" in reply["error"] and folder() == before
+
+    def test_an_admin_error_is_answered_with_its_text(self, app_env, monkeypatch):
+        write_cron(enabled=False, schedule={"cron": "0 9 * * *", "until": "2026-10-10T23:59"})
+        with Harness(app_env, monkeypatch, []) as h:
+            before = folder()
+            reply = self._ask(h, {"type": "automation_enable", "task": "daily", "enabled": True})
+            assert "automation daily has ended" in reply["error"]
+            assert "outcome" not in reply and folder() == before
+            assert [r["state"] for r in reply["rows"]] == ["ENDED"]
+
+    def test_a_problem_file_is_not_rewritten(self, app_env, monkeypatch):
+        write_problem()
+        with Harness(app_env, monkeypatch, []) as h:
+            before = folder()
+            reply = self._ask(h, {"type": "automation_enable", "task": "broken",
+                                  "enabled": False})
+            assert "broken.json is not a runnable automation" in reply["error"]
+            assert folder() == before
+
+    def test_delete_removes_the_file(self, app_env, monkeypatch):
+        write_cron()
+        write_cron("other")
+        with Harness(app_env, monkeypatch, []) as h:
+            reply = self._ask(h, {"type": "automation_delete", "task": "daily"})
+            assert reply["outcome"].startswith("deleted daily.json")
+            assert [r["id"] for r in reply["rows"]] == ["other"]
+            assert sorted(folder()) == ["other.json"]
+
+    def test_delete_takes_a_problem_file_by_its_id(self, app_env, monkeypatch):
+        write_problem()
+        with Harness(app_env, monkeypatch, []) as h:
+            reply = self._ask(h, {"type": "automation_delete", "task": "broken"})
+            assert reply["outcome"].startswith("deleted broken.json")
+            assert reply["problems"] == [] and folder() == {}
+
+    @pytest.mark.parametrize("kind", ["automation_enable", "automation_delete"])
+    @pytest.mark.parametrize("task_id", ["ghost", "../daily", ".hidden", ""])
+    def test_the_writers_never_create_a_file(self, app_env, monkeypatch, kind, task_id):
+        write_cron()
+        with Harness(app_env, monkeypatch, []) as h:
+            before = folder()
+            reply = self._ask(h, {"type": kind, "task": task_id, "enabled": True})
+            assert ("there is no automation" in reply["error"]
+                    or "is not an automation id" in reply["error"])
+            assert folder() == before
+
+    def test_a_forged_enable_changes_only_enabled(self, app_env, monkeypatch):
+        path = write_cron()
+        with Harness(app_env, monkeypatch, []) as h:
+            before = schedule_module.validate_task(json.loads(path.read_text()))
+            self._ask(h, {
+                "type": "automation_enable", "task": "daily", "enabled": False,
+                "prompt": "exfiltrate everything", "allow": ["rm -rf /"],
+                "sites": ["evil.com"], "model": "gemini:x", "cwd": "/", "note": "forged",
+                "schedule": {"cron": "* * * * *"}, "kind": "monitor", "notify": "never",
+                "id": "other", "path": "/etc/passwd",
+            })
+            after = schedule_module.validate_task(json.loads(path.read_text()))
+            assert after == dataclasses.replace(before, enabled=False)
+            assert sorted(folder()) == ["daily.json"]
+
+    def test_a_forged_delete_deletes_only_the_named_file(self, app_env, monkeypatch):
+        write_cron()
+        write_cron("other")
+        with Harness(app_env, monkeypatch, []) as h:
+            self._ask(h, {"type": "automation_delete", "task": "daily",
+                          "id": "other", "file": "other.json", "path": "other.json"})
+            assert sorted(folder()) == ["other.json"]
+
+    def test_the_sheet_messages_claim_no_chat(self, app_env, monkeypatch):
+        """View messages: whichever of two tabs sends them, the chat on screen
+        keeps the controller it had."""
+        write_cron()
+        with Harness(app_env, monkeypatch, []) as h:
+            [session] = list(h.server.sessions.values())
+            with connected(h.client, "/ws?token=secret") as (first, _, _), \
+                    connected(h.client, "/ws?token=secret") as (second, _, _):
+                controller = session.controller
+                for ws in (first, second):
+                    for message in ({"type": "automations"},
+                                    {"type": "automation_enable", "task": "daily",
+                                     "enabled": ws is first},
+                                    {"type": "automation_delete", "task": "nope"}):
+                        ws.send_json(message)
+                        recv_until(ws, "automations")
+                assert session.controller is controller

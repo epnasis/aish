@@ -61,6 +61,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from uvicorn.protocols.utils import ClientDisconnected
 
 from . import (
+    automation_admin,
     backends,
     browser,
     dir_ignore,
@@ -2911,6 +2912,15 @@ class WebServer:
             # automation file and edits nothing in the one on screen, so it
             # claims no control of it.
             await self._run_now(client, message)
+        elif kind == "automations":
+            # VIEW messages, the three of them: the owner's automations sheet
+            # reads, toggles or deletes a file in the automations folder and
+            # edits nothing in the chat on screen, so none claims control of it.
+            await self._send_automations(client)
+        elif kind == "automation_enable":
+            await self._automation_enable(client, message)
+        elif kind == "automation_delete":
+            await self._automation_delete(client, message)
         elif kind == "dequeue":
             self._dequeue(client, str(message.get("text", "")))
         elif kind == "dequeue_cwd":
@@ -3031,7 +3041,7 @@ class WebServer:
         if not task_id:
             await self._refuse(
                 client, "this chat was not started by an automation — name one: "
-                "/run-now <id> (the terminal's /tasks lists them)",
+                "/run-now <id> (/tasks lists them)",
             )
             return
         if not schedule.TASK_ID_RE.fullmatch(task_id):
@@ -3055,6 +3065,96 @@ class WebServer:
             "text": f"started {task_id} now, in a new chat; its schedule is unchanged "
             "and its next scheduled run still happens",
         })
+
+    async def _send_automations(
+        self, client: Client, *, outcome: str = "", error: str = ""
+    ) -> None:
+        """The owner's automations, as the web sheet shows them: the rows
+        `automation_admin.task_rows` builds from the same listing and helpers
+        the terminal's `/tasks` prints, so the two cannot disagree. Sent to
+        the asking client only; a change made elsewhere is seen on the next
+        fetch, never pushed. `outcome`/`error` say what the action that
+        prompted this fresh listing did."""
+        reply: dict[str, Any] = {"type": "automations", "rows": [], "problems": [], "notes": []}
+        if self.scheduler is None:
+            reply["error"] = error or "no scheduler is running on this server"
+            await client.ws.send_json(reply)
+            return
+        scheduler = self.scheduler
+        now = scheduler.clock()
+
+        def read() -> dict[str, Any]:
+            # The scheduler's own deny list, so the sheet calls a file a
+            # problem exactly when the scheduler does (cli's `_deny_prefixes`
+            # reads the same file).
+            listing = automation_admin.read_listing(
+                self.state_dir, deny_prefixes=list(scheduler.deny_prefixes()), now=now
+            )
+            return automation_admin.task_rows(listing, now)
+
+        try:
+            reply.update(await asyncio.to_thread(read))
+        except OSError as exc:
+            reply["error"] = f"aish cannot read the automations folder: {exc}"
+        if outcome:
+            reply["outcome"] = outcome
+        if error:
+            reply["error"] = error
+        await client.ws.send_json(reply)
+
+    async def _automation_enable(self, client: Client, message: dict) -> None:
+        """Pause or resume one automation: the terminal's own toggle
+        (`automation_admin.set_enabled`), which rewrites exactly `enabled` on
+        an EXISTING file and can create none. Only `task` and `enabled` are
+        read, and `enabled` must be a real JSON boolean — "false" is a truthy
+        string, and a toggle that guesses is how a pause becomes a resume."""
+        task_id = str(message.get("task") or "").strip()
+        enabled = message.get("enabled")
+        if not isinstance(enabled, bool):
+            await self._send_automations(
+                client, error="not changed: `enabled` must be true or false"
+            )
+            return
+        if self.scheduler is None:
+            await self._send_automations(client)
+            return
+        scheduler = self.scheduler
+        now = scheduler.clock()
+        try:
+            updated, wrote = await asyncio.to_thread(
+                automation_admin.set_enabled, task_id, enabled,
+                deny_prefixes=list(scheduler.deny_prefixes()), now=now,
+            )
+        except automation_admin.AdminError as exc:
+            await self._send_automations(client, error=str(exc))
+            return
+        verb = "enabled" if enabled else "disabled"
+        if not wrote:
+            outcome = f"{task_id} is already {verb}"
+        elif not enabled:
+            outcome = (f"disabled {task_id} — it will not start again until it is "
+                       "resumed; a run already in progress is not stopped")
+        else:
+            stands = await asyncio.to_thread(
+                automation_admin.enabled_words, updated, self.state_dir, now
+            )
+            outcome = f"enabled {task_id} — {stands}"
+        await self._send_automations(client, outcome=outcome)
+
+    async def _automation_delete(self, client: Client, message: dict) -> None:
+        """Delete one automation file — `automation_admin.delete`, the
+        terminal's shredder; the web asks first, in its confirm modal. Only
+        `task` is read, and only a file the folder already holds can be named."""
+        task_id = str(message.get("task") or "").strip()
+        try:
+            path = await asyncio.to_thread(automation_admin.delete, task_id)
+        except automation_admin.AdminError as exc:
+            await self._send_automations(client, error=str(exc))
+            return
+        await self._send_automations(
+            client, outcome=f"deleted {path.name}; aish-web drops its schedule state "
+            "and any monitor snapshot the next time it reads the folder",
+        )
 
     def _automation_of(self, session: Session) -> str:
         """The automation a schedule-origin chat was started by: its live meta,

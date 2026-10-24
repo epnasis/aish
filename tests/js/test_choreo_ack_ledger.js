@@ -193,6 +193,12 @@ function ledgerWorld({ socket = "open" } = {}) {
     // permanent delete — go through act(), and the server republishes the list
     // to every device after each, so a lost query repairs itself.
     trash: "read",
+    // Also a read (#5): asking for the automations listing paints the sheet
+    // and claims nothing. The three things that CHANGE an automation — pause
+    // or resume, delete, run now — go through act(), and each change is
+    // answered with a fresh listing, so a lost query is one sheet that says
+    // "Loading…" until it is opened again.
+    automations: "read",
     // ALREADY GUARDED, more strictly than a receipt: the message is on screen
     // pending until the server's own version lands, and the text goes back to
     // the composer if it never does.

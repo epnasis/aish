@@ -1682,6 +1682,7 @@ function handle(event) {
     case "console_shared": showToast("shared to context"); break;
     // `/run-now` started a run (#5 S4): the new chat appears on the roster.
     case "run_started": showToast(event.text || "started"); break;
+    case "automations": onAutomations(event); break;
     case "console_error": showToast(event.text); break;
   }
 }
@@ -9382,6 +9383,7 @@ const SLASH_COMMANDS = [
   ["/objective", "this chat's objective — aish's reading of your goal, its sources and history"],
   ["/objective edit", "set the objective in your own words"],
   ["/plan", "aish's own plan for the objective — drop a task or ask for a replan"],
+  ["/tasks", "your automations — pause, resume, run now or delete one"],
   ["/run-now", "run this chat's automation now (or /run-now <id>) — its schedule is unchanged"],
   ["/help", "about aish web"],
 ];
@@ -9759,8 +9761,8 @@ function submitCommand() {
 }
 
 // "/session" is the pre-#260 name for "/chat": off the menu, still dispatched.
-// "/tasks" and "/runs" are dispatched only to say they are terminal-only (#5 S4).
-const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit", "/session", "/tasks", "/runs"]);
+// "/runs" is dispatched only to say it is terminal-only (#5 S4).
+const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit", "/session", "/runs"]);
 
 function handleSlash(text) {
   let [command, ...rest] = text.split(/\s+/);
@@ -9860,9 +9862,13 @@ function handleSlash(text) {
     case "/run-now":
       return act(arg ? { type: "run_now", task: arg } : { type: "run_now" },
         { label: "starting that run" });
-    // The automation list and its runs are the terminal's (#5 S4). Said, not
-    // "unknown": the command exists, and saying where it lives is the answer.
-    case "/tasks": case "/runs":
+    // The owner's automations, as a sheet (#5): the terminal's /tasks listing,
+    // toggle and shredder. Typed only, like every slash ([CHIP-NEVER-COMMANDS]);
+    // the sheet's own buttons are DOM, never model output.
+    case "/tasks": openAutomationsSheet(); return true;
+    // The run history is the terminal's (#5 S4). Said, not "unknown": the
+    // command exists, and saying where it lives is the answer.
+    case "/runs":
       showToast(`${command} is a terminal-only command — run it in aish in a terminal`);
       return true;
     case "/help": openSheet("workspace-sheet"); return true;
@@ -19178,6 +19184,170 @@ function onSessionRestored(event) {
   requestSessions($("sessions-search").value || "");
   offlineSyncSoon();
 }
+
+// [AUTOMATIONS-START]
+// The owner's automations (#5): what the terminal's `/tasks` shows and does,
+// as a sheet a phone can reach without typing. The rows are the SERVER's —
+// built by the same helpers that print the terminal's listing — and nothing
+// here derives a fact about a task: the sheet paints what it is told, and the
+// one mapping it owns is which buttons a stated state offers.
+//
+// Fetched when the sheet opens and answered afresh after every action; a
+// change made elsewhere while it is open is not pushed, and shows on the next
+// fetch. The writers are the terminal's own toggle and shredder: they rewrite
+// `enabled` on a file that exists or delete one, and can never create one, so
+// the approval card stays the only author of what an automation does.
+
+function openAutomationsSheet() {
+  // Raised from the rail's workspace entry on a phone too: stand the
+  // slide-over down first, or the sheet opens behind it ([TRASH]'s lesson).
+  closeSessionRail();
+  openSheet("automations-sheet");
+  setAutomationsStatus("Loading…", "");
+  send({ type: "automations" });
+}
+
+function setAutomationsStatus(text, kind) {
+  const status = $("automations-status");
+  status.textContent = text;
+  status.className = kind ? `auto-status ${kind}` : "auto-status";
+  status.hidden = !text;
+}
+
+// What a row can be asked to do, from the state the server stated. ENDED
+// offers only Delete: the server refuses a resume past the end and a run by
+// hand past it, so a button for either would be a control that always fails.
+function automationActions(row) {
+  if (row.state === "enabled") return ["pause", "run", "delete"];
+  if (row.state === "DISABLED") return ["resume", "delete"];
+  return ["delete"];
+}
+
+function automationLine(className, text) {
+  const line = document.createElement("div");
+  line.className = className;
+  line.textContent = text;
+  return line;
+}
+
+function automationButton(label, className, onPress) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  button.onclick = onPress;
+  return button;
+}
+
+// Each handler closes over the id of the ROW it was built for, never a
+// selection read back at press time: a fresh listing repaints the sheet under
+// the finger, and a press must land on the automation that was on screen.
+function automationRow(row) {
+  const item = document.createElement("div");
+  item.className = `auto-row state-${row.state.toLowerCase()}`;
+  item.dataset.task = row.id;
+  const head = document.createElement("div");
+  head.className = "auto-head";
+  head.append(
+    automationLine("auto-id", row.note ? `${row.id} — ${row.note}` : row.id),
+    automationLine("auto-state", row.state),
+  );
+  item.append(head);
+  item.append(automationLine("auto-line", `${row.kind} · ${row.when} · notify ${row.notify}`));
+  item.append(automationLine("auto-line", row.ran ? `${row.stands} · ${row.ran}` : row.stands));
+  // The grants are on the row because resuming re-arms unattended runs that
+  // carry them — the card's own words for each.
+  if (row.allow && row.allow.length) {
+    item.append(automationLine("auto-grant",
+      `Runs without asking: commands starting with ${row.allow.join(", ")} (plus read-only ones)`));
+  }
+  if (row.sites && row.sites.length) {
+    item.append(automationLine("auto-grant",
+      `Presses things as you, without the per-site card, on: ${row.sites.join(", ")}`));
+  }
+  const actions = document.createElement("div");
+  actions.className = "auto-actions";
+  const id = row.id;
+  for (const action of automationActions(row)) {
+    if (action === "pause") {
+      actions.append(automationButton("Pause", "auto-btn", () =>
+        act({ type: "automation_enable", task: id, enabled: false }, { label: "pausing that automation" })));
+    } else if (action === "resume") {
+      actions.append(automationButton("Resume", "auto-btn", () =>
+        act({ type: "automation_enable", task: id, enabled: true }, { label: "resuming that automation" })));
+    } else if (action === "run") {
+      actions.append(automationButton("Run now", "auto-btn", () => {
+        act({ type: "run_now", task: id }, { label: "starting that run" });
+        send({ type: "automations" });
+      }));
+    } else {
+      actions.append(automationButton("Delete", "auto-btn danger", () => askDeleteAutomation(id)));
+    }
+  }
+  item.append(actions);
+  return item;
+}
+
+function problemRow(problem) {
+  const item = document.createElement("div");
+  item.className = "auto-row state-problem";
+  item.dataset.task = problem.id;
+  const head = document.createElement("div");
+  head.className = "auto-head";
+  head.append(automationLine("auto-id", problem.file), automationLine("auto-state", "PROBLEM"));
+  item.append(head);
+  item.append(automationLine("auto-line", "not a runnable automation, so it will not run:"));
+  item.append(automationLine("auto-line auto-error", problem.error));
+  const actions = document.createElement("div");
+  actions.className = "auto-actions";
+  const id = problem.id;
+  actions.append(automationButton("Delete", "auto-btn danger", () => askDeleteAutomation(id)));
+  item.append(actions);
+  return item;
+}
+
+// Through the shared [CONFIRM] modal: there is no trash for an automation, and
+// the only way back is a new one, which comes on its own approval card.
+function askDeleteAutomation(id) {
+  askConfirm({
+    title: `Delete automation ${id}?`,
+    body:
+      `Deletes the automation file ${id}.json, so it stops running. There is no ` +
+      "Recently deleted for automations and no way back short of asking aish for " +
+      "a new one, which comes on its own approval card. A run already in progress " +
+      "is not stopped.",
+    verb: "Delete",
+    action: () => act({ type: "automation_delete", task: id }, { label: "deleting that automation" }),
+  });
+}
+
+function onAutomations(event) {
+  const list = $("automations-list");
+  list.textContent = "";
+  const rows = event.rows || [];
+  const problems = event.problems || [];
+  for (const row of rows) list.appendChild(automationRow(row));
+  for (const problem of problems) list.appendChild(problemRow(problem));
+  for (const note of event.notes || []) list.appendChild(automationLine("auto-note", note));
+  if (!rows.length && !problems.length && !event.error) {
+    list.appendChild(automationLine("auto-note",
+      "No automations — ask aish for one (“check the portal after 10pm”); each " +
+      "comes on its own approval card."));
+  }
+  // Said in the status line pinned above the list, not a toast: the list is
+  // the scroller, so the line stays in view wherever the press happened, and
+  // these sentences are too long for a pill.
+  if (event.error) {
+    setAutomationsStatus(event.error, "error");
+  } else if (event.outcome) {
+    setAutomationsStatus(event.outcome, "");
+  } else {
+    setAutomationsStatus("", "");
+  }
+}
+
+$("ws-automations").onclick = () => openAutomationsSheet();
+// [AUTOMATIONS-END]
 // [TRASH-END]
 
 // ---- rendering the list --------------------------------------------------

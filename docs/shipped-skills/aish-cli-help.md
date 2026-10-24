@@ -51,7 +51,7 @@ Tab completes them, and an unambiguous prefix works (`/res` for `/resume`).
 - `/tasks enable <id>` / `/tasks disable <id>` turn one on or off — the only field they change; what an automation does changes only on a new approval card. A file that does not load is refused (fix it in an editor, or delete it). `/tasks delete <id>` removes the file after a y/N (default No); there is no way back short of a new automation on its own card.
 - `/runs` lists recent scheduled runs newest first — what each did (a monitor's verdict, "ran for 09:00") or why it did not happen (expired, did not start, skipped) — and marks chats not opened yet. It names chats; scheduled chats are never resumed.
 - At startup aish says how many scheduled runs from the last 14 days have not been opened (silent monitor runs not counted).
-- Running an automation now, outside its schedule, is the web's `/run-now`.
+- Running an automation now, outside its schedule, is the web's `/run-now`. The web also has `/tasks`, as a sheet with Pause / Resume / Run now / Delete per automation.
 
 ## Models
 - The current model is named on aish's identity line. `--model`, `$AISH_MODEL` or the config's `model` key set the startup default; `/model <name> --save` persists a switch.
