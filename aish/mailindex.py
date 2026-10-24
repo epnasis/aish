@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import datetime
+import email.policy
 import email.utils
 import hashlib
 import html
@@ -196,6 +198,12 @@ class Header:
     links: tuple[Link, ...] = ()
     attachments: tuple[Attachment, ...] = ()
     provider_id: str = ""
+    # Which gateway this message came through, DECLARED by the adapter that
+    # parsed it (`from_gmail` / `from_rfc822`), never inferred from a header.
+    # The Gate reads it to decide whose authentication result, if any, exists
+    # (`mailgate.authenticate_header`). Index files written before it existed
+    # were all Gmail.
+    mailbox: str = "gmail"
 
     @property
     def correspondents(self) -> tuple[str, ...]:
@@ -220,6 +228,26 @@ def header_from_json(raw: dict[str, Any]) -> Header:
     data["attachments"] = tuple(Attachment(**a) for a in data.get("attachments") or ())
     data["at"] = float(data["at"])
     return Header(**data)
+
+
+def header_path(state_dir: os.PathLike | str, digest: str) -> Path:
+    """Where the index keeps one message — `MailIndex._path`'s one definition."""
+    return mail_dir(state_dir) / INDEX_DIRNAME / digest[:2] / f"{digest}.json"
+
+
+def load_header(state_dir: os.PathLike | str, digest: str) -> Header | None:
+    """One message's header, read straight from its own file, or None.
+
+    The owner surface (`/mail`) joins verdicts to the index by digest through
+    this, rather than loading the whole index: it reads only the rows it shows.
+    Contained per file — an unreadable one is None, never a raise."""
+    if not re.fullmatch(r"[0-9a-f]{64}", digest or ""):
+        return None
+    try:
+        header = header_from_json(json.loads(header_path(state_dir, digest).read_text()))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    return header if header.digest == digest else None
 
 
 def digest_for(message_id: str, from_addr: str, date_header: str, subject: str, body: str) -> str:
@@ -351,25 +379,69 @@ def _from_gmail(msg: dict, owner_addresses: frozenset[str] | set[str]) -> Parsed
     payload = msg.get("payload") or {}
     if isinstance(payload, dict):
         _walk(payload, plain, htmls, files)
-    markup = "\n".join(htmls)
-    body = "\n".join(p for p in plain if p.strip()) or html_to_text(markup)
-    body = body[:BODY_CHARS]
+    labels = tuple(str(x) for x in msg.get("labelIds") or ())
+    owners = {a.lower() for a in owner_addresses}
+    from_addr = address_of(_first(headers, "From"))
+    internal = str(msg.get("internalDate") or "")
+    header = _build_header(
+        headers, plain, htmls, files,
+        provider_at=int(internal) / 1000.0 if internal.isdigit() else None,
+        direction="out" if (from_addr in owners or "SENT" in labels) else "in",
+        # Gmail prepends its own result above any the sender wrote; the Gate
+        # reads only the top-most and only when Gmail wrote it.
+        auth_results=_all(headers, "Authentication-Results"),
+        provider_id=str(msg.get("id") or ""),
+        mailbox="gmail",
+    )
+    return Parsed(header, _body_of(plain, htmls), labels)
+
+
+def date_header_time(value: str) -> float | None:
+    """A Date header as a timestamp, or None. RFC 5322's `-0000` zone means
+    "UTC, local offset unknown", and `parsedate_to_datetime` returns it NAIVE;
+    a naive value is read as UTC here, never as this machine's local time."""
+    if not value or not value.strip():
+        return None
+    parsed = email.utils.parsedate_to_datetime(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.UTC)
+    return parsed.timestamp()
+
+
+def _body_of(plain: list[str], htmls: list[str]) -> str:
+    body = "\n".join(p for p in plain if p.strip()) or html_to_text("\n".join(htmls))
+    return body[:BODY_CHARS]
+
+
+def _build_header(
+    headers: list[tuple[str, str]],
+    plain: list[str],
+    htmls: list[str],
+    files: list[Attachment],
+    *,
+    provider_at: float | None,
+    direction: str,
+    auth_results: tuple[str, ...],
+    provider_id: str,
+    mailbox: str,
+) -> Header:
+    """The one place a parsed message becomes a `Header`, whichever gateway it
+    came through. What differs by gateway is passed IN by the adapter: the
+    receipt time it vouches for, the direction it determined, and which
+    authentication results (if any) a reader may trust."""
+    body = _body_of(plain, htmls)
     from_value = _first(headers, "From")
     from_addr = address_of(from_value)
     message_id = normalize_message_id(_first(headers, "Message-ID"))
     subject = _first(headers, "Subject")
     date_header = _first(headers, "Date")
-    internal = str(msg.get("internalDate") or "")
-    if internal.isdigit():
-        at, at_source = int(internal) / 1000.0, "provider"
+    if provider_at is not None:
+        at, at_source = provider_at, "provider"
     else:
-        parsed = email.utils.parsedate_to_datetime(date_header) if date_header else None
-        at = parsed.timestamp() if parsed is not None else 0.0
-        at_source = "date_header" if parsed is not None else "none"
-    labels = tuple(str(x) for x in msg.get("labelIds") or ())
-    owners = {a.lower() for a in owner_addresses}
-    direction = "out" if (from_addr in owners or "SENT" in labels) else "in"
-    header = Header(
+        stamp = date_header_time(date_header)
+        at = stamp if stamp is not None else 0.0
+        at_source = "date_header" if stamp is not None else "none"
+    return Header(
         digest=digest_for(message_id, from_addr, date_header, subject, body),
         message_id=message_id,
         in_reply_to=message_ids(_first(headers, "In-Reply-To")),
@@ -386,13 +458,99 @@ def _from_gmail(msg: dict, owner_addresses: frozenset[str] | set[str]) -> Parsed
         list_id=_first(headers, "List-Id"),
         list_unsubscribe=_first(headers, "List-Unsubscribe"),
         precedence=_first(headers, "Precedence"),
-        auth_results=_all(headers, "Authentication-Results"),
+        auth_results=auth_results,
         body_chars=len(body),
-        links=extract_links("\n".join(plain), markup),
+        links=extract_links("\n".join(plain), "\n".join(htmls)),
         attachments=tuple(files),
-        provider_id=str(msg.get("id") or ""),
+        provider_id=provider_id,
+        mailbox=mailbox,
     )
-    return Parsed(header, body, labels)
+
+
+# ---------------------------------------------------------------- RFC 5322 shape
+
+
+_FOLD = re.compile(r"\r?\n[ \t]+")
+
+
+def _part_text(part: Any) -> str:
+    try:
+        content = part.get_content()
+    except (LookupError, ValueError, AssertionError, KeyError):
+        raw = part.get_payload(decode=True) or b""
+        content = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+    return content if isinstance(content, str) else ""
+
+
+def from_rfc822(
+    raw: str,
+    *,
+    provider_id: str,
+    in_sent_folder: bool,
+    mailbox: str,
+) -> Parsed | None:
+    """One raw RFC 5322 message from a gateway that is NOT Gmail (the Tuta
+    bridge, via himalaya), or None — counted unparseable — when it cannot be
+    read. Contained per mail, as `from_gmail` is.
+
+    **Every Authentication-Results header is dropped here, at parse time.**
+    On Gmail the top-most one is Gmail's own, prepended above anything the
+    sender wrote; through this gateway nothing is prepended, so the top-most
+    one IS the sender's, and a sender-written exact copy of Gmail's would read
+    as authenticated. There is no result here a reader may trust, so none is
+    kept (`mailgate.authenticate_header` says so in words).
+
+    **Direction is the FOLDER**: out iff the mail sits in his Sent folder. A
+    From header naming an owner address is something any sender can write;
+    on this gateway it makes nothing "his", so it can never become an owner
+    act in the ledger (`mailgate.owner_acts`). His addresses are not consulted
+    for direction at all here.
+
+    **`at` is the Date header** (no gateway receipt time is read), so it is
+    sender-written; `at_source` says so on every record."""
+    try:
+        return _from_rfc822(raw, provider_id=provider_id, in_sent_folder=in_sent_folder,
+                            mailbox=mailbox)
+    except Exception:  # noqa: BLE001 — containment is the point
+        return None
+
+
+def _from_rfc822(
+    raw: str, *, provider_id: str, in_sent_folder: bool, mailbox: str
+) -> Parsed | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    msg = email.message_from_string(raw, policy=email.policy.default)
+    headers = [
+        (str(name), _FOLD.sub(" ", str(value)))
+        for name, value in msg.items()
+        if str(name).lower() != "authentication-results"
+    ]
+    plain: list[str] = []
+    htmls: list[str] = []
+    files: list[Attachment] = []
+    for seen, part in enumerate(msg.walk()):
+        if seen >= MAX_MIME_PARTS:
+            break
+        if part.is_multipart():
+            continue
+        mime = part.get_content_type().lower()
+        filename = part.get_filename() or ""
+        if filename:
+            files.append(Attachment(str(filename), mime))
+        elif mime == "text/plain":
+            plain.append(_part_text(part))
+        elif mime == "text/html":
+            htmls.append(_part_text(part))
+    header = _build_header(
+        headers, plain, htmls, files,
+        provider_at=None,
+        direction="out" if in_sent_folder else "in",
+        auth_results=(),
+        provider_id=provider_id,
+        mailbox=mailbox,
+    )
+    return Parsed(header, _body_of(plain, htmls), ())
 
 
 # ---------------------------------------------------------------- the index
@@ -464,8 +622,8 @@ class MailIndex:
     # -- persistence
 
     def _path(self, digest: str) -> Path:
-        assert self.directory is not None
-        return self.directory / digest[:2] / f"{digest}.json"
+        assert self.state_dir is not None
+        return header_path(self.state_dir, digest)
 
     def _load(self) -> None:
         assert self.directory is not None

@@ -114,9 +114,11 @@ class Auth:
     dkim_domain: str = ""
     header_from: str = ""
     read_from: str = ""  # which header was read: "top" or "" (none usable)
+    gateway: str = "gmail"
+    why: str = ""  # code-written, for an ending that read no result
 
     def as_json(self) -> dict[str, Any]:
-        return {
+        out = {
             "verdict": self.verdict,
             "authenticated": self.authenticated,
             "dmarc": self.dmarc,
@@ -124,7 +126,39 @@ class Auth:
             "dkim": self.dkim,
             "dkim_domain": self.dkim_domain,
             "read_from": self.read_from,
+            "gateway": self.gateway,
         }
+        if self.why:
+            out["why"] = self.why
+        return out
+
+
+# The ending for a mail that came through a gateway with no authentication
+# result a reader may trust (`authenticate_header`).
+NOT_READABLE = "not_readable_via_gateway"
+
+# Which gateway's own authentication result is readable, and whose authserv-id
+# wrote it. A gateway absent here has none: on the Tuta bridge nobody prepends
+# a result above the sender's, so the top-most one is the sender's own.
+GATEWAY_AUTHSERV = {"gmail": GMAIL_AUTHSERV}
+
+
+def authenticate_header(header: mailindex.Header) -> Auth:
+    """The authentication verdict for one indexed mail, by the gateway its
+    ADAPTER declared (`Header.mailbox`) — never inferred from its headers.
+
+    Through a gateway with no readable result the answer is an explicit
+    ending, not authenticated, with the reason in words; the headers are not
+    looked at even if some survived parsing (`mailindex.from_rfc822` drops
+    them). Unauthenticated, the grade is `first-contact` whatever the history,
+    no case is opened and no account enters a case's history — so such mail
+    can mint nothing."""
+    if header.mailbox not in GATEWAY_AUTHSERV:
+        return Auth(
+            NOT_READABLE, False, gateway=header.mailbox,
+            why=f"no authentication result readable via the {header.mailbox} gateway",
+        )
+    return authenticate(header.auth_results, mailindex.domain_of(header.from_addr))
 
 
 _RESULT = re.compile(r"\b(dmarc|spf|dkim)\s*=\s*([a-z]+)", re.I)
