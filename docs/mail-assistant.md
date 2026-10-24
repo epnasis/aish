@@ -308,6 +308,12 @@ directory (`backfill`), never the live store, and every question the pipeline as
 the mail under review. Only ground truth reads the future (`truth_of`, `later_replies`).
 `TestFrozenClocks`.
 
+**Admission is NOT scratch.** The role admission ledger is machine-level state, so the arms are
+judged against the real state home (`admission_state_dir`, default `paths.state_home()`) while
+every pipeline store stays in the scratch tree. Passing the scratch dir for both ended 170 of 300
+real Reader calls `unadmitted` on a run whose model had just been admitted; and nothing written
+into a scratch tree can admit a model. `TestAdmissionLedger`.
+
 **Deterministic first, models on demand.** `backfill` takes no chat seam and no model spec.
 The arms then read a bounded selection (`select`: strong tier first, then weak, then near-null,
 each oldest first, up to `--reader-max`), the same mails for every arm. Verdicts land in the run's

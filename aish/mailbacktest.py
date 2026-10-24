@@ -189,9 +189,15 @@ def run_arms(
     charter: roles.Charter,
     state_dir: Path,
     check_admission: bool = True,
+    admission_state_dir: Path | None = None,
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """{arm: {mail digest: record}}. Resumable: a final reading already in the
-    run's verdict store is reused, not re-bought."""
+    run's verdict store is reused, not re-bought.
+
+    `state_dir` is the run's SCRATCH tree (index, cases, verdicts, evidence);
+    admission is read from `admission_state_dir`, the machine's real state home
+    by default — nothing written into a scratch tree can admit a model."""
+    ledger = paths.state_home() if admission_state_dir is None else admission_state_dir
     verdicts = mailverdicts.VerdictStore(state_dir)
     out: dict[str, dict[str, dict[str, Any]]] = {}
     for spec, chat in arms.items():
@@ -206,6 +212,7 @@ def run_arms(
                 record = mailwatch.assess(
                     run.index, run.store, header, charter=charter, model_spec=spec, chat=chat,
                     state_dir=state_dir, propose=False, check_admission=check_admission,
+                    admission_state_dir=ledger,
                 )
             except Exception as exc:  # noqa: BLE001 — one mail's failure is its own record
                 record = mailverdicts.error_record(header, charter, spec, exc)
@@ -408,6 +415,7 @@ def run_backtest(
     reader_max: int = DEFAULT_READER_MAX,
     now: float | None = None,
     check_admission: bool = True,
+    admission_state_dir: Path | None = None,
 ) -> dict[str, Any]:
     now = time.time() if now is None else now
     state_dir = out_dir / "state"
@@ -417,7 +425,8 @@ def run_backtest(
     }
     selected = select(run, truths, reader_max)
     results = run_arms(run, selected, arms, charter=charter, state_dir=state_dir,
-                       check_admission=check_admission)
+                       check_admission=check_admission,
+                       admission_state_dir=admission_state_dir)
     result = report(run, truths, selected, results, now=now)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.json").write_text(json.dumps(result, indent=1, sort_keys=True))
