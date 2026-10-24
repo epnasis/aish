@@ -266,8 +266,20 @@ def _parse_shape(raw: Any) -> Shape:
             caps[name] = value
         statement = Field("statement", "text", max_chars=caps["max_chars"])
         return Shape(kind, (statement,), 0, caps)
+    if kind == "verdict":
+        # The mail Reader's typed verdict (#142 W5). Its skeleton and rules
+        # live in `mailreader`; the frontmatter declares only the caps.
+        from . import mailreader
+
+        caps = {}
+        for name in mailreader.VERDICT_CAPS:
+            value = raw.get(name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise CharterError(f"a verdict output must declare a positive {name}")
+            caps[name] = value
+        return Shape(kind, mailreader.shape_fields(caps), 0, caps)
     if kind != "rows":
-        raise CharterError(f"unknown output shape {kind!r} (rows | objective)")
+        raise CharterError(f"unknown output shape {kind!r} (rows | objective | verdict)")
     fields = tuple(_parse_field(f) for f in (raw.get("fields") or ()))
     if not fields:
         raise CharterError("output: declares no fields")
@@ -289,7 +301,12 @@ KINDS = frozenset({"reader", "judge", "worker", "owner"})
 # entry arrives with the second role that needs a different model.
 # `session` (#424): the session's OWN backend, whatever it is, so the owner's
 # text never rides to a different provider than the one he chose for the chat.
-MODEL_CLASSES = frozenset({"cloud-fast", "session"})
+# `caller` (#142 W5): the CALLER names the model spec, and per-model admission
+# is what decides which specs may run. The mail Reader is examined on two
+# models side by side (a cloud reference and a local one) because their
+# disagreement is the backtest's audit set; neither is "the session's" model,
+# since the Reader runs from a CLI with no session at all.
+MODEL_CLASSES = frozenset({"cloud-fast", "session", "caller"})
 
 
 class Degradation:
@@ -502,6 +519,10 @@ def _case(raw: Any, input_names: set[str], shape: Shape, source: str) -> Case:
         declared = shape.field(str(fname))
         if declared is None:
             raise CharterError(f"golden pair {name!r} expects undeclared field {fname!r}")
+    if shape.kind == "verdict":
+        from . import mailreader
+
+        mailreader.check_expectation(name, expect)
     checks = dict(expect)
     values: dict[str, list[str]] = {}
     for fname, wanted in (expect.get("field_values") or {}).items():
@@ -724,6 +745,10 @@ def validate(
         from . import objective
 
         return objective.validate_answer(shape, payload, inputs or {})
+    if shape.kind == "verdict":
+        from . import mailreader
+
+        return mailreader.validate_answer(shape, payload, inputs or {})
     if not isinstance(payload, dict):
         raise ValueError("the reply must be a JSON object")
     raw = payload.get("rows")
@@ -1018,6 +1043,10 @@ def contract_text(shape: Shape, rows: tuple[int, ...]) -> str:
         from . import objective
 
         return objective.contract_text(shape)
+    if shape.kind == "verdict":
+        from . import mailreader
+
+        return mailreader.contract_text(shape)
     lines = [
         "Reply with ONE JSON object and nothing else. No prose before or after "
         "it, no code fence.",
@@ -1288,9 +1317,15 @@ def check_case(case: Case, value: Any) -> list[str]:
     model chooses, so a literal expectation would be unmeetable and the exam
     would be measuring formatting.
     """
-    table: dict[str, Callable[[Any, Any], list[str]]] = (
-        dict(_ASSERTIONS) if isinstance(value, Rows) else _objective_assertions()
-    )
+    from . import mailreader
+
+    table: dict[str, Callable[[Any, Any], list[str]]]
+    if isinstance(value, Rows):
+        table = dict(_ASSERTIONS)
+    elif isinstance(value, (mailreader.Verdict, mailreader.Ask)):
+        table = dict(mailreader.ASSERTIONS)
+    else:
+        table = _objective_assertions()
     return [
         problem
         for key, expected in case.expect.items()
@@ -1380,6 +1415,10 @@ def _objective_assertions() -> dict[str, Callable[[Any, Any], list[str]]]:
 def _assertions_for(shape: Shape) -> dict[str, Any]:
     """The assertion kinds a case may use, by output shape. A rows assertion
     means nothing to a ledger and the reverse, so each shape has its own."""
+    if shape.kind == "verdict":
+        from . import mailreader
+
+        return dict(mailreader.ASSERTIONS)
     return _objective_assertions() if shape.kind == "objective" else dict(_ASSERTIONS)
 
 
@@ -1451,6 +1490,10 @@ def tally_flags(shape: Shape, value: Any) -> dict[str, dict[str, int]]:
         from . import objective
 
         return objective.tally(value)
+    if shape.kind == "verdict":
+        from . import mailreader
+
+        return mailreader.tally(value)
     out: dict[str, dict[str, int]] = {}
     for declared in shape.fields:
         if declared.type != "enum":

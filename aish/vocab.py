@@ -331,7 +331,11 @@ def scan(root=None, days: int | None = None) -> dict[str, Counters]:
     if not directory.is_dir():
         return {}
     out: dict[str, Counters] = {}
-    for path in sorted(directory.glob("session-*.jsonl")):
+    # The shadow inbox pipeline (#142 W5) runs as its own CLI with no session,
+    # so its per-pass tallies land in `mail/runs-YYYYMMDD.jsonl` in the same
+    # record shape; the dated stem is what `_within` reads.
+    logs = [*directory.glob("session-*.jsonl"), *(directory / "mail").glob("runs-*.jsonl")]
+    for path in sorted(logs):
         if days is not None and not _within(path.stem, days):
             continue
         try:

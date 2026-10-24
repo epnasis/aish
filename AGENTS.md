@@ -90,6 +90,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `vocab.py`, `aish vocab`, **any list of words matched against page text, a control label, error text or a command name** | `docs/vocabularies.md` |
 | `export.py` | `docs/export-pdf.md` |
 | `replay.py`, `replay_driver.py`, `replay_checks.py`, `evals/`, `aish-replay` | `docs/replay.md` |
+| `mailindex.py`, `mailgate.py`, `mailcases.py`, `mailreader.py`, `mailverdicts.py`, `mailwatch.py`, `mailbacktest.py`, the mail-reader charter, the `mail_verdict` record | `docs/mail-assistant.md` |
 
 **New rationale goes in the area's doc, never here.** This file spent a year as a decision log — a paragraph per issue — and grew past the 150k-char limit Claude Code warns at, which is the point where the whole thing stops being reliable context. `tests/test_claude_md_size.py` fails if it passes 40k. Add a line here only for a rule that applies to *every* task; everything else belongs in `docs/`.
 
@@ -140,6 +141,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`pins.py`** — the pin ledger: which chats the OWNER has pinned, shared by every device. A toggle, so not monotonic — no client time is trusted at all (last-reconnect-wins in the server's clock), which is what makes sharing it safe. → `docs/web-server.md`
 - **`pty_session.py`** — the PTY behind the one global interactive console. The model has NO write path to it, by construction. → `docs/web-server.md`
 - **`email_poll.py`** — the Gmail→`/trigger` poller; every effectful edge (gws, HTTP, notifier, clock) is a parameter seam, so it tests with no subprocess, no network and no sleeps. → `docs/web-server.md`
+- **`mailindex.py` … `mailbacktest.py`** — the inbox assistant in SHADOW mode (#142 W5 S1): aish's own thread index, the deterministic Gate (owner-acts-only ledger), a code-side correlator and minimal case store, the toolless `mail-reader` role's typed verdict, a verdict store, the `aish-mailwatch` CLI and the `aish-mailbacktest` harness. Verdicts act on NOTHING; every mailbox call is read-only by an allowlist enforced in code; every question is asked as of the mail, so nothing sees its future. → `docs/mail-assistant.md`
 - **`schedule.py` + `scheduler.py`** — the owner's one-shot automations: inert JSON files written only through `schedule_task`'s card (never from a triggered session; other model writes are fenced, with a named open gap for writes made inside approved scripts/plugins), fired by a loop inside aish-web through the SAME guarded seam `/trigger` uses. The fired ledger in the state tree is the one authority on what ran. → `docs/web-server.md`
 - **`skills.py`** — the knowledge store (skills + memory): progressive disclosure, pre-flight injection, lifecycle. → `docs/knowledge-layer.md`
 - **`embeddings.py`** — the semantic layer over retrieval. Lexical word-matching is the guaranteed floor; embeddings are an upgrade, never a dependency. → `docs/knowledge-layer.md`
