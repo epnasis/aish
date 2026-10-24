@@ -1020,6 +1020,17 @@ automation's chat (or `/run-now <id>` anywhere) runs it right away in a new
 chat; its schedule is unchanged and the next scheduled run still happens.
 `/tasks` and `/runs` are terminal-only.
 
+**The inbox assistant (shadow mode).** `aish-mailwatch --once` reads new mail
+in your Gmail and, with `--source tuta`, your Tutanota mailbox, and records
+what aish's Reader makes of each one — what it is, what it wants of you, what
+aish *would* do with it — without doing anything to any mail: nothing is
+labelled, archived, marked read or sent. `scripts/install-mailwatch-service.sh`
+runs it every 15 minutes under launchd. In the terminal, `/mail` (or
+`/mail 50`) lists the newest results — sender, subject, the reading, the
+would-be action and the mail checks — under a health line that warns when the
+watcher has not run lately or an inbox could not be listed. `/mail` is
+terminal-only. Design and limits: `docs/mail-assistant.md`.
+
 Interrupted work is picked up again. If aish-web goes down mid-task — a
 deploy, a crash — the next start reopens that session and tells the model to
 continue from where it stopped instead of redoing what already succeeded.

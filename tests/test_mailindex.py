@@ -171,8 +171,12 @@ class TestGmailParse:
         assert mailindex.Link("https://evil.example/login", "bank.example") in header.links
         assert [a.filename for a in header.attachments] == ["invoice.pdf"]
 
-    def test_direction_comes_from_the_owner_address_or_the_sent_label(self):
-        assert parsed(gmail("a", frm=f"Owner <{OWNER}>", labels=())).header.direction == "out"
+    def test_direction_is_gmails_sent_label_and_never_a_from_header(self):
+        """S1.5 (delivery review, blocking): a From naming him is something any
+        sender writes. Only Gmail's own SENT label makes a mail his."""
+        assert parsed(gmail("a", frm=f"Owner <{OWNER}>", labels=())).header.direction == "in"
+        assert parsed(gmail("a2", frm=f"Owner <{OWNER}>", labels=("INBOX",))).header.direction \
+            == "in"
         assert parsed(gmail("b", frm="x@y.example", labels=("SENT",))).header.direction == "out"
         assert parsed(gmail("c", frm="x@y.example")).header.direction == "in"
 
@@ -201,8 +205,11 @@ class TestGmailParse:
             if h["name"] == "Date":
                 h["value"] = "not a date at all"
         broken["payload"]["parts"] = "not a list"
-        assert mailindex.from_gmail(broken, OWNERS) is None  # the Date header raised inside
         assert mailindex.from_gmail({"payload": 7}, OWNERS) is None
+        # A garbage Date costs the mail its date, never the mail (S1.5): a
+        # sender could otherwise opt a mail out of assessment by writing one.
+        kept = mailindex.from_gmail(broken, OWNERS)
+        assert kept is not None and kept.header.at_source == "none" and kept.header.at == 0.0
 
     def test_a_reload_does_not_count_the_reply_prefix_again(self, tmp_path):
         from aish import vocab

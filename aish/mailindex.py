@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import datetime
+import email.policy
 import email.utils
 import hashlib
 import html
@@ -196,6 +198,12 @@ class Header:
     links: tuple[Link, ...] = ()
     attachments: tuple[Attachment, ...] = ()
     provider_id: str = ""
+    # Which gateway this message came through, DECLARED by the adapter that
+    # parsed it (`from_gmail` / `from_rfc822`), never inferred from a header.
+    # The Gate reads it to decide whose authentication result, if any, exists
+    # (`mailgate.authenticate_header`). Index files written before it existed
+    # were all Gmail.
+    mailbox: str = "gmail"
 
     @property
     def correspondents(self) -> tuple[str, ...]:
@@ -222,8 +230,48 @@ def header_from_json(raw: dict[str, Any]) -> Header:
     return Header(**data)
 
 
-def digest_for(message_id: str, from_addr: str, date_header: str, subject: str, body: str) -> str:
-    """The content address of a message: its Message-ID, else its content."""
+def header_path(state_dir: os.PathLike | str, digest: str) -> Path:
+    """Where the index keeps one message — `MailIndex._path`'s one definition."""
+    return mail_dir(state_dir) / INDEX_DIRNAME / digest[:2] / f"{digest}.json"
+
+
+def load_header(state_dir: os.PathLike | str, digest: str) -> Header | None:
+    """One message's header, read straight from its own file, or None.
+
+    The owner surface (`/mail`) joins verdicts to the index by digest through
+    this, rather than loading the whole index: it reads only the rows it shows.
+    Contained per file — an unreadable one is None, never a raise."""
+    if not re.fullmatch(r"[0-9a-f]{64}", digest or ""):
+        return None
+    try:
+        header = header_from_json(json.loads(header_path(state_dir, digest).read_text()))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    return header if header.digest == digest else None
+
+
+def digest_for(
+    message_id: str, from_addr: str, date_header: str, subject: str, body: str,
+    *, gateway: str = "gmail",
+) -> str:
+    """The content address of a message: its Message-ID, else its content.
+
+    **Through a gateway that cannot authenticate (anything but Gmail), the
+    Message-ID is not an identity**: a sender writes it, and a Tuta mail
+    carrying a real Gmail mail's Message-ID would otherwise BE that mail to
+    the index and the verdict store — first copy wins, so an earlier forged
+    Date would squat it. So a non-Gmail message is addressed by its gateway,
+    Message-ID AND content together, and can never collide with a Gmail
+    digest. The cost, stated: a mail delivered to both inboxes is two entries
+    (and two readings); the conversation union still joins them by
+    Message-ID."""
+    if gateway != "gmail":
+        blob = json.dumps(
+            [gateway, message_id, from_addr, date_header.strip(), subject.strip(),
+             evidence.digest_of(body)],
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(f"gateway:{blob}".encode()).hexdigest()
     if message_id:
         return hashlib.sha256(f"mid:{message_id}".encode()).hexdigest()
     blob = json.dumps(
@@ -351,26 +399,77 @@ def _from_gmail(msg: dict, owner_addresses: frozenset[str] | set[str]) -> Parsed
     payload = msg.get("payload") or {}
     if isinstance(payload, dict):
         _walk(payload, plain, htmls, files)
-    markup = "\n".join(htmls)
-    body = "\n".join(p for p in plain if p.strip()) or html_to_text(markup)
-    body = body[:BODY_CHARS]
+    labels = tuple(str(x) for x in msg.get("labelIds") or ())
+    internal = str(msg.get("internalDate") or "")
+    header = _build_header(
+        headers, plain, htmls, files,
+        provider_at=int(internal) / 1000.0 if internal.isdigit() else None,
+        # Direction is Gmail's OWN evidence: its SENT label. A From header
+        # naming him is something any sender can write; on its own it makes
+        # nothing his (a forged From: him in his inbox stays "in", and the
+        # Gmail source counts it — `mailsource.GmailSource.fetch`).
+        direction="out" if "SENT" in labels else "in",
+        # Gmail prepends its own result above any the sender wrote; the Gate
+        # reads only the top-most and only when Gmail wrote it.
+        auth_results=_all(headers, "Authentication-Results"),
+        provider_id=str(msg.get("id") or ""),
+        mailbox="gmail",
+    )
+    return Parsed(header, _body_of(plain, htmls), labels)
+
+
+def date_header_time(value: str) -> float | None:
+    """A Date header as a timestamp, or None. RFC 5322's `-0000` zone means
+    "UTC, local offset unknown", and `parsedate_to_datetime` returns it NAIVE;
+    a naive value is read as UTC here, never as this machine's local time."""
+    if not value or not value.strip():
+        return None
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        # A garbage Date is the sender's to write; it must cost the mail its
+        # date (`at_source` "none"), never the mail itself.
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.UTC)
+    return parsed.timestamp()
+
+
+def _body_of(plain: list[str], htmls: list[str]) -> str:
+    body = "\n".join(p for p in plain if p.strip()) or html_to_text("\n".join(htmls))
+    return body[:BODY_CHARS]
+
+
+def _build_header(
+    headers: list[tuple[str, str]],
+    plain: list[str],
+    htmls: list[str],
+    files: list[Attachment],
+    *,
+    provider_at: float | None,
+    direction: str,
+    auth_results: tuple[str, ...],
+    provider_id: str,
+    mailbox: str,
+) -> Header:
+    """The one place a parsed message becomes a `Header`, whichever gateway it
+    came through. What differs by gateway is passed IN by the adapter: the
+    receipt time it vouches for, the direction it determined, and which
+    authentication results (if any) a reader may trust."""
+    body = _body_of(plain, htmls)
     from_value = _first(headers, "From")
     from_addr = address_of(from_value)
     message_id = normalize_message_id(_first(headers, "Message-ID"))
     subject = _first(headers, "Subject")
     date_header = _first(headers, "Date")
-    internal = str(msg.get("internalDate") or "")
-    if internal.isdigit():
-        at, at_source = int(internal) / 1000.0, "provider"
+    if provider_at is not None:
+        at, at_source = provider_at, "provider"
     else:
-        parsed = email.utils.parsedate_to_datetime(date_header) if date_header else None
-        at = parsed.timestamp() if parsed is not None else 0.0
-        at_source = "date_header" if parsed is not None else "none"
-    labels = tuple(str(x) for x in msg.get("labelIds") or ())
-    owners = {a.lower() for a in owner_addresses}
-    direction = "out" if (from_addr in owners or "SENT" in labels) else "in"
-    header = Header(
-        digest=digest_for(message_id, from_addr, date_header, subject, body),
+        stamp = date_header_time(date_header)
+        at = stamp if stamp is not None else 0.0
+        at_source = "date_header" if stamp is not None else "none"
+    return Header(
+        digest=digest_for(message_id, from_addr, date_header, subject, body, gateway=mailbox),
         message_id=message_id,
         in_reply_to=message_ids(_first(headers, "In-Reply-To")),
         references=message_ids(_first(headers, "References")),
@@ -386,13 +485,99 @@ def _from_gmail(msg: dict, owner_addresses: frozenset[str] | set[str]) -> Parsed
         list_id=_first(headers, "List-Id"),
         list_unsubscribe=_first(headers, "List-Unsubscribe"),
         precedence=_first(headers, "Precedence"),
-        auth_results=_all(headers, "Authentication-Results"),
+        auth_results=auth_results,
         body_chars=len(body),
-        links=extract_links("\n".join(plain), markup),
+        links=extract_links("\n".join(plain), "\n".join(htmls)),
         attachments=tuple(files),
-        provider_id=str(msg.get("id") or ""),
+        provider_id=provider_id,
+        mailbox=mailbox,
     )
-    return Parsed(header, body, labels)
+
+
+# ---------------------------------------------------------------- RFC 5322 shape
+
+
+_FOLD = re.compile(r"\r?\n[ \t]+")
+
+
+def _part_text(part: Any) -> str:
+    try:
+        content = part.get_content()
+    except (LookupError, ValueError, AssertionError, KeyError):
+        raw = part.get_payload(decode=True) or b""
+        content = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+    return content if isinstance(content, str) else ""
+
+
+def from_rfc822(
+    raw: str,
+    *,
+    provider_id: str,
+    in_sent_folder: bool,
+    mailbox: str,
+) -> Parsed | None:
+    """One raw RFC 5322 message from a gateway that is NOT Gmail (the Tuta
+    bridge, via himalaya), or None — counted unparseable — when it cannot be
+    read. Contained per mail, as `from_gmail` is.
+
+    **Every Authentication-Results header is dropped here, at parse time.**
+    On Gmail the top-most one is Gmail's own, prepended above anything the
+    sender wrote; through this gateway nothing is prepended, so the top-most
+    one IS the sender's, and a sender-written exact copy of Gmail's would read
+    as authenticated. There is no result here a reader may trust, so none is
+    kept (`mailgate.authenticate_header` says so in words).
+
+    **Direction is the FOLDER**: out iff the mail sits in his Sent folder. A
+    From header naming an owner address is something any sender can write;
+    on this gateway it makes nothing "his", so it can never become an owner
+    act in the ledger (`mailgate.owner_acts`). His addresses are not consulted
+    for direction at all here.
+
+    **`at` is the Date header** (no gateway receipt time is read), so it is
+    sender-written; `at_source` says so on every record."""
+    try:
+        return _from_rfc822(raw, provider_id=provider_id, in_sent_folder=in_sent_folder,
+                            mailbox=mailbox)
+    except Exception:  # noqa: BLE001 — containment is the point
+        return None
+
+
+def _from_rfc822(
+    raw: str, *, provider_id: str, in_sent_folder: bool, mailbox: str
+) -> Parsed | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    msg = email.message_from_string(raw, policy=email.policy.default)
+    headers = [
+        (str(name), _FOLD.sub(" ", str(value)))
+        for name, value in msg.items()
+        if str(name).lower() != "authentication-results"
+    ]
+    plain: list[str] = []
+    htmls: list[str] = []
+    files: list[Attachment] = []
+    for seen, part in enumerate(msg.walk()):
+        if seen >= MAX_MIME_PARTS:
+            break
+        if part.is_multipart():
+            continue
+        mime = part.get_content_type().lower()
+        filename = part.get_filename() or ""
+        if filename:
+            files.append(Attachment(str(filename), mime))
+        elif mime == "text/plain":
+            plain.append(_part_text(part))
+        elif mime == "text/html":
+            htmls.append(_part_text(part))
+    header = _build_header(
+        headers, plain, htmls, files,
+        provider_at=None,
+        direction="out" if in_sent_folder else "in",
+        auth_results=(),
+        provider_id=provider_id,
+        mailbox=mailbox,
+    )
+    return Parsed(header, _body_of(plain, htmls), ())
 
 
 # ---------------------------------------------------------------- the index
@@ -427,6 +612,9 @@ class Health:
     # or subject: two messages claiming one Message-ID. The first is kept; the
     # second is counted here rather than dropped without a word.
     collisions: list[str] = field(default_factory=list)
+    # Replies whose In-Reply-To names a Message-ID two DIFFERENT senders'
+    # messages claim (`MailIndex.reply_parent`); resolved to no parent.
+    ambiguous_parents: int = 0
 
 
 class MailIndex:
@@ -450,7 +638,10 @@ class MailIndex:
         self.directory = mail_dir(state_dir) / INDEX_DIRNAME if state_dir is not None else None
         self.state_dir = state_dir
         self.by_digest: dict[str, Header] = {}
-        self.by_mid: dict[str, str] = {}
+        # Message-ID -> every digest that claims it. Not a key: through a
+        # gateway that cannot authenticate, two messages may claim one id
+        # (`digest_for`), so a reply's parent is resolved by `reply_parent`.
+        self.mid_members: dict[str, list[str]] = {}
         self.linked_by: dict[str, str] = {}
         self.fallback: dict[str, str] = {}  # digest -> the earlier digest it was linked to
         # With no state dir there is no evidence store to hold bodies, so an
@@ -464,8 +655,8 @@ class MailIndex:
     # -- persistence
 
     def _path(self, digest: str) -> Path:
-        assert self.directory is not None
-        return self.directory / digest[:2] / f"{digest}.json"
+        assert self.state_dir is not None
+        return header_path(self.state_dir, digest)
 
     def _load(self) -> None:
         assert self.directory is not None
@@ -519,7 +710,9 @@ class MailIndex:
         self.by_digest[header.digest] = header
         self._cache.clear()
         if header.message_id:
-            self.by_mid.setdefault(header.message_id, header.digest)
+            members = self.mid_members.setdefault(header.message_id, [])
+            if header.digest not in members:
+                members.append(header.digest)
         if header.in_reply_to or header.references:
             self.linked_by[header.digest] = "headers"
         elif has_reply_prefix(header.subject, count=count):
@@ -577,6 +770,29 @@ class MailIndex:
 
     def get(self, digest: str) -> Header | None:
         return self.by_digest.get(digest)
+
+    def reply_parent(self, message_id: str, before: tuple[float, str]) -> Header | None:
+        """The message a reply's In-Reply-To names, among those before
+        `before` — or None when there is none or the claimants DISAGREE about
+        who sent it.
+
+        Two claimants of one Message-ID that agree on the sender are one mail
+        delivered twice; the Gmail copy is preferred (its sender is the one
+        that can be authenticated). Claimants that disagree mean somebody
+        squatted the id, and a reply to it is then nobody's act: the ledger,
+        the case store and alias admission all read this, so an ambiguity can
+        only cost an act, never mint one. Counted in `Health.ambiguous_parents`."""
+        claimants = [
+            h for h in (self.by_digest.get(d) for d in self.mid_members.get(message_id, ()))
+            if h is not None and h.position < before
+        ]
+        if not claimants:
+            return None
+        if len({h.from_addr for h in claimants}) > 1:
+            self.health.ambiguous_parents += 1
+            return None
+        gmail = [h for h in claimants if h.mailbox == "gmail"]
+        return min(gmail or claimants, key=lambda h: h.position)
 
     def body(self, digest: str) -> str | None:
         """The stored body, or None when it is not (or no longer) recorded."""

@@ -21,6 +21,7 @@ from . import (
     backends,
     browser,
     learning,
+    mailview,
     objective,
     owner_ua,
     recipients,
@@ -211,7 +212,7 @@ class ChipStream:
 # dispatched, so a script or a habit does not break on the rename.
 SLASH_COMMANDS = (
     "/add-dir", "/aliases", "/browser", "/cd", "/chat", "/clear", "/delete",
-    "/dir-add", "/exit", "/feedback", "/help", "/jobs", "/learn", "/model",
+    "/dir-add", "/exit", "/feedback", "/help", "/jobs", "/learn", "/mail", "/model",
     "/new", "/objective", "/plan", "/quit", "/rename", "/resume", "/runs", "/session",
     "/tasks",
 )
@@ -250,6 +251,11 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  back short of a new automation on its own card
   {CYAN}/runs{RESET}          recent scheduled runs, newest first — what each did or
                  why it did not happen — marking chats you have not opened
+  {CYAN}/mail [n]{RESET}      the inbox assistant's shadow results, newest first (n of
+                 them, default 20): each mail's sender and subject, the Reader's
+                 reading, what it WOULD have done, and the Gate's facts — under
+                 the watcher's health line. Shadow mode: nothing was done to
+                 any of them
   {CYAN}/new, /clear{RESET}   fresh conversation in a new chat (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
@@ -1716,6 +1722,9 @@ def handle_slash(
     if command == "/runs":
         show_runs(state_dir)
         return "handled"
+    if command == "/mail":
+        show_mail(task, state_dir)
+        return "handled"
     if command == "/rename":
         parts = task.split(maxsplit=1)
         title = parts[1].strip() if len(parts) > 1 else ""
@@ -1935,6 +1944,26 @@ def show_runs(state_dir: Path) -> None:
         print(f"{DIM}no scheduled runs yet{RESET}")
     for line in lines:
         print(f"{YELLOW if '[not opened]' in line else DIM}{line}{RESET}")
+
+
+def _mail_cell(text: str) -> str:
+    """`/mail`'s sanitiser: card mode, unconditionally. Every string it is
+    handed came from a mail or from a model that read one."""
+    return _plain(text)
+
+
+def show_mail(task: str, state_dir: Path, now: float | None = None) -> None:
+    """`/mail` (#142 W5 S1.5): the shadow results and the watcher's health.
+    Reads only; every mail- or model-originated string is rendered through
+    `_plain` — `mailview.lines` cannot be called without a sanitiser."""
+    limit = mailview.parse_limit(task.split()[1:])
+    if limit is None:
+        print(f"{DIM}usage: /mail [n] — the newest n shadow results (default "
+              f"{mailview.MAIL_SHOWN}, at most {mailview.MAIL_LIMIT_MAX}){RESET}")
+        return
+    styles = {"warn": YELLOW + BOLD, "head": BOLD}
+    for style, text in mailview.lines(state_dir, clean=_mail_cell, limit=limit, now=now):
+        print(f"{styles.get(style, DIM)}{text}{RESET}")
 
 
 def print_runs_notice(state_dir: Path) -> None:

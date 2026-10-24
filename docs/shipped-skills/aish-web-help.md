@@ -70,4 +70,5 @@ How the aish web UI works, for answering the user's questions about it. Answer f
 - A monitor run that saved its baseline or found nothing changed does not count in "Needs you" and sits in the date list like a read chat; a changed, unreadable or failed run does, and so does any run holding a card.
 - `/run-now` in an automation's chat (or `/run-now <id>` anywhere) runs it now, in a new chat. Its schedule is unchanged and the next scheduled run still happens. Refused for a disabled automation, for a one-shot that expired, and for a recurring one past its until or before its from.
 - Listing, enabling, disabling and deleting automations, and the list of recent runs, are the terminal's `/tasks` and `/runs`; typed here they answer "terminal-only".
+- The inbox assistant's shadow results are the terminal's `/mail`; typed here it answers "terminal-only".
 - Renaming and deleting happen in the chat menu above.

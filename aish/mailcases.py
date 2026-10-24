@@ -360,7 +360,7 @@ class CaseStore:
                 touched[case.id] = case
         if header.direction == "out" and header.in_reply_to and index is not None:
             for parent_id in header.in_reply_to:
-                parent = index.get(index.by_mid.get(parent_id, ""))
+                parent = index.reply_parent(parent_id, position)
                 if parent is None:
                     continue
                 for case in self.cases.values():
@@ -420,7 +420,7 @@ class CaseStore:
         aimed = {mailindex.domain_of(a) for a in header.correspondents}
         if index is not None:
             for parent_id in header.in_reply_to:
-                parent = index.get(index.by_mid.get(parent_id, ""))
+                parent = index.reply_parent(parent_id, header.position)
                 if parent is not None and parent.direction == "in":
                     aimed.add(mailindex.domain_of(parent.from_addr))
         out = []

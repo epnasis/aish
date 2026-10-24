@@ -37,12 +37,13 @@ against a fake one. `docs/mail-assistant.md`.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -132,7 +133,7 @@ def backfill(
     since = datetime.datetime.fromtimestamp(now - days * 86400, datetime.UTC)
     ids = mailbox.list(f"after:{since:%Y/%m/%d}", LISTING_LIMIT, include_trash=True)
     counts = {"listed": 0, "fetched": 0, "fetch_failed": 0, "unparseable": 0,
-              "outside_window": 0}
+              "outside_window": 0, "held": 0}
     if ids is None:
         counts["listing_failed"] = 1
         ids = []
@@ -140,23 +141,56 @@ def backfill(
     parsed: list[mailindex.Parsed] = []
     labels: dict[str, tuple[str, ...]] = {}
     floor = now - days * 86400
-    for message_id in dict.fromkeys(ids):
-        msg = mailbox.get(message_id)
-        if msg is None:
-            counts["fetch_failed"] += 1
-            continue
-        counts["fetched"] += 1
-        item = mailindex.from_gmail(msg, owner_addresses)
-        if item is None:
-            counts["unparseable"] += 1
-            continue
-        if item.header.at < floor:
-            counts["outside_window"] += 1
-            continue
-        parsed.append(item)
-        labels[item.header.digest] = tuple(sorted(set(labels.get(item.header.digest, ())) |
-                                                  set(item.labels)))
+    # A resumed run re-buys no fetch: an id this run's index already holds,
+    # whose labels were recorded when it was fetched, is not fetched again.
     index = mailindex.MailIndex(state_dir)
+    seen = _read_fetched(state_dir)
+    held_ids = {h.provider_id: d for d, h in index.by_digest.items() if h.provider_id}
+    # One mailbox may serve several runs in a process: an exhaustion from an
+    # earlier run is not this one's.
+    if hasattr(mailbox, "quota_exhausted"):
+        mailbox.quota_exhausted = False
+    ordered = list(dict.fromkeys(ids))
+    with _fetched_log(state_dir) as remember:
+        for position, message_id in enumerate(ordered):
+            if getattr(mailbox, "quota_exhausted", False):
+                # The adapter spent its retries on a quota refusal: every
+                # further get would buy the same refusal, each after a full
+                # backoff. The rest are counted not fetched; a resumed run
+                # into this directory fetches them and re-buys nothing else.
+                counts["fetch_failed"] += len(ordered) - position
+                counts["quota_stopped"] = 1
+                break
+            known = seen.get(message_id)
+            if known is not None and known.get("outside"):
+                # Fetched by an earlier run and outside the window: counted
+                # once, as outside, never also as held.
+                counts["outside_window"] += 1
+                continue
+            if known is not None and message_id in held_ids:
+                counts["held"] += 1
+                digest = held_ids[message_id]
+                labels[digest] = tuple(sorted(set(labels.get(digest, ()))
+                                              | set(known.get("labels") or ())))
+                continue
+            msg = mailbox.get(message_id)
+            if msg is None:
+                counts["fetch_failed"] += 1
+                continue
+            counts["fetched"] += 1
+            item = mailindex.from_gmail(msg, owner_addresses)
+            if item is None:
+                counts["unparseable"] += 1
+                continue
+            outside = item.header.at < floor
+            remember({"id": message_id, "digest": item.header.digest,
+                      "labels": list(item.labels), "outside": outside})
+            if outside:
+                counts["outside_window"] += 1
+                continue
+            parsed.append(item)
+            labels[item.header.digest] = tuple(sorted(set(labels.get(item.header.digest, ())) |
+                                                      set(item.labels)))
     store = mailcases.CaseStore(state_dir)
     mailwatch.ingest(index, store, parsed)
     counts["in_index"] = len(index.by_digest)
@@ -164,6 +198,43 @@ def backfill(
     counts["index_unreadable"] = len(index.health.unreadable)
     counts["message_id_collisions"] = len(index.health.collisions)
     return Backfill(index, store, labels, counts)
+
+
+FETCHED_LOG = "fetched.jsonl"
+
+
+def _read_fetched(state_dir: Path) -> dict[str, dict[str, Any]]:
+    """What earlier runs into this directory fetched: id -> {labels, outside}.
+    One unreadable line costs that line (it is fetched again)."""
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        text = (Path(state_dir) / FETCHED_LOG).read_text()
+    except OSError:
+        return out
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("id"):
+            out[str(entry["id"])] = entry
+    return out
+
+
+@contextlib.contextmanager
+def _fetched_log(state_dir: Path) -> Iterator[Callable[[dict[str, Any]], None]]:
+    """Append one line per fetch as it happens: the labels of what was
+    fetched, which the index never stores (a label has no timestamp). A later
+    run into the same directory skips a fetch only when the index holds the
+    mail too — so a run killed BEFORE the backfill's ingest finished re-buys
+    those fetches; one killed during the arms re-buys none."""
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    with (Path(state_dir) / FETCHED_LOG).open("a") as handle:
+        def remember(entry: dict[str, Any]) -> None:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+            handle.flush()
+
+        yield remember
 
 
 def select(
@@ -356,6 +427,10 @@ def render(result: dict[str, Any]) -> str:
     ]
     if w.get("listing_failed"):
         lines.append("the mailbox LISTING failed: nothing below describes the window")
+    if w.get("quota_stopped"):
+        lines.append("the Gmail quota refused fetches past its retries: the backfill stopped "
+                     "asking, and the mail it did not fetch is ABSENT below — re-run into the "
+                     "same --out to fetch only those")
     trash = result["trash_observability"]
     lines.append(
         f"trashed inbound observed: {trash['trashed_inbound']} (oldest "

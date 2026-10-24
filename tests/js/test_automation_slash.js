@@ -53,7 +53,7 @@ function check(name, fn) {
   }
 }
 
-for (const command of ["/tasks", "/runs"]) {
+for (const command of ["/tasks", "/runs", "/mail"]) {
   check(`${command} answers terminal-only, never "unknown command"`, () => {
     assert.strictEqual(sandbox.handleSlash(command), true);
     assert.deepStrictEqual(calls, [
@@ -80,7 +80,7 @@ check("/run-now <id> names the automation and nothing else", () => {
 
 check("/run-now is offered in the composer's list", () => {
   assert.ok(sandbox.SLASH_COMMANDS.some(([cmd]) => cmd === "/run-now"));
-  assert.ok(!sandbox.SLASH_COMMANDS.some(([cmd]) => cmd === "/tasks" || cmd === "/runs"),
+  assert.ok(!sandbox.SLASH_COMMANDS.some(([cmd]) => ["/tasks", "/runs", "/mail"].includes(cmd)),
     "the terminal-only commands are dispatched, not advertised");
 });
 

@@ -114,9 +114,11 @@ class Auth:
     dkim_domain: str = ""
     header_from: str = ""
     read_from: str = ""  # which header was read: "top" or "" (none usable)
+    gateway: str = "gmail"
+    why: str = ""  # code-written, for an ending that read no result
 
     def as_json(self) -> dict[str, Any]:
-        return {
+        out = {
             "verdict": self.verdict,
             "authenticated": self.authenticated,
             "dmarc": self.dmarc,
@@ -124,7 +126,41 @@ class Auth:
             "dkim": self.dkim,
             "dkim_domain": self.dkim_domain,
             "read_from": self.read_from,
+            "gateway": self.gateway,
         }
+        if self.why:
+            out["why"] = self.why
+        return out
+
+
+# The ending for a mail that came through a gateway with no authentication
+# result a reader may trust (`authenticate_header`).
+NOT_READABLE = "not_readable_via_gateway"
+
+# Which gateway's own authentication result is readable, and whose authserv-id
+# wrote it. A gateway absent here has none: on the Tuta bridge nobody prepends
+# a result above the sender's, so the top-most one is the sender's own.
+GATEWAY_AUTHSERV = {"gmail": GMAIL_AUTHSERV}
+
+
+def authenticate_header(header: mailindex.Header) -> Auth:
+    """The authentication verdict for one indexed mail, by the gateway its
+    ADAPTER declared (`Header.mailbox`) — never inferred from its headers.
+
+    Through a gateway with no readable result the answer is an explicit
+    ending, not authenticated, with the reason in words; the headers are not
+    looked at even if some survived parsing (`mailindex.from_rfc822` drops
+    them). Unauthenticated, the grade is `first-contact` whatever the history,
+    and an INBOUND mail opens no case and puts no account in a case's history
+    — it mints nothing on its own behalf. His own outbound mail (his Sent
+    folder) records his acts whatever the gateway: direction, not
+    authentication, decides that (`mailindex.from_rfc822`)."""
+    if header.mailbox not in GATEWAY_AUTHSERV:
+        return Auth(
+            NOT_READABLE, False, gateway=header.mailbox,
+            why=f"no authentication result readable via the {header.mailbox} gateway",
+        )
+    return authenticate(header.auth_results, mailindex.domain_of(header.from_addr))
 
 
 _RESULT = re.compile(r"\b(dmarc|spf|dkim)\s*=\s*([a-z]+)", re.I)
@@ -374,7 +410,7 @@ def owner_acts(
         # References and join that conversation, and his earlier replies there
         # must not become acts toward it.
         for parent_id in header.in_reply_to:
-            parent = index.get(index.by_mid.get(parent_id, ""))
+            parent = index.reply_parent(parent_id, header.position)
             if (
                 parent is not None
                 and parent.direction == "in"
