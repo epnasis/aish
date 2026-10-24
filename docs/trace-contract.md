@@ -1025,10 +1025,10 @@ Paired by case: A→D, 35 cases stopped crediting the user and 10 started; A→B
 |---|---|
 | `mail` | The content digest (`mailindex.digest_for`): Message-ID, else content. Never a provider id — the Tuta gateway renumbers them. |
 | `provider_id` | To fetch the mail again. Not a key. |
-| `at`, `at_source` | The provider's receipt time when there is one (`provider`), else the sender-written Date header (`date_header`). |
+| `at`, `at_source` | The provider's receipt time when there is one (`provider`), else the sender-written Date header (`date_header`) — always the latter for Tuta mail (S1.5). |
 | `model`, `charter`, `version`, `charter_digest` | Which Reader, examined against which text (§0 corollary 1): a reader never needs today's charter to know what read this mail. |
 | `ending` | `ok` \| `invalid` (answered twice, neither validated) \| `unavailable` \| `unadmitted` \| `gated` (list headers; no call) \| `error` (the assessment raised; `why` names the exception, and this record carries only the identity fields beside it). Only `ok` carries a `verdict`. `ok`, `invalid` and `gated` are final; the rest are read again on the next pass. |
-| `gate` | The deterministic Gate's facts as of the mail — authentication from the top-most Gmail header, the owner-acts-only grade (`inbound` is recorded and read by nothing), structural flags, the newsletter gate and which header decided it. Flag `detail` is a code-written host or filename, attacker-chosen — for audit, never for an acting context. |
+| `gate` | The deterministic Gate's facts as of the mail — authentication from the top-most Gmail header (S1.5 adds `auth.gateway`, the gateway the parsing adapter DECLARED, and, for a gateway with no readable result such as `tuta`, `auth.verdict` = `not_readable_via_gateway` with the reason in `auth.why`; fields added, `v` kept), the owner-acts-only grade (`inbound` is recorded and read by nothing), structural flags, the newsletter gate and which header decided it. Flag `detail` is a code-written host or filename, attacker-chosen — for audit, never for an acting context. |
 | `candidates` | The correlator's shortlist with the bundle ref each was shown as, score and reasons. |
 | `verdict` | The validated, capped Reader answer (`mailreader.Verdict`). `meaning` and `kind` are de-linked and de-voiced; every closed axis may be `cannot_tell`. |
 | `case_choice` | The chosen ref resolved to a case id, or the word (`new`, `no_case`, `cannot_tell`). |

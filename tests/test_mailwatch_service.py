@@ -37,7 +37,7 @@ def test_the_job_is_an_interval_pass_over_both_inboxes(tmp_path):
     job = printed(tmp_path, "me@example.org", "gemini:flash", "me@tuta.example", "a&b@x.example")
     args = job["ProgramArguments"]
     assert args[0].endswith("/.local/bin/aish-mailwatch") and "--once" in args
-    pairs = list(zip(args, args[1:]))
+    pairs = list(zip(args, args[1:], strict=False))
     assert ("--source", "gmail") in pairs and ("--source", "tuta") in pairs
     assert ("--account", "me@example.org") in pairs and ("--model", "gemini:flash") in pairs
     assert ("--owner", "me@tuta.example") in pairs and ("--owner", "a&b@x.example") in pairs

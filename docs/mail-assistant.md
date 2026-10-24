@@ -1,10 +1,12 @@
-# The inbox assistant — shadow mode (#142 W5, slice S1)
+# The inbox assistant — shadow mode (#142 W5, slices S1 and S1.5)
 
 `mailindex.py`, `mailgate.py`, `mailcases.py`, `mailreader.py`, `mailverdicts.py`,
-`mailwatch.py`, `mailbacktest.py`, `aish/charters/mail-reader.md`.
+`mailwatch.py`, `mailsource.py`, `mailtuta.py`, `mailview.py`, `mailbacktest.py`,
+`aish/charters/mail-reader.md`, `scripts/install-mailwatch-service.sh`.
 The binding design is the comment *"W5 REWRITTEN — the inbox assistant"* on epic #142
-(2026-10-24). This file says what slice S1 built from it, what it deliberately did not, and
-why each fence is where it is.
+(2026-10-24). This file says what slice S1 built from it, what S1.5 added (the owner surface,
+both inboxes, quota discipline, continuous runs — §S1.5 below), what they deliberately did not,
+and why each fence is where it is.
 
 **How to use this file.** The design in one screen first, then the one-line state of S1, then
 one section per component — each ends with the test class that pins it. Then the record, the
@@ -49,7 +51,8 @@ The outputs are a verdict store, its counters, and a backtest report — for the
 | Reader charter + exam, admitted per model | built | — |
 | correlator + minimal case index | built | full case memory, entities, owner surface, follow-up queue: S3 |
 | verdict store + `mail_verdict` record | built | delivery into a session: S2 |
-| ingress | a CLI, `aish-mailwatch --once` | inside aish-web's lifespan: S2 |
+| ingress | a CLI, `aish-mailwatch --once`; S1.5: both inboxes, a launchd interval job | inside aish-web's lifespan: S2 |
+| owner surface | S1.5: `/mail` in the terminal (results + watcher health) | the case store's own surface: S3 |
 | Zone C | **none** | proposals S2, trust lanes S4, relevance S5 |
 
 ---
@@ -287,7 +290,8 @@ Four kinds, all recorded, none read to decide anything:
 ## Ingress — `aish-mailwatch --once`
 
 A CLI, not a loop inside aish-web: the driver runs and schedules it; S2 moves it into the
-lifespan. One pass lists the inbox and sent mail for the last `--days`, fetches each, folds
+lifespan. One pass lists the inbox and sent mail for the last `--days`, fetches each the index
+does not already hold (S1.5), folds
 everything into the index and case store (`ingest`, oldest first, a held mail is a no-op), and
 assesses each new INBOUND inbox mail (`assess`): Gate facts → Reader → case flags → record. His
 sent mail is ingested — it is the ledger's evidence and seeds cases — and never judged.
@@ -298,8 +302,169 @@ sent mail is ingested — it is the ledger's evidence and seeds cases — and ne
 `~/.config/gws-accounts/` (`account_env`, the per-account mapping the owner's gmail tools use:
 the file keyring backend and that directory as the config dir); a missing one refuses the run.
 **No notification**: health is a file (`watch_health.json`: consecutive failed listings, the last
-good pass, the last pass's counts) and the printed pass summary. `TestReadOnly`,
-`TestCredentials`.
+good pass, the last pass's counts, and per inbox since S1.5) and the printed pass summary; the
+owner reads it with `/mail`. `TestReadOnly`, `TestCredentials`.
+
+---
+
+## S1.5 — what the owner sees, both inboxes, quota, continuous runs
+
+Four directives from the owner, in his priority order reversed: (1) live shadow validation
+running continuously; (2) BOTH inboxes; (3) Gmail API quota discipline; (4) **a surface he can
+see** — before S1.5 nothing the pipeline recorded reached him.
+
+### The owner surface — `/mail` (`mailview.py`)
+
+A terminal slash command (`docs/cli.md` §`/mail`). It lists the newest `MAIL_SHOWN` (20)
+readings — `/mail <n>` up to `MAIL_LIMIT_MAX` (200) — newest first by the mail's own time: date,
+the code-derived sender address (display name after it), subject and inbox; the Reader's reading
+(`kind` — `meaning`); what it WOULD have done (disposition, what the mail wants of him, a stated
+deadline, a non-quiet `suspicion` / `sender_case`); the Gate's facts (authentication or the
+reason there is none, grade, newsletter-gated and by which header, structural flags with their
+details, raised case flags); attachment names. Every row says shadow mode: nothing was done.
+
+**The join is by digest.** The verdict store holds no subject or sender — `build_record` keeps
+digest, provider id, gate and verdict — so each shown row reads its mail's own index file by
+digest (`mailindex.load_header`, one file, contained). A verdict whose index file is missing is
+shown as *not in the index: provider id …*, never dropped; an unreadable verdict file is
+counted. `TestJoin`.
+
+**Render safety is not delegated to the writer.** Subject, display name, attachment names and
+flag details are a stranger's bytes; `meaning` and `kind` are a model's, steered by one; the
+closed words were validated when written and are not trusted when read. `mailview.lines` takes
+its sanitiser as a REQUIRED argument and passes every string from a record or an index file
+through it before its cap; the terminal passes `cli._plain` (C0 and C1 — the one-byte CSI 0x9b
+included — every ESC form with its string terminators, the bidi controls, U+2028/9), so
+something removed is visibly marked. The stored sanitiser strips only C0 and is not sufficient,
+which is why this runs at render, unconditionally. Caps are applied after sanitising, at render
+(subjects are stored uncapped): `SUBJECT_CHARS` (120), `NAME_CHARS` (60), `MEANING_CHARS` (300),
+`KIND_CHARS` (40), `WHY_CHARS` (200), `FLAG_TEXT_CHARS` (80), `ATTACHMENT_CHARS` (60).
+`TestRenderSafety` seeds a row whose every field carries 0x9b, U+202E, CSI, OSC 8 and U+2028,
+and a recording sanitiser proves no field bypasses it.
+
+**The health line comes first**, because a watcher that stops must be noticeable where he looks
+(the email-poll outage, `docs/web-server.md` §email_poll). Warnings: no pass recorded at all;
+no pass for `STALE_AFTER_S` (45 min — three intervals); an inbox whose listing failed on the
+last N passes, with the last good listing and the typed failure; the Tuta bridge's own
+connection words when it is not connected; mail listed but not yet fetched. Each says what was
+observed, never why. `TestHealth`, `TestWiring` (the slash registration; the web answers
+terminal-only).
+
+### Both inboxes — `mailtuta.py`
+
+`TutaMailbox` sits beside the Gmail source (`mailsource.GmailSource`) behind one seam:
+`listing`, `held`, `fetch`, `note`. It drives himalaya against tutabridge with the config
+tutalib generates (`~/.config/aish/tools/_tuta/tutalib.py`, loaded by path; the secret
+`TUTA_BRIDGE_PASSWORD` comes from aish's own store at run time, and its absence fails that
+inbox's listing visibly while Gmail still runs). One shared state tree for both: the ledger
+must see all of his acts whichever inbox they are in, and digest dedup makes a mail delivered to
+both one entry (`TestIdentityNotUid`).
+
+**The authenticator is declared by the adapter, never inferred from headers.** Each parser
+stamps `Header.mailbox`; `mailgate.authenticate_header` reads it. Through the Tuta gateway
+nothing prepends a result above the sender's, so the top-most Authentication-Results IS the
+sender's, and a sender-written exact copy of Gmail's would authenticate. So
+`mailindex.from_rfc822` DROPS every Authentication-Results header at parse time, and the Gate
+gives the explicit ending `not_readable_via_gateway` with the reason in words — even for a
+header that somehow survived. Unauthenticated, a Tuta mail is `first-contact` whatever the
+history, opens no case, admits no alias and enters no case's account history; the forged
+perfect-Gmail-header case is pinned end to end. `TestAuthenticationIsDeclaredByTheGateway`.
+
+**Direction is the folder.** On Tuta a mail is `out` iff it sits in his Sent folder
+(`\Sent`, else a folder named Sent). A From header naming one of his addresses is something any
+sender can write; in his inbox it makes nothing his, so it can never become an owner act toward
+the attacker it is addressed to (pinned). Counted, not acted on: `inbox_from_an_owner_address`,
+and `sent_from_an_unlisted_address` — a mail in his Sent folder from an address not passed as
+`--owner`, i.e. an alias the watcher was not told about. **Every alias he sends from must be in
+`--owner`**: on Gmail it still decides direction. `at` is the sender-written Date header on Tuta
+(counted per pass as `at_from_sender`).
+
+**Reading never sets \Seen.** His unread markers are his mailbox state and the shadow's ground
+truth. `message read` runs without `--seen` (the `tuta_read` / `tutalib.read_body`
+discipline), and `mailtuta.check_argv` refuses BEFORE a process starts any argv outside
+`ALLOWED_ARGV` — the subcommand AND every flag, so `message read --seen` is refused, as are
+store, move, search, raw and expunge. `TestReadOnlyFence`.
+
+**Listing is enumeration, never SEARCH.** tutabridge answers some SEARCHes with a silently
+empty set; a SEARCH listing would read as a healthy quiet mailbox forever. A listing reads the
+folder's STATUS count and pages envelopes by sequence number from the newest
+(`ENVELOPE_PAGE` (200) per connection — the bridge falls over under bursts), stopping at the
+first page wholly older than the window. An empty folder is a healthy empty listing; a failed
+STATUS or page is a failed listing. `TestEnumeration`.
+
+**Provider ids are unstable here** (UIDs renumber on restart, UIDVALIDITY unchanged), so all
+skip-by-id and top-up logic is Gmail-only. A Tuta fetch is skipped only when the envelope's own
+Message-ID maps to a digest the index already holds — an identity the renumbering cannot move.
+A message renumbered between listing and fetch is still a real message of that folder and is
+kept, counted `renumbered_between_list_and_fetch`.
+
+### Quota discipline — `mailsource.py`
+
+**Failures are typed at the runner seam.** `default_runner` returns an `Outcome`, and a failed
+`gws` exit becomes one `Failure` of a closed set (`FAILURE_KINDS`: quota, permanent, timeout,
+transient, parse, missing, unknown) in exactly one place, `classify_gws`: a status read from the
+reply first, words second, with what matched recorded. Gmail says a rate refusal as 429 or as
+403 `rateLimitExceeded`, so the rate words win over the 403; *"Units per minute"* is quota; a
+named daily quota is quota that is not waited out. `TestClassification`.
+
+**One retry policy, owned by the adapter** (`docs/rate-limits.md`). `GwsMailbox._call` takes a
+token from a `TokenBucket` (`GMAIL_CALLS_PER_S` (2.0) sustained, `GMAIL_BURST` (5)) before EVERY
+call, so the watcher and the backtest both inherit it, then re-issues per `MAX_ATTEMPTS`: quota
+up to 4 attempts with `QUOTA_BACKOFF_S` (10) doubling, timeout and 5xx one re-issue. A permanent
+refusal is never retried; an unknown one is not either (the behaviour before typing, and an
+unknown is not evidence that another call helps). A quota refusal that outlasts its retries sets
+`quota_exhausted`, and the Gmail source stops asking for the rest of the pass — the remaining
+mail goes to the ledger. The bucket numbers are conservative CHOICES, not measurements; the only
+observation is the 2026-10-24 backtest's 116 unfetched of 862 listed. `TestRetryPolicy`,
+`TestTokenBucket`.
+
+**The top-up ledger.** The premise that the index recorded fetched-vs-not was false: the misses
+were counted and forgotten. `UnfetchedLedger` (`<state>/mail/unfetched.json`) records each
+listed Gmail mail whose fetch failed, with its role and attempts; the next pass fetches exactly
+those, even once they have left the listing's window. A permanent failure, or
+`LEDGER_MAX_ATTEMPTS` (20) of them, abandons the entry, counted. **And the cheap complement**:
+a Gmail id the index already holds is not fetched again — it was refetched every pass before.
+The same skip makes a resumed backtest re-buy no fetch: labels are recorded per fetch in the
+run's `fetched.jsonl`, because the index never stores one. `TestTopUp`, `TestHeldSkip`,
+`TestResume`.
+
+### Continuous runs — the launchd job
+
+`scripts/install-mailwatch-service.sh <gmail-account> <model> [owner…]` writes and loads
+`com.aish.mailwatch`: `aish-mailwatch --once --source gmail --source tuta` every 900 s, NOT
+inside aish-web (S2 moves it there). Provider keys reach it the way they reach aish-web — through
+`envrun` and aish-web's env file — never written into the plist; the gws variables the email-poll
+outage taught are set by `account_env` itself. `--print` writes the plist and changes nothing.
+It writes nothing into the automations or runs stores, whose only author is the approval card;
+its health surfaces in `/mail`.
+
+**Overlap is locked out, not accepted.** A launchd pass and a manual `--once` could otherwise
+interleave two writers of one index, case store and ledger. `pass_lock` takes an exclusive
+non-blocking `flock` on `<state>/mail/watch.lock`; the second pass exits (code 3) having touched
+nothing. The kernel drops the lock when its holder exits, however it exits, so there is no stale
+lock to clear. The trade: a pass that hangs holds the lock, and every later pass skips until it
+ends — the health line then goes stale and says so. `TestPassLock`, `TestHealthPerSource`.
+
+### The owner's exam cases
+
+His eight adjudications of the backtest run 20261024-170329 — all eight would-have-expired mails
+ruled "fine to bin": four one-time codes, two review requests, two notices whose date has passed
+— are owner cases in `~/.config/aish/roles/mail-reader/cases.yaml` (the private tree, never this
+repository), as synthetic-equivalent reconstructions: same shape, kind and language, invented
+senders and codes. Each asserts the reading of his ruling, stated in the file so it can be
+disputed: disposition `expire_after_grace` or `archive`, nothing suspicious, and (for the codes
+and the outage notice) nothing wanted of him. **Adding them changed the admission bar**: the
+owner-cases digest is part of every admission, so each model must be re-examined before the
+Reader runs again.
+
+### What a backtest costs
+
+Two independent costs, and `--reader-max` bounds only one. **Reader calls** scale with
+`--reader-max` (each selected mail is at most one call per arm, plus at most `READER_ASK_ROUNDS`
+re-asks). **Fetch cost** scales with `--days` × his mail volume: the backfill lists the whole
+window and fetches every listed mail once, one `gws` call each, under the bucket — 862 listed in
+90 days on 2026-10-24 — whatever `--reader-max` is. A resumed run into the same directory re-buys
+no fetch whose mail its index holds.
 
 ## The backtest — `aish-mailbacktest`
 
@@ -365,6 +530,25 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
   (S3). Until then it is a store he cannot see or shred, written only by this CLI.
 - **The lookalike flag needs admitted domains**, and admission now needs his act toward a sender,
   so early on it has few to compare against.
+- **On Gmail a From header naming him still decides direction (found in S1.5).**
+  `from_gmail` calls a mail `out` when its From is an owner address OR it carries `SENT`. A
+  stranger's inbound mail forging his From, addressed to the stranger's own address, would read
+  as his act toward that address; an authenticated mail from it could then grade `known`. Tuta
+  closes this by deciding direction by folder alone; Gmail was left as S1 shipped it because
+  changing it moves the ledger the backtest measured. Not fixed here.
+- **Tuta's `at` is sender-written.** The Date header is all this gateway gives. It is bounded —
+  an unauthenticated mail opens no case and moves no grade — but a forged Date reorders the
+  index, and a Tuta copy of a mail that arrived first by its claimed Date is the copy the index
+  keeps (first wins), which costs that mail its Gmail authentication: fail-closed, never open.
+  Counted per pass as `at_from_sender`.
+- **The no-\Seen guarantee rests on himalaya's documented behaviour.** The fence pins that no
+  argv carries `--seen`; that `message read --raw` without it leaves the flag untouched is
+  himalaya's help text ("Without this flag the read leaves the seen state untouched"), the same
+  basis `tuta_read` stands on. It was not re-observed against the live bridge here — doing so
+  risks marking a real mail read.
+- **The himalaya envelope JSON shape** the Tuta listing reads (`messages[].uid`,
+  `envelope.message_id`, `envelope.date`; STATUS `messages`) is the shape the tuta_* tools and
+  their tests use; a run against the live bridge has not been made from this module.
 - **The Reader's admission has not been run.** The charter's central claims — that a model answers
   these cases as the exam expects — are hypotheses until `scripts/role-admission.py` runs per
   model. Nothing in this repository measured a model on it.
@@ -378,7 +562,10 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **Open any trust lane** — S4, by his explicit per-lane act, never a threshold.
 - **Match interests** — S5. The Reader never sees the interest profile.
 - **Run inside aish-web** — S2.
-- **Read any mailbox but one Gmail account**, and only by the commands in this file.
+- **Read any mailbox but his Gmail account and his Tuta mailbox**, and only by the commands in
+  this file (`READ_ONLY_CALLS`, `mailtuta.ALLOWED_ARGV`).
+- **Notify.** A failing watcher is a warning in `/mail`, not a push; #362's escalation pattern
+  is for a later slice.
 
 ---
 
@@ -401,7 +588,12 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    `report.txt` is the human report; `report.json` holds the full disagreement list for his
    adjudication. The backfill fetches every mail in the window one `gws` call each.
 3. **Shadow pass** (when wanted): `aish-mailwatch --once --account pawel@wenda.eu --owner
-   pawel@wenda.email --model <admitted spec>`, then `aish-mailwatch --counters`.
+   pawel@wenda.email --source gmail --source tuta --model <admitted spec>`, then
+   `aish-mailwatch --counters`, and `/mail` in aish.
+3a. **S1.5: re-admit first.** The owner cases file changed, so every earlier admission of the
+   Reader no longer matches; re-run step 1 per model before the watcher's verdicts read `ok`.
+   Then schedule it: `scripts/install-mailwatch-service.sh --print pawel@wenda.eu <spec>
+   pawel@wenda.email` to read the plist, and without `--print` to load it.
 4. **The mined replay scenario** — a real courier/store pair from his inbox — goes in the private
    tree (`~/.config/aish/evals/<name>/`, `docs/replay.md`), never here: find the pair in the
    backtest run's verdict store (`case_choice` on the courier mail), and replay it end to end

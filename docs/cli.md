@@ -151,6 +151,14 @@ What a toggle means is the scheduler's, already shipped: a disable stops future 
 
 **The startup notice** — *"N scheduled runs from the last 14 days you haven't opened (silent monitor runs not counted) — /runs"* — is the same derivation, bounded by `NOTICE_DAYS` (14) of chat start times (read from the file names, so the bound costs no I/O) and skipping any log whose mtime is not past the owner's look, so an opened chat is never parsed. It is worded as what it counts; a failure to read prints nothing rather than delaying the prompt. `TestTasksListing`, `TestTheToggle`, `TestDelete`, `TestRuns`, `TestStartupNotice` (`tests/test_automation_admin.py`).
 
+## The inbox assistant: `/mail` (#142 W5 S1.5)
+
+`/mail [n]` shows what the shadow inbox pipeline recorded (`docs/mail-assistant.md` §The owner surface): the watcher's health line first, then the newest n readings (default 20, at most 200) — sender, subject and inbox, the Reader's reading, what it would have done, the Gate's facts. Terminal-only; the web answers "terminal-only" like `/tasks` and `/runs` (`tests/js/test_automation_slash.js`). It reads the mail state tree and writes nothing.
+
+**Render safety lives here.** `show_mail` hands `mailview.lines` the sanitiser `_mail_cell`, which is `_plain` — card mode, unconditionally — and `mailview.lines` cannot be called without one. Every string from a verdict record or an index file passes through it, the closed verdict words included, because the bytes on disk are a stranger's or a steered model's whatever the write path checked. A removed control is shown as the replacement mark.
+
+**`/m` is now ambiguous** (`/mail`, `/model`) and lists both, as any shared prefix does; `/mo` still resolves to `/model`.
+
 ## CLI-only entry points
 
 - `aish secret <set|get|list|rm>` — the Keychain store (`docs/tools-layer.md`).

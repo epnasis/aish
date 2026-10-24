@@ -52,7 +52,7 @@ MEANING_CHARS = 300
 KIND_CHARS = 40
 WORD_CHARS = 24
 WHY_CHARS = 200
-DETAIL_CHARS = 80
+FLAG_TEXT_CHARS = 80
 ATTACHMENT_CHARS = 60
 ATTACHMENTS_SHOWN = 5
 FLAGS_SHOWN = 6
@@ -214,7 +214,7 @@ def _gate_words(record: dict[str, Any], clean: Clean) -> list[str]:
     if flags:
         shown = ", ".join(
             f"{_capped(clean, f.get('what'), WORD_CHARS)}"
-            f"({_capped(clean, f.get('detail'), DETAIL_CHARS)})"
+            f"({_capped(clean, f.get('detail'), FLAG_TEXT_CHARS)})"
             for f in flags[:FLAGS_SHOWN]
         )
         more = f" +{len(flags) - FLAGS_SHOWN} more" if len(flags) > FLAGS_SHOWN else ""
