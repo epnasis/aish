@@ -721,7 +721,7 @@ def _plain_live(text: str) -> str:
 
 def make_write_approver(log, get_intent=None):
     def approve_write(plan) -> bool:
-        verb = "create" if plan.is_new else "edit"
+        verb = "delete" if getattr(plan, "remove", False) else "create" if plan.is_new else "edit"
         said = (get_intent() if get_intent else "") or ""
         print_intent(said)
         if plan.rule:

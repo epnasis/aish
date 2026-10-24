@@ -1637,7 +1637,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         return Denied(comment) if comment else None
 
     def approve_write(plan) -> "bool | Approved | Denied":
-        verb = "create" if plan.is_new else "edit"
+        verb = "delete" if getattr(plan, "remove", False) else "create" if plan.is_new else "edit"
         request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "write",

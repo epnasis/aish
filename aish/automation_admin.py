@@ -232,23 +232,33 @@ def set_enabled(
             f"{path.name} is not a runnable automation ({exc}), so aish will not "
             f"rewrite one field of it; fix it in an editor, or /tasks delete {task_id}"
         ) from None
-    if task.until is not None and task.past_until(now):
-        until = _clock(task.until)
-        # Enabling past the end is provably useless: the scheduler re-seeds
-        # `since` at the enable, after the final occurrence, so nothing is
-        # ever due again. Disabling stays possible through the grace, where it
-        # still stops a late final run; past the grace there is nothing to stop.
-        if enabled or now - task.until > schedule.STALE_AFTER:
-            raise AdminError(
-                f"automation {task_id} has ended: its until ({until}) has passed — ask "
-                f"aish for a new automation, which comes on its own approval card "
-                f"(or /tasks delete {task_id})"
-            )
+    refusal = toggle_refusal(task, enabled, now)
+    if refusal:
+        raise AdminError(refusal)
     if task.enabled == enabled:
         return task, False
     updated = dataclasses.replace(task, enabled=enabled)
     atomic_write.publish(path, updated.render(), encoding="utf-8")
     return updated, True
+
+
+def toggle_refusal(task: schedule.Task, enabled: bool, now: datetime) -> str:
+    """Why turning `task` on or off would do nothing, or "" when it may. One
+    answer for every surface that toggles: `/tasks`, and `schedule_task`'s
+    `enabled` (#459)."""
+    if task.until is None or not task.past_until(now):
+        return ""
+    # Enabling past the end is provably useless: the scheduler re-seeds
+    # `since` at the enable, after the final occurrence, so nothing is ever
+    # due again. Disabling stays possible through the grace, where it still
+    # stops a late final run; past the grace there is nothing to stop.
+    if enabled or now - task.until > schedule.STALE_AFTER:
+        return (
+            f"automation {task.id} has ended: its until ({_clock(task.until)}) has passed — "
+            f"ask aish for a new automation, which comes on its own approval card "
+            f"(or /tasks delete {task.id})"
+        )
+    return ""
 
 
 def enabled_words(task: schedule.Task, state_dir: Path, now: datetime) -> str:

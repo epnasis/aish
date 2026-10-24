@@ -85,7 +85,10 @@ class TestScheduleTaskCreation:
         later = (AT + timedelta(hours=1)).isoformat(timespec="minutes")
         agent._dispatch("schedule_task", schedule_args(at=later))
         assert cards[1].is_new is False
-        assert cards[1].note.startswith("Replaces automation 'eon-invoices'")
+        # An edit leads with what changes, computed by aish (#459), then the
+        # whole resulting automation in words.
+        assert cards[1].note.startswith("Changes:\n  · at: ")
+        assert "\n\nReplaces automation 'eon-invoices'" in cards[1].note
 
     @pytest.mark.parametrize(
         "over, fragment",

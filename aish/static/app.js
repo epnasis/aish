@@ -8481,7 +8481,7 @@ function buildWriteCard(card, event) {
     ? ({ Created: "New rule", Updated: "Rule change", Retired: "Retire rule" }[
         event.rule_verb
       ] || "Rule")
-    : event.verb === "create" ? "Create file" : "Edit file";
+    : ({ create: "Create file", delete: "Delete file" }[event.verb] || "Edit file");
   const hsub = document.createElement("span");
   hsub.className = isRule ? "card-hsub" : "card-hsub mono";
   hsub.textContent = isRule ? event.rule : relTarget(event.target);

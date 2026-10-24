@@ -1780,7 +1780,8 @@ TOOL_SCHEMAS: list[dict] = [
                 "(cron: 'every weekday at 9'), not both. The user approves it on a "
                 "card; then aish runs your prompt in a new chat, where changes wait for "
                 "approval. MUST be a complete handoff: the goal, what you "
-                "already found, where to look. Never a reminder app or 'come back later'."
+                "already found, where to look. Never a reminder app or 'come back later'. "
+                "An EXISTING id is changed: pass only what changes; everything else is kept."
             ),
             "parameters": {
                 "type": "object",
@@ -1824,8 +1825,39 @@ TOOL_SCHEMAS: list[dict] = [
                         "description": "monitor (cron only): 'tell me when X changes'.",
                     },
                     "notify": {"type": "string", "enum": ["always", "on_change", "never"]},
+                    "clear": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["from", "until", "allow", "sites", "model", "cwd"],
+                        },
+                        "description": "Existing id: fields to drop.",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Existing id: false pauses it, true resumes it.",
+                    },
+                    "delete": {
+                        "type": "boolean",
+                        "description": "Existing id: true deletes it. Pass nothing else.",
+                    },
                 },
-                "required": ["id", "prompt", "note"],
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "automations",
+            "description": (
+                "The user's automations (what schedule_task made). No id: list them all. "
+                "With id: that one's whole instruction and settings. Read this before "
+                "changing one; never search the disk for them."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
             },
         },
     },

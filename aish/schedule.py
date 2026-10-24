@@ -1291,9 +1291,16 @@ def describe(task: Task, now: datetime, *, replacing: bool = False) -> str:
             ending.append(_ending_line(task))
     else:
         when = f"Runs {when_words(task, now)}, in a new chat with nobody watching."
+    # An edit keeps the file's `enabled`, so a paused task's card would
+    # otherwise read as live: the times above are when it WOULD run.
+    paused = (
+        ["It is PAUSED: none of those runs happen until it is resumed."]
+        if not task.enabled else []
+    )
     lines = [
         f"{verb} '{task.id}'" + (f" — {task.note}" if task.note else ""),
         when,
+        *paused,
         *ending,
         *_monitor_lines(task),
         "",
@@ -1341,3 +1348,126 @@ def describe(task: Task, now: datetime, *, replacing: bool = False) -> str:
             "are set up)."
         )
     return "\n".join(lines)
+
+
+# -- changing one: the edit, its delta, and a deletion (#459) -----------------
+
+#: Optional fields an edit may drop by name (`schedule_task`'s `clear`).
+#: `roots` has no `schedule_task` argument at all, so an edit keeps it and
+#: cannot drop it; `psu_ua` is aish's, never the model's (below).
+CLEARABLE = ("from", "until", "allow", "sites", "model", "cwd")
+
+#: What an edit may set, beside the schedule's own fields.
+EDITABLE = ("prompt", "note", "model", "cwd", "allow", "sites", "kind", "notify", "enabled")
+
+_SCHEDULE_FIELDS = ("at", "cron", "from", "until")
+
+
+def edited(old: Task, change: dict[str, Any], clear: Collection[str] = ()) -> dict[str, Any]:
+    """The raw task an edit of `old` proposes: the file's own task with ONLY
+    the named fields changed, for `validate_task` to judge.
+
+    `enabled` and `created` are the file's unless named, so an edit never
+    re-arms a paused task as a side effect. A shape change that would drop a
+    window bound the owner approved (`from`/`until` on a cron task turned
+    one-shot) is refused unless `clear` names it. `psu_ua` (the owner present,
+    delegated) is minted only at creation: an edit keeps a one-shot's and a
+    task that becomes recurring loses it, as validate_task requires."""
+    unknown = sorted(set(clear) - set(CLEARABLE))
+    if unknown:
+        raise InvalidTask(
+            f"clear cannot drop {', '.join(unknown)}; it drops only {', '.join(CLEARABLE)}"
+        )
+    both = sorted(set(clear) & set(change))
+    if both:
+        raise InvalidTask(f"{', '.join(both)} is both set and cleared; do one")
+    if "at" in change and "cron" in change:
+        raise InvalidTask("pass at (once) or cron (recurring), not both")
+    raw = old.to_dict()
+    schedule = dict(raw["schedule"])
+    if "at" in change:
+        dropped = [k for k in ("from", "until") if k in schedule and k not in clear]
+        if dropped:
+            words = " and ".join(dropped)
+            raise InvalidTask(
+                f"{old.id} has a {words}, which a one-shot cannot carry, so making it run "
+                f"once would drop it; pass clear: {dropped} if that is what the user wants"
+            )
+        schedule = {"at": change["at"]}
+    elif "cron" in change:
+        schedule = {k: v for k, v in schedule.items() if k != "at"}
+        schedule["cron"] = change["cron"]
+    for key in ("from", "until"):
+        if key in clear:
+            schedule.pop(key, None)
+        if key in change:
+            schedule[key] = change[key]
+    raw["schedule"] = schedule
+    for key in EDITABLE:
+        if key in change:
+            raw[key] = change[key]
+    for key in ("model", "cwd", "allow", "sites"):
+        if key in clear:
+            raw.pop(key, None)
+    if "kind" in change and change["kind"] != old.kind and "notify" not in change:
+        # The new kind's own default, never the old kind's policy carried over
+        # (a plain task refuses every notify but "always").
+        raw.pop("notify", None)
+    if "at" not in schedule:
+        raw.pop("psu_ua", None)
+    return raw
+
+
+def _value_words(value: object) -> str:
+    if value in (None, "", ()):
+        return "none"
+    if isinstance(value, datetime):
+        return day_time(value)
+    if isinstance(value, tuple):
+        return _listed(value)
+    return f"`{value}`"
+
+
+def changes(old: Task, new: Task) -> list[str]:
+    """What an edit changes, field by field, computed from the two tasks —
+    never from anything the model said about its own call."""
+    out: list[str] = []
+    fields: tuple[tuple[str, object, object], ...] = (
+        ("at", old.at, new.at),
+        ("cron", old.cron, new.cron),
+        ("from", old.start, new.start),
+        ("until", old.until, new.until),
+        ("note", old.note, new.note),
+        ("kind", old.kind, new.kind),
+        ("notify", old.notify, new.notify),
+        ("model", old.model, new.model),
+        ("cwd", old.cwd, new.cwd),
+        ("commands it may run without asking", old.allow, new.allow),
+        ("sites it may act on as you", old.sites, new.sites),
+    )
+    for name, before, after in fields:
+        if before != after:
+            out.append(f"{name}: {_value_words(before)} → {_value_words(after)}")
+    if old.prompt != new.prompt:
+        out.append("the instruction it runs: rewritten (the whole new one is below)")
+    if old.enabled != new.enabled:
+        out.append("paused → resumed" if new.enabled else "resumed → PAUSED")
+    if old.psu_ua != new.psu_ua:
+        out.append("no longer says you are present to your bank" if not new.psu_ua
+                   else "now says you are present to your bank")
+    return out
+
+
+def describe_deletion(task_id: str, task: Task | None, problem: str, now: datetime) -> str:
+    """The delete card's meaning. `task` is None for a file that does not
+    load, which is said AS that, with its error."""
+    if task is None:
+        what = (f"Deletes the automation file {task_id}.json, which is not a runnable "
+                f"automation ({problem}).")
+    else:
+        note = f" — {task.note}" if task.note else ""
+        what = f"Deletes automation '{task.id}'{note}, which runs {when_words(task, now)}."
+    return (
+        f"{what} It stops running, and there is no way back short of a new "
+        "automation on its own card."
+    )

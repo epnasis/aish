@@ -1003,6 +1003,17 @@ that saved a baseline or found nothing changed does not light the web's
 "Needs you" badge — a changed, unreadable or failed one does, as does any run
 holding a card for you.
 
+**Asking aish to change one.** *"Move the Paris check to 9 and 20"* — aish
+reads the automation (it has a tool for that, in your own chat only) and
+proposes a change on the same kind of card, headed by what changes: *"cron:
+`0 9 * * *` → `0 9,20 * * *`"*. Everything it was not asked to change is kept
+as it is — a paused automation stays paused. It can also pause, resume or
+delete one, each on its own card (a delete card says so, and that there is no
+way back); once a web page, a mail or a tool's output has entered the task, it
+will not offer to pause or delete one — use `/tasks` for that. If the
+automation changes while the card is open, approving it writes nothing and
+aish says so, rather than overwriting the change.
+
 **Seeing and managing them.** In the terminal, `/tasks` lists your automations
 — when each runs, when next, enabled or not, its notify policy, and whether a
 one-shot is pending, fired or expired; a file aish cannot load is listed as a

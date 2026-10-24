@@ -56,7 +56,15 @@ from aish import tools
 # schedule_task's `from` argument (+166 chars: 35,957 -> 36,123) — until's
 # mirror, one string and its MUST. Without it a named start ("od 7 listopada")
 # had nowhere to go but the prompt's prose, the same defect at the other edge.
-MAX_MENU_CHARS = 36_200
+#
+# Raised 36,200 -> 36,900 on 2026-10-24 (#459) for managing an existing
+# automation (+720 chars: 36,123 -> 36,843): ONE new read tool, `automations`
+# (its description says to read it rather than search the disk), and
+# schedule_task's `clear`, `enabled` and `delete` (two booleans and an enum
+# list). The alternative is the session that filed it: with no way to read
+# one, the model grepped ~/.config and ~/.local for 120 s and re-sent the
+# whole task to change one field.
+MAX_MENU_CHARS = 36_900
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.

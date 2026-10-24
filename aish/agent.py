@@ -37,6 +37,8 @@ import ollama
 
 from . import aliases as alias_map
 from . import (
+    atomic_write,
+    automation_admin,
     backends,
     browse,
     browser,
@@ -1230,6 +1232,31 @@ AUTOMATION_COMMAND_REFUSED = (
     "files that start unattended runs. A command touching it is refused whether "
     "it would read or write, because that cannot be told apart from the command "
     "text; read_file can still read a task file. There is nothing to approve here."
+)
+
+# Reading the owner's automations is the owner chat's job (#459): a triggered
+# run has no use for the other automations' instructions, which carry his
+# private details, and every one of them is in reach of its egress.
+AUTOMATIONS_ONLY_FROM_OWNER = (
+    "NOT EXECUTED: automations works only in the user's own chat. This session "
+    "was started by an automation or a trigger, and a run does not read the "
+    "other automations. There is nothing to approve here."
+)
+
+# Pausing or deleting is how outside content would SILENCE an automation — a
+# monitor that stops watching says nothing about it (#459). Taint, not origin:
+# the owner's own chat can carry a page or a mail that asks for exactly this.
+AUTOMATION_SILENCING_TAINTED = (
+    "NOT EXECUTED: outside content (a web page, a mail, a tool's output) entered "
+    "this task, and pausing or deleting an automation is how such content would "
+    "silence one, so aish does not offer it from here. The user can do it with "
+    "/tasks, in the terminal or on the web. There is nothing to approve here."
+)
+
+AUTOMATION_CHANGED_WHILE_OPEN = (
+    "NOT WRITTEN: {path} changed while the card was open, so the approved version "
+    "would have overwritten that change. Call automations with id={task_id} to read "
+    "it as it is now, and propose again."
 )
 
 # A triggered session must never author the thing that triggers sessions.
@@ -14587,6 +14614,9 @@ class Agent:
         if name == "schedule_task":
             return self._schedule_task(args)
 
+        if name == "automations":
+            return self._automations(args)
+
         if name == "run_command":
             # Expand any aish alias on the first word BEFORE the gate, so the
             # denylist/approval/cd-check all classify the real command.
@@ -15645,11 +15675,58 @@ class Agent:
         self._run_meta = {"decision": "approved", **diff_meta}
         return result
 
+    def _automations(self, args: dict) -> str | tools.ToolOutcome:
+        """The owner's automations, read (#459): the `/tasks` listing, or one
+        task's stored file — what an edit through `schedule_task` names its
+        changes against. No card: it reads aish's own config into the context,
+        the way `recall` reads past chats; it is the shell and the file tools
+        that stay fenced off the folder."""
+        if self.origin != "user":
+            return _gate_outcome(AUTOMATIONS_ONLY_FROM_OWNER, decision="blocked")
+        now = datetime.datetime.now().replace(microsecond=0)
+        state_dir = Path(self.state_dir) if self.state_dir else paths.state_home()
+        listing = automation_admin.read_listing(
+            state_dir, deny_prefixes=self._automation_deny_prefixes(), now=now
+        )
+        task_id = str(args.get("id", "") or "").strip()
+        if not task_id:
+            lines = automation_admin.task_lines(listing, now)
+            if not lines:
+                return "The user has no automations."
+            return (
+                "The user's automations (call automations with an id for one's whole "
+                "instruction and settings):\n\n" + "\n".join(lines)
+            )
+        for task in listing.tasks:
+            if task.id == task_id:
+                one = dataclasses.replace(listing, tasks=[task], problems=[])
+                return (
+                    "\n".join(automation_admin.task_lines(one, now))
+                    + "\n\nIts stored file — to change it, call schedule_task with this "
+                    "id and ONLY the fields that change:\n" + task.render()
+                )
+        for problem in listing.problems:
+            if Path(problem.path).stem == task_id:
+                return (
+                    f"{Path(problem.path).name} is not a runnable automation, so it does "
+                    f"not run: {problem.error}. To replace it, call schedule_task with this "
+                    "id and a complete task (prompt and at or cron); or delete=true."
+                )
+        known = ", ".join(t.id for t in listing.tasks) or "none"
+        return f"ERROR: there is no automation {task_id!r}. The user's automations: {known}."
+
+    @staticmethod
+    def _automation_deny_prefixes() -> list[str]:
+        """The deny list the scheduler validates task files against, so this
+        and `/tasks` call a file a problem exactly when aish-web does."""
+        return load_prefixes(Path(os.environ.get("AISH_DENYLIST") or default_denylist()))
+
     def _schedule_task(self, args: dict) -> str | tools.ToolOutcome:
-        """Propose a one-shot automation (epic #142 W2). Validated, rendered by
-        aish (the model never writes the JSON), and written only through the
-        diff-approval card, whose note says in words when it runs, the whole
-        prompt, and what it may do without asking."""
+        """Propose an automation (epic #142 W2), or change, pause or delete one
+        that exists (#459). Validated and rendered by aish (the model never
+        writes the JSON), and written only through the diff-approval card,
+        whose note says in words what will run and, for a change, what
+        changes."""
         if self.origin != "user":
             # Early refusal, like the charter fence: no card exists to approve,
             # because the property is that no triggered session ever authors
@@ -15658,8 +15735,49 @@ class Agent:
         if self.approve_write is None:
             return "ERROR: no write approver available; cannot schedule work."
         now = datetime.datetime.now().replace(microsecond=0)
+        task_id = str(args.get("id", "") or "").strip()
+        if not schedule.TASK_ID_RE.fullmatch(task_id):
+            return (f"ERROR: id {task_id!r} must be lowercase letters, digits and "
+                    "hyphens, e.g. 'eon-invoices'. Fix it and call schedule_task again.")
+        flags: dict[str, bool] = {}
+        for name in ("enabled", "delete"):
+            if args.get(name) is None:
+                continue
+            # Strict: models send the STRING "false", which is truthy.
+            value = {True: True, False: False, "true": True, "false": False}.get(
+                args[name].strip().lower() if isinstance(args[name], str) else args[name]
+            )
+            if value is None:
+                return f"ERROR: {name} must be true or false, got {args[name]!r}."
+            flags[name] = value
+        clear = args.get("clear") or []
+        if isinstance(clear, str):
+            clear = [clear]
+        if not isinstance(clear, list) or not all(isinstance(c, str) for c in clear):
+            return f"ERROR: clear must be a list of field names, got {clear!r}."
+        deny = self._automation_deny_prefixes()
+        target = schedule.automations_dir() / f"{task_id}.json"
+        if flags.get("delete"):
+            return self._delete_automation(task_id, target, args, now, deny)
+        if target.exists():
+            try:
+                raw_file = json.loads(target.read_text(encoding="utf-8"))
+                old = schedule.validate_task(raw_file, deny_prefixes=deny, as_of=now)
+                if old.id != task_id:
+                    raise schedule.InvalidTask(f"its id is {old.id!r}")
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
+                if not (args.get("prompt") and (args.get("at") or args.get("cron"))):
+                    return (
+                        f"ERROR: {target.name} is not a runnable automation ({exc}), so "
+                        "aish will not change one field of it. Pass a complete task "
+                        "(prompt and at or cron) to replace it, or delete=true."
+                    )
+            else:
+                return self._edit_automation(old, target, args, flags, clear, now, deny)
+        if clear:
+            return f"ERROR: clear changes an existing automation, and there is no {task_id!r}."
         raw: dict[str, Any] = {
-            "id": str(args.get("id", "") or "").strip(),
+            "id": task_id,
             "note": str(args.get("note", "") or "").strip(),
             "prompt": str(args.get("prompt", "") or ""),
             # Both or neither is passed through as-is: validate_task refuses
@@ -15669,7 +15787,7 @@ class Agent:
             "schedule": {
                 k: args[k] for k in ("at", "cron", "from", "until") if args.get(k)
             },
-            "enabled": True,
+            "enabled": flags.get("enabled", True),
             "created": now.isoformat(),
         }
         for key in ("model", "cwd", "kind", "notify"):
@@ -15685,20 +15803,167 @@ class Agent:
         psu_ua = self.plugin_env.get(owner_ua.ENV_KEY, "")
         if psu_ua and "at" in raw["schedule"] and "cron" not in raw["schedule"]:
             raw["psu_ua"] = psu_ua
-        deny_path = Path(os.environ.get("AISH_DENYLIST") or default_denylist())
         try:
-            task = schedule.validate_task(
-                raw, deny_prefixes=load_prefixes(deny_path), now=now
-            )
+            task = schedule.validate_task(raw, deny_prefixes=deny, now=now)
         except schedule.InvalidTask as exc:
             return f"ERROR: {exc}. Fix it and call schedule_task again."
-        target = schedule.automations_dir() / f"{task.id}.json"
         plan = files.plan_write(str(target), task.render(), self.cwd)
         if plan.error:
             return f"ERROR: {plan.error}"
         plan = dataclasses.replace(
             plan, note=schedule.describe(task, now, replacing=not plan.is_new)
         )
+        refused = self._automation_card(plan, task_id)
+        if refused is not None:
+            return refused
+        if task.recurring:
+            begins = (
+                f"; it starts at {task.start.isoformat(sep=' ', timespec='minutes')}, and no "
+                "occurrence before that ever runs"
+                if task.start is not None and task.start > now else ""
+            )
+            ends = (
+                f"; it ends at {task.until.isoformat(sep=' ', timespec='minutes')}, and no "
+                "occurrence after that ever runs" if task.until is not None else ""
+            )
+            nxt = self._next_run_words(task, now)
+            when = f"on the schedule `{task.cron}` ({nxt}{begins}{ends}). Each time"
+        else:
+            when = f"for {task.one_shot_at().isoformat(sep=' ', timespec='minutes')}. At that time"
+        watching = (
+            " As a monitor, each run compares against the previous run's snapshot "
+            f"and notifies the user per notify={task.notify}." if task.monitor else ""
+        )
+        return (
+            f"Scheduled '{task.id}' {when} aish runs it in a new chat; anything that "
+            f"needs approval will wait for the user there.{watching} Tell the user it is "
+            "scheduled — do not also set a reminder."
+        )
+
+    @staticmethod
+    def _next_run_words(task: "schedule.Task", now: datetime.datetime) -> str:
+        # The clipped helper, never `cron_next` raw: a raw next would name a
+        # run before `from` (or after `until`) that will never start.
+        coming = schedule.upcoming(task, now, 1)
+        return (
+            f"next: {coming[0].isoformat(sep=' ', timespec='minutes')}" if coming
+            else "no run is left in its window"
+        )
+
+    def _edit_automation(
+        self, old: "schedule.Task", target: Path, args: dict, flags: dict[str, bool],
+        clear: list[str], now: datetime.datetime, deny: list[str],
+    ) -> str | tools.ToolOutcome:
+        """Change ONLY what the call names (#459). The file's task is the base,
+        so a field the model left out is kept, never reset — the replace this
+        used to be re-enabled a paused task and dropped what it was not sent."""
+        change: dict[str, Any] = {
+            key: args[key]
+            for key in ("at", "cron", "from", "until", "prompt", "note", "model", "cwd",
+                        "kind", "notify", "allow", "sites")
+            if args.get(key)
+        }
+        if "enabled" in flags:
+            change["enabled"] = flags["enabled"]
+        if change.get("enabled") is False and self._tainted:
+            return _gate_outcome(AUTOMATION_SILENCING_TAINTED, decision="blocked")
+        try:
+            raw = schedule.edited(old, change, clear)
+            # The creation-time checks (a time already past, an end before the
+            # next run) apply only when the schedule itself is what changes: a
+            # note edit on a one-shot whose time has passed is not a new time.
+            moved = raw["schedule"] != old.schedule
+            task = schedule.validate_task(
+                raw, deny_prefixes=deny, now=now if moved else None, as_of=now
+            )
+        except schedule.InvalidTask as exc:
+            return f"ERROR: {exc}. Fix it and call schedule_task again."
+        if task.enabled != old.enabled:
+            refusal = automation_admin.toggle_refusal(old, task.enabled, now)
+            if refusal:
+                return f"ERROR: {refusal}."
+        delta = schedule.changes(old, task)
+        if not delta:
+            return (f"Nothing to change: '{old.id}' already is what was asked. Tell the "
+                    "user it is already so.")
+        plan = files.plan_write(str(target), task.render(), self.cwd)
+        if plan.error:
+            return f"ERROR: {plan.error}"
+        note = (
+            "Changes:\n" + "\n".join(f"  · {line}" for line in delta) + "\n\n"
+            + schedule.describe(task, now, replacing=True)
+        )
+        refused = self._automation_card(dataclasses.replace(plan, note=note), old.id)
+        if refused is not None:
+            return refused
+        if not task.enabled:
+            stands = "It is paused: nothing runs until it is resumed."
+        elif task.recurring:
+            stands = f"It runs on `{task.cron}` ({self._next_run_words(task, now)})."
+        else:
+            stands = (f"It runs once, at "
+                      f"{task.one_shot_at().isoformat(sep=' ', timespec='minutes')}.")
+        # What the scheduler does with the change (`since`, scheduler.py): a
+        # new cron expr starts from now, so a run the old one missed is gone;
+        # an unchanged one keeps its place, so a run already due starts with
+        # this version.
+        if task.recurring and task.enabled and task.cron != old.cron:
+            stands += " The new schedule counts from now: no earlier run fires."
+        elif task.recurring and task.enabled:
+            stands += " A run already due and not yet started will start with this version."
+        return f"Changed '{old.id}': " + "; ".join(delta) + f". {stands}"
+
+    def _delete_automation(
+        self, task_id: str, target: Path, args: dict, now: datetime.datetime,
+        deny: list[str],
+    ) -> str | tools.ToolOutcome:
+        """Delete one automation, on a card that says so (#459). A problem file
+        may be deleted too — that is the way on for one."""
+        others = sorted(
+            key for key, value in args.items()
+            if key not in ("id", "delete") and value not in (None, "", [], False)
+        )
+        if others:
+            return (f"ERROR: delete=true takes only id; also passed: {', '.join(others)}. "
+                    "Call schedule_task again with id and delete=true only.")
+        if self._tainted:
+            return _gate_outcome(AUTOMATION_SILENCING_TAINTED, decision="blocked")
+        try:
+            automation_admin.automation_file(task_id)
+            text = target.read_text(encoding="utf-8")
+        except automation_admin.AdminError as exc:
+            return f"ERROR: {exc}."
+        except (OSError, UnicodeDecodeError) as exc:
+            return (f"ERROR: cannot read {target.name} ({exc}); the user can delete it "
+                    f"with /tasks delete {task_id}.")
+        task: schedule.Task | None = None
+        problem = ""
+        try:
+            task = schedule.validate_task(json.loads(text), deny_prefixes=deny, as_of=now)
+        except (ValueError, schedule.InvalidTask) as exc:
+            problem = str(exc)
+        plan = files.WritePlan(
+            target, str(target), text, "", False, remove=True,
+            note=schedule.describe_deletion(task_id, task, problem, now),
+        )
+        refused = self._automation_card(plan, task_id)
+        if refused is not None:
+            return refused
+        return (f"Deleted automation '{task_id}'. aish-web drops its schedule state and any "
+                "monitor snapshot the next time it reads the folder.")
+
+    def _automation_card(
+        self, plan: "files.WritePlan", task_id: str
+    ) -> str | tools.ToolOutcome | None:
+        """Ask the write card, and on approval publish the plan — or say why
+        not. None means it landed.
+
+        The file is re-read at commit: a card can stay open for minutes (346 s
+        in the session that filed #459), and the owner may pause or edit the
+        same automation meanwhile — the approved bytes must not silently undo
+        that. A change in that window refuses the write; the check and the
+        rename are not one atomic step, and that last instant is not closed."""
+        assert self.approve_write is not None  # _schedule_task refuses without one
         decision = self.approve_write(plan)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
@@ -15715,38 +15980,23 @@ class Agent:
             )
         if not decision:
             return _gate_outcome(WRITE_DENIED, decision="denied")
-        result = files.commit(plan)
-        if result.startswith("ERROR"):
-            return result
-        if task.recurring:
-            begins = (
-                f"; it starts at {task.start.isoformat(sep=' ', timespec='minutes')}, and no "
-                "occurrence before that ever runs"
-                if task.start is not None and task.start > now else ""
+        try:
+            current: str | None = (
+                plan.target.read_text(encoding="utf-8") if plan.target.exists() else None
             )
-            ends = (
-                f"; it ends at {task.until.isoformat(sep=' ', timespec='minutes')}, and no "
-                "occurrence after that ever runs" if task.until is not None else ""
-            )
-            # The clipped helper, never `cron_next` raw: a raw next would name a
-            # run before `from` (or after `until`) that will never start.
-            coming = schedule.upcoming(task, now, 1)
-            nxt = (
-                f"next: {coming[0].isoformat(sep=' ', timespec='minutes')}" if coming
-                else "no run is left in its window"
-            )
-            when = f"on the schedule `{task.cron}` ({nxt}{begins}{ends}). Each time"
-        else:
-            when = f"for {task.one_shot_at().isoformat(sep=' ', timespec='minutes')}. At that time"
-        watching = (
-            " As a monitor, each run compares against the previous run's snapshot "
-            f"and notifies the user per notify={task.notify}." if task.monitor else ""
-        )
-        return (
-            f"Scheduled '{task.id}' {when} aish runs it in a new chat; anything that "
-            f"needs approval will wait for the user there.{watching} Tell the user it is "
-            "scheduled — do not also set a reminder."
-        )
+        except (OSError, UnicodeDecodeError):
+            current = "\0unreadable"
+        if current != (None if plan.is_new else plan.old):
+            return AUTOMATION_CHANGED_WHILE_OPEN.format(path=plan.target.name, task_id=task_id)
+        try:
+            if plan.remove:
+                plan.target.unlink()
+            else:
+                plan.target.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write.publish(plan.target, plan.new, encoding="utf-8")
+        except OSError as exc:
+            return f"ERROR: cannot write {plan.target}: {exc}"
+        return None
 
     def _parse_cd(self, command: str) -> str | None:
         """Detect a bare `cd <dir>`. For the user (! prefix) it changes agent

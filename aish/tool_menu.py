@@ -38,6 +38,11 @@ CORE_TOOLS = (
     # Cost: +1,185 chars (compact; 1,246 as the brief records it) on every
     # selected menu — the native core goes 12 schemas / 11,681 -> 13 / 12,866.
     "schedule_task",
+    # #459: changing an automation starts with reading it, and the message
+    # that filed it was another Polish one-liner ("Zmień harmonogram <id> …")
+    # — the shape ranking already failed on for schedule_task. Without it the
+    # model searched the disk with the shell for two minutes.
+    "automations",
 )
 
 #: Tools admitted by ranking against the task, beyond core and the structural

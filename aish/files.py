@@ -268,6 +268,10 @@ class WritePlan:
     # him YAML. The name and the verb are what he is actually deciding about.
     rule: str = ""
     rule_verb: str = ""
+    # Set when approving this DELETES `target` (an automation, #459): every
+    # card then says delete, never edit. `commit` refuses such a plan — the
+    # one caller that deletes does it itself, so this is no general unlinker.
+    remove: bool = False
 
     @property
     def diff(self) -> str:
@@ -389,6 +393,8 @@ def plan_edit(path: str, old_str: str, new_str: str, cwd: str) -> WritePlan:
 def commit(plan: WritePlan) -> str:
     if plan.error:
         return f"ERROR: {plan.error}"
+    if plan.remove:
+        return f"ERROR: {plan.target} is a deletion, which commit does not perform"
     try:
         plan.target.parent.mkdir(parents=True, exist_ok=True)
         plan.target.write_text(plan.new, encoding="utf-8")
