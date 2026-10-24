@@ -199,6 +199,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_ctx=int(spec.get("num_ctx") or config.get("num_ctx", 32768)),
         aliases=config.get("aliases"),
     )
+    # A run's config is a COPY of the owner's tree, automations included, and
+    # its state starts empty — so its scheduler would fire his tasks (a
+    # recurring one with a run since its file was saved is due at once) as
+    # unwatched chats inside the run (#460). Off before startup starts it;
+    # a code root with no way to reach it does not run at all.
+    server = getattr(app.state, "server", None)
+    if server is None or not hasattr(server, "scheduler"):
+        raise SystemExit("replay: cannot switch off the scheduler of this code root")
+    server.scheduler = None
+    emit({"type": "scheduler_off"})
     with TestClient(app) as client, client.websocket_connect("/ws?token=replay") as ws:
         drive(ws, spec["turns"], spec["approve_commands"], spec["approve_tools"], emit,
               comment_rules=spec.get("comment_rules") or [])

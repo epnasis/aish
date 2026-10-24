@@ -13,6 +13,7 @@ import ast
 import json
 import os
 import shutil
+import types
 from pathlib import Path
 
 import pytest
@@ -310,6 +311,59 @@ class TestDriverOverTheRealServer:
         log = tmp_path / "state" / hello["session"]
         verdict = replay_checks.no_unapproved_shell(replay_checks.load_run(log))
         assert verdict.passed is False and "touch pwned" in verdict.evidence
+
+    def _spec(self, tmp_path):
+        spec = {"events_path": str(tmp_path / "events.jsonl"), "config_path": str(tmp_path / "c"),
+                "model": "fake", "state_dir": str(tmp_path), "allow_path": str(tmp_path / "a"),
+                "deny_path": str(tmp_path / "d"), "lessons_path": str(tmp_path / "l"),
+                "cwd": str(tmp_path), "turns": [], "approve_commands": [],
+                "approve_tools": []}
+        path = tmp_path / "spec.json"
+        path.write_text(json.dumps(spec), encoding="utf-8")
+        return path
+
+    def test_the_driver_switches_the_copied_automations_scheduler_off(self, tmp_path,
+                                                                     monkeypatch):
+        """#460: a run's config is a copy of the owner's tree, automations
+        included; its scheduler must be off before the app starts it."""
+        import starlette.testclient
+
+        import aish.server
+        server = types.SimpleNamespace(scheduler="live")
+        monkeypatch.setattr(aish.server, "create_app", lambda *a, **k: types.SimpleNamespace(
+            state=types.SimpleNamespace(server=server)))
+        seen = []
+
+        class Started(Exception):
+            pass
+
+        class Client:
+            def __init__(self, app):
+                seen.append(app.state.server.scheduler)
+
+            def __enter__(self):
+                raise Started
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(starlette.testclient, "TestClient", Client)
+        with pytest.raises(Started):
+            replay_driver.main([str(self._spec(tmp_path))])
+        assert seen == [None]
+        events = (tmp_path / "events.jsonl").read_text(encoding="utf-8")
+        assert '"scheduler_off"' in events
+
+    def test_a_code_root_it_cannot_switch_off_does_not_run(self, tmp_path, monkeypatch):
+        import starlette.testclient
+
+        import aish.server
+        monkeypatch.setattr(aish.server, "create_app", lambda *a, **k: types.SimpleNamespace(
+            state=types.SimpleNamespace()))
+        monkeypatch.setattr(starlette.testclient, "TestClient",
+                            lambda app: pytest.fail("the app was started"))
+        with pytest.raises(SystemExit):
+            replay_driver.main([str(self._spec(tmp_path))])
 
     def test_the_driver_imports_no_harness_module_at_load(self):
         """It runs against a baseline tree that predates the harness."""

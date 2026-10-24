@@ -68,6 +68,7 @@ A regression guard — a scenario that pins behaviour which already works — pa
 | `egress-vouches.json` | **absent** | lives in the state dir, which starts empty: vouches grant cardless egress |
 | `embeddings.json` | **own copy** of one batch snapshot | both arms start from the same cache |
 | notifications | **off** | `AISH_NOTIFY=0` |
+| the scheduler | **off** | the config copy carries the owner's `automations/` and the state starts empty, so a live scheduler would fire his tasks as unwatched chats inside the run (a recurring one with a run since its file was saved is due at once, #460). The driver sets `app.state.server.scheduler = None` before startup and records `scheduler_off`; a code root it cannot reach that way does not run (`test_the_driver_switches_the_copied_automations_scheduler_off`) |
 | every other `AISH_*` from the caller | **dropped** | `run_env`; `AISH_LOCAL_URL` is the one passed through |
 | tool data (e.g. trippy's cache) | **own** if the scenario says so | `[env] TRIPPY_DATA_DIR = "{run}/trippy"` |
 | cwd | **own, empty** | |
