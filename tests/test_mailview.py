@@ -158,6 +158,22 @@ class TestHealth:
         assert any("gmail listing FAILED on the last 3 pass(es)" in t
                    and "Units per minute" in t for t in warn)
 
+    def test_unparseable_mail_is_surfaced(self, tmp_path):
+        result = mailwatch.Pass(sources={"gmail": mailwatch.SourcePass(unparseable=2)})
+        mailwatch.record_health(tmp_path, result, NOW - 60)
+        warn = [t for s, t in mailview.lines(tmp_path, clean=_identity, now=NOW) if s == "warn"]
+        assert any("2 mail(s) on the last pass could not be parsed" in t for t in warn)
+
+    def test_an_inbox_not_read_on_the_last_pass_shows_no_current_streak(self, tmp_path):
+        failing = mailwatch.Pass(listing_ok=False, sources={
+            "tuta": mailwatch.SourcePass(listing_ok=False, failure="timeout")})
+        mailwatch.record_health(tmp_path, failing, NOW - 600)
+        mailwatch.record_health(tmp_path, mailwatch.Pass(sources={
+            "gmail": mailwatch.SourcePass()}), NOW - 60)
+        texts = [t for _s, t in mailview.lines(tmp_path, clean=_identity, now=NOW)]
+        assert any("tuta was not read on the last pass" in t for t in texts)
+        assert not any("tuta listing FAILED" in t for t in texts)
+
     def test_a_watcher_that_stopped_is_visible(self, tmp_path):
         mailwatch.record_health(tmp_path, mailwatch.Pass(), NOW - 5 * 3600)
         (style, text), *_ = mailview.lines(tmp_path, clean=_identity, now=NOW)

@@ -129,6 +129,8 @@ class TestReadOnlyFence:
         ["imap", "expunge", "INBOX"],
         ["message", "delete", "7"],
         ["imap", "fetch", "-m", "INBOX", "--json", "1:5", "extra"],
+        ["message", "read", "-m", "--seen", "--raw", "7"],
+        ["message", "read", "--raw", "--json", "7", "-m"],
     ])
     def test_everything_else_is_refused_before_any_process(self, argv):
         runner = FakeHimalaya({})
@@ -291,12 +293,76 @@ class TestIdentityNotUid:
         assert result.sources["tuta"].unfetched == 0
         assert not (mailindex.mail_dir(tmp_path) / "unfetched.json").read_text().count("tuta:")
 
-    def test_one_mail_in_both_inboxes_is_one_entry(self, tmp_path):
+    def test_one_mail_in_both_inboxes_is_two_entries_in_one_conversation(self, tmp_path):
+        """A non-Gmail digest folds in content (`mailindex.digest_for`), so a
+        cross-delivered mail is two entries — the stated cost — joined by
+        Message-ID into one conversation."""
         tuta_copy = rfc822(frm="friend@friends.example", subject="Plans", message_id="p@f.example",
                            at=T0 + DAY + 30)
         gmail_copy = gmail("gp", frm="friend@friends.example", subject="Plans",
                            message_id="p@f.example", at=T0 + DAY, labels=("INBOX",))
         result = run(tmp_path, [FakeMailbox([gmail_copy]),
                                 tuta(FakeHimalaya({"INBOX": [tuta_copy], "Sent": []}))])
-        assert len(mailindex.MailIndex(tmp_path).by_digest) == 1
-        assert result.assessed == 1
+        index = mailindex.MailIndex(tmp_path)
+        assert len(index.by_digest) == 2 and result.assessed == 2
+        a, b = index.by_digest.values()
+        assert index.conversation(a.digest, as_of=(T0 + 3 * DAY, "")) == \
+            index.conversation(b.digest, as_of=(T0 + 3 * DAY, ""))
+
+
+class TestMessageIdSquatting:
+    def test_a_tuta_mail_cannot_squat_a_gmail_mails_message_id(self, tmp_path):
+        """A Tuta mail carrying a real Gmail mail's Message-ID and an EARLIER
+        forged Date must not suppress the Gmail copy's indexing or reading."""
+        squatter = rfc822(frm="attacker@evil.example", subject="Invoice", body="pay me",
+                          message_id="real@bank.example", at=T0)
+        real = gmail("g1", frm="alerts@bank.example", subject="Statement",
+                     message_id="real@bank.example", at=T0 + DAY, labels=("INBOX",))
+        run(tmp_path, [tuta(FakeHimalaya({"INBOX": [squatter], "Sent": []})),
+                       FakeMailbox([real])])
+        index = mailindex.MailIndex(tmp_path)
+        gmail_held = [h for h in index.by_digest.values() if h.mailbox == "gmail"]
+        assert len(gmail_held) == 1 and gmail_held[0].from_addr == "alerts@bank.example"
+        assert index.health.collisions == []
+        by_pid = {r["provider_id"]: r for r in mailverdicts.iter_store(tmp_path)}
+        assert by_pid["g1"]["ending"] == "ok"
+        assert by_pid["g1"]["gate"]["auth"]["authenticated"] is True
+
+    def test_a_reply_to_a_squatted_id_is_no_act_toward_the_squatter(self, tmp_path):
+        squatter = rfc822(frm="attacker@evil.example", subject="Hi", message_id="x@friends.example",
+                          at=T0)
+        real = gmail("g1", frm="ania@friends.example", subject="Hi",
+                     message_id="x@friends.example", at=T0 + 60, labels=("INBOX",))
+        reply = gmail("g2", frm=OWNER, to="ania@friends.example", subject="Re: Hi",
+                      in_reply_to="x@friends.example", at=T0 + 120, labels=("SENT",))
+        run(tmp_path, [tuta(FakeHimalaya({"INBOX": [squatter], "Sent": []})),
+                       FakeMailbox([real, reply])])
+        index = mailindex.MailIndex(tmp_path)
+        acts = mailgate.owner_acts(index, "attacker@evil.example", (T0 + DAY, ""))
+        assert acts == []
+        assert index.reply_parent("x@friends.example", (T0 + DAY, "")) is None  # disagree
+        assert index.health.ambiguous_parents >= 1
+
+    def test_two_copies_that_agree_on_the_sender_resolve_to_the_gmail_one(self):
+        index = mailindex.MailIndex()
+        for item in (
+            mailindex.from_rfc822(rfc822(frm="ania@friends.example", message_id="y@f", at=T0),
+                                  provider_id="t", in_sent_folder=False, mailbox="tuta"),
+            mailindex.from_gmail(gmail("g", frm="ania@friends.example", message_id="y@f",
+                                       at=T0 + 5), OWNERS),
+        ):
+            assert item is not None
+            index.add(item.header, item.body)
+        parent = index.reply_parent("y@f", (T0 + DAY, ""))
+        assert parent is not None and parent.mailbox == "gmail"
+
+
+class TestMalformedDate:
+    def test_a_garbage_date_costs_the_date_never_the_assessment(self, tmp_path):
+        raw = rfc822(frm="a@shop.example", subject="Hello", message_id="d@shop.example").replace(
+            "Date: " + email.utils.formatdate(T0), "Date: not a date at all")
+        runner = FakeHimalaya({"INBOX": [raw], "Sent": []})
+        result = run(tmp_path, [tuta(runner)])
+        assert result.sources["tuta"].unparseable == 0 and result.assessed == 1
+        (held,) = mailindex.MailIndex(tmp_path).by_digest.values()
+        assert held.at_source == "none"

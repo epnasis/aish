@@ -397,6 +397,10 @@ def record_health(state_dir: os.PathLike | str, result: Pass, now: float) -> dic
                                            else ""),
             "note": sp.note,
             "unfetched": sp.unfetched,
+            "unparseable": sp.unparseable,
+            # A source not read on a pass keeps its old entry with an older
+            # `last_run_at`, which `/mail` shows as not current.
+            "last_run_at": now,
         }
         sources[name] = entry
     state = {"failed_listings": streak, "last_ok_at": last_ok, "last_pass_at": now,
@@ -606,8 +610,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--account", default=os.environ.get("AISH_MAIL_ACCOUNT", ""),
                         help="the Gmail account (needs ~/.config/gws-accounts/<email>/)")
     parser.add_argument("--owner", action="append", default=[],
-                        help="an address that is the owner's own (repeatable). EVERY alias "
-                        "he sends from must be listed: on Gmail it decides direction")
+                        help="an address that is the owner's own (repeatable). List every "
+                        "alias he sends from: the counters that make a forged From: him, "
+                        "or an unlisted alias in his Sent folder, visible read it")
     parser.add_argument("--source", action="append", choices=SOURCES, default=[],
                         help="an inbox to read (repeatable; default: gmail)")
     parser.add_argument("--model", default=os.environ.get("AISH_MAIL_READER_MODEL", ""))

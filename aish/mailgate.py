@@ -151,8 +151,10 @@ def authenticate_header(header: mailindex.Header) -> Auth:
     ending, not authenticated, with the reason in words; the headers are not
     looked at even if some survived parsing (`mailindex.from_rfc822` drops
     them). Unauthenticated, the grade is `first-contact` whatever the history,
-    no case is opened and no account enters a case's history — so such mail
-    can mint nothing."""
+    and an INBOUND mail opens no case and puts no account in a case's history
+    — it mints nothing on its own behalf. His own outbound mail (his Sent
+    folder) records his acts whatever the gateway: direction, not
+    authentication, decides that (`mailindex.from_rfc822`)."""
     if header.mailbox not in GATEWAY_AUTHSERV:
         return Auth(
             NOT_READABLE, False, gateway=header.mailbox,
@@ -408,7 +410,7 @@ def owner_acts(
         # References and join that conversation, and his earlier replies there
         # must not become acts toward it.
         for parent_id in header.in_reply_to:
-            parent = index.get(index.by_mid.get(parent_id, ""))
+            parent = index.reply_parent(parent_id, header.position)
             if (
                 parent is not None
                 and parent.direction == "in"

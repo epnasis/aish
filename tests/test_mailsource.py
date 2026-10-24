@@ -248,3 +248,67 @@ class TestHealthPerSource:
         assert state["sources"]["tuta"]["failed_listings"] == 2
         assert state["sources"]["gmail"]["failed_listings"] == 0
         assert state["sources"]["gmail"]["last_ok_at"] == T0 + DAY
+
+    def test_an_inbox_not_read_this_pass_is_marked_not_current(self, tmp_path):
+        both = mailwatch.Pass(sources={"gmail": mailwatch.SourcePass(),
+                                       "tuta": mailwatch.SourcePass(listing_ok=False)})
+        mailwatch.record_health(tmp_path, both, T0)
+        only_gmail = mailwatch.Pass(sources={"gmail": mailwatch.SourcePass()})
+        state = mailwatch.record_health(tmp_path, only_gmail, T0 + 60)
+        assert state["sources"]["tuta"]["last_run_at"] == T0
+        assert state["sources"]["gmail"]["last_run_at"] == T0 + 60
+
+    def test_unparseable_mail_reaches_the_health_file(self, tmp_path):
+        result = mailwatch.Pass(sources={"gmail": mailwatch.SourcePass(unparseable=2)})
+        state = mailwatch.record_health(tmp_path, result, T0)
+        assert state["sources"]["gmail"]["unparseable"] == 2
+
+
+class TestGmailDirection:
+    def test_a_forged_from_him_in_his_inbox_is_inbound_no_act_and_read(self, tmp_path):
+        """Delivery review (blocking): on Gmail a From header naming him used
+        to make a mail his — minting acts toward its recipient, opening
+        owner-created cases, and skipping assessment. Only SENT is his now."""
+        from mail_fixtures import OWNER
+
+        from aish import mailcases, mailgate
+
+        forged = gmail("f", frm=f"Owner <{OWNER}>", to="attacker@evil.example",
+                       subject="Order LS-48213", body="Order LS-48213 confirmed.",
+                       at=T0, labels=("INBOX",), auth="fail")
+        later = gmail("l", frm="attacker@evil.example", subject="Re: Order LS-48213",
+                      at=T0 + 40 * DAY, labels=("INBOX",), auth="pass")
+        reader = ScriptedReader(lambda b: verdict_json(citations=[b["mail"]]))
+        result = run(tmp_path, FakeMailbox([forged, later]), reader)
+        index = mailindex.MailIndex(tmp_path)
+        held = next(h for h in index.by_digest.values() if h.provider_id == "f")
+        assert held.direction == "in"
+        assert mailgate.owner_acts(index, "attacker@evil.example", (T0 + 41 * DAY, "")) == []
+        records = {r["provider_id"]: r for r in mailverdicts.iter_store(tmp_path)}
+        assert "f" in records  # assessed like any inbound mail
+        assert records["l"]["gate"]["grade"]["grade"] == mailgate.FIRST_CONTACT
+        # The forged mail opened no OWNER case (the attacker's own authenticated
+        # mail may open an inbound one — S1's rule, unchanged).
+        cases = mailcases.CaseStore(tmp_path).cases.values()
+        assert not [c for c in cases if c.created_by == "owner"]
+        assert result.sources["gmail"].counts == {"inbox_from_an_owner_address": 1}
+
+
+class TestExhaustedThisPass:
+    def test_a_refusal_never_sent_spends_no_ledger_attempt(self, tmp_path):
+        ledger = UnfetchedLedger(tmp_path)
+        ledger.missed("gmail", "x", "inbox", Failure("quota", sent=False), T0)
+        assert ledger.entries["gmail"]["x"]["attempts"] == 0
+        ledger.missed("gmail", "x", "inbox", Failure("quota"), T0)
+        assert ledger.entries["gmail"]["x"]["attempts"] == 1
+
+    def test_a_new_pass_resets_the_exhaustion(self):
+        box, _calls, _ = mailbox([Outcome({"messages": []}), Outcome({"messages": []})])
+        box.quota_exhausted = True
+        assert mailsource.GmailSource(box).listing(2, 10) is not None
+        assert box.quota_exhausted is False
+
+    def test_a_failed_inbox_listing_spends_nothing_on_sent(self):
+        box, calls, _ = mailbox([Outcome(failure=classify_gws(1, PERM_403))])
+        assert mailsource.GmailSource(box).listing(2, 10) is None
+        assert len(calls) == 1

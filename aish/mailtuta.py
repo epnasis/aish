@@ -9,8 +9,14 @@ can vouch for, and each difference is enforced here, not hoped for:
   prepends one above the sender's, so the parser drops every
   Authentication-Results header (`mailindex.from_rfc822`) and the Gate gives
   the explicit ending (`mailgate.authenticate_header`). A Tuta mail is never
-  authenticated, so it can never mint a grade, admit an alias, open a case or
-  enter a case's account history.
+  authenticated, so an INBOUND Tuta mail mints nothing on its own behalf: no
+  grade for its sender, no case opened, no account in a case's history. A
+  mail in his Sent folder is different, and legitimately so: it is his own
+  act (direction `out`), so it records acts toward its recipients, can open
+  an owner case and admit the domains he wrote to — exactly as his Gmail sent
+  mail does. That rests on the Sent folder being his alone: only Tuta puts
+  mail there, and the bridge offers no APPEND (`tutalib`), so no client of
+  it can either.
 - **Reading never sets \\Seen.** His unread markers are both his mailbox
   state and the shadow's ground truth. `message read` runs WITHOUT `--seen`
   — the discipline of `tuta_read` / `tutalib.read_body` — and `check_argv`
@@ -94,8 +100,9 @@ def check_argv(args: list[str]) -> None:
     rest = iter(args[2:])
     for token in rest:
         if token == "-m" and mailbox_ok:
-            if next(rest, None) is None:
-                raise ReadOnlyViolation("refused: -m with no mailbox")
+            value = next(rest, None)
+            if value is None or value.startswith("-"):
+                raise ReadOnlyViolation("refused: -m needs a mailbox name, not a flag")
             continue
         if token in flags:
             continue
@@ -163,6 +170,16 @@ def _envelope_time(envelope: dict[str, Any]) -> float | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=datetime.UTC)
     return parsed.timestamp()
+
+
+def _envelope_sender(envelope: dict[str, Any]) -> str:
+    """The bare sender address of a himalaya envelope, whichever of its shapes
+    (a "Name <addr>" string, or a mapping) it arrived in; "" when unreadable."""
+    senders = envelope.get("from") or []
+    first = senders[0] if isinstance(senders, list) and senders else senders
+    if isinstance(first, dict):
+        first = first.get("addr") or first.get("address") or first.get("email") or ""
+    return mailindex.address_of(str(first or ""))
 
 
 def _ref(folder: str, uid: int) -> str:
@@ -298,15 +315,26 @@ class TutaMailbox:
         return Listing(inbox, sent)
 
     def held(self, ref: str, index: mailindex.MailIndex, by_pid: dict[str, str]) -> str | None:
-        """The digest the index already holds for this message — by the
-        envelope's Message-ID, never by UID."""
-        message_id = mailindex.normalize_message_id(
-            str((self._envelopes.get(ref) or {}).get("message_id") or "")
-        )
+        """The digest of a Tuta message the index already holds that this
+        envelope names — never by UID. A Tuta digest folds in content
+        (`mailindex.digest_for`), so it cannot be computed from an envelope;
+        instead a held Tuta message must match the envelope's Message-ID AND
+        sender address AND subject. Anything less matching is fetched (dedup
+        absorbs it): a skip that matched on the Message-ID alone would let a
+        squatter's mail suppress the fetch of another carrying its id."""
+        envelope = self._envelopes.get(ref) or {}
+        message_id = mailindex.normalize_message_id(str(envelope.get("message_id") or ""))
         if not message_id:
             return None
-        digest = mailindex.digest_for(message_id, "", "", "", "")
-        return digest if digest in index.by_digest else None
+        sender = _envelope_sender(envelope)
+        subject = " ".join(str(envelope.get("subject") or "").split())
+        for digest in index.mid_members.get(message_id, ()):
+            header = index.get(digest)
+            if (header is not None and header.mailbox == NAME and sender
+                    and header.from_addr == sender
+                    and " ".join(header.subject.split()) == subject):
+                return digest
+        return None
 
     def fetch(
         self, ref: str, owners: frozenset[str]

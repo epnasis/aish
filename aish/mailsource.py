@@ -67,6 +67,9 @@ class Failure:
     matched: str = ""
     text: str = ""
     scope: str = ""  # for QUOTA: "minute" (waitable) or "day" (not), else ""
+    # False when aish declined to make the call (a quota already exhausted
+    # this pass): nothing was asked, so it is no attempt at that mail.
+    sent: bool = True
 
     def __post_init__(self) -> None:
         if self.kind not in FAILURE_KINDS:
@@ -249,6 +252,8 @@ class UnfetchedLedger:
     def missed(self, source: str, pid: str, role: str, failure: Failure, now: float) -> None:
         held = self.entries.setdefault(source, {})
         entry = held.setdefault(pid, {"role": role, "first_at": now, "attempts": 0})
+        if not failure.sent:
+            return  # owed a fetch, but nothing was tried: no attempt is spent
         entry["attempts"] = int(entry.get("attempts") or 0) + 1
         entry["last"] = failure.describe()[:200]
         entry["last_at"] = now
@@ -294,14 +299,24 @@ class GmailSource:
     def __init__(self, mailbox: Any) -> None:
         self.mailbox = mailbox
         self.last_failure: Failure | None = None
+        self.counts: dict[str, int] = {}
 
     def _failure(self, fallback: str) -> Failure:
         failure = getattr(self.mailbox, "last_failure", None)
         return failure if isinstance(failure, Failure) else Failure(UNKNOWN, text=fallback)
 
     def listing(self, days: int, limit: int) -> Listing | None:
+        # A pass starts here: an exhaustion from an earlier pass of a reused
+        # mailbox is not this pass's.
+        if hasattr(self.mailbox, "quota_exhausted"):
+            self.mailbox.quota_exhausted = False
+        self.counts = {}
         inbox = self.mailbox.list(f"in:inbox newer_than:{days}d", limit)
-        sent = self.mailbox.list(f"in:sent newer_than:{days}d", limit)
+        # A failed inbox listing fails the pass's listing anyway; the sent
+        # listing would only spend quota.
+        sent = None
+        if inbox is not None:
+            sent = self.mailbox.list(f"in:sent newer_than:{days}d", limit)
         if inbox is None or sent is None:
             self.last_failure = self._failure("the listing returned nothing")
             return None
@@ -317,11 +332,19 @@ class GmailSource:
             # The adapter already spent its retries on a quota refusal this
             # pass: every further call would buy the same refusal. The rest go
             # to the ledger for the next pass.
-            return None, Failure(QUOTA, matched="exhausted earlier this pass")
+            return None, Failure(QUOTA, matched="exhausted earlier this pass", sent=False)
         msg = self.mailbox.get(ref)
         if msg is None:
             return None, self._failure("the fetch returned nothing")
-        return mailindex.from_gmail(msg, owners), None
+        parsed = mailindex.from_gmail(msg, owners)
+        if parsed is not None and parsed.header.direction == "in" and (
+            parsed.header.from_addr in owners
+        ):
+            # Counted, and nothing more: without Gmail's SENT label, a From
+            # naming him makes nothing his. Visible so a forgery is observable.
+            self.counts["inbox_from_an_owner_address"] = (
+                self.counts.get("inbox_from_an_owner_address", 0) + 1)
+        return parsed, None
 
     def note(self) -> str:
         return ""

@@ -346,7 +346,9 @@ and a recording sanitiser proves no field bypasses it.
 (the email-poll outage, `docs/web-server.md` §email_poll). Warnings: no pass recorded at all;
 no pass for `STALE_AFTER_S` (45 min — three intervals); an inbox whose listing failed on the
 last N passes, with the last good listing and the typed failure; the Tuta bridge's own
-connection words when it is not connected; mail listed but not yet fetched. Each says what was
+connection words when it is not connected; mail listed but not yet fetched; mail the last pass
+could not parse (and so did not assess); and an inbox NOT read on the last pass, whose old
+streak is then not shown as current (`last_run_at`). Each says what was
 observed, never why. `TestHealth`, `TestWiring` (the slash registration; the web answers
 terminal-only).
 
@@ -357,8 +359,21 @@ terminal-only).
 tutalib generates (`~/.config/aish/tools/_tuta/tutalib.py`, loaded by path; the secret
 `TUTA_BRIDGE_PASSWORD` comes from aish's own store at run time, and its absence fails that
 inbox's listing visibly while Gmail still runs). One shared state tree for both: the ledger
-must see all of his acts whichever inbox they are in, and digest dedup makes a mail delivered to
-both one entry (`TestIdentityNotUid`).
+must see all of his acts whichever inbox they are in.
+
+**Through Tuta a Message-ID is not an identity** (the delivery review's squatting finding). A
+sender writes it, and when a Message-ID alone was the digest, a Tuta mail carrying a real Gmail
+mail's id and an earlier forged Date became that mail to the index and the verdict store — first
+copy won, and the Gmail copy was never read. So `mailindex.digest_for` addresses a non-Gmail
+message by its gateway, Message-ID AND content together; it can never collide with a Gmail
+digest. **This supersedes "digest dedup absorbs cross-delivery" and "first copy wins" for
+anything that is not Gmail**: a mail delivered to both inboxes is now two entries and two
+readings — the stated cost — joined into one conversation by Message-ID. And because two
+messages may claim one id, a reply's parent is resolved by `MailIndex.reply_parent`: claimants
+that agree on the sender are one mail (the Gmail copy preferred); claimants that DISAGREE make
+the reply nobody's act, counted in `Health.ambiguous_parents` — so the ledger, the case store
+and alias admission can lose an act to a squatter but never gain one. `TestMessageIdSquatting`,
+`TestIdentityNotUid`.
 
 **The authenticator is declared by the adapter, never inferred from headers.** Each parser
 stamps `Header.mailbox`; `mailgate.authenticate_header` reads it. Through the Tuta gateway
@@ -366,18 +381,29 @@ nothing prepends a result above the sender's, so the top-most Authentication-Res
 sender's, and a sender-written exact copy of Gmail's would authenticate. So
 `mailindex.from_rfc822` DROPS every Authentication-Results header at parse time, and the Gate
 gives the explicit ending `not_readable_via_gateway` with the reason in words — even for a
-header that somehow survived. Unauthenticated, a Tuta mail is `first-contact` whatever the
-history, opens no case, admits no alias and enters no case's account history; the forged
-perfect-Gmail-header case is pinned end to end. `TestAuthenticationIsDeclaredByTheGateway`.
+header that somehow survived. Unauthenticated, an INBOUND Tuta mail mints nothing on its own
+behalf: its sender is `first-contact` whatever the history, and it opens no case and puts no
+account in a case's history; the forged perfect-Gmail-header case is pinned end to end. **A mail
+in his Tuta Sent folder is his own act and legitimately counts** — acts toward its recipients,
+an owner case from a key in it, admission of the domains he wrote to — as his Gmail sent mail
+does. That rests on the Sent folder being his alone: only Tuta puts mail there, and the bridge
+offers no APPEND, so no IMAP client can. `TestAuthenticationIsDeclaredByTheGateway`.
 
 **Direction is the folder.** On Tuta a mail is `out` iff it sits in his Sent folder
 (`\Sent`, else a folder named Sent). A From header naming one of his addresses is something any
 sender can write; in his inbox it makes nothing his, so it can never become an owner act toward
 the attacker it is addressed to (pinned). Counted, not acted on: `inbox_from_an_owner_address`,
 and `sent_from_an_unlisted_address` — a mail in his Sent folder from an address not passed as
-`--owner`, i.e. an alias the watcher was not told about. **Every alias he sends from must be in
-`--owner`**: on Gmail it still decides direction. `at` is the sender-written Date header on Tuta
-(counted per pass as `at_from_sender`).
+`--owner`, i.e. an alias the watcher was not told about. **Gmail now decides direction the same
+way, by its own evidence**: `out` iff Gmail's `SENT` label (`from_gmail`); a From naming him
+without it is `in`, assessed like any inbound mail, and counted `inbox_from_an_owner_address`
+on the Gmail source (`TestGmailDirection`). Before the S1.5 review a From header decided Gmail
+direction, so a forged From: him minted acts toward its recipient, could open an owner case and
+feed alias admission, and was never assessed. `--owner` still names his addresses, for the
+counters and the bridge address. `at` is the sender-written Date header on Tuta (counted per
+pass as `at_from_sender`). **A Date that will not parse costs the mail its date** (`at_source`
+`none`, `mailindex.date_header_time`), never the mail: before, it made the mail unparseable,
+which let a sender opt a mail out of assessment (`TestMalformedDate`).
 
 **Reading never sets \Seen.** His unread markers are his mailbox state and the shadow's ground
 truth. `message read` runs without `--seen` (the `tuta_read` / `tutalib.read_body`
@@ -393,8 +419,11 @@ first page wholly older than the window. An empty folder is a healthy empty list
 STATUS or page is a failed listing. `TestEnumeration`.
 
 **Provider ids are unstable here** (UIDs renumber on restart, UIDVALIDITY unchanged), so all
-skip-by-id and top-up logic is Gmail-only. A Tuta fetch is skipped only when the envelope's own
-Message-ID maps to a digest the index already holds — an identity the renumbering cannot move.
+skip-by-id and top-up logic is Gmail-only. A Tuta fetch is skipped only when the index already
+holds a TUTA message matching the envelope's Message-ID AND sender address AND subject — an
+identity the renumbering cannot move, and one a squatter matching on the id alone cannot use to
+suppress another mail's fetch. Anything less matching is fetched, and identical content dedups.
+`mailtuta.check_argv` also refuses an `-m` whose value starts with `-`.
 A message renumbered between listing and fetch is still a real message of that folder and is
 kept, counted `renumbered_between_list_and_fetch`.
 
@@ -414,7 +443,13 @@ up to 4 attempts with `QUOTA_BACKOFF_S` (10) doubling, timeout and 5xx one re-is
 refusal is never retried; an unknown one is not either (the behaviour before typing, and an
 unknown is not evidence that another call helps). A quota refusal that outlasts its retries sets
 `quota_exhausted`, and the Gmail source stops asking for the rest of the pass — the remaining
-mail goes to the ledger. The bucket numbers are conservative CHOICES, not measurements; the only
+mail goes to the ledger without spending an attempt (a refusal aish never sent is
+`Failure.sent` False). The flag is reset when a pass starts (`GmailSource.listing`), and a
+failed inbox listing does not go on to spend quota on the sent listing. **The backtest
+honours it too**: `backfill` stops asking once it is set, counts the rest not fetched and says
+so in the report (`quota_stopped`); a re-run into the same `--out` fetches only those
+(`TestExhaustedThisPass`, `test_an_exhausted_quota_stops_the_backfill_asking`). The
+bucket numbers are conservative CHOICES, not measurements; the only
 observation is the 2026-10-24 backtest's 116 unfetched of 862 listed. `TestRetryPolicy`,
 `TestTokenBucket`.
 
@@ -530,17 +565,14 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
   (S3). Until then it is a store he cannot see or shred, written only by this CLI.
 - **The lookalike flag needs admitted domains**, and admission now needs his act toward a sender,
   so early on it has few to compare against.
-- **On Gmail a From header naming him still decides direction (found in S1.5).**
-  `from_gmail` calls a mail `out` when its From is an owner address OR it carries `SENT`. A
-  stranger's inbound mail forging his From, addressed to the stranger's own address, would read
-  as his act toward that address; an authenticated mail from it could then grade `known`. Tuta
-  closes this by deciding direction by folder alone; Gmail was left as S1 shipped it because
-  changing it moves the ledger the backtest measured. Not fixed here.
 - **Tuta's `at` is sender-written.** The Date header is all this gateway gives. It is bounded —
-  an unauthenticated mail opens no case and moves no grade — but a forged Date reorders the
-  index, and a Tuta copy of a mail that arrived first by its claimed Date is the copy the index
-  keeps (first wins), which costs that mail its Gmail authentication: fail-closed, never open.
-  Counted per pass as `at_from_sender`.
+  an inbound unauthenticated mail opens no case and moves no grade, and since the squatting fix
+  it can no longer displace a Gmail copy — but a forged Date still reorders the index and the
+  `as of` questions asked around it. Counted per pass as `at_from_sender`.
+- **A cross-delivered mail is read twice** (once per inbox) since Tuta digests fold in content;
+  a reply naming it resolves to the Gmail copy when the two agree on the sender.
+- **A backtest run directory built before S1.5's direction fix keeps its old directions** on
+  resume (held entries are not re-parsed): re-run a backtest into a fresh `--out`.
 - **The no-\Seen guarantee rests on himalaya's documented behaviour.** The fence pins that no
   argv carries `--seen`; that `message read --raw` without it leaves the flag untouched is
   himalaya's help text ("Without this flag the read leaves the seen state untouched"), the same

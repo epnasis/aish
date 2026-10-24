@@ -168,6 +168,13 @@ def health_lines(state: dict[str, Any] | None, now: float, clean: Clean) -> list
             continue
         streak = int(_float(source.get("failed_listings")))
         label = clean(str(name))[:WORD_CHARS]
+        ran = source.get("last_run_at")
+        if ran is not None and _float(ran) != _float(last_pass):
+            # Not read on the last pass: its streak and counts are history,
+            # and are not shown as current.
+            out.append(("warn", f"watcher: {label} was not read on the last pass; last read "
+                                f"{_when(ran)}"))
+            continue
         if streak:
             failure = clean(str(source.get("last_failure") or ""))[:WHY_CHARS]
             out.append(("warn", (
@@ -180,6 +187,10 @@ def health_lines(state: dict[str, Any] | None, now: float, clean: Clean) -> list
         note = clean(str(source.get("note") or ""))[:WHY_CHARS]
         if note:
             out.append(("warn", f"watcher: {label}: {note}"))
+        unparseable = int(_float(source.get("unparseable")))
+        if unparseable:
+            out.append(("warn", f"watcher: {label}: {unparseable} mail(s) on the last pass could "
+                                "not be parsed and were not assessed"))
         pending = int(_float(source.get("unfetched")))
         if pending:
             out.append(("warn" if streak else "ok",

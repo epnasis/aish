@@ -220,8 +220,30 @@ class TestResume:
         second_box = history()
         second = go(second_box)
         assert [c for c in second_box.calls if c[0] == "get"] == []
-        assert second["window"]["held"] == first["window"]["fetched"]
+        # Each mail counted once: held (in the index) or outside the window.
+        assert second["window"]["held"] + second["window"]["outside_window"] == \
+            first["window"]["fetched"]
+        assert second["window"]["held"] == first["window"]["in_index"]
         assert second["truth_tiers"] == first["truth_tiers"]  # labels survived the skip
+
+    def test_an_exhausted_quota_stops_the_backfill_asking(self, tmp_path):
+        class Exhausting(FakeMailbox):
+            quota_exhausted = False
+
+            def get(self, gid):
+                self.calls.append(("get", gid))
+                self.quota_exhausted = True  # the adapter spent its retries on this one
+                return None
+
+        box = Exhausting(list(history().messages.values()))
+        run = mailbacktest.backfill(box, tmp_path / "state", frozenset({OWNER}), days=90, now=NOW)
+        assert len([c for c in box.calls if c[0] == "get"]) == 1
+        assert run.counts["fetch_failed"] == run.counts["listed"]
+        assert run.counts["quota_stopped"] == 1
+        assert "stopped asking" in mailbacktest.render(
+            {"window": run.counts, "trash_observability": {"trashed_inbound": 0,
+             "oldest_trashed_days": None, "retention_days": 30}, "truth_tiers": {},
+             "selected": 0, "arms": {}, "disagreements": []})
 
     def test_the_run_never_writes_the_live_mail_store(self, tmp_path):
         backtest(tmp_path, {ARM_A: ScriptedReader(careful)})

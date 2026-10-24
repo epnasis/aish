@@ -146,17 +146,32 @@ def backfill(
     index = mailindex.MailIndex(state_dir)
     seen = _read_fetched(state_dir)
     held_ids = {h.provider_id: d for d, h in index.by_digest.items() if h.provider_id}
+    # One mailbox may serve several runs in a process: an exhaustion from an
+    # earlier run is not this one's.
+    if hasattr(mailbox, "quota_exhausted"):
+        mailbox.quota_exhausted = False
+    ordered = list(dict.fromkeys(ids))
     with _fetched_log(state_dir) as remember:
-        for message_id in dict.fromkeys(ids):
+        for position, message_id in enumerate(ordered):
+            if getattr(mailbox, "quota_exhausted", False):
+                # The adapter spent its retries on a quota refusal: every
+                # further get would buy the same refusal, each after a full
+                # backoff. The rest are counted not fetched; a resumed run
+                # into this directory fetches them and re-buys nothing else.
+                counts["fetch_failed"] += len(ordered) - position
+                counts["quota_stopped"] = 1
+                break
             known = seen.get(message_id)
-            if known is not None and (known.get("outside") or message_id in held_ids):
+            if known is not None and known.get("outside"):
+                # Fetched by an earlier run and outside the window: counted
+                # once, as outside, never also as held.
+                counts["outside_window"] += 1
+                continue
+            if known is not None and message_id in held_ids:
                 counts["held"] += 1
-                if known.get("outside"):
-                    counts["outside_window"] += 1
-                else:
-                    digest = held_ids[message_id]
-                    labels[digest] = tuple(sorted(set(labels.get(digest, ()))
-                                                  | set(known.get("labels") or ())))
+                digest = held_ids[message_id]
+                labels[digest] = tuple(sorted(set(labels.get(digest, ()))
+                                              | set(known.get("labels") or ())))
                 continue
             msg = mailbox.get(message_id)
             if msg is None:
@@ -412,6 +427,10 @@ def render(result: dict[str, Any]) -> str:
     ]
     if w.get("listing_failed"):
         lines.append("the mailbox LISTING failed: nothing below describes the window")
+    if w.get("quota_stopped"):
+        lines.append("the Gmail quota refused fetches past its retries: the backfill stopped "
+                     "asking, and the mail it did not fetch is ABSENT below — re-run into the "
+                     "same --out to fetch only those")
     trash = result["trash_observability"]
     lines.append(
         f"trashed inbound observed: {trash['trashed_inbound']} (oldest "
