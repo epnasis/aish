@@ -361,10 +361,13 @@ def run_once(
         if verdicts.has(header.digest, model_spec, charter.digest):
             result.already_recorded += 1
             continue
-        record = assess(
-            index, store, header, charter=charter, model_spec=model_spec, chat=chat,
-            state_dir=state_dir, observation=observed.get(header.digest), now=now(),
-        )
+        try:
+            record = assess(
+                index, store, header, charter=charter, model_spec=model_spec, chat=chat,
+                state_dir=state_dir, observation=observed.get(header.digest), now=now(),
+            )
+        except Exception as exc:  # noqa: BLE001 — one mail's failure is its own record
+            record = mailverdicts.error_record(header, charter, model_spec, exc, now())
         verdicts.write(record)
         result.assessed += 1
         result.endings[record["ending"]] = result.endings.get(record["ending"], 0) + 1

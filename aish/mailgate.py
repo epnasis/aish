@@ -150,8 +150,12 @@ def authenticate(auth_results: tuple[str, ...], from_domain: str) -> Auth:
     if not auth_results:
         return Auth(UNKNOWN, False)
     top = auth_results[0]
-    authserv = top.split(";", 1)[0].strip().lower()
-    if not authserv.startswith(GMAIL_AUTHSERV):
+    # The authserv-id is the first token before ";" (RFC 8601 lets a version
+    # number follow it). EXACT, never a prefix: `mx.google.com.evil.example`
+    # is somebody else's server.
+    head = top.split(";", 1)[0].split()
+    authserv = head[0].lower() if head else ""
+    if authserv != GMAIL_AUTHSERV:
         return Auth(UNKNOWN, False)
     found: dict[str, str] = {}
     for method, result in _RESULT.findall(top):
@@ -286,7 +290,9 @@ def red_flags(header: mailindex.Header, admitted_domains: frozenset[str]) -> tup
         if risky:
             flags.append(Flag("attachment_risky_type", attachment.filename[:80]))
         pieces = name.split(".")
-        if len(pieces) >= 3 and 2 <= len(pieces[-2]) <= 4 and pieces[-2].isalpha():
+        # `.tar.gz` is one compound suffix, not a disguise.
+        if (len(pieces) >= 3 and 2 <= len(pieces[-2]) <= 4 and pieces[-2].isalpha()
+                and pieces[-2] != "tar"):
             flags.append(Flag("attachment_double_extension", attachment.filename[:80]))
     return tuple(dict.fromkeys(flags))
 

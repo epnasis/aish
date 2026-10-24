@@ -59,6 +59,11 @@ FALLBACK_WINDOW_DAYS = 30
 # bounds what one hostile message can make every later bundle carry.
 BODY_CHARS = 20000
 
+# How deep and how wide a MIME tree is walked. Real mail nests a handful of
+# levels; the caps bound what a hostile one can make the parser do.
+MAX_MIME_DEPTH = 32
+MAX_MIME_PARTS = 500
+
 # The words mail clients put in front of a reply's or a forward's subject.
 # Consulted only for a message with NO reply headers, to decide whether the
 # subject fallback may link it at all: a miss BREAKS that fallback quietly (the
@@ -112,9 +117,12 @@ def normalize_subject(subject: str) -> str:
     return " ".join(text.split()).casefold()
 
 
-def has_reply_prefix(subject: str) -> bool:
+def has_reply_prefix(subject: str, *, count: bool = True) -> bool:
+    """`count=False` for a RE-decision (an index reload): the counter is about
+    how often a message needed the fallback, not how often the index loaded."""
     found = bool(_REPLY_PREFIX.match(subject or ""))
-    vocab.note("mailindex._REPLY_PREFIXES", matched=found)
+    if count:
+        vocab.note("mailindex._REPLY_PREFIXES", matched=found)
     return found
 
 
@@ -257,19 +265,30 @@ def _decode(data: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _walk(part: dict, plain: list[str], htmls: list[str], files: list[Attachment]) -> None:
-    mime = str(part.get("mimeType") or "").lower()
-    filename = str(part.get("filename") or "")
-    body = part.get("body") or {}
-    if filename:
-        files.append(Attachment(filename, mime))
-    elif mime == "text/plain":
-        plain.append(_decode(str(body.get("data") or "")))
-    elif mime == "text/html":
-        htmls.append(_decode(str(body.get("data") or "")))
-    for child in part.get("parts") or ():
-        if isinstance(child, dict):
-            _walk(child, plain, htmls, files)
+def _walk(root: dict, plain: list[str], htmls: list[str], files: list[Attachment]) -> None:
+    """Every MIME part, depth-first, iteratively and bounded: a hostile mail
+    nesting thousands of parts must cost its own parse, not the pass."""
+    stack: list[tuple[dict, int]] = [(root, 0)]
+    seen = 0
+    while stack and seen < MAX_MIME_PARTS:
+        part, depth = stack.pop()
+        seen += 1
+        mime = str(part.get("mimeType") or "").lower()
+        filename = str(part.get("filename") or "")
+        body = part.get("body") or {}
+        if not isinstance(body, dict):
+            body = {}
+        if filename:
+            files.append(Attachment(filename, mime))
+        elif mime == "text/plain":
+            plain.append(_decode(str(body.get("data") or "")))
+        elif mime == "text/html":
+            htmls.append(_decode(str(body.get("data") or "")))
+        if depth >= MAX_MIME_DEPTH:
+            continue
+        children = part.get("parts") or ()
+        if isinstance(children, list):
+            stack.extend((c, depth + 1) for c in reversed(children) if isinstance(c, dict))
 
 
 _ANCHOR = re.compile(r"<a\b[^>]*?href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a\s*>", re.I | re.S)
@@ -309,7 +328,20 @@ class Parsed:
 
 
 def from_gmail(msg: dict, owner_addresses: frozenset[str] | set[str]) -> Parsed | None:
-    """One `gws gmail users messages get` response (format full or metadata)."""
+    """One `gws gmail users messages get` response (format full or metadata),
+    or None when it cannot be read — which every caller COUNTS as unparseable.
+
+    Contained per mail: the payload is written by a stranger, and one mail
+    whose Date header or MIME tree breaks the parser must cost that mail and
+    nothing else — never the pass, and never every later backtest over a
+    window it sits in."""
+    try:
+        return _from_gmail(msg, owner_addresses)
+    except Exception:  # noqa: BLE001 — containment is the point
+        return None
+
+
+def _from_gmail(msg: dict, owner_addresses: frozenset[str] | set[str]) -> Parsed | None:
     if not isinstance(msg, dict):
         return None
     headers = _gmail_headers(msg)
@@ -409,9 +441,9 @@ class MailIndex:
     from the RESULT would still hand an earlier mail the joined structure —
     structure only the future created. So the links each message carries are
     stored, and a conversation is the union over messages at or before `as_of`
-    only. The subject fallback is decided once, at admission, against the
-    messages earlier than the one admitted — so it too depends on nothing
-    later.
+    only. The subject fallback is decided at admission against the messages
+    earlier than the one admitted — so it depends on nothing later — and is
+    re-decided the same way at every load (see `_load`).
     """
 
     def __init__(self, state_dir: os.PathLike | str | None = None) -> None:
@@ -448,10 +480,13 @@ class MailIndex:
                 self.health.unreadable.append(path.name)
                 continue
             loaded.append(header)
-        # Re-admitted in position order, so the subject fallback reaches the
-        # same answer it did when each message first arrived in order.
+        # Re-admitted in position order. The subject fallback is RE-decided
+        # here against the messages earlier than each one — so a mail fetched
+        # in a later pass but older than others can change a link. A verdict
+        # already recorded keeps the bundle it was given (its bytes are in the
+        # evidence store); it is never recomputed from today's index.
         for header in sorted(loaded, key=lambda h: h.position):
-            self._admit(header)
+            self._admit(header, count=False)
         self.health.loaded = len(loaded)
 
     # -- writing
@@ -480,14 +515,14 @@ class MailIndex:
         self._admit(header)
         return True
 
-    def _admit(self, header: Header) -> None:
+    def _admit(self, header: Header, count: bool = True) -> None:
         self.by_digest[header.digest] = header
         self._cache.clear()
         if header.message_id:
             self.by_mid.setdefault(header.message_id, header.digest)
         if header.in_reply_to or header.references:
             self.linked_by[header.digest] = "headers"
-        elif has_reply_prefix(header.subject):
+        elif has_reply_prefix(header.subject, count=count):
             match = self._fallback_parent(header)
             if match is not None:
                 self.fallback[header.digest] = match.digest

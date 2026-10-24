@@ -87,7 +87,8 @@ _KEY_KINDS = {
 }
 
 _KEY_PATTERN = re.compile(
-    r"(?P<word>" + "|".join(re.escape(w) for w in sorted(_KEY_WORDS, key=len, reverse=True))
+    # The leading \b: "border 12345" and "preorder X9123" are not orders.
+    r"\b(?P<word>" + "|".join(re.escape(w) for w in sorted(_KEY_WORDS, key=len, reverse=True))
     + r")\w*\.?\s*(?:no\.?|nr\.?|number|numer|code|kod|id)?\s*[:#]?\s*"
     r"(?P<key>[A-Z0-9][A-Z0-9/-]{3,29})\b",
     re.I,
@@ -148,6 +149,7 @@ def _cents(number: str) -> int | None:
 def extract_amounts(text: str) -> tuple[tuple[str, int], ...]:
     """(currency, cents) for every amount with a currency next to it."""
     found: list[tuple[str, int]] = []
+    # A zero amount ("0,00 zł to pay") correlates nothing, so it is not kept.
     for number, currency in _AMOUNT_AFTER.findall(text or ""):
         cents = _cents(number)
         if cents:
@@ -268,7 +270,20 @@ class Case:
         return {d for d, v in self.admitted.items() if v["at"] < as_of}
 
     def coordinates_before(self, as_of: Position) -> set[str]:
-        return {c["value"] for c in self.coordinates if c["at"] < as_of}
+        """The case's account history as of the mail.
+
+        When the case has ADMITTED senders, only accounts those senders sent
+        count. Otherwise a stranger passing DMARC on its own domain could mail
+        the order number with its own account first, and that account would
+        then read as "the case's account" — the comparison would vouch for
+        the very value it exists to question. With no admitted sender yet the
+        whole authenticated history is all there is, and that is weaker; it
+        is stated in `docs/mail-assistant.md`, not hidden."""
+        admitted = self.admitted_before(as_of)
+        return {
+            c["value"] for c in self.coordinates
+            if c["at"] < as_of and (not admitted or c.get("domain") in admitted)
+        }
 
     def last_before(self, as_of: Position) -> Position | None:
         earlier = [p for p in self.mails if p < as_of]
@@ -389,7 +404,9 @@ class CaseStore:
                     for currency, cents in extract_amounts(text):
                         case.amounts.append({"currency": currency, "cents": cents, "at": position})
                     for value in extract_coordinates(text):
-                        case.coordinates.append({"value": value, "at": position})
+                        case.coordinates.append(
+                            {"value": value, "at": position, "domain": domain}
+                        )
             self._save(case)
         return Observation(keys, tuple(sorted(touched)), created, tuple(admitted))
 

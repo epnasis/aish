@@ -77,14 +77,21 @@ correspondent. `TestThreadReconstruction`.
 References name two earlier conversations joins them. An index that unioned everything and
 then hid later messages from the result would still hand an earlier mail the joined structure
 — structure only the future created. So `conversation` rebuilds the union over messages at or
-before `as_of` only, and the subject fallback is decided once, at admission, against earlier
-messages. Found by the design review; the bridging case is pinned. `TestFrozenClock`.
+before `as_of` only, and the subject fallback is decided against earlier messages only — at
+admission, and again the same way at every load. A load can therefore change a link when an
+older mail was fetched in a later pass; a verdict already recorded keeps the bundle it was given
+(its bytes are in the evidence store) and is never recomputed. Found by the design review; the
+bridging case is pinned. `TestFrozenClock`.
 
 **Persistence.** One JSON file per message under `<state>/mail/index/`, written through
 `atomic_write`; no thread id is ever stored. The BODY goes to the evidence store, which is
 purgeable by contract, and the index keeps its digest; a purged body reads as
 `[body not recorded]`, never as an empty mail. One unreadable file costs that message and is
-counted in `Health.unreadable`. `TestPersistence`, `TestGmailParse`.
+counted in `Health.unreadable`. **Parsing is contained per mail too**: `from_gmail` walks the MIME
+tree iteratively within `MAX_MIME_DEPTH` (32) and `MAX_MIME_PARTS` (500), and a payload that
+still breaks it is `None`, counted `unparseable` — a hostile mail nesting thousands of parts raised
+out of the first draft and would have stopped every pass it was listed in (found in delivery
+review). `TestPersistence`, `TestGmailParse`.
 
 **`at` is the provider's receipt time** (`internalDate`) when there is one, because the Date
 header is written by the sender. `at_source` records which.
@@ -93,10 +100,15 @@ header is written by the sender. `at_source` records which.
 
 **Authentication reads the TOP-MOST Authentication-Results header, and only Gmail's.** A
 sender can write any number of Authentication-Results headers; Gmail prepends its own above
-them. `authenticate` reads the first, requires authserv-id `mx.google.com` (`GMAIL_AUTHSERV`),
-and calls the mail authenticated on `dmarc=pass`, or on an aligned `dkim=pass` under a domain
-with no DMARC policy. This tightens `email_poll.dmarc_pass`, which substring-matches the first
-header without checking who wrote it. `TestAuthentication`.
+them. `authenticate` reads the first, requires its authserv-id to be EXACTLY `mx.google.com`
+(`GMAIL_AUTHSERV`; a prefix test read `mx.google.com.evil.example` as Gmail until delivery
+review), and calls the mail authenticated on `dmarc=pass`, or on an aligned `dkim=pass` under a
+domain with no DMARC policy. This tightens `email_poll.dmarc_pass`, which substring-matches the
+first header without checking who wrote it. **The guarantee holds for mail Gmail received by
+SMTP**, where Gmail's header is the top one by construction. Mail Gmail did not receive that way
+— fetched from another mailbox, imported — may carry no Gmail-written header at all, and then
+the top-most one is the sender's, an exact forgery of Gmail's included; nothing here can tell
+the two apart. Named under *Residuals*. `TestAuthentication`.
 
 **Red flags, structural first.** Link text showing a domain other than the link's host, an
 IP-literal host, userinfo in the URL, a punycode host, a lookalike of an ADMITTED domain
@@ -145,7 +157,11 @@ and carrying a digit, the UPS shape without one; amounts beside a currency
 **A case is opened by code**, from an explicit key in a mail he sent (`created_by: owner`) or in
 an AUTHENTICATED inbound mail. An unauthenticated stranger cannot plant a case, and its payment
 coordinates never enter a case's history — otherwise a spoofer could seed the account it later
-asks to be paid to. `TestCaseCreation`.
+asks to be paid to. **Authenticated is not enough for the history either**: a sender passing DMARC
+on its OWN domain can mail the order number with its own account first. So once a case has an
+admitted sender, its account history is only what admitted senders sent (`coordinates_before`);
+before it has one, the whole authenticated history is all there is, and that is weaker.
+`TestCaseCreation`.
 
 **Alias admission is deterministic corroboration, and the corroboration is HIS.** A sender
 domain is admitted on a case when it was seen there in authenticated mail AND he then acted on
@@ -169,11 +185,15 @@ reasons. **Only facts STRICTLY before the mail count**, so a mail never correlat
 it opened itself. The courier/store pair — a courier notice naming the store, two days after the
 order, with no shared key — is the synthetic case pinned here. `TestCorrelator`.
 
-**Deterministic case flags** (`case_flags`): `coordinates_changed` names each linked case whose
-history lacks an account this mail carries — code's comparison, over the Reader's validated
-extraction and code's own regex hits together; `sender_not_admitted` names each linked case with
-admitted senders that do not include this one. Linked cases are the key-linked ones plus the
-Reader's chosen candidate. `TestCaseFlags`.
+**Deterministic case flags** (`case_flags`): `coordinates_changed` names each linked case that
+HAS an account history and whose history lacks an account this mail carries — code's comparison,
+over the Reader's validated extraction and code's own regex hits together; `sender_not_admitted`
+names each linked case that HAS admitted senders, none of them this one. Linked cases are the
+key-linked ones plus the Reader's chosen candidate. **Both need a prior, and the corner without
+one draws no flag**: a case he opened from his own sent mail (a key, no account, no admitted
+sender yet), then an unauthenticated stranger quoting the leaked order number and asking payment
+to a fresh account — zero case flags; only the Reader's judged axes and the Gate's authentication
+verdict stand. `TestCaseFlags`.
 
 **Persistence**: one file per case under `<state>/mail/cases/`, `atomic_write`, unreadable
 counted; `evict` removes a case whole and leaves a dated tombstone. Nothing calls `evict` in S1
@@ -219,7 +239,9 @@ fails validation. `TestAskForMore`.
 
 **An answer that will not parse is its own ending.** Two failed validations are `invalid`, with
 no verdict — never a guess. A newsletter is `gated` with no call; no admission is `unadmitted`
-with no call. `TestRead`.
+with no call. An assessment that RAISES is that mail's own `error` record, naming the exception
+and not final, so the next pass tries it again and the rest of the pass is untouched
+(`error_record`). `TestRead`, `TestShadowPass`.
 
 **The exam is synthetic, and the owner's real half lives in the private tree.** The repository
 is public, so every shipped case is invented (the `docs/replay.md` law); `roles.owner_cases`
@@ -230,7 +252,8 @@ the hard axis (a free-mail address speaking for the shop; a lookalike changing t
 lawful `cannot_tell` (a thin reply with no context), and injection (a mail instructing its reader
 how to classify it; a mail posing as aish's own voice). `absent` needles that `sanitize` would
 remove anyway are not used — a check that cannot fail is documentation wearing a test's clothes
-(`docs/roles.md`).
+(`docs/roles.md`); that is why the injection case asserts on `right away` and not on the
+URL it pushes, which `sanitize` turns into `[link]` whatever the model does.
 
 ## The record and the store — `mailverdicts.py`
 
@@ -320,6 +343,16 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
   joins that conversation in the Reader's bundle (it cannot inherit his acts — the ledger fence
   above). The bundle shows each message's sender, and `sender_case` exists for this; nothing
   structural stops the join.
+- **Authentication is only as good as Gmail's header being there.** For mail Gmail received
+  directly, the top-most Authentication-Results is Gmail's by construction. For mail it fetched or
+  imported from elsewhere it may write none, and a sender-written exact copy of Gmail's would read
+  as authenticated. The consequence is bounded: authentication alone mints no grade (that needs
+  his acts) and admits no alias (that needs his act toward the sender), but it does let such a
+  mail open a case and enter an un-admitted case's account history. The owner's Gmail account is
+  assumed to receive directly; nothing here checks that.
+- **A case's account history is weakest before it has an admitted sender** — then it is the whole
+  authenticated history, which a stranger passing DMARC on its own domain can seed. Once a sender
+  is admitted, only admitted senders' accounts count.
 - **Coarse registrable domain.** `link_text_mismatch` compares the last two labels, so
   `a.co.uk` and `b.co.uk` read as one; it only ever fails to flag, never grants.
 - **The case store has no owner surface yet** — no list, no delete path. The design requires one

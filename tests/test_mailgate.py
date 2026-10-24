@@ -26,6 +26,13 @@ class TestAuthentication:
         auth = auth_of(msg)
         assert auth.verdict == mailgate.FAIL and not auth.authenticated
 
+    def test_the_authserv_id_is_matched_exactly_never_as_a_prefix(self):
+        """Found in delivery review: a prefix test read this server as Gmail."""
+        forged = ("mx.google.com.evil.example; dmarc=pass header.from=bank.example",)
+        assert mailgate.authenticate(forged, "bank.example").verdict == mailgate.UNKNOWN
+        versioned = ("mx.google.com 1; dmarc=pass header.from=bank.example",)
+        assert mailgate.authenticate(versioned, "bank.example").authenticated
+
     def test_a_top_header_from_another_authserv_is_unknown(self):
         msg = gmail("a", frm="a@x.example", auth="relay.evil.example; dmarc=pass")
         assert auth_of(msg).verdict == mailgate.UNKNOWN
@@ -74,6 +81,10 @@ class TestRedFlags:
         risky = {f.detail for f in flags if f.what == "attachment_risky_type"}
         assert risky == {"invoice.pdf.exe", "x.scr"}  # ".js" is not ".json"
         assert any(f.what == "attachment_double_extension" for f in flags)
+        tarball = mailgate.red_flags(
+            parsed(gmail("t", frm="a@x.example", attachments=("backup.tar.gz",))).header,
+            frozenset())
+        assert tarball == ()
 
 
 class TestNewsletter:

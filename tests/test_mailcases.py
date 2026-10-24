@@ -47,6 +47,9 @@ class TestExtraction:
         assert keys == {"LS-48213": "order", "4471-2290": "order",
                         "1Z999AA10123456784": "tracking"}
 
+    def test_an_introducing_word_must_be_a_whole_word(self):
+        assert mailcases.extract_keys("the border 12345 crossing, a preorder X9123") == {}
+
     def test_amounts_in_both_writing_conventions(self):
         assert mailcases.extract_amounts("Kwota 1 249,00 zł oraz EUR 12.50") == (
             ("PLN", 124900), ("EUR", 1250))
@@ -207,6 +210,29 @@ class TestCaseFlags:
         flags = mailcases.case_flags(store, change, (), [case.id])
         assert flags.sender_not_admitted == (case.id,)
         assert mailgate.lookalike_of("bui1der.example", store.admitted_domains(change.position))
+
+    def test_a_stranger_cannot_seed_the_account_it_later_asks_for(self):
+        """Found in delivery review's wake: a sender passing DMARC on its OWN
+        domain mails the order number with its own account; once the case has
+        an admitted sender, only that sender's accounts are the history."""
+        order = gmail("o", frm=OWNER, to="shop@shop.example", subject="Order LS-77001",
+                      at=T0, labels=("SENT",), message_id="o@example.org")
+        shop = gmail("s", frm="shop@shop.example", subject="Re: Order LS-77001",
+                     body=f"Pay order LS-77001 to {IBAN_OLD}", at=T0 + 60,
+                     in_reply_to="o@example.org", message_id="s@shop.example")
+        thanks = gmail("t", frm=OWNER, to="shop@shop.example", subject="Re: Order LS-77001",
+                       at=T0 + 120, in_reply_to="s@shop.example", labels=("SENT",))
+        seed = gmail("x1", frm="billing@shop-billing.example", subject="Order LS-77001",
+                     body=f"Order LS-77001: account {IBAN_NEW}", at=T0 + DAY)
+        ask = gmail("x2", frm="billing@shop-billing.example", subject="Order LS-77001 overdue",
+                    body=f"Pay order LS-77001 now to {IBAN_NEW}", at=T0 + 2 * DAY)
+        index, store = build(order, shop, thanks, seed, ask)
+        (case,) = store.cases.values()
+        assert set(case.admitted) == {"shop.example"}
+        flags = mailcases.case_flags(store, header(index, ask),
+                                     mailcases.extract_coordinates(IBAN_NEW), [case.id])
+        assert flags.coordinates_changed == (case.id,)
+        assert flags.sender_not_admitted == (case.id,)
 
     def test_an_unauthenticated_mail_never_enters_the_account_history(self):
         _index, store, _change = self.builder_case(later_auth="fail")

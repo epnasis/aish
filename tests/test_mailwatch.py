@@ -133,6 +133,26 @@ class TestShadowPass:
         assert [m["direction"] for m in bundle["messages"]] == [
             "to_owner", "from_owner", "to_owner"]
 
+    def test_one_mail_that_breaks_the_assessment_is_its_own_record(self, tmp_path, monkeypatch):
+        from aish import mailreader
+
+        real = mailreader.read
+
+        def flaky(charter, index, store, header, facts, **kw):
+            if header.provider_id == "i":
+                raise KeyError("boom")
+            return real(charter, index, store, header, facts, **kw)
+
+        monkeypatch.setattr(mailreader, "read", flaky)
+        reader = ScriptedReader(lambda b: verdict_json(citations=[b["mail"]]))
+        result = run(tmp_path, builder_mailbox(), reader)
+        held = records(tmp_path)
+        assert held["i"]["ending"] == "error" and "KeyError" in held["i"]["why"]
+        assert held["c"]["ending"] == "ok" and result.assessed == 3
+        monkeypatch.setattr(mailreader, "read", real)
+        again = run(tmp_path, builder_mailbox(), reader)
+        assert again.assessed == 1 and records(tmp_path)["i"]["ending"] == "ok"
+
     def test_no_model_named_is_a_recorded_ending(self, tmp_path):
         run(tmp_path, builder_mailbox(), None, model="")
         assert records(tmp_path)["i"]["ending"] == roles.Status.UNAVAILABLE

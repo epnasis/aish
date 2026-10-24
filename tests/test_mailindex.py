@@ -181,6 +181,37 @@ class TestGmailParse:
                     extra_ar=("evil.example; dmarc=pass",))
         assert parsed(msg).header.auth_results[0].startswith("mx.google.com")
 
+    def test_a_hostile_mime_tree_costs_its_own_parse_and_nothing_more(self):
+        """Found in delivery review: a 3000-deep tree raised RecursionError out
+        of the parser and would have stopped every pass it was listed in."""
+        msg = gmail("deep", frm="a@x.example", body="top")
+        node = {"mimeType": "multipart/mixed", "parts": []}
+        msg["payload"]["parts"].append(node)
+        for _ in range(3000):
+            child = {"mimeType": "multipart/mixed", "parts": []}
+            node["parts"] = [child]
+            node = child
+        item = mailindex.from_gmail(msg, OWNERS)
+        assert item is not None and item.body == "top"
+
+    def test_an_unreadable_payload_is_none_never_an_exception(self):
+        broken = gmail("b", frm="a@x.example")
+        del broken["internalDate"]
+        for h in broken["payload"]["headers"]:
+            if h["name"] == "Date":
+                h["value"] = "not a date at all"
+        broken["payload"]["parts"] = "not a list"
+        assert mailindex.from_gmail(broken, OWNERS) is None  # the Date header raised inside
+        assert mailindex.from_gmail({"payload": 7}, OWNERS) is None
+
+    def test_a_reload_does_not_count_the_reply_prefix_again(self, tmp_path):
+        from aish import vocab
+
+        index_of(gmail("a", frm="a@x.example", subject="Re: hi", at=T0), state_dir=tmp_path)
+        vocab.reset()
+        mailindex.MailIndex(tmp_path)
+        assert "mailindex._REPLY_PREFIXES" not in vocab.drain()
+
     def test_a_stored_header_round_trips(self):
         header = parsed(gmail("a", frm="a@x.example", html='<a href="https://h.example">t</a>',
                               attachments=("a.pdf",))).header

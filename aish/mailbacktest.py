@@ -202,10 +202,13 @@ def run_arms(
                 if isinstance(held, dict):
                     mine[header.digest] = held
                     continue
-            record = mailwatch.assess(
-                run.index, run.store, header, charter=charter, model_spec=spec, chat=chat,
-                state_dir=state_dir, propose=False, check_admission=check_admission,
-            )
+            try:
+                record = mailwatch.assess(
+                    run.index, run.store, header, charter=charter, model_spec=spec, chat=chat,
+                    state_dir=state_dir, propose=False, check_admission=check_admission,
+                )
+            except Exception as exc:  # noqa: BLE001 — one mail's failure is its own record
+                record = mailverdicts.error_record(header, charter, spec, exc)
             verdicts.write(record)
             mine[header.digest] = record
     return out

@@ -30,6 +30,10 @@ VERDICTS_DIRNAME = "verdicts"
 RECORD_KIND = "mail_verdict"
 RECORD_VERSION = 1
 FINAL_ENDINGS = frozenset({roles.Status.OK, roles.Status.INVALID, mailreader.GATED})
+# The assessment itself raised. Recorded rather than lost, NOT final (the next
+# pass tries again), and its `why` names the exception — what was observed,
+# never a guess at the cause.
+ERROR = "error"
 
 # The Reader's closed axes, declared as vocabularies so their consultation is
 # counted beside every other word list aish matches (`docs/vocabularies.md`).
@@ -189,6 +193,22 @@ def build_record(
             "created": observation.created,
             "admitted": list(observation.admitted),
         },
+        "recorded_at": time.time() if now is None else now,
+    }
+
+
+def error_record(
+    header: mailindex.Header, charter: roles.Charter, model: str, exc: BaseException,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """The record for a mail whose assessment raised: one mail's failure is
+    that mail's record, never the pass's."""
+    return {
+        "kind": RECORD_KIND, "v": RECORD_VERSION, "mail": header.digest,
+        "provider_id": header.provider_id, "at": header.at, "at_source": header.at_source,
+        "direction": header.direction, "model": model, "charter": charter.name,
+        "version": charter.version, "charter_digest": charter.digest, "ending": ERROR,
+        "why": f"{type(exc).__name__}: {exc}"[:400], "verdict": None,
         "recorded_at": time.time() if now is None else now,
     }
 
