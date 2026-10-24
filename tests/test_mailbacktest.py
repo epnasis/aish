@@ -204,6 +204,25 @@ class TestResume:
         backtest(tmp_path, {ARM_A: reader})
         assert reader.calls == calls
 
+    def test_a_resumed_run_re_buys_no_fetch_and_keeps_its_truth(self, tmp_path):
+        charter = reader_charter()
+        admit(tmp_path / "real-state", charter, ARM_A)
+
+        def go(box):
+            return mailbacktest.run_backtest(
+                mailbox=box, owner_addresses=frozenset({OWNER}),
+                arms={ARM_A: ScriptedReader(careful)}, charter=charter,
+                out_dir=tmp_path / "run", days=60, now=NOW,
+                admission_state_dir=tmp_path / "real-state")
+
+        first_box = history()
+        first = go(first_box)
+        second_box = history()
+        second = go(second_box)
+        assert [c for c in second_box.calls if c[0] == "get"] == []
+        assert second["window"]["held"] == first["window"]["fetched"]
+        assert second["truth_tiers"] == first["truth_tiers"]  # labels survived the skip
+
     def test_the_run_never_writes_the_live_mail_store(self, tmp_path):
         backtest(tmp_path, {ARM_A: ScriptedReader(careful)})
         assert not (tmp_path / "mail").exists()

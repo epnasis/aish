@@ -1,40 +1,51 @@
-"""`aish-mailwatch` — the inbox assistant in SHADOW mode (#142 W5, slice S1).
+"""`aish-mailwatch` — the inbox assistant in SHADOW mode (#142 W5, S1 + S1.5).
 
-Every new mail in the owner's personal inbox flows Gate → Reader → a recorded
-verdict, and the verdict acts on NOTHING: no label is changed, nothing is
-archived or trashed, nobody is notified. What it produces is the verdict store
-(`mailverdicts`) and the counters over it, for the driver to read.
+Every new mail in the owner's personal inboxes — Gmail and, with
+`--source tuta`, his primary Tutanota mailbox — flows Gate → Reader → a
+recorded verdict, and the verdict acts on NOTHING: no label is changed,
+nothing is archived or trashed, nobody is notified. What it produces is the
+verdict store (`mailverdicts`), the counters over it, and a health file; the
+owner reads all of it with `/mail` in the terminal (`mailview`).
 
-    aish-mailwatch --once --account pawel@wenda.eu --model <spec>
+    aish-mailwatch --once --account pawel@wenda.eu --owner pawel@wenda.email \\
+        --source gmail --source tuta --model <spec>
     aish-mailwatch --counters        # what the store holds; no mail, no model
 
-**Read-only by construction, not by care.** Every call to the mailbox goes
-through `GwsMailbox`, whose runner refuses any `gws` invocation outside
-`READ_ONLY_CALLS` (list and get) before a process is spawned. There is no code
-here that could modify, label, send or delete.
+**Read-only by construction, not by care.** Every Gmail call goes through
+`GwsMailbox`, which refuses any `gws` invocation outside `READ_ONLY_CALLS`
+(list and get) before a process is spawned; every Tuta call goes through
+`mailtuta.check_argv`, which refuses any himalaya argv outside its allowlist
+of subcommands AND flags (so `--seen` is refused). There is no code here that
+could modify, label, send or delete.
 
-**Fail closed on credentials.** The account must have its own credential
-directory (`~/.config/gws-accounts/<email>/`, the per-account pattern the
-owner's gmail tools use); a missing one refuses the run rather than falling
-back to another account's mailbox.
+**Fail closed on credentials.** The Gmail account must have its own credential
+directory (`~/.config/gws-accounts/<email>/`); a missing one refuses the run.
+A missing Tuta secret fails that source's listing, visibly, and the Gmail
+half still runs.
 
-The effectful edges — the gws runner, the clock, the model's chat callable —
-are parameter seams, so the tests use a fake mailbox, a scripted role and no
-sleeps, in the shape `email_poll.run_poll` already proved.
+**One pass at a time.** `pass_lock` takes an exclusive `flock` on
+`<state>/mail/watch.lock`; a second pass started while one runs (launchd's
+interval beside a manual `--once`) exits without touching anything. The lock
+dies with its process, so there is no stale lock to clear.
 
-`docs/mail-assistant.md`.
+The effectful edges — the gws runner, the himalaya runner, the clock, the
+sleeps, the model's chat callable — are parameter seams, so the tests use
+fakes and no sleeps. `docs/mail-assistant.md`.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import dataclasses
 import datetime
+import fcntl
 import json
 import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -50,6 +61,23 @@ from . import (
     roles,
     vocab,
 )
+from .mailsource import (
+    MISSING,
+    PARSE,
+    QUOTA,
+    TIMEOUT,
+    Failure,
+    GmailSource,
+    Outcome,
+    ReadOnlyViolation,
+    TokenBucket,
+    UnfetchedLedger,
+    backoff_s,
+    classify_gws,
+    should_retry,
+)
+
+__all__ = ["ReadOnlyViolation", "GwsMailbox", "run_once", "main"]
 
 READ_ONLY_CALLS = frozenset({
     ("gmail", "users", "messages", "list"),
@@ -59,20 +87,16 @@ READ_ONLY_CALLS = frozenset({
 DEFAULT_DAYS = 2
 DEFAULT_MAX = 50
 GWS_TIMEOUT = 60
+SOURCES = ("gmail", "tuta")
 
-Runner = Callable[[list[str], dict[str, str]], "dict | list | None"]
+Runner = Callable[[list[str], dict[str, str]], "Outcome | dict | list | None"]
 
 
 def log(msg: str) -> None:
     print(f"[mailwatch] {msg}", file=sys.stderr, flush=True)
 
 
-# ---------------------------------------------------------------- the mailbox
-
-
-class ReadOnlyViolation(RuntimeError):
-    """A gws call outside the read-only allowlist. Raised before any process
-    is spawned: this is the enforcing line for "S1 makes read-only calls"."""
+# ---------------------------------------------------------------- the Gmail mailbox
 
 
 def accounts_root() -> Path:
@@ -98,34 +122,71 @@ def account_env(account: str) -> tuple[dict[str, str] | None, str]:
     return env, ""
 
 
-def default_runner(args: list[str], env: dict[str, str]) -> dict | list | None:
+def default_runner(args: list[str], env: dict[str, str]) -> Outcome:
+    """One `gws` call, its failure TYPED (`mailsource.classify_gws`). Never
+    retries: the retry policy is `GwsMailbox._call`'s, and only its."""
     try:
         done = subprocess.run(
             ["gws", *args], capture_output=True, text=True, timeout=GWS_TIMEOUT, env=env
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        log(f"gws {args[:4]} failed: {exc}")
-        return None
+    except FileNotFoundError as exc:
+        return Outcome(failure=Failure(MISSING, matched="FileNotFoundError", text=str(exc)))
+    except subprocess.TimeoutExpired:
+        return Outcome(failure=Failure(TIMEOUT, matched=f"{GWS_TIMEOUT}s"))
     if done.returncode != 0:
-        log(f"gws {args[:4]} rc={done.returncode}: {done.stderr.strip()[:200]}")
-        return None
+        return Outcome(failure=classify_gws(done.returncode, done.stderr, done.stdout))
     try:
-        return json.loads(done.stdout)
+        return Outcome(json.loads(done.stdout))
     except json.JSONDecodeError:
-        return None
+        return Outcome(failure=Failure(PARSE, matched="not JSON", text=done.stdout[:200]))
 
 
 class GwsMailbox:
-    """The owner's Gmail through `gws`, read-only."""
+    """The owner's Gmail through `gws`, read-only, paced and retried.
 
-    def __init__(self, env: dict[str, str], runner: Runner = default_runner) -> None:
+    Every caller — the watcher and the backtest — inherits the bucket and the
+    backoff, because both live in `_call`. After a quota refusal that
+    survives its retries, `quota_exhausted` is set and the sources stop
+    asking for the rest of the pass (`mailsource.GmailSource.fetch`)."""
+
+    def __init__(
+        self,
+        env: dict[str, str],
+        runner: Runner = default_runner,
+        *,
+        bucket: TokenBucket | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.env = env
         self.runner = runner
+        self.sleep = sleep
+        self.bucket = bucket if bucket is not None else TokenBucket(sleep=sleep)
+        self.last_failure: Failure | None = None
+        self.quota_exhausted = False
+        self.failures: dict[str, int] = {}
+        self.retries = 0
 
     def _call(self, args: list[str]) -> dict | list | None:
         if tuple(args[:4]) not in READ_ONLY_CALLS:
             raise ReadOnlyViolation(f"refused: gws {' '.join(args[:4])} is not read-only")
-        return self.runner(args, self.env)
+        attempt = 0
+        while True:
+            attempt += 1
+            self.bucket.take()
+            raw = self.runner(args, self.env)
+            outcome = raw if isinstance(raw, Outcome) else Outcome(raw)
+            if outcome.failure is None and outcome.value is not None:
+                self.last_failure = None
+                return outcome.value
+            failure = outcome.failure or Failure(PARSE, matched="empty reply")
+            self.failures[failure.kind] = self.failures.get(failure.kind, 0) + 1
+            if not should_retry(failure, attempt):
+                self.last_failure = failure
+                if failure.kind == QUOTA:
+                    self.quota_exhausted = True
+                return None
+            self.retries += 1
+            self.sleep(backoff_s(failure, attempt))
 
     def list(self, query: str, limit: int, include_trash: bool = False) -> list[str] | None:
         """Message ids matching `query`, up to `limit`; None if the listing failed."""
@@ -158,6 +219,12 @@ class GwsMailbox:
         return msg if isinstance(msg, dict) else None
 
 
+def as_source(mailbox: Any) -> Any:
+    """A mailbox in the pass's source shape. A bare `list`/`get` object (a
+    `GwsMailbox`, the tests' `FakeMailbox`) is Gmail."""
+    return mailbox if hasattr(mailbox, "listing") else GmailSource(mailbox)
+
+
 # ---------------------------------------------------------------- one assessment
 
 
@@ -173,7 +240,7 @@ def gate_facts(
 ) -> mailreader.Facts:
     """Zone A's deterministic half and the correlator, as of the mail."""
     as_of = header.position
-    auth = mailgate.authenticate(header.auth_results, mailindex.domain_of(header.from_addr))
+    auth = mailgate.authenticate_header(header)
     return mailreader.Facts(
         auth=auth,
         grade=mailgate.grade(index, header, auth, store.owner_case_parties(as_of)),
@@ -251,12 +318,31 @@ def ingest(
         if not index.add(item.header, item.body):
             continue
         header = index.get(item.header.digest) or item.header
-        auth = mailgate.authenticate(header.auth_results, mailindex.domain_of(header.from_addr))
+        auth = mailgate.authenticate_header(header)
         observed[header.digest] = store.observe(header, item.body, auth.authenticated, index)
     return observed
 
 
 # ---------------------------------------------------------------- one pass
+
+
+@dataclass
+class SourcePass:
+    """What one pass did with one inbox."""
+
+    listing_ok: bool = True
+    failure: str = ""
+    listed: int = 0
+    topped_up: int = 0  # ledger entries tried this pass
+    held: int = 0  # not fetched: the index already holds it
+    fetched: int = 0
+    fetch_failed: dict[str, int] = field(default_factory=dict)
+    unparseable: int = 0
+    at_from_sender: int = 0  # `at` came from the Date header, not the provider
+    unfetched: int = 0  # still in the ledger after this pass
+    abandoned: int = 0
+    note: str = ""
+    counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -272,9 +358,10 @@ class Pass:
     already_recorded: int = 0
     endings: dict[str, int] = field(default_factory=dict)
     listing_ok: bool = True
+    sources: dict[str, SourcePass] = field(default_factory=dict)
 
     def as_json(self) -> dict[str, Any]:
-        return dict(self.__dict__)
+        return dataclasses.asdict(self)
 
 
 def health_path(state_dir: os.PathLike | str) -> Path:
@@ -282,22 +369,38 @@ def health_path(state_dir: os.PathLike | str) -> Path:
 
 
 def record_health(state_dir: os.PathLike | str, result: Pass, now: float) -> dict[str, Any]:
-    """Consecutive failed listings, the last good pass and the last pass's
-    counts. Counted only: S1 pushes nothing to the owner (#362's escalation
-    is the pattern a later slice inherits, not something this one does)."""
+    """Consecutive failed listings — for the pass and per inbox — the last good
+    pass and the last pass's counts. Counted only; S1 pushes nothing. The owner
+    reads it with `/mail`, where a streak or a stale pass is shown as a
+    warning (`mailview.health_lines`)."""
     path = health_path(state_dir)
     try:
         prior = json.loads(path.read_text())
-        streak = int(prior.get("failed_listings") or 0)
-        last_ok = prior.get("last_ok_at")
-    except (OSError, ValueError, TypeError, AttributeError):
-        streak, last_ok = 0, None
+        if not isinstance(prior, dict):
+            raise TypeError("not a mapping")
+    except (OSError, ValueError, TypeError):
+        prior = {}
+    streak = int(prior.get("failed_listings") or 0)
+    last_ok = prior.get("last_ok_at")
     if result.listing_ok:
         streak, last_ok = 0, now
     else:
         streak += 1
+    sources = dict(prior.get("sources") or {}) if isinstance(prior.get("sources"), dict) else {}
+    for name, sp in result.sources.items():
+        held = sources.get(name)
+        before: dict[str, Any] = held if isinstance(held, dict) else {}
+        entry = {
+            "failed_listings": 0 if sp.listing_ok else int(before.get("failed_listings") or 0) + 1,
+            "last_ok_at": now if sp.listing_ok else before.get("last_ok_at"),
+            "last_failure": sp.failure or (before.get("last_failure") if not sp.listing_ok
+                                           else ""),
+            "note": sp.note,
+            "unfetched": sp.unfetched,
+        }
+        sources[name] = entry
     state = {"failed_listings": streak, "last_ok_at": last_ok, "last_pass_at": now,
-             "last_pass": result.as_json()}
+             "last_pass": result.as_json(), "sources": sources}
     atomic_write.publish(path, json.dumps(state, sort_keys=True))
     return state
 
@@ -317,9 +420,77 @@ def flush_counters(state_dir: os.PathLike | str, result: Pass, now: float) -> No
             handle.write(json.dumps(line, sort_keys=True) + "\n")
 
 
+def _collect(
+    source: Any,
+    sp: SourcePass,
+    *,
+    index: mailindex.MailIndex,
+    by_pid: dict[str, str],
+    ledger: UnfetchedLedger,
+    owners: frozenset[str],
+    days: int,
+    limit: int,
+    now: float,
+) -> tuple[list[mailindex.Parsed], list[str]]:
+    """List one source, fetch what the index does not already hold, and say
+    which digests are INBOX mail. Returns (parsed, inbox digests)."""
+    parsed: list[mailindex.Parsed] = []
+    inbox_digests: list[str] = []
+    listing = source.listing(days, limit)
+    if listing is None:
+        sp.listing_ok = False
+        failure = getattr(source, "last_failure", None)
+        sp.failure = failure.describe() if isinstance(failure, Failure) else "listing failed"
+        return parsed, inbox_digests
+    roles_by_ref: dict[str, str] = {}
+    for ref in listing.sent:
+        roles_by_ref.setdefault(ref, "sent")
+    for ref in listing.inbox:
+        roles_by_ref[ref] = "inbox"
+    sp.listed = len(roles_by_ref)
+    if source.stable_ids:
+        # The top-up: listed earlier, never fetched. Gmail only — on Tuta a
+        # remembered UID names a different message after a bridge restart.
+        for ref, role in ledger.pending(source.name)[:limit]:
+            if ref not in roles_by_ref:
+                roles_by_ref[ref] = role
+                sp.topped_up += 1
+    for ref, role in roles_by_ref.items():
+        held = source.held(ref, index, by_pid)
+        if held is not None:
+            sp.held += 1
+            if role == "inbox":
+                inbox_digests.append(held)
+            if source.stable_ids:
+                ledger.done(source.name, ref)
+            continue
+        item, failure = source.fetch(ref, owners)
+        if failure is not None:
+            sp.fetch_failed[failure.kind] = sp.fetch_failed.get(failure.kind, 0) + 1
+            if source.stable_ids:
+                ledger.missed(source.name, ref, role, failure, now)
+            continue
+        if source.stable_ids:
+            ledger.done(source.name, ref)
+        sp.fetched += 1
+        if item is None:
+            sp.unparseable += 1
+            continue
+        if item.header.at_source != "provider":
+            sp.at_from_sender += 1
+        parsed.append(item)
+        if role == "inbox":
+            inbox_digests.append(item.header.digest)
+    sp.unfetched = ledger.count(source.name)
+    sp.abandoned = ledger.abandoned.get(source.name, 0)
+    sp.counts = dict(getattr(source, "counts", {}) or {})
+    return parsed, inbox_digests
+
+
 def run_once(
     *,
-    mailbox: Any,
+    mailbox: Any = None,
+    mailboxes: list[Any] | None = None,
     state_dir: os.PathLike | str,
     owner_addresses: frozenset[str],
     model_spec: str,
@@ -329,36 +500,39 @@ def run_once(
     limit: int = DEFAULT_MAX,
     now: Callable[[], float] = time.time,
 ) -> Pass:
-    """One shadow pass: list, fetch, index, assess the new inbound, record."""
+    """One shadow pass over every source: list, fetch what is new, index,
+    assess the new inbound, record. One state tree for all of them — the
+    ledger must see every act of his, whichever inbox it is in — and digest
+    dedup absorbs a mail delivered to both."""
+    sources = [as_source(m) for m in (mailboxes if mailboxes is not None else [mailbox])]
     result = Pass()
     index = mailindex.MailIndex(state_dir)
     store = mailcases.CaseStore(state_dir)
     verdicts = mailverdicts.VerdictStore(state_dir)
-    inbox = mailbox.list(f"in:inbox newer_than:{days}d", limit)
-    sent = mailbox.list(f"in:sent newer_than:{days}d", limit)
-    if inbox is None or sent is None:
-        result.listing_ok = False
-    inbox_ids = list(dict.fromkeys(inbox or ()))
-    ids = list(dict.fromkeys(inbox_ids + list(sent or ())))
-    result.listed = len(ids)
+    ledger = UnfetchedLedger(state_dir)
+    # Gmail's provider ids are stable, so an id the index holds is that mail.
+    by_pid = {h.provider_id: d for d, h in index.by_digest.items()
+              if h.mailbox == "gmail" and h.provider_id}
     parsed: list[mailindex.Parsed] = []
-    for message_id in ids:
-        msg = mailbox.get(message_id)
-        if msg is None:
-            result.fetch_failed += 1
-            continue
-        result.fetched += 1
-        item = mailindex.from_gmail(msg, owner_addresses)
-        if item is None:
-            result.unparseable += 1
-            continue
-        parsed.append(item)
+    inbox_digests: list[str] = []
+    for source in sources:
+        sp = result.sources.setdefault(source.name, SourcePass())
+        got, inbox = _collect(source, sp, index=index, by_pid=by_pid, ledger=ledger,
+                              owners=owner_addresses, days=days, limit=limit, now=now())
+        sp.note = source.note()
+        parsed += got
+        inbox_digests += inbox
+        result.listing_ok = result.listing_ok and sp.listing_ok
+        result.listed += sp.listed
+        result.fetched += sp.fetched
+        result.fetch_failed += sum(sp.fetch_failed.values())
+        result.unparseable += sp.unparseable
+    ledger.save()
     observed = ingest(index, store, parsed)
     result.new_in_index = len(observed)
-    inbox_set = set(inbox_ids)
-    for item in sorted(parsed, key=lambda p: p.header.position):
-        header = index.get(item.header.digest)
-        if header is None or header.direction != "in" or item.header.provider_id not in inbox_set:
+    inbox_headers = [index.get(d) for d in dict.fromkeys(inbox_digests)]
+    for header in sorted((h for h in inbox_headers if h is not None), key=lambda h: h.position):
+        if header.direction != "in":
             continue
         if verdicts.has(header.digest, model_spec, charter.digest):
             result.already_recorded += 1
@@ -376,20 +550,66 @@ def run_once(
     return result
 
 
+@contextlib.contextmanager
+def pass_lock(state_dir: os.PathLike | str) -> Iterator[bool]:
+    """Yield True while this process holds the one pass lock, False when
+    another pass holds it. `flock` is released by the kernel when its holder
+    exits, however it exits."""
+    path = mailindex.mail_dir(state_dir) / "watch.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def load_reader() -> roles.Charter:
     catalogue = roles.load_charters()
     roles.check_wirings(catalogue)
     return catalogue[mailreader.READER]
 
 
+def tuta_env() -> tuple[dict[str, str], str]:
+    """The environment for himalaya: this one plus the bridge secret from
+    aish's own store when it is not already set. The bridge's own address is
+    returned too — it is his, so it joins the owner addresses."""
+    from . import mailtuta, secrets
+
+    env = dict(os.environ)
+    if not env.get(mailtuta.SECRET_ENV):
+        try:
+            value = secrets.get(mailtuta.SECRET_ENV)
+        except Exception as exc:  # noqa: BLE001 — a missing secret fails the listing, visibly
+            log(f"the Tuta secret could not be read: {type(exc).__name__}")
+            value = None
+        if value:
+            env[mailtuta.SECRET_ENV] = value
+    address = ""
+    try:
+        address = str(mailtuta._load_tutalib()._bridge_settings()["email"]).lower()
+    except Exception:  # noqa: BLE001 — the listing reports the missing bridge itself
+        pass
+    return env, address
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="the inbox assistant, shadow mode (#142 W5 S1)")
+    parser = argparse.ArgumentParser(description="the inbox assistant, shadow mode (#142 W5)")
     parser.add_argument("--once", action="store_true", help="run one shadow pass")
     parser.add_argument("--counters", action="store_true",
                         help="print what the verdict store holds; no mail, no model")
-    parser.add_argument("--account", default=os.environ.get("AISH_MAIL_ACCOUNT", ""))
+    parser.add_argument("--account", default=os.environ.get("AISH_MAIL_ACCOUNT", ""),
+                        help="the Gmail account (needs ~/.config/gws-accounts/<email>/)")
     parser.add_argument("--owner", action="append", default=[],
-                        help="an address that is the owner's own (repeatable; the account is one)")
+                        help="an address that is the owner's own (repeatable). EVERY alias "
+                        "he sends from must be listed: on Gmail it decides direction")
+    parser.add_argument("--source", action="append", choices=SOURCES, default=[],
+                        help="an inbox to read (repeatable; default: gmail)")
     parser.add_argument("--model", default=os.environ.get("AISH_MAIL_READER_MODEL", ""))
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
     parser.add_argument("--max", type=int, default=DEFAULT_MAX)
@@ -402,27 +622,44 @@ def main(argv: list[str] | None = None) -> int:
     if not args.once:
         parser.print_help()
         return 2
-    env, why = account_env(args.account)
-    if env is None:
-        log(f"refusing to run: {why}")
-        return 2
+    wanted = list(dict.fromkeys(args.source or ["gmail"]))
+    owners = {a.lower() for a in args.owner}
+    mailboxes: list[Any] = []
+    if "gmail" in wanted:
+        env, why = account_env(args.account)
+        if env is None:
+            log(f"refusing to run: {why}")
+            return 2
+        owners.add(args.account.lower())
+        mailboxes.append(GmailSource(GwsMailbox(env)))
+    if "tuta" in wanted:
+        from . import mailtuta
+
+        env, address = tuta_env()
+        if address:
+            owners.add(address)
+        mailboxes.append(mailtuta.TutaMailbox(env))
     try:
         charter = load_reader()
     except roles.CharterError as exc:
         log(f"the Reader's charter does not load: {exc}")
         return 2
-    started = time.time()
-    result = run_once(
-        mailbox=GwsMailbox(env),
-        state_dir=state_dir,
-        owner_addresses=frozenset({args.account.lower(), *(a.lower() for a in args.owner)}),
-        model_spec=args.model,
-        charter=charter,
-        days=args.days,
-        limit=args.max,
-    )
-    record_health(state_dir, result, started)
-    flush_counters(state_dir, result, started)
+    with pass_lock(state_dir) as held:
+        if not held:
+            log("another pass holds the lock — this one does nothing")
+            return 3
+        started = time.time()
+        result = run_once(
+            mailboxes=mailboxes,
+            state_dir=state_dir,
+            owner_addresses=frozenset(owners),
+            model_spec=args.model,
+            charter=charter,
+            days=args.days,
+            limit=args.max,
+        )
+        record_health(state_dir, result, started)
+        flush_counters(state_dir, result, started)
     print(json.dumps(result.as_json(), sort_keys=True))
     return 0 if result.listing_ok else 1
 
