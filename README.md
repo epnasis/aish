@@ -914,6 +914,10 @@ this endpoint, so treat the shortcut as you would the URL itself.
 
 ## Automation (optional)
 
+An inbox assistant exists in **shadow mode only** (`aish-mailwatch`, `aish-mailbacktest`): it
+reads your personal Gmail read-only and records a verdict per new mail, and does nothing with it
+yet — no labels, no archiving, no notifications (`docs/mail-assistant.md`).
+
 aish can also act on its own — for jobs you set up and own. A token-gated
 `POST /trigger` endpoint launches a task in a background session (from a
 schedule, an incoming email, a webhook), observable when you open it. The
