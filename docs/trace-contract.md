@@ -18,6 +18,7 @@
 **#433 (2026-09-29) added `plan` as §3.15** — level two of the owner's model: aish's own checklist for the objective, written only by the acting model through a `plan` tool, with `done` accepted only on evidence that resolves to the chat's own records, and dropped or replanned by the owner through intercepted actions. Renderless; shown on the objective strip.
 **#423 (2026-09-30, tracker charter v2) widened what the tracker reads in §3.14**: besides the new messages, an `earlier` list of owner messages it already read (what the statement rests on, and his newest), which a cite may now name. The `role` record gains `input.earlier` and `input.earlier_omitted`; the `objective` record's shape is unchanged.
 **#446 (2026-10-12) added `learning` as §3.19** — the learning-suggestion detector's evaluation at every delivered answer: what the task's own records counted, the thresholds in force, what tripped, and whether the "Save this as a lesson?" chip was shown or why not. Renderless; written by the surface through `logref.step`; cold replay reads its `chip` to put the chip back on the turn's `done`.
+**#142 W5 S1 (2026-10-24) added `mail_verdict` as §3.20** — the shadow inbox assistant's verdict on one mail, with every Gate and correlator fact beside it. Registered renderless, but in S1 written ONLY to the verdict store, never to a session log.
 **The outcome row (2026-10-05) added `outcome` as §3.18** — the result of a decision made beside the acting model (the rules a turn bound, the answer's checks, a rule compiled from his words, the objective tracker's revision), rendered.
 **The harness row (2026-10-05) added `harness` as §3.17** — aish's own notes to the model drawn as trace rows from their message records, with no logged step of their own; slice 2 added `call` and `notes` to tool-role `message` records, and closed two more green refusals in §6.13 (the speak-first gate's, and a denied `create_rule`/`create_tool` write).
 **#352 slice 1 (2026-09-03) stamped `model_call` on the rendered `tool_start` and `tool` steps** — the second amendment to §2's fork 1(b), beside the `brief` one (`docs/diagnostics.md`). Additive; omitted rather than zeroed where no recorded model call issued the call (claude-max), matching the renderless `call` record it mirrors. The browser is built from rendered steps alone, so without it the trace card could fold its timeline into rounds only by counting rows. `thinking` is still untouched.
@@ -983,6 +984,61 @@ Paired by case: A→D, 35 cases stopped crediting the user and 10 started; A→B
 | `unevaluated` | Instead of all the above when the evaluation raised: the exception's type name, `chip: false`. |
 
 **What it does NOT establish:** that the task actually went badly — it records what was counted and what was shown; or that a lesson was saved — that is the `/learn` turn's own records, if he tapped it.
+
+### 3.20 · `mail_verdict` — the inbox assistant's verdict on one mail (#142 W5)
+
+**BUILT 2026-10-24 (slice S1, shadow).** Rationale and fences: `docs/mail-assistant.md`. One record per (mail, Reader model), written by `mailverdicts.build_record` for every inbound mail a shadow pass or a backtest arm assessed — gated, unadmitted and failed readings included (§0 corollary 2: a mail that was not read says so).
+
+**Where it is written, and where it is not.** In S1 the record lives ONLY in the verdict store, `<state>/mail/verdicts/<dd>/<mail digest>.json` under `by_model`, and in a backtest run's own copy of that store. **No session log carries one, and nothing reads one to act.** The kind is in `RENDERLESS_STEPS` so that the slice which first carries a verdict into a session (S2, as a tainted outside-content note) cannot open an empty live card or replay as a row; until then that registration is a guard, not a description of a live emitter.
+
+**Change discipline.** `v` is the record version (`RECORD_VERSION`); a field added keeps `v`, a field whose meaning changes bumps it, and a reader keys on `v` rather than guessing from shape.
+
+```json
+{"kind": "mail_verdict", "v": 1,
+ "mail": "3f1c…", "provider_id": "18c2…", "at": 1780086400.0, "at_source": "provider",
+ "direction": "in", "model": "gemini:<flash>",
+ "charter": "mail-reader", "version": "1", "charter_digest": "9a0e…",
+ "ending": "ok", "why": "",
+ "gate": {"auth": {"verdict": "fail", "authenticated": false, "dmarc": "fail", "spf": "fail",
+                   "dkim": "fail", "dkim_domain": "bui1der.example", "read_from": "top"},
+          "grade": {"grade": "first-contact", "acts": 0, "first_act_at": null, "age_days": null,
+                    "inbound": 1, "authenticated": false, "how": []},
+          "flags": [{"what": "sender_lookalike", "detail": "bui1der.example~builder.example"}],
+          "newsletter": {"gated": false, "by": []}},
+ "candidates": [{"ref": "c1", "case": "case-5b0e…", "score": 121, "reasons": ["key", "name", "window", "recent"]}],
+ "verdict": {"disposition": "hold", "wanted": "pay", "deadline": "none", "case": "c1",
+             "sender_case": "mismatch", "suspicion": "suspicious",
+             "payment_coordinates": [{"value": "DE89370400440532013000", "cite": "m2", "kind": "iban"}],
+             "citations": ["m2", "c1"], "meaning": "…", "kind": "bank account change request"},
+ "case_choice": "case-5b0e…",
+ "case_flags": {"coordinates_changed": ["case-5b0e…"], "sender_not_admitted": ["case-5b0e…"]},
+ "coordinates": {"reader": ["DE89370400440532013000"], "code": ["DE89370400440532013000"]},
+ "attachments": {"count": 0, "names": [], "read": false},
+ "asks": [], "calls": [{"status": "ok", "attempts": 1, "ms": 2100,
+                        "input": {"name": "bundle", "trust": "untrusted", "chars": 4210, "digest": "c7d2…"},
+                        "usage": {"input": 2900, "output": 180}}],
+ "observation": {"keys": ["2026/41"], "cases": ["case-5b0e…"], "created": "", "admitted": []},
+ "recorded_at": 1780172800.0}
+```
+
+| field | why |
+|---|---|
+| `mail` | The content digest (`mailindex.digest_for`): Message-ID, else content. Never a provider id — the Tuta gateway renumbers them. |
+| `provider_id` | To fetch the mail again. Not a key. |
+| `at`, `at_source` | The provider's receipt time when there is one (`provider`), else the sender-written Date header (`date_header`) — always the latter for Tuta mail (S1.5). |
+| `model`, `charter`, `version`, `charter_digest` | Which Reader, examined against which text (§0 corollary 1): a reader never needs today's charter to know what read this mail. |
+| `ending` | `ok` \| `invalid` (answered twice, neither validated) \| `unavailable` \| `unadmitted` \| `gated` (list headers; no call) \| `error` (the assessment raised; `why` names the exception, and this record carries only the identity fields beside it). Only `ok` carries a `verdict`. `ok`, `invalid` and `gated` are final; the rest are read again on the next pass. |
+| `gate` | The deterministic Gate's facts as of the mail — authentication from the top-most Gmail header (S1.5 adds `auth.gateway`, the gateway the parsing adapter DECLARED, and, for a gateway with no readable result such as `tuta`, `auth.verdict` = `not_readable_via_gateway` with the reason in `auth.why`; fields added, `v` kept), the owner-acts-only grade (`inbound` is recorded and read by nothing), structural flags, the newsletter gate and which header decided it. Flag `detail` is a code-written host or filename, attacker-chosen — for audit, never for an acting context. |
+| `candidates` | The correlator's shortlist with the bundle ref each was shown as, score and reasons. |
+| `verdict` | The validated, capped Reader answer (`mailreader.Verdict`). `meaning` and `kind` are de-linked and de-voiced; every closed axis may be `cannot_tell`. |
+| `case_choice` | The chosen ref resolved to a case id, or the word (`new`, `no_case`, `cannot_tell`). |
+| `case_flags` | CODE's comparisons, not the Reader's: an account the linked case never had, a sender outside the case's admitted senders. |
+| `coordinates` | Accounts the Reader extracted (each verified present in its cited message) and those code's checksum regex found, separately. |
+| `attachments` | Count and names, and `read: false` — declared, because the Reader is toolless and is shown names only. |
+| `asks`, `calls` | Each closed ask honoured, and each role call's status, attempts, timing, usage and input digest — the bundle's BYTES are in the evidence store (R7). |
+| `observation` | What folding this mail into the case store did: keys found, cases touched, a case it opened, admissions it caused. |
+
+**What it does NOT establish:** that the verdict is right — the backtest compares verdicts with what he did, in raw counts; or that anything happened to the mail — in S1 nothing does.
 
 ---
 

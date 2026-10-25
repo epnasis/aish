@@ -765,6 +765,11 @@ RENDERLESS_STEPS = frozenset(
         # effect — the chip — rides on the turn's `done`, which the replay
         # re-derives from this record (`learning.with_chip`).
         "learning",  # #446
+        # #142 W5. The inbox assistant's verdict on one mail. In S1 it is
+        # written ONLY to the verdict store (`mailverdicts`), never to a chat
+        # log; it is registered here so the first slice that does carry one
+        # into a session cannot open an empty live card or replay as a row.
+        "mail_verdict",  # #142 W5
     }
 )
 

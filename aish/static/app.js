@@ -9761,8 +9761,9 @@ function submitCommand() {
 }
 
 // "/session" is the pre-#260 name for "/chat": off the menu, still dispatched.
-// "/runs" is dispatched only to say it is terminal-only (#5 S4).
-const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit", "/session", "/runs"]);
+// "/runs" (#5 S4) and "/mail" (#142 W5 S1.5) are dispatched only to say they
+// are terminal-only.
+const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit", "/session", "/runs", "/mail"]);
 
 function handleSlash(text) {
   let [command, ...rest] = text.split(/\s+/);
@@ -9866,9 +9867,10 @@ function handleSlash(text) {
     // toggle and shredder. Typed only, like every slash ([CHIP-NEVER-COMMANDS]);
     // the sheet's own buttons are DOM, never model output.
     case "/tasks": openAutomationsSheet(); return true;
-    // The run history is the terminal's (#5 S4). Said, not "unknown": the
-    // command exists, and saying where it lives is the answer.
-    case "/runs":
+    // The run history (#5 S4) and the inbox assistant's shadow results (#142
+    // W5 S1.5) are the terminal's. Said, not "unknown": the command exists,
+    // and saying where it lives is the answer.
+    case "/runs": case "/mail":
       showToast(`${command} is a terminal-only command — run it in aish in a terminal`);
       return true;
     case "/help": openSheet("workspace-sheet"); return true;

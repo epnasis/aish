@@ -914,6 +914,10 @@ this endpoint, so treat the shortcut as you would the URL itself.
 
 ## Automation (optional)
 
+An inbox assistant exists in **shadow mode only** (`aish-mailwatch`, `aish-mailbacktest`): it
+reads your personal Gmail read-only and records a verdict per new mail, and does nothing with it
+yet — no labels, no archiving, no notifications (`docs/mail-assistant.md`).
+
 aish can also act on its own — for jobs you set up and own. A token-gated
 `POST /trigger` endpoint launches a task in a background session (from a
 schedule, an incoming email, a webhook), observable when you open it. The
@@ -1032,6 +1036,17 @@ open shows the next time it is opened. In the web composer, `/run-now` on an
 automation's chat (or `/run-now <id>` anywhere) runs it right away in a new
 chat; its schedule is unchanged and the next scheduled run still happens.
 `/runs` is terminal-only.
+
+**The inbox assistant (shadow mode).** `aish-mailwatch --once` reads new mail
+in your Gmail and, with `--source tuta`, your Tutanota mailbox, and records
+what aish's Reader makes of each one — what it is, what it wants of you, what
+aish *would* do with it — without doing anything to any mail: nothing is
+labelled, archived, marked read or sent. `scripts/install-mailwatch-service.sh`
+runs it every 15 minutes under launchd. In the terminal, `/mail` (or
+`/mail 50`) lists the newest results — sender, subject, the reading, the
+would-be action and the mail checks — under a health line that warns when the
+watcher has not run lately or an inbox could not be listed. `/mail` is
+terminal-only. Design and limits: `docs/mail-assistant.md`.
 
 Interrupted work is picked up again. If aish-web goes down mid-task — a
 deploy, a crash — the next start reopens that session and tells the model to

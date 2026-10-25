@@ -22,6 +22,15 @@ Issue #297, stage 1 of the epic in #295.
 >
 > The rest of this banner — the snippet reader, uncalled — is unchanged.
 
+> ## The second caller: the mail Reader (#142 W5 S1)
+>
+> `mail-reader` is called by the shadow inbox pipeline (`aish-mailwatch`, `aish-mailbacktest`)
+> — a CLI with no session and no Agent. Its verdict reaches NO acting context in S1, so it adds
+> no entry to `roles.WIRINGS`. It runs a model only when admitted for the exact spec the caller
+> names, and it extended the framework in two places, each with this one customer: a third
+> output shape, `verdict` (delegated to `mailreader.py` as `objective` is to `objective.py`),
+> and a third model class, `caller`. `docs/mail-assistant.md`.
+
 > ## Read this first: no role is called today, and the thing that replaced one was reverted
 >
 > The framework shipped with one customer — the snippet reader, wired to every
@@ -106,7 +115,7 @@ prose below is the task, addressed to the model.
 | `name` | lowercase-dashed, and must match the filename |
 | `version` | any non-empty string; the exam is bound to it |
 | `kind` | `reader` \| `judge` \| `worker` \| `owner` |
-| `model` | a model CLASS: `cloud-fast` or `session` — see *Which model* |
+| `model` | a model CLASS: `cloud-fast`, `session` or `caller` — see *Which model* |
 | `num_ctx` | the context budget, handed to the backend |
 | `tools` | must be `[]` in v1; a declared tool **refuses to load** |
 | `degradation` | `skip` (advisory) \| `hold` (load-bearing) |
@@ -164,6 +173,17 @@ rows assertion names nothing a statement has, so an objective case may use only
 `verdict_in`, `change_in`, `cites_any`, `mentions_any` and `absent`
 (`objective.ASSERTIONS`), and a charter mixing them does not load.
 `tests/test_objective.py::TestTheCharter`.
+
+**`shape: verdict`** (#142 W5) is the third, for the mail Reader. Its frontmatter declares only
+caps (`mailreader.VERDICT_CAPS`: the meaning and kind lengths, citations, coordinates), and
+`roles.validate`, `roles.contract_text`, `roles.tally_flags` and the exam assertions hand off to
+`mailreader`, whose answer is a `Verdict` (a closed skeleton, every axis able to say
+`cannot_tell`, citations and payment coordinates checked against the bundle) or an `Ask` (a closed
+request for more, from the bundle's own offer). The closed axes and the two capped text fields are
+declared as `Field`s so the wiring law and the counters see them. A verdict exam case may use only
+`axis_in`, `case_in`, `deadline_in`, `coordinates_include`, `cites_any`, `absent` and
+`meaning_mentions_any` (`mailreader.ASSERTIONS`), and an expected word outside a vocabulary is
+refused at load (`mailreader.check_expectation`). `tests/test_mailreader.py::TestTheCharter`.
 
 `roles.capped` is the enforcement: control characters are flattened first (a field that
 can carry a newline can carry a fake banner into whatever renders it), then the cap is
@@ -227,6 +247,12 @@ server and CLI boundary capture. The tracker reads the owner's text, and a class
 could route it to a cloud provider he did not choose for this chat would be a leak the
 declaration hid. `AISH_ROLE_MODEL` does not apply to it for that reason. claude-max still
 answers "" — **N/A there**, recorded as `unavailable`.
+
+**The third class arrived with the third customer:** `caller` (#142 W5), for the mail Reader. The
+caller names the model spec (`--model`, `--arm`), and per-model admission is what decides which
+specs may run. It is examined on two models side by side — a cloud reference and the local 35B —
+because their disagreement is the backtest's audit set, and it runs from a CLI that has no session
+for `session` to mean.
 
 ### The governor, and what it does not carry
 
@@ -1138,9 +1164,11 @@ text would be a second place for a stale answer to live.
 
 Read this list before assuming a capability.
 
-- **One role is called.** The tracker (#432) is called at every task end with a new
+- **Two roles are called.** The tracker (#432) is called at every task end with a new
   owner message and runs a model only when admitted; its capped statement reaches the
-  acting model's reminder, the one entry in `roles.WIRINGS` (`docs/objective.md`).
+  acting model's reminder, the one entry in `roles.WIRINGS` (`docs/objective.md`). The mail
+  Reader (#142 W5) is called by the shadow inbox CLI, only when admitted for the named spec, and
+  its verdict reaches no acting context (`docs/mail-assistant.md`).
   Its `role` record is written by `objective.role_record` through the server-side sink,
   in `Agent._record_role`'s shape but with no `call` — it belongs to the task, not to a
   tool call.

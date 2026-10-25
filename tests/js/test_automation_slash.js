@@ -64,12 +64,18 @@ check("/tasks with the terminal's arguments opens the sheet, never acts on the w
   assert.deepStrictEqual(calls, [{ sheet: "automations" }]);
 });
 
-check('/runs answers terminal-only, never "unknown command"', () => {
-  assert.strictEqual(sandbox.handleSlash("/runs"), true);
-  assert.deepStrictEqual(calls, [
-    { toast: "/runs is a terminal-only command — run it in aish in a terminal" },
-  ]);
-});
+for (const command of ["/runs", "/mail"]) {
+  check(`${command} answers terminal-only, never "unknown command"`, () => {
+    assert.strictEqual(sandbox.handleSlash(command), true);
+    assert.deepStrictEqual(calls, [
+      { toast: `${command} is a terminal-only command — run it in aish in a terminal` },
+    ]);
+  });
+  check(`${command} with an argument is still terminal-only`, () => {
+    sandbox.handleSlash(`${command} enable daily`);
+    assert.ok(calls[0].toast.includes("terminal-only"));
+  });
+}
 
 check("/run-now with no argument asks for the chat on screen's automation", () => {
   assert.strictEqual(sandbox.handleSlash("/run-now"), true);
@@ -86,8 +92,8 @@ check("/run-now <id> names the automation and nothing else", () => {
 check("/run-now and /tasks are offered in the composer's list, /runs is not", () => {
   assert.ok(sandbox.SLASH_COMMANDS.some(([cmd]) => cmd === "/run-now"));
   assert.ok(sandbox.SLASH_COMMANDS.some(([cmd]) => cmd === "/tasks"));
-  assert.ok(!sandbox.SLASH_COMMANDS.some(([cmd]) => cmd === "/runs"),
-    "the terminal-only command is dispatched, not advertised");
+  assert.ok(!sandbox.SLASH_COMMANDS.some(([cmd]) => ["/runs", "/mail"].includes(cmd)),
+    "the terminal-only commands are dispatched, not advertised");
 });
 
 check("a chip can never send /run-now or /tasks: submitInput routes only TYPED slashes", () => {

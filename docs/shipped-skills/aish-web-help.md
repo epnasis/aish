@@ -74,4 +74,5 @@ How the aish web UI works, for answering the user's questions about it. Answer f
 - Each row has Pause / Resume (no question — reversible; the only field it changes), Run now (the same as `/run-now <id>`), and Delete, which asks first: there is no way back short of a new automation on its own approval card. An ENDED automation offers only Delete. What an automation does changes only on a new approval card.
 - The sheet fetches the list when it opens and after each action; a change made elsewhere while it is open shows when it is next opened.
 - The list of recent runs is the terminal's `/runs`; typed here it answers "terminal-only".
+- The inbox assistant's shadow results are the terminal's `/mail`; typed here it answers "terminal-only".
 - Renaming and deleting happen in the chat menu above.

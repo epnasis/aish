@@ -112,8 +112,31 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `agent.REFUSAL_OPENINGS` | EN (aish's own words) | permits | yes | `_gate_outcome` / `ToolOutcome.meta`, checked FIRST | 6 |
 | `ratelimit._OVERFLOW_PHRASES` | EN (provider error text) | friction | yes | the 4xx status that already bounds it — these words only ever split `BAD_REQUEST`, never create a failure | 10 |
 | `schedule.VERDICT_MARKERS` | aish's own protocol words, matched against MODEL output | friction | yes | the parse's mandatory `unreadable` ending — no marker, no silence (`docs/web-server.md` §Monitors) | 3 |
+| `mailreader.DISPOSITIONS` | aish's own verdict words, matched against MODEL output | friction | yes | `validate_answer` refuses any word outside it — an answer is a word or no answer (`docs/mail-assistant.md`) | 5 |
+| `mailreader.WANTED` | as above | friction | yes | as above | 6 |
+| `mailreader.SENDER_CASE` | as above | friction | yes | as above | 3 |
+| `mailreader.SUSPICION` | as above | friction | yes | as above | 3 |
+| `mailgate._CREDENTIAL_WORDS` | EN + PL URL path words | permits | yes | link text/href mismatch, userinfo, IP host, punycode, lookalike — all word-free | 22 |
+| `mailgate._RISKY_SUFFIXES` | file suffixes | permits | yes | the double-extension test, which needs no payload list | 24 |
+| `mailindex._REPLY_PREFIXES` | client subject prefixes | breaks | yes | In-Reply-To / References, read first — the prefix is consulted only when both are absent | 9 |
+| `mailcases._KEY_WORDS` | EN + PL + DE + FR | breaks | yes | the UPS `1Z` shape and the IBAN checksum, which need no introducing word | 22 |
+| `mailcases._CURRENCY_WORDS` | currency signs and ISO codes | breaks | yes | — | 10 |
 | `signin._SECOND_LEVEL` | public suffixes | friction | **no** | — | 10 |
 | `web._NOT_BUYABLE` | schema.org enum | breaks | **no** | subset of `web._AVAILABILITY`, tested at the same call site | 3 |
+
+### The inbox assistant's lists (#142 W5 S1)
+
+Nine lists arrived with the shadow inbox pipeline (`docs/mail-assistant.md`). Their verdicts
+are read against S1, in which **nothing acts on a verdict**. So `permits` on
+`mailgate._CREDENTIAL_WORDS` costs one fewer flag on a shadow record today, and becomes a real
+fail-open the day a slice reads that flag to decide something: re-read this row then. The four
+`mailreader.*` rows are the Reader's closed axes, matched against model output: asked once per
+verdict, matched when the answer is definite, so `asked − matched` is the cannot-tell count. A
+miss there is `friction` because every later slice holds or surfaces an undecided mail rather than
+acting on it. They are counted at the pipeline (`mailverdicts.count_verdict`), not in validation,
+so a corrective retry does not count twice. The mail CLI has no session, so it drains its tallies
+into `<state>/mail/runs-YYYYMMDD.jsonl` in the `vocab` record shape, and `vocab.scan` reads those
+files beside the session logs.
 
 ### The entries worth arguing about
 
