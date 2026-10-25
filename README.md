@@ -740,7 +740,8 @@ this UI. Highlights:
   on a Mac `Ctrl+K` stays the text field's own kill-line. Each button's tooltip
   names its chord.
 - **Global interactive console.** The real TTY shell described above, openable
-  from any chat (`⌘/Ctrl+\`), `tmux`-backed for restart survival. URLs in its
+  from any chat (`⌘⇧B` on macOS, `Ctrl+Shift+B` elsewhere), `tmux`-backed for
+  restart survival. URLs in its
   output are tappable — including the ones an auth CLI wraps across several
   lines — and **hold a link to choose where it opens**: your own browser, or
   aish's remote browser, where you can see the page and sign in to it. The
