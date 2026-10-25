@@ -257,8 +257,9 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  reading, what it WOULD have done, and the Gate's facts — under
                  the watcher's health line. Shadow mode: nothing was done to
                  any of them
-  {CYAN}/mail export{RESET}   every recorded reading as one CSV row per (mail, model), to
-                 sort and filter in a spreadsheet; prints the file's path
+  {CYAN}/mail export [path]{RESET} every recorded reading as one CSV row per (mail,
+                 model), to sort and filter in a spreadsheet — into your
+                 Downloads folder unless a path is given; prints the file's path
   {CYAN}/new, /clear{RESET}   fresh conversation in a new chat (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
@@ -1960,20 +1961,25 @@ def show_mail(task: str, state_dir: Path, now: float | None = None) -> None:
     Reads only; every mail- or model-originated string is rendered through
     `_plain` — `mailview.lines` cannot be called without a sanitiser."""
     args = task.split()[1:]
-    if args == ["export"]:
-        path, rows, unreadable = mailexport.write(
-            mailexport.live_path(state_dir, now), state_dir, clean=_mail_cell)
-        print(f"{DIM}{rows} row(s), one per (mail, model) — the review file:{RESET}")
-        if unreadable:
-            print(f"{YELLOW}{unreadable} verdict file(s) could not be read and are not in "
-                  f"it{RESET}")
-        print(str(path))
+    if args[:1] == ["export"] and len(args) <= 2:
+        written = mailexport.export(
+            state_dir, clean=_mail_cell, run=mailexport.LIVE_RUN,
+            fallback_dir=mailexport.live_fallback_dir(state_dir),
+            out_file=Path(args[1]) if len(args) == 2 else None, now=now)
+        print(f"{DIM}{written.rows} row(s), one per (mail, model) — the review file:{RESET}")
+        if written.unreadable:
+            print(f"{YELLOW}{written.unreadable} verdict file(s) could not be read and are not "
+                  f"in it{RESET}")
+        if written.note:
+            print(f"{YELLOW}{written.note}{RESET}")
+        print(str(written.path))
         return
     limit = mailview.parse_limit(args)
     if limit is None:
         print(f"{DIM}usage: /mail [n] — the newest n shadow results (default "
-              f"{mailview.MAIL_SHOWN}, at most {mailview.MAIL_LIMIT_MAX}); /mail export — "
-              f"every recorded reading as a CSV file{RESET}")
+              f"{mailview.MAIL_SHOWN}, at most {mailview.MAIL_LIMIT_MAX}); /mail export "
+              f"[path] — every recorded reading as a CSV file (default: your Downloads "
+              f"folder){RESET}")
         return
     styles = {"warn": YELLOW + BOLD, "head": BOLD}
     for style, text in mailview.lines(state_dir, clean=_mail_cell, limit=limit, now=now):

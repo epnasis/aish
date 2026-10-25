@@ -1046,8 +1046,10 @@ runs it every 15 minutes under launchd. In the terminal, `/mail` (or
 `/mail 50`) lists the newest results — sender, subject, the reading, the
 would-be action and the mail checks — under a health line that warns when the
 watcher has not run lately or an inbox could not be listed; `/mail export`
-writes every result to a CSV file you can sort and filter in a spreadsheet,
-and prints where. A mail in a conversation you wrote in within the last 30
+writes every result to a CSV file you can sort and filter in a spreadsheet —
+into your Downloads folder, or the path you give (`/mail export <path>`) —
+and prints where; if Downloads cannot be used it says why and where the file
+went instead. A mail in a conversation you wrote in within the last 30
 days is never filed away, whatever the Reader said. `/mail` is
 terminal-only. Design and limits: `docs/mail-assistant.md`.
 

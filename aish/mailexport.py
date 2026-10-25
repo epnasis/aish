@@ -28,6 +28,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -175,17 +176,141 @@ def render(
     return out.getvalue(), len(view.rows), view.unreadable
 
 
+BOM = "﻿"
+
+
 def write(
     path: Path, state_dir: os.PathLike | str, *, clean: Clean, truth: TruthOf | None = None
 ) -> tuple[Path, int, int]:
-    """Write the review file. UTF-8 with a BOM, so a spreadsheet reads the
-    Polish and the accents as what they are."""
+    """Write the review file to exactly `path`. UTF-8 with a BOM, so a
+    spreadsheet reads the Polish and the accents as what they are."""
     text, rows, unreadable = render(state_dir, clean=clean, truth=truth)
-    atomic_write.publish(path, "﻿" + text, encoding="utf-8")
+    atomic_write.publish(path, BOM + text, encoding="utf-8")
     return path, rows, unreadable
 
 
-def live_path(state_dir: os.PathLike | str, now: float | None = None) -> Path:
-    """Where `/mail export` writes: the live state tree's own exports folder."""
-    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() if now is None else now))
-    return mailindex.mail_dir(state_dir) / EXPORTS_DIRNAME / f"verdicts-{stamp}.csv"
+# ---------------------------------------------------------------- where it lands
+
+#: Replaces where the Downloads folder is. The tests point it at a temp dir:
+#: ~/Downloads is a macOS privacy-protected folder, and a process outside the
+#: owner's own terminal that opens one has hung on this machine.
+DOWNLOADS_ENV = "AISH_DOWNLOADS_DIR"
+LIVE_RUN = "live"
+_MAX_SAME_SECOND = 1000
+
+
+def downloads_dir() -> Path:
+    override = os.environ.get(DOWNLOADS_ENV, "").strip()
+    return Path(override).expanduser() if override else Path.home() / "Downloads"
+
+
+def interactive() -> bool:
+    """Whether this process was started from a terminal: stdin is a tty. A
+    launchd job, a pipe from another program, an agent's shell — none is, and
+    none of them is where the review file is meant to be generated."""
+    try:
+        return bool(sys.stdin is not None and sys.stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def file_name(run: str, now: float) -> str:
+    """`aish-verdicts-<run>-<export stamp>.csv`: which run, and when to the
+    second. Two exports in one second are told apart by `_claim`'s counter."""
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+    return f"aish-verdicts-{run}-{stamp}.csv"
+
+
+def _claim(directory: Path, name: str) -> Path:
+    """A path in `directory` that no other export holds — `name`, else
+    `name-2`, `-3`, … — claimed with O_EXCL, so a second export in the same
+    second takes the next name instead of replacing the first file."""
+    stem = name.removesuffix(".csv")
+    for n in range(1, _MAX_SAME_SECOND + 1):
+        candidate = directory / (name if n == 1 else f"{stem}-{n}.csv")
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return candidate
+    raise FileExistsError(f"{_MAX_SAME_SECOND} exports named {stem}-* already in {directory}")
+
+
+def _publish_new(directory: Path, name: str, payload: str) -> Path:
+    path = _claim(directory, name)
+    try:
+        atomic_write.publish(path, payload, encoding="utf-8")
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def _why(exc: OSError) -> str:
+    return exc.strerror or type(exc).__name__
+
+
+@dataclass(frozen=True)
+class Written:
+    path: Path
+    rows: int
+    unreadable: int
+    #: "" when the file is where it was asked to go (an explicit path, or the
+    #: Downloads folder); otherwise what was observed and where it went.
+    note: str = ""
+
+
+def export(
+    state_dir: os.PathLike | str,
+    *,
+    clean: Clean,
+    run: str,
+    fallback_dir: Path,
+    out_file: Path | None = None,
+    truth: TruthOf | None = None,
+    now: float | None = None,
+) -> Written:
+    """Write the review file where the owner will look for it.
+
+    `out_file` wins: a file path is written as named, a directory gets the
+    generated name inside it. Otherwise the Downloads folder — tried ONLY
+    when this process runs in a terminal, so a background process never
+    opens it at all. Whatever cannot be written there lands in
+    `fallback_dir` under the generated name, and `note` says what was
+    observed. The folder never fails the export; only the fallback can."""
+    text, rows, unreadable = render(state_dir, clean=clean, truth=truth)
+    payload = BOM + text
+    name = file_name(run, time.time() if now is None else now)
+    note = ""
+    if out_file is not None:
+        target = Path(out_file).expanduser()
+        try:
+            if target.is_dir():
+                return Written(_publish_new(target, name, payload), rows, unreadable)
+            atomic_write.publish(target, payload, encoding="utf-8")
+            return Written(target, rows, unreadable)
+        except OSError as exc:
+            note = f"could not write {target} ({_why(exc)})"
+    elif not interactive():
+        note = "not run from a terminal, so the Downloads folder was not tried"
+    else:
+        downloads = downloads_dir()
+        if not downloads.is_dir():
+            note = f"{downloads} does not exist"
+        elif not os.access(downloads, os.W_OK):
+            note = f"{downloads} is not writable"
+        else:
+            try:
+                return Written(_publish_new(downloads, name, payload), rows, unreadable)
+            except OSError as exc:
+                note = f"writing into {downloads} failed ({_why(exc)})"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    path = _publish_new(fallback_dir, name, payload)
+    return Written(path, rows, unreadable, f"{note} — written to {fallback_dir} instead")
+
+
+def live_fallback_dir(state_dir: os.PathLike | str) -> Path:
+    """Where `/mail export` writes when Downloads is not used: the live state
+    tree's own exports folder (where every export went before 2026-10-26)."""
+    return mailindex.mail_dir(state_dir) / EXPORTS_DIRNAME

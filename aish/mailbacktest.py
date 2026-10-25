@@ -30,8 +30,13 @@ confusion counts per axis per tier, `cannot_tell` as its own column, and a
 headline that is the DESTRUCTIVE direction — mail the pipeline would have
 expired that he kept or replied to. The report never prints a rate.
 
-The mailbox is a seam (`list`, `get`), so the tests drive this end to end
-against a fake one. `docs/mail-assistant.md`.
+**Two inboxes, one index** (`--source`, default gmail only): Gmail through
+`GwsMailbox`, Tuta through the shipped `mailtuta.TutaMailbox` — enumeration,
+never SEARCH; no \\Seen; nothing keyed by its unstable UIDs. What a source
+cannot show is set apart in its own words, never guessed into a tier.
+
+The mailboxes are seams (`list`/`get`, and the Tuta runner), so the tests
+drive this end to end against fakes. `docs/mail-assistant.md`.
 """
 
 from __future__ import annotations
@@ -48,7 +53,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import mailcases, mailexport, mailindex, mailreader, mailverdicts, mailwatch, paths, roles
+from . import (
+    mailcases,
+    mailexport,
+    mailindex,
+    mailreader,
+    mailtuta,
+    mailverdicts,
+    mailwatch,
+    paths,
+    roles,
+)
+from .mailsource import Failure
 
 DEFAULT_DAYS = 90
 DEFAULT_READER_MAX = 200
@@ -72,9 +88,38 @@ TRUTH_TIERS = {
     "kept_read": WEAK,  # addition to the design's tiering
     "unread": NEAR_NULL,
     "spam": SET_APART,
+    # In a Tuta inbox, but the listing carried no flags for it: read or
+    # unread is not known, so it is neither.
+    "seen_unknown": SET_APART,
+    # A Tuta mail this run's listing did not name in any enumerated folder:
+    # where it is now was not observed. Never "archived" — Tuta archiving is
+    # a move to a folder the backtest does not enumerate.
+    "unobserved": SET_APART,
 }
 KEPT = frozenset({"replied", "starred", "archived", "kept_read", "unread"})
 NO_VERDICT = "no_verdict"
+
+# Labels the Tuta half writes in Gmail's vocabulary, so `truth_of` reads one
+# shape: the folder a mail was enumerated in, and its IMAP flags.
+SEEN_UNKNOWN = "SEEN_UNKNOWN"
+SOURCES = ("gmail", "tuta")
+
+
+def tuta_labels(role: str, flags: tuple[str, ...] | None) -> tuple[str, ...]:
+    """A Tuta mail's folder role and flags as the labels `truth_of` reads.
+    `\\Flagged` is STARRED (tutalib's own vocabulary maps "starred" to it);
+    no `\\Seen` in a flags list that was listed is UNREAD; no flags list at
+    all is SEEN_UNKNOWN, never a guess either way."""
+    held = {str(f).lower() for f in flags or ()}
+    labels = {{"inbox": "INBOX", "sent": "SENT", "trash": "TRASH"}[role]}
+    if "\\flagged" in held:
+        labels.add("STARRED")
+    if role == "inbox":
+        if flags is None:
+            labels.add(SEEN_UNKNOWN)
+        elif "\\seen" not in held:
+            labels.add("UNREAD")
+    return tuple(sorted(labels))
 
 
 @dataclass(frozen=True)
@@ -100,9 +145,14 @@ def truth_of(
     if "SPAM" in held:
         facts.append("spam")
     if "INBOX" in held:
-        facts.append("unread" if "UNREAD" in held else "kept_read")
+        if SEEN_UNKNOWN in held:
+            facts.append("seen_unknown")
+        else:
+            facts.append("unread" if "UNREAD" in held else "kept_read")
     elif "TRASH" not in held and "SPAM" not in held:
-        facts.append("archived")
+        # On Gmail no INBOX label IS archived. Elsewhere only the enumerated
+        # folders were seen, so the absence says nothing.
+        facts.append("archived" if header.mailbox == "gmail" else "unobserved")
     if "spam" in facts and "replied" not in facts:
         return Truth("spam", SET_APART, tuple(facts))
     label = next(t for t in TRUTH_TIERS if t in facts)
@@ -117,7 +167,19 @@ class Backfill:
     index: mailindex.MailIndex
     store: mailcases.CaseStore
     labels: dict[str, tuple[str, ...]]
+    #: Totals over every source, and the index's own counts. Gmail's
+    #: `listing_failed` / `quota_stopped` stay here, as before Tuta joined.
     counts: dict[str, int] = field(default_factory=dict)
+    #: Per source: its own counts, and for Tuta what the enumeration observed
+    #: (folders, depth, trash exposure).
+    sources: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+_SUMMED = ("listed", "fetched", "fetch_failed", "unparseable", "outside_window", "held")
+
+
+def _union(labels: dict[str, tuple[str, ...]], digest: str, more: tuple[str, ...]) -> None:
+    labels[digest] = tuple(sorted(set(labels.get(digest, ())) | set(more)))
 
 
 def backfill(
@@ -127,77 +189,192 @@ def backfill(
     *,
     days: int,
     now: float,
+    tuta: Any = None,
 ) -> Backfill:
-    """Fetch the window (inbox, archive, sent and trash; read-only) and fold
-    it, oldest first, into a scratch index and case store. No model call."""
-    since = datetime.datetime.fromtimestamp(now - days * 86400, datetime.UTC)
-    ids = mailbox.list(f"after:{since:%Y/%m/%d}", LISTING_LIMIT, include_trash=True)
-    counts = {"listed": 0, "fetched": 0, "fetch_failed": 0, "unparseable": 0,
-              "outside_window": 0, "held": 0}
-    if ids is None:
-        counts["listing_failed"] = 1
-        ids = []
-    counts["listed"] = len(ids)
+    """Fetch the window and fold it, oldest first, into ONE scratch index and
+    case store — Gmail (inbox, archive, sent and trash) when `mailbox` is
+    given, Tuta (INBOX, Sent, Trash) when `tuta` is. Read-only; no model
+    call. One index for both, so a reply he sent from either inbox is his act
+    in the conversation, and the frozen-clock order spans both."""
+    floor = now - days * 86400
+    index = mailindex.MailIndex(state_dir)
     parsed: list[mailindex.Parsed] = []
     labels: dict[str, tuple[str, ...]] = {}
-    floor = now - days * 86400
-    # A resumed run re-buys no fetch: an id this run's index already holds,
-    # whose labels were recorded when it was fetched, is not fetched again.
-    index = mailindex.MailIndex(state_dir)
-    seen = _read_fetched(state_dir)
-    held_ids = {h.provider_id: d for d, h in index.by_digest.items() if h.provider_id}
-    # One mailbox may serve several runs in a process: an exhaustion from an
-    # earlier run is not this one's.
-    if hasattr(mailbox, "quota_exhausted"):
-        mailbox.quota_exhausted = False
-    ordered = list(dict.fromkeys(ids))
+    counts: dict[str, int] = {key: 0 for key in _SUMMED}
+    sources: dict[str, dict[str, Any]] = {}
     with _fetched_log(state_dir) as remember:
-        for position, message_id in enumerate(ordered):
-            if getattr(mailbox, "quota_exhausted", False):
-                # The adapter spent its retries on a quota refusal: every
-                # further get would buy the same refusal, each after a full
-                # backoff. The rest are counted not fetched; a resumed run
-                # into this directory fetches them and re-buys nothing else.
-                counts["fetch_failed"] += len(ordered) - position
-                counts["quota_stopped"] = 1
-                break
-            known = seen.get(message_id)
-            if known is not None and known.get("outside"):
-                # Fetched by an earlier run and outside the window: counted
-                # once, as outside, never also as held.
-                counts["outside_window"] += 1
-                continue
-            if known is not None and message_id in held_ids:
-                counts["held"] += 1
-                digest = held_ids[message_id]
-                labels[digest] = tuple(sorted(set(labels.get(digest, ()))
-                                              | set(known.get("labels") or ())))
-                continue
-            msg = mailbox.get(message_id)
-            if msg is None:
-                counts["fetch_failed"] += 1
-                continue
-            counts["fetched"] += 1
-            item = mailindex.from_gmail(msg, owner_addresses)
-            if item is None:
-                counts["unparseable"] += 1
-                continue
-            outside = item.header.at < floor
-            remember({"id": message_id, "digest": item.header.digest,
-                      "labels": list(item.labels), "outside": outside})
-            if outside:
-                counts["outside_window"] += 1
-                continue
-            parsed.append(item)
-            labels[item.header.digest] = tuple(sorted(set(labels.get(item.header.digest, ())) |
-                                                      set(item.labels)))
+        if mailbox is not None:
+            gmail_counts = _backfill_gmail(mailbox, state_dir, index, owner_addresses, now=now,
+                                           floor=floor, parsed=parsed, labels=labels,
+                                           remember=remember)
+            sources["gmail"] = dict(gmail_counts)
+            counts.update({k: v for k, v in gmail_counts.items() if k not in _SUMMED})
+        if tuta is not None:
+            sources["tuta"] = _backfill_tuta(tuta, index, owner_addresses, floor=floor,
+                                             parsed=parsed, labels=labels, remember=remember)
+            sources["tuta"]["window_days"] = days
+    for source_counts in sources.values():
+        for key in _SUMMED:
+            counts[key] += int(source_counts.get(key) or 0)
     store = mailcases.CaseStore(state_dir)
     mailwatch.ingest(index, store, parsed)
     counts["in_index"] = len(index.by_digest)
     counts["cases"] = len(store.cases)
     counts["index_unreadable"] = len(index.health.unreadable)
     counts["message_id_collisions"] = len(index.health.collisions)
-    return Backfill(index, store, labels, counts)
+    return Backfill(index, store, labels, counts, sources)
+
+
+def _backfill_gmail(
+    mailbox: Any,
+    state_dir: Path,
+    index: mailindex.MailIndex,
+    owner_addresses: frozenset[str],
+    *,
+    now: float,
+    floor: float,
+    parsed: list[mailindex.Parsed],
+    labels: dict[str, tuple[str, ...]],
+    remember: Callable[[dict[str, Any]], None],
+) -> dict[str, int]:
+    since = datetime.datetime.fromtimestamp(floor, datetime.UTC)
+    ids = mailbox.list(f"after:{since:%Y/%m/%d}", LISTING_LIMIT, include_trash=True)
+    counts = {key: 0 for key in _SUMMED}
+    if ids is None:
+        counts["listing_failed"] = 1
+        ids = []
+    counts["listed"] = len(ids)
+    # A resumed run re-buys no fetch: an id this run's index already holds,
+    # whose labels were recorded when it was fetched, is not fetched again.
+    seen = _read_fetched(state_dir)
+    held_ids = {h.provider_id: d for d, h in index.by_digest.items()
+                if h.provider_id and h.mailbox == "gmail"}
+    # One mailbox may serve several runs in a process: an exhaustion from an
+    # earlier run is not this one's.
+    if hasattr(mailbox, "quota_exhausted"):
+        mailbox.quota_exhausted = False
+    ordered = list(dict.fromkeys(ids))
+    for position, message_id in enumerate(ordered):
+        if getattr(mailbox, "quota_exhausted", False):
+            # The adapter spent its retries on a quota refusal: every
+            # further get would buy the same refusal, each after a full
+            # backoff. The rest are counted not fetched; a resumed run
+            # into this directory fetches them and re-buys nothing else.
+            counts["fetch_failed"] += len(ordered) - position
+            counts["quota_stopped"] = 1
+            break
+        known = seen.get(message_id)
+        if known is not None and known.get("outside"):
+            # Fetched by an earlier run and outside the window: counted
+            # once, as outside, never also as held.
+            counts["outside_window"] += 1
+            continue
+        if known is not None and message_id in held_ids:
+            counts["held"] += 1
+            _union(labels, held_ids[message_id], tuple(known.get("labels") or ()))
+            continue
+        msg = mailbox.get(message_id)
+        if msg is None:
+            counts["fetch_failed"] += 1
+            continue
+        counts["fetched"] += 1
+        item = mailindex.from_gmail(msg, owner_addresses)
+        if item is None:
+            counts["unparseable"] += 1
+            continue
+        outside = item.header.at < floor
+        remember({"id": message_id, "digest": item.header.digest,
+                  "labels": list(item.labels), "outside": outside})
+        if outside:
+            counts["outside_window"] += 1
+            continue
+        parsed.append(item)
+        _union(labels, item.header.digest, item.labels)
+    return counts
+
+
+def _tuta_log_id(digest: str) -> str:
+    # Tuta UIDs renumber on a bridge restart, so the run's log keys a Tuta
+    # observation by its digest: a remembered UID would name another message.
+    return f"tuta-digest:{digest}"
+
+
+def _backfill_tuta(
+    tuta: Any,
+    index: mailindex.MailIndex,
+    owner_addresses: frozenset[str],
+    *,
+    floor: float,
+    parsed: list[mailindex.Parsed],
+    labels: dict[str, tuple[str, ...]],
+    remember: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    """The Tuta half: enumerate (never SEARCH) INBOX, Sent and Trash back to
+    `floor` through the shipped adapter, skip a fetch only on its identity
+    match (never a UID), fetch the rest without \\Seen. Labels come from the
+    folder and the flags THIS listing carried, logged per digest."""
+    counts: dict[str, Any] = {key: 0 for key in _SUMMED}
+    history = tuta.history(floor, LISTING_LIMIT)
+    if history is None:
+        failure = getattr(tuta, "last_failure", None)
+        counts["listing_failed"] = 1
+        counts["listing_failure"] = (failure.describe() if isinstance(failure, Failure)
+                                     else "the listing failed")
+        return counts
+    roles_by_ref: dict[str, str] = {}
+    for role in ("sent", "trash", "inbox"):
+        for ref in getattr(history, role):
+            roles_by_ref[ref] = role
+    counts["listed"] = len(roles_by_ref)
+    counts["listed_by_folder"] = {role: len(getattr(history, role))
+                                  for role in ("inbox", "sent", "trash")}
+    observed: dict[str, tuple[str, ...]] = {}
+    outside: set[str] = set()
+    fetch_failed_by_kind: dict[str, int] = {}
+    for ref, role in roles_by_ref.items():
+        flags = tuta.flags_of(ref)
+        held = tuta.held(ref, index, {})
+        if held is not None:
+            counts["held"] += 1
+            _union(observed, held, tuta_labels(role, flags))
+            continue
+        item, failure = tuta.fetch(ref, owner_addresses)
+        if failure is not None:
+            counts["fetch_failed"] += 1
+            fetch_failed_by_kind[failure.kind] = fetch_failed_by_kind.get(failure.kind, 0) + 1
+            continue
+        counts["fetched"] += 1
+        if item is None:
+            counts["unparseable"] += 1
+            continue
+        if not tuta.is_listed(ref, item):
+            # Renumbered between listing and fetch: the folder is still this
+            # one, the listed flags are another message's.
+            flags = None
+        if item.header.at < floor:
+            counts["outside_window"] += 1
+            outside.add(item.header.digest)
+            continue
+        parsed.append(item)
+        _union(observed, item.header.digest, tuta_labels(role, flags))
+    for digest in sorted(outside - set(observed)):
+        remember({"id": _tuta_log_id(digest), "digest": digest, "labels": [], "outside": True})
+    for digest, held_labels in sorted(observed.items()):
+        remember({"id": _tuta_log_id(digest), "digest": digest, "labels": list(held_labels),
+                  "outside": False})
+        _union(labels, digest, held_labels)
+    counts["fetch_failed_by_kind"] = fetch_failed_by_kind
+    counts["folders"] = dict(history.folders)
+    counts["depth"] = {}
+    for name, facts in tuta.depth.items():
+        oldest = facts.get("oldest_at")
+        # Walked to the folder's first message without meeting the window's
+        # start: the folder is shorter than the window. A stated fact.
+        shorter = bool(facts.get("reached_beginning") and facts.get("messages")
+                       and (oldest is None or oldest >= floor))
+        counts["depth"][name] = {**facts, "shorter_than_window": shorter}
+    counts["adapter"] = dict(getattr(tuta, "counts", {}) or {})
+    return counts
 
 
 FETCHED_LOG = "fetched.jsonl"
@@ -270,15 +447,21 @@ def export_truth(state_dir: Path) -> Callable[[str], tuple[str, str] | None]:
     return truth
 
 
-CSV_NAME = "verdicts.csv"
-
-
-def export_csv(run_dir: Path, clean: Callable[[str], str]) -> tuple[Path, int, int]:
-    """Write `<run-dir>/verdicts.csv` from the run's scratch tree. Reads the
-    run directory only: no mailbox, no model."""
+def export_csv(
+    run_dir: Path,
+    clean: Callable[[str], str],
+    *,
+    out_file: Path | None = None,
+    now: float | None = None,
+) -> mailexport.Written:
+    """Write the run's review file — into the Downloads folder by default,
+    else into the run directory (`mailexport.export` decides, and says why).
+    The name carries the run's own stamp (its directory name). Reads the run
+    directory only: no mailbox, no model."""
     state_dir = run_dir / "state"
-    return mailexport.write(run_dir / CSV_NAME, state_dir, clean=clean,
-                            truth=export_truth(state_dir))
+    return mailexport.export(
+        state_dir, clean=clean, run=run_dir.resolve().name or "run", fallback_dir=run_dir,
+        out_file=out_file, truth=export_truth(state_dir), now=now)
 
 
 def select(
@@ -370,11 +553,24 @@ def report(
         if header.direction == "in":
             truth = truths[header.digest]
             _add(tiers, truth.tier, truth.label)
-    trashed = [h for h in run.index.by_digest.values()
-               if h.direction == "in" and "trashed" in truths[h.digest].facts]
-    oldest_trash_days = (
-        round((now - min(h.at for h in trashed)) / 86400, 1) if trashed else None
-    )
+    def trashed_in(mailbox: str) -> list[mailindex.Header]:
+        return [h for h in run.index.by_digest.values()
+                if h.direction == "in" and h.mailbox == mailbox
+                and "trashed" in truths[h.digest].facts]
+
+    def oldest_days(headers: list[mailindex.Header]) -> float | None:
+        return round((now - min(h.at for h in headers)) / 86400, 1) if headers else None
+
+    trashed = trashed_in("gmail")
+    oldest_trash_days = oldest_days(trashed)
+    sources = {name: dict(facts) for name, facts in run.sources.items()}
+    if "tuta" in sources:
+        tuta_trashed = trashed_in(mailtuta.NAME)
+        sources["tuta"]["trashed_inbound"] = len(tuta_trashed)
+        sources["tuta"]["oldest_trashed_days"] = oldest_days(tuta_trashed)
+    selected_by_mailbox: dict[str, int] = {}
+    for header in selected:
+        selected_by_mailbox[header.mailbox] = selected_by_mailbox.get(header.mailbox, 0) + 1
     arms: dict[str, Any] = {}
     for spec, records in results.items():
         disposition: dict[str, dict[str, int]] = {}
@@ -450,6 +646,8 @@ def report(
                 })
     return {
         "window": run.counts,
+        "sources": sources,
+        "selected_by_mailbox": selected_by_mailbox,
         "truth_tiers": tiers,
         "trash_observability": {
             "trashed_inbound": len(trashed),
@@ -464,6 +662,55 @@ def report(
 
 def _pairs(table: dict[str, int]) -> str:
     return ", ".join(f"{k} {v}" for k, v in sorted(table.items()))
+
+
+def _day(at: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(at))
+
+
+def _tuta_lines(facts: dict[str, Any], days: int | None) -> list[str]:
+    """What the Tuta enumeration observed, stated as facts — what each folder
+    held, how far back it went, and what is absent and why it is absent."""
+    if facts.get("listing_failed"):
+        return [f"the Tuta LISTING failed ({facts.get('listing_failure')}): nothing below "
+                "describes Tuta's half of the window"]
+    by_folder = facts.get("listed_by_folder") or {}
+    folders = facts.get("folders") or {}
+    lines = [
+        f"tuta: {facts.get('listed', 0)} listed (" + ", ".join(
+            f"{role} {by_folder.get(role, 0)}" for role in ("inbox", "sent", "trash")
+            if folders.get(role)) + f"), {facts.get('fetched', 0)} fetched, "
+        f"{facts.get('held', 0)} already held, {facts.get('fetch_failed', 0)} not fetched, "
+        f"{facts.get('unparseable', 0)} unparseable, {facts.get('outside_window', 0)} outside "
+        "the window",
+    ]
+    window = f"the {days}-day window" if days else "the window"
+    for role in ("inbox", "sent", "trash"):
+        name = folders.get(role)
+        depth = (facts.get("depth") or {}).get(name or "")
+        if not name or not isinstance(depth, dict):
+            continue
+        oldest = depth.get("oldest_at")
+        if depth.get("capped"):
+            lines.append(f"tuta {name}: the listing stopped at {LISTING_LIMIT} messages, before "
+                         f"the start of {window}")
+        elif not depth.get("messages"):
+            lines.append(f"tuta {name}: the folder is empty")
+        elif depth.get("shorter_than_window"):
+            lines.append(f"tuta {name}: the folder holds {depth.get('messages')} message(s), "
+                         f"the oldest dated {_day(oldest) if oldest else '(no readable date)'}"
+                         f" — shorter than {window}")
+    if folders.get("trash"):
+        lines.append(
+            f"tuta: trashed inbound observed: {facts.get('trashed_inbound', 0)} (oldest "
+            f"{facts.get('oldest_trashed_days')} days). How long Tuta keeps Trash is not known "
+            "here; mail it has emptied is ABSENT from every count, not counted as kept.")
+    else:
+        lines.append("tuta: the bridge exposes no Trash folder — mail he trashed in Tuta is "
+                     "ABSENT from every count, not counted as kept.")
+    lines.append("tuta: only INBOX, Sent and Trash are enumerated — mail he moved to any other "
+                 "folder (an archive, spam, his own folders) is ABSENT, never counted archived.")
+    return lines
 
 
 def _table(title: str, table: dict[str, dict[str, int]]) -> list[str]:
@@ -487,23 +734,36 @@ def render(result: dict[str, Any]) -> str:
         f"{w.get('fetch_failed', 0)} not fetched, {w.get('unparseable', 0)} unparseable, "
         f"{w.get('in_index', 0)} in the index, {w.get('cases', 0)} cases built",
     ]
+    sources = result.get("sources") or {}
+    several = len(sources) > 1
     if w.get("listing_failed"):
-        lines.append("the mailbox LISTING failed: nothing below describes the window")
+        lines.append("the Gmail LISTING failed: nothing below describes "
+                     + ("Gmail's half of the window" if several else "the window"))
     if w.get("quota_stopped"):
         lines.append("the Gmail quota refused fetches past its retries: the backfill stopped "
                      "asking, and the mail it did not fetch is ABSENT below — re-run into the "
                      "same --out to fetch only those")
-    trash = result["trash_observability"]
-    lines.append(
-        f"trashed inbound observed: {trash['trashed_inbound']} (oldest "
-        f"{trash['oldest_trashed_days']} days). Gmail empties Trash after "
-        f"{trash['retention_days']} days, so mail he trashed earlier than that is in no "
-        "listing — it is ABSENT from every count here, not counted as kept."
-    )
+    if "gmail" in sources or not sources:
+        trash = result["trash_observability"]
+        lines.append(
+            f"{'gmail: ' if several else ''}trashed inbound observed: "
+            f"{trash['trashed_inbound']} (oldest {trash['oldest_trashed_days']} days). Gmail "
+            f"empties Trash after {trash['retention_days']} days, so mail he trashed earlier "
+            "than that is in no listing — it is ABSENT from every count here, not counted as "
+            "kept."
+        )
+    if "tuta" in sources:
+        lines += _tuta_lines(sources["tuta"], sources["tuta"].get("window_days"))
+    if several:
+        lines.append("sources: " + ", ".join(
+            f"{name} {facts.get('listed', 0)} listed, {facts.get('fetched', 0)} fetched"
+            for name, facts in sorted(sources.items())))
     lines.append("truth, by tier (inbound mail in the window):")
     for tier, labels in sorted(result["truth_tiers"].items()):
         lines.append(f"  {tier}: " + ", ".join(f"{k} {v}" for k, v in sorted(labels.items())))
-    lines.append(f"read by each arm: {result['selected']} selected mail(s)")
+    by_mailbox = result.get("selected_by_mailbox") or {}
+    lines.append(f"read by each arm: {result['selected']} selected mail(s)"
+                 + (" (" + _pairs(by_mailbox) + ")" if several and by_mailbox else ""))
     for spec, arm in sorted(result["arms"].items()):
         lines.append("")
         lines.append(f"arm {spec}: {arm['read']} of {result['selected']} recorded")
@@ -554,6 +814,7 @@ def render(result: dict[str, Any]) -> str:
 def run_backtest(
     *,
     mailbox: Any,
+    tuta: Any = None,
     owner_addresses: frozenset[str],
     arms: dict[str, Callable[..., Any] | None],
     charter: roles.Charter,
@@ -566,7 +827,7 @@ def run_backtest(
 ) -> dict[str, Any]:
     now = time.time() if now is None else now
     state_dir = out_dir / "state"
-    run = backfill(mailbox, state_dir, owner_addresses, days=days, now=now)
+    run = backfill(mailbox, state_dir, owner_addresses, days=days, now=now, tuta=tuta)
     truths = {
         d: truth_of(run.index, h, run.labels.get(d, ())) for d, h in run.index.by_digest.items()
     }
@@ -585,21 +846,43 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="backtest the shadow inbox pipeline (#142 W5)")
     parser.add_argument("--account", default=os.environ.get("AISH_MAIL_ACCOUNT", ""))
     parser.add_argument("--owner", action="append", default=[])
+    parser.add_argument("--source", action="append", choices=SOURCES, default=[],
+                        help="an inbox to backfill (repeatable; default: gmail only — a Tuta "
+                             "backfill fetches every Tuta mail in the window too, and its "
+                             "inbound mail joins the one --reader-max selection)")
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
     parser.add_argument("--arm", action="append", default=[],
                         help="a Reader model spec; repeat for a cross-model comparison")
     parser.add_argument("--reader-max", type=int, default=DEFAULT_READER_MAX)
     parser.add_argument("--out", default="")
     parser.add_argument("--csv", default="", metavar="RUN_DIR",
-                        help="export-only: write RUN_DIR/verdicts.csv from a finished run's "
-                             "store and exit — no mailbox, no model")
+                        help="export-only: write the review file from a finished run's store "
+                             "and exit — no mailbox, no model. Lands in your Downloads folder "
+                             "when run from a terminal, else in RUN_DIR")
+    parser.add_argument("--out-file", default="", metavar="PATH",
+                        help="with --csv: write the review file here instead (a directory "
+                             "gets the generated name inside it)")
     args = parser.parse_args(argv)
+    if args.out_file and not args.csv:
+        parser.error("--out-file needs --csv")
     if args.csv:
-        return _export_only(Path(args.csv))
-    env, why = mailwatch.account_env(args.account)
-    if env is None:
-        print(f"refusing to run: {why}", file=sys.stderr)
-        return 2
+        return _export_only(Path(args.csv), Path(args.out_file) if args.out_file else None)
+    wanted = list(dict.fromkeys(args.source or ["gmail"]))
+    owners = {a.lower() for a in args.owner}
+    gmail_box: Any = None
+    if "gmail" in wanted:
+        env, why = mailwatch.account_env(args.account)
+        if env is None:
+            print(f"refusing to run: {why}", file=sys.stderr)
+            return 2
+        owners.add(args.account.lower())
+        gmail_box = mailwatch.GwsMailbox(env)
+    tuta_box: Any = None
+    if "tuta" in wanted:
+        tuta_env, address = mailwatch.tuta_env()
+        if address:
+            owners.add(address)
+        tuta_box = mailtuta.TutaMailbox(tuta_env)
     try:
         charter = mailwatch.load_reader()
     except roles.CharterError as exc:
@@ -609,8 +892,9 @@ def main(argv: list[str] | None = None) -> int:
         paths.state_home() / "mail-backtests" / time.strftime("%Y%m%d-%H%M%S")
     )
     result = run_backtest(
-        mailbox=mailwatch.GwsMailbox(env),
-        owner_addresses=frozenset({args.account.lower(), *(a.lower() for a in args.owner)}),
+        mailbox=gmail_box,
+        tuta=tuta_box,
+        owner_addresses=frozenset(owners),
         arms={spec: None for spec in args.arm},
         charter=charter,
         out_dir=out,
@@ -623,18 +907,20 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _export_only(run_dir: Path) -> int:
+def _export_only(run_dir: Path, out_file: Path | None = None) -> int:
     from .cli import _plain  # the terminal's sanitiser: mailview's law, one sanitiser
 
     if not (run_dir / "state").is_dir():
         print(f"refusing to export: {run_dir} has no state/ — not a backtest run directory",
               file=sys.stderr)
         return 2
-    path, rows, unreadable = export_csv(run_dir, _plain)
-    print(f"{rows} row(s), one per (mail, model); truth recomputed at export")
-    if unreadable:
-        print(f"{unreadable} verdict file(s) could not be read and are not in the file")
-    print(f"written to {path}")
+    written = export_csv(run_dir, _plain, out_file=out_file)
+    print(f"{written.rows} row(s), one per (mail, model); truth recomputed at export")
+    if written.unreadable:
+        print(f"{written.unreadable} verdict file(s) could not be read and are not in the file")
+    if written.note:
+        print(written.note)
+    print(f"written to {written.path}")
     return 0
 
 
