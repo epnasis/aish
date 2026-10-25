@@ -501,6 +501,13 @@ Two exceptions sit in the same sentence: a benefit with a deadline, or an unreso
 with the purchase. The case's reconstruction had also dropped the property his ruling rested on,
 which was that the mail was a REPEAT. It now carries the earlier unanswered ask in its thread.
 
+**Charter v3 states his one-time-code preference** (2026-10-25): re-admission showed both models
+answering `surface` and `decide` on all four code cases against prose that said nothing about
+such mails, and his ruling — a code asks nothing of him through aish because he is signing in
+himself, and it may sit in the inbox until it has expired — now stands in the disposition
+guidance as `nothing` and `expire_after_grace`, deliberately with no exception for a code he did
+not request.
+
 ### What a backtest costs
 
 Two independent costs, and `--reader-max` bounds only one. **Reader calls** scale with
