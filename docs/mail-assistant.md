@@ -492,6 +492,15 @@ and the outage notice) nothing wanted of him. **Adding them changed the admissio
 owner-cases digest is part of every admission, so each model must be re-examined before the
 Reader runs again.
 
+**Charter v2 states his review-request preference** (2026-10-25). Re-admission with these cases
+showed both models answering `surface` on the second review request, and the charter's prose
+said nothing about such mails, so the exam enforced a preference the Reader in production could
+not see. Two review nags ruled "fine to bin" now stand in the disposition guidance: review,
+rating or feedback requests about a completed purchase are expendable, and a repeat adds nothing.
+Two exceptions sit in the same sentence: a benefit with a deadline, or an unresolved problem
+with the purchase. The case's reconstruction had also dropped the property his ruling rested on,
+which was that the mail was a REPEAT. It now carries the earlier unanswered ask in its thread.
+
 ### What a backtest costs
 
 Two independent costs, and `--reader-max` bounds only one. **Reader calls** scale with
