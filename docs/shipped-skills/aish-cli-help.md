@@ -53,6 +53,7 @@ Tab completes them, and an unambiguous prefix works (`/res` for `/resume`).
 - At startup aish says how many scheduled runs from the last 14 days have not been opened (silent monitor runs not counted).
 - Running an automation now, outside its schedule, is the web's `/run-now`. The web also has `/tasks`, as a sheet with Pause / Resume / Run now / Delete per automation.
 - `/mail` (or `/mail <n>`, up to 200) lists the inbox assistant's shadow results newest first — sender, subject, which inbox, the Reader's reading, what it WOULD have done, and the mail checks (authenticated or why not, newsletter-gated, flags) — under the watcher's health line, which warns when no pass ran lately or an inbox's listing failed. Shadow mode: nothing was done to any of those mails. The results come from `aish-mailwatch`, scheduled by `scripts/install-mailwatch-service.sh`. `/m` is ambiguous now; `/mo` is `/model`.
+- `/mail export` writes every recorded result as a CSV file (one row per mail and model: date, sender, subject, the reading, what aish would do, whether the live-conversation rule overrode it, the mail checks) to sort and filter in a spreadsheet, and prints its path. A mail in a conversation he wrote in within the last 30 days is never filed away (archived or expired) — shown as CLAMPED.
 
 ## Models
 - The current model is named on aish's identity line. `--model`, `$AISH_MODEL` or the config's `model` key set the startup default; `/model <name> --save` persists a switch.

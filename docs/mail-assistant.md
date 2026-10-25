@@ -1,11 +1,14 @@
-# The inbox assistant — shadow mode (#142 W5, slices S1 and S1.5)
+# The inbox assistant — shadow mode (#142 W5, slices S1, S1.5 and S1.6)
 
 `mailindex.py`, `mailgate.py`, `mailcases.py`, `mailreader.py`, `mailverdicts.py`,
-`mailwatch.py`, `mailsource.py`, `mailtuta.py`, `mailview.py`, `mailbacktest.py`,
+`mailwatch.py`, `mailsource.py`, `mailtuta.py`, `mailview.py`, `mailexport.py`,
+`mailbacktest.py`,
 `aish/charters/mail-reader.md`, `scripts/install-mailwatch-service.sh`.
 The binding design is the comment *"W5 REWRITTEN — the inbox assistant"* on epic #142
 (2026-10-24). This file says what slice S1 built from it, what S1.5 added (the owner surface,
-both inboxes, quota discipline, continuous runs — §S1.5 below), what they deliberately did not,
+both inboxes, quota discipline, continuous runs — §S1.5 below), what S1.6 added (live
+conversations, reply recognition, the CSV review file — §S1.6 below), what they deliberately
+did not,
 and why each fence is where it is.
 
 **How to use this file.** The design in one screen first, then the one-line state of S1, then
@@ -508,6 +511,124 @@ himself, and it may sit in the inbox until it has expired — now stands in the 
 guidance as `nothing` and `expire_after_grace`, deliberately with no exception for a code he did
 not request.
 
+## S1.6 — live conversations, reply recognition, the review file
+
+Three directives from the owner (2026-10-25): (1) never auto-file a live conversation — keep
+active conversations visible; (2) teach the Reader to recognize those, and mail that wants an
+answer from him; (3) a CSV review file of every judged mail, to sort and filter in a spreadsheet.
+
+### The measurement that framed it: the misses were openers
+
+The year backtest (run 20261025-110427) recorded 8 mails the gemini arm would have ARCHIVED that
+he replied to: insurance policies from his agent (one of them his own forward), a booking
+confirmation for an upcoming stay, a meter-exchange protocol, a property-fee clarification, a visa
+application receipt, an Airbnb receipt. Measured against that run's own index (the conversation as
+of each mail, its `direction == "out"` members before it): **he had written in 0 of the 8 threads
+before the mail — all 8 were conversation OPENERS.** So the code clamp below, which keys on his
+having written in the conversation, would have changed none of them. It protects CONTINUATIONS
+only; the openers are carried by the teaching (charter v4 and his exam cases). Nothing here claims
+the clamp fixes the 8. The backtest reports raw and clamped counts side by side so the two can be
+told apart: the clamp's effect is the difference between them, the teaching's is the raw count
+moving.
+
+### The fact — `owner_wrote_in_this_conversation`
+
+`compose` adds a code-computed bundle fact: when he last wrote in THIS conversation before the
+mail (`3 days ago`), or `never` (`mailreader.owner_wrote_words`). **Past-facing by construction**:
+only conversation members at or before the mail's own position count, so a reply he sends LATER
+never makes the earlier mail live (`_owner_wrote_days`). **Computed over the full conversation**,
+before the shown slice is cut to `READER_CONVERSATION_SHOWN`, so a long thread whose oldest message
+is his still reads as live. **Thread-scoped by name**: it says he wrote in this thread, not that he
+knows the sender — that is the ledger's grade, which counts his acts toward an ADDRESS. The record
+carries it as `owner_wrote_days` (days, or null for never) for every assessed mail, gated ones
+included. `TestTheFact` in `tests/test_mail_live.py`.
+
+### The clamp — code wins, the verdict is untouched
+
+When the fact is at most `LIVE_CONVERSATION_DAYS` (30) and the validated verdict's disposition is
+`archive` or `expire_after_grace`, the EFFECTIVE disposition is `surface` (`mailreader.clamp`).
+**30 is the owner's explicit choice (2026-10-26: "if I go on vacation, 14 days would file things
+too quickly"), not a measurement** — stated like the `TokenBucket` numbers, and moved only on
+evidence or his word. It is code-written into the record BESIDE the verdict, `clamped: {from, to,
+owner_wrote_days, limit}`; the verdict itself is never rewritten, so what the Reader answered stays
+measurable. One reader decides what the pipeline would do, `mailverdicts.effective_disposition`,
+for `/mail`, the CSV and the backtest alike; a record written before the clamp reads as its
+verdict. It only ever moves toward his attention. `/mail` shows `would: surface [CLAMPED from
+archive: you wrote in this conversation N days before it, within 30]`. The charter's prose says
+"recently"; the number lives in code and in the fact. `TestTheClamp`, `TestTheOwnerSurface`.
+
+**Joining a live thread earns visibility, never capability.** A hostile mail naming his thread's
+Message-IDs in References joins the conversation (*Residuals*), so it gets the fact and the clamp:
+it stays visible. It gains nothing else — the ledger counts acts by a reply's OWN In-Reply-To, so
+membership mints no act and no grade, and the clamp only ever surfaces. The fail-safe direction: a
+wrong join costs him one more mail to look at. `TestJoiningByReferences`.
+
+### Charter v4 — the teaching
+
+Beside v2's and v3's sentences, in the disposition guidance: a live conversation is never filed —
+a keeper document arriving in one still belongs to its case, but the mail stays visible; `archive`
+is for a record with nothing left for him to do, and a mail that carries a record AND asks him
+something, or leaves him something to do ahead, is `surface` even when it opens a conversation.
+Under `wanted`: a direct question or request addressed to him personally wants `reply`; a no-reply
+or bulk sender's courtesy "reply to this email" is not a request of him. Every shipped golden
+pair's bundle now carries the fact as `compose` writes it. `TestCharterV4`.
+
+**His exam cases** (private tree, 15 after this slice): four OPENER reconstructions of the 8 — the
+insurance policy with his agent's question, the booking confirmation for an upcoming stay with
+payment due on arrival, the meter protocol asking confirmation, the property-fee clarification —
+expecting `surface` or `hold`, and `reply`/`decide` where the text plainly asks him something.
+Their bodies were mostly not recorded in the run (HTML-only), so each reconstruction states in its
+text the property the ruling rests on. Two CONTINUATIONS (he wrote 4 days before; the reply carries
+an offer, a refund confirmation) pin the charter half of the clamp. One over-teaching CONTROL: a
+shop's transactional notice with a "just reply" footer and no list header must NOT want `reply` —
+a listed newsletter would test a dead path, since the Gate skips those before the Reader. **Charter
+v4 and the changed cases move the admission digest**: every model is re-admitted before the Reader
+runs again, and a resumed backtest run directory re-buys its Reader calls under v4 (a new charter
+digest is a new reading — expected, not a resume bug).
+
+### The review file — `mailexport.py`
+
+One exporter over the verdict store and the index, through `mailview.collect` — the SAME join
+`/mail` shows, never a second one — for a backtest run directory or the live store. One row per
+(mail, model): date, `from_addr`, display name, subject, inbox, model, `ending`, kind, meaning,
+`disposition_raw`, `disposition_effective`, `clamped`, `owner_wrote_days`, wanted, deadline,
+suspicion, `sender_case` (the hard axis), case (the resolved case id or the case word),
+`newsletter_gated_by`, the gate summary (`mailview.gate_words`), charter version, digest, provider
+id. **No cell stands blank for unknown**: a gated, invalid, error or unadmitted reading keeps its
+ending, and its verdict cells say `gated` or `no_verdict` exactly as the report counts them
+(`mailexport.verdict_word`, which the report's own cell function calls); a missing index entry
+says so; an empty meaning is `(empty)`; a record from before the fact is `not recorded`.
+
+**Every cell takes one path**: the caller's sanitiser (required — `cli._plain`), whitespace
+flattened, the spreadsheet-formula escape (a leading `=`, `+`, `-`, `@`, tab or CR — also behind
+leading whitespace — gets an apostrophe, `formula_safe`), then the cap. The escape runs on every
+column, so there is no list of "safe" ones to drift. Python's `csv`, `QUOTE_ALL`, UTF-8 with a BOM
+so a spreadsheet reads the Polish. `TestCells`, `TestRows`.
+
+**Surfaced twice**: `/mail export` (the live store, no truth columns; `docs/cli.md`) and
+`aish-mailbacktest --csv <run-dir>` — export-only: no account, no mailbox, no model; it writes
+`<run-dir>/verdicts.csv`. A backtest file adds `truth_recomputed_at_export` and
+`tier_recomputed_at_export`: **truths are never persisted**, so they are recomputed as the harness
+computes them — `truth_of` over the run's index, with labels re-unioned per digest from the run's
+`fetched.jsonl` (`recorded_labels`, the same union `backfill` makes) — and the column names say so.
+`TestBacktestExport`.
+
+**One authority for the counts.** `report.json` carries no per-cell digest lists: every per-arm
+cell is a filter over the file's columns, pinned by
+`test_every_arm_cell_of_the_report_is_a_filter_over_the_columns`. Filter `model` = the arm, then:
+`endings` → by `ending`; `disposition_by_truth[tier:label][v]` → `tier_…` = tier, `truth_…` =
+label, `disposition_raw` = v (`…_clamped`: `disposition_effective`); `wanted_by_reply[tier:replied]`
+→ `truth_…` = `replied` (else `not_replied`), by `wanted`; the HEADLINE
+`destructive_expire_on_kept` → `disposition_raw` = `expire_after_grace` and `truth_…` one of
+replied, starred, archived, kept_read, unread (`…_clamped`: `disposition_effective`);
+`archive_on_replied` → `disposition_raw` = `archive` and `truth_…` = `replied`; `clamped` →
+`clamped` starts with `yes`; `gated_by_truth[by][label]` → `ending` = `gated`,
+`newsletter_gated_by` = by. **The window, tier and trash counts are not in the file**: they
+describe every inbound mail in the window, judged or not, and the file holds judged mail only.
+**And the report counts the run's SELECTION**: a store re-run at a smaller `--reader-max` holds
+rows the report did not count, and a row from an earlier charter keeps its own `charter_version` —
+filter on it.
+
 ### What a backtest costs
 
 Two independent costs, and `--reader-max` bounds only one. **Reader calls** scale with
@@ -564,7 +685,16 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **A thread can be joined by References.** A hostile mail naming an owner thread's Message-IDs
   joins that conversation in the Reader's bundle (it cannot inherit his acts — the ledger fence
   above). The bundle shows each message's sender, and `sender_case` exists for this; nothing
-  structural stops the join.
+  structural stops the join. Since S1.6 the join also earns the live-conversation fact and the
+  clamp — visibility only: membership is not an act, the ledger still refuses it any, and the
+  clamp only ever surfaces. The fail-safe direction is one more mail for him to look at.
+- **The clamp protects continuations only.** The 8 archive-on-replied misses it was built after
+  were all openers (§S1.6); for those only the teaching acts, and whether it does is a
+  re-admission and a backtest away — not measured here.
+- **The review file's truth is recomputed, not recorded.** It is `truth_of` over the run's index
+  and `fetched.jsonl` as they stand at export; labels an earlier run into the same directory
+  logged for mail this run's listing no longer named are unioned too, where `backfill` would have
+  used only the listed ones.
 - **Authentication is only as good as Gmail's header being there.** For mail Gmail received
   directly, the top-most Authentication-Results is Gmail's by construction. For mail it fetched or
   imported from elsewhere it may write none, and a sender-written exact copy of Gmail's would read
@@ -642,6 +772,11 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    Reader no longer matches; re-run step 1 per model before the watcher's verdicts read `ok`.
    Then schedule it: `scripts/install-mailwatch-service.sh --print pawel@wenda.eu <spec>
    pawel@wenda.email` to read the plist, and without `--print` to load it.
+3b. **S1.6: re-admit, then measure the teaching.** Charter v4 and the owner's 15 cases move the
+   admission digest: re-run step 1 per model. A backtest resumed into an existing run directory
+   re-buys every Reader call under v4 (expected). `report.txt` shows the raw counts and, beside
+   them, the counts after the clamp. `aish-mailbacktest --csv <run-dir>` writes the review file
+   (`<run-dir>/verdicts.csv`) without touching the mailbox; `/mail export` writes the live one.
 4. **The mined replay scenario** — a real courier/store pair from his inbox — goes in the private
    tree (`~/.config/aish/evals/<name>/`, `docs/replay.md`), never here: find the pair in the
    backtest run's verdict store (`case_choice` on the courier mail), and replay it end to end
