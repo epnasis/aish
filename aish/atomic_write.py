@@ -29,9 +29,10 @@ from pathlib import Path
 
 
 def publish(
-    path: Path, text: str, *, encoding: str | None = None, keep_existing: bool = False
+    path: Path, text: str | bytes, *, encoding: str | None = None, keep_existing: bool = False
 ) -> bool:
-    """Write `text` to `path` through a per-call temp file; True if it landed.
+    """Write `text` (or bytes, written raw) to `path` through a per-call temp
+    file; True if it landed.
 
     `keep_existing` is for a content-addressed store, where a file already at
     `path` holds these exact bytes by construction: if a concurrent writer
@@ -51,8 +52,12 @@ def publish(
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.tmp")
     moved = False
     try:
-        with os.fdopen(fd, "w", encoding=encoding) as handle:
-            handle.write(text)
+        if isinstance(text, bytes):
+            with os.fdopen(fd, "wb") as binary:
+                binary.write(text)
+        else:
+            with os.fdopen(fd, "w", encoding=encoding) as handle:
+                handle.write(text)
         if keep_existing and path.exists():
             return False
         os.replace(tmp_name, path)

@@ -31,6 +31,8 @@ Tab completes them, and an unambiguous prefix works (`/res` for `/resume`).
 - A SCANNED PDF (pages that are pictures, with no text in them) is read with the Mac's own text recognition (OCR) — nothing to install. aish marks those words as machine-recognised (they may contain errors, a value in a table can be listed apart from its label, a ticked box can come out as a stray letter, and signatures are not captured) and says which pages it could not read and why: off a Mac, `AISH_OCR=0`, or more than 12 scanned pages in one go (asking again reads the next ones).
 - A PICTURE file — a photo of a letter, a screenshot, a JPEG or HEIC saved from a mail — is read the same way: aish reads its words with the same OCR (`read_file` on it), marked the same way, and says if it found none or could not read it.
 
+- Asked for a PDF, report or printable summary, aish makes one with `make_report` and names the file's path in the answer; open it from there. It lives in the chat's scratch workspace and is deleted with the chat.
+
 ## Deleting, and the trash
 - A delete is NOT final: the chat moves to the trash and can be restored for **30 days**. `aish trash` lists it, `aish trash restore <name>` brings one back, `aish trash delete <name>` destroys one for good.
 - Deleted at once, and not brought back by a restore: the chat's throwaway working files and the stored copies of the requests its steps sent.

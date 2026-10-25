@@ -64,7 +64,12 @@ from aish import tools
 # list). The alternative is the session that filed it: with no way to read
 # one, the model grepped ~/.config and ~/.local for 120 s and re-sent the
 # whole task to change one field.
-MAX_MENU_CHARS = 36_900
+#
+# Raised 36,900 -> 37,500 on 2026-10-25 for ONE new tool, make_report (+499
+# chars: 36,872 -> 37,371). A new capability rather than an essay: the session
+# that asked for a PDF report spent five approval cards and fifteen minutes
+# hand-building one with a script, and never delivered it.
+MAX_MENU_CHARS = 37_500
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.
