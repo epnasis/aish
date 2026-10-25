@@ -129,6 +129,9 @@ class TestTheCountingChangedNoMatching:
         # a saved bare `arch` rule auto-approved `brew install` (agent-core.md,
         # "`arch` is a launcher"). Not a word list either — a command list.
         "aish/approval.py:EXEC_WRAPPERS": {"added": ["arch"], "removed": []},
+        # Not a word list: aish's own tool NAMES. make_report writes only into
+        # the chat's scratch workspace and fetches nothing, so it needs no card.
+        "aish/agent.py:READ_ONLY_TOOLS": {"added": ["make_report"], "removed": []},
     }
 
     @staticmethod

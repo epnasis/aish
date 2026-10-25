@@ -1358,6 +1358,29 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "make_report",
+            "description": (
+                "Make a PDF (report, summary, raport) the user can open, print and "
+                "share; returns the exact line for your answer. You MUST use it for "
+                "every PDF — NEVER a script or ~/Downloads. Pictures: show_image "
+                "first, embed the path it returns."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "markdown": {
+                        "type": "string",
+                        "description": "The whole document, in the user's language.",
+                    },
+                },
+                "required": ["title", "markdown"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "recall",
             "description": (
                 "Search everything you know: saved skills, memory, and past "

@@ -20,6 +20,22 @@ It **calls** that fetch rather than repeating it, and the distinction is the who
 
 ---
 
+## Reports the model makes — `make_report`
+
+The third shape, and the only one the MODEL starts: `render_report_pdf` renders markdown the model composed, and `Agent._make_report` saves it and hands back the exact file line `[name.pdf](/abs/path)`. Before it existed, a request for "a PDF report" (owner session 2026-10-18) was hand-built: converter probes, a reportlab script through five approval cards, the file saved into `~/Downloads` (outside every root, so aish could not read it back), the path named as prose. The PDF never reached the owner.
+
+**It lives in the chat's scratch workspace** (`<scratch>/reports/`), deleted with the chat. The owner's call: a report lives as long as its chat, and anything worth keeping he shares out of the preview into another app. Scratch is in the session's `workspace_roots`, so `/pdf/page` and `/download` serve it; opening a chat loads its session, and a viewed session is never evicted, so the chip previews after a restart too (checked in a browser at the real server). The file is named after the title (Unicode kept, since the name travels with the file when shared), and a name already taken is never overwritten — an earlier chip keeps opening the document it was made with (`_report_path`). Identical bytes reuse their file; the header carries a minute-granular time, so that happens only for the same document within the same minute.
+
+**Nothing is fetched.** The owner-tapped exports fetch remote pictures through the guarded fetcher; a report must not, because the model composed every address in the document and the egress gate reads tool arguments, not a document body. So `_MediaEmbedder(fetch_remote=False)` turns every remote picture, map snapshot and video thumbnail into a link card, and the tool's result names each one that is not in the PDF with what was checked about it (`not_embedded`: "a web address; it was not fetched", "a video; its thumbnail was not fetched", "outside this session's directories", …). Its header says "Made by aish", not "Exported from aish". A web picture reaches a report through `show_image`, which IS gated and leaves its copy in the media store, inside the roots. That is why `make_report` is in `READ_ONLY_TOOLS` and not `EGRESS_TOOLS`: its only effect is one file in aish's own workspace.
+
+**No provenance record is written for the report.** An artefact with none reads as outside content, so a later `read_pdf` of aish's own report is treated as outside. That fails safe — over-restriction, never laundering — and must not be "fixed" by treating unrecorded files as aish's own.
+
+**Ranked, not core — measured.** `make_report` is not in `CORE_TOOLS`. In the mined replay `paris-pdf-report` (batch 20261025-205931, gemini-3.8-flash, 3+3 runs) ranking handed it to all three candidate runs on the Polish *"…jako raport pdf"*, and all three called it. Promote it only on a replay that shows ranking missing it, as `schedule_task` was.
+
+**The chip reaches the owner even when the answer forgets it.** `_link_unlinked_reports` runs on the delivering pass: a report line from this task that no delivered text links is appended as `REPORT_LINK_NOTE`, an `[aish]` line. No rework round is spent — aish holds the exact line. On the terminal the tool's result says the path is shown rather than promising a preview (`take_surface`).
+
+---
+
 ## Nested blocks in lists (#172)
 
 Neither library handles the markdown the model actually writes, so `_pdf_markdown_extension()` — built lazily, keeping `markdown` deferred — adds two pieces.

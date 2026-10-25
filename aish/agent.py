@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import weakref
@@ -44,6 +45,7 @@ from . import (
     browser,
     documents,
     evidence,
+    export,
     files,
     media,
     ocr,
@@ -217,7 +219,8 @@ OUTPUT
 Markdown. Link the pages you opened when they carry the answer. Show pictures \
 and video ONLY with the exact line show_image / show_video returns — aish checks \
 every image line at delivery, may send the answer back over a hand-written one, \
-and removes or flags one that cannot display. If you end on a \
+and removes or flags one that cannot display. A PDF or report: make_report \
+only. If you end on a \
 question with a few likely answers, you MUST append one \
 `[Label](aish-reply://ready-to-send answer)` per option, each on its own line \
 «(one-tap buttons); a payload ending in ":" or a space pre-fills instead of \
@@ -1819,6 +1822,10 @@ READ_ONLY_TOOLS = frozenset(
         # state, no wrapper re-run (#192). Read-only by the same argument as
         # show_image's write into the media store.
         "read_tool_output",
+        # Writes one PDF into the chat's OWN scratch workspace, where writes
+        # never need a card, and fetches nothing (export.render_report_pdf).
+        # It never lays a file over an existing one (`_report_path`).
+        "make_report",
     }
 )
 
@@ -2091,6 +2098,8 @@ IMAGES_UNCHECKED_NOTE = (
     "{items}. Call show_image and paste the EXACT line it returns — never type "
     "a picture path yourself.]"
 )
+
+REPORT_LINK_NOTE = "[aish] The report made in this task: {line}"
 
 SHOW_IMAGE_NO_CURL = (
     "Do NOT fall back to curl or wget — a file fetched that way cannot be "
@@ -3297,6 +3306,24 @@ def environment_context(cwd: str) -> str:
     )
 
 
+def _report_path(scratch_dir: Path, title: str, data: bytes) -> Path:
+    """Where `make_report` keeps these bytes: named after the title, since the
+    name travels with the file when the owner shares it, and never laid over a
+    different report of the same name — an earlier chip must keep opening the
+    document it was made with. Identical bytes reuse their file."""
+    stem = re.sub(r"[^\w]+", "-", unicodedata.normalize("NFC", title)).strip("-_")[:60]
+    stem = stem.strip("-_") or "report"
+    folder = scratch_dir / "reports"
+    for n in itertools.count(1):
+        path = folder / (f"{stem}.pdf" if n == 1 else f"{stem}-{n}.pdf")
+        try:
+            if not path.exists() or path.read_bytes() == data:
+                return path
+        except OSError:
+            continue
+    raise AssertionError("unreachable")
+
+
 def _remove_scratch(path: Path) -> None:
     """Delete a scratch workspace, ignoring errors — cleanup is best-effort
     and must never raise from a finalizer/close()."""
@@ -4108,6 +4135,9 @@ class Agent:
         # The display lines show_image handed back this task, and how many
         # times an answer was sent back for its pictures (#430).
         self._shown_images: list[str] = []
+        # The file lines make_report handed over this task: a report the
+        # answer never linked is added to it at delivery (`_unlinked_reports`).
+        self._reports_made: list[str] = []
         self._image_asks = 0
         self._image_removal: tuple[str, list, int] | None = None
         # Rules already reported as broken. A rule file does not fix itself
@@ -5074,6 +5104,7 @@ class Agent:
         self._cardless = _Cardless()
         self.cardless_this_task = 0
         self._shown_images = []
+        self._reports_made = []
         self._image_asks = 0
         self._image_removal = None
         # Skill-read gates belong to the task that armed them; run_task re-arms
@@ -5904,6 +5935,7 @@ class Agent:
                     )
                     continue
                 self._commit_image_removal()
+                self._link_unlinked_reports(result)
                 self._commit_hold_advice()
                 was_held = self._held_answer is not None
                 # A released hold streams itself, notes included; an unbound
@@ -6128,6 +6160,7 @@ class Agent:
         checked = stripped
         self._verify_answer(checked, ask=False)
         self._commit_image_removal()
+        self._link_unlinked_reports(content)
         # Every exit releases the hold, or a bound turn that ends at the loop
         # detector, the stall cap or the ceiling delivers NOTHING: the wrap-up
         # text sits in the buffer and the client shows a dead turn. The note
@@ -8468,6 +8501,8 @@ class Agent:
             return str(a.get("source", ""))
         if name == "show_video":
             return str(a.get("url", ""))
+        if name == "make_report":
+            return str(a.get("title", ""))
         if name == "read_media":
             where = str(a.get("at") or "") or (
                 f"search {a['search']!r}" if a.get("search") else ""
@@ -9290,6 +9325,11 @@ class Agent:
             source = str(args.get("source", ""))
             caption = str(args.get("caption", "") or "")
             return f"→ show_image: {source}", partial(self._show_image, source, caption)
+        if name == "make_report":
+            title = str(args.get("title", "") or "")
+            return f"→ make_report: {title}", partial(
+                self._make_report, title, str(args.get("markdown", "") or "")
+            )
         if name == "read_pdf":
             source = str(args.get("source", ""))
             pages_spec = str(args.get("pages", "") or "").strip()
@@ -9689,6 +9729,65 @@ class Agent:
             "Video ready. Include this line in your answer EXACTLY as written "
             f"(do not alter the link):\n\n[{label or 'Watch'}]({url})"
         )
+
+    def _make_report(self, title: str, markdown_text: str) -> str:
+        """Render a document the model composed to PDF and hand back its file line.
+
+        Before this the model built PDFs by hand: it probed for a converter,
+        wrote a reportlab script, saved into ~/Downloads (outside every root,
+        so it could neither check the file nor give it to the owner) and named
+        a path in prose. Five approval cards and fifteen minutes, and the PDF
+        never reached him. The owner-tapped export already has the renderer;
+        this is the model's door onto it.
+
+        The file goes in the chat's scratch workspace: the owner's call is that
+        a report lives as long as its chat, and anything he means to keep he
+        shares out of the preview. Its only write is there, aish's own
+        directory, which is why it needs no card.
+        """
+        title = re.sub(r"\s+", " ", title).strip()
+        if not markdown_text.strip():
+            return "ERROR: make_report needs the document's markdown."
+        try:
+            data, not_embedded = export.render_report_pdf(
+                markdown_text, title or "Report", self.workspace_roots()
+            )
+        except Exception as exc:  # noqa: BLE001 — the renderer's failure, said to the model
+            return f"ERROR: the PDF could not be rendered ({exc})."
+        try:
+            path = _report_path(self.scratch_dir, title, data)
+            # A concurrent call that took this name first sends us to the next.
+            while not path.exists() and not atomic_write.publish(
+                path, data, keep_existing=True
+            ):
+                path = _report_path(self.scratch_dir, title, data)
+        except OSError as exc:
+            return f"ERROR: could not save the report ({exc})."
+        # Built here rather than trusted to the model, as show_image's line is:
+        # the label is the file's own name, so the chip says what the owner
+        # will be sending.
+        line = f"[{path.name}]({path})"
+        self._reports_made.append(line)
+        lines = [
+            f"Report saved ({documents.page_count(path)} page(s), "
+            f"{max(1, len(data) // 1024)} KB). "
+            + (
+                "The user sees this line as the file's path and opens it from there. "
+                if take_surface(self.base_context)[0] == "cli"
+                else "The user taps this line to preview the PDF, then save or share it. "
+            )
+            + "Include it in your answer EXACTLY as written:",
+            "",
+            line,
+        ]
+        if not_embedded:
+            lines += ["", "These pictures are NOT in the PDF — each became a link instead:"]
+            lines += [f"- {src} — {reason}" for src, reason in not_embedded]
+            lines.append(
+                "To include one, call show_image on it, put the path it returns in "
+                "the markdown, and call make_report again."
+            )
+        return "\n".join(lines)
 
     def _show_image(self, source: str, caption: str) -> str:
         """Fetch or adopt an image, store it, and hand back the markdown line.
@@ -13248,6 +13347,21 @@ class Agent:
         )
         return "".join(kept), None
 
+    def _link_unlinked_reports(self, answer: str) -> None:
+        """Give the owner every report this task made that nothing he was told
+        links to.
+
+        The report exists for him to open, and the model's answer is the only
+        place a chip comes from. Observed before this tool existed: the PDF was
+        made and the answer named it as path text, which nothing renders. No
+        rework round is spent on it — aish holds the exact line, so it is
+        added, and the added line says it came from aish."""
+        told = "\n".join([*self._delivered, answer])
+        for line in self._reports_made:
+            path = line[line.index("](") + 2 : -1]
+            if f"]({path})" not in told and f"](file://{path})" not in told:
+                self._not_followed.append(REPORT_LINK_NOTE.format(line=line))
+
     def _commit_image_removal(self) -> None:
         """The delivering pass: say what the image check removed, and record it."""
         if self._image_removal is None:
@@ -13518,6 +13632,7 @@ class Agent:
         self._commit_hold_advice()
         if self._bindings:
             self._verify_answer(answer, ask=False)
+        self._link_unlinked_reports(answer)
         notes, self._not_followed = self._not_followed, []
         notes = notes + self._cardless.take()
         if not notes:

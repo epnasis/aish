@@ -64,8 +64,8 @@ GLOBAL_TOOLS_DIR = config_home() / "tools"
 # Raised from 25 to 26 by #433, which added the native `plan` tool: the native
 # menu alone must never trip it. Raised to 27 by epic #142 W2, which added the
 # native `schedule_task`, for the same reason. Raised to 28 by #459, which
-# added the native `automations`.
-TOOL_BUDGET = 28
+# added the native `automations`, and to 29 by the native `make_report`.
+TOOL_BUDGET = 29
 NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")

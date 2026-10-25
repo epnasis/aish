@@ -547,9 +547,15 @@ class _MediaEmbedder:
     fetched and inlined, everything else (or any failure) a captioned link
     card. One instance per document so the fetch budget spans all blocks."""
 
-    def __init__(self, image_roots: Sequence[os.PathLike | str]) -> None:
+    def __init__(
+        self, image_roots: Sequence[os.PathLike | str], *, fetch_remote: bool = True
+    ) -> None:
         self.roots = [Path(root).resolve() for root in image_roots]
-        self.fetches_left = MAX_REMOTE_FETCHES
+        self.fetches_left = MAX_REMOTE_FETCHES if fetch_remote else 0
+        # (picture, what this pass observed about it) for every picture that
+        # became a link card instead of being embedded — so a caller can say
+        # which ones, in the terms that were actually checked.
+        self.not_embedded: list[tuple[str, str]] = []
 
     def _fetch(self, url: str) -> bytes | None:
         if self.fetches_left <= 0:
@@ -603,6 +609,8 @@ class _MediaEmbedder:
         poster = self._label_poster(label_html)
         if poster is not None:
             return _embed_card(poster[0], poster[1], url, "YouTube video")
+        if self.fetches_left <= 0:
+            self.not_embedded.append((url, "a video; its thumbnail was not fetched"))
         thumb = self._fetch(f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg")
         image = _img_tag(thumb, "video thumbnail") if thumb else None
         if image is None:
@@ -620,6 +628,8 @@ class _MediaEmbedder:
         key = os.environ.get("GOOGLE_MAPS_API_KEY")
         if not key:
             return _link_card(label_html, url, "map")
+        if self.fetches_left <= 0:
+            self.not_embedded.append((url, "a map; its snapshot was not fetched"))
         snapshot = self._fetch(_static_map_url(markers, key))
         image = _img_tag(snapshot, "map") if snapshot else None
         if image is None:
@@ -637,8 +647,13 @@ class _MediaEmbedder:
         if src.startswith("data:"):
             return tag  # already inline (e.g. a card this pass's sibling emitted)
         if src.startswith(("http://", "https://")):
+            if self.fetches_left <= 0:
+                self.not_embedded.append((src, "a web address; it was not fetched"))
+                return _link_card(_escape(alt), src, "image")
             data = self._fetch(src)
             image = _img_tag(data, alt) if data else None
+            if image is None:
+                self.not_embedded.append((src, "a web address that did not return an image"))
             return image or _link_card(_escape(alt), src, "image")
         return self._local_image(src, alt)
 
@@ -650,17 +665,25 @@ class _MediaEmbedder:
         never read."""
         card = _link_card(_escape(alt), src, "image not embedded")
         if not src.startswith("/"):
-            return card  # relative / ~ / other schemes: no trusted anchor to resolve against
+            # relative / ~ / other schemes: no trusted anchor to resolve against
+            self.not_embedded.append((src, "not an absolute path"))
+            return card
         path = files.resolved(src)
         if path is None or not files.within_roots(self.roots, path):
+            self.not_embedded.append((src, "outside this session's directories"))
             return card
         try:
             if not path.is_file() or path.stat().st_size > FETCH_MAX_BYTES:
+                self.not_embedded.append((src, "no such file, or larger than 8 MB"))
                 return card
             data = path.read_bytes()
         except OSError:
+            self.not_embedded.append((src, "could not be read"))
             return card
-        return _img_tag(data, alt) or card
+        image = _img_tag(data, alt)
+        if image is None:
+            self.not_embedded.append((src, "not a png/jpg/gif/webp picture"))
+        return image or card
 
 
 def _reflow_code_blocks(html: str) -> str:
@@ -1030,6 +1053,24 @@ def render_answer_pdf(
     return _html_to_pdf(_document(title, [body]))
 
 
+def render_report_pdf(
+    markdown_text: str, title: str, image_roots: Sequence[os.PathLike | str]
+) -> tuple[bytes, list[tuple[str, str]]]:
+    """A report the MODEL composed (`make_report`): PDF bytes, plus each picture
+    that became a link card and why.
+
+    Unlike the owner-tapped exports above, nothing is fetched. The model chose
+    every address in this markdown, and a picture fetched here would be an
+    outbound GET past the egress gate, which reads tool arguments rather than
+    the body of a document. Remote pictures reach a report through show_image,
+    which IS gated and leaves its copy in the media store, inside `image_roots`.
+    """
+    embedder = _MediaEmbedder(image_roots, fetch_remote=False)
+    body = _markdown_to_html_fragment(markdown_text, embedder)
+    pdf = _html_to_pdf(_document(title, [body], made_by="Made by aish"))
+    return pdf, embedder.not_embedded
+
+
 def render_session_pdf(
     messages: list[dict], title: str, image_roots: Sequence[os.PathLike | str] = ()
 ) -> bytes:
@@ -1045,14 +1086,16 @@ def render_session_pdf(
     return _html_to_pdf(_document(title, blocks))
 
 
-def _document(title: str, answer_html_blocks: list[str]) -> str:
+def _document(
+    title: str, answer_html_blocks: list[str], made_by: str = "Exported from aish"
+) -> str:
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     # The title comes from the prompt, so it can carry emoji too — wrap them and
     # drop variation selectors like the body, or the H1 shows tofu boxes.
     safe_title = _wrap_emoji(_escape(_drop_variation_selectors(title or "aish")))
     body_parts = [
         f'<h1>{safe_title}</h1>',
-        f'<div class="aish-doc-header">Exported from aish · {stamp}</div>',
+        f'<div class="aish-doc-header">{made_by} · {stamp}</div>',
     ]
     body_parts += [
         f'<div class="aish-answer">{block}</div>' for block in answer_html_blocks
