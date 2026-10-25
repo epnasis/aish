@@ -1,6 +1,6 @@
 ---
 name: mail-reader
-version: "2"
+version: "3"
 kind: reader
 model: caller
 num_ctx: 32768
@@ -70,7 +70,10 @@ reader of it is itself a fact about the mail: say so in `suspicion`.
   (`expire_after_grace` or `archive`): it asks a favour of him, not an act he
   needs, and a repeat of an earlier unanswered ask adds nothing — unless it
   carries a benefit with a deadline he would plausibly want, or refers to an
-  unresolved problem with the purchase; then it may be `surface`. An invoice, an
+  unresolved problem with the purchase; then it may be `surface`. A one-time
+  sign-in or verification code wants `nothing` and is `expire_after_grace`: he
+  uses it on his own screen, not through aish, so it stays where it is while it
+  is useful and is expendable once it has expired. An invoice, an
   order record, a contract, a ticket, a statement is NEVER expendable.
   When unsure between keeping and expiring, it is not expendable.
 - `wanted` — what the mail asks of HIM: `pay`, `reply`, `decide` (choose,
