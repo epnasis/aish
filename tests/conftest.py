@@ -176,6 +176,16 @@ def no_real_notifications(monkeypatch, no_inherited_aish_env):
 
 
 @pytest.fixture(autouse=True)
+def no_real_downloads(tmp_path_factory, monkeypatch, no_inherited_aish_env):
+    """The review-file exports default to ~/Downloads, which is a macOS
+    privacy-protected folder: a process outside the owner's own terminal that
+    opens one has hung on this machine. So no test may resolve the real one —
+    the seam points at a temp dir suite-wide, and a test that wants Downloads
+    missing or unwritable moves it itself."""
+    monkeypatch.setenv("AISH_DOWNLOADS_DIR", str(tmp_path_factory.mktemp("downloads")))
+
+
+@pytest.fixture(autouse=True)
 def no_real_ocr(monkeypatch, no_inherited_aish_env):
     """No test starts macOS's text recognizer unless it asks for it.
 

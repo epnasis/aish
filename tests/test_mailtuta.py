@@ -44,11 +44,16 @@ class FakeHimalaya:
     """The bridge as himalaya presents it: folders of (uid, raw) messages.
     Records every argv; refuses nothing itself — the fence is the adapter's."""
 
-    def __init__(self, folders: dict[str, list[str]], *, fail=None) -> None:
+    def __init__(self, folders: dict[str, list[str]], *, fail=None, flags=None,
+                 trash=True) -> None:
         self.folders = {name: list(msgs) for name, msgs in folders.items()}
         self.uid_base = 1
         self.calls: list[list[str]] = []
         self.fail = fail or {}
+        # folder -> one flags list per message (seq order); None = the page
+        # carries no flags for that message. Sent only when --flags is asked.
+        self.flags = flags or {}
+        self.trash = trash
 
     def renumber(self, by: int) -> None:
         self.uid_base += by
@@ -67,21 +72,29 @@ class FakeHimalaya:
         if verb in self.fail:
             return Outcome(failure=self.fail[verb])
         if verb == ("imap", "list"):
-            return Outcome({"mailboxes": [
-                {"name": "INBOX", "attributes": []},
-                {"name": "Sent", "attributes": ["\\Sent"]},
-                {"name": "Trash", "attributes": ["\\Trash"]},
-            ]})
+            boxes = [{"name": "INBOX", "attributes": []},
+                     {"name": "Sent", "attributes": ["\\Sent"]}]
+            if self.trash:
+                boxes.append({"name": "Trash", "attributes": ["\\Trash"]})
+            return Outcome({"mailboxes": boxes})
         if verb == ("imap", "status"):
             return Outcome({"messages": len(self.folders.get(args[2], [])), "uid_validity": 1})
         if verb == ("imap", "fetch"):
             folder = args[args.index("-m") + 1]
             lo, hi = (int(x) for x in args[-1].split(":"))
             msgs = self.folders.get(folder, [])
-            return Outcome({"messages": [
-                {"uid": self._uid(seq), "envelope": self._envelope(msgs[seq - 1]), "flags": []}
-                for seq in range(lo, hi + 1) if 1 <= seq <= len(msgs)
-            ]})
+            page = []
+            for seq in range(lo, hi + 1):
+                if not 1 <= seq <= len(msgs):
+                    continue
+                entry = {"uid": self._uid(seq), "envelope": self._envelope(msgs[seq - 1])}
+                if "--flags" in args:
+                    held = self.flags.get(folder, [])
+                    flags = held[seq - 1] if seq - 1 < len(held) else []
+                    if flags is not None:
+                        entry["flags"] = list(flags)
+                page.append(entry)
+            return Outcome({"messages": page})
         if verb == ("message", "read"):
             folder = args[args.index("-m") + 1]
             seq = int(args[-1]) - self.uid_base + 1

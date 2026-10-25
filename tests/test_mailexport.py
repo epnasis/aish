@@ -159,7 +159,8 @@ class TestBacktestExport:
     def test_one_row_per_mail_and_arm_with_truth_recomputed(self, tmp_path):
         result = backtest(tmp_path, {ARM_A: ScriptedReader(careful),
                                      ARM_B: ScriptedReader(expire_everything)})
-        path, rows, _ = mailbacktest.export_csv(tmp_path / "run", cli._plain)
+        written = mailbacktest.export_csv(tmp_path / "run", cli._plain)
+        path, rows = written.path, written.rows
         table = read_csv(path)
         assert rows == 2 * result["selected"]
         assert {r["model"] for r in table} == {ARM_A, ARM_B}
@@ -179,7 +180,7 @@ class TestBacktestExport:
     def test_every_arm_cell_of_the_report_is_a_filter_over_the_columns(self, tmp_path):
         result = backtest(tmp_path, {ARM_A: ScriptedReader(careful),
                                      ARM_B: ScriptedReader(expire_everything)})
-        table = read_csv(mailbacktest.export_csv(tmp_path / "run", cli._plain)[0])
+        table = read_csv(mailbacktest.export_csv(tmp_path / "run", cli._plain).path)
         truth, tier = "truth_recomputed_at_export", "tier_recomputed_at_export"
 
         def count(rows, col):
@@ -231,11 +232,12 @@ class TestBacktestExport:
 
         monkeypatch.setattr(mailwatch, "GwsMailbox", refuse)
         monkeypatch.setattr(mailwatch, "account_env", refuse)
+        monkeypatch.setattr(mailexport, "interactive", lambda: True)
         assert mailbacktest.main(["--csv", str(tmp_path / "run")]) == 0
         out = capsys.readouterr().out
         assert "truth recomputed at export" in out
-        assert f"written to {tmp_path / 'run' / 'verdicts.csv'}" in out
-        assert (tmp_path / "run" / "verdicts.csv").is_file()
+        [path] = list(mailexport.downloads_dir().glob("aish-verdicts-run-*.csv"))
+        assert f"written to {path}" in out
 
     def test_export_only_refuses_a_directory_that_is_not_a_run(self, tmp_path):
         assert mailbacktest.main(["--csv", str(tmp_path)]) == 2
@@ -267,20 +269,172 @@ class TestBacktestExport:
 
 
 class TestWiring:
-    def test_mail_export_writes_the_live_file_and_prints_its_path(self, tmp_path, capsys):
+    def test_mail_export_writes_the_live_file_and_prints_its_path(self, tmp_path, capsys,
+                                                                  monkeypatch):
         from aish.agent import Agent
         from aish.session import SessionLog
 
         hostile_state(tmp_path)
+        monkeypatch.setattr(mailexport, "interactive", lambda: True)
         agent = Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
         logref = cli.LogRef(SessionLog.new(tmp_path))
         assert cli.handle_slash("/mail export", agent, logref, tmp_path) == "handled"
         out = capsys.readouterr().out
-        [path] = list((tmp_path / "mail" / "exports").glob("verdicts-*.csv"))
+        [path] = list(mailexport.downloads_dir().glob("aish-verdicts-live-*.csv"))
         assert str(path) in out and "1 row(s)" in out
         assert "truth_recomputed_at_export" not in path.read_text(encoding="utf-8-sig")
         assert "/mail export" in cli.SLASH_HELP
 
     def test_unknown_words_still_print_usage(self, tmp_path, capsys):
-        cli.show_mail("/mail export now", tmp_path)
+        cli.show_mail("/mail export one two", tmp_path)
         assert "/mail export" in capsys.readouterr().out
+
+
+class TestWhereItLands:
+    """Downloads by default, from a terminal only; every other outcome lands in
+    the old place and SAYS what was observed. The real ~/Downloads is never
+    resolved here (`no_real_downloads` in conftest points the seam away)."""
+
+    def export(self, tmp_path, **kwargs):
+        kwargs.setdefault("now", T0)
+        return mailexport.export(tmp_path, clean=cli._plain, run="r1",
+                                 fallback_dir=tmp_path / "fallback", **kwargs)
+
+    def test_the_suite_never_resolves_the_real_downloads(self):
+        from pathlib import Path
+
+        assert mailexport.downloads_dir() != Path.home() / "Downloads"
+
+    def test_from_a_terminal_it_lands_in_downloads_with_the_run_stamp(self, tmp_path,
+                                                                       monkeypatch):
+        hostile_state(tmp_path)
+        monkeypatch.setattr(mailexport, "interactive", lambda: True)
+        written = self.export(tmp_path)
+        stamp = mailexport.file_name("r1", T0)
+        assert written.path == mailexport.downloads_dir() / stamp
+        assert stamp.startswith("aish-verdicts-r1-") and written.note == ""
+        assert len(read_csv(written.path)) == 1
+
+    def test_outside_a_terminal_downloads_is_never_touched(self, tmp_path, monkeypatch):
+        hostile_state(tmp_path)
+        monkeypatch.setattr(mailexport, "interactive", lambda: False)
+
+        def refuse():
+            raise AssertionError("a background export resolved the Downloads folder")
+
+        monkeypatch.setattr(mailexport, "downloads_dir", refuse)
+        written = self.export(tmp_path)
+        assert written.path.parent == tmp_path / "fallback"
+        assert "not run from a terminal" in written.note
+        assert f"written to {tmp_path / 'fallback'} instead" in written.note
+
+    def test_a_missing_downloads_folder_falls_back_and_says_so(self, tmp_path, monkeypatch):
+        hostile_state(tmp_path)
+        monkeypatch.setattr(mailexport, "interactive", lambda: True)
+        monkeypatch.setenv(mailexport.DOWNLOADS_ENV, str(tmp_path / "no-such-folder"))
+        written = self.export(tmp_path)
+        assert written.path.parent == tmp_path / "fallback" and written.path.is_file()
+        assert f"{tmp_path / 'no-such-folder'} does not exist" in written.note
+
+    def test_an_unwritable_downloads_folder_falls_back_and_says_so(self, tmp_path,
+                                                                    monkeypatch):
+        hostile_state(tmp_path)
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        try:
+            monkeypatch.setattr(mailexport, "interactive", lambda: True)
+            monkeypatch.setenv(mailexport.DOWNLOADS_ENV, str(locked))
+            written = self.export(tmp_path)
+        finally:
+            locked.chmod(0o700)
+        assert written.path.parent == tmp_path / "fallback" and written.path.is_file()
+        assert "is not writable" in written.note
+        assert list(locked.iterdir()) == []
+
+    def test_a_write_refused_in_downloads_falls_back_and_says_what_was_refused(
+            self, tmp_path, monkeypatch):
+        hostile_state(tmp_path)
+        monkeypatch.setattr(mailexport, "interactive", lambda: True)
+        real = mailexport._publish_new
+
+        def refusing(directory, name, payload):
+            if directory == mailexport.downloads_dir():
+                raise PermissionError(1, "Operation not permitted")
+            return real(directory, name, payload)
+
+        monkeypatch.setattr(mailexport, "_publish_new", refusing)
+        written = self.export(tmp_path)
+        assert written.path.parent == tmp_path / "fallback"
+        assert "failed (Operation not permitted)" in written.note
+
+    def test_two_exports_in_one_second_never_overwrite_each_other(self, tmp_path,
+                                                                   monkeypatch):
+        hostile_state(tmp_path)
+        for interactive in (True, False):
+            monkeypatch.setattr(mailexport, "interactive", lambda i=interactive: i)
+            first = self.export(tmp_path)
+            second = self.export(tmp_path)
+            third = self.export(tmp_path)
+            assert len({first.path, second.path, third.path}) == 3
+            assert second.path.name == mailexport.file_name("r1", T0).replace(".csv", "-2.csv")
+            assert all(len(read_csv(w.path)) == 1 for w in (first, second, third))
+
+    def test_an_explicit_file_is_written_as_named(self, tmp_path, monkeypatch):
+        hostile_state(tmp_path)
+        monkeypatch.setattr(mailexport, "interactive", lambda: False)
+        target = tmp_path / "mine.csv"
+        written = self.export(tmp_path, out_file=target)
+        assert written.path == target and written.note == ""
+
+    def test_an_explicit_directory_gets_the_generated_name(self, tmp_path):
+        hostile_state(tmp_path)
+        (tmp_path / "here").mkdir()
+        written = self.export(tmp_path, out_file=tmp_path / "here")
+        assert written.path == tmp_path / "here" / mailexport.file_name("r1", T0)
+
+    def test_an_explicit_path_that_cannot_be_written_falls_back_and_says_so(self, tmp_path):
+        hostile_state(tmp_path)
+        (tmp_path / "a-file").write_text("not a directory")
+        target = tmp_path / "a-file" / "x.csv"
+        written = self.export(tmp_path, out_file=target)
+        assert written.path.parent == tmp_path / "fallback" and written.path.is_file()
+        assert f"could not write {target}" in written.note
+
+
+class TestExportSurfaces:
+    def test_mail_export_takes_a_path(self, tmp_path, capsys):
+        hostile_state(tmp_path)
+        target = tmp_path / "out.csv"
+        cli.show_mail(f"/mail export {target}", tmp_path)
+        out = capsys.readouterr().out
+        assert str(target) in out and target.is_file()
+
+    def test_mail_export_outside_a_terminal_names_where_it_went(self, tmp_path, capsys,
+                                                                monkeypatch):
+        hostile_state(tmp_path)
+        monkeypatch.setattr(mailexport, "interactive", lambda: False)
+        cli.show_mail("/mail export", tmp_path)
+        out = capsys.readouterr().out
+        [path] = list((tmp_path / "mail" / "exports").glob("aish-verdicts-live-*.csv"))
+        assert str(path) in out and "not run from a terminal" in out
+
+    def test_csv_out_file_overrides_and_needs_csv(self, tmp_path, capsys):
+        import pytest
+
+        backtest(tmp_path, {ARM_A: ScriptedReader(careful)})
+        target = tmp_path / "review.csv"
+        assert mailbacktest.main(["--csv", str(tmp_path / "run"), "--out-file",
+                                  str(target)]) == 0
+        assert f"written to {target}" in capsys.readouterr().out and target.is_file()
+        with pytest.raises(SystemExit):
+            mailbacktest.main(["--out-file", str(target)])
+
+    def test_csv_outside_a_terminal_lands_in_the_run_directory_and_says_so(
+            self, tmp_path, capsys, monkeypatch):
+        backtest(tmp_path, {ARM_A: ScriptedReader(careful)})
+        monkeypatch.setattr(mailexport, "interactive", lambda: False)
+        assert mailbacktest.main(["--csv", str(tmp_path / "run")]) == 0
+        out = capsys.readouterr().out
+        [path] = list((tmp_path / "run").glob("aish-verdicts-run-*.csv"))
+        assert f"written to {path}" in out and "not run from a terminal" in out

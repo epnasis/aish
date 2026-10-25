@@ -47,6 +47,7 @@ import json
 import os
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -182,6 +183,18 @@ def _envelope_sender(envelope: dict[str, Any]) -> str:
     return mailindex.address_of(str(first or ""))
 
 
+@dataclass
+class History:
+    """What `TutaMailbox.history` enumerated, by folder role. `folders`
+    names the folder behind each role; `trash` is "" when the bridge exposes
+    no Trash folder."""
+
+    inbox: list[str] = field(default_factory=list)
+    sent: list[str] = field(default_factory=list)
+    trash: list[str] = field(default_factory=list)
+    folders: dict[str, str] = field(default_factory=dict)
+
+
 def _ref(folder: str, uid: int) -> str:
     return f"{NAME}:{uid}:{folder}"
 
@@ -211,7 +224,10 @@ class TutaMailbox:
         self.status_path = status_path
         self.last_failure: Failure | None = None
         self.sent_folder = ""
+        self.trash_folder = ""
         self._envelopes: dict[str, dict[str, Any]] = {}
+        self._flags: dict[str, tuple[str, ...] | None] = {}
+        self.depth: dict[str, dict[str, Any]] = {}
         self.counts: dict[str, int] = {}
 
     def _bump(self, key: str) -> None:
@@ -226,12 +242,18 @@ class TutaMailbox:
         return outcome.value
 
     def _folders(self) -> tuple[str, str] | None:
+        names = self._folder_names()
+        return None if names is None else (names[0], names[1])
+
+    def _folder_names(self) -> tuple[str, str, str] | None:
+        """(inbox, sent, trash) — trash "" when the bridge exposes none: by
+        the `\\Trash` attribute, else a folder named Trash (tutalib's rule)."""
         doc = self._call(["imap", "list", "--all", "--json"])
         boxes = doc.get("mailboxes") if isinstance(doc, dict) else None
         if not isinstance(boxes, list) or not boxes:
             self.last_failure = self.last_failure or Failure(PARSE, matched="no mailboxes")
             return None
-        inbox = sent = ""
+        inbox = sent = trash = ""
         for box in boxes:
             if not isinstance(box, dict):
                 continue
@@ -241,9 +263,15 @@ class TutaMailbox:
                 inbox = name
             if "\\sent" in attrs:
                 sent = name
+            if "\\trash" in attrs:
+                trash = name
         if not sent:
             sent = next((str(b.get("name")) for b in boxes if isinstance(b, dict)
                          and str(b.get("name") or "").lower() == "sent"), "")
+        if not trash:
+            trash = next((str(b.get("name")) for b in boxes if isinstance(b, dict)
+                          and str(b.get("name") or "").strip().lower() == "trash"), "")
+        self.trash_folder = trash
         if not inbox or not sent:
             # Without his Sent folder the ledger cannot see his acts: that is a
             # listing that failed, not one that is merely incomplete.
@@ -251,29 +279,36 @@ class TutaMailbox:
                                         text=", ".join(str(b.get("name")) for b in boxes
                                                        if isinstance(b, dict)))
             return None
-        return inbox, sent
+        return inbox, sent, trash
 
-    def _enumerate(self, folder: str, floor: float, limit: int) -> list[str] | None:
+    def _enumerate(
+        self, folder: str, floor: float, limit: int, *, flags: bool = False
+    ) -> list[str] | None:
         """Refs of the folder's messages dated at or after `floor`, newest
         first, by sequence-number pages from the STATUS count down. A message
         whose envelope date cannot be read is kept (bounded by `limit`):
-        dropping it would be a silent miss."""
+        dropping it would be a silent miss. With `flags`, each page also
+        carries the IMAP flags (`flags_of`). How deep the walk went is kept in
+        `depth[folder]`, as observed."""
         status = self._call(["imap", "status", folder, "--json"])
         if not isinstance(status, dict) or not isinstance(status.get("messages"), int):
             self.last_failure = self.last_failure or Failure(PARSE, matched="no message count")
             return None
         hi = int(status["messages"])
+        depth: dict[str, Any] = {"messages": hi, "oldest_at": None, "reached_beginning": False,
+                                 "capped": False}
+        self.depth[folder] = depth
         refs: list[str] = []
         while hi >= 1 and len(refs) < limit:
             lo = max(1, hi - ENVELOPE_PAGE + 1)
-            page = self._call(["imap", "fetch", "-m", folder, "--seq", "--envelope", "--json",
-                               f"{lo}:{hi}"])
+            page = self._call(["imap", "fetch", "-m", folder, "--seq", "--envelope",
+                               *(["--flags"] if flags else []), "--json", f"{lo}:{hi}"])
             messages = page.get("messages") if isinstance(page, dict) else None
             if not isinstance(messages, list):
                 self.last_failure = self.last_failure or Failure(PARSE, matched="no messages")
                 return None
             newest_dated = None
-            dated: list[tuple[float, int, dict]] = []
+            dated: list[tuple[float, int, dict, Any]] = []
             for message in messages:
                 if not isinstance(message, dict) or message.get("uid") is None:
                     continue
@@ -283,19 +318,75 @@ class TutaMailbox:
                 if at is None:
                     self._bump("undated_envelopes")
                     at = float("inf")
-                elif newest_dated is None or at > newest_dated:
-                    newest_dated = at
-                dated.append((at, int(message["uid"]), envelope))
-            for at, uid, envelope in sorted(dated, key=lambda d: d[1], reverse=True):
+                else:
+                    if newest_dated is None or at > newest_dated:
+                        newest_dated = at
+                    if depth["oldest_at"] is None or at < depth["oldest_at"]:
+                        depth["oldest_at"] = at
+                dated.append((at, int(message["uid"]), envelope, message.get("flags")))
+            for at, uid, envelope, raw_flags in sorted(dated, key=lambda d: d[1], reverse=True):
                 if at < floor:
                     continue
                 ref = _ref(folder, uid)
                 self._envelopes[ref] = envelope
+                if flags:
+                    # A page without a flags list says nothing about \Seen: None,
+                    # never an empty set (which would read as unread).
+                    self._flags[ref] = (tuple(str(f) for f in raw_flags)
+                                        if isinstance(raw_flags, list) else None)
                 refs.append(ref)
             if newest_dated is not None and newest_dated < floor:
                 break  # this whole page is older than the window
             hi = lo - 1
+        depth["reached_beginning"] = hi < 1
+        depth["capped"] = len(refs) >= limit and hi >= 1
         return refs[:limit]
+
+    def history(self, floor: float, limit: int) -> History | None:
+        """The backtest's listing: INBOX, Sent and — when the bridge exposes
+        one — Trash, back to `floor`, by the same enumeration (never SEARCH),
+        with each message's flags. None when any enumeration failed."""
+        self.last_failure = None
+        self.depth = {}
+        self._flags = {}
+        if not self.env.get(SECRET_ENV):
+            self.last_failure = Failure(MISSING, matched=SECRET_ENV,
+                                        text=f"secret {SECRET_ENV} is not available")
+            return None
+        folders = self._folder_names()
+        if folders is None:
+            return None
+        inbox_folder, self.sent_folder, trash_folder = folders
+        found: dict[str, list[str]] = {}
+        for role, folder in (("inbox", inbox_folder), ("sent", self.sent_folder),
+                             ("trash", trash_folder)):
+            if not folder:
+                found[role] = []
+                continue
+            refs = self._enumerate(folder, floor, limit, flags=True)
+            if refs is None:
+                return None
+            found[role] = refs
+        return History(found["inbox"], found["sent"], found["trash"],
+                       {"inbox": inbox_folder, "sent": self.sent_folder, "trash": trash_folder})
+
+    def flags_of(self, ref: str) -> tuple[str, ...] | None:
+        """The IMAP flags `history` listed for `ref`; None when the page
+        carried none for it."""
+        return self._flags.get(ref)
+
+    def is_listed(self, ref: str, parsed: mailindex.Parsed) -> bool:
+        """Whether the message fetched at `ref` is the one its envelope was
+        listed for — the bridge may renumber in between, and then the listed
+        flags belong to another message. By Message-ID when the envelope has
+        one, else by sender and subject."""
+        envelope = self._envelopes.get(ref) or {}
+        listed = mailindex.normalize_message_id(str(envelope.get("message_id") or ""))
+        if listed:
+            return parsed.header.message_id == listed
+        subject = " ".join(str(envelope.get("subject") or "").split())
+        return (_envelope_sender(envelope) == parsed.header.from_addr
+                and subject == " ".join(parsed.header.subject.split()))
 
     def listing(self, days: int, limit: int) -> Listing | None:
         self.last_failure = None

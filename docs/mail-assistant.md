@@ -607,9 +607,9 @@ leading whitespace — gets an apostrophe, `formula_safe`), then the cap. The es
 column, so there is no list of "safe" ones to drift. Python's `csv`, `QUOTE_ALL`, UTF-8 with a BOM
 so a spreadsheet reads the Polish. `TestCells`, `TestRows`.
 
-**Surfaced twice**: `/mail export` (the live store, no truth columns; `docs/cli.md`) and
-`aish-mailbacktest --csv <run-dir>` — export-only: no account, no mailbox, no model; it writes
-`<run-dir>/verdicts.csv`. A backtest file adds `truth_recomputed_at_export` and
+**Surfaced twice**: `/mail export [path]` (the live store, no truth columns; `docs/cli.md`) and
+`aish-mailbacktest --csv <run-dir> [--out-file PATH]` — export-only: no account, no mailbox, no
+model. Both land in the Downloads folder by default (§Where the file lands). A backtest file adds `truth_recomputed_at_export` and
 `tier_recomputed_at_export`: **truths are never persisted**, so they are recomputed as the harness
 computes them — `truth_of` over the run's index, with labels re-unioned per digest from the run's
 `fetched.jsonl` (`recorded_labels`, the same union `backfill` makes) — and the column names say so.
@@ -638,7 +638,91 @@ Two independent costs, and `--reader-max` bounds only one. **Reader calls** scal
 re-asks). **Fetch cost** scales with `--days` × his mail volume: the backfill lists the whole
 window and fetches every listed mail once, one `gws` call each, under the bucket — 862 listed in
 90 days on 2026-10-24 — whatever `--reader-max` is. A resumed run into the same directory re-buys
-no fetch whose mail its index holds.
+no fetch whose mail its index holds. **With `--source tuta`** the Tuta window is enumerated and
+every Tuta mail in it fetched too — one himalaya call (one bridge connection) per mail, plus one
+per envelope page — and its inbound mail joins the same `--reader-max` selection; Reader cost is
+still bounded by the cap, fetch cost grows by his Tuta volume.
+
+## S1.6 follow-up (2026-10-26) — exports in Downloads, the backtest over Tuta
+
+Two owner directives: the CSV review file lands where he looks for downloads, and the history
+backtest measures his primary inbox too.
+
+### Where the file lands — `mailexport.export`
+
+One function decides for both surfaces, in this order: **an explicit path** (`/mail export
+<path>`, `aish-mailbacktest --csv <run> --out-file PATH`; a directory gets the generated name
+inside it, a file path is written as named) → **the Downloads folder**, tried only when this
+process's stdin is a terminal (`mailexport.interactive`) → **the fallback**: the live store's
+`<state>/mail/exports/`, or the backtest's run directory — exactly where each wrote before.
+Whatever sends a file to the fallback is printed as what was observed: *not run from a
+terminal*, *`<dir>` does not exist*, *is not writable*, *writing into `<dir>` failed
+(`<the OS's words>`)*, *could not write `<path>`* — followed by where it went. The folder never
+fails the export; only a failing fallback write can.
+
+**Exports are meant to be generated from the owner's own terminal; background contexts fall back
+to the state dir.** ~/Downloads is a macOS privacy-protected (TCC) folder, and on this machine a
+session running under the remote-control LaunchAgent that opened such a folder blocked forever.
+So the choice is: a process with no terminal on stdin never resolves or stats Downloads at all —
+the stat could itself be the call that blocks. The cost of the choice: run from a terminal with
+stdin redirected (`< /dev/null`), the file goes to the fallback, and the printed line says so.
+`test_outside_a_terminal_downloads_is_never_touched`. The location comes through a seam,
+`AISH_DOWNLOADS_DIR`; the suite-wide `no_real_downloads` fixture (`tests/conftest.py`) points it
+at a temp dir, so no test can resolve the real folder.
+
+**The name says which run and when, and never overwrites**: `aish-verdicts-<run>-<YYYYmmdd-
+HHMMSS>[-N].csv`, where `<run>` is the backtest run directory's name (its own timestamp by
+default) or `live`. The name is claimed with `O_EXCL` before the file is published, so a second
+export in the same second takes `-2`, `-3`… (`_claim`). Before, the live name carried seconds
+only and the backtest file was a fixed `verdicts.csv` that every export replaced.
+`TestWhereItLands`, `TestExportSurfaces` in `tests/test_mailexport.py`.
+
+### The backtest over Tuta — `--source tuta`
+
+`--source` is repeatable, as the watcher's is. **The default stays Gmail only**, so an existing
+invocation fetches and reads exactly what it did: adding Tuta silently would add a fetch per Tuta
+mail in the window, and move which mails the arms read under the same `--reader-max` — a cost
+surprise. A Tuta-only run needs no Gmail account.
+
+**The shipped adapter, reused.** `TutaMailbox.history` enumerates INBOX, Sent and — when the
+bridge exposes one (the `\Trash` attribute, else a folder named Trash: tutalib's rule) — Trash,
+by the same `_enumerate` the watcher uses: STATUS count, envelope pages by sequence number,
+never SEARCH, with `--flags` added to each page fetch (the argv tutalib's own envelope read
+already issues; `--flags` was in `ALLOWED_ARGV`). Every fetch is `TutaMailbox.fetch`, so no
+`--seen`; a fetch is skipped only on `held`'s identity match (Message-ID AND sender AND subject),
+never a UID. `test_listing_is_enumeration_with_flags_never_search_never_seen`; `TestUnstableIds`.
+
+**Truth from folder and flags, in the labels `truth_of` already reads** (`tuta_labels`): a mail
+enumerated in INBOX is `INBOX`, plus `UNREAD` when the listed flags lack `\Seen`; `\Flagged` is
+`STARRED` (tutalib's own vocabulary maps "starred" to it); Trash is `TRASH`. **Replied** is the
+same `later_replies` over the one index: a message in his Sent folder is his act (`direction
+out`), and it is past-facing at export exactly as Gmail's is. **What cannot be observed is set
+apart, never guessed**: a page that carried no flags list for a mail makes it `seen_unknown`; a
+Tuta mail no enumerated folder named this run is `unobserved` — never `archived`, because
+archiving in Tuta is a move to a folder the backtest does not enumerate. Both are in the
+set-apart tier, so neither is judged. A message renumbered between listing and fetch keeps its
+folder and loses its flags (they were another message's): `seen_unknown`.
+`TestTutaTruth`, `test_a_renumber_between_listing_and_fetch_costs_the_flags_never_guesses`.
+
+**The run's log keys Tuta by digest** (`tuta-digest:<digest>` in `fetched.jsonl`), one line per
+digest with this listing's labels, so `recorded_labels` — and through it the review file's
+recomputed truth — reads Tuta exactly as `backfill` did, and no remembered UID ever names a
+different message. `test_the_log_keys_tuta_by_digest_never_by_uid`.
+
+**Window depth is a stated fact.** Enumeration pages until the first page wholly older than the
+window, or the folder's first message. Each folder's walk is kept (`TutaMailbox.depth`), and the
+report header states a folder that ended before the window began — *"tuta INBOX: the folder holds
+N message(s), the oldest dated D — shorter than the 90-day window"* — an empty folder, or a
+listing stopped at `LISTING_LIMIT`. Never an error. It also states, for Tuta, the trashed inbound
+it saw and that how long Tuta keeps Trash is not known here; when there is no Trash folder,
+that trashed Tuta mail is absent; and that only INBOX, Sent and Trash are enumerated.
+
+**One index, one selection.** Both inboxes fold into ONE scratch index and case store, ingested
+in position order, so the frozen clock spans both. `select` is unchanged: strong, then weak, then
+near-null, each oldest first, across both inboxes, under the one `--reader-max`; the report names
+the split (`read by each arm: 4 selected mail(s) (gmail 2, tuta 2)`). A failed Tuta listing is
+stated and the Gmail half still runs. `TestBothInboxes`, `TestSources` in
+`tests/test_mailbacktest_tuta.py`.
 
 ## The backtest — `aish-mailbacktest`
 
@@ -734,6 +818,16 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **The himalaya envelope JSON shape** the Tuta listing reads (`messages[].uid`,
   `envelope.message_id`, `envelope.date`; STATUS `messages`) is the shape the tuta_* tools and
   their tests use; a run against the live bridge has not been made from this module.
+- **Tuta's flags are as of the backtest run**, like Gmail's labels: `\Seen` and `\Flagged` are
+  read today, not as of the mail. A mail he read after the window closed reads `kept_read`.
+- **The `--flags` page shape** (`messages[].flags`, beside `envelope`) is tutalib's own
+  envelope-read argv and the shape its tests use; no run against the live bridge has been
+  made from this module, and a bridge that omits the list yields `seen_unknown`, never a tier.
+- **Tuta mail outside INBOX, Sent and Trash is absent** from the backtest — an archive folder,
+  spam, his own folders — and the report says so; nothing there is counted archived.
+- **Whether an export runs "from a terminal" is stdin's tty** (`mailexport.interactive`). A
+  terminal run with stdin redirected falls back, and says so; a background process with a tty
+  on stdin would try Downloads.
 - **The Reader's admission has not been run.** The charter's central claims — that a model answers
   these cases as the exam expects — are hypotheses until `scripts/role-admission.py` runs per
   model. Nothing in this repository measured a model on it.
@@ -783,7 +877,11 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    admission digest: re-run step 1 per model. A backtest resumed into an existing run directory
    re-buys every Reader call under v4 (expected). `report.txt` shows the raw counts and, beside
    them, the counts after the clamp. `aish-mailbacktest --csv <run-dir>` writes the review file
-   (`<run-dir>/verdicts.csv`) without touching the mailbox; `/mail export` writes the live one.
+   into ~/Downloads without touching the mailbox; `/mail export` writes the live one. Both from
+   his own terminal — a background context falls back to the state dir and says so.
+3c. **The backtest over Tuta** (2026-10-26): add `--source gmail --source tuta` to step 2 (the
+   bridge running, `TUTA_BRIDGE_PASSWORD` in aish's secret store). The report header states each
+   Tuta folder's depth against the window and what is absent.
 4. **The mined replay scenario** — a real courier/store pair from his inbox — goes in the private
    tree (`~/.config/aish/evals/<name>/`, `docs/replay.md`), never here: find the pair in the
    backtest run's verdict store (`case_choice` on the courier mail), and replay it end to end
