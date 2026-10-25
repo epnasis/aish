@@ -204,7 +204,7 @@ def _capped(clean: Clean, value: Any, cap: int) -> str:
     return text if len(text) <= cap else text[: cap - 1] + "…"
 
 
-def _gate_words(record: dict[str, Any], clean: Clean) -> list[str]:
+def gate_words(record: dict[str, Any], clean: Clean) -> list[str]:
     gate = _mapping(record.get("gate"))
     words: list[str] = []
     auth = _mapping(gate.get("auth"))
@@ -264,8 +264,15 @@ def row_lines(row: Row, clean: Clean) -> list[tuple[str, str]]:
         kind = _capped(clean, verdict.get("kind") or "?", KIND_CHARS)
         meaning = _capped(clean, verdict.get("meaning") or "", MEANING_CHARS)
         out.append(("body", f"  reading: {kind} — {meaning}"))
-        would = (f"  would: {_capped(clean, verdict.get('disposition'), WORD_CHARS)}; "
-                 f"wants of you: {_capped(clean, verdict.get('wanted'), WORD_CHARS)}")
+        would = f"  would: {_capped(clean, mailverdicts.effective_disposition(record), WORD_CHARS)}"
+        clamped = mailverdicts.clamp_of(record)
+        if clamped:
+            source = _capped(clean, clamped.get("from"), WORD_CHARS)
+            days = _capped(clean, clamped.get("owner_wrote_days"), WORD_CHARS)
+            limit = _capped(clean, clamped.get("limit"), WORD_CHARS)
+            would += (f" [CLAMPED from {source}: you wrote in this conversation {days} days "
+                      f"before it, within {limit}]")
+        would += f"; wants of you: {_capped(clean, verdict.get('wanted'), WORD_CHARS)}"
         deadline = _capped(clean, verdict.get("deadline") or "", WORD_CHARS)
         if deadline and deadline != "none":
             would += f" by {deadline}"
@@ -277,7 +284,7 @@ def row_lines(row: Row, clean: Clean) -> list[tuple[str, str]]:
     else:
         why = _capped(clean, record.get("why") or "", WHY_CHARS)
         out.append(("body", f"  ending: {ending}" + (f" — {why}" if why else "") + f"  ({model})"))
-    gate = _gate_words(record, clean)
+    gate = gate_words(record, clean)
     if gate:
         out.append(("gate", "  gate: " + " · ".join(gate)))
     attachments = _mapping(record.get("attachments"))

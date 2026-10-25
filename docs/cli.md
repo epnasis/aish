@@ -157,6 +157,8 @@ What a toggle means is the scheduler's, already shipped: a disable stops future 
 
 **Render safety lives here.** `show_mail` hands `mailview.lines` the sanitiser `_mail_cell`, which is `_plain` — card mode, unconditionally — and `mailview.lines` cannot be called without one. Every string from a verdict record or an index file passes through it, the closed verdict words included, because the bytes on disk are a stranger's or a steered model's whatever the write path checked. A removed control is shown as the replacement mark.
 
+**`/mail export`** (#142 W5 S1.6) writes every recorded reading as a CSV review file — one row per (mail, model), for a spreadsheet — to `<state>/mail/exports/verdicts-<timestamp>.csv`, and prints the path (`docs/mail-assistant.md` §The review file). The same join and the same sanitiser as the listing (`_mail_cell`), then the spreadsheet-formula escape. The live store has no ground truth, so the file has no truth columns; a backtest run's file (`aish-mailbacktest --csv <run-dir>`) does. Its only write is that file. A row clamped by the live-conversation rule shows `would: surface [CLAMPED from archive: …]` in the listing and `clamped: yes (from …)` in the file. `TestWiring` in `tests/test_mailexport.py`.
+
 **`/m` is now ambiguous** (`/mail`, `/model`) and lists both, as any shared prefix does; `/mo` still resolves to `/model`.
 
 ## CLI-only entry points

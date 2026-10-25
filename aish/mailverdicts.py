@@ -139,16 +139,21 @@ def build_record(
     observation: mailcases.Observation | None,
     flags: mailcases.CaseFlags,
     code_coordinates: tuple[str, ...],
+    owner_wrote_days: float | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     """The `mail_verdict` record — every field code-written except `verdict`,
-    which is the validated, capped Reader answer."""
+    which is the validated, capped Reader answer. `clamped` is code's override
+    of that answer's disposition on a live conversation, written BESIDE it: the
+    verdict itself is never rewritten."""
     bundle = reading.bundle
     refs = bundle.cases if bundle is not None else {}
     verdict = reading.verdict
     chosen = ""
+    clamped = None
     if verdict is not None:
         chosen = refs.get(verdict.case, verdict.case)
+        clamped = mailreader.clamp(verdict.disposition, owner_wrote_days)
     return {
         "kind": RECORD_KIND,
         "v": RECORD_VERSION,
@@ -173,6 +178,8 @@ def build_record(
             {"ref": f"c{n}", **cand.as_json()} for n, cand in enumerate(facts.candidates, 1)
         ],
         "verdict": verdict.as_json() if verdict is not None else None,
+        "owner_wrote_days": None if owner_wrote_days is None else round(owner_wrote_days, 1),
+        "clamped": clamped,
         "case_choice": chosen,
         "case_flags": flags.as_json(),
         "coordinates": {
@@ -195,6 +202,24 @@ def build_record(
         },
         "recorded_at": time.time() if now is None else now,
     }
+
+
+def clamp_of(record: dict[str, Any]) -> dict[str, Any] | None:
+    """A record's live-conversation clamp, or None (also for a record written
+    before the clamp existed)."""
+    clamped = record.get("clamped")
+    return clamped if isinstance(clamped, dict) and clamped.get("to") else None
+
+
+def effective_disposition(record: dict[str, Any]) -> str | None:
+    """What the pipeline WOULD do with the mail: the clamp's disposition when
+    code overrode the Reader, else the Reader's own; None with no verdict. The
+    one reader of this, for `/mail`, the CSV export and the backtest alike."""
+    verdict = record.get("verdict")
+    if not isinstance(verdict, dict):
+        return None
+    clamped = clamp_of(record)
+    return str(clamped["to"]) if clamped else str(verdict.get("disposition") or "")
 
 
 def error_record(
