@@ -9953,7 +9953,7 @@ $("composer-actions").addEventListener("click", (e) => {
     case "feedback": composerInsert("/feedback "); break;
     case "browser": openBrowserView(""); break;
     case "terminal": enterCmdMode(); break; // the `!` shell-command input mode
-    // The global console has its own top-bar button + Ctrl+\; not in this menu.
+    // The global console has its own top-bar button + its chord (⌘⇧B / Ctrl+Shift+B); not in this menu.
   }
 });
 
@@ -10060,7 +10060,7 @@ function composerInsert(ch) {
 function escapeExit() {
   // Esc leaves the OLD `!` terminal-input mode. It deliberately does NOT touch
   // the global console: there Esc is a real key (vim/tmux/less/…), so it passes
-  // through to the PTY — close the console with its button or Ctrl+\ instead.
+  // through to the PTY — close the console with its button or its chord (⌘⇧B / Ctrl+Shift+B) instead.
   if (cmdMode) { exitCmdMode(); return true; } // exitCmdMode already focuses input
   return false;
 }
@@ -10796,10 +10796,10 @@ async function openConsole() {
   consoleTerm.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
     // Esc is a REAL terminal key here (vim/tmux/less) — let xterm send it to the
-    // PTY; the console is closed via its button or Ctrl+\, never Esc.
-    // stopPropagation on Ctrl+\ so the document handler doesn't re-toggle the
-    // console open right after we close it.
-    if ((e.metaKey || e.ctrlKey) && e.key === "\\") { e.preventDefault(); e.stopPropagation(); hideConsole(); input.focus(); return false; }
+    // PTY; the console is closed via its button or its chord, never Esc.
+    // stopPropagation on the chord so the document handler doesn't re-toggle
+    // the console open right after we close it.
+    if (consoleChord(e)) { e.preventDefault(); e.stopPropagation(); hideConsole(); input.focus(); return false; }
     // Cmd/Ctrl+Shift+C to copy the xterm selection — never plain Ctrl+C (that's
     // SIGINT to the program). Cmd (meta) alone works too on macOS. Paste is NOT
     // intercepted: xterm handles the browser paste event natively, and grabbing
@@ -16703,8 +16703,8 @@ function activeApprovalCard() {
 // tooltips.
 const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
 const CHORD_HINTS = IS_MAC
-  ? { new: "⌘⇧O", search: "⌘K", rail: "⌘B", models: "⌘⇧M", modelToggle: "⌘M" }
-  : { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+B", models: "Ctrl+Shift+M", modelToggle: "Ctrl+M" };
+  ? { new: "⌘⇧O", search: "⌘K", rail: "⌘B", models: "⌘⇧M", modelToggle: "⌘M", console: "⌘⇧B" }
+  : { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+B", models: "Ctrl+Shift+M", modelToggle: "Ctrl+M", console: "Ctrl+Shift+B" };
 
 function primaryChord(e) {
   if (e.altKey) return false;
@@ -16718,6 +16718,8 @@ function primaryChord(e) {
 // ⌘⇧K); once the field has focus each further press moves the highlight a row
 // down / up ([RAIL-CURSOR]) ·
 // "rail" = show/hide the chat list (⌘B, the editors' sidebar toggle) ·
+// "console" = show/hide the global console (⌘⇧B; closing it from inside the
+// terminal is consoleChord's, in xterm's own key handler) ·
 // "export" = the chat as a PDF (⌘P) · "models" = the model list, and each
 // further press while it is up is one row down, as ↓ is (⌘⇧M) ·
 // "model-toggle" = local ⇄ cloud, to the model last used on the other side
@@ -16732,10 +16734,16 @@ function navChord(e, { modal = false, terminal = false } = {}) {
   const key = String(e.key || "").toLowerCase();
   if (key === "n" || key === "o") return "new";
   if (key === "k") return e.shiftKey ? "search-up" : "search";
-  if (key === "b" && !e.shiftKey) return "rail";
+  if (key === "b") return e.shiftKey ? "console" : "rail";
   if (key === "p" && !e.shiftKey) return "export";
   if (key === "m") return e.shiftKey ? "models" : "model-toggle";
   return null;
+}
+
+// The console chord on its own, for the terminal's key handler: navChord stands
+// down while the terminal has the keyboard, but this chord must still close it.
+function consoleChord(e) {
+  return primaryChord(e) && e.shiftKey && String(e.key || "").toLowerCase() === "b";
 }
 // [NAV-CHORDS-END]
 
@@ -16844,13 +16852,10 @@ document.addEventListener("keydown", (e) => {
     act({ type: "toggle_model" }, { label: "the model switch" });
     return;
   }
-  // Cmd/Ctrl+\ toggles the global "Quake console" (#148 follow-up). When the
-  // overlay itself has focus, xterm's own key handler catches this first; this
-  // is the OPEN path from anywhere else in the app.
-  if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
-    e.preventDefault();
-    toggleConsole();
-  }
+  // The global "Quake console" (#148 follow-up). When the terminal has the
+  // keyboard, xterm's own key handler closes it (consoleChord); this is the
+  // OPEN path from anywhere else in the app.
+  if (chord === "console") { e.preventDefault(); toggleConsole(); }
 });
 
 // Desktop only: auto-focusing on a phone would pop the keyboard over the
@@ -16864,10 +16869,10 @@ const FINE_POINTER = matchMedia("(pointer: fine)").matches;
 // modifier regardless of what is printed here.
 if (FINE_POINTER) {
   $("send").title = IS_MAC ? "send (↩ · multi-line: ⌘↩)" : "send (Enter · multi-line: Ctrl+Enter)";
-  // The navigation chords, on the buttons they duplicate (#384) — the same
-  // convention as the console button's "console (⌘/Ctrl+\)", with the
+  // The navigation chords, on the buttons they duplicate (#384), in the
   // platform's own glyph. The chats button's title is written by
   // syncRailToggle, which names the chord there.
+  $("console-btn").title = `console (${CHORD_HINTS.console})`;
   $("new-chip").title = `new chat (${CHORD_HINTS.new})`;
   $("sessions-new").title = `new chat (${CHORD_HINTS.new})`;
   $("model-chip").title = `switch model (${CHORD_HINTS.models} · local ⇄ cloud: ${CHORD_HINTS.modelToggle})`;

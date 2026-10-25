@@ -6,7 +6,7 @@
 //
 //   1. New chat is ⌘⇧O and ⌘O on macOS (Ctrl+Shift+O / Ctrl+O elsewhere);
 //      search chats is ⌘K and ⌘⇧K (Ctrl+K / Ctrl+Shift+K); the chat list
-//      shows/hides on ⌘B (Ctrl+B). The platform is DETECTED and the other
+//      shows/hides on ⌘B (Ctrl+B), the console on ⌘⇧B (Ctrl+Shift+B). The platform is DETECTED and the other
 //      modifier is not accepted: on macOS Ctrl+K is the text field's own
 //      kill-line, and on Linux Ctrl+K in the terminal is the shell's.
 //   2. Nothing fires while the confirmation modal is up or while the terminal
@@ -70,7 +70,7 @@ check("macOS: ⌘⇧O and ⌘O are new chat, ⌘K and ⌘⇧K are search, ⌘B i
   assert.equal(s.navChord(key("p", { metaKey: true })), "export");
   assert.equal(s.navChord(key("n", { metaKey: true })), "new");
   assert.equal(s.navChord(key("p", { metaKey: true, shiftKey: true })), null);
-  assert.equal(s.navChord(key("b", { metaKey: true, shiftKey: true })), null);
+  assert.equal(s.navChord(key("b", { metaKey: true, shiftKey: true })), "console", "⌘⇧B is the console");
   // A plain key is nothing.
   assert.equal(s.navChord(key("k")), null);
   assert.equal(s.navChord(key("k", { shiftKey: true })), null);
@@ -80,7 +80,7 @@ check("macOS: ⌘⇧O and ⌘O are new chat, ⌘K and ⌘⇧K are search, ⌘B i
   assert.equal(s.navChord(key("m", { metaKey: true })), "model-toggle");
   assert.equal(s.navChord(key("m", { ctrlKey: true })), null);
   assert.equal(s.navChord(key("m", { ctrlKey: true, shiftKey: true })), null);
-  assert.deepEqual(s.CHORD_HINTS, { new: "⌘⇧O", search: "⌘K", rail: "⌘B", models: "⌘⇧M", modelToggle: "⌘M" });
+  assert.deepEqual(s.CHORD_HINTS, { new: "⌘⇧O", search: "⌘K", rail: "⌘B", models: "⌘⇧M", modelToggle: "⌘M", console: "⌘⇧B" });
 });
 
 check("Windows/Linux: Ctrl+Shift+O / Ctrl+O are new chat, Ctrl+K and Ctrl+Shift+K are search, Ctrl+B is the chat list; ⌘ (Win key) is not accepted", () => {
@@ -101,7 +101,7 @@ check("Windows/Linux: Ctrl+Shift+O / Ctrl+O are new chat, Ctrl+K and Ctrl+Shift+
     assert.equal(s.navChord(key("m", { ctrlKey: true })), "model-toggle", platform);
     // Ctrl+M is the terminal's carriage return there: the terminal keeps it.
     assert.equal(s.navChord(key("m", { ctrlKey: true }), { terminal: true }), null, platform);
-    assert.deepEqual(s.CHORD_HINTS, { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+B", models: "Ctrl+Shift+M", modelToggle: "Ctrl+M" }, platform);
+    assert.deepEqual(s.CHORD_HINTS, { new: "Ctrl+Shift+O", search: "Ctrl+K", rail: "Ctrl+B", models: "Ctrl+Shift+M", modelToggle: "Ctrl+M", console: "Ctrl+Shift+B" }, platform);
   }
 });
 
@@ -177,9 +177,34 @@ check("⌘K opens the chat list and focuses its search field through the one han
   // Ctrl+K on macOS falls through untouched.
   assert.equal(w.fire(key("k", { ctrlKey: true })), false);
   assert.deepEqual(w.calls, []);
-  // Ctrl+\ is still the console's own toggle, either modifier.
-  assert.equal(w.fire(key("\\", { ctrlKey: true })), true);
+  // ⌘⇧B toggles the console; Ctrl+Shift+B on macOS is not the chord, and the
+  // old Ctrl+\ is retired.
+  assert.equal(w.fire(key("B", { metaKey: true, shiftKey: true })), true);
   assert.deepEqual(w.calls, ["toggleConsole"]);
+  w.calls.length = 0;
+  assert.equal(w.fire(key("B", { ctrlKey: true, shiftKey: true })), false);
+  assert.equal(w.fire(key("\\", { ctrlKey: true })), false);
+  assert.deepEqual(w.calls, []);
+});
+
+check("off macOS the console chord is Ctrl+Shift+B, and ⌘⇧B is not", () => {
+  const w = handlerWorld("Win32");
+  assert.equal(w.fire(key("B", { ctrlKey: true, shiftKey: true })), true);
+  assert.deepEqual(w.calls, ["toggleConsole"]);
+  w.calls.length = 0;
+  assert.equal(w.fire(key("B", { metaKey: true, shiftKey: true })), false);
+  assert.deepEqual(w.calls, []);
+});
+
+check("consoleChord — the terminal's close path — is the same chord navChord names, terminal or not", () => {
+  for (const [platform, mod, other] of [["MacIntel", "metaKey", "ctrlKey"], ["Linux x86_64", "ctrlKey", "metaKey"]]) {
+    const ctx = chords(platform);
+    assert.equal(ctx.consoleChord(key("B", { [mod]: true, shiftKey: true })), true, platform);
+    assert.equal(ctx.consoleChord(key("b", { [mod]: true })), false, `${platform}: plain ⌘B/Ctrl+B is the rail`);
+    assert.equal(ctx.consoleChord(key("B", { [other]: true, shiftKey: true })), false, platform);
+    assert.equal(ctx.navChord(key("B", { [mod]: true, shiftKey: true })), "console", platform);
+    assert.equal(ctx.navChord(key("B", { [mod]: true, shiftKey: true }), { terminal: true }), null, platform);
+  }
 });
 
 check("⌘⇧M opens the model list, and each further press moves one row down; ⌘M asks the server to toggle", () => {
@@ -302,10 +327,11 @@ check("with the confirmation modal up, or the terminal focused, the handler does
 
 check("the buttons' tooltips name the chord in the platform's glyph, the console button's convention", () => {
   const html = require("fs").readFileSync(require("path").join(__dirname, "..", "..", "aish", "static", "index.html"), "utf8");
-  assert(html.includes('id="console-btn" class="bar-btn icon" title="console (⌘/Ctrl+\\)"'), "the convention being mirrored");
+  assert(html.includes('id="console-btn" class="bar-btn icon" title="console"'), "the chord is written on a fine pointer only");
   // The titles are written where the send tooltip is, on a fine pointer.
   const block = extract(src, "if (FINE_POINTER) {", "// Grabber: drag down to dismiss");
   assert(block.includes('$("new-chip").title = `new chat (${CHORD_HINTS.new})`'), block);
+  assert(block.includes('$("console-btn").title = `console (${CHORD_HINTS.console})`'), block);
   assert(block.includes('$("sessions-new").title = `new chat (${CHORD_HINTS.new})`'), block);
   assert(block.includes('$("model-chip").title = `switch model (${CHORD_HINTS.models} · local ⇄ cloud: ${CHORD_HINTS.modelToggle})`'), block);
 });

@@ -5,7 +5,7 @@
 //
 // The global console (#148 follow-up) treats Esc as a REAL terminal key
 // (vim/tmux/less): escapeExit does NOT touch it — it's closed via its button or
-// Ctrl+\. escapeExit only leaves the old `!` terminal-input mode (cmdMode).
+// ⌘⇧B / Ctrl+Shift+B. escapeExit only leaves the old `!` terminal-input mode (cmdMode).
 //
 // Run manually: node tests/js/test_escape_exit.js
 "use strict";
