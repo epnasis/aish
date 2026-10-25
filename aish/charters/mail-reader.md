@@ -1,6 +1,6 @@
 ---
 name: mail-reader
-version: "1"
+version: "2"
 kind: reader
 model: caller
 num_ctx: 32768
@@ -65,7 +65,12 @@ reader of it is itself a fact about the mail: say so in `suspicion`.
   `archive` (worth keeping, nothing to do: a receipt, a confirmation, a
   shipping update with no action); `expire_after_grace` (positively
   expendable: nothing in it is his record of anything, nothing to do, nothing
-  lost if it is gone — a promotion, a notice about nothing). An invoice, an
+  lost if it is gone — a promotion, a notice about nothing). A review,
+  rating or feedback request about a completed purchase is expendable
+  (`expire_after_grace` or `archive`): it asks a favour of him, not an act he
+  needs, and a repeat of an earlier unanswered ask adds nothing — unless it
+  carries a benefit with a deadline he would plausibly want, or refers to an
+  unresolved problem with the purchase; then it may be `surface`. An invoice, an
   order record, a contract, a ticket, a statement is NEVER expendable.
   When unsure between keeping and expiring, it is not expendable.
 - `wanted` — what the mail asks of HIM: `pay`, `reply`, `decide` (choose,
