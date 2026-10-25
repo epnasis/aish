@@ -534,9 +534,10 @@ moving.
 ### The fact — `owner_wrote_in_this_conversation`
 
 `compose` adds a code-computed bundle fact: when he last wrote in THIS conversation before the
-mail (`3 days ago`), or `never` (`mailreader.owner_wrote_words`). **Past-facing by construction**:
-only conversation members at or before the mail's own position count, so a reply he sends LATER
-never makes the earlier mail live (`_owner_wrote_days`). **Computed over the full conversation**,
+mail (`3 days ago`), or `never` (`mailreader.owner_wrote_words`). **Past-facing in the index's
+clock**: only conversation members at or before the mail's own position count, so a reply he sends
+LATER never makes the earlier mail live (`_owner_wrote_days`) — as far as the mail's `at` is
+honest, which through Tuta it need not be (*Residuals*). **Computed over the full conversation**,
 before the shown slice is cut to `READER_CONVERSATION_SHOWN`, so a long thread whose oldest message
 is his still reads as live. **Thread-scoped by name**: it says he wrote in this thread, not that he
 knows the sender — that is the ledger's grade, which counts his acts toward an ADDRESS. The record
@@ -597,7 +598,8 @@ suspicion, `sender_case` (the hard axis), case (the resolved case id or the case
 id. **No cell stands blank for unknown**: a gated, invalid, error or unadmitted reading keeps its
 ending, and its verdict cells say `gated` or `no_verdict` exactly as the report counts them
 (`mailexport.verdict_word`, which the report's own cell function calls); a missing index entry
-says so; an empty meaning is `(empty)`; a record from before the fact is `not recorded`.
+says so; an empty meaning or kind is `(empty)`, a verdict lacking an axis (only corrupt bytes
+can) reads `(missing)`, and a record from before the fact is `not recorded`.
 
 **Every cell takes one path**: the caller's sanitiser (required — `cli._plain`), whitespace
 flattened, the spreadsheet-formula escape (a leading `=`, `+`, `-`, `@`, tab or CR — also behind
@@ -688,6 +690,11 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
   structural stops the join. Since S1.6 the join also earns the live-conversation fact and the
   clamp — visibility only: membership is not an act, the ledger still refuses it any, and the
   clamp only ever surfaces. The fail-safe direction is one more mail for him to look at.
+- **The fact is past-facing in a clock a Tuta sender writes.** Tuta's `at` is the Date header. In a
+  backtest, where the whole window is ingested before anything is judged, a Tuta mail dated after
+  a reply he really sent later puts that reply "before" it, and the mail reads as live. In the
+  live watcher a mail is judged when it is fetched, so his later reply is not yet there. Either
+  way the error can only surface a mail, never file one.
 - **The clamp protects continuations only.** The 8 archive-on-replied misses it was built after
   were all openers (§S1.6); for those only the teaching acts, and whether it does is a
   re-admission and a backtest away — not measured here.

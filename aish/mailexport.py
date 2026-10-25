@@ -72,22 +72,31 @@ def cell(clean: Clean, value: Any, cap: int = CELL_CHARS) -> str:
     return text if len(text) <= cap else text[: cap - 1] + "…"
 
 
+MISSING = "(missing)"
+
+
 def verdict_word(record: dict[str, Any], axis: str) -> str:
     """A verdict axis as the backtest report counts it: `gated` for a gated
-    mail, `no_verdict` for any other reading with no verdict, else the word."""
+    mail, `no_verdict` for any other reading with no verdict, `(missing)` for
+    a verdict that lacks the axis (only corrupt or hand-written bytes can),
+    else the word. Never empty."""
     if str(record.get("ending") or "") == mailreader.GATED:
         return "gated"
     verdict = record.get("verdict")
     if not isinstance(verdict, dict):
         return "no_verdict"
-    return str(verdict.get(axis) or "")
+    if axis not in verdict:
+        return MISSING
+    return str(verdict.get(axis) or "") or MISSING
 
 
 def _text_field(record: dict[str, Any], name: str) -> str:
-    word = verdict_word(record, name)
-    if word in ("gated", "no_verdict"):
-        return word
-    return word or "(empty)"
+    """`kind` and `meaning` may lawfully be empty (`may_be_empty`): an empty
+    one reads `(empty)`, an absent one `(missing)`."""
+    verdict = record.get("verdict")
+    if isinstance(verdict, dict) and name in verdict and not verdict.get(name):
+        return "(empty)"
+    return verdict_word(record, name)
 
 
 def _owner_wrote(record: dict[str, Any]) -> str:
@@ -98,8 +107,14 @@ def _owner_wrote(record: dict[str, Any]) -> str:
 
 
 def _gated_by(record: dict[str, Any]) -> str:
-    newsletter = ((record.get("gate") or {}).get("newsletter") or {})
-    if not isinstance(newsletter, dict) or not newsletter.get("gated"):
+    """The list header(s) that gated the mail, as the report's
+    `gated_by_truth` keys them. A gated ending whose gate facts say nothing
+    reads `?`, never "not gated" beside `ending: gated`."""
+    gate = record.get("gate")
+    newsletter = gate.get("newsletter") if isinstance(gate, dict) else None
+    newsletter = newsletter if isinstance(newsletter, dict) else {}
+    gated = newsletter.get("gated") or record.get("ending") == mailreader.GATED
+    if not gated:
         return "not gated"
     return "+".join(str(b) for b in newsletter.get("by") or ()) or "?"
 

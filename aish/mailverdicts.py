@@ -178,7 +178,7 @@ def build_record(
             {"ref": f"c{n}", **cand.as_json()} for n, cand in enumerate(facts.candidates, 1)
         ],
         "verdict": verdict.as_json() if verdict is not None else None,
-        "owner_wrote_days": None if owner_wrote_days is None else round(owner_wrote_days, 2),
+        "owner_wrote_days": None if owner_wrote_days is None else round(owner_wrote_days, 1),
         "clamped": clamped,
         "case_choice": chosen,
         "case_flags": flags.as_json(),

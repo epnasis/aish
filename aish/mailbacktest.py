@@ -239,8 +239,9 @@ def _fetched_log(state_dir: Path) -> Iterator[Callable[[dict[str, Any]], None]]:
 
 def recorded_labels(state_dir: Path) -> dict[str, tuple[str, ...]]:
     """digest -> labels, re-unioned from the run's `fetched.jsonl` the way
-    `backfill` unions them: every in-window fetch of the digest, outside-window
-    entries skipped. Labels are never stored in the index (a label has no
+    `backfill` unions them: over the LAST logged fetch of each provider id
+    (`_read_fetched` keeps one per id, as `backfill` reads it), unioned per
+    digest, outside-window entries skipped. Labels are never stored in the index (a label has no
     timestamp), so this log is their only record, and an export reads them
     from here rather than from anything the backfill kept in memory."""
     labels: dict[str, set[str]] = {}

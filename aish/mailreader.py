@@ -128,10 +128,12 @@ def _owner_wrote_days(
     """Days from his latest message in `conversation` at or before `header`
     to `header`, or None when he wrote none there.
 
-    PAST-facing by construction: only members at or before the mail's own
-    position count, so a reply he sends later never makes an earlier mail
-    "live". THREAD-scoped: it says he wrote in this conversation, not that he
-    knows the sender — that is the ledger's grade, which counts his acts toward
+    PAST-facing in the index's clock: only members at or before the mail's
+    own position count, so a reply he sends later never makes an earlier mail
+    "live" — as far as `at` is honest. Through Tuta `at` is the sender-written
+    Date (`docs/mail-assistant.md` residuals); the error can only surface.
+    THREAD-scoped: it says he wrote in this conversation, not that he knows the
+    sender — that is the ledger's grade, which counts his acts toward
     an address; joining a thread by References earns this fact, never a grade.
     """
     mine = [

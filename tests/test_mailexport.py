@@ -142,6 +142,17 @@ class TestRows:
                                                     "verdict": {"disposition": "surface"}})
         [row] = read_csv(mailexport.write(tmp_path / "o.csv", tmp_path, clean=cli._plain)[0])
         assert row["subject"] == "(not in the index)"
+        # A partial verdict — only corrupt or hand-written bytes make one —
+        # still leaves no cell blank.
+        assert all(row.values())
+        assert row["wanted"] == row["kind"] == "(missing)"
+        assert row["disposition_raw"] == "surface"
+
+    def test_a_gated_ending_never_reads_not_gated(self, tmp_path):
+        seed(tmp_path, digest_of="e" * 64, record={"model": "m", "ending": "gated", "at": T0,
+                                                    "verdict": None})
+        [row] = read_csv(mailexport.write(tmp_path / "o.csv", tmp_path, clean=cli._plain)[0])
+        assert (row["ending"], row["newsletter_gated_by"]) == ("gated", "?")
 
 
 class TestBacktestExport:
