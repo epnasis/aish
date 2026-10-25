@@ -301,7 +301,8 @@ def assess(
     flags = mailcases.case_flags(store, header, coordinates, linked)
     return mailverdicts.build_record(
         header=header, facts=facts, reading=reading, charter=charter, model=model_spec,
-        observation=observation, flags=flags, code_coordinates=code_coordinates, now=now,
+        observation=observation, flags=flags, code_coordinates=code_coordinates,
+        owner_wrote_days=mailreader.owner_wrote_days(index, header), now=now,
     )
 
 

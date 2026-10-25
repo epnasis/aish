@@ -21,6 +21,7 @@ from . import (
     backends,
     browser,
     learning,
+    mailexport,
     mailview,
     objective,
     owner_ua,
@@ -256,6 +257,8 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  reading, what it WOULD have done, and the Gate's facts — under
                  the watcher's health line. Shadow mode: nothing was done to
                  any of them
+  {CYAN}/mail export{RESET}   every recorded reading as one CSV row per (mail, model), to
+                 sort and filter in a spreadsheet; prints the file's path
   {CYAN}/new, /clear{RESET}   fresh conversation in a new chat (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
@@ -1956,10 +1959,21 @@ def show_mail(task: str, state_dir: Path, now: float | None = None) -> None:
     """`/mail` (#142 W5 S1.5): the shadow results and the watcher's health.
     Reads only; every mail- or model-originated string is rendered through
     `_plain` — `mailview.lines` cannot be called without a sanitiser."""
-    limit = mailview.parse_limit(task.split()[1:])
+    args = task.split()[1:]
+    if args == ["export"]:
+        path, rows, unreadable = mailexport.write(
+            mailexport.live_path(state_dir, now), state_dir, clean=_mail_cell)
+        print(f"{DIM}{rows} row(s), one per (mail, model) — the review file:{RESET}")
+        if unreadable:
+            print(f"{YELLOW}{unreadable} verdict file(s) could not be read and are not in "
+                  f"it{RESET}")
+        print(str(path))
+        return
+    limit = mailview.parse_limit(args)
     if limit is None:
         print(f"{DIM}usage: /mail [n] — the newest n shadow results (default "
-              f"{mailview.MAIL_SHOWN}, at most {mailview.MAIL_LIMIT_MAX}){RESET}")
+              f"{mailview.MAIL_SHOWN}, at most {mailview.MAIL_LIMIT_MAX}); /mail export — "
+              f"every recorded reading as a CSV file{RESET}")
         return
     styles = {"warn": YELLOW + BOLD, "head": BOLD}
     for style, text in mailview.lines(state_dir, clean=_mail_cell, limit=limit, now=now):

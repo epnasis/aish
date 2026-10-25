@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import mailcases, mailindex, mailreader, mailverdicts, mailwatch, paths, roles
+from . import mailcases, mailexport, mailindex, mailreader, mailverdicts, mailwatch, paths, roles
 
 DEFAULT_DAYS = 90
 DEFAULT_READER_MAX = 200
@@ -237,6 +237,49 @@ def _fetched_log(state_dir: Path) -> Iterator[Callable[[dict[str, Any]], None]]:
         yield remember
 
 
+def recorded_labels(state_dir: Path) -> dict[str, tuple[str, ...]]:
+    """digest -> labels, re-unioned from the run's `fetched.jsonl` the way
+    `backfill` unions them: every in-window fetch of the digest, outside-window
+    entries skipped. Labels are never stored in the index (a label has no
+    timestamp), so this log is their only record, and an export reads them
+    from here rather than from anything the backfill kept in memory."""
+    labels: dict[str, set[str]] = {}
+    for entry in _read_fetched(state_dir).values():
+        digest = str(entry.get("digest") or "")
+        if not digest or entry.get("outside"):
+            continue
+        labels.setdefault(digest, set()).update(str(x) for x in entry.get("labels") or ())
+    return {digest: tuple(sorted(held)) for digest, held in labels.items()}
+
+
+def export_truth(state_dir: Path) -> Callable[[str], tuple[str, str] | None]:
+    """The CSV's truth columns, recomputed at export exactly as the harness
+    computes them (`truth_of` over the run's own index and recorded labels).
+    Truths are never persisted, so there is nothing else to read."""
+    index = mailindex.MailIndex(state_dir)
+    labels = recorded_labels(state_dir)
+
+    def truth(digest: str) -> tuple[str, str] | None:
+        header = index.get(digest)
+        if header is None:
+            return None
+        found = truth_of(index, header, labels.get(digest, ()))
+        return found.label, found.tier
+
+    return truth
+
+
+CSV_NAME = "verdicts.csv"
+
+
+def export_csv(run_dir: Path, clean: Callable[[str], str]) -> tuple[Path, int, int]:
+    """Write `<run-dir>/verdicts.csv` from the run's scratch tree. Reads the
+    run directory only: no mailbox, no model."""
+    state_dir = run_dir / "state"
+    return mailexport.write(run_dir / CSV_NAME, state_dir, clean=clean,
+                            truth=export_truth(state_dir))
+
+
 def select(
     run: Backfill, truths: dict[str, Truth], reader_max: int
 ) -> list[mailindex.Header]:
@@ -296,13 +339,14 @@ def run_arms(
 
 
 def _cell(record: dict[str, Any], axis: str) -> str:
-    ending = str(record.get("ending") or "")
-    if ending == mailreader.GATED:
-        return "gated"
-    verdict = record.get("verdict")
-    if not isinstance(verdict, dict):
-        return NO_VERDICT
-    return str(verdict.get(axis) or "")
+    """One report cell — the CSV's `verdict_word`, so every count here is a
+    filter over the review file's columns."""
+    return mailexport.verdict_word(record, axis)
+
+
+def _effective_cell(record: dict[str, Any]) -> str:
+    """The disposition after the live-conversation clamp."""
+    return mailverdicts.effective_disposition(record) or _cell(record, "disposition")
 
 
 def _add(table: dict[str, dict[str, int]], row: str, col: str) -> None:
@@ -333,9 +377,13 @@ def report(
     arms: dict[str, Any] = {}
     for spec, records in results.items():
         disposition: dict[str, dict[str, int]] = {}
+        disposition_clamped: dict[str, dict[str, int]] = {}
         wanted_vs_reply: dict[str, dict[str, int]] = {}
         destructive: dict[str, int] = {}
+        destructive_clamped: dict[str, int] = {}
         archived_replied = 0
+        archived_replied_clamped = 0
+        clamped = 0
         gated: dict[str, dict[str, int]] = {}
         endings: dict[str, int] = {}
         for header in selected:
@@ -353,6 +401,15 @@ def report(
                 destructive[truth.label] = destructive.get(truth.label, 0) + 1
             if value == "archive" and "replied" in truth.facts:
                 archived_replied += 1
+            # The same cells after code's live-conversation clamp, beside the
+            # raw ones, so what the TEACHING achieves stays measurable alone.
+            effective = _effective_cell(record)
+            clamped += mailverdicts.clamp_of(record) is not None
+            _add(disposition_clamped, f"{truth.tier}:{truth.label}", effective)
+            if effective == "expire_after_grace" and truth.label in KEPT:
+                destructive_clamped[truth.label] = destructive_clamped.get(truth.label, 0) + 1
+            if effective == "archive" and "replied" in truth.facts:
+                archived_replied_clamped += 1
             if ending == mailreader.GATED:
                 by = "+".join(((record.get("gate") or {}).get("newsletter") or {}).get("by") or ())
                 _add(gated, by or "?", truth.label)
@@ -362,6 +419,10 @@ def report(
             "destructive_expire_on_kept": destructive,
             "archive_on_replied": archived_replied,
             "disposition_by_truth": disposition,
+            "clamped": clamped,
+            "destructive_expire_on_kept_clamped": destructive_clamped,
+            "archive_on_replied_clamped": archived_replied_clamped,
+            "disposition_by_truth_clamped": disposition_clamped,
             "wanted_by_reply": wanted_vs_reply,
             "gated_by_truth": gated,
         }
@@ -454,7 +515,17 @@ def render(result: dict[str, Any]) -> str:
                if destructive else "")
         )
         lines.append(f"  would have archived mail he replied to: {arm['archive_on_replied']}")
+        if "clamped" in arm:
+            kept = arm["destructive_expire_on_kept_clamped"]
+            lines.append(
+                f"  after the live-conversation clamp ({arm['clamped']} reading(s) clamped): "
+                f"would have expired mail he kept: {sum(kept.values())} of {arm['read']}; "
+                f"would have archived mail he replied to: {arm['archive_on_replied_clamped']}"
+            )
         lines += _table("disposition (rows: tier:truth)", arm["disposition_by_truth"])
+        if "disposition_by_truth_clamped" in arm:
+            lines += _table("disposition after the clamp (rows: tier:truth)",
+                            arm["disposition_by_truth_clamped"])
         lines += _table("wanted (rows: tier:replied?)", arm["wanted_by_reply"])
         lines += _table("newsletter-gated, by list header (rows) x truth", arm["gated_by_truth"])
     shown = result["disagreements"][:DISAGREEMENT_SHOWN]
@@ -518,7 +589,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="a Reader model spec; repeat for a cross-model comparison")
     parser.add_argument("--reader-max", type=int, default=DEFAULT_READER_MAX)
     parser.add_argument("--out", default="")
+    parser.add_argument("--csv", default="", metavar="RUN_DIR",
+                        help="export-only: write RUN_DIR/verdicts.csv from a finished run's "
+                             "store and exit — no mailbox, no model")
     args = parser.parse_args(argv)
+    if args.csv:
+        return _export_only(Path(args.csv))
     env, why = mailwatch.account_env(args.account)
     if env is None:
         print(f"refusing to run: {why}", file=sys.stderr)
@@ -542,6 +618,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(render(result))
     print(f"\nwritten to {out}", file=sys.stderr)
+    print(f"review file: aish-mailbacktest --csv {out}", file=sys.stderr)
+    return 0
+
+
+def _export_only(run_dir: Path) -> int:
+    from .cli import _plain  # the terminal's sanitiser: mailview's law, one sanitiser
+
+    if not (run_dir / "state").is_dir():
+        print(f"refusing to export: {run_dir} has no state/ — not a backtest run directory",
+              file=sys.stderr)
+        return 2
+    path, rows, unreadable = export_csv(run_dir, _plain)
+    print(f"{rows} row(s), one per (mail, model); truth recomputed at export")
+    if unreadable:
+        print(f"{unreadable} verdict file(s) could not be read and are not in the file")
+    print(f"written to {path}")
     return 0
 
 

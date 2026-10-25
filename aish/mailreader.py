@@ -71,6 +71,16 @@ READER_REST_SHOWN = 20
 READER_ASK_ROUNDS = 2
 READER_ASK_ITEMS = 3
 
+# A conversation the owner wrote in within this many days is LIVE: a verdict
+# filing it (archive, expire) is overridden to `surface` by code (`clamp`). A
+# CHOICE, not a measurement — the owner's own (2026-10-26: "if I go on vacation,
+# 14 days would file things too quickly"), stated like the `TokenBucket`
+# numbers. The Reader's prose says "recently"; the number lives here and in the
+# bundle fact, never in the charter.
+LIVE_CONVERSATION_DAYS = 30
+FILING_DISPOSITIONS = ("archive", "expire_after_grace")
+CLAMP_TO = "surface"
+
 _URL = re.compile(r"\b(?:https?://|www\.)\S+", re.I)
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -101,6 +111,7 @@ class Bundle:
     messages: dict[str, str]  # ref -> digest
     cases: dict[str, str]  # ref -> case id
     expandable: dict[str, tuple[str, str]] = field(default_factory=dict)
+    owner_wrote_days: float | None = None
 
     @property
     def text(self) -> str:
@@ -109,6 +120,52 @@ class Bundle:
 
 def _day(at: float) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(at))
+
+
+def _owner_wrote_days(
+    conversation: list[mailindex.Header], header: mailindex.Header
+) -> float | None:
+    """Days from his latest message in `conversation` at or before `header`
+    to `header`, or None when he wrote none there.
+
+    PAST-facing by construction: only members at or before the mail's own
+    position count, so a reply he sends later never makes an earlier mail
+    "live". THREAD-scoped: it says he wrote in this conversation, not that he
+    knows the sender — that is the ledger's grade, which counts his acts toward
+    an address; joining a thread by References earns this fact, never a grade.
+    """
+    mine = [
+        h.at for h in conversation
+        if h.direction == "out" and h.position <= header.position and h.digest != header.digest
+    ]
+    return (header.at - max(mine)) / 86400 if mine else None
+
+
+def owner_wrote_days(index: mailindex.MailIndex, header: mailindex.Header) -> float | None:
+    """`_owner_wrote_days` over the WHOLE conversation as of the mail — never
+    the slice a bundle shows, which a long thread truncates."""
+    return _owner_wrote_days(index.conversation(header.digest, header.position), header)
+
+
+def owner_wrote_words(days: float | None) -> str:
+    """The bundle's wording of the fact: `never`, or whole days ago."""
+    if days is None:
+        return "never"
+    whole = int(days)
+    return "1 day ago" if whole == 1 else f"{whole} days ago"
+
+
+def clamp(disposition: str, days: float | None) -> dict[str, Any] | None:
+    """The live-conversation clamp: code's override of a filing disposition on
+    a conversation he wrote in within `LIVE_CONVERSATION_DAYS`, or None.
+
+    It never rewrites the verdict — the result is stored BESIDE it, so the
+    Reader's own answer stays measurable — and it only ever moves toward his
+    attention (`surface`), never away from it."""
+    if days is None or days > LIVE_CONVERSATION_DAYS or disposition not in FILING_DISPOSITIONS:
+        return None
+    return {"from": disposition, "to": CLAMP_TO, "owner_wrote_days": round(days, 1),
+            "limit": LIVE_CONVERSATION_DAYS}
 
 
 def _message_entry(
@@ -155,6 +212,8 @@ def compose(
     """
     as_of = header.position
     conversation = index.conversation(header.digest, as_of)
+    # Over the full conversation, BEFORE the shown slice is cut below.
+    wrote_days = _owner_wrote_days(conversation, header)
     earlier = [h for h in conversation if h.digest != header.digest]
     whole = "rest of thread t1" in expand
     shown = earlier[-READER_REST_SHOWN:] if whole else earlier[-READER_CONVERSATION_SHOWN:]
@@ -195,6 +254,7 @@ def compose(
         "thread": "t1",
         "messages": entries,
         "omitted_messages": omitted,
+        "owner_wrote_in_this_conversation": owner_wrote_words(wrote_days),
         "candidates": candidate_entries,
         "sender": {
             "address": header.from_addr,
@@ -204,7 +264,7 @@ def compose(
         },
         "available": available,
     }
-    return Bundle(data, messages, cases)
+    return Bundle(data, messages, cases, owner_wrote_days=wrote_days)
 
 
 # ---------------------------------------------------------------- the answer
