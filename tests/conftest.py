@@ -13,6 +13,7 @@ from aish import notify as notify_module
 from aish import ratelimit as ratelimit_module
 from aish import rule_compiler as rule_compiler_module
 from aish import rules as rules_module
+from aish import sandbox as sandbox_module
 from aish import secrets as secrets_module
 from aish import signin as signin_module
 from aish import skills as skills_module
@@ -173,6 +174,23 @@ def no_real_notifications(monkeypatch, no_inherited_aish_env):
     """
     monkeypatch.setenv("AISH_NOTIFY", "0")
     assert not notify_module.enabled()
+
+
+@pytest.fixture(autouse=True)
+def no_real_sandbox(monkeypatch):
+    """Cardless shell commands go through aish's sandbox (epic #462), and the
+    real one is macOS-only and reads the system log after every run. The
+    suite gets a pass-through stand-in, so it behaves the same on Linux CI and
+    on a Mac; tests about the sandbox install their own, and the real profile
+    is exercised only under the `macos_sandbox` marker."""
+    from fake_sandbox import PassThroughSandbox
+
+    fake = PassThroughSandbox()
+    monkeypatch.setattr(sandbox_module, "_system", fake)
+    # A fresh deferred-read pool per test: a server test's shutdown closes the
+    # process-wide one, and a closed pool records every later read as not read.
+    monkeypatch.setattr(sandbox_module, "_deferred", sandbox_module.DeferredReads())
+    return fake
 
 
 @pytest.fixture(autouse=True)

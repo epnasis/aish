@@ -86,8 +86,12 @@ back to word matching without it).
 
 Every command the model proposes is shown verbatim and waits for you.
 Read-only commands inside the project auto-approve; anything that mutates state,
-reaches outside the project, or looks destructive stops for a decision. File
-writes show a colored diff *before* anything touches disk.
+reaches outside the project, or looks destructive stops for a decision. On macOS
+a command that runs without your decision runs in aish's **sandbox**, enforced by
+the kernel: it can read the chat's folders, write only to the chat's scratch
+folder, start only the programs on a fixed list (its read-only commands, plus
+mkdir/touch/rm for scratch), and has no network. File writes
+show a colored diff *before* anything touches disk.
 
 ![The approval card: a proposed file write shown as a colored diff, waiting for Approve or Deny](docs/images/approval-card.png)
 
@@ -161,7 +165,8 @@ unless you explicitly *Share* a selection.
 
 | Tool | What | Gate |
 |------|------|------|
-| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the project and in aish's own scratch/media/document dirs; `mkdir`/`touch`/`rm` inside the scratch workspace auto-approve) |
+| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the project and in aish's own scratch/media/document dirs; `mkdir`/`touch`/`rm` inside the scratch workspace auto-approve; whatever auto-approves runs in aish's kernel sandbox) |
+| `processes` | is a program running — pid, name, running time | none (aish runs `ps` itself; arguments and environment are never shown) |
 | `write_file` / `edit_file` | create or edit files | **colored diff + y/N** |
 | `read_file` | read a file | auto inside the project; **prompts outside it and on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
 | `read_media` | look at a video or audio recording — a YouTube link, any media URL, or a file on disk. Returns a map (length, chapters, captions) and frames from any moment, each labelled with the time it actually came from | auto |
@@ -623,6 +628,19 @@ thousands of entries without bloating the context.
    in the middle of the turn loses it. The model is told to make such changes
    only when you asked or agreed. A rule of yours that says *ask me first*
    always gets a card, even for a change that would otherwise need none.
+   **Whatever runs without asking runs in a kernel sandbox** (macOS Seatbelt,
+   `docs/sandbox.md`): the project is read-only to it, it may write only to the
+   chat's scratch folder, it may start only the programs on a fixed list (the
+   read-only commands plus mkdir/touch/rm for scratch; no interpreters, no
+   `man`, no `ps`), it has no network, and secrets
+   like `.env` and `~/.ssh` stay closed even after the shell expands a glob. If
+   the sandbox refuses something, the model is told what, and may propose the
+   command again — that proposal is a card, and approving it runs the command
+   outside the sandbox with your rights. No sandbox (not macOS, or its self-test
+   failed) means no command runs without asking: you get a card instead, and an
+   automation nobody is watching does not run it at all. `ps` asks first now;
+   aish answers "is X running" itself with the `processes` tool, which never
+   shows another program's arguments.
    Auto-approval covers only a conservatively
    parsed set of read-only commands, and is **scoped to the project directory** —
    commands whose paths escape it (absolute, `~`, `..`, resolved symlinks) prompt

@@ -51,6 +51,7 @@ from . import (
     ocr,
     owner_ua,
     paths,
+    processes,
     provenance,
     ratelimit,
     recipients,
@@ -59,6 +60,7 @@ from . import (
     roles,
     rule_compiler,
     rules,
+    sandbox,
     schedule,
     secrets,
     skill_import,
@@ -76,10 +78,13 @@ from . import (
 from . import plan as checklist
 from .approval import (
     Approved,
+    AutoApproved,
     Blocked,
     Denied,
     Licensed,
     default_denylist,
+    is_auto_approvable,
+    is_read_only,
     is_scratch_housekeeping,
     load_prefixes,
     path_within,
@@ -1265,6 +1270,64 @@ BLOCKED_RESULT = (
     "be approved through you at all. If the user truly intends this, they must "
     "run it themselves with the ! prefix. Propose a safer alternative if one exists."
 )
+
+# Epic #462 S1 — what aish says about its sandbox. Every sentence states what
+# was observed (the profile it built, the kernel's own log lines, a canary's
+# effects on disk); none names a cause no line of code checked (L8).
+SANDBOX_REFUSED_NOTE = (
+    "[aish: this command ran in aish's read-only sandbox — {allowed}. The "
+    "kernel refused: {refused}. That list is a sample read from the system "
+    "log, which can drop lines.{hint} If the command needs what was refused, "
+    "you may propose it again: it will be shown to the user for approval, and "
+    "if approved it runs outside the sandbox with the user's full rights.]"
+)
+SANDBOX_WHICH_HINT = (
+    "`which` cannot run inside the sandbox; `type <name>` is the shell's own "
+    "lookup and does."
+)
+SANDBOX_LOG_UNREAD = (
+    "[aish: this command ran in aish's read-only sandbox — {allowed}. aish "
+    "could not read the system log ({error}), so it does not know whether the "
+    "sandbox refused anything.]"
+)
+SANDBOX_BACKGROUND_NOTE = (
+    "[aish: this job runs in aish's read-only sandbox — {allowed}. What the "
+    "sandbox refuses a background job is not read back.]"
+)
+SANDBOX_UNAVAILABLE_UNATTENDED = (
+    "NOT RUN — this command would have run without a card inside aish's "
+    "sandbox, and the sandbox is not available ({observed}). Nobody is "
+    "watching this session, so aish runs no unapproved shell command without "
+    "it. Do not retry it; continue without it or report that it could not run."
+)
+SANDBOX_UNAVAILABLE_CARD = (
+    "aish's sandbox is not available ({observed}), so this command needs your "
+    "approval; if approved it runs with your full rights."
+)
+SANDBOX_REFUSED_BEFORE_CARD = (
+    "aish's sandbox refused this command earlier in this chat ({refused}). If "
+    "approved it runs outside the sandbox, with your full rights."
+)
+# How long the end of a task waits for its deferred refusal reads, and what a
+# read not done by then records instead.
+REFUSAL_SETTLE_S = 10.0
+SANDBOX_READ_NOT_SETTLED = "the read had not finished 10 s after the task ended"
+SANDBOX_READ_ABANDONED = "aish stopped before the read finished"
+
+SANDBOX_FAILED_CLOSED = (
+    "NOT RUN — this command was let through without a card, but aish could "
+    "not run it inside its sandbox ({observed}) and does not run an unapproved "
+    "command without it."
+)
+
+
+def _refusal_list(report: "sandbox.RefusalReport") -> str:
+    """`proc op target; …` for a note, with the total when the sample is cut."""
+    listed = "; ".join(
+        f"{r.process} {r.operation} {r.target}".strip() for r in report.refusals
+    )
+    hidden = report.seen - len(report.refusals)
+    return f"{listed} (+{hidden} more lines)" if hidden > 0 else listed
 
 # The shipped charter catalogue, loaded once per process. A dict rather than an
 # lru_cache so a test can clear it without reaching into a decorator's internals.
@@ -3775,8 +3838,25 @@ class Agent:
         approve_tool: Callable[..., Any] | None = None,
         approve_import: Callable[..., Any] | None = None,
         origin: str = "user",
+        # The kernel boundary for commands nobody approved (epic #462). None
+        # means the process-wide one, resolved at USE so the suite's stand-in
+        # (tests/conftest.py) reaches agents built before it was installed.
+        sandbox_runner: Any = None,
     ):
         self.model = model
+        self._sandbox_runner = sandbox_runner
+        # Commands the sandbox refused something to in THIS chat, with what it
+        # refused: proposing one again draws a card instead of the same
+        # refusal (the model was told it may ask). Session scope like roots,
+        # so restore_workspace clears it (L4).
+        self._sandbox_refused: dict[str, str] = {}
+        # Why the shell approver must draw a card for a command it would
+        # otherwise auto-approve; set only for the duration of one approve()
+        # call and read through `shell_card_reason()`.
+        self._shell_card_reason = ""
+        # Refusal reads for this task's SUCCEEDED sandboxed runs, still in
+        # flight (`sandbox.DeferredReads`); settled at the end of the task.
+        self._deferred_refusal_reads: list = []
         # Session provenance (#160/#178): "user" for every CLI session and
         # every web chat a human started; "schedule"/"email"/"webhook" for
         # triggered sessions, set by the server's open_session. A non-user
@@ -4975,6 +5055,7 @@ class Agent:
         # get_scope, the web's root union), so it must stay the same object.
         self.roots[:] = [Path(anchor).resolve()]
         self.session_prefixes.clear()  # same object rule as roots above
+        self._sandbox_refused.clear()  # a refusal belongs to the chat it came from
         self._sync_cwd_in_context()  # restored cwd shows in the system prompt too
         for path in trusted:
             resolved = Path(path).resolve()
@@ -5369,6 +5450,7 @@ class Agent:
             raise
         finally:
             self._in_task = False
+            self._settle_refusal_reads()
             self._flush_vocab()
 
     def _run_task(
@@ -7912,6 +7994,7 @@ class Agent:
         # interruptible (its whole process group is signaled — issue #76).
         result = tools.run_command(
             command,
+            confinement=tools.OWNER_TYPED,
             cwd=self.cwd,
             on_line=self.stream,
             allow_detach=True,
@@ -13693,6 +13776,99 @@ class Agent:
         client raises itself, and those label their own."""
         return self._gate_asking
 
+    # ------------------------------------------------------------ sandbox
+    # Epic #462 S1: a shell command nobody approved runs in aish's sandbox.
+
+    def shell_card_reason(self) -> str:
+        """Why the shell approver must draw a card for a command it would
+        otherwise auto-approve — empty when it need not. Late-bound like
+        `asking_gate`: the approver owns the card, the agent owns the reason."""
+        return self._shell_card_reason
+
+    def _sandbox(self) -> Any:
+        return self._sandbox_runner if self._sandbox_runner is not None else sandbox.system()
+
+    def _would_run_cardless(self, command: str) -> bool:
+        """True when the approver would let `command` through with no card on
+        the classifier's word alone — no prefix rule involved. That is Tier R,
+        and it is decided here, BEFORE the approver, because when the sandbox
+        cannot take it the approver must be told to draw a card instead."""
+        return is_read_only(command) and is_auto_approvable(
+            command, (), cwd=self.cwd, roots=self.workspace_roots()
+        )
+
+    def _confine(self) -> "sandbox.Confinement | sandbox.Unavailable":
+        """This chat's Tier R sandbox for one run: its roots readable, its
+        scratch writable, aish's own state and config trees closed."""
+        state = Path(self.state_dir) if self.state_dir else paths.state_home()
+        return self._sandbox().prepare(
+            self.workspace_roots(),
+            self.scratch_dir,
+            protected=[state, paths.config_home()],
+            path_env=os.environ.get("PATH", ""),
+        )
+
+    def _defer_refusal_read(self, confinement: Any, command: str) -> None:
+        """Read a SUCCEEDED run's refusals off the command's path. Turn and call
+        are captured NOW: by delivery the agent may be several calls on, and the
+        record must join the step it is about, not whatever is current."""
+        turn = self._turn
+        call_no = getattr(self._call_ids, "current", 0)
+
+        def deliver(record: dict) -> None:
+            if record.get("refused"):
+                self._sandbox_refused[command] = "; ".join(
+                    f"{r['process']} {r['op']} {r['target']}" for r in record["refused"]
+                )
+            self._emit_record(kind="sandbox_refusals", turn=turn, call=call_no, **record)
+
+        job = sandbox.deferred_reads().submit(
+            # exit_code=0 asks for ONE read: for a failed run this already IS
+            # the third look, after the two it made before returning.
+            lambda: confinement.refusals(exit_code=0), deliver
+        )
+        self._deferred_refusal_reads.append(job)
+
+    def _settle_refusal_reads(self) -> None:
+        """At the end of a task, wait for this task's deferred reads so their
+        records land in the turn's own evidence and in the log the turn was
+        written to (the CLI switches logs on /new and /resume between tasks).
+        Bounded: a read not done by then is recorded as not read."""
+        jobs, self._deferred_refusal_reads = self._deferred_refusal_reads, []
+        if jobs:
+            sandbox.deferred_reads().settle(
+                jobs, REFUSAL_SETTLE_S, SANDBOX_READ_NOT_SETTLED
+            )
+
+    def _card_reason_for(self, command: str, confinement: Any) -> str:
+        """Why a cardless command must be carded after all, as what aish
+        OBSERVED — or empty when the sandbox can take it."""
+        if not confinement:
+            return SANDBOX_UNAVAILABLE_CARD.format(observed=confinement.observed)
+        refused = self._sandbox_refused.get(command)
+        if refused:
+            return SANDBOX_REFUSED_BEFORE_CARD.format(refused=refused)
+        return ""
+
+    def _sandbox_note(self, confinement: Any, report: "sandbox.RefusalReport") -> str:
+        """The model-facing account of one sandboxed run: what the sandbox
+        allowed and what the kernel log said it refused. Empty when the log
+        was read and named nothing — that is not a claim that nothing was
+        refused (the record is a sample), so nothing is said either way."""
+        allowed = confinement.describe()
+        if report.read_error:
+            return SANDBOX_LOG_UNREAD.format(allowed=allowed, error=report.read_error)
+        if not report.refusals:
+            return ""
+        refused = _refusal_list(report)
+        hint = ""
+        if any(
+            r.operation.startswith("process-exec") and os.path.basename(r.target) == "which"
+            for r in report.refusals
+        ):
+            hint = " " + SANDBOX_WHICH_HINT
+        return SANDBOX_REFUSED_NOTE.format(allowed=allowed, refused=refused, hint=hint)
+
     def _ask_owner(self, gate: str, name: str, args: dict, preview: "str | None"):
         """Draw one approval card and say WHICH GATE drew it.
 
@@ -14719,6 +14895,13 @@ class Agent:
         if name == "schedule_task":
             return self._schedule_task(args)
 
+        if name == "processes":
+            # aish's own read-only check (epic #462 S1): `ps` is setuid and
+            # cannot run in the sandbox a cardless command runs in.
+            result = processes.report(str(args.get("program", "")))
+            self._note(f"→ processes: {args.get('program', '')}")
+            return result
+
         if name == "automations":
             return self._automations(args)
 
@@ -14762,10 +14945,35 @@ class Agent:
             # a scratch write_file. is_scratch_housekeeping fails closed —
             # anything ambiguous or escaping falls through to self.approve, so
             # the denylist and prompt still guard every other command.
-            if is_scratch_housekeeping(command, self.cwd, self.scratch_dir):
-                decision: Any = command
+            #
+            # Epic #462 S1: every command that runs with no card — that
+            # shortcut, and whatever the approver lets through on the
+            # classifier's word alone (Tier R) — runs in aish's sandbox. When
+            # the sandbox cannot take it (unavailable, or it refused this very
+            # command earlier in the chat), an attended session is asked on a
+            # card and an unattended one does not run it.
+            housekeeping = is_scratch_housekeeping(command, self.cwd, self.scratch_dir)
+            confinement: Any = None
+            card_reason = ""
+            if housekeeping or self._would_run_cardless(command):
+                confinement = self._confine()
+                card_reason = self._card_reason_for(command, confinement)
+            if card_reason and not confinement and self.origin != "user":
+                result = SANDBOX_UNAVAILABLE_UNATTENDED.format(observed=confinement.observed)
+                self._note("✕ aish's sandbox is unavailable: unapproved command not run")
+                self._run_meta = {
+                    "command": command, "decision": "rejected", "output": result,
+                    "sandbox": {"confined": False, "unavailable": confinement.observed},
+                }
+                return _gate_outcome(result, decision="rejected")
+            if housekeeping and not card_reason:
+                decision: Any = AutoApproved(command)
             else:
-                decision = self.approve(command)
+                self._shell_card_reason = card_reason
+                try:
+                    decision = self.approve(command)
+                finally:
+                    self._shell_card_reason = ""
             if isinstance(decision, Blocked):
                 self._run_meta = {
                     "command": command, "decision": "blocked", "output": decision.reason,
@@ -14802,32 +15010,125 @@ class Agent:
             if decision is None or decision is False:
                 self._run_meta = {"command": command, "decision": "denied", "output": ""}
                 return DENIED_RESULT
-            final = command if decision is True else str(decision)
+            # How it runs. INVERTED POLARITY (L7): a cardless command is
+            # sandboxed unless it is positively a prefix-rule command (Tier T,
+            # not sandboxed until S2); only a click runs with the owner's
+            # rights (Tier C, until S3). `tools.run_command` has no default.
+            if isinstance(decision, AutoApproved):
+                final = decision.command
+                if decision.by_rule and not (housekeeping or is_read_only(final)):
+                    runner: Any = tools.ALLOWLIST_RULE
+                else:
+                    if confinement is None:
+                        confinement = self._confine()
+                    if not confinement or card_reason:
+                        # An approver that answered with no card although the
+                        # agent asked for one, or a sandbox that went away:
+                        # fail closed.
+                        observed = (
+                            confinement.observed if not confinement else card_reason
+                        )
+                        result = SANDBOX_FAILED_CLOSED.format(observed=observed)
+                        self._run_meta = {
+                            "command": final, "decision": "rejected", "output": result,
+                            "sandbox": {"confined": False, "unavailable": observed},
+                        }
+                        return _gate_outcome(result, decision="rejected")
+                    runner = confinement
+            else:
+                final = command if decision is True else str(decision)
+                runner = tools.CARD_APPROVED
+            if isinstance(runner, tools.Unsandboxed):
+                sandbox_meta: dict = {"confined": False, "why": runner.why}
+            else:
+                sandbox_meta = {"confined": True, "tier": runner.tier}
             # command_start opens the bounded terminal block in the web UI:
             # cwd + the (possibly edited) command that is about to run.
             self._emit_command_start(final)
             if args.get("background"):
-                result = tools.start_background(final, cwd=self.cwd, log_dir=self.job_log_dir)
+                result = tools.start_background(
+                    final, confinement=runner, cwd=self.cwd, log_dir=self.job_log_dir
+                )
+                if sandbox_meta["confined"]:
+                    sandbox_meta["refusals_read"] = False
+                    note = SANDBOX_BACKGROUND_NOTE.format(allowed=runner.describe())
+                    self._note_in_result("sandbox", note)
+                    result += "\n\n" + note
                 self._note(result)
-                self._run_meta = {"command": final, "decision": "approved", "output": result}
+                self._run_meta = {
+                    "command": final, "decision": "approved", "output": result,
+                    "sandbox": sandbox_meta,
+                }
                 # A detached job has no exit code — label the block instead.
                 self._emit_command_end(status="detached", job=_parse_job_id(result))
                 return result
             result = tools.run_command(
                 final,
+                confinement=runner,
                 cwd=self.cwd,
                 on_line=self.stream,
                 allow_detach=True,
                 log_dir=self.job_log_dir,
                 should_stop=self._cancel.is_set,
             )
-            self._run_meta = {"command": final, "decision": "approved", "output": result}
+            code = _parse_exit_code(result)
+            if sandbox_meta["confined"] and result.startswith(tools.DETACHED_PREFIX):
+                # Ctrl-B: the job is still running, inside the same sandbox
+                # (the kernel's sandbox is inherited), and anything it is
+                # refused from here on would be missed — say so, as a
+                # background job does, rather than record a partial sample.
+                sandbox_meta["refusals_read"] = False
+                note = SANDBOX_BACKGROUND_NOTE.format(allowed=runner.describe())
+                self._note_in_result("sandbox", note)
+                result += "\n\n" + note
+            elif sandbox_meta["confined"] and code == 0:
+                # SUCCEEDED: the model is not told about refusals on a run
+                # that worked, so the ~800 ms log read is taken off its path
+                # (owner's decision, 2026-10-26). The result lands as a
+                # `sandbox_refusals` record joined to THIS step by turn+call.
+                sandbox_meta["deferred"] = True
+                sandbox_meta["nonce"] = runner.nonce
+                sandbox_meta["started"] = round(runner.started, 3)
+                self._defer_refusal_read(runner, final)
+            elif sandbox_meta["confined"]:
+                # FAILED (or no exit code): read now — the note may be what
+                # tells the model why.
+                report = runner.refusals(exit_code=code)
+                sandbox_meta.update(report.as_record())
+                if not report.refusals and not report.read_error:
+                    # Both reads came back empty, and under load the kernel's
+                    # line can land after them (delivery review F1): read once
+                    # more in the background, so a late refusal still reaches
+                    # the record and arms the card for a re-proposal.
+                    sandbox_meta["deferred"] = True
+                    self._defer_refusal_read(runner, final)
+                # The run's own key into the kernel log, so the sample can be
+                # read again later (`log show … CONTAINS "<nonce>"`) — the
+                # record is what aish saw then, not all the log holds.
+                sandbox_meta["nonce"] = runner.nonce
+                sandbox_meta["started"] = round(runner.started, 3)
+                if report.refusals:
+                    self._sandbox_refused[final] = _refusal_list(report)
+                sandbox_note = self._sandbox_note(runner, report)
+                if sandbox_note:
+                    if self.stream is not None:
+                        self.stream(sandbox_note)
+                    self._note(
+                        "✕ aish's sandbox refused part of this command"
+                        if report.refusals
+                        else "? aish could not read what its sandbox refused"
+                    )
+                    self._note_in_result("sandbox", sandbox_note)
+                    result += "\n\n" + sandbox_note
+            self._run_meta = {
+                "command": final, "decision": "approved", "output": result,
+                "sandbox": sandbox_meta,
+            }
             # command_end closes the block: a user cancel has no clean exit
             # code, a failed-to-start command none at all; otherwise the code.
             if self._cancel.is_set():
                 self._emit_command_end(status="interrupted")
             else:
-                code = _parse_exit_code(result)
                 self._emit_command_end(status="exit", exit_code=code)
             if self.stream is None:
                 self.echo(result)

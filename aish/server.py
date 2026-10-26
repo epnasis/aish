@@ -74,6 +74,7 @@ from . import (
     owner_ua,
     recipients,
     roles,
+    sandbox,
     schedule,
     tools,
     turns,
@@ -89,6 +90,7 @@ from .agent import (
     ASKED_BY_WRITE,
     CANCELLED_RESULT,
     FEEDBACK_SWITCH_NOTE,
+    SANDBOX_READ_ABANDONED,
     Agent,
     ModelUnavailable,
     environment_context,
@@ -98,6 +100,7 @@ from .agent import (
 )
 from .approval import (
     Approved,
+    AutoApproved,
     Blocked,
     Denied,
     Licensed,
@@ -106,6 +109,7 @@ from .approval import (
     default_denylist,
     escaping_dirs,
     is_auto_approvable,
+    is_read_only,
     load_prefixes,
     looks_destructive,
     prefix_suggestions,
@@ -1433,7 +1437,7 @@ def card_latency(answer: dict) -> dict:
 
 def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir,
                        get_origin=None, get_session_prefixes=None, get_intent=None,
-                       get_gate=None):
+                       get_gate=None, get_card_reason=None):
     """The three approval callbacks, backed by browser round trips. Mirrors
     cli.make_approver semantics exactly: denylist first (also on edited
     commands), then auto-approval scoped to the live session roots, then a
@@ -1455,7 +1459,13 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     owns the card and the log, the agent owns the reason the card exists, and
     neither can compute the other's half. Empty for the cards raised HERE —
     shell, read, write, import — which label themselves, since no agent gate
-    raised them."""
+    raised them.
+    get_card_reason() -> why the agent needs a CARD for a shell command that
+    would otherwise run with none (epic #462: aish's sandbox is unavailable,
+    or refused this very command earlier in the chat); shown on the card as
+    `sandbox_note` and recorded as the card's `preview`. An auto-approval
+    returns `AutoApproved`, never the bare string a click returns, because the
+    agent runs a command nobody saw in the sandbox."""
     own_prefixes: set[str] = set()
 
     def session_prefixes() -> set[str]:
@@ -1542,12 +1552,20 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             return blocked(command, reason)
 
         cwd, roots = get_scope()
-        if not ask_all and is_auto_approvable(
+        must_ask = (get_card_reason() if get_card_reason else "") or ""
+        if not ask_all and not must_ask and is_auto_approvable(
             command, consulted_prefixes(), cwd=cwd, roots=roots
         ):
             bridge.emit({"type": "echo", "text": f"✓ auto-approved: {command}"})
             record(command, "auto", asked_by=ASKED_BY_SHELL)
-            return command
+            # Not read-only on the classifier's word ⇒ a prefix rule let it in.
+            return AutoApproved(command, by_rule=not is_read_only(command))
+
+        def card_record(command: str, decision: str, **kw) -> None:
+            # Every record below is about this card, so each carries why the
+            # card exists when the agent asked for one — the observation the
+            # card showed, never a cause.
+            record(command, decision, preview=must_ask, **kw)
 
         # Empty when no prefix could ever silence this command — the frontend
         # then omits the Session/Always buttons rather than offering a rule the
@@ -1564,6 +1582,8 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             "prefixes": suggestions,
             "escapes": escapes,
         }
+        if must_ask:
+            request["sandbox_note"] = must_ask
         carry_intent(request)
         answer = bridge.ask(request)
         action = answer.get("action")
@@ -1578,13 +1598,13 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             return Approved(comment, final) if comment else final
 
         if action == "approve":
-            record(command, tagged("approved"), card=answer, asked_by=ASKED_BY_SHELL)
+            card_record(command, tagged("approved"), card=answer, asked_by=ASKED_BY_SHELL)
             resolve(request["id"], "approved", comment)
             return granted()
         if action == "approve_trust" and escapes:
             notes = [trust_dir(directory) for directory in escapes]
             bridge.emit({"type": "echo", "text": "✓ " + "; ".join(notes)})
-            record(command, tagged(f"approved+trusted:{','.join(escapes)}"), card=answer,
+            card_record(command, tagged(f"approved+trusted:{','.join(escapes)}"), card=answer,
                    asked_by=ASKED_BY_SHELL)
             resolve(request["id"], "approved", comment)
             return granted()
@@ -1593,7 +1613,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             bridge.emit(
                 {"type": "echo", "text": f"✓ chat-allowed: {', '.join(suggestions)}"}
             )
-            record(command, tagged("approved+session"), card=answer,
+            card_record(command, tagged("approved+session"), card=answer,
                    asked_by=ASKED_BY_SHELL)
             resolve(request["id"], "approved", comment)
             return granted()
@@ -1610,7 +1630,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             bridge.emit(
                 {"type": "echo", "text": f"✓ always-allowed: {', '.join(suggestions)}"}
             )
-            record(
+            card_record(
                 command,
                 tagged(f"approved+always:{','.join(suggestions)}"),
                 card=answer,
@@ -1625,15 +1645,15 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
                 # `ls` could be edited into `rm -rf /` and run unchecked.
                 reason = check_denied(edited, load_prefixes(deny_path))
                 if reason:
-                    record(f"{command} => {edited}", f"blocked: {reason}", card=answer,
+                    card_record(f"{command} => {edited}", f"blocked: {reason}", card=answer,
                            asked_by=ASKED_BY_SHELL)
                     resolve(request["id"], "denied")
                     return blocked(edited, reason)
-                record(f"{command} => {edited}", tagged("edited"), card=answer,
+                card_record(f"{command} => {edited}", tagged("edited"), card=answer,
                        asked_by=ASKED_BY_SHELL)
                 resolve(request["id"], "edited", comment)
                 return granted(edited)
-        record(command, tagged("denied"), card=answer, asked_by=ASKED_BY_SHELL)
+        card_record(command, tagged("denied"), card=answer, asked_by=ASKED_BY_SHELL)
         resolve(request["id"], "denied", comment)
         return Denied(comment) if comment else None
 
@@ -2237,6 +2257,11 @@ class WebServer:
         if self.console is not None:
             self.console.kill()
             self.console = None
+        # A refusal read still in flight for a sandboxed run (epic #462) would
+        # die with the process (main() ends in os._exit) and leave its step
+        # saying only "deferred": record each as not read while the logs are
+        # still writable, and take no more.
+        sandbox.deferred_reads().abandon_all(SANDBOX_READ_ABANDONED)
         # Release the worker pool WITHOUT waiting on parked threads: the deny
         # loop above already unblocked every held approval, and wait=False +
         # cancel_futures (3.9+) drops anything still queued instead of
@@ -7366,6 +7391,9 @@ def create_app(
             ),
             get_intent=lambda: agent_holder[0].turn_intent() if agent_holder else "",
             get_gate=lambda: agent_holder[0].asking_gate() if agent_holder else "",
+            get_card_reason=(
+                lambda: agent_holder[0].shell_card_reason() if agent_holder else ""
+            ),
         )
         # Coalesce a command's per-line output into fewer, larger `stream`
         # events (issue #109) — huge output otherwise emits one WS event + one

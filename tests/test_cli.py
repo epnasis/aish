@@ -8,7 +8,7 @@ import pytest
 
 from aish import recipients
 from aish import skills as skills_module
-from aish.approval import Licensed, load_prefixes
+from aish.approval import AutoApproved, Licensed, load_prefixes
 from aish.cli import (
     make_approver,
     make_import_approver,
@@ -16,6 +16,14 @@ from aish.cli import (
     make_tool_approver,
     make_write_approver,
 )
+
+
+def no_card(verdict) -> str:
+    """The command an auto-approval let through. It is a typed verdict, not
+    the bare string a "y" returns (epic #462): the agent runs a command
+    nobody saw in its sandbox, so the two must not be confusable."""
+    assert isinstance(verdict, AutoApproved), verdict
+    return verdict.command
 
 
 def scripted_input(monkeypatch, answers):
@@ -44,7 +52,8 @@ def test_always_persists_per_segment_and_future_auto_approves(tmp_path, monkeypa
     assert approve("git status && cargo build --quiet") == "git status && cargo build --quiet"
     assert load_prefixes(allow) == ["git status", "cargo build"]
     # next time: no prompt at all (input would raise StopIteration if called)
-    assert approve("git status && cargo build --release") == "git status && cargo build --release"
+    command = "git status && cargo build --release"
+    assert no_card(approve(command)) == command
 
 
 def test_always_says_so_when_no_prefix_could_ever_help(tmp_path, monkeypatch, capsys):
@@ -81,7 +90,7 @@ def test_session_allow_auto_approves_without_persisting(tmp_path, monkeypatch):
     assert approve("cargo build --quiet") == "cargo build --quiet"
     assert load_prefixes(allow) == []  # nothing written to disk
     # same prefix auto-approves for the rest of the session (no prompt)
-    assert approve("cargo build --release") == "cargo build --release"
+    assert no_card(approve("cargo build --release")) == "cargo build --release"
 
 
 def test_session_allow_is_per_approver_not_global(tmp_path, monkeypatch):
@@ -118,7 +127,7 @@ def test_trust_dir_approves_and_widens_roots(tmp_path, monkeypatch):
     assert approve(f"ls {other}") == f"ls {other}"
     assert trusted == [str(other)]
     # the widened roots now auto-approve without any prompt
-    assert approve(f"ls {other}") == f"ls {other}"
+    assert no_card(approve(f"ls {other}")) == f"ls {other}"
 
 
 def test_trust_option_absent_inside_roots(tmp_path, monkeypatch, capsys):
@@ -203,7 +212,7 @@ def test_approving_for_this_chat_answers_to_c_and_to_s(tmp_path, monkeypatch):
         approve = make_approver(False, allow, None)
         scripted_input(monkeypatch, [key, ""])  # scope key, then accept the prefix
         assert approve("cargo build --quiet") == "cargo build --quiet"
-        assert approve("cargo build --release") == "cargo build --release"  # no prompt
+        assert no_card(approve("cargo build --release")) == "cargo build --release"  # no prompt
         assert not allow.exists()
 
 
@@ -244,7 +253,7 @@ def test_ask_all_prompts_even_for_read_only(tmp_path, monkeypatch):
 
 def test_read_only_auto_approves_without_input(tmp_path):
     approve = make_approver(False, tmp_path / "allow.txt", None)
-    assert approve("ls -la | wc -l && date") == "ls -la | wc -l && date"
+    assert no_card(approve("ls -la | wc -l && date")) == "ls -la | wc -l && date"
 
 
 def test_load_context_files_reads_cwd_aish_md(tmp_path, monkeypatch):
@@ -661,7 +670,7 @@ def test_resume_leaves_the_previous_chats_trusted_dirs_behind(tmp_path, monkeypa
 
     scripted_input(monkeypatch, ["t"])  # 'trust this directory' at the prompt
     assert approve(f"ls {extra}") == f"ls {extra}"
-    assert approve(f"ls {extra}") == f"ls {extra}"  # auto-approved now (no input left)
+    assert no_card(approve(f"ls {extra}")) == f"ls {extra}"  # auto-approved now (no input left)
     left_behind = logref.log
 
     handle_slash("/resume", agent, logref, sessions)
@@ -692,7 +701,7 @@ def test_resume_restores_the_dirs_that_session_trusted(tmp_path, monkeypatch):
     logref.message({"role": "user", "content": "from january"})
     agent.add_root(str(shared))  # /add-dir, in this chat
     approve = scope_approver(tmp_path, agent)
-    assert approve(f"ls {shared}") == f"ls {shared}"  # auto-approved, no prompt
+    assert no_card(approve(f"ls {shared}")) == f"ls {shared}"  # auto-approved, no prompt
 
     handle_slash("/new", agent, logref, sessions)  # a different chat: not trusted here
     assert shared.resolve() not in agent.roots
@@ -702,7 +711,7 @@ def test_resume_restores_the_dirs_that_session_trusted(tmp_path, monkeypatch):
     handle_slash("/resume", agent, logref, sessions)  # back to january
 
     assert shared.resolve() in agent.roots
-    assert approve(f"ls {shared}") == f"ls {shared}"  # auto-approves again, no input
+    assert no_card(approve(f"ls {shared}")) == f"ls {shared}"  # auto again, no input
 
 
 def test_resume_without_a_recorded_cwd_returns_to_the_launch_dir(tmp_path):
@@ -761,7 +770,7 @@ def test_session_prefix_allowance_lasts_only_that_session(tmp_path, monkeypatch)
 
     scripted_input(monkeypatch, ["s", ""])  # 'session', accept the suggested prefix
     assert approve("cargo build --quiet") == "cargo build --quiet"
-    assert approve("cargo build --release") == "cargo build --release"  # auto, no input
+    assert no_card(approve("cargo build --release")) == "cargo build --release"  # auto, no input
 
     handle_slash("/new", agent, logref, sessions)
 
@@ -822,7 +831,7 @@ def test_always_allowlist_outlives_the_session_that_saved_it(tmp_path, monkeypat
     handle_slash("/new", agent, logref, sessions)
 
     assert load_prefixes(allow) == saved
-    assert approve("cargo test --release") == "cargo test --release"  # auto, no input
+    assert no_card(approve("cargo test --release")) == "cargo test --release"  # auto, no input
 
 
 def test_resume_picker_lists_slugs_and_selects_by_number(tmp_path, capsys, monkeypatch):

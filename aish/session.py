@@ -709,6 +709,10 @@ _ENTRY_CACHE: dict[str, tuple[tuple[int, int], "SessionEntry | None"]] = {}
 RENDERLESS_STEPS = frozenset(
     {
         "render_error",  # #188
+        # Epic #462: what the kernel refused a SUCCEEDED sandboxed run, read
+        # after the run's `tool` step was emitted and joined to it by turn +
+        # call. Evidence about a step, never a step: renderless live and cold.
+        "sandbox_refusals",
         "rule_eval",  # #191
         "binding",  # #191
         "gate",  # #191

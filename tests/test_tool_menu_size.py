@@ -69,7 +69,12 @@ from aish import tools
 # chars: 36,872 -> 37,371). A new capability rather than an essay: the session
 # that asked for a PDF report spent five approval cards and fifteen minutes
 # hand-building one with a script, and never delivered it.
-MAX_MENU_CHARS = 37_500
+#
+# Raised 37,500 -> 37,800 on 2026-10-26 for ONE new tool, processes (+389
+# chars: 37,341 -> 37,730, measured). Epic #462 S1 runs every cardless command in a
+# sandbox, and the kernel refuses `ps` (setuid) inside any sandbox; without
+# aish's own read-only check, "is X running" becomes an approval card.
+MAX_MENU_CHARS = 37_800
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.

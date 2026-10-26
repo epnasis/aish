@@ -50,6 +50,7 @@ from .agent import (
     surface_slot,
 )
 from .approval import (
+    AutoApproved,
     Blocked,
     Licensed,
     check_denied,
@@ -57,6 +58,7 @@ from .approval import (
     default_denylist,
     escaping_dirs,
     is_auto_approvable,
+    is_read_only,
     load_prefixes,
     looks_destructive,
     prefix_suggestions,
@@ -506,6 +508,7 @@ def make_approver(
     get_session_prefixes=None,
     trust_dir=None,
     get_intent=None,
+    get_card_reason=None,
 ):
     """get_scope() -> (cwd, roots): the agent's live directory scope, bound
     late because the agent is constructed after its approver. When present,
@@ -521,7 +524,12 @@ def make_approver(
     them (also late-bound, in-memory only). get_intent() -> what the model said
     it was doing on the step that proposed this command (#252), printed above
     the prompt and recorded with the decision — the terminal gate shows the same
-    reason the web card does, because the two gate identically."""
+    reason the web card does, because the two gate identically.
+    get_card_reason() -> why the agent needs a CARD for a command that would
+    otherwise run with none (epic #462: aish's sandbox is unavailable, or it
+    refused this very command earlier in the chat); empty when it does not.
+    An auto-approval returns `AutoApproved`, never the bare string a "y"
+    returns, because the agent runs the two differently."""
     deny_path = deny_path if deny_path is not None else default_denylist()
     own_prefixes: set[str] = set()
 
@@ -541,7 +549,10 @@ def make_approver(
             # last happened to be open.
             log.command(command, decision, intent(), asked_by=ASKED_BY_SHELL)
 
-    def ask_approval(command: str) -> str | Blocked | None:
+    def card_reason() -> str:
+        return (get_card_reason() if get_card_reason else "") or ""
+
+    def ask_approval(command: str) -> str | AutoApproved | Blocked | None:
         # Denylist first: unrecoverable commands never reach the prompt and
         # the allowlist can never bypass this.
         reason = check_denied(command, load_prefixes(deny_path))
@@ -552,14 +563,18 @@ def make_approver(
             return Blocked(reason)
 
         cwd, roots = get_scope() if get_scope else (None, None)
-        if not ask_all and is_auto_approvable(
+        must_ask = card_reason()
+        if not ask_all and not must_ask and is_auto_approvable(
             command, known_prefixes(), cwd=cwd, roots=roots
         ):
             print(f"\n{GREEN}✓ auto-approved:{RESET} {BOLD}{_plain(command)}{RESET}")
             record(command, "auto")
-            return command
+            # Not read-only on the classifier's word ⇒ a prefix rule let it in.
+            return AutoApproved(command, by_rule=not is_read_only(command))
 
         print_intent(intent())
+        if must_ask:
+            print(f"{YELLOW}  ⚠ {_plain(must_ask)}{RESET}")
         warning = f" {RED}⚠ destructive{RESET}" if looks_destructive(command) else ""
         # The thing being approved is the thing being printed, one line above
         # [y/N]: it must not be able to repaint itself (#327). The RECORD keeps
@@ -2910,6 +2925,11 @@ def main() -> int:
         # (#252) — late-bound off the agent like the scope and the allowances.
         return agent_holder[0].turn_intent() if agent_holder else ""
 
+    def get_card_reason() -> str:
+        # Why the agent needs a card for a command its sandbox cannot take
+        # (epic #462) — late-bound like the rest.
+        return agent_holder[0].shell_card_reason() if agent_holder else ""
+
     def get_gate() -> str:
         # Same late binding as get_intent, and the same hazard: the gates run
         # on the agent, the log lives here.
@@ -2930,6 +2950,7 @@ def main() -> int:
             approve=make_approver(
                 args.ask_all, allow_path, logref, deny_path, get_scope,
                 get_session_prefixes, trust_dir=trust_dir, get_intent=get_intent,
+                get_card_reason=get_card_reason,
             ),
             approve_write=make_write_approver(logref, get_intent),
             approve_read=make_read_approver(
@@ -2966,6 +2987,7 @@ def main() -> int:
             approve=make_approver(
                 args.ask_all, allow_path, logref, deny_path, get_scope,
                 get_session_prefixes, trust_dir=trust_dir, get_intent=get_intent,
+                get_card_reason=get_card_reason,
             ),
             approve_write=make_write_approver(logref, get_intent),
             approve_read=make_read_approver(
