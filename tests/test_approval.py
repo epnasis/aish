@@ -26,7 +26,7 @@ SAFE = [
     "find /usr/bin -maxdepth 1 -type f | wc -l",
     "grep -r 'pattern' /tmp | head -20",
     "du -sh /tmp",
-    "ps aux | grep python | wc -l",
+    "ls -la | grep python | wc -l",
     "man tar",
     "stat -f '%z' file.txt",
     "date",
@@ -45,6 +45,8 @@ UNSAFE = [
     "find . -execdir rm {} +",
     "sort -o /etc/hosts input",
     "sort --output=/etc/hosts input",
+    "sort -o/etc/hosts input",  # glued value (epic #462: overwrote ~/.zshrc)
+    "sort -ro/etc/hosts input",  # bundled after another flag
     "echo $HOME",  # expansion we can't reason about
     "ls | xargs rm",  # unlisted command in pipeline
     "/tmp/fake/ls",  # path form shadowing the real PATH binary

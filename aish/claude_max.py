@@ -288,6 +288,11 @@ class ClaudeMaxAgent:
         # is forwarded by hand.
         return self.inner.asking_gate()
 
+    def shell_card_reason(self) -> str:
+        # The same hand-forwarded seam (epic #462): the shell gate runs on the
+        # inner agent, which is the one that knows its sandbox needs a card.
+        return self.inner.shell_card_reason()
+
     def restore_workspace(self, cwd: str | None, trusted: list[str]) -> None:
         self.inner.restore_workspace(cwd, trusted)
 
@@ -407,6 +412,7 @@ class ClaudeMaxAgent:
             return self.rebase(cd_target)  # !cd aliases /cd: root moves too
         result = tools.run_command(
             command,
+            confinement=tools.OWNER_TYPED,
             cwd=self.cwd,
             on_line=self.inner.stream,
             allow_detach=True,
@@ -453,6 +459,7 @@ class ClaudeMaxAgent:
             # counters (#322) never runs on this backend, so a claude-max
             # session would record none of its consultations and every list
             # would read as "not consulted" on the days he worked here.
+            self.inner._settle_refusal_reads()  # the same, for epic #462's reads
             self.inner._flush_vocab()
 
     def _run_task_body(self, task: str) -> str:

@@ -35,7 +35,7 @@ import aish.schedule as schedule_module
 import aish.server as server_module
 import aish.session as session_module
 from aish.agent import DENIED_RESULT, WRITE_DENIED
-from aish.approval import Licensed
+from aish.approval import AutoApproved, Licensed
 from aish.server import (
     SESSION_TITLE_PROMPT,
     TITLE_PROMPT,
@@ -8370,20 +8370,26 @@ class TestUnattendedShellPolicy:
     def test_user_origin_still_honours_the_allowlist(self, tmp_path):
         # L6's other half: a `user` session behaves byte-identically.
         ask, bridge, _, _ = self._approver("user", tmp_path)
-        assert ask("git commit -m 'mine'") == "git commit -m 'mine'"
+        verdict = ask("git commit -m 'mine'")
+        assert isinstance(verdict, AutoApproved) and verdict.by_rule
+        assert verdict.command == "git commit -m 'mine'"
         assert bridge.asked == []
 
     def test_read_only_classification_survives_unattended(self, tmp_path):
         # Requirement 1 keeps read-only autonomy; only the allowlist is cut.
         ask, bridge, _, _ = self._approver("email", tmp_path)
-        assert ask("ls -la") == "ls -la"
+        verdict = ask("ls -la")
+        # No card, and no rule: the agent runs it in the sandbox (epic #462).
+        assert isinstance(verdict, AutoApproved) and not verdict.by_rule
+        assert verdict.command == "ls -la"
         assert bridge.asked == []
 
     def test_a_grant_made_on_this_sessions_own_card_is_honoured(self, tmp_path):
         # "Allow this chat" is the owner's live act on this very session.
         ask, bridge, _, _ = self._approver("email", tmp_path,
                                            live={"git commit"})
-        assert ask("git commit -m 'he said so here'").startswith("git commit")
+        verdict = ask("git commit -m 'he said so here'")
+        assert isinstance(verdict, AutoApproved) and verdict.by_rule
         assert bridge.asked == []
 
     def test_the_held_card_still_offers_rules_the_gate_honours(self, tmp_path):
@@ -8397,10 +8403,11 @@ class TestUnattendedShellPolicy:
     def test_always_allow_takes_effect_in_this_session_too(self, tmp_path):
         ask, bridge, allow, prefixes = self._approver(
             "email", tmp_path, answer={"action": "approve_always"})
-        assert ask("git push origin main") == "git push origin main"
+        assert ask("git push origin main") == "git push origin main"  # the click
         assert "git push" in allow.read_text()   # future attended sessions
         assert "git push" in prefixes            # and THIS session, at once
-        assert ask("git push origin main") == "git push origin main"
+        again = ask("git push origin main")
+        assert isinstance(again, AutoApproved) and again.command == "git push origin main"
         assert len(bridge.asked) == 1            # the second call drew no card
 
 

@@ -93,6 +93,25 @@ class Licensed:
     def __init__(self, policy: str):
         self.policy = policy
 
+
+class AutoApproved:
+    """Shell approver verdict for a command that runs with NO card: the
+    classifier, or a saved prefix rule, let it through (epic #462).
+
+    Distinct from the bare string a click returns, because nobody saw this
+    command, and a command nobody saw runs in aish's sandbox. `by_rule` says a
+    saved prefix rule (allow.txt, or one granted for this chat) was needed —
+    the one cardless case slice S1 leaves unsandboxed (Tier T, sandboxed from
+    S2). It defaults to False, so a verdict that does not say otherwise is
+    sandboxed: the polarity fails closed."""
+
+    def __init__(self, command: str, by_rule: bool = False):
+        self.command = command
+        self.by_rule = by_rule
+
+    def __repr__(self) -> str:
+        return f"AutoApproved({self.command!r}, by_rule={self.by_rule})"
+
 SAFE_COMMANDS = vocab.declare(
     "approval.SAFE_COMMANDS",
     languages="program names — locale-invariant",
@@ -130,7 +149,10 @@ SAFE_COMMANDS = vocab.declare(
         "md5",
         "md5sum",
         "printf",
-        "ps",
+        # `ps` is NOT here (epic #462 S1): it is setuid, the kernel refuses
+        # it inside every sandbox, and a cardless command runs in one — so it
+        # could only ever fail. aish's own `processes` tool answers "is X
+        # running", and `ps` itself cards like any other unlisted command.
         "pwd",
         "sha256sum",
         "shasum",
@@ -344,11 +366,21 @@ def _tokens_with_quoting(segment: str) -> list[tuple[str, bool]] | None:
 
 
 def _has_unsafe_flag(name: str, tokens: list[str]) -> bool:
-    return any(
-        tok == flag or tok.startswith(flag + "=")
-        for flag in UNSAFE_FLAGS.get(name, ())
-        for tok in tokens[1:]
-    )
+    """A write/exec flag in any spelling the program accepts. A one-letter
+    flag also takes its value GLUED (`sort -o/Users/x/.zshrc`) and rides in a
+    bundle (`sort -ro<path>`); both slipped past the exact-token match and
+    auto-approved an overwrite of any file (epic #462). So for a one-letter
+    flag, any single-dash token carrying that letter counts — a few harmless
+    spellings card as well, which is the direction L3 errs in."""
+    for flag in UNSAFE_FLAGS.get(name, ()):
+        one_letter = len(flag) == 2 and flag[0] == "-" and flag[1] != "-"
+        for tok in tokens[1:]:
+            if tok == flag or tok.startswith(flag + "="):
+                return True
+            if one_letter and tok.startswith("-") and not tok.startswith("--"):
+                if flag[1] in tok[1:]:
+                    return True
+    return False
 
 
 def _in_trusted_bindir(abs_path: str) -> bool:

@@ -327,6 +327,30 @@ check("the fold opens and closes, and says which it will do", () => {
   assert.strictEqual(more.textContent, "Show more");
 });
 
+// Epic #462: a command that would have run with no card, carded because aish's
+// sandbox could not take it, says why — as text, before the model's reason.
+vm.runInContext(
+  extract("function sandboxNote", "function buildReadCard").replace(/\bconst\b/g, "var"),
+  sandbox
+);
+
+check("a sandbox note is drawn as text, before the model's reason", () => {
+  const note = "aish's sandbox refused this command earlier in this chat (cat file-read-data /p/.env).";
+  const card = makeEl("div");
+  sandbox.buildCommandCard(card, { ...CMD_EVENT, intent: INTENT, sandbox_note: note });
+  const shown = find(card, "sandbox-note");
+  assert(shown, "no .sandbox-note on the card");
+  assert.strictEqual(shown.textContent, `⚠ ${note}`);
+  const at = (cls) => card.children.findIndex((c) => c._class && c._class.split(/\s+/).includes(cls));
+  assert(at("sandbox-note") < at("card-intent"), "the note must come before the model's reason");
+});
+
+check("an ordinary command card has no sandbox note", () => {
+  const card = makeEl("div");
+  sandbox.buildCommandCard(card, { ...CMD_EVENT, intent: INTENT });
+  assert(!find(card, "sandbox-note"), "a note appeared with nothing to say");
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

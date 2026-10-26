@@ -7,6 +7,8 @@ import pytest
 
 from aish import tools
 
+UNCONFINED = tools.Unsandboxed("test")
+
 
 def make_fake_command(bin_dir, name: str, script_body: str) -> None:
     path = bin_dir / name
@@ -47,18 +49,18 @@ class TestTruncate:
 
 class TestRunCommand:
     def test_captures_stdout_and_exit_code(self):
-        result = tools.run_command("echo hello")
+        result = tools.run_command("echo hello", confinement=UNCONFINED)
         assert "hello" in result
         assert "[exit code: 0]" in result
 
     def test_captures_stderr_and_nonzero_exit(self):
         # stderr is merged into stdout so live streaming preserves ordering
-        result = tools.run_command("echo oops >&2; exit 3")
+        result = tools.run_command("echo oops >&2; exit 3", confinement=UNCONFINED)
         assert "oops" in result
         assert "[exit code: 3]" in result
 
     def test_timeout_reported_not_raised(self):
-        result = tools.run_command("sleep 5", timeout=0.2)
+        result = tools.run_command("sleep 5", confinement=UNCONFINED, timeout=0.2)
         assert "timed out" in result
 
 
@@ -129,7 +131,7 @@ def test_man_output_is_plain_text():
 
 def test_subprocess_gets_no_stdin():
     """Interactive commands must not hang waiting for input."""
-    result = tools.run_command("read line; echo got:$line", timeout=5)
+    result = tools.run_command("read line; echo got:$line", confinement=UNCONFINED, timeout=5)
     assert "timed out" not in result
 
 
@@ -167,7 +169,7 @@ class TestReadDocsTopic:
 class TestBinaryOutput:
     def test_non_utf8_output_does_not_crash(self):
         """Regression: cat on a binary plist emitted 0xdf and killed the REPL."""
-        result = tools.run_command(r"printf 'ok\337end'")
+        result = tools.run_command(r"printf 'ok\337end'", confinement=UNCONFINED)
         assert "ok" in result and "end" in result
         assert "�" in result  # replacement char, not an exception
         assert "[exit code: 0]" in result
@@ -181,11 +183,13 @@ class TestBinaryOutput:
 class TestStreamingAndCwd:
     def test_on_line_receives_lines_in_order(self):
         seen = []
-        tools.run_command(r"printf 'one\ntwo\nthree\n'", on_line=seen.append)
+        tools.run_command(
+            r"printf 'one\ntwo\nthree\n'", confinement=UNCONFINED, on_line=seen.append
+        )
         assert seen == ["one", "two", "three"]
 
     def test_cwd_is_respected(self, tmp_path):
-        result = tools.run_command("pwd", cwd=str(tmp_path))
+        result = tools.run_command("pwd", confinement=UNCONFINED, cwd=str(tmp_path))
         assert tmp_path.name in result
 
     def test_keyboard_interrupt_cancels_command_returns_partial(self):
@@ -195,14 +199,17 @@ class TestStreamingAndCwd:
             raise KeyboardInterrupt
 
         result = tools.run_command(
-            'sh -c \'echo first; sleep 30; echo never\'', timeout=60, on_line=interrupt
+            'sh -c \'echo first; sleep 30; echo never\'',
+            confinement=UNCONFINED,
+            timeout=60,
+            on_line=interrupt,
         )
         assert "first" in result
         assert "stopped by user" in result
         assert "never" not in result
 
     def test_timeout_includes_partial_output(self):
-        result = tools.run_command("echo early; sleep 5", timeout=0.5)
+        result = tools.run_command("echo early; sleep 5", confinement=UNCONFINED, timeout=0.5)
         assert "early" in result
         assert "timed out" in result
 
@@ -210,7 +217,7 @@ class TestStreamingAndCwd:
 class TestBackgroundJobs:
     def test_start_registers_and_logs(self, tmp_path, monkeypatch):
         monkeypatch.setattr(tools, "JOBS", [])
-        result = tools.start_background("echo bg-marker", log_dir=tmp_path)
+        result = tools.start_background("echo bg-marker", confinement=UNCONFINED, log_dir=tmp_path)
         assert "background job started" in result
         assert "tail -n 30" in result
         job = tools.JOBS[-1]
@@ -221,7 +228,7 @@ class TestBackgroundJobs:
 
     def test_respects_cwd(self, tmp_path, monkeypatch):
         monkeypatch.setattr(tools, "JOBS", [])
-        tools.start_background("pwd", cwd=str(tmp_path), log_dir=tmp_path)
+        tools.start_background("pwd", confinement=UNCONFINED, cwd=str(tmp_path), log_dir=tmp_path)
         tools.JOBS[-1]["proc"].wait(timeout=10)
         assert tmp_path.name in Path(tools.JOBS[-1]["log"]).read_text()
 
@@ -236,7 +243,7 @@ class TestBackgroundJobs:
         state = tmp_path / "state"
         monkeypatch.setenv("AISH_STATE_DIR", str(state))
         assert tools._default_job_log_dir() == state / "jobs"
-        tools.start_background("echo unnamed")
+        tools.start_background("echo unnamed", confinement=UNCONFINED)
         tools.JOBS[-1]["proc"].wait(timeout=10)
         assert Path(tools.JOBS[-1]["log"]).parent == state / "jobs"
 

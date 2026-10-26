@@ -208,8 +208,42 @@ def _stop_group(proc: subprocess.Popen) -> None:
         proc.wait(timeout=2)
 
 
+class Unsandboxed:
+    """The ONE way to say a command runs with the owner's full rights (epic
+    #462). `run_command` and `start_background` take a `confinement` with no
+    default: anything that is not an `Unsandboxed` is treated as a sandbox
+    (`.launch(command) -> (argv, env)`), so a caller that forgets to decide
+    gets a TypeError, never an unconfined command. `why` says who allowed it
+    — the owner typed it, a card, an allowlist rule — for the trace."""
+
+    def __init__(self, why: str):
+        self.why = why
+
+    def __repr__(self) -> str:
+        return f"Unsandboxed({self.why!r})"
+
+
+# The three reasons a command runs with the owner's rights in slice S1. The
+# word is what the trace records as `sandbox.why`.
+OWNER_TYPED = Unsandboxed("owner")  # a `!` command: he typed it himself
+CARD_APPROVED = Unsandboxed("card")  # approved on a card (sandboxed from S3)
+ALLOWLIST_RULE = Unsandboxed("allowlist")  # a saved prefix rule (sandboxed from S2)
+
+
+def _spawn(command: str, confinement, cwd: str | None, **popen_kwargs) -> subprocess.Popen:
+    """Start `command` in its own session, unconfined only when told so."""
+    if isinstance(confinement, Unsandboxed):
+        return subprocess.Popen(
+            command, shell=True, cwd=cwd, start_new_session=True, **popen_kwargs
+        )
+    argv, env = confinement.launch(command)
+    return subprocess.Popen(argv, cwd=cwd, env=env, start_new_session=True, **popen_kwargs)
+
+
 def run_command(
     command: str,
+    *,
+    confinement,
     timeout: float = 120,
     cwd: str | None = None,
     on_line: Callable[[str], None] | None = None,
@@ -225,17 +259,18 @@ def run_command(
     to the background-job table and returns immediately.
     """
     try:
-        proc = subprocess.Popen(
+        # Own process group (`_spawn` starts a new session) so a cancel/timeout
+        # can signal the whole group — the shell AND everything it spawned —
+        # not just the shell (a bare terminate leaves grandchildren like a
+        # `sleep` inside `sh -c` alive). Under the sandbox it is also what
+        # bounds the signals the command may send: its own group only.
+        proc = _spawn(
             command,
-            shell=True,
-            cwd=cwd,
+            confinement,
+            cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            # Own process group so a cancel/timeout can signal the whole group —
-            # the shell AND everything it spawned — not just the shell (a bare
-            # terminate leaves grandchildren like a `sleep` inside `sh -c` alive).
-            start_new_session=True,
         )
     except OSError as exc:
         return f"ERROR: failed to start command: {exc}"
@@ -332,6 +367,11 @@ def _default_job_log_dir() -> Path:
     return state_home() / "jobs"
 
 
+# How a Ctrl-B detach result begins — read by the agent, which must not treat
+# the job's refusals-so-far as the whole run's (epic #462).
+DETACHED_PREFIX = "[detached to background:"
+
+
 def _detach_running(proc, command, collected, log_dir, on_line) -> str:
     """Hand a running foreground command to the background-job table. Its
     still-open output pipe is drained by an INDEPENDENT process in its own
@@ -375,7 +415,7 @@ def _detach_running(proc, command, collected, log_dir, on_line) -> str:
         threading.Thread(target=drain, daemon=True).start()
 
     message = (
-        f"[detached to background: pid {proc.pid}, log: {log_path}]\n"
+        f"{DETACHED_PREFIX} pid {proc.pid}, log: {log_path}]\n"
         f"Still running. Check with: tail -n 30 {log_path} — stop with: kill {proc.pid}"
     )
     if on_line:
@@ -394,7 +434,9 @@ TRUNCATION_HINT = (
 JOBS: list[dict] = []
 
 
-def start_background(command: str, cwd: str | None = None, log_dir=None) -> str:
+def start_background(
+    command: str, *, confinement, cwd: str | None = None, log_dir=None
+) -> str:
     """Start a detached long-running command; output goes to a log file the
     model (or user) can tail. The process survives aish exiting."""
     directory = Path(log_dir) if log_dir else _default_job_log_dir()
@@ -403,14 +445,13 @@ def start_background(command: str, cwd: str | None = None, log_dir=None) -> str:
     log_path = directory / f"job-{stamp}-{len(JOBS) + 1}.log"
     log_file = log_path.open("wb")
     try:
-        proc = subprocess.Popen(
+        proc = _spawn(
             command,
-            shell=True,
-            cwd=cwd,
+            confinement,
+            cwd,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            start_new_session=True,
         )
     except OSError as exc:
         log_file.close()
@@ -1471,6 +1512,23 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "processes",
+            "description": (
+                "Check whether a program is running. Use this, NOT ps (ps needs the "
+                "user's approval). Matches executable names, and argument words "
+                "exactly, e.g. 'ollama' or 'aish-web'. Shows pid, name and running "
+                "time — never arguments."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"program": {"type": "string"}},
+                "required": ["program"],
             },
         },
     },

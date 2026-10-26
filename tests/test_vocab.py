@@ -132,6 +132,11 @@ class TestTheCountingChangedNoMatching:
         # Not a word list: aish's own tool NAMES. make_report writes only into
         # the chat's scratch workspace and fetches nothing, so it needs no card.
         "aish/agent.py:READ_ONLY_TOOLS": {"added": ["make_report"], "removed": []},
+        # Epic #462 S1: a cardless command runs in aish's sandbox, and the
+        # kernel refuses a setuid program inside any sandbox — `ps` could only
+        # ever fail there. It cards now; the `processes` tool answers it.
+        # A command list, not a word list.
+        "aish/approval.py:SAFE_COMMANDS": {"added": [], "removed": ["ps"]},
     }
 
     @staticmethod

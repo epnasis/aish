@@ -8392,6 +8392,7 @@ function buildCommandCard(card, event) {
 
   const escapes = event.escapes || [];
   if (escapes.length) card.appendChild(escapeNote(escapes));
+  if (event.sandbox_note) card.appendChild(sandboxNote(event.sandbox_note));
   card.appendChild(intentBlock(event));
 
   const feedback = feedbackField();
@@ -8860,6 +8861,18 @@ function escapeNote(escapes) {
   const note = document.createElement("div");
   note.className = "escape-note";
   note.textContent = `⚠ outside the trusted folders: ${escapes.join(", ")}`;
+  return note;
+}
+
+// Why a command that would have run with no card is on a card after all
+// (epic #462): aish's sandbox is not available, or it refused this command
+// earlier in the chat. The text is the server's own observation; drawn as
+// text, in the escape note's warning style, because it says the same kind
+// of thing — approving this reaches further than an ordinary run.
+function sandboxNote(text) {
+  const note = document.createElement("div");
+  note.className = "escape-note sandbox-note";
+  note.textContent = `⚠ ${text}`;
   return note;
 }
 

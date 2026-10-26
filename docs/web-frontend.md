@@ -66,6 +66,8 @@ A card showed the action and nothing else, so the owner reverse-engineered its p
 
 `tests/js/test_card_intent.js`.
 
+**The sandbox note (epic #462 S1).** A command card can carry `sandbox_note` — the server's sentence for why a command that would have run with no card is on a card after all: aish's sandbox is not available, or it refused this very command earlier in the chat, and approving runs it with the owner's full rights. `sandboxNote` draws it as text in the escape note's orange warning style, after the escapes and before the intent block, because it says the same kind of thing: this approval reaches further than an ordinary run. Absent on every other card. `docs/sandbox.md`.
+
 ### `[CARD-LATENCY]` — a sub-second tap is a blind tap
 
 The consent design rests on the claim that SOME cards are still worth spending — the rare, checkable-at-a-glance ones. Nothing measured it. What the record held was the negative: an eleven-line grant card is one he scrolls past, and a five-cards-per-search flow trained the tap that lost a purchase. A card tapped blind is **worse** than no card, because it converts a missing control into a *recorded consent* (#306).
