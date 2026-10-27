@@ -592,7 +592,8 @@ digest is a new reading — expected, not a resume bug).
 One exporter over the verdict store and the index, through `mailview.collect` — the SAME join
 `/mail` shows, never a second one — for a backtest run directory or the live store. One row per
 (mail, model): date, `from_addr`, display name, subject, inbox, model, `ending`, kind, meaning,
-`disposition_raw`, `disposition_effective`, `clamped`, `owner_wrote_days`, wanted, deadline,
+`disposition_raw`, `disposition_effective` (after BOTH clamps), `clamped`, `keeper_clamped`
+(`yes (from <disposition>: <signals>)` or `no`), `owner_wrote_days`, wanted, deadline,
 suspicion, `sender_case` (the hard axis), case (the resolved case id or the case word),
 `newsletter_gated_by`, the gate summary (`mailview.gate_words`), charter version, digest, provider
 id. **No cell stands blank for unknown**: a gated, invalid, error or unadmitted reading keeps its
@@ -619,12 +620,13 @@ computes them — `truth_of` over the run's index, with labels re-unioned per di
 cell is a filter over the file's columns, pinned by
 `test_every_arm_cell_of_the_report_is_a_filter_over_the_columns`. Filter `model` = the arm, then:
 `endings` → by `ending`; `disposition_by_truth[tier:label][v]` → `tier_…` = tier, `truth_…` =
-label, `disposition_raw` = v (`…_clamped`: `disposition_effective`); `wanted_by_reply[tier:replied]`
+label, `disposition_raw` = v (`…_clamped`, the live clamp ALONE: `surface` where `clamped` starts
+with `yes`, else `disposition_raw`; `…_keeper`, after both clamps: `disposition_effective`); `wanted_by_reply[tier:replied]`
 → `truth_…` = `replied` (else `not_replied`), by `wanted`; the HEADLINE
 `destructive_expire_on_kept` → `disposition_raw` = `expire_after_grace` and `truth_…` one of
-replied, starred, archived, kept_read, unread (`…_clamped`: `disposition_effective`);
-`archive_on_replied` → `disposition_raw` = `archive` and `truth_…` = `replied`; `clamped` →
-`clamped` starts with `yes`; `gated_by_truth[by][label]` → `ending` = `gated`,
+replied, starred, archived, kept_read, unread (`…_clamped` and `…_keeper` as above);
+`archive_on_replied` → `disposition_raw` = `archive` and `truth_…` = `replied` (likewise);
+`clamped` → `clamped` starts with `yes`; `keeper_clamped` → `keeper_clamped` starts with `yes`; `gated_by_truth[by][label]` → `ending` = `gated`,
 `newsletter_gated_by` = by. **The window, tier and trash counts are not in the file**: they
 describe every inbound mail in the window, judged or not, and the file holds judged mail only.
 **And the report counts the run's SELECTION**: a store re-run at a smaller `--reader-max` holds
@@ -724,6 +726,85 @@ the split (`read by each arm: 4 selected mail(s) (gmail 2, tuta 2)`). A failed T
 stated and the Gmail half still runs. `TestBothInboxes`, `TestSources` in
 `tests/test_mailbacktest_tuta.py`.
 
+## The keeper clamp (2026-10-27) — keeper documents are never filed on arrival
+
+**The owner's decision (option A):** keeper documents — insurance policies, bookings, visas, order
+and invoice confirmations — are never filed (`archive`) or binned (`expire_after_grace`) on arrival;
+they stay visible until their case closes. **Why code and not teaching:** the full-year backtest
+(run 20261025-204111, charter v4) still filed 12 mails he replied to — 11 archived, 1 expired — and
+the live-conversation clamp cannot reach them (it clamped 0 readings there: they are openers).
+
+### The rule — `mailreader.keeper_clamp`, beside the live clamp, under its law
+
+Same shape as the live clamp: when the validated verdict's disposition is a filing one, code writes
+`keeper_clamped: {from, to, signals, cases}` BESIDE the verdict, which is never rewritten, and the
+effective disposition is `surface`. It fires on any of three signals, each of which can only keep a
+mail visible:
+
+- `case_key` — the correlator extracts a case key (`mailcases.extract_keys`, the same regex that
+  opens cases) from the mail, AND its sender is authenticated;
+- `document_attachment` — an attachment whose last suffix is in `mailreader._DOCUMENT_SUFFIXES`
+  (pdf, doc, docx, odt, rtf, xls, xlsx, ods, pages, numbers — a declared, counted list), or whose
+  MIME type is `application/pdf`, AND its sender is authenticated (a mail with no attachment asks
+  the list nothing, so its counter is not swamped by mail that could never match);
+- `reader_case` — the Reader placed the mail on a case (a candidate ref or `new`). **A judged
+  signal is lawful here because it can only RESTRICT**: it can block filing and permits nothing.
+
+**Never on a newsletter-gated mail** — the rule refuses `gated` whatever the signals say (a gated
+mail has no verdict anyway; the refusal is the belt to that brace). **Unauthenticated mail — every
+inbound Tuta mail included — gets it from the judged signal only**: the deterministic signals name
+an authenticated sender, as the owner's rule states. What it gets is visibility: the clamp writes
+nothing into the case store, the ledger or the admissions, so it mints no case, grade or alias.
+`TestUnauthenticated` in `tests/test_mail_keeper.py`.
+
+It only ever moves toward his attention, and never touches the verdict: `TestItFires`;
+the gated refusal: `TestNewslettersNever`.
+
+**Precedence is plain**: either clamp makes the effective disposition `surface`. Both are recorded
+independently, so each one's effect stays measurable. **Restrict-only is checked by the reader
+too**: `keeper_clamp_of` accepts a clamp only when it names `surface`, and odd shapes from corrupt
+bytes neither raise nor release. `TestCorruptRecords`.
+
+### Case closure releases it — and there is no closure yet
+
+`cases` is every case the mail is on at assessment (the cases whose mails include it, the
+key-linked ones, the Reader's chosen candidate). `mailreader.keeper_released` is true only when the
+mail is on at least one case and EVERY one of them is closed; `effective_disposition` takes the
+closed set as an argument. **The case store has no closure today (S3), so no caller passes any and
+every keeper clamp holds: fail-visible.** Nothing here invents a closure. A keeper on NO case — a
+document from a sender with no key and no Reader case — can never be released by closure and holds
+for good. `TestCaseClosureReleases`.
+
+### The surfaces
+
+`/mail` shows `would: surface [KEEPER-CLAMPED from archive: case key, document attachment — kept
+visible until its case closes]`. The CSV's `disposition_effective` is after both clamps and its new
+`keeper_clamped` column marks the row. The backtest report adds, beside the raw and live-clamp
+counts, `after the keeper clamp too (N reading(s) keeper-clamped)` and a `disposition after both
+clamps` table; `report.json` carries `keeper_clamped`, `…_keeper` cells. `TestTheSurfaces`.
+
+### The measurement — what it catches and what it costs
+
+Recomputed over run 20261025-204111's own stores, read-only (its verdict records, index, bodies
+and case store; truth from that run's CSV export's `truth_recomputed_at_export`; the run tree's
+sorted stat listing identical before and after). One arm, `gemini:gemini-3.8-flash`, 6285 records,
+2164 of them filed after the live clamp.
+
+- **Caught: 10 of the 12** replied-but-filed. 7 by a deterministic signal (all
+  `document_attachment`, with `reader_case` beside it on 5), 3 by `reader_case` alone (two Gmail,
+  one Tuta). **Not caught: 2, both Tuta, no attachment, Reader case `no_case`** (one archived, one
+  expired). No signal exists on them; neither an auth-free variant of the deterministic signals
+  catches them (measured: still 10).
+- **Cost: 849 more mails kept visible** of the 2164 filed (by truth: unread 631, kept_read 198,
+  replied 10, trashed 8, archived 2; Gmail 295, Tuta 554). **The judged signal is most of it**: 722
+  of the 849 rest on `reader_case` alone (unread 545, kept_read 166, trashed 8, replied 3); 127
+  carry a deterministic signal (unread 86, kept_read 32, replied 7, archived 2).
+
+So the deterministic signals alone would catch 7 of the 12 at a cost of 127; the judged signal
+adds 3 catches for 722 more visible mails. That trade is the owner's to make — stated here, not
+decided. Whether the 12 are the 8 keeper documents the decision names is not checked: the
+measurement reads truth labels, not his classification of each mail.
+
 ## The backtest — `aish-mailbacktest`
 
 **Frozen clocks.** Index and case store are built in arrival order inside a SCRATCH run
@@ -782,6 +863,14 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **The clamp protects continuations only.** The 8 archive-on-replied misses it was built after
   were all openers (§S1.6); for those only the teaching acts, and whether it does is a
   re-admission and a backtest away — not measured here.
+- **The keeper clamp has no release.** It is released by case closure, and the case store has no
+  closure until S3: every keeper clamp holds, and a keeper on no case holds for good, whatever
+  closure later exists.
+- **The keeper clamp's judged signal is most of its cost** — 722 of 849 extra visible mails in run
+  20261025-204111 rest on `reader_case` alone (§The keeper clamp). It is restrict-only by
+  construction; its price is his attention, measured, not argued.
+- **2 of the 12 replied-but-filed mails in that run carry no keeper signal** (Tuta, no attachment,
+  no Reader case). Neither clamp reaches them; only the teaching can.
 - **The review file's truth is recomputed, not recorded.** It is `truth_of` over the run's index
   and `fetched.jsonl` as they stand at export; labels an earlier run into the same directory
   logged for mail this run's listing no longer named are unioned too, where `backfill` would have
@@ -882,6 +971,10 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 3c. **The backtest over Tuta** (2026-10-26): add `--source gmail --source tuta` to step 2 (the
    bridge running, `TUTA_BRIDGE_PASSWORD` in aish's secret store). The report header states each
    Tuta folder's depth against the window and what is absent.
+3d. **The keeper clamp** (2026-10-27) needs no re-admission (no charter change). A fresh backtest
+   writes `keeper_clamped` into every record. A run directory from before it reads as no keeper
+   clamp, and resuming it does not change that (a final reading is never re-read): re-run into a
+   fresh `--out` to see the clamp in a report.
 4. **The mined replay scenario** — a real courier/store pair from his inbox — goes in the private
    tree (`~/.config/aish/evals/<name>/`, `docs/replay.md`), never here: find the pair in the
    backtest run's verdict store (`case_choice` on the courier mail), and replay it end to end

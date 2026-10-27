@@ -1070,7 +1070,11 @@ writes every result to a CSV file you can sort and filter in a spreadsheet —
 into your Downloads folder, or the path you give (`/mail export <path>`) —
 and prints where; if Downloads cannot be used it says why and where the file
 went instead. A mail in a conversation you wrote in within the last 30
-days is never filed away, whatever the Reader said. `/mail` is
+days is never filed away, whatever the Reader said; nor is a keeper
+document — an order, booking, policy or invoice confirmation, a PDF or office
+attachment from a verified sender, or a mail the Reader placed on a case —
+which stays visible until its case closes (cases cannot be closed yet, so
+these stay visible). `/mail` is
 terminal-only. Design and limits: `docs/mail-assistant.md`.
 
 Interrupted work is picked up again. If aish-web goes down mid-task — a

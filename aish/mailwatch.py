@@ -228,8 +228,9 @@ def as_source(mailbox: Any) -> Any:
 # ---------------------------------------------------------------- one assessment
 
 
-def _case_ids_by_key(store: mailcases.CaseStore, header: mailindex.Header, body: str) -> list[str]:
-    keys = set(mailcases.extract_keys(f"{header.subject}\n{body}"))
+def _case_ids_by_key(
+    store: mailcases.CaseStore, header: mailindex.Header, keys: set[str]
+) -> list[str]:
     return sorted(
         c.id for c in store.cases.values() if keys & c.keys_before(header.position)
     )
@@ -281,7 +282,8 @@ def assess(
         )
     verdict = reading.verdict
     code_coordinates = mailcases.extract_coordinates(f"{header.subject}\n{body}")
-    linked = _case_ids_by_key(store, header, body)
+    keys = set(mailcases.extract_keys(f"{header.subject}\n{body}"))
+    linked = _case_ids_by_key(store, header, keys)
     if verdict is not None and reading.bundle is not None:
         mailverdicts.count_verdict(verdict)
         chosen = reading.bundle.cases.get(verdict.case)
@@ -299,10 +301,14 @@ def assess(
     if verdict is not None:
         coordinates |= {mailcases.normalize_coordinate(c.value) for c in verdict.coordinates}
     flags = mailcases.case_flags(store, header, coordinates, linked)
+    # The cases the mail is ON — those it joined or opened at ingest, and the
+    # key-linked ones — which a keeper clamp holds until they close.
+    on = {c.id for c in store.cases.values() if header.position in c.mails} | set(linked)
     return mailverdicts.build_record(
         header=header, facts=facts, reading=reading, charter=charter, model=model_spec,
         observation=observation, flags=flags, code_coordinates=code_coordinates,
-        owner_wrote_days=mailreader.owner_wrote_days(index, header), now=now,
+        owner_wrote_days=mailreader.owner_wrote_days(index, header), keys=keys,
+        mail_cases=on, now=now,
     )
 
 

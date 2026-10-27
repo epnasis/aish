@@ -29,11 +29,11 @@ import datetime
 import json
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Container, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import mailcases, mailgate, mailindex, roles
+from . import mailcases, mailgate, mailindex, roles, vocab
 
 READER = "mail-reader"
 BUNDLE_INPUT = "bundle"
@@ -168,6 +168,94 @@ def clamp(disposition: str, days: float | None) -> dict[str, Any] | None:
         return None
     return {"from": disposition, "to": CLAMP_TO, "owner_wrote_days": round(days, 1),
             "limit": LIVE_CONVERSATION_DAYS}
+
+
+# The keeper clamp's signals, closed names. The owner's rule (2026-10-27): a
+# keeper document — policy, booking, visa, order or invoice confirmation — is
+# never filed on arrival; it stays visible until its case closes.
+KEEPER_CASE_KEY = "case_key"
+KEEPER_DOCUMENT = "document_attachment"
+KEEPER_READER_CASE = "reader_case"
+KEEPER_SIGNALS = (KEEPER_CASE_KEY, KEEPER_DOCUMENT, KEEPER_READER_CASE)
+
+# Attachment types that carry a document. Exact membership of the LAST suffix,
+# as `mailgate._RISKY_SUFFIXES`: `policy.pdf.exe` is not a document. A miss
+# loses one keeper signal, and the mail is filed as the Reader answered.
+_DOCUMENT_SUFFIXES = vocab.declare(
+    "mailreader._DOCUMENT_SUFFIXES",
+    (".pdf", ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods", ".pages", ".numbers"),
+    languages="file suffixes",
+    on_miss=vocab.BREAKS,
+    demanded=False,
+    structural="the `application/pdf` MIME type, read beside the suffix",
+    note="A miss is a document attachment not recognised: one keeper signal fewer, so "
+    "the mail may be filed as the Reader answered.",
+)
+
+
+def has_document(attachments: tuple[mailindex.Attachment, ...]) -> bool:
+    """Does the mail carry a document attachment? One consultation per mail
+    that HAS attachments: a mail with none asks the list nothing, so it cannot
+    read as a list that never matches."""
+    if not attachments:
+        return False
+    found = False
+    for attachment in attachments:
+        name = attachment.filename.lower().strip()
+        suffix = name[name.rfind("."):] if "." in name else ""
+        if suffix in _DOCUMENT_SUFFIXES or attachment.mime.lower() == "application/pdf":
+            found = True
+            break
+    vocab.note("mailreader._DOCUMENT_SUFFIXES", matched=found)
+    return found
+
+
+def keeper_clamp(
+    disposition: str,
+    *,
+    authenticated: bool,
+    gated: bool,
+    keys: Collection[str],
+    attachments: tuple[mailindex.Attachment, ...],
+    case_choice: str,
+    cases: Iterable[str],
+) -> dict[str, Any] | None:
+    """The keeper clamp: code's override of a filing disposition on a mail
+    that is a keeper document, or None.
+
+    Same law as `clamp`: written BESIDE the verdict, never rewriting it, and
+    only ever toward his attention. Every signal can only RESTRICT filing, so
+    a judged one is allowed: the Reader placing the mail on a case (a candidate
+    or `new`) can block filing and permits nothing. The deterministic signals
+    need an authenticated sender; an unauthenticated mail gets the clamp from
+    the judged signal alone — visibility, which mints no trust, grade, case or
+    alias (nothing here writes). A newsletter-gated mail never gets it.
+
+    `cases` are the case ids the mail is on: the clamp holds until every one
+    of them is closed (`keeper_released`). A keeper on no case holds for good."""
+    if gated or disposition not in FILING_DISPOSITIONS:
+        return None
+    signals = []
+    if authenticated and keys:
+        signals.append(KEEPER_CASE_KEY)
+    if authenticated and has_document(attachments):
+        signals.append(KEEPER_DOCUMENT)
+    if case_choice and case_choice not in ("no_case", CANNOT_TELL):
+        signals.append(KEEPER_READER_CASE)
+    if not signals:
+        return None
+    return {"from": disposition, "to": CLAMP_TO, "signals": signals,
+            "cases": sorted({str(c) for c in cases})}
+
+
+def keeper_released(clamped: dict[str, Any], closed_cases: Container[str]) -> bool:
+    """Has the keeper's case closed? Only when the mail is on at least one
+    case and EVERY one of them is in `closed_cases` — the deterministic or
+    owner-act closure rule's output. The case store has no closure yet (S3),
+    so no caller supplies any and every keeper clamp holds: fail-visible."""
+    raw = clamped.get("cases")
+    cases = [c for c in raw if isinstance(c, str)] if isinstance(raw, list) else []
+    return bool(cases) and all(c in closed_cases for c in cases)
 
 
 def _message_entry(

@@ -200,12 +200,19 @@ class TestBacktestExport:
                 endings[r["ending"]] = endings.get(r["ending"], 0) + 1
             assert arm["endings"] == endings
             assert arm["disposition_by_truth"] == count(mine, "disposition_raw")
-            assert arm["disposition_by_truth_clamped"] == count(mine, "disposition_effective")
+            # After the live clamp alone: `surface` where `clamped` says yes,
+            # else the raw word. After both clamps: `disposition_effective`.
+            for r in mine:
+                r["live"] = "surface" if r["clamped"].startswith("yes") else r["disposition_raw"]
+            assert arm["disposition_by_truth_clamped"] == count(mine, "live")
+            assert arm["disposition_by_truth_keeper"] == count(mine, "disposition_effective")
+            assert arm["keeper_clamped"] == sum(r["keeper_clamped"].startswith("yes") for r in mine)
             replied = [dict(r, **{truth: "replied" if r[truth] == "replied" else "not_replied"})
                        for r in mine]
             assert arm["wanted_by_reply"] == count(replied, "wanted")
             for raw_key, col in (("destructive_expire_on_kept", "disposition_raw"),
-                                 ("destructive_expire_on_kept_clamped", "disposition_effective")):
+                                 ("destructive_expire_on_kept_clamped", "live"),
+                                 ("destructive_expire_on_kept_keeper", "disposition_effective")):
                 kept: dict[str, int] = {}
                 for r in mine:
                     if r[col] == "expire_after_grace" and r[truth] in mailbacktest.KEPT:
@@ -214,6 +221,8 @@ class TestBacktestExport:
             assert arm["archive_on_replied"] == sum(
                 r["disposition_raw"] == "archive" and r[truth] == "replied" for r in mine)
             assert arm["archive_on_replied_clamped"] == sum(
+                r["live"] == "archive" and r[truth] == "replied" for r in mine)
+            assert arm["archive_on_replied_keeper"] == sum(
                 r["disposition_effective"] == "archive" and r[truth] == "replied" for r in mine)
             assert arm["clamped"] == sum(r["clamped"].startswith("yes") for r in mine)
             gated: dict[str, dict[str, int]] = {}
