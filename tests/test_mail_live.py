@@ -110,7 +110,10 @@ class TestTheClamp:
         run(tmp_path, owner_thread(LIMIT + 1), ScriptedReader(file_everything))
         record = records(tmp_path)["a"]
         assert record["clamped"] is None
-        assert mailverdicts.effective_disposition(record) == "archive"
+        assert mailverdicts.live_disposition(record) == "archive"
+        # The renewed policy is a keeper document: the OTHER clamp keeps it.
+        assert record["keeper_clamped"]["signals"] == ["document_attachment"]
+        assert mailverdicts.effective_disposition(record) == "surface"
 
     def test_a_record_from_before_the_clamp_reads_as_its_verdict(self):
         old = {"ending": "ok", "verdict": {"disposition": "archive"}}

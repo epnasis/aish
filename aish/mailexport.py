@@ -50,7 +50,7 @@ _FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
 COLUMNS = (
     "date", "from_addr", "display_name", "subject", "mailbox", "model", "ending",
     "kind", "meaning", "disposition_raw", "disposition_effective", "clamped",
-    "owner_wrote_days", "wanted", "deadline", "suspicion", "sender_case", "case",
+    "keeper_clamped", "owner_wrote_days", "wanted", "deadline", "suspicion", "sender_case", "case",
     "newsletter_gated_by", "gate", "charter_version", "digest", "provider_id",
 )
 TRUTH_COLUMNS = ("truth_recomputed_at_export", "tier_recomputed_at_export")
@@ -120,6 +120,11 @@ def _gated_by(record: dict[str, Any]) -> str:
     return "+".join(str(b) for b in newsletter.get("by") or ()) or "?"
 
 
+def _signals(keeper: dict[str, Any]) -> str:
+    signals = keeper.get("signals")
+    return "+".join(str(s) for s in signals) if isinstance(signals, list) and signals else "?"
+
+
 def row_of(
     row: mailview.Row, clean: Clean, truth: TruthOf | None = None
 ) -> list[str]:
@@ -127,6 +132,7 @@ def row_of(
     raw = verdict_word(record, "disposition")
     effective = mailverdicts.effective_disposition(record) or raw
     clamped = mailverdicts.clamp_of(record)
+    keeper = mailverdicts.keeper_clamp_of(record)
     case = str(record.get("case_choice") or "") or verdict_word(record, "case")
     gate = " · ".join(mailview.gate_words(record, clean)) or "(no gate facts recorded)"
     values: list[tuple[Any, int]] = [
@@ -144,6 +150,7 @@ def row_of(
         (raw, CELL_CHARS),
         (effective, CELL_CHARS),
         (f"yes (from {clamped.get('from')})" if clamped else "no", CELL_CHARS),
+        (f"yes (from {keeper.get('from')}: {_signals(keeper)})" if keeper else "no", CELL_CHARS),
         (_owner_wrote(record), CELL_CHARS),
         (verdict_word(record, "wanted"), CELL_CHARS),
         (verdict_word(record, "deadline"), CELL_CHARS),

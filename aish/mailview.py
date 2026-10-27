@@ -85,6 +85,10 @@ def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _float(value: Any) -> float:
     try:
         return float(value)
@@ -272,6 +276,15 @@ def row_lines(row: Row, clean: Clean) -> list[tuple[str, str]]:
             limit = _capped(clean, clamped.get("limit"), WORD_CHARS)
             would += (f" [CLAMPED from {source}: you wrote in this conversation {days} days "
                       f"before it, within {limit}]")
+        keeper = mailverdicts.keeper_clamp_of(record)
+        if keeper:
+            source = _capped(clean, keeper.get("from"), WORD_CHARS)
+            signals = ", ".join(
+                _capped(clean, s, WORD_CHARS).replace("_", " ")
+                for s in _list(keeper.get("signals")) if isinstance(s, str)
+            ) or "?"
+            would += (f" [KEEPER-CLAMPED from {source}: {signals} — kept visible until its "
+                      "case closes]")
         would += f"; wants of you: {_capped(clean, verdict.get('wanted'), WORD_CHARS)}"
         deadline = _capped(clean, verdict.get("deadline") or "", WORD_CHARS)
         if deadline and deadline != "none":

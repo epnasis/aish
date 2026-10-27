@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Collection, Container, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -140,20 +141,34 @@ def build_record(
     flags: mailcases.CaseFlags,
     code_coordinates: tuple[str, ...],
     owner_wrote_days: float | None = None,
+    keys: Collection[str] = (),
+    mail_cases: Iterable[str] = (),
     now: float | None = None,
 ) -> dict[str, Any]:
     """The `mail_verdict` record — every field code-written except `verdict`,
-    which is the validated, capped Reader answer. `clamped` is code's override
-    of that answer's disposition on a live conversation, written BESIDE it: the
-    verdict itself is never rewritten."""
+    which is the validated, capped Reader answer. `clamped` (a live
+    conversation) and `keeper_clamped` (a keeper document) are code's overrides
+    of that answer's disposition, written BESIDE it: the verdict itself is never
+    rewritten. `keys` are the case keys the correlator extracts from the mail;
+    `mail_cases` the case ids it is on, which the keeper clamp holds until they
+    close."""
     bundle = reading.bundle
     refs = bundle.cases if bundle is not None else {}
     verdict = reading.verdict
     chosen = ""
     clamped = None
+    keeper = None
     if verdict is not None:
         chosen = refs.get(verdict.case, verdict.case)
         clamped = mailreader.clamp(verdict.disposition, owner_wrote_days)
+        keeper_cases = set(mail_cases)
+        if verdict.case in refs:
+            keeper_cases.add(refs[verdict.case])
+        keeper = mailreader.keeper_clamp(
+            verdict.disposition, authenticated=facts.auth.authenticated,
+            gated=facts.newsletter.gated, keys=keys, attachments=header.attachments,
+            case_choice=chosen, cases=keeper_cases,
+        )
     return {
         "kind": RECORD_KIND,
         "v": RECORD_VERSION,
@@ -180,6 +195,7 @@ def build_record(
         "verdict": verdict.as_json() if verdict is not None else None,
         "owner_wrote_days": None if owner_wrote_days is None else round(owner_wrote_days, 1),
         "clamped": clamped,
+        "keeper_clamped": keeper,
         "case_choice": chosen,
         "case_flags": flags.as_json(),
         "coordinates": {
@@ -211,15 +227,44 @@ def clamp_of(record: dict[str, Any]) -> dict[str, Any] | None:
     return clamped if isinstance(clamped, dict) and clamped.get("to") else None
 
 
-def effective_disposition(record: dict[str, Any]) -> str | None:
-    """What the pipeline WOULD do with the mail: the clamp's disposition when
-    code overrode the Reader, else the Reader's own; None with no verdict. The
-    one reader of this, for `/mail`, the CSV export and the backtest alike."""
+def keeper_clamp_of(record: dict[str, Any]) -> dict[str, Any] | None:
+    """A record's keeper clamp, or None (also for a record written before the
+    keeper clamp existed)."""
+    keeper = record.get("keeper_clamped")
+    # Restrict-only is checked by the READER too, not only promised by the
+    # writer: a clamp that names anything but `surface` is no clamp.
+    if isinstance(keeper, dict) and keeper.get("to") == mailreader.CLAMP_TO:
+        return keeper
+    return None
+
+
+def live_disposition(record: dict[str, Any]) -> str | None:
+    """The disposition after the live-conversation clamp ALONE — the backtest's
+    middle column, so each clamp's effect stays separately measurable."""
     verdict = record.get("verdict")
     if not isinstance(verdict, dict):
         return None
     clamped = clamp_of(record)
     return str(clamped["to"]) if clamped else str(verdict.get("disposition") or "")
+
+
+def effective_disposition(
+    record: dict[str, Any], closed_cases: Container[str] = frozenset()
+) -> str | None:
+    """What the pipeline WOULD do with the mail: a clamp's disposition when
+    code overrode the Reader, else the Reader's own; None with no verdict. The
+    one reader of this, for `/mail`, the CSV export and the backtest alike.
+
+    `closed_cases` releases a keeper clamp whose cases have all closed. The
+    case store has no closure yet, so every caller passes none and the keeper
+    clamp holds."""
+    live = live_disposition(record)
+    if live is None or clamp_of(record):
+        return live
+    keeper = keeper_clamp_of(record)
+    if keeper and not mailreader.keeper_released(keeper, closed_cases):
+        return str(keeper["to"])
+    return live
 
 
 def error_record(

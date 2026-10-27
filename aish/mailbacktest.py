@@ -528,8 +528,13 @@ def _cell(record: dict[str, Any], axis: str) -> str:
     return mailexport.verdict_word(record, axis)
 
 
+def _live_cell(record: dict[str, Any]) -> str:
+    """The disposition after the live-conversation clamp alone."""
+    return mailverdicts.live_disposition(record) or _cell(record, "disposition")
+
+
 def _effective_cell(record: dict[str, Any]) -> str:
-    """The disposition after the live-conversation clamp."""
+    """The disposition after both clamps — the CSV's `disposition_effective`."""
     return mailverdicts.effective_disposition(record) or _cell(record, "disposition")
 
 
@@ -581,6 +586,10 @@ def report(
         archived_replied = 0
         archived_replied_clamped = 0
         clamped = 0
+        disposition_keeper: dict[str, dict[str, int]] = {}
+        destructive_keeper: dict[str, int] = {}
+        archived_replied_keeper = 0
+        keeper_clamped = 0
         gated: dict[str, dict[str, int]] = {}
         endings: dict[str, int] = {}
         for header in selected:
@@ -600,13 +609,21 @@ def report(
                 archived_replied += 1
             # The same cells after code's live-conversation clamp, beside the
             # raw ones, so what the TEACHING achieves stays measurable alone.
-            effective = _effective_cell(record)
+            live = _live_cell(record)
             clamped += mailverdicts.clamp_of(record) is not None
-            _add(disposition_clamped, f"{truth.tier}:{truth.label}", effective)
-            if effective == "expire_after_grace" and truth.label in KEPT:
+            _add(disposition_clamped, f"{truth.tier}:{truth.label}", live)
+            if live == "expire_after_grace" and truth.label in KEPT:
                 destructive_clamped[truth.label] = destructive_clamped.get(truth.label, 0) + 1
-            if effective == "archive" and "replied" in truth.facts:
+            if live == "archive" and "replied" in truth.facts:
                 archived_replied_clamped += 1
+            # And after the keeper clamp too: the effective disposition.
+            effective = _effective_cell(record)
+            keeper_clamped += mailverdicts.keeper_clamp_of(record) is not None
+            _add(disposition_keeper, f"{truth.tier}:{truth.label}", effective)
+            if effective == "expire_after_grace" and truth.label in KEPT:
+                destructive_keeper[truth.label] = destructive_keeper.get(truth.label, 0) + 1
+            if effective == "archive" and "replied" in truth.facts:
+                archived_replied_keeper += 1
             if ending == mailreader.GATED:
                 by = "+".join(((record.get("gate") or {}).get("newsletter") or {}).get("by") or ())
                 _add(gated, by or "?", truth.label)
@@ -620,6 +637,10 @@ def report(
             "destructive_expire_on_kept_clamped": destructive_clamped,
             "archive_on_replied_clamped": archived_replied_clamped,
             "disposition_by_truth_clamped": disposition_clamped,
+            "keeper_clamped": keeper_clamped,
+            "destructive_expire_on_kept_keeper": destructive_keeper,
+            "archive_on_replied_keeper": archived_replied_keeper,
+            "disposition_by_truth_keeper": disposition_keeper,
             "wanted_by_reply": wanted_vs_reply,
             "gated_by_truth": gated,
         }
@@ -783,10 +804,21 @@ def render(result: dict[str, Any]) -> str:
                 f"would have expired mail he kept: {sum(kept.values())} of {arm['read']}; "
                 f"would have archived mail he replied to: {arm['archive_on_replied_clamped']}"
             )
+        if "keeper_clamped" in arm:
+            kept = arm["destructive_expire_on_kept_keeper"]
+            lines.append(
+                f"  after the keeper clamp too ({arm['keeper_clamped']} reading(s) "
+                f"keeper-clamped): would have expired mail he kept: {sum(kept.values())} of "
+                f"{arm['read']}; would have archived mail he replied to: "
+                f"{arm['archive_on_replied_keeper']}"
+            )
         lines += _table("disposition (rows: tier:truth)", arm["disposition_by_truth"])
         if "disposition_by_truth_clamped" in arm:
             lines += _table("disposition after the clamp (rows: tier:truth)",
                             arm["disposition_by_truth_clamped"])
+        if "disposition_by_truth_keeper" in arm:
+            lines += _table("disposition after both clamps (rows: tier:truth)",
+                            arm["disposition_by_truth_keeper"])
         lines += _table("wanted (rows: tier:replied?)", arm["wanted_by_reply"])
         lines += _table("newsletter-gated, by list header (rows) x truth", arm["gated_by_truth"])
     shown = result["disagreements"][:DISAGREEMENT_SHOWN]
