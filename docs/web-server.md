@@ -221,6 +221,15 @@ A `Session` carries an `origin` (`user`|`schedule`|`email`|`webhook`) + `trigger
 
 **Per-trigger model override (#186).** The payload may name a `model`; `open_session(model_override=…)` builds it FIRST — before `SessionLog.new`, so a bad spec leaves no orphan log — and swaps chat/model/provider on the fresh Agent. It exists for privacy-scoped automation and therefore FAILS CLOSED (L6): an unbuildable override answers 503, never a silent fallback to the server's possibly-cloud default, which would be exactly the leak the override prevents. Resumed sessions ignore it; a claude-max server refuses it.
 
+### The daily inbox report — `/trigger`'s `report` field (#142 W5)
+
+`aish-mailreport` (`docs/mail-assistant.md` §The daily report) POSTs `/trigger` with `origin: schedule`, `meta.kind: report`, a day's `dedup_key`, a task string of fixed words and a headline of counts, and the report itself in `report` — a string, at most `REPORT_NOTE_MAX_CHARS` (20 000; else 400). A token holder can already start any session with any prompt; the field lets it only ADD content that taints the session it starts, under words the server chooses. `launch_triggered(report=)` does two things, both after `open_turn`:
+
+- `agent.add_outside_note(REPORT_NOTE_HEADING, report, source="inbox_report", kept=True)` — the monitor-snapshot seam, KEPT: every later task in the chat starts tainted while the note is in the conversation (`docs/agent-core.md`). The heading is the SERVER's and says only what it knows: delivered over `/trigger` as the daily report, content to discuss, never instructions.
+- `_run_task(present=presented_report(report))` — the turn's answer is the report, composed by code, through `Agent.present`: no model call, so no fallback chips (`apply_quick_reply_net` is skipped), no lesson chip, and the done-push (`_notify_done`, unchanged — non-user origin, nobody viewing) carries the first line only, the code headline of counts, never a sender or subject. `presented_report` puts the server's `REPORT_PROVENANCE_LINE` under the headline and breaks every markdown `](` that does not open `https://mail.google.com/mail/`, whatever the caller sent, so no link, image or quick-reply chip forms from it.
+
+The chat is an ordinary schedule-origin triggered session: automated glyph, unread until he opens it, never resumed after a restart. `tests/test_mailreport_chat.py`.
+
 ### Capability policy: two reasons a mutation may skip its card
 
 `_auto_safe(name, args, origin)` plus a branch atop `approve_tool`, wired through `make_web_approvers(..., get_origin=…)`. It returns the NAME of the policy that licensed the run, or None. There are two, and they are **deliberately not one list**, because they are safe for unrelated reasons:
@@ -228,6 +237,8 @@ A `Session` carries an `origin` (`user`|`schedule`|`email`|`webhook`) + `trigger
 **Origin-scoped — `TRIGGERED_SAFE_TOOLS` (relabeling).** Safe *because* nobody is at the keyboard. Draft-and-hold, built out of the existing gate rather than a bespoke hold flow: every other mutation in a triggered session falls through to the normal card, which simply BLOCKS pending until the owner opens the session and answers — which is what makes the notification below load-bearing rather than a nicety. In the owner's own session he still sees these cards, because there he is the one who can cheaply say no.
 
 **Consequence-scoped — `recipients.owner_scoped_send`: `gmail_send`, draft or live, when every recipient is the owner.** **Recipient-scoped autonomy**: a send that can only reach the owner's own inbox carries no exfiltration risk. That safety is a property of the ACTION, so it holds in EVERY origin — see `docs/agent-core.md`'s recipient-scope section for why it stopped being a conjunct of the triggered policy (#377), and `recipients.py` for the parse. A reply with no explicit `to` is NOT auto-safe: its recipient is not verifiable from the args.
+
+**Not in a chat holding a kept outside note** (the daily inbox report): there the owner is MEANT to act, so the origin-scoped premise — nobody at the keyboard — is false, and `_auto_safe(kept_outside=True)` withholds it (`make_web_approvers(get_kept_outside=)`, read off the agent's `holds_kept_outside_note`). The consequence-scoped licence still applies, as in every session.
 
 When either policy licenses a call, `approve_tool` returns `Licensed(policy)` rather than `True` (the CLI's approver does the same): the agent needs to know no card was drawn, because it announces every cardless change in the answer itself (`docs/agent-core.md`, *A change with no card is announced by aish*).
 

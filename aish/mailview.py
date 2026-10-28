@@ -321,6 +321,11 @@ def lines(
     is no unsanitised way to render this."""
     now = time.time() if now is None else now
     out = health_lines(read_health(state_dir), now, clean)
+    # The daily report's own health (#142 W5): a failed delivery lands here,
+    # where he already looks. Imported here: mailreport builds on this module.
+    from . import mailreport
+
+    out += mailreport.health_lines(state_dir, now, clean)
     view = collect(state_dir, limit)
     if view.unreadable:
         out.append(("warn", f"{view.unreadable} verdict file(s) could not be read"))

@@ -2,8 +2,9 @@
 
 `mailindex.py`, `mailgate.py`, `mailcases.py`, `mailreader.py`, `mailverdicts.py`,
 `mailwatch.py`, `mailsource.py`, `mailtuta.py`, `mailview.py`, `mailexport.py`,
-`mailbacktest.py`,
-`aish/charters/mail-reader.md`, `scripts/install-mailwatch-service.sh`.
+`mailbacktest.py`, `mailreport.py`,
+`aish/charters/mail-reader.md`, `scripts/install-mailwatch-service.sh`,
+`scripts/install-mailreport-service.sh`.
 The binding design is the comment *"W5 REWRITTEN — the inbox assistant"* on epic #142
 (2026-10-24). This file says what slice S1 built from it, what S1.5 added (the owner surface,
 both inboxes, quota discipline, continuous runs — §S1.5 below), what S1.6 added (live
@@ -805,6 +806,186 @@ adds 3 catches for 722 more visible mails. That trade is the owner's to make —
 decided. Whether the 12 are the 8 keeper documents the decision names is not checked: the
 measurement reads truth labels, not his classification of each mail.
 
+## The daily report (2026-10-28) — `mailreport.py`, `aish-mailreport`
+
+**The premise amendment, recorded so it is not "fixed" back.** The epic's governing line
+*"delivery stays event alerts, not digests"* (#295/#281) is amended for the inbox assistant by
+the owner's explicit request: *"Daily inbox report on everything needs action from both new
+emails as well as follow ups and also separately for info that may be of interest. Basically ai
+assistant perspective on my inbox."* (epic #142, comment of 2026-10-28). It is W5's proposals
+step in digest form; event pushes stay deferred. **Delivered as an aish-web chat**, not an email
+(owner directive the same day): one new chat each morning, which he can answer — *"pay this"*,
+*"file that"* — in place.
+
+### What it holds — three sections, built by code, no model call
+
+Read from the verdict store and the thread index only (and the watcher's health file and the
+report's own ledger). Every reading per mail: the newest one with a verdict; a mail any model
+saw newsletter-gated is gated.
+
+- **Needs your action** — new mail whose stored verdict says `wanted` ∈ {pay, reply, decide},
+  ordered dated deadline soonest first, then pay, reply, decide, then newest. Each item: what is
+  wanted and by when, sender, subject, the Reader's one line, inbox, date, and — for Gmail mail
+  only — an *open in Gmail* link built by CODE from the hex provider id (`gmail_link`).
+- **Follow-ups** — deterministic, below.
+- **May interest you** — new mail whose EFFECTIVE disposition (`mailverdicts.
+  effective_disposition`, after both clamps) is `surface` with `wanted` nothing. **v1 is not
+  interest matching**: there is no interest index (S5), and the section header says so in
+  words — *these are new mails the assistant would keep visible that ask nothing of you*.
+
+**Excluded everywhere, and counted where he reads it**: newsletter-gated mail (the gate's record,
+or the index's own List-Id / List-Unsubscribe — so a mail with no reading is still recognised by
+code) and one-time codes and sign-in links (`_ONE_TIME_CODE_PHRASES`, a declared, counted PL+EN
+list matched word-bounded against the folded Reader `kind` and subject; the owner's v3 ruling).
+Mail with no reading (unadmitted, error, invalid) is counted with its endings, never dropped,
+and so is every reading in no section: `wanted` `cannot_tell` (*the Reader could not tell what
+they want of you*), `wait`, and `nothing` the pipeline would hold or file — every eligible
+reading is in a section or a count (delivery review B2). A mail delivered to both inboxes (two
+digests, `digest_for`) — the same Message-ID FROM THE SAME SENDER; two senders claiming one id
+are two mails (review M4) — is shown once, the Gmail copy preferred, the dropped copies counted
+and recorded as shown with it, so they never return as new (review B1). The report's footer says all of it: *Not shown: N
+newsletter-gated, N one-time code(s) or sign-in link(s), N with no reading (endings: …)*.
+
+**Caution, visible, never hidden — he decides**: `suspicion` suspicious, `sender_case` mismatch,
+or the case flag `coordinates_changed` put a **CAUTION** marker on the item in code's words, and
+the Reader's summary of that mail is WITHHELD: a summary of a suspicious mail is exactly where an
+attacker's account number or *"pay X to Y"* would ride in aish's report (design review M5).
+
+### What is new — the eligibility window
+
+A mail is news when it arrived at or after the floor and no earlier delivered report SHOWED it
+(the ledger records the digests shown). The floor is: the first report, 7 days back
+(`FIRST_RUN_DAYS`); after a delivered report, that report's build time minus `LATE_GRACE_DAYS`
+(7) — so a mail read late (an admission lapse, a top-up fetch) or held over a section's cap
+(`NEEDS_SHOWN` 30, `INTEREST_SHOWN` 20; the overflow line says they stay eligible) still reaches
+him once, and nothing is shown twice. The time judged is the provider's receipt time when there
+is one; a sender-written Date (Tuta) is never later than when aish first read the mail, so no
+sender can date a mail into the future to keep it news, and an undated mail is judged by when it
+was first read. `--since YYYY-MM-DD|Nd` asks for everything since then, whatever earlier reports
+showed. Both 7s are CHOICES.
+
+### Follow-ups — the deterministic definition
+
+The measured precursor of the conversation-state axis (the 2026-10-26 directive). **Per
+counterparty, not per conversation**: for every conversation whose newest message is inside
+`FOLLOWUP_WINDOW_DAYS` (60 — the owner's *30–60 days*), every address he wrote to there (his
+`direction: out` mail — the SENT label / Sent folder, never a From header), minus his own and the
+bot's addresses and any address that mails him from a list:
+
+- **your turn** — that address sent mail after his last message to it, and at least one such
+  mail's reading wants `reply`, `decide` or `pay`, or `cannot_tell`, or has no reading at all
+  (the fail-visible direction; the line says *no reading recorded*). Newsletter-gated and
+  one-time-code mail is not an answer. Shown with days waiting since the first such mail.
+- **their turn** — nothing from that address since his last message to it — anywhere in the
+  index, so an answer in a new thread counts (review M7) — and that message is
+  `THEIR_TURN_DAYS` (5) or more days old — **a stated choice, not a measurement** — and inside
+  the window. Pinned at the boundary: exactly 5 days is in, a second less is out.
+
+**Why per counterparty** (design review B3): a conversation is a union any mail can join by naming
+a Message-ID (*Residuals*). Keyed per conversation, a stranger joining one would have made it his
+turn with an attacker-chosen subject, or put his last word to someone else in front of a real
+pending answer. Keyed per address he wrote to, the joiner is nobody he wrote to, and the subject
+shown is HIS message's. Answers are ordered by the same clamped time as eligibility. Both inboxes
+are one index, so a Gmail message answered through Tuta is one follow-up. Recomputed in full every
+morning — it is state, not news — and a conversation whose answer already sits under *Needs your
+action* today is not repeated. **When the index holds none of his sent mail in the window** the
+section says so — *the thread index holds none of your sent mail from the last 60 days (it
+reaches back to …), so follow-ups cannot be computed from it* — because an empty section would
+read as "none". That is the live state on 2026-10-28 (*For the driver*, below).
+
+### Render law, and the one link
+
+`mailview`'s law: every mail- or model-origin string goes through the caller's sanitiser
+(`cli._mail_cell`, which is `cli._plain`: C0/C1/ESC/bidi/U+2028-9), whitespace flattened, then
+`_disarm_links` — every `scheme://` link, opaque scheme (`aish-reply:`, `javascript:`, `press:`,
+`data:` …) and `www.` host becomes `[link]`, and `](` is broken, so the chat's markdown
+(`app.js` INLINE_RE: http links, quick-reply chips, images, local files) can form nothing from
+it — then the cap. Applied at render whatever write-time did. The report is markdown-light plain
+text; the ONLY link in it is the code-built Gmail one. `TestRenderSafety` seeds a mail whose every
+field carries 0x9b, U+202E, CSI, OSC 8, a chip, an image, `javascript:` and `www.`, and a
+recording sanitiser proves no field bypasses it; every URL left in the output is the Gmail one.
+
+**The watcher's health leads the report.** Any `warn` from `mailview.health_lines` (no pass, a
+stale pass, a failing listing) makes the headline say *THE MAIL WATCHER IS NOT HEALTHY, this
+report may be incomplete* and each warning follows as a `WATCHER:` line: a report built on a dead
+watcher must not look complete. **An empty day still delivers**: *nothing needs you.*, with each
+section saying so in one line — a missing report must mean a fault, never good news.
+
+### Delivery — a chat, through the one ingress, with no model in between
+
+`aish-mailreport` POSTs `/trigger` (the poller's path into `launch_triggered`: dedup, rate
+bucket, concurrency cap) with `origin: schedule`, `meta {kind: report, dedup_key:
+mailreport:<date>}`, the title *Inbox report — Wed 28 Oct*, a task string of fixed words plus the
+code headline of counts — **no mail text ever rides the task string** (the owner-hosts
+laundering law) — and the report in the payload's `report` field. The server
+(`docs/web-server.md` §The daily report) delivers it twice, both by code:
+
+1. **as a KEPT outside note** (`Agent.add_outside_note(kept=True)`, source `inbox_report`):
+   disarmed, bannered, under a heading the SERVER writes (`REPORT_NOTE_HEADING`, which says only
+   what the server knows: it came over `/trigger` as the daily report). *Kept* means every later
+   task in that chat starts tainted while the note is in the conversation, so when he types
+   *"pay this"* the task is tainted and its actions are carded; and the origin-scoped cardless
+   licence (`TRIGGERED_SAFE_TOOLS`, "safe because nobody is at the keyboard") is OFF in that chat,
+   because its premise is false there. What stays cardless is what is cardless in EVERY chat: a
+   mail only he can receive, an opted-in note write (#377, #379). **So "every action goes
+   through its card" is exactly: every action except those that cannot reach past him.**
+2. **as the turn's answer, composed by code — rendering choice (b)** (`Agent.present`): the
+   owner reads the report exactly as code wrote it, with the server's provenance line under the
+   headline, and the server breaks every markdown link but the Gmail one again
+   (`presented_report`) whatever the caller sent. The model's copy of that answer is a pointer
+   (`PRESENTED_POINTER`) — the note already holds the text — and the log's copy is the report, so
+   the owner and cold replay see it; the record also keeps `model_content`, which `SessionLog.
+   _parse` restores, so a cold reopen hands the model the pointer too, never a second copy
+   (review M2). An empty `report` is refused (400). A `presented` record (trace contract §3.22) is the evidence
+   that no model wrote it, and keeps the turn reconstructable: live and cold render identically
+   (`test_live_and_cold_replay_show_the_same_turn`).
+
+**Why (b) and not (a), a model presenting the noted report** — the delivery review's blocking B1,
+adopted: under (a) the owner's view is a model's paraphrase of attacker-steered text: it can drop
+an item, garble the hex id in a Gmail link so it opens another mail, drop a CAUTION marker, and —
+being an ordinary unattended turn with the full tool menu and the chip convention — emit a
+quick-reply chip whose tap is an owner-typed task, which folds its hosts into the owner's
+(`note_owner_hosts`). (b) costs no call, and *delivered* means *in the log*: the report is there
+when the session is created (B2).
+
+**The push** is the existing done-push (`_notify_done`: non-user origin, nobody viewing) — no new
+notifier — and its body is the code headline only (counts): no sender or subject leaves the
+machine for Pushover.
+
+**Retries and the ledger.** launchd fires once a day, so a 429/503 or an unreachable server is
+retried for ~18 minutes (`RETRY_WAITS_S`, honouring a longer Retry-After). A POST that may have
+reached the server — anything but a refused connection or an unresolved name: a timeout, a
+connection dropped mid-exchange (review M5) — is `unknown`, never `failed`, and the retry resolves it — the
+day's `dedup_key` makes the second POST return the chat the first one made (`deduped`). Every
+attempt is one line in `<state>/mail/reports.jsonl`: `at`, `as_of`, `day`, `status`
+(`delivered` | `deduped` | `unknown` | `failed`), `session`, `counts` per section, `attempts`,
+`error`, and — only when `delivered` — the `digests` shown. A `deduped` answer means the day's chat was
+made by an earlier attempt with its own report, so it records nothing as shown and does not move
+the window (review M1); a `--since` run has its own dedup key. A day already delivered is not
+delivered again: the server's dedup does not survive its restart; this ledger does. One run at a
+time (`report.lock`). `--dry-run` prints the report and writes NOTHING (no ledger, no lock, no
+counters) and sends nothing — pinned by a byte-identical tree.
+
+**Failures land in `/mail`.** `mailreport.health_lines` adds the report's line under the
+watcher's: *daily report: last delivered … (chat …)*, a warning when the last attempt failed or got
+no answer, or when none was delivered for 26 hours after one had been (`REPORT_STALE_AFTER_S`); *none
+recorded* when there is no ledger (the job may not be installed).
+
+**The job** is code-owned and never an automation file: `scripts/install-mailreport-service.sh
+[--print] <gmail-account>` writes `com.aish.mailreport` with `StartCalendarInterval` 07:30 local,
+through `envrun` + aish-web's env file as the watcher's job, `AISH_WEB_URL` in the plist, the
+token read at run time from the Keychain (`email_poll.read_token`), never in the plist.
+
+`tests/test_mailreport.py` — `TestNeedsYourAction`, `TestMayInterestYou`, `TestExclusions`,
+`TestCautions`, `TestFollowUps`, `TestWhatIsNew` (the window), `TestRenderSafety`,
+`TestTheReportSaysWhatItRestsOn` (stale watcher, empty day), `TestRun` (dry run, delivery,
+ledger), `TestHealthInMail`; `tests/test_mailreport_chat.py` — `TestTheReportChat` (origin +
+meta, unread, the kept note outside the task string, no model call, live == cold), `TestThePush`
+(no viewer, headline only), `TestTheChatStaysTainted`, `TestKeptNoteMechanics`,
+`TestTheServersFences`; `tests/test_mailreport_review.py` — `TestTheReportFindings`,
+`TestTheChatFindings` (each delivery-review finding pinned);
+`tests/test_mailreport_service.py` (the plist).
+
 ## The backtest — `aish-mailbacktest`
 
 **Frozen clocks.** Index and case store are built in arrival order inside a SCRATCH run
@@ -917,6 +1098,22 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **Whether an export runs "from a terminal" is stdin's tty** (`mailexport.interactive`). A
   terminal run with stdin redirected falls back, and says so; a background process with a tty
   on stdin would try Downloads.
+- **The daily report quotes attacker-steered prose into a chat he acts in.** The Reader's
+  one-line `meaning` reaches the report (withheld on cautioned mail), bounded, sanitised and
+  de-linked, never sterile. The chat is tainted for every task while the note is there, and the
+  origin-scoped cardless licence is off; the consequence-scoped ones (owner-only mail, opted-in
+  note writes) stay, as in every chat.
+- **The report's follow-ups do not judge whether his last message asked anything**: a closing
+  *"thanks"* shows as *their turn* after 5 days, and a thread he finished by phone keeps showing
+  until it leaves the 60-day window. There is no "handled" control yet. The section's footer says
+  so.
+- **A forged OLD Date through Tuta can hide an answer from Follow-ups** (it sorts before his
+  message). A future date is clamped to when aish first read the mail; a past one is not, since
+  mail older than the watcher's first pass is legitimately first read late.
+- **The Gmail link's form** (`https://mail.google.com/mail/u/0/?authuser=<account>#all/<id>`)
+  was not opened against his account here; it is built from the provider id alone.
+- **Retry on the report's answer** re-asks the task string — fixed words and the headline — of the
+  session's MODEL, with the note in context: a model's presentation then replaces code's.
 - **The Reader's admission has not been run.** The charter's central claims — that a model answers
   these cases as the exam expects — are hypotheses until `scripts/role-admission.py` runs per
   model. Nothing in this repository measured a model on it.
@@ -932,8 +1129,9 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **Run inside aish-web** — S2.
 - **Read any mailbox but his Gmail account and his Tuta mailbox**, and only by the commands in
   this file (`READ_ONLY_CALLS`, `mailtuta.ALLOWED_ARGV`).
-- **Notify.** A failing watcher is a warning in `/mail`, not a push; #362's escalation pattern
-  is for a later slice.
+- **Notify per mail.** A failing watcher is a warning in `/mail`, not a push; #362's escalation
+  pattern is for a later slice. The one push is the daily report's chat (§The daily report,
+  2026-10-28, the owner's premise amendment) — a digest of counts, never a per-mail alert.
 
 ---
 
@@ -975,6 +1173,15 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    writes `keeper_clamped` into every record. A run directory from before it reads as no keeper
    clamp, and resuming it does not change that (a final reading is never re-read): re-run into a
    fresh `--out` to see the clamp in a report.
+3e. **The daily report** (2026-10-28). Needs aish-web restarted on this build (the `/trigger`
+   `report` field and `Agent.present` are server-side). Preview first:
+   `aish-mailreport --dry-run --account pawel@wenda.eu` (reads only; sends and writes nothing).
+   Then `scripts/install-mailreport-service.sh --print pawel@wenda.eu` to read the plist and
+   without `--print` to load `com.aish.mailreport` (daily 07:30); **track the plist in mm-config
+   like the watcher's**. Observed on 2026-10-28: the live index holds **0** of his sent messages
+   (130 messages since 2026-10-23, Gmail 28, Tuta 102), so Follow-ups currently says it cannot be
+   computed. Why the watcher indexes no sent mail is not established here — the next thing to
+   look at before Follow-ups can mean anything.
 4. **The mined replay scenario** — a real courier/store pair from his inbox — goes in the private
    tree (`~/.config/aish/evals/<name>/`, `docs/replay.md`), never here: find the pair in the
    backtest run's verdict store (`case_choice` on the courier mail), and replay it end to end

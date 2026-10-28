@@ -820,6 +820,20 @@ class MailIndex:
         ]
         return sorted(members, key=lambda h: h.position)
 
+    def conversations(self) -> list[list[Header]]:
+        """Every conversation as it stands NOW (the union at the latest
+        position), each oldest first. One pass over the index, for readers
+        that need all of them at once (the daily report's follow-ups) rather
+        than `conversation` per message, which would rebuild per call."""
+        if not self.by_digest:
+            return []
+        latest = max(h.position for h in self.by_digest.values())
+        union = self._union_as_of(latest)
+        groups: dict[str, list[Header]] = {}
+        for header in self.by_digest.values():
+            groups.setdefault(union.find(header.digest), []).append(header)
+        return [sorted(members, key=lambda h: h.position) for members in groups.values()]
+
     def before(self, as_of: tuple[float, str]) -> list[Header]:
         """Every message at or before `as_of`, oldest first."""
         return sorted(

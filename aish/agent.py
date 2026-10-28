@@ -2780,6 +2780,33 @@ def outside_note(heading: str, text: str) -> str:
     so it can neither speak in aish's voice nor close the frame early."""
     return f"{AISH_NOTE}{heading}]\n{web.UNTRUSTED_NOTE}{provenance.disarm_markers(text)}"
 
+
+# The heading prefix of an outside note that keeps EVERY later task in its
+# chat tainted, not only the next one (`add_outside_note(kept=True)`): the
+# daily inbox report (#142 W5), which the owner is meant to act on in that
+# chat afterwards. Content-borne, so a chat reopened cold from its log is
+# tainted by the same note — no flag has to survive a restart.
+KEPT_OUTSIDE = "outside content kept in this chat — "
+# The model's copy of a code-composed answer (`Agent.present`): the owner saw
+# the report itself; the model already holds it as the kept note.
+PRESENTED_POINTER = (
+    "(aish's code showed the owner the report in the note above, exactly as written; "
+    "no model composed it.)"
+)
+
+
+def holds_kept_outside(messages: list[dict]) -> bool:
+    """Does this conversation carry a kept outside note? Matched on the note's
+    opening, bare or inside the `NOTE_REMINDER` wrapper `_append` applies.
+    `disarm_markers` breaks `[aish:` inside outside content, so only aish's
+    own heading can open with it; the owner typing it only taints his chat."""
+    bare = AISH_NOTE + KEPT_OUTSIDE
+    wrapped = NOTE_REMINDER.split("{note}", 1)[0] + bare
+    return any(
+        m.get("role") == "user" and str(m.get("content") or "").startswith((bare, wrapped))
+        for m in messages
+    )
+
 # How every `[aish: …]` note reaches the model (§3.17): inside the tag the
 # system prompt already names as aish's voice (rule 2e). `_append` applies it,
 # so no call site can forget it; the measure script's arm D is this string.
@@ -3902,6 +3929,11 @@ class Agent:
         # call to raise the taint for it (`add_outside_note`, #5 S3): the next
         # task starts tainted. Survives `_reset_task_state` exactly once.
         self._outside_note_pending = False
+        # A KEPT outside note was delivered (`add_outside_note(kept=True)`):
+        # every task starts tainted until the conversation is dropped. The
+        # flag is for backends whose conversation is not `self.messages`
+        # (claude-max's SDK session); `holds_kept_outside` covers a cold reopen.
+        self._kept_outside = False
         # Links a PAGE (or any other tool result) actually offered this task,
         # recorded as whole addresses rather than re-derived by searching raw
         # text later. Read by _url_was_offered.
@@ -4396,6 +4428,7 @@ class Agent:
     def reset(self) -> None:
         """Drop the conversation, keep the system prompt."""
         del self.messages[1:]
+        self._kept_outside = False  # the kept note went with the conversation
         # A note held for the next task belongs to the conversation just
         # dropped: drawn in the next chat it would be a row for words that
         # chat's model never received (found in delivery review).
@@ -4661,6 +4694,7 @@ class Agent:
         source: str | None = None,
         call: int | None = None,
         notes: list[tuple[str, str]] | None = None,
+        model_copy: bool = False,
     ) -> None:
         """`interim` stamps the LOG record as a delivery — something said on
         the way to the answer (#212) — without touching the message dict the
@@ -4713,6 +4747,11 @@ class Agent:
                 record["delivered"] = True
             if record_content is not None:
                 record["content"] = record_content
+                if model_copy:
+                    # What the MODEL was given, kept beside what the owner saw,
+                    # so a cold reopen hands the model the same text a live
+                    # conversation held (`SessionLog._parse`).
+                    record["model_content"] = message.get("content")
             if source:
                 record["source"] = source
             if call:
@@ -5223,6 +5262,11 @@ class Agent:
             # Delivered for THIS task by add_outside_note: it is in the context
             # the first model call sees, so the task is tainted from its start.
             self._outside_note_pending = False
+            self._mark_tainted("", None)
+        elif self.holds_kept_outside_note():
+            # A kept note (the daily inbox report) is still in this
+            # conversation, so whatever the owner asks next is answered over
+            # it: every task here is tainted, not only the first. Restrict-only.
             self._mark_tainted("", None)
         # Offered links belong to the task that read them, exactly as taint
         # does: the gate that consults them only exists while a task is
@@ -10792,7 +10836,54 @@ class Agent:
         (session.synthetic_kind, #171; contract §3.17)."""
         self._append({"role": "user", "content": text}, source=source)
 
-    def add_outside_note(self, heading: str, text: str, source: str) -> None:
+    def holds_kept_outside_note(self) -> bool:
+        """Is a kept outside note (the daily inbox report) in this conversation?
+        Then every task is tainted and the origin-scoped cardless licence is off
+        (`server._auto_safe`): the owner is meant to act in this chat."""
+        return self._kept_outside or holds_kept_outside(self.messages)
+
+    def present(self, task: str, answer: str) -> str:
+        """A turn whose answer is CODE's, with no model call: the daily inbox
+        report (#142 W5), which aish's code composed from the mail store and
+        must reach the owner as composed — a model presenting it could drop an
+        item, garble a link or be steered by the mail it quotes.
+
+        The turn is an ordinary one to every reader: the task and the answer
+        are appended through `_append`, so the log, the trace and cold replay
+        see a user message and an assistant answer exactly as a model turn
+        leaves them, and the answer streams as a model's would. The MODEL's
+        copy of the answer is a pointer to the note it repeats (the report is
+        already in front of it as outside content); the log's copy, which the
+        owner and replay see, is the report (`record_content`)."""
+        task = provenance.disarm_markers(task)
+        self._previous_unfinished, self._task_unfinished = self._task_unfinished, ""
+        self._in_task = True
+        held, self._held_harness = self._held_harness, []
+        self._drawn_at_start = held
+        for step in held:
+            self._note("⚑ aish told the model: " + harness_headline(step["text"]))
+            if self.on_step is not None:
+                self.on_step(step)
+        try:
+            self._reset_task_state()
+            self._append({"role": "user", "content": task})
+            # The evidence that no model wrote it (trace contract §3.22).
+            self._emit_record(kind="presented", by="code", chars=len(answer), model_calls=0)
+            self._append({"role": "assistant", "content": PRESENTED_POINTER},
+                         record_content=answer, model_copy=True)
+            if self.on_token:
+                self.on_token("\n")
+                self.on_token(answer)
+                self.on_token("\n")
+            return answer
+        finally:
+            self._in_task = False
+            self._settle_refusal_reads()
+            self._flush_vocab()
+
+    def add_outside_note(
+        self, heading: str, text: str, source: str, *, kept: bool = False
+    ) -> None:
         """Deliver content aish did NOT author — a monitor's snapshot (#5 S3),
         which a previous run distilled from whatever it read — as the next
         task's context, and make that task tainted from its first model call.
@@ -10803,7 +10894,14 @@ class Agent:
         folded into `_owner_hosts` (no `note_owner_hosts`, as `add_system_note`
         for #178 P0-2) — a host a page named must not become one the egress gate
         treats as the owner's. The taint is raised explicitly because no tool
-        call will raise it: the content arrives without one."""
+        call will raise it: the content arrives without one.
+
+        `kept` (the daily inbox report): the note stays tainting — every later
+        task in this chat starts tainted while the note is in the conversation
+        (`holds_kept_outside`), because the owner is meant to act on it there."""
+        if kept:
+            heading = KEPT_OUTSIDE + heading
+            self._kept_outside = True
         self._append({"role": "user", "content": outside_note(heading, text)}, source=source)
         self._outside_note_pending = True
 
