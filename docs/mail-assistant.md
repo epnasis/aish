@@ -837,9 +837,13 @@ saw newsletter-gated is gated.
 or the index's own List-Id / List-Unsubscribe — so a mail with no reading is still recognised by
 code) and one-time codes and sign-in links (`_ONE_TIME_CODE_PHRASES`, a declared, counted PL+EN
 list matched word-bounded against the folded Reader `kind` and subject; the owner's v3 ruling).
-Mail with no reading (unadmitted, error, invalid) is counted with its endings, never dropped; a
-mail delivered to both inboxes (two digests, `digest_for`) is shown once, the Gmail copy
-preferred, and the dropped copies counted. The report's footer says all of it: *Not shown: N
+Mail with no reading (unadmitted, error, invalid) is counted with its endings, never dropped,
+and so is every reading in no section: `wanted` `cannot_tell` (*the Reader could not tell what
+they want of you*), `wait`, and `nothing` the pipeline would hold or file — every eligible
+reading is in a section or a count (delivery review B2). A mail delivered to both inboxes (two
+digests, `digest_for`) — the same Message-ID FROM THE SAME SENDER; two senders claiming one id
+are two mails (review M4) — is shown once, the Gmail copy preferred, the dropped copies counted
+and recorded as shown with it, so they never return as new (review B1). The report's footer says all of it: *Not shown: N
 newsletter-gated, N one-time code(s) or sign-in link(s), N with no reading (endings: …)*.
 
 **Caution, visible, never hidden — he decides**: `suspicion` suspicious, `sender_case` mismatch,
@@ -872,7 +876,8 @@ bot's addresses and any address that mails him from a list:
   mail's reading wants `reply`, `decide` or `pay`, or `cannot_tell`, or has no reading at all
   (the fail-visible direction; the line says *no reading recorded*). Newsletter-gated and
   one-time-code mail is not an answer. Shown with days waiting since the first such mail.
-- **their turn** — nothing from that address since his last message to it, and that message is
+- **their turn** — nothing from that address since his last message to it — anywhere in the
+  index, so an answer in a new thread counts (review M7) — and that message is
   `THEIR_TURN_DAYS` (5) or more days old — **a stated choice, not a measurement** — and inside
   the window. Pinned at the boundary: exactly 5 days is in, a second less is out.
 
@@ -929,7 +934,9 @@ laundering law) — and the report in the payload's `report` field. The server
    headline, and the server breaks every markdown link but the Gmail one again
    (`presented_report`) whatever the caller sent. The model's copy of that answer is a pointer
    (`PRESENTED_POINTER`) — the note already holds the text — and the log's copy is the report, so
-   the owner and cold replay see it. A `presented` record (trace contract §3.22) is the evidence
+   the owner and cold replay see it; the record also keeps `model_content`, which `SessionLog.
+   _parse` restores, so a cold reopen hands the model the pointer too, never a second copy
+   (review M2). An empty `report` is refused (400). A `presented` record (trace contract §3.22) is the evidence
    that no model wrote it, and keeps the turn reconstructable: live and cold render identically
    (`test_live_and_cold_replay_show_the_same_turn`).
 
@@ -946,12 +953,15 @@ notifier — and its body is the code headline only (counts): no sender or subje
 machine for Pushover.
 
 **Retries and the ledger.** launchd fires once a day, so a 429/503 or an unreachable server is
-retried for ~18 minutes (`RETRY_WAITS_S`, honouring a longer Retry-After). A POST that timed out
-may have reached the server: it is `unknown`, never `failed`, and the retry resolves it — the
+retried for ~18 minutes (`RETRY_WAITS_S`, honouring a longer Retry-After). A POST that may have
+reached the server — anything but a refused connection or an unresolved name: a timeout, a
+connection dropped mid-exchange (review M5) — is `unknown`, never `failed`, and the retry resolves it — the
 day's `dedup_key` makes the second POST return the chat the first one made (`deduped`). Every
 attempt is one line in `<state>/mail/reports.jsonl`: `at`, `as_of`, `day`, `status`
 (`delivered` | `deduped` | `unknown` | `failed`), `session`, `counts` per section, `attempts`,
-`error`, and — only when delivered — the `digests` shown. A day already delivered is not
+`error`, and — only when `delivered` — the `digests` shown. A `deduped` answer means the day's chat was
+made by an earlier attempt with its own report, so it records nothing as shown and does not move
+the window (review M1); a `--since` run has its own dedup key. A day already delivered is not
 delivered again: the server's dedup does not survive its restart; this ledger does. One run at a
 time (`report.lock`). `--dry-run` prints the report and writes NOTHING (no ledger, no lock, no
 counters) and sends nothing — pinned by a byte-identical tree.
@@ -972,7 +982,8 @@ token read at run time from the Keychain (`email_poll.read_token`), never in the
 ledger), `TestHealthInMail`; `tests/test_mailreport_chat.py` — `TestTheReportChat` (origin +
 meta, unread, the kept note outside the task string, no model call, live == cold), `TestThePush`
 (no viewer, headline only), `TestTheChatStaysTainted`, `TestKeptNoteMechanics`,
-`TestTheServersFences`;
+`TestTheServersFences`; `tests/test_mailreport_review.py` — `TestTheReportFindings`,
+`TestTheChatFindings` (each delivery-review finding pinned);
 `tests/test_mailreport_service.py` (the plist).
 
 ## The backtest — `aish-mailbacktest`

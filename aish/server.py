@@ -448,6 +448,7 @@ TRIGGER_RETRY_AFTER_S = 30      # Retry-After hint on either 429
 # aish's voice — and the cap bounds what one POST can put in a context.
 REPORT_NOTE_MAX_CHARS = 20_000
 REPORT_NOTE_SOURCE = "inbox_report"
+REPORT_PUSH_CHARS = 200  # the headline's cap in the push, whatever a caller's first line is
 # Says only what the server knows: the text arrived over /trigger as the daily
 # report. Which job sent it is not something this process can check.
 REPORT_NOTE_HEADING = (
@@ -3939,7 +3940,7 @@ class WebServer:
             # of truth for a later {type:create_issue}) and strip the raw fence
             # from the stored/replayed answer — the frontend renders the review
             # card from the live stream, so the fenced source never shows.
-            issue, result = parse_issue_block(result)
+            issue, result = (None, result) if present else parse_issue_block(result)
             if issue is not None:
                 session.pending_issue = issue
             # Web-only quick-reply safety net (issue #46): a question with no
@@ -3951,7 +3952,7 @@ class WebServer:
             if suffix is not None:
                 session.bridge.emit({"type": "token", "text": suffix})
             # The push quotes the answer, never the suggestion chip on it.
-            pushed = (present.split("\n", 1)[0] if present else result)
+            pushed = (present.split("\n", 1)[0][:REPORT_PUSH_CHARS] if present else result)
             # A task that went the long way round gets one more chip (#446):
             # the detector reads this turn's records back and writes its own
             # record whatever it decides. After the net, so the chip never
@@ -3981,7 +3982,7 @@ class WebServer:
                 done["answer"] = session.logref.last_answer_id
             # Riding on `done` (not a new event type) makes replay correctness
             # automatic and keeps the answer↔sources association explicit.
-            sources = getattr(session.agent, "task_sources", [])
+            sources = [] if present else getattr(session.agent, "task_sources", [])
             if sources:
                 done["sources"] = list(sources)
             session.bridge.emit(done)
@@ -6046,8 +6047,10 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         # with any prompt; this only lets it ADD content that taints the
         # session it starts, under a heading the SERVER writes.
         report = body.get("report")
-        if report is not None and not isinstance(report, str):
-            return JSONResponse({"error": "report must be a string"}, status_code=400)
+        if report is not None and (not isinstance(report, str) or not report.strip()):
+            # An empty one would start a model session told to present a note
+            # that is not there.
+            return JSONResponse({"error": "report must be a non-empty string"}, status_code=400)
         if report is not None and len(report) > REPORT_NOTE_MAX_CHARS:
             return JSONResponse(
                 {"error": f"report over the {REPORT_NOTE_MAX_CHARS}-char cap"}, status_code=400

@@ -460,18 +460,26 @@ class ClaudeMaxAgent:
         call. The pending notes are RECORDED now, as the turn they belong to,
         and stay queued — unrecorded — for the next prompt the SDK sees, which
         is where this backend delivers notes to the model."""
-        self.inner._reset_task_state()
-        task = provenance.disarm_markers(task)
-        notes, self._pending_notes = list(self._pending_notes), []
-        for source, text in notes:
-            self._record_note(text, source)
-        self._recorded_unsent.extend(text for _source, text in notes)
-        self._record({"role": "user", "content": task})
-        self.inner._emit_record(kind="presented", by="code", chars=len(answer), model_calls=0)
-        self._record({"role": "assistant", "content": answer})
-        if self.on_token:
-            self.on_token("\n" + answer + "\n")
-        return answer
+        inner = self.inner
+        inner._previous_unfinished, inner._task_unfinished = inner._task_unfinished, ""
+        inner._in_task = True
+        try:
+            inner._reset_task_state()
+            task = provenance.disarm_markers(task)
+            notes, self._pending_notes = list(self._pending_notes), []
+            for source, text in notes:
+                self._record_note(text, source)
+            self._recorded_unsent.extend(text for _source, text in notes)
+            self._record({"role": "user", "content": task})
+            inner._emit_record(kind="presented", by="code", chars=len(answer), model_calls=0)
+            self._record({"role": "assistant", "content": answer})
+            if self.on_token:
+                self.on_token("\n" + answer + "\n")
+            return answer
+        finally:
+            inner._in_task = False
+            inner._settle_refusal_reads()
+            inner._flush_vocab()
 
     def run_task(self, task: str) -> str:
         # The SDK owns the loop, so the inner Agent's run_task — where per-task

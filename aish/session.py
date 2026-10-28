@@ -1532,7 +1532,12 @@ class SessionLog:
                 pending_cmd = None
             elif kind == "message" and record.get("role") != "system":
                 keys = ("role", "content", "tool_name", "images", "documents", "tool_calls")
-                messages.append({k: v for k, v in record.items() if k in keys})
+                restored = {k: v for k, v in record.items() if k in keys}
+                if isinstance(record.get("model_content"), str):
+                    # The model was given a different text than the owner saw
+                    # (`Agent.present`): restore the model's, as it was live.
+                    restored["content"] = record["model_content"]
+                messages.append(restored)
                 issued_by.append(record.get("model_call"))
             elif kind == "trace" and messages:
                 step = record.get("step")

@@ -4694,6 +4694,7 @@ class Agent:
         source: str | None = None,
         call: int | None = None,
         notes: list[tuple[str, str]] | None = None,
+        model_copy: bool = False,
     ) -> None:
         """`interim` stamps the LOG record as a delivery — something said on
         the way to the answer (#212) — without touching the message dict the
@@ -4746,6 +4747,11 @@ class Agent:
                 record["delivered"] = True
             if record_content is not None:
                 record["content"] = record_content
+                if model_copy:
+                    # What the MODEL was given, kept beside what the owner saw,
+                    # so a cold reopen hands the model the same text a live
+                    # conversation held (`SessionLog._parse`).
+                    record["model_content"] = message.get("content")
             if source:
                 record["source"] = source
             if call:
@@ -10864,7 +10870,7 @@ class Agent:
             # The evidence that no model wrote it (trace contract §3.22).
             self._emit_record(kind="presented", by="code", chars=len(answer), model_calls=0)
             self._append({"role": "assistant", "content": PRESENTED_POINTER},
-                         record_content=answer)
+                         record_content=answer, model_copy=True)
             if self.on_token:
                 self.on_token("\n")
                 self.on_token(answer)

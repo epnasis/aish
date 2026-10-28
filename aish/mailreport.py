@@ -48,6 +48,7 @@ import fcntl
 import json
 import os
 import re
+import socket
 import sys
 import time
 import unicodedata
@@ -102,7 +103,10 @@ DELIVERED = "delivered"
 DEDUPED = "deduped"  # the server already held today's chat: delivered earlier
 UNKNOWN = "unknown"  # the POST may have reached the server; no answer came back
 FAILED = "failed"
-SHOWN_STATUSES = (DELIVERED, DEDUPED)
+#: Only a delivery that made the chat records what it showed; a `deduped` answer
+#: means the day's chat was made earlier, by another attempt with its own report.
+SHOWN_STATUSES = (DELIVERED,)
+TODAY_STATUSES = (DELIVERED, DEDUPED)  # a chat for the day exists
 #: The report's line in `/mail`: none delivered for this long after one
 #: existed is shown as a warning (one daily slot plus slack).
 REPORT_STALE_AFTER_S = 26 * 3600
@@ -283,6 +287,9 @@ OK = "ok"
 GATED_OUT = "gated"
 OTP_OUT = "otp"
 NO_READING = "no_reading"
+UNDECIDED = "undecided"  # the Reader could not tell what the mail wants of him
+WAITING = "waiting"  # it wants him to wait
+QUIET = "quiet"  # it wants nothing, and would not be kept in front of him
 
 
 def classify(reading: Reading | None, header: mailindex.Header | None) -> str:
@@ -336,6 +343,7 @@ class Report:
     excluded: dict[str, int] = field(default_factory=dict)
     no_reading_endings: dict[str, int] = field(default_factory=dict)
     duplicates: int = 0
+    siblings: dict[str, list[str]] = field(default_factory=dict)
     watcher_warnings: list[str] = field(default_factory=list)
     unreadable_verdicts: int = 0
     unreadable_index: int = 0
@@ -350,7 +358,10 @@ class Report:
         """The new mail this report SHOWS — never again in a later report.
         Items over a section's cap are not shown, so they stay eligible."""
         shown = [*self.needs[:NEEDS_SHOWN], *self.interest[:INTEREST_SHOWN]]
-        return sorted({i.reading.digest for i in shown})
+        digests = {i.reading.digest for i in shown}
+        for digest in list(digests):
+            digests.update(self.siblings.get(digest, ()))  # its other inbox's copy
+        return sorted(digests)
 
 
 def _bump(table: dict[str, int], key: str) -> None:
@@ -420,6 +431,14 @@ def follow_ups(
     listy = {h.from_addr for h in index.by_digest.values()
              if h.direction == "in" and (h.list_id or h.list_unsubscribe)}
     window = now - FOLLOWUP_WINDOW_DAYS * 86400
+    # The newest mail from each address anywhere in the index: an answer in a
+    # NEW thread (no reply headers) is still an answer, so it is never "their
+    # turn" — it is just not a follow-up this code can place.
+    last_from: dict[str, float] = {}
+    for h in index.by_digest.values():
+        if h.direction == "in" and h.from_addr:
+            when = _effective_at(h, readings)
+            last_from[h.from_addr] = max(last_from.get(h.from_addr, 0.0), when)
     yours: list[FollowUp] = []
     theirs: list[FollowUp] = []
     for conversation in index.conversations():
@@ -433,7 +452,8 @@ def follow_ups(
                        if h.direction == "in" and h.from_addr == party
                        and _effective_at(h, readings) > his.at]
             if not answers:
-                if now - his.at >= THEIR_TURN_DAYS * 86400 and his.at >= window:
+                if (now - his.at >= THEIR_TURN_DAYS * 86400 and his.at >= window
+                        and last_from.get(party, 0.0) <= his.at):
                     theirs.append(FollowUp("theirs", party, his.at, his))
                 continue
             asking: list[tuple[mailindex.Header, Reading | None]] = []
@@ -457,30 +477,36 @@ def follow_ups(
     return yours, theirs
 
 
-def _one_copy(items: list[Item]) -> tuple[list[Item], int]:
+def _one_copy(items: list[Item]) -> tuple[list[Item], dict[str, list[str]]]:
     """A mail delivered to both inboxes is two digests (`mailindex.digest_for`);
-    shown once, the Gmail copy preferred as `reply_parent` prefers it.
-    Returns (items, copies dropped)."""
-    by_mid: dict[str, Item] = {}
+    shown once, the Gmail copy preferred as `reply_parent` prefers it. Copies
+    are the same Message-ID FROM THE SAME SENDER — two senders claiming one id
+    is squatting (`MailIndex.reply_parent`), and both stay. Returns (items,
+    kept digest -> the digests of its dropped copies), so the copies are
+    recorded as shown with it and never come back as new."""
+    by_key: dict[tuple[str, str], Item] = {}
+    siblings: dict[str, list[str]] = {}
     out: list[Item] = []
-    dropped = 0
     for item in items:
-        mid = item.header.message_id if item.header is not None else ""
-        if not mid:
+        header = item.header
+        key = (header.message_id, header.from_addr) if header is not None else ("", "")
+        if not key[0]:
             out.append(item)
             continue
-        held = by_mid.get(mid)
+        held = by_key.get(key)
         if held is None:
-            by_mid[mid] = item
+            by_key[key] = item
             out.append(item)
             continue
-        dropped += 1
-        if held.header is not None and held.header.mailbox != "gmail" and (
-            item.header is not None and item.header.mailbox == "gmail"
-        ):
+        keep, drop = held, item
+        if (held.header is not None and held.header.mailbox != "gmail"
+                and header is not None and header.mailbox == "gmail"):
+            keep, drop = item, held
             out[out.index(held)] = item
-            by_mid[mid] = item
-    return out, dropped
+            by_key[key] = item
+            siblings[keep.reading.digest] = siblings.pop(held.reading.digest, [])
+        siblings.setdefault(keep.reading.digest, []).append(drop.reading.digest)
+    return out, siblings
 
 
 def build(
@@ -540,13 +566,21 @@ def build(
         elif (wanted == "nothing"
               and mailverdicts.effective_disposition(reading.record or {}) == "surface"):
             interest.append(Item(reading, header))
-    needs, dropped_needs = _one_copy(needs)
-    interest, dropped_interest = _one_copy(interest)
-    report.duplicates = dropped_needs + dropped_interest
+        else:
+            # In no section, and COUNTED: the Reader could not tell what it
+            # wants, it wants him to wait, or it wants nothing and the pipeline
+            # would not keep it in front of him (held, filed).
+            _bump(report.excluded, {mailreader.CANNOT_TELL: UNDECIDED, "wait": WAITING}
+                  .get(wanted, QUIET))
+    needs, needs_siblings = _one_copy(needs)
+    interest, interest_siblings = _one_copy(interest)
+    report.siblings = {**needs_siblings, **interest_siblings}
+    report.duplicates = sum(len(v) for v in report.siblings.values())
     report.needs = sorted(needs, key=_needs_key)
     report.interest = sorted(interest, key=lambda i: -i.reading.when)
     report.yours, report.theirs = follow_ups(
-        index, readings, now, skip=frozenset(i.reading.digest for i in report.needs)
+        index, readings, now,
+        skip=frozenset(i.reading.digest for i in report.needs[:NEEDS_SHOWN]),
     )
     return report
 
@@ -743,9 +777,12 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
         + (" (endings: " + ", ".join(f"{safe(clean, k, WORD_CHARS)} {v}"
                                      for k, v in sorted(report.no_reading_endings.items()))
            + ")" if report.no_reading_endings else "")
+        + f", {excluded.get(UNDECIDED, 0)} the Reader could not tell what they want of you"
+        + f", {excluded.get(WAITING, 0)} that ask you to wait"
+        + f", {excluded.get(QUIET, 0)} that ask nothing and would be held or filed"
         + (f", {report.duplicates} second copy(ies) of a mail delivered to both inboxes"
            if report.duplicates else "")
-        + "."
+        + ". `/mail` lists every reading."
     )
     window = {"the last report": f"since the last report ({_when(report.since)})",
               "first report": f"since {_when(report.since)} (first report: "
@@ -789,8 +826,7 @@ def read_ledger(state_dir: os.PathLike | str) -> list[dict[str, Any]]:
 
 
 def last_shown(ledger: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The newest attempt whose chat is known to exist (delivered, or the
-    server already held today's)."""
+    """The newest attempt that DELIVERED a chat holding its own report."""
     for entry in reversed(ledger):
         if entry.get("status") in SHOWN_STATUSES:
             return entry
@@ -861,10 +897,11 @@ Post = Callable[[str, bytes, int], tuple[int, Mapping[str, str], bytes]]
 
 
 def _no_answer(exc: BaseException) -> bool:
-    """A timeout: the request may have reached the server. Everything else a
-    transport raises (refused, unreachable, DNS) means it did not."""
+    """Could the request have reached the server? Yes for anything but a
+    connection that was REFUSED or a name that did not resolve — a timeout or
+    a connection dropped mid-exchange may have delivered it."""
     reason = getattr(exc, "reason", exc)
-    return isinstance(reason, TimeoutError)  # socket.timeout is its alias
+    return not isinstance(reason, (ConnectionRefusedError, socket.gaierror))
 
 
 def deliver(
@@ -875,6 +912,7 @@ def deliver(
     token: str,
     post: Post,
     sleep: Callable[[float], None] = time.sleep,
+    key_suffix: str = "",
 ) -> Delivery:
     """`POST /trigger` — the guarded ingress. Retried on a 429/503 or a
     transport failure (`RETRY_WAITS_S`), because the next slot is a day away.
@@ -886,7 +924,7 @@ def deliver(
     payload = {
         "prompt": task_prompt(report),
         "origin": "schedule",
-        "meta": {"kind": "report", "dedup_key": f"mailreport:{day}"},
+        "meta": {"kind": "report", "dedup_key": f"mailreport:{day}{key_suffix}"},
         "title": f"Inbox report — {day_words(report.now)}",
         "report": text,
     }
@@ -977,7 +1015,7 @@ def run(
     ledger does)."""
     day = time.strftime("%Y-%m-%d", time.localtime(now))
     if not dry_run and since is None and any(
-        e.get("day") == day and e.get("status") in SHOWN_STATUSES
+        e.get("day") == day and e.get("status") in TODAY_STATUSES
         for e in read_ledger(state_dir)
     ):
         out(f"[mailreport] today's report ({day}) was already delivered — nothing sent")
@@ -997,7 +1035,8 @@ def run(
             delivery = Delivery(FAILED, error="no /trigger token (Keychain aish/AISH_WEB_TOKEN "
                                               "or env) — nothing was sent")
         else:
-            delivery = deliver(report, text, base=base, token=token, post=post, sleep=sleep)
+            delivery = deliver(report, text, base=base, token=token, post=post, sleep=sleep,
+                               key_suffix="" if since is None else f":since:{int(since)}")
         entry.update(status=delivery.status, session=delivery.session, error=delivery.error,
                      attempts=delivery.attempts)
         if delivery.status in SHOWN_STATUSES:
@@ -1005,7 +1044,7 @@ def run(
         append_ledger(state_dir, entry)
         flush_counters(state_dir, now)
     out(json.dumps({k: v for k, v in entry.items() if k != "digests"}, sort_keys=True))
-    return 0 if delivery.status in SHOWN_STATUSES else 1
+    return 0 if delivery.status in TODAY_STATUSES else 1
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -11,6 +11,7 @@ origin-scoped cardless licence off there, and the server's own fences."""
 
 from __future__ import annotations
 
+import json
 import time
 
 from test_server import app_env, connected, make_client, model_says, recv_until
@@ -114,9 +115,10 @@ class TestTheReportChat:
         # The model's copy of the answer is a pointer, not a second copy.
         answers = [m for m in messages if m.get("role") == "assistant"]
         assert [m["content"] for m in answers] == [agent_module.PRESENTED_POINTER]
-        records = SessionLog._parse(path).messages
-        assert any(m.get("role") == "assistant" and "Invoice 41" in str(m.get("content"))
-                   for m in records), "the log keeps what the owner saw"
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        assert any(r.get("role") == "assistant" and "Invoice 41" in str(r.get("content"))
+                   and r.get("model_content") == agent_module.PRESENTED_POINTER
+                   for r in records), "the log keeps what the owner saw AND what the model got"
 
     def test_the_answer_breaks_every_link_but_the_gmail_one(self, app_env):
         client, _ = make_client(app_env, [], token="secret")
