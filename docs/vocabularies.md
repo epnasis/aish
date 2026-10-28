@@ -119,6 +119,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `mailgate._CREDENTIAL_WORDS` | EN + PL URL path words | permits | yes | link text/href mismatch, userinfo, IP host, punycode, lookalike — all word-free | 22 |
 | `mailgate._RISKY_SUFFIXES` | file suffixes | permits | yes | the double-extension test, which needs no payload list | 24 |
 | `mailreader._DOCUMENT_SUFFIXES` | file suffixes | breaks | yes | the `application/pdf` MIME type, read beside the suffix | 10 |
+| `mailreport._ONE_TIME_CODE_PHRASES` | PL + EN (+ ID `kode`) | friction | yes | charter v3 answers a code `nothing` + `expire_after_grace`, so a code reaches the daily report's sections only on a Reader miss AND a list miss | 28 |
 | `mailindex._REPLY_PREFIXES` | client subject prefixes | breaks | yes | In-Reply-To / References, read first — the prefix is consulted only when both are absent | 9 |
 | `mailcases._KEY_WORDS` | EN + PL + DE + FR | breaks | yes | the UPS `1Z` shape and the IBAN checksum, which need no introducing word | 22 |
 | `mailcases._CURRENCY_WORDS` | currency signs and ISO codes | breaks | yes | — | 10 |
@@ -139,7 +140,7 @@ so a corrective retry does not count twice. The mail CLI has no session, so it d
 into `<state>/mail/runs-YYYYMMDD.jsonl` in the `vocab` record shape, and `vocab.scan` reads those
 files beside the session logs.
 
-`mailreader._DOCUMENT_SUFFIXES` came later (2026-10-27, the keeper clamp). It is `breaks`, not `permits`, because the clamp only ever keeps a mail visible: a miss loses one keeper signal and the mail is filed as the Reader answered, and nothing is ever let through by it.
+`mailreport._ONE_TIME_CODE_PHRASES` came later still (2026-10-28, the daily inbox report): matched word-bounded against the folded Reader `kind` and the subject. `friction`: a miss puts one code mail in the report, and a false match hides a mail from the report — COUNTED there as a one-time code, the mail itself untouched. `mailreader._DOCUMENT_SUFFIXES` came later (2026-10-27, the keeper clamp). It is `breaks`, not `permits`, because the clamp only ever keeps a mail visible: a miss loses one keeper signal and the mail is filed as the Reader answered, and nothing is ever let through by it.
 
 ### The entries worth arguing about
 

@@ -161,6 +161,8 @@ What a toggle means is the scheduler's, already shipped: a disable stops future 
 
 **`/m` is now ambiguous** (`/mail`, `/model`) and lists both, as any shared prefix does; `/mo` still resolves to `/model`.
 
+**The daily report in `/mail`, and `aish-mailreport`** (#142 W5, 2026-10-28). Under the watcher's health line `/mail` shows the daily report's own (`mailreport.health_lines`, from `<state>/mail/reports.jsonl`): when it was last delivered and to which chat, a warning when the last attempt failed or got no answer from aish-web, or none was delivered for 26 h after one had been; *none recorded* when the job never ran. `aish-mailreport [--dry-run] [--since YYYY-MM-DD|Nd] [--account <gmail>]` builds the report from the mail state tree and delivers it as a new aish-web chat over `/trigger`; `--dry-run` prints it through the same sanitiser (`_mail_cell`) and sends and writes nothing. Scheduled by `scripts/install-mailreport-service.sh` (`com.aish.mailreport`, daily 07:30). `docs/mail-assistant.md` §The daily report.
+
 ## CLI-only entry points
 
 - `aish secret <set|get|list|rm>` — the Keychain store (`docs/tools-layer.md`).

@@ -61,6 +61,7 @@ aish-curate = "aish.curate:main"
 aish-replay = "aish.replay:main"
 aish-mailwatch = "aish.mailwatch:main"
 aish-mailbacktest = "aish.mailbacktest:main"
+aish-mailreport = "aish.mailreport:main"
 
 [dependency-groups]
 dev = [

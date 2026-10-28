@@ -25,6 +25,7 @@ from typing import Any
 
 from . import provenance, tools
 from .agent import (
+    KEPT_OUTSIDE,
     RULES_REMINDER,
     Agent,
     ModelUnavailable,
@@ -156,6 +157,8 @@ class ClaudeMaxAgent:
         self._session_id: str | None = None
         # (source, text): what aish will put in front of the next prompt.
         self._pending_notes: list[tuple[str, str]] = []
+        # Notes already recorded by `present`, still owed to the SDK's next prompt.
+        self._recorded_unsent: list[str] = []
         # The SDK may run tool handlers concurrently; the inner Agent is not
         # thread-safe (_run_meta, _pending_skill_reads, cwd) and two approval
         # prompts must never interleave — every entry into it serializes here.
@@ -396,7 +399,9 @@ class ClaudeMaxAgent:
     def reset(self) -> None:
         self._session_id = None
         self._pending_notes.clear()
+        self._recorded_unsent.clear()
         self.messages.clear()
+        self.inner._kept_outside = False  # the SDK session holding it is gone
 
     def load_history(self, _messages: list[dict]) -> None:
         self.echo(
@@ -430,13 +435,43 @@ class ClaudeMaxAgent:
         inventory)."""
         self._pending_notes.append((source or "", text))
 
-    def add_outside_note(self, heading: str, text: str, source: str) -> None:
+    def add_outside_note(
+        self, heading: str, text: str, source: str, *, kept: bool = False
+    ) -> None:
         """`Agent.add_outside_note` for this backend: the same disarmed, banner-
         wrapped text in front of the next prompt, and the same taint, raised by
         the inner reset this backend's `run_task` already calls. No hosts fold
-        here either."""
+        here either. `kept` taints every later task too: the conversation lives
+        in the SDK session, not `inner.messages`, so the inner flag carries it."""
+        if kept:
+            heading = KEPT_OUTSIDE + heading
+            self.inner._kept_outside = True
         self._pending_notes.append((source, outside_note(heading, text)))
         self.inner._outside_note_pending = True
+
+    def holds_kept_outside_note(self) -> bool:
+        """The live flag only: this backend cannot resume an SDK session from
+        the log (`load_history`), so after a cold reopen the report is not in
+        the model's context at all, and no taint is owed for it."""
+        return self.inner._kept_outside
+
+    def present(self, task: str, answer: str) -> str:
+        """`Agent.present` for this backend: a code-composed answer, no SDK
+        call. The pending notes are RECORDED now, as the turn they belong to,
+        and stay queued — unrecorded — for the next prompt the SDK sees, which
+        is where this backend delivers notes to the model."""
+        self.inner._reset_task_state()
+        task = provenance.disarm_markers(task)
+        notes, self._pending_notes = list(self._pending_notes), []
+        for source, text in notes:
+            self._record_note(text, source)
+        self._recorded_unsent.extend(text for _source, text in notes)
+        self._record({"role": "user", "content": task})
+        self.inner._emit_record(kind="presented", by="code", chars=len(answer), model_calls=0)
+        self._record({"role": "assistant", "content": answer})
+        if self.on_token:
+            self.on_token("\n" + answer + "\n")
+        return answer
 
     def run_task(self, task: str) -> str:
         # The SDK owns the loop, so the inner Agent's run_task — where per-task
@@ -478,7 +513,9 @@ class ClaudeMaxAgent:
             framed = RULES_REMINDER.format(rules=provenance.disarm_markers(rules_text))
             notes.insert(0, ("rules", framed))
             self.inner.mark_rules_seeded()
-        prompt = "\n\n".join([*(text for _source, text in notes), task])
+        # Notes `present` already recorded ride this prompt too, unrecorded.
+        unsent, self._recorded_unsent = self._recorded_unsent, []
+        prompt = "\n\n".join([*unsent, *(text for _source, text in notes), task])
         # Everything in front of his words is recorded, each as the note it is,
         # and drawn as a row (contract §3.17): before this, the rules prose and
         # the pending notes reached the model and NO record held them.

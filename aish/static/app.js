@@ -3175,6 +3175,9 @@ const HARNESS_SOURCES = {
   console_share: ["inform", "Passed on what you shared from the console"],
   rules: ["enforce", "Told it the rules in force"],
   user_command: ["inform", "Passed on the output of your ! command"],
+  // Outside content aish delivered as a note — never his words, never aish's.
+  monitor_snapshot: ["inform", "Gave it the previous run's snapshot (outside content)"],
+  inbox_report: ["inform", "Gave it the inbox report (outside content)"],
 };
 const HARNESS_COLORS = { enforce: "var(--orange)", guide: "var(--yellow)", inform: "var(--dim)" };
 

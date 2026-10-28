@@ -769,6 +769,12 @@ RENDERLESS_STEPS = frozenset(
         # effect — the chip — rides on the turn's `done`, which the replay
         # re-derives from this record (`learning.with_chip`).
         "learning",  # #446
+        # #142 W5. A turn whose answer CODE composed, with no model call (the
+        # daily inbox report, `Agent.present`): the evidence that no model
+        # wrote what the owner read. The answer itself is an ordinary
+        # assistant message; this record renders nowhere live and is skipped
+        # on replay — and, being a trace, keeps the turn reconstructable.
+        "presented",  # #142 W5
         # #142 W5. The inbox assistant's verdict on one mail. In S1 it is
         # written ONLY to the verdict store (`mailverdicts`), never to a chat
         # log; it is registered here so the first slice that does carry one

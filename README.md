@@ -1076,6 +1076,7 @@ attachment from a verified sender, or a mail the Reader placed on a case —
 which stays visible until its case closes (cases cannot be closed yet, so
 these stay visible). `/mail` is
 terminal-only. Design and limits: `docs/mail-assistant.md`.
+Each morning at 07:30 (`scripts/install-mailreport-service.sh`) aish opens a new chat, *Inbox report — <day>*: what needs your action (pay, reply, decide — deadlines first), follow-ups (people who wrote after you and ask something; people you wrote to 5+ days ago who have not answered), and new mail that may interest you (not yet matched to your interests) — newsletters and sign-in codes left out and counted, suspicious mail marked CAUTION; you can answer in that chat, and every action there still gets its card, except the ones that cannot reach past you (a mail only you receive, a note write you opted in). `aish-mailreport --dry-run` prints today's report without sending anything.
 
 Interrupted work is picked up again. If aish-web goes down mid-task — a
 deploy, a crash — the next start reopens that session and tells the model to
