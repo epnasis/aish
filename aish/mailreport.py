@@ -91,6 +91,8 @@ INTEREST_SHOWN = 20
 #: Under `server.REPORT_NOTE_MAX_CHARS` (pinned by test): the note stays in
 #: every later turn's context, so it is kept small.
 REPORT_MAX_CHARS = 18_000
+#: The footer's own cap inside it, so the sections can never squeeze it out.
+FOOTER_MAX_CHARS = 5_000
 
 SUBJECT_CHARS = mailview.SUBJECT_CHARS
 NAME_CHARS = mailview.NAME_CHARS
@@ -218,6 +220,9 @@ class Reading:
     first_seen: float  # the earliest recorded_at: when aish first read it
     at: float
     at_source: str
+    # Every model's record of this mail: the preferences' safety floor reads
+    # all of them, so a flag on a reading that is not the newest still holds.
+    records: tuple[dict[str, Any], ...] = ()
 
     @property
     def verdict(self) -> dict[str, Any]:
@@ -279,6 +284,7 @@ def load_readings(state_dir: os.PathLike | str) -> tuple[dict[str, Reading], int
             first_seen=min(stamped) if stamped else 0.0,
             at=max(_f(r.get("at")) for r in records),
             at_source=str((chosen or records[0]).get("at_source") or ""),
+            records=tuple(records),
         )
     return out, unreadable
 
@@ -316,6 +322,8 @@ class Item:
 
     reading: Reading
     header: mailindex.Header | None
+    pinned: str = ""  # the show_first preference that put it first
+    despite: list[tuple[str, list[str]]] = field(default_factory=list)  # (pref id, why shown)
 
 
 @dataclass
@@ -329,6 +337,19 @@ class FollowUp:
     reading: Reading | None = None  # yours: the newest asking mail's reading
     latest: mailindex.Header | None = None  # yours: the newest asking mail
     asking: int = 1
+    asked: tuple[Reading | None, ...] = ()  # yours: EVERY asking mail's reading (the floor)
+    conversation: frozenset[str] = frozenset()  # every digest in its conversation
+    newest: float = 0.0  # the newest message of HIS or THEIRS it rests on
+    pinned: str = ""
+    despite: list[tuple[str, list[str]]] = field(default_factory=list)
+
+
+@dataclass
+class Due:
+    """One reminder due in this report — his words, approved on a card."""
+
+    text: str
+    ref: str  # the preference id or the case id it lives on
 
 
 @dataclass
@@ -349,6 +370,14 @@ class Report:
     unreadable_index: int = 0
     index_oldest: float = 0.0
     sent_in_window: int = 0
+    # His inbox preferences (`mailprefs`): what was applied and what it did.
+    prefs: dict[str, str] = field(default_factory=dict)  # applied id -> its sentence
+    prefs_by_kind: dict[str, int] = field(default_factory=dict)
+    hidden: dict[str, list[str]] = field(default_factory=dict)  # pref id -> what it hid
+    shown_despite: int = 0
+    reminders: list[Due] = field(default_factory=list)
+    prefs_unreadable: int = 0
+    corrections: int = 0
 
     def counts(self) -> dict[str, int]:
         return {"needs_action": len(self.needs), "your_turn": len(self.yours),
@@ -445,6 +474,7 @@ def follow_ups(
         if conversation[-1].at < window:
             continue
         outs = [h for h in conversation if h.direction == "out"]
+        members = frozenset(h.digest for h in conversation)
         parties = sorted({c for h in outs for c in h.correspondents} - mine - listy - {""})
         for party in parties:
             his = [h for h in outs if party in h.correspondents][-1]
@@ -454,7 +484,8 @@ def follow_ups(
             if not answers:
                 if (now - his.at >= THEIR_TURN_DAYS * 86400 and his.at >= window
                         and last_from.get(party, 0.0) <= his.at):
-                    theirs.append(FollowUp("theirs", party, his.at, his))
+                    theirs.append(FollowUp("theirs", party, his.at, his,
+                                       conversation=members, newest=his.at))
                 continue
             asking: list[tuple[mailindex.Header, Reading | None]] = []
             for header in answers:
@@ -471,7 +502,9 @@ def follow_ups(
                 continue
             latest, reading = asking[-1]
             yours.append(FollowUp("yours", party, _effective_at(asking[0][0], readings), his,
-                                  reading, latest, len(asking)))
+                                  reading, latest, len(asking), conversation=members,
+                                  newest=_effective_at(latest, readings),
+                                  asked=tuple(readings.get(h.digest) for h in answers)))
     yours.sort(key=lambda f: f.since)
     theirs.sort(key=lambda f: f.since)
     return yours, theirs
@@ -507,6 +540,193 @@ def _one_copy(items: list[Item]) -> tuple[list[Item], dict[str, list[str]]]:
             siblings[keep.reading.digest] = siblings.pop(held.reading.digest, [])
         siblings.setdefault(keep.reading.digest, []).append(drop.reading.digest)
     return out, siblings
+
+
+def _authenticated(record: dict[str, Any]) -> bool:
+    gate = record.get("gate")
+    auth = gate.get("auth") if isinstance(gate, dict) else None
+    return isinstance(auth, dict) and auth.get("authenticated") is True
+
+
+class _Preferences:
+    """His saved inbox preferences, applied to one report (`mailprefs`).
+
+    Hiding passes the safety floor first (`mailprefs.floor`): a hide or
+    not-a-follow-up can never take a risk-flagged mail out of his sight — the
+    suppression attack, in a chat a mail's words may have steered. Such an item
+    stays, marked with the preference and why it is shown anyway."""
+
+    def __init__(self, state_dir: os.PathLike | str, report: Report,
+                 readings: dict[str, Reading], index: mailindex.MailIndex) -> None:
+        from . import mailprefs  # mailprefs reads this module's helpers
+
+        self.prefs = mailprefs
+        self.store = mailprefs.Store.load(state_dir)
+        self.report = report
+        self.readings = readings
+        report.prefs_unreadable = len(self.store.unreadable)
+        report.corrections = len(self.store.of(mailprefs.CORRECTION))
+        for pref in self.store.of(*mailprefs.APPLIED_KINDS):
+            report.prefs[pref.id] = pref.text
+            _bump(report.prefs_by_kind, pref.kind)
+        # When each sender first passed authentication, by AISH's clock (when
+        # it first read the mail) — never a sender-written Date, which a forger
+        # could backdate past the sender's first pass.
+        self.index = index
+        self.passed: dict[str, float] = {}
+        for reading in readings.values():
+            header = index.get(reading.digest)
+            if header is None or not any(_authenticated(r) for r in reading.records):
+                continue
+            first = self.passed.get(header.from_addr)
+            seen = reading.first_seen
+            self.passed[header.from_addr] = min(first, seen) if first is not None else seen
+
+    def _floor(self, readings: list[Reading]) -> list[str]:
+        """Why these mails must stay visible: every model's record of each —
+        the item's own mail, its other inbox's copy, every asking mail of a
+        follow-up row."""
+        reasons: list[str] = []
+        for reading in readings:
+            header = self.index.get(reading.digest)
+            before = self.passed.get(header.from_addr) if header is not None else None
+            passed_before = bool(before is not None and before < reading.first_seen)
+            for record in reading.records or ((reading.record,) if reading.record else ()):
+                for why in self.prefs.floor(record, authenticated_before=passed_before):
+                    if why not in reasons:
+                        reasons.append(why)
+        return reasons
+
+    def _hid(self, pref_id: str, what: str) -> None:
+        self.report.hidden.setdefault(pref_id, []).append(what)
+
+    def _hide(self, reading: Reading | None, header: mailindex.Header | None,
+              extra: Callable[[Any], bool] = lambda _p: False,
+              also: tuple[Reading | None, ...] = (),
+              ) -> tuple[str, list[tuple[str, list[str]]]]:
+        """(the preference that hides it, or "", the preferences it is shown despite)."""
+        kind_word = str((reading.verdict if reading else {}).get("kind") or "")
+        despite: list[tuple[str, list[str]]] = []
+        under = [r for r in (reading, *also) if r is not None]
+        for pref in self.store.of(self.prefs.HIDE, self.prefs.NOT_A_FOLLOW_UP):
+            hit = (extra(pref) if pref.kind == self.prefs.NOT_A_FOLLOW_UP
+                   else self.prefs.matches_mail(pref, header, kind_word))
+            if not hit:
+                continue
+            reasons = self._floor(under)
+            if reasons:
+                despite.append((pref.id, reasons))
+                continue
+            return pref.id, []
+        return "", despite
+
+    def _pin(self, header: mailindex.Header | None, reading: Reading | None) -> str:
+        kind_word = str((reading.verdict if reading else {}).get("kind") or "")
+        for pref in self.store.of(self.prefs.SHOW_FIRST):
+            if self.prefs.matches_mail(pref, header, kind_word):
+                return pref.id
+        return ""
+
+    def items(self, items: list[Item], counts_as: Callable[[Item], str]) -> list[Item]:
+        kept = []
+        for item in items:
+            # A copy delivered to his other inbox was dropped by `_one_copy`;
+            # its readings still count toward the floor.
+            siblings = tuple(self.readings.get(d)
+                             for d in self.report.siblings.get(item.reading.digest, ()))
+            hidden_by, despite = self._hide(item.reading, item.header, also=siblings)
+            if hidden_by:
+                self._hid(hidden_by, counts_as(item))
+                continue
+            item.despite = despite
+            self.report.shown_despite += 1 if despite else 0
+            item.pinned = self._pin(item.header, item.reading)
+            kept.append(item)
+        # Stable: pinned first, each part in the section's own order.
+        return [i for i in kept if i.pinned] + [i for i in kept if not i.pinned]
+
+    def follow_ups(self, rows: list[FollowUp]) -> list[FollowUp]:
+        kept = []
+        for row in rows:
+            header = row.latest  # yours: the asking mail; theirs: None
+
+            def stops(pref: Any, row: FollowUp = row) -> bool:
+                f = pref.fields
+                if "counterparty" in f:
+                    return bool(row.counterparty == f["counterparty"])
+                # One conversation, as of when he said so: a new message in it
+                # after the preference brings it back.
+                return bool(f.get("conversation") in row.conversation
+                            and row.newest <= pref.created_at)
+
+            hidden_by, despite = self._hide(row.reading, header, stops, also=row.asked)
+            if not hidden_by and header is None:
+                # Their turn: nobody's mail to read, so a sender or domain hide
+                # is matched against the person he wrote to.
+                for pref in self.store.of(self.prefs.HIDE):
+                    if self.prefs.matches_party(pref, row.counterparty):
+                        hidden_by = pref.id
+                        break
+            if hidden_by:
+                self._hid(hidden_by, row.counterparty)
+                continue
+            row.despite = despite
+            self.report.shown_despite += 1 if despite else 0
+            kind_word = str((row.reading.verdict if row.reading else {}).get("kind") or "")
+            for pref in self.store.of(self.prefs.SHOW_FIRST):
+                if (self.prefs.matches_mail(pref, header, kind_word) if header is not None
+                        else self.prefs.matches_party(pref, row.counterparty)):
+                    row.pinned = pref.id
+                    break
+            kept.append(row)
+        return [r for r in kept if r.pinned] + [r for r in kept if not r.pinned]
+
+    def reminders(self, state_dir: os.PathLike | str, index: mailindex.MailIndex,
+                  now: float, clean: Clean) -> list[Due]:
+        """Reminders due in THIS report: his preferences, and the reminders on
+        his open cases (`cases` action=remind) — the report is where both are
+        delivered. Nothing is pushed for either."""
+        prefs = self.prefs
+        out: list[Due] = []
+        cases = mailcases.CaseStore(state_dir)
+        mine = owner_addresses(index)
+        for pref in self.store.of(prefs.REMIND):
+            f = pref.fields
+            if "case" in f:
+                case = cases.find(str(f["case"]))
+                if case is None or case.status == mailcases.CLOSED or case.dismissed:
+                    continue  # a case reminder ends when the case closes
+            if "due" in f:
+                due = prefs.due_dated(str(f["due"]), now)
+            elif "every" in f:
+                due = prefs.weekday(now) == f["every"]
+            else:
+                due = self._unanswered(index, mine, str(f["counterparty"]),
+                                       int(f["no_answer_days"]), now)
+            if due:
+                out.append(Due(safe(clean, pref.text, 400), pref.id))
+        for case in sorted(cases.cases.values(), key=lambda c: c.id):
+            if case.status == mailcases.CLOSED or case.dismissed or case.merged_into:
+                continue
+            for reminder in case.reminders:
+                if prefs.due_dated(str(reminder.get("due") or ""), now):
+                    out.append(Due(
+                        f"due {safe(clean, reminder.get('due'), 12)} on case "
+                        f"“{safe(clean, case.display_title(), 80)}”: "
+                        f"“{safe(clean, reminder.get('text'), 300)}”", case.id))
+        return out
+
+    def _unanswered(self, index: mailindex.MailIndex, mine: frozenset[str], party: str,
+                    days: int, now: float) -> bool:
+        his = [h.at for h in index.by_digest.values()
+               if h.direction == "out" and party in h.correspondents]
+        if not his:
+            return False
+        last = max(his)
+        answered = any(h.direction == "in" and h.from_addr == party
+                       and _effective_at(h, self.readings) > last
+                       for h in index.by_digest.values())
+        return not answered and now - last >= days * 86400
 
 
 def build(
@@ -579,12 +799,19 @@ def build(
     interest, interest_siblings = _one_copy(interest)
     report.siblings = {**needs_siblings, **interest_siblings}
     report.duplicates = sum(len(v) for v in report.siblings.values())
-    report.needs = sorted(needs, key=_needs_key)
-    report.interest = sorted(interest, key=lambda i: -i.reading.when)
-    report.yours, report.theirs = follow_ups(
+    prefs = _Preferences(state_dir, report, readings, index)
+
+    def sender(item: Item) -> str:
+        return item.header.from_addr if item.header is not None else item.reading.digest[:12]
+
+    report.needs = prefs.items(sorted(needs, key=_needs_key), sender)
+    report.interest = prefs.items(sorted(interest, key=lambda i: -i.reading.when), sender)
+    yours, theirs = follow_ups(
         index, readings, now,
         skip=frozenset(i.reading.digest for i in report.needs[:NEEDS_SHOWN]),
     )
+    report.yours, report.theirs = prefs.follow_ups(yours), prefs.follow_ups(theirs)
+    report.reminders = prefs.reminders(state_dir, index, now, clean)
     return report
 
 
@@ -666,16 +893,38 @@ def _needs_line(item: Item, clean: Clean, account: str) -> str:
         due = f" by {deadline}"
     elif deadline == mailreader.CANNOT_TELL:
         due = " (deadline: cannot tell)"
-    return (f"- {_cautions(item.reading.record)}{wanted}{due} — "
+    return (f"- {_pinned(item.pinned)}{_cautions(item.reading.record)}{wanted}{due} — "
             f"{_who(item.header, clean)} — {_subject(item.header, clean)} — "
             f"{_summary(item.reading, clean)} — "
-            f"{_where(item.header, item.reading.when, clean, account)}")
+            f"{_where(item.header, item.reading.when, clean, account)}"
+            f"{_ref(item.reading.digest)}{_despite(item.despite)}")
 
 
 def _interest_line(item: Item, clean: Clean, account: str) -> str:
-    return (f"- {_cautions(item.reading.record)}{_who(item.header, clean)} — "
+    return (f"- {_pinned(item.pinned)}{_cautions(item.reading.record)}"
+            f"{_who(item.header, clean)} — "
             f"{_subject(item.header, clean)} — {_summary(item.reading, clean)} — "
-            f"{_where(item.header, item.reading.when, clean, account)}")
+            f"{_where(item.header, item.reading.when, clean, account)}"
+            f"{_ref(item.reading.digest)}{_despite(item.despite)}")
+
+
+#: How many hex characters of a mail's digest the report prints — enough for
+#: the preference tool to name the mail (`mailprefs._resolve_mail`).
+REF_CHARS = 12
+
+
+def _ref(digest: str) -> str:
+    return f" — ref {digest[:REF_CHARS]}" if re.fullmatch(r"[0-9a-f]{64}", digest) else ""
+
+
+def _pinned(pref_id: str) -> str:
+    return f"[first: your preference {pref_id}] " if pref_id else ""
+
+
+def _despite(despite: list[tuple[str, list[str]]]) -> str:
+    """Never silent: an item a preference would have hidden, kept by the floor."""
+    return "".join(f" — **shown despite your preference {pref_id} because "
+                   + "; ".join(reasons) + "**" for pref_id, reasons in despite)
 
 
 def _yours_line(f: FollowUp, now: float, clean: Clean, account: str) -> str:
@@ -683,16 +932,52 @@ def _yours_line(f: FollowUp, now: float, clean: Clean, account: str) -> str:
     wanted = safe(clean, f.reading.verdict.get("wanted") if record and f.reading
                   else "no reading recorded", WORD_CHARS)
     more = f"{f.asking} messages" if f.asking > 1 else "a message"
-    return (f"- {_cautions(record)}{_days(now - f.since)} day(s) waiting on you — "
-            f"{safe(clean, f.counterparty, ADDRESS_CHARS)} sent {more} after your "
+    return (f"- {_pinned(f.pinned)}{_cautions(record)}{_days(now - f.since)} day(s) waiting "
+            f"on you — {safe(clean, f.counterparty, ADDRESS_CHARS)} sent {more} after your "
             f"{_subject(f.his, clean)} (the Reader: {wanted}) — "
-            f"{_where(f.latest, f.latest.at if f.latest else f.since, clean, account)}")
+            f"{_where(f.latest, f.latest.at if f.latest else f.since, clean, account)}"
+            f"{_ref(f.latest.digest if f.latest else '')}{_despite(f.despite)}")
 
 
 def _theirs_line(f: FollowUp, now: float, clean: Clean, account: str) -> str:
-    return (f"- {_days(now - f.since)} day(s) with no reply — you wrote to "
+    return (f"- {_pinned(f.pinned)}{_days(now - f.since)} day(s) with no reply — you wrote to "
             f"{safe(clean, f.counterparty, ADDRESS_CHARS)}: {_subject(f.his, clean)} — "
-            f"{_where(f.his, f.his.at, clean, account)}")
+            f"{_where(f.his, f.his.at, clean, account)}{_ref(f.his.digest)}")
+
+
+#: The collapsed line names at most this many hidden senders per preference.
+HIDDEN_NAMED = 3
+
+
+def _preference_lines(report: Report, clean: Clean) -> list[str]:
+    """ALWAYS present: what his preferences did to this report. Hiding is
+    never silent — each preference that hid something, how many and whose."""
+    hidden = sum(len(v) for v in report.hidden.values())
+    if report.prefs:
+        kinds = ", ".join(f"{k.replace('_', ' ')} {v}"
+                          for k, v in sorted(report.prefs_by_kind.items()))
+        out = [f"Using {len(report.prefs)} of your preferences ({kinds}) — hid {hidden} "
+               f"item(s); {report.shown_despite} shown despite a preference (marked on the "
+               "item)."]
+    else:
+        out = ["Using 0 of your preferences — none saved. Tell this chat what to hide, show "
+               "first or stop listing; aish saves it only after you approve the card."]
+    if report.hidden:
+        parts = []
+        for pref_id, what in sorted(report.hidden.items()):
+            names = sorted(set(what))
+            named = ", ".join(safe(clean, n, ADDRESS_CHARS) for n in names[:HIDDEN_NAMED])
+            more = f" +{len(names) - HIDDEN_NAMED}" if len(names) > HIDDEN_NAMED else ""
+            sentence = safe(clean, report.prefs.get(pref_id, ""), 120)
+            parts.append(f"{safe(clean, pref_id, 40)} “{sentence}” {len(what)} ({named}{more})")
+        out.append("Hidden by your preferences: " + " · ".join(parts))
+    if report.corrections:
+        out.append(f"{report.corrections} correction(s) of yours recorded — kept as ground "
+                   "truth for measuring the mail Reader, not applied to its readings.")
+    if report.prefs_unreadable:
+        out.append(f"{report.prefs_unreadable} preference file(s) could not be read and were "
+                   "NOT applied.")
+    return out
 
 
 INTEREST_NOTE = (
@@ -729,6 +1014,10 @@ def _section(title: str, rows: list[str], shown: int, empty: str, note: str = ""
 def _follow_section(report: Report, clean: Clean, account: str) -> list[str]:
     now = report.now
     out = ["", f"## Follow-ups ({len(report.yours) + len(report.theirs)})"]
+    if report.reminders:
+        # His own reminders lead: they are what he asked to be told today.
+        out.append(f"Reminders due ({len(report.reminders)}):")
+        out += [f"- REMINDER ({safe(clean, d.ref, 40)}): {d.text}" for d in report.reminders]
     if not report.sent_in_window:
         # Observed, not inferred: with none of his sent mail indexed there is
         # nothing to compute from, and an empty section would read as "none".
@@ -772,7 +1061,8 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
         note=INTEREST_NOTE,
     )
     excluded = report.excluded
-    lines += ["", "---"]
+    body = lines
+    lines = ["", "---"]  # the footer: what was NOT shown, and why — never cut by the cap
     lines.append(
         f"Not shown: {excluded.get(GATED_OUT, 0)} newsletter-gated, "
         f"{excluded.get(OTP_OUT, 0)} one-time code(s) or sign-in link(s), "
@@ -787,6 +1077,7 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
            if report.duplicates else "")
         + ". `/mail` lists every reading."
     )
+    lines += _preference_lines(report, clean)
     window = {"the last report": f"since the last report ({_when(report.since)})",
               "first report": f"since {_when(report.since)} (first report: "
                               f"{FIRST_RUN_DAYS} days)",
@@ -798,10 +1089,16 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
         "(a chosen number), whether or not your last message asked anything. "
         "Shadow mode: nothing was done to any mail."
     )
-    text = "\n".join(lines)
-    if len(text) > REPORT_MAX_CHARS:
-        text = text[: REPORT_MAX_CHARS - 80] + "\n(the report was cut here, at its size cap)"
-    return text
+    # The footer is the only place hiding is disclosed, so the size cap cuts
+    # the sections, never it; the footer has its own, smaller cap.
+    footer = "\n".join(lines)
+    if len(footer) > FOOTER_MAX_CHARS:
+        footer = footer[: FOOTER_MAX_CHARS - 60] + "\n(the footer was cut here, at its size cap)"
+    text = "\n".join(body)
+    room = REPORT_MAX_CHARS - len(footer) - 1
+    if len(text) > room:
+        text = text[: room - 60] + "\n(the report was cut here, at its size cap)"
+    return text + "\n" + footer
 
 
 # ---------------------------------------------------------------- the ledger
@@ -1059,7 +1356,16 @@ def main(argv: list[str] | None = None) -> int:
                         "reports showed (default: since the last delivered report)")
     parser.add_argument("--account", default=os.environ.get("AISH_MAIL_ACCOUNT", ""),
                         help="the Gmail account, for the Gmail links")
+    parser.add_argument("--seed-preferences", action="store_true",
+                        help="write the owner's seeded inbox preferences once (epic #142); "
+                        "a re-run writes nothing new; sends no report")
     args = parser.parse_args(argv)
+    if args.seed_preferences:
+        from . import mailprefs
+
+        for line in mailprefs.seed(paths.state_home(), now=time.time()):
+            print(f"[mailreport] {line}")
+        return 0
     from . import email_poll
     from .cli import _mail_cell  # `/mail`'s sanitiser (`cli._plain`): one sanitiser
 

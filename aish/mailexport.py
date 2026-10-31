@@ -27,12 +27,12 @@ import io
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import atomic_write, mailindex, mailreader, mailverdicts, mailview
+from . import atomic_write, mailindex, mailprefs, mailreader, mailverdicts, mailview
 
 Clean = Callable[[str], str]
 #: digest -> (truth label, tier), or None when the run's index lacks the mail.
@@ -52,6 +52,9 @@ COLUMNS = (
     "kind", "meaning", "disposition_raw", "disposition_effective", "clamped",
     "keeper_clamped", "owner_wrote_days", "wanted", "deadline", "suspicion", "sender_case", "case",
     "newsletter_gated_by", "gate", "charter_version", "digest", "provider_id",
+    # His own label on the mail (`mailprefs` correction): the strongest ground
+    # truth there is, recorded and never applied to the Reader.
+    "owner_correction",
 )
 TRUTH_COLUMNS = ("truth_recomputed_at_export", "tier_recomputed_at_export")
 
@@ -135,7 +138,8 @@ def _keeper_cell(record: dict[str, Any], keeper: dict[str, Any] | None,
 
 
 def row_of(
-    row: mailview.Row, clean: Clean, truth: TruthOf | None = None
+    row: mailview.Row, clean: Clean, truth: TruthOf | None = None,
+    corrections: Mapping[str, str] | None = None,
 ) -> list[str]:
     record, header = row.record, row.header
     raw = verdict_word(record, "disposition")
@@ -171,6 +175,7 @@ def row_of(
         (record.get("version") or "?", CELL_CHARS),
         (record.get("mail") or "?", CELL_CHARS),
         (record.get("provider_id") or "(none)", CELL_CHARS),
+        ((corrections or {}).get(str(record.get("mail") or ""), "none"), CELL_CHARS),
     ]
     if truth is not None:
         found = truth(str(record.get("mail") or ""))
@@ -187,8 +192,11 @@ def render(
     out = io.StringIO()
     writer = csv.writer(out, quoting=csv.QUOTE_ALL, lineterminator="\r\n")
     writer.writerow(COLUMNS + (TRUTH_COLUMNS if truth is not None else ()))
+    # His corrections live in the store's own state tree; a backtest run
+    # directory holds none, so its file says `none` throughout.
+    corrections = mailprefs.corrections(state_dir)
     for row in view.rows:
-        writer.writerow(row_of(row, clean, truth))
+        writer.writerow(row_of(row, clean, truth, corrections))
     return out.getvalue(), len(view.rows), view.unreadable
 
 

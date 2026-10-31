@@ -1979,6 +1979,42 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "inbox_preferences",
+            "description": (
+                "The owner's standing feedback on his inbox reports. list is free. add / edit "
+                "/ remove ONLY when his own message asks; he approves a card. Example: 'ignore "
+                "familysafety@microsoft.com' -> add kind=hide sender=familysafety@microsoft.com. "
+                "NEVER say you will remember or ignore something unless this tool answered SAVED."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "add", "edit", "remove"]},
+                    "id": {"type": "string", "description": "edit/remove: a pref id from list."},
+                    "kind": {"type": "string", "enum": ["hide", "show_first", "not_a_follow_up",
+                                                        "remind", "correction"]},
+                    "sender": {"type": "string"},
+                    "domain": {"type": "string"},
+                    "recipient": {"type": "string", "description": "hide mail sent TO this."},
+                    "mail_kind": {"type": "string"},
+                    "subject": {"type": "string", "description": "a subject phrase"},
+                    "counterparty": {"type": "string"},
+                    "conversation": {"type": "string", "description": "a report ref"},
+                    "mail": {"type": "string", "description": "correction: a report ref"},
+                    "case": {"type": "string"},
+                    "due": {"type": "string", "description": "YYYY-MM-DD"},
+                    "every": {"type": "string", "description": "a weekday"},
+                    "no_answer_days": {"type": "integer"},
+                    "note": {"type": "string"},
+                    "label": {"type": "string", "enum": ["needed_action", "junk"]},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "plan",
             "description": (
                 "Your own checklist for the owner's objective; he sees it. ONLY for work "

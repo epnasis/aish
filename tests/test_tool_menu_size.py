@@ -77,7 +77,10 @@ from aish import tools
 # Raised 37,800 -> 38,900 on 2026-10-31 for ONE new tool, cases (+1,115 chars;
 # epic #142 W5): the owner's mail cases read and changed from the report chat,
 # where the model otherwise searched mail and shell-probed the state dir.
-MAX_MENU_CHARS = 38_900
+# Raised 38,900 -> 40,200 on 2026-10-31 for ONE new tool, inbox_preferences
+# (+1,259 chars; epic #142 W5): in session-20261031-191100-732487 the report
+# chat promised to ignore a sender and had no way to make that true.
+MAX_MENU_CHARS = 40_200
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.
