@@ -408,8 +408,9 @@ reports Tuta's status=hard_fail* — never a cause. A copy in the body is not a 
 read; a header only counts when the ADAPTER asked for it, so another gateway's mail carrying the
 same line authenticates nothing. **An index file written before this slice has no observation**
 and reads *no … observation was recorded for this mail (indexed before aish read the bridge's
-header)* — not authenticated; held mail is never re-fetched, so Tuta mail indexed before
-2026-10-31 stays unauthenticated (*Residuals*).
+header)* — not authenticated. A watcher pass never re-fetches held mail; the one-time
+`--recheck-tuta-auth` does, and records the observation onto the existing entry (§The Tuta
+authentication recheck).
 
 **What it changes, all by existing rules:** an authenticated Tuta mail opens cases, puts accounts
 in a case's history, earns owner-act grades and becomes admissible as an alias exactly like
@@ -1148,11 +1149,89 @@ Follow-ups are computed from those two stores at read time, so nothing else is w
 - **Stated limits.** Late observation is as-of-correct (every case query is positional) but not
   identical to having watched live: a case opened by a later mail that was observed first keeps
   that later creation position, and an older mail joins it as a member. Tuta mail already in the
-  index from before 2026-10-31 is held, so it is not re-fetched and gains no bridge observation
-  (§Both inboxes). Gmail's listing is `in:inbox` / `in:sent`: mail he archived out of the inbox
+  index from before 2026-10-31 is held, so the backfill does not re-fetch it and it gains no
+  bridge observation; `--recheck-tuta-auth` does that (§The Tuta authentication recheck). Gmail's listing is `in:inbox` / `in:sent`: mail he archived out of the inbox
   is not listed.
 
 `tests/test_mailwatch_backfill.py` — `TestTheBackfill`, `TestTheCommand`.
+
+## The Tuta authentication recheck (2026-10-31) — `aish-mailwatch --recheck-tuta-auth`
+
+**Why.** Tuta mail indexed before the bridge-header slice (#461) carries no observation of
+`X-Tutabridge-Authentication`, so it reads as not authenticated (§Both inboxes), and it opened no
+case, put no account in a case's history and admitted no sender. A watcher pass and the backfill
+never re-fetch held mail. The owner asked on 2026-10-31 for one recheck that gives that mail the
+bridge's verification.
+
+**What it does** (`mailwatch.recheck_tuta_auth`). The targets are every Tuta index entry whose
+`gateway_auth_observed` is empty. It lists Tuta's INBOX and Sent back to the oldest target, plus
+a day (the same enumeration as a pass, up to `BACKFILL_LIMIT` per folder unless `--max` is
+given). It fetches only the listed messages whose envelope Message-ID, sender and subject match
+a target in the folder that agrees with the target's direction (`TutaMailbox.envelope_identity`
+/ `mailtuta.identity_of`). Every fetch is `TutaMailbox.fetch`: the `check_argv` fence, no
+`--seen`. The observation is then recorded onto the EXISTING entry
+(`MailIndex.record_gateway_auth`): same file, same digest, every other field untouched. An
+observation already recorded is never overwritten.
+
+- **Identity is the digest, unchanged.** The bridge's line sits in the header block, and none of
+  a Tuta digest's inputs do (`mailindex.digest_for`: gateway, Message-ID, sender, Date, subject,
+  body digest). So the fetched message re-parses to the digest the mail was indexed under, and
+  that equality IS the match; the envelope only narrows what is fetched. A fetched message
+  that re-parses to no target's digest is counted `fetched_not_matching`. A target with no such
+  message is counted `unmatched` and left byte-identical. Nothing is ever added to the index.
+- **The consequences follow as if the mail had arrived authenticated, in arrival order**
+  (`_follow_authentication`, index order, oldest first, from the earliest newly authenticated
+  inbound mail). A newly authenticated inbound mail on no case is observed
+  (`CaseStore.observe`), so it may open a case or join one. On every case it is on, it gains
+  the facts observation records only for authenticated mail, each at its OWN position
+  (`CaseStore.record_authenticated`): the sender's domain seen (moved earlier, never later), the
+  amounts, the payment coordinates. A LATER mail of his on a case a newly authenticated mail is
+  on re-asks admission as of itself (`CaseStore.admit_toward`), so his reply toward that sender
+  now admits it, at the reply's position. A LATER mail on no case that carries a key of an
+  earlier newly authenticated mail now on a case is observed, and joins it. Mail he moved is never re-observed: it stays
+  where he put it and gains its sighting there. Grades, the report's Follow-ups and the
+  ledger read the stores and the header at read time, so nothing else is written.
+- **Verdicts already recorded are NOT recomputed.** A verdict keeps the Gate facts, grade and
+  bundle it was given, which said *not authenticated*. Only mail the watcher reads after the
+  recheck sees the new state.
+- **A still-unauthenticated observation is final too.** A forged or second header, a
+  `status` other than `authenticated`, or a message the bridge served with no header gets that
+  observation recorded, `still_not_why` counts it in code's words, and it is not a target again.
+- **No Reader, structurally.** `recheck_tuta_auth` takes no model and no chat seam, the command
+  loads no charter, and no verdict is written. Pinned with `mailreader.read` replaced by a
+  function that fails the test.
+- **Idempotent and resumable.** Header observations are recorded LAST, after every case write;
+  every case step is idempotent, and which cases and keys the later steps act on is derived
+  from where each still-unrecorded mail now IS, never from what the interrupted run changed. So a
+  run interrupted before the headers is redone whole by the next one. Pinned: a crash at EVERY
+  case write in turn, then a re-run, leaves stores byte-identical to an uninterrupted run's
+  (`test_a_crash_at_any_case_write_is_finished_by_the_next_run`).
+- **A failed fetch defers the whole run.** It is counted `failed` and its entry left untouched,
+  and the mail matched beside it is counted `deferred`: nothing is applied and nothing recorded,
+  because applying a later mail now would let the earlier one, next run, meet cases the later one
+  opened. The next run redoes the whole set; a fetch that never succeeds holds every recheck back
+  until it does, and `failed` says so on every run.
+- **A second run is a no-op once every target is matched**: it finds no target and makes no
+  bridge call. An `unmatched` entry stays a target, so each later run lists the folders and
+  counts it `unmatched` again (pinned), changing nothing.
+- **One pass at a time**: it takes `pass_lock` (exit 3 when held). It needs no Gmail account.
+- **Recorded**: a `mail_tuta_recheck` line in `runs-YYYYMMDD.jsonl`, and the summary printed as
+  JSON: `needing`, `listed`, `fetched`, `rechecked`, `now_authenticated`, `still_not` (+
+  `still_not_why`), `failed` (+ `failed_kinds`), `unmatched`, `fetched_not_matching`,
+  `deferred`, `unparseable`, `gained_facts`, `observed`, `admitted`, `cases_before`/`cases_after`, and each
+  folder's enumeration `depth` (`capped` says the listing limit was hit before the window's start).
+- **Stated limits.** These are the backfill's: every fact this run writes carries the mail's own
+  position, but `CaseStore.observe` matches keys over the whole store, so an older mail can join
+  a case a later mail opened, which keeps that later creation position and the key's later
+  first sighting (pinned, `test_an_older_mail_joins_a_case_a_later_mail_opened`). The as-of
+  readers (`keys_before`, `admitted_before`, `coordinates_before`) still see nothing after the
+  mail. Mail he archived out of INBOX or Sent, or
+  deleted, is not listed and stays `unmatched`. The envelope match compares the subject as the
+  bridge's envelope gives it, so an envelope whose subject is decoded differently from the stored
+  header fetches nothing, and that mail is counted `unmatched`, never mis-matched.
+
+`tests/test_mailwatch_recheck.py` — `TestIdentity`, `TestConsequences`, `TestRunDiscipline`,
+`TestTheCommand`.
 
 ## The backtest — `aish-mailbacktest`
 
@@ -1255,9 +1334,12 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **Tuta authentication rests on the bridge's guarantee, checked only structurally.** aish
   verifies position and copy count; that the value reflects Tuta's real `authStatus` is the
   bridge's claim (#16's acceptance, observed by the owner on a sample, not by this repository). A
-  bridge bug that wrote `authenticated` for a spoof would authenticate it. And Tuta mail indexed
-  before 2026-10-31 carries no observation and stays unauthenticated: held mail is never
-  re-fetched, so its cases, grades and admissions are not reconsidered.
+  bridge bug that wrote `authenticated` for a spoof would authenticate it.
+- **Tuta mail indexed before 2026-10-31 is authenticated only once `--recheck-tuta-auth` has
+  run** (§The Tuta authentication recheck). Until then it carries no observation and stays
+  unauthenticated. The recheck reconsiders cases and admissions; it does NOT recompute a
+  verdict already recorded, and an entry it cannot match by digest, or that has left INBOX and
+  Sent, stays unauthenticated.
 - **Tuta's `at` is sender-written.** The Date header is all this gateway gives. It is bounded —
   an inbound unauthenticated mail opens no case and moves no grade, and since the squatting fix
   it can no longer displace a Gmail copy — but a forged Date still reorders the index and the
@@ -1377,6 +1459,15 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    command after an interruption or a quota stop — it fetches only what the index lacks. Then
    `aish-mailreport --dry-run --account pawel@wenda.eu` shows whether Follow-ups now has sent mail
    to work from.
+3g. **The Tuta authentication recheck** (2026-10-31), once, with the bridge running and
+   aish-web's env (`TUTA_BRIDGE_PASSWORD` in aish's secret store):
+   ```sh
+   aish-mailwatch --recheck-tuta-auth --owner pawel@wenda.email
+   ```
+   No model, no Reader call, never `--seen`. The printed JSON says how many were rechecked, how
+   many are now authenticated, still not (and why), failed, unmatched, and cases before/after.
+   Re-run after an interruption or `failed` > 0; a run with nothing left to recheck makes no
+   bridge call.
 4. **The mined replay scenario** — a real courier/store pair from his inbox — goes in the private
    tree (`~/.config/aish/evals/<name>/`, `docs/replay.md`), never here: find the pair in the
    backtest run's verdict store (`case_choice` on the courier mail), and replay it end to end

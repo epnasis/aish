@@ -591,6 +591,49 @@ class CaseStore:
             self._save(case)
         return Observation(keys, tuple(sorted(touched)), created, tuple(admitted))
 
+    def record_authenticated(self, case: Case, header: mailindex.Header, body: str) -> bool:
+        """The facts `observe` records only for AUTHENTICATED inbound mail —
+        the sender's domain seen on the case, its amounts, its coordinates —
+        for a mail already on `case` that was observed unauthenticated and is
+        authenticated now (the Tuta recheck). Every fact at the mail's own
+        position; idempotent per fact; the domain's first sighting moves only
+        EARLIER, never later. True when anything changed (and was saved)."""
+        if header.direction != "in" or header.position not in case.mails:
+            return False
+        position = header.position
+        text = f"{header.subject}\n{body}"
+        domain = mailindex.domain_of(header.from_addr)
+        changed = False
+        if domain and (domain not in case.domains or position < case.domains[domain]):
+            case.domains[domain] = position
+            changed = True
+        amounts = {(a["currency"], a["cents"]) for a in case.amounts if a["at"] == position}
+        for currency, cents in extract_amounts(text):
+            if (currency, cents) not in amounts:
+                case.amounts.append({"currency": currency, "cents": cents, "at": position})
+                changed = True
+        values = {c["value"] for c in case.coordinates if c["at"] == position}
+        for value in extract_coordinates(text):
+            if value not in values:
+                case.coordinates.append({"value": value, "at": position, "domain": domain})
+                changed = True
+        if changed:
+            self._save(case)
+        return changed
+
+    def admit_toward(
+        self, case: Case, header: mailindex.Header, index: mailindex.MailIndex | None
+    ) -> list[str]:
+        """Re-ask, as of an owner act already on `case`, which senders it admits
+        (`_admit_toward`) — after the case gained an authenticated sighting
+        earlier than the act. Idempotent; saves when it admitted anything."""
+        if header.direction != "out" or header.position not in case.mails:
+            return []
+        admitted = self._admit_toward(case, header, index)
+        if admitted:
+            self._save(case)
+        return admitted
+
     def _admit_toward(
         self, case: Case, header: mailindex.Header, index: mailindex.MailIndex | None
     ) -> list[str]:

@@ -207,6 +207,12 @@ class History:
     folders: dict[str, str] = field(default_factory=dict)
 
 
+def identity_of(header: mailindex.Header) -> tuple[str, str, str]:
+    """(Message-ID, sender address, subject) of a held message, in the shape
+    `TutaMailbox.envelope_identity` gives for a listed envelope."""
+    return header.message_id, header.from_addr, " ".join(header.subject.split())
+
+
 def _ref(folder: str, uid: int) -> str:
     return f"{NAME}:{uid}:{folder}"
 
@@ -425,19 +431,25 @@ class TutaMailbox:
         sender address AND subject. Anything less matching is fetched (dedup
         absorbs it): a skip that matched on the Message-ID alone would let a
         squatter's mail suppress the fetch of another carrying its id."""
-        envelope = self._envelopes.get(ref) or {}
-        message_id = mailindex.normalize_message_id(str(envelope.get("message_id") or ""))
+        message_id, sender, subject = self.envelope_identity(ref)
         if not message_id:
             return None
-        sender = _envelope_sender(envelope)
-        subject = " ".join(str(envelope.get("subject") or "").split())
         for digest in index.mid_members.get(message_id, ()):
             header = index.get(digest)
             if (header is not None and header.mailbox == NAME and sender
-                    and header.from_addr == sender
-                    and " ".join(header.subject.split()) == subject):
+                    and identity_of(header) == (message_id, sender, subject)):
                 return digest
         return None
+
+    def envelope_identity(self, ref: str) -> tuple[str, str, str]:
+        """(Message-ID, sender address, subject) of the envelope listed for
+        `ref` — what `identity_of` gives for a held message, so the two compare.
+        A NARROWING of what to fetch, never an identity: only the digest of the
+        fetched message is that."""
+        envelope = self._envelopes.get(ref) or {}
+        return (mailindex.normalize_message_id(str(envelope.get("message_id") or "")),
+                _envelope_sender(envelope),
+                " ".join(str(envelope.get("subject") or "").split()))
 
     def fetch(
         self, ref: str, owners: frozenset[str]
