@@ -204,6 +204,13 @@ class Header:
     # (`mailgate.authenticate_header`). Index files written before it existed
     # were all Gmail.
     mailbox: str = "gmail"
+    # The gateway's own authentication header, as the ADAPTER asked the parse
+    # to observe it (`from_rfc822(first_header=...)`): its value only when it
+    # was the raw message's FIRST header line and the only copy in the header
+    # block, and code's words for what was seen (`first_header_observation`).
+    # Empty on Gmail and on index files written before it existed.
+    gateway_auth: str = ""
+    gateway_auth_observed: str = ""
 
     @property
     def correspondents(self) -> tuple[str, ...]:
@@ -499,6 +506,42 @@ def _build_header(
 
 _FOLD = re.compile(r"\r?\n[ \t]+")
 
+# `first_header_observation`'s one positive word. Anything else it says is a
+# reason the header is not the gateway's own.
+FIRST_AND_ONLY = "the first header line, the only copy"
+
+
+def first_header_observation(raw: str, name: str, parsed_count: int) -> tuple[str, str]:
+    """(value, observed) for a header a gateway promises to write as the FIRST
+    header line of every message, after stripping every copy a sender wrote.
+
+    The promise is checked, not trusted: the value is returned only when the
+    raw message's very first line is that header AND exactly one copy exists
+    anywhere in the header block — counted on the raw lines (a name followed
+    by optional blanks and a colon, any case) and again by the email parser
+    (`parsed_count`), so a copy either reading misses is still a second copy.
+    A copy in the BODY is not a header and is never read. `observed` says what
+    was seen, in code's words; the value is "" whenever it is not
+    `FIRST_AND_ONLY`."""
+    head = re.split(r"\r?\n\r?\n", raw, maxsplit=1)[0]
+    lines = re.split(r"\r?\n", head)
+    starts = re.compile(r"^" + re.escape(name) + r"[ \t]*:", re.I)
+    copies = [n for n, line in enumerate(lines) if starts.match(line)]
+    count = max(len(copies), parsed_count)
+    if not copies and not parsed_count:
+        return "", f"no {name} header"
+    if count > 1:
+        return "", f"{count} copies of {name} in the header block"
+    if copies != [0]:
+        where = f"header line {copies[0] + 1}" if copies else "a place the raw scan did not find"
+        return "", f"{name} is not the first header line (it is at {where})"
+    value = lines[0].split(":", 1)[1]
+    for line in lines[1:]:
+        if line[:1] not in (" ", "\t"):
+            break
+        value += " " + line.strip()
+    return " ".join(value.split()), FIRST_AND_ONLY
+
 
 def _part_text(part: Any) -> str:
     try:
@@ -515,6 +558,7 @@ def from_rfc822(
     provider_id: str,
     in_sent_folder: bool,
     mailbox: str,
+    first_header: str = "",
 ) -> Parsed | None:
     """One raw RFC 5322 message from a gateway that is NOT Gmail (the Tuta
     bridge, via himalaya), or None — counted unparseable — when it cannot be
@@ -524,8 +568,15 @@ def from_rfc822(
     On Gmail the top-most one is Gmail's own, prepended above anything the
     sender wrote; through this gateway nothing is prepended, so the top-most
     one IS the sender's, and a sender-written exact copy of Gmail's would read
-    as authenticated. There is no result here a reader may trust, so none is
-    kept (`mailgate.authenticate_header` says so in words).
+    as authenticated. There is no such result here a reader may trust, so none
+    is kept.
+
+    **`first_header` is the adapter's declaration** of the header its gateway
+    writes first on every message (tutabridge's `X-Tutabridge-Authentication`).
+    Only when the adapter names one is it observed — position and copy count
+    on the raw text (`first_header_observation`) — and the Gate's authenticator
+    for that gateway reads only the observation (`mailgate.authenticate_header`).
+    A header naming itself is never enough: the name comes from the adapter.
 
     **Direction is the FOLDER**: out iff the mail sits in his Sent folder. A
     From header naming an owner address is something any sender can write;
@@ -537,17 +588,21 @@ def from_rfc822(
     sender-written; `at_source` says so on every record."""
     try:
         return _from_rfc822(raw, provider_id=provider_id, in_sent_folder=in_sent_folder,
-                            mailbox=mailbox)
+                            mailbox=mailbox, first_header=first_header)
     except Exception:  # noqa: BLE001 — containment is the point
         return None
 
 
 def _from_rfc822(
-    raw: str, *, provider_id: str, in_sent_folder: bool, mailbox: str
+    raw: str, *, provider_id: str, in_sent_folder: bool, mailbox: str, first_header: str = ""
 ) -> Parsed | None:
     if not isinstance(raw, str) or not raw.strip():
         return None
     msg = email.message_from_string(raw, policy=email.policy.default)
+    gateway_auth = gateway_auth_observed = ""
+    if first_header:
+        gateway_auth, gateway_auth_observed = first_header_observation(
+            raw, first_header, len(msg.get_all(first_header) or ()))
     headers = [
         (str(name), _FOLD.sub(" ", str(value)))
         for name, value in msg.items()
@@ -577,6 +632,9 @@ def _from_rfc822(
         provider_id=provider_id,
         mailbox=mailbox,
     )
+    if first_header:
+        header = _replace(header, gateway_auth=gateway_auth,
+                          gateway_auth_observed=gateway_auth_observed)
     return Parsed(header, _body_of(plain, htmls), ())
 
 

@@ -5,13 +5,20 @@ The same seam as the Gmail source (`mailsource.GmailSource`): a listing of
 inbox and sent, a fetch per mail, a parser. What differs is what the gateway
 can vouch for, and each difference is enforced here, not hoped for:
 
-- **No authentication result is readable through this gateway.** Nothing
-  prepends one above the sender's, so the parser drops every
-  Authentication-Results header (`mailindex.from_rfc822`) and the Gate gives
-  the explicit ending (`mailgate.authenticate_header`). A Tuta mail is never
-  authenticated, so an INBOUND Tuta mail mints nothing on its own behalf: no
-  grade for its sender, no case opened, no account in a case's history. A
-  mail in his Sent folder is different, and legitimately so: it is his own
+- **The bridge's own header is the authenticator, declared here.** tutabridge
+  (epnasis/tutabridge#16) writes `X-Tutabridge-Authentication` from Tuta's
+  server-computed `authStatus` as the FIRST header line of every message,
+  after stripping every copy a sender wrote. This adapter declares it
+  (`AUTH_HEADER`, passed to `mailindex.from_rfc822`), the parse records its
+  position and copy count, and the Gate's `tuta-bridge` authenticator
+  (`mailgate.authenticate_tuta_bridge`) reads only that observation: first
+  line, one copy, `status-source=tuta-server`, `status=authenticated` — else
+  not authenticated, with what was observed in words. Authentication-Results
+  headers are still dropped at parse time: nothing prepends one above the
+  sender's here. An INBOUND mail that is not authenticated mints nothing on
+  its own behalf: no grade for its sender, no case opened, no account in a
+  case's history; an authenticated one counts exactly as authenticated Gmail
+  does. A mail in his Sent folder is different, and legitimately so: it is his own
   act (direction `out`), so it records acts toward its recipients, can open
   an owner case and admit the domains he wrote to — exactly as his Gmail sent
   mail does. That rests on the Sent folder being his alone: only Tuta puts
@@ -27,8 +34,10 @@ can vouch for, and each difference is enforced here, not hoped for:
   healthy, quiet mailbox forever — the email-poll outage's shape. Here a
   listing pages the folder by sequence number from its STATUS count, and a
   listing is a failure only when the enumeration itself failed.
-- **Provider ids are not stable.** tutabridge renumbers UIDs on restart
-  without bumping UIDVALIDITY, so nothing is keyed by UID across passes: no
+- **Provider ids are treated as unstable.** tutabridge renumbered UIDs on
+  restart without bumping UIDVALIDITY (fixed bridge-side since
+  epnasis/tutabridge#19, not yet relied on here), so nothing is keyed by UID
+  across passes: no
   top-up ledger and no skip-by-id. A fetch is skipped only when the
   envelope's own Message-ID maps to a digest the index already holds — an
   identity the renumbering cannot change. Everything else is refetched and
@@ -51,7 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import mailindex, paths
+from . import mailgate, mailindex, paths
 from .mailsource import (
     MISSING,
     PARSE,
@@ -65,6 +74,9 @@ from .mailsource import (
 )
 
 NAME = "tuta"
+# The header this gateway writes first on every message — the adapter's
+# declaration, never something a header says about itself.
+AUTH_HEADER = mailgate.TUTA_BRIDGE_HEADER
 SECRET_ENV = "TUTA_BRIDGE_PASSWORD"
 HIMALAYA_TIMEOUT = 60
 # Sequence numbers per envelope page. Every himalaya call is a fresh TLS
@@ -439,7 +451,8 @@ class TutaMailbox:
         if not isinstance(raw, str):
             return None, Failure(PARSE, matched="no raw message")
         parsed = mailindex.from_rfc822(raw, provider_id=ref, mailbox=NAME,
-                                       in_sent_folder=folder == self.sent_folder)
+                                       in_sent_folder=folder == self.sent_folder,
+                                       first_header=AUTH_HEADER)
         if parsed is not None:
             listed = mailindex.normalize_message_id(
                 str((self._envelopes.get(ref) or {}).get("message_id") or ""))

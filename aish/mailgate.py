@@ -138,29 +138,87 @@ class Auth:
 NOT_READABLE = "not_readable_via_gateway"
 
 # Which gateway's own authentication result is readable, and whose authserv-id
-# wrote it. A gateway absent here has none: on the Tuta bridge nobody prepends
-# a result above the sender's, so the top-most one is the sender's own.
+# wrote it — Gmail's, read from its Authentication-Results header.
 GATEWAY_AUTHSERV = {"gmail": GMAIL_AUTHSERV}
+
+# The Tuta bridge's own header (epnasis/tutabridge#16): written by the bridge
+# as the FIRST header line of every message it serves, from Tuta's
+# server-computed `authStatus`, after it strips every copy the sender wrote.
+# Its documented guarantee: present means the bridge wrote it, and exactly one
+# copy exists. `mailtuta.TutaMailbox` declares it; this module only reads the
+# parse's observation of it.
+TUTA_BRIDGE = "tuta-bridge"
+TUTA_BRIDGE_HEADER = "X-Tutabridge-Authentication"
+TUTA_STATUS_SOURCE = "tuta-server"
+TUTA_AUTHENTICATED = "authenticated"
+
+# Which authenticator each gateway's ADAPTER declared. A gateway absent here
+# has none, and its mail is never authenticated.
+GATEWAY_AUTHENTICATOR = {"gmail": "gmail-authserv", "tuta": TUTA_BRIDGE}
 
 
 def authenticate_header(header: mailindex.Header) -> Auth:
     """The authentication verdict for one indexed mail, by the gateway its
     ADAPTER declared (`Header.mailbox`) — never inferred from its headers.
 
-    Through a gateway with no readable result the answer is an explicit
-    ending, not authenticated, with the reason in words; the headers are not
-    looked at even if some survived parsing (`mailindex.from_rfc822` drops
-    them). Unauthenticated, the grade is `first-contact` whatever the history,
-    and an INBOUND mail opens no case and puts no account in a case's history
-    — it mints nothing on its own behalf. His own outbound mail (his Sent
-    folder) records his acts whatever the gateway: direction, not
-    authentication, decides that (`mailindex.from_rfc822`)."""
+    Gmail: Gmail's own top-most Authentication-Results (`authenticate`).
+    Tuta: the bridge's own first-line header, and only as the parse observed
+    it (`authenticate_tuta_bridge`); Authentication-Results headers are dropped
+    at parse time there and never read. Any other gateway: an explicit ending,
+    not authenticated, with the reason in words. Unauthenticated, the grade is
+    `first-contact` whatever the history, and an INBOUND mail opens no case and
+    puts no account in a case's history — it mints nothing on its own behalf.
+    His own outbound mail (his Sent folder) records his acts whatever the
+    gateway: direction, not authentication, decides that
+    (`mailindex.from_rfc822`)."""
+    authenticator = GATEWAY_AUTHENTICATOR.get(header.mailbox, "")
+    if authenticator == TUTA_BRIDGE:
+        return authenticate_tuta_bridge(header)
     if header.mailbox not in GATEWAY_AUTHSERV:
         return Auth(
             NOT_READABLE, False, gateway=header.mailbox,
             why=f"no authentication result readable via the {header.mailbox} gateway",
         )
     return authenticate(header.auth_results, mailindex.domain_of(header.from_addr))
+
+
+def _bridge_params(value: str) -> dict[str, list[str]]:
+    params: dict[str, list[str]] = {}
+    for part in value.split(";"):
+        if "=" not in part:
+            continue
+        key, _, raw = part.partition("=")
+        params.setdefault(key.strip().lower(), []).append(raw.strip().lower())
+    return params
+
+
+def authenticate_tuta_bridge(header: mailindex.Header) -> Auth:
+    """Authenticated ONLY when the bridge's header was the raw message's first
+    header line and its only copy (the parse's observation), its
+    `status-source` is `tuta-server`, and its `status` is `authenticated` —
+    each named once. Every other case is not authenticated, and `why` says
+    what was observed, never why it happened."""
+    def refused(why: str, verdict: str = UNKNOWN) -> Auth:
+        return Auth(verdict, False, gateway=header.mailbox, read_from="", why=why)
+
+    observed = header.gateway_auth_observed
+    if not observed:
+        return refused(f"no {TUTA_BRIDGE_HEADER} observation was recorded for this mail "
+                       "(indexed before aish read the bridge's header)")
+    if observed != mailindex.FIRST_AND_ONLY:
+        return refused(f"tuta bridge header: {observed}")
+    params = _bridge_params(header.gateway_auth)
+    source = params.get("status-source", [])
+    if source != [TUTA_STATUS_SOURCE]:
+        shown = ", ".join(v[:40] for v in source) if source else "absent"
+        return refused(f"tuta bridge header: status-source {shown}, not {TUTA_STATUS_SOURCE}")
+    status = params.get("status", [])
+    if len(status) != 1:
+        return refused(f"tuta bridge header: {len(status)} status values")
+    if status[0] != TUTA_AUTHENTICATED:
+        return refused(f"the bridge reports Tuta's status={status[0][:40]}",
+                       verdict=status[0][:40] or UNKNOWN)
+    return Auth(TUTA_AUTHENTICATED, True, gateway=header.mailbox, read_from="bridge-header")
 
 
 _RESULT = re.compile(r"\b(dmarc|spf|dkim)\s*=\s*([a-z]+)", re.I)

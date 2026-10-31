@@ -380,14 +380,46 @@ and alias admission can lose an act to a squatter but never gain one. `TestMessa
 `TestIdentityNotUid`.
 
 **The authenticator is declared by the adapter, never inferred from headers.** Each parser
-stamps `Header.mailbox`; `mailgate.authenticate_header` reads it. Through the Tuta gateway
-nothing prepends a result above the sender's, so the top-most Authentication-Results IS the
-sender's, and a sender-written exact copy of Gmail's would authenticate. So
-`mailindex.from_rfc822` DROPS every Authentication-Results header at parse time, and the Gate
-gives the explicit ending `not_readable_via_gateway` with the reason in words — even for a
-header that somehow survived. Unauthenticated, an INBOUND Tuta mail mints nothing on its own
-behalf: its sender is `first-contact` whatever the history, and it opens no case and puts no
-account in a case's history; the forged perfect-Gmail-header case is pinned end to end. **A mail
+stamps `Header.mailbox`; `mailgate.authenticate_header` reads it, through
+`GATEWAY_AUTHENTICATOR` (`gmail` → Gmail's authserv-id, `tuta` → `tuta-bridge`, anything else →
+the explicit ending `not_readable_via_gateway`). Through the Tuta gateway nothing prepends an
+Authentication-Results above the sender's, so the top-most one IS the sender's, and a
+sender-written exact copy of Gmail's would authenticate. So `mailindex.from_rfc822` DROPS every
+Authentication-Results header at parse time, still.
+
+**Since 2026-10-31 (#461) Tuta's authenticator is the bridge's own header.** tutabridge
+(epnasis/tutabridge#16, observed live on 2026-10-31: 6 of 6 sampled raw messages carried it)
+writes `X-Tutabridge-Authentication: status=<authenticated|hard_fail|soft_fail|invalid_mail_from|
+missing_mail_from|unknown>; status-source=tuta-server; encryption-auth=<…>` — Tuta's
+server-computed `authStatus` — as the FIRST header line of every message it serves, after
+stripping every copy the sender wrote. Its documented guarantee: *present means the bridge wrote
+it, and exactly one copy exists.* aish checks that guarantee rather than trusting it. The adapter
+declares the header (`mailtuta.AUTH_HEADER`, passed as `from_rfc822(first_header=…)`); the parse
+records what it saw (`mailindex.first_header_observation` → `Header.gateway_auth` and
+`gateway_auth_observed`): the value only when the raw message's FIRST line is that header and
+exactly one copy exists in the header block — counted on the raw lines (any case, blanks before
+the colon) AND by the email parser, the larger count winning. The Gate's
+`mailgate.authenticate_tuta_bridge` then authenticates ONLY on: the observation is *the first
+header line, the only copy*; `status-source` is named once and is `tuta-server`; `status` is named
+once and is `authenticated`. Anything else is not authenticated, and `why` says what was seen —
+*no X-Tutabridge-Authentication header*, *2 copies of … in the header block*, *… is not the first
+header line (it is at header line 4)*, *status-source sender, not tuta-server*, *the bridge
+reports Tuta's status=hard_fail* — never a cause. A copy in the body is not a header and is never
+read; a header only counts when the ADAPTER asked for it, so another gateway's mail carrying the
+same line authenticates nothing. **An index file written before this slice has no observation**
+and reads *no … observation was recorded for this mail (indexed before aish read the bridge's
+header)* — not authenticated; held mail is never re-fetched, so Tuta mail indexed before
+2026-10-31 stays unauthenticated (*Residuals*).
+
+**What it changes, all by existing rules:** an authenticated Tuta mail opens cases, puts accounts
+in a case's history, earns owner-act grades and becomes admissible as an alias exactly like
+authenticated Gmail; an unauthenticated one still mints nothing on its own behalf — its sender is
+`first-contact` whatever the history, it opens no case and puts no account in a case's history.
+Pinned forgeries: the header not first, two copies (one genuine), two copies in different case, a
+`status-source` other than `tuta-server` or absent, two `status` values, the header inside the
+body, a perfect Gmail Authentication-Results, the line on a gateway that did not declare it.
+`tests/test_mailtuta_auth.py`; the forged perfect-Gmail-header case is pinned end to end in
+`TestAuthenticationIsDeclaredByTheGateway`. **A mail
 in his Tuta Sent folder is his own act and legitimately counts** — acts toward its recipients,
 an owner case from a key in it, admission of the domains he wrote to — as his Gmail sent mail
 does. That rests on the Sent folder being his alone: only Tuta puts mail there, and the bridge
@@ -422,8 +454,14 @@ folder's STATUS count and pages envelopes by sequence number from the newest
 first page wholly older than the window. An empty folder is a healthy empty listing; a failed
 STATUS or page is a failed listing. `TestEnumeration`.
 
-**Provider ids are unstable here** (UIDs renumber on restart, UIDVALIDITY unchanged), so all
-skip-by-id and top-up logic is Gmail-only. A Tuta fetch is skipped only when the index already
+**Provider ids are treated as unstable here** (UIDs renumbered on restart, UIDVALIDITY
+unchanged), so all skip-by-id and top-up logic is Gmail-only. **The bridge fixed this
+(epnasis/tutabridge#19: stable UIDs), and aish does NOT rely on it yet.** Flipping
+`TutaMailbox.stable_ids` would now be possible, and would buy the Gmail-side economies for Tuta:
+skip-by-UID instead of the Message-ID+sender+subject match, and the top-up ledger for failed
+fetches. It is a separate change, made on an observation of UIDs surviving a bridge restart, not
+on the bridge's word; identity stays content-addressed either way (`digest_for`), so flipping it
+would move no digest. A Tuta fetch is skipped only when the index already
 holds a TUTA message matching the envelope's Message-ID AND sender address AND subject — an
 identity the renumbering cannot move, and one a squatter matching on the id alone cannot use to
 suppress another mail's fetch. Anything less matching is fetched, and identical content dedups.
@@ -752,8 +790,8 @@ mail visible:
   signal is lawful here because it can only RESTRICT**: it can block filing and permits nothing.
 
 **Never on a newsletter-gated mail** — the rule refuses `gated` whatever the signals say (a gated
-mail has no verdict anyway; the refusal is the belt to that brace). **Unauthenticated mail — every
-inbound Tuta mail included — gets it from the judged signal only**: the deterministic signals name
+mail has no verdict anyway; the refusal is the belt to that brace). **Unauthenticated mail — Tuta mail
+without the bridge's authenticated header included — gets it from the judged signal only**: the deterministic signals name
 an authenticated sender, as the owner's rule states. What it gets is visibility: the clamp writes
 nothing into the case store, the ledger or the admissions, so it mints no case, grade or alias.
 `TestUnauthenticated` in `tests/test_mail_keeper.py`.
@@ -1072,6 +1110,12 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
   (S3). Until then it is a store he cannot see or shred, written only by this CLI.
 - **The lookalike flag needs admitted domains**, and admission now needs his act toward a sender,
   so early on it has few to compare against.
+- **Tuta authentication rests on the bridge's guarantee, checked only structurally.** aish
+  verifies position and copy count; that the value reflects Tuta's real `authStatus` is the
+  bridge's claim (#16's acceptance, observed by the owner on a sample, not by this repository). A
+  bridge bug that wrote `authenticated` for a spoof would authenticate it. And Tuta mail indexed
+  before 2026-10-31 carries no observation and stays unauthenticated: held mail is never
+  re-fetched, so its cases, grades and admissions are not reconsidered.
 - **Tuta's `at` is sender-written.** The Date header is all this gateway gives. It is bounded —
   an inbound unauthenticated mail opens no case and moves no grade, and since the squatting fix
   it can no longer displace a Gmail copy — but a forged Date still reorders the index and the

@@ -217,8 +217,10 @@ class TestAuthenticationIsDeclaredByTheGateway:
                                        mailbox="tuta")
         assert parsed is not None and parsed.header.auth_results == ()
         auth = mailgate.authenticate_header(parsed.header)
-        assert auth.authenticated is False and auth.verdict == mailgate.NOT_READABLE
-        assert "no authentication result readable via the tuta gateway" in auth.why
+        # The Tuta authenticator is the bridge's own header (#461,
+        # tests/test_mailtuta_auth.py); a Gmail-shaped header never reaches it.
+        assert auth.authenticated is False and auth.verdict == mailgate.UNKNOWN
+        assert "X-Tutabridge-Authentication" in auth.why
 
     def test_even_a_surviving_header_is_not_read_on_a_non_gmail_gateway(self):
         parsed = mailindex.from_rfc822(rfc822(frm="a@bank.example", message_id="z@x"),
