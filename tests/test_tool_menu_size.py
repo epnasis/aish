@@ -74,7 +74,10 @@ from aish import tools
 # chars: 37,341 -> 37,730, measured). Epic #462 S1 runs every cardless command in a
 # sandbox, and the kernel refuses `ps` (setuid) inside any sandbox; without
 # aish's own read-only check, "is X running" becomes an approval card.
-MAX_MENU_CHARS = 37_800
+# Raised 37,800 -> 38,900 on 2026-10-31 for ONE new tool, cases (+1,115 chars;
+# epic #142 W5): the owner's mail cases read and changed from the report chat,
+# where the model otherwise searched mail and shell-probed the state dir.
+MAX_MENU_CHARS = 38_900
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.

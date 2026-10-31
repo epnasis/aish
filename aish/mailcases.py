@@ -38,12 +38,15 @@ Eviction is whole-unit: the file goes and a dated tombstone says it went.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
+import fcntl
 import hashlib
 import json
 import os
 import re
 import time
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -52,6 +55,29 @@ from . import atomic_write, mailindex, vocab
 
 CASES_DIRNAME = "cases"
 TOMBSTONES_DIRNAME = "tombstones"
+# The owner's case acts, one JSON line each, appended by `CaseStore.act` only.
+ACTS_NAME = "case-acts.jsonl"
+
+OPEN = "open"
+CLOSED = "closed"
+# The kind of a key he typed when he created a case: matched literally
+# (`_says_key`), where an extracted key needs its introducing word.
+OWNER_KEY = "yours"
+
+# The owner's verbs (`CaseStore.act`). Each is HIS act: nothing in the
+# pipeline calls one, and the agent offers them only through a card in a task
+# he sent (`docs/mail-assistant.md` §The case verbs).
+CLOSE, REOPEN, MERGE, MOVE, RENAME, DISMISS, RESTORE, NOTE, REMIND, CREATE = (
+    "close", "reopen", "merge", "move", "rename", "dismiss", "restore", "note", "remind",
+    "create",
+)
+VERBS = (CLOSE, REOPEN, MERGE, MOVE, RENAME, DISMISS, RESTORE, NOTE, REMIND, CREATE)
+
+CASE_TITLE_CHARS = 80
+CASE_NOTE_CHARS = 400
+# A case verb waits this long for a running watcher pass to let go of the
+# store; past it the act is refused and says so (`store_lock`).
+STORE_LOCK_WAIT_S = 20.0
 
 MAX_CANDIDATES = 5
 TIME_WINDOW_DAYS = 7  # a courier mail days after the store's
@@ -115,6 +141,11 @@ _NRB = re.compile(r"(?<![\w])(\d{2}(?:[ ]?\d{4}){6})(?![\w])")  # a Polish accou
 
 
 # ---------------------------------------------------------------- extraction
+
+
+def _says_key(upper_text: str, key: str) -> bool:
+    """Does the (upper-cased) text carry `key` as a whole token?"""
+    return re.search(r"(?<![A-Z0-9])" + re.escape(key) + r"(?![A-Z0-9])", upper_text) is not None
 
 
 def extract_keys(text: str) -> dict[str, str]:
@@ -219,6 +250,17 @@ class Case:
     amounts: list[dict[str, Any]] = field(default_factory=list)  # {currency, cents, at}
     coordinates: list[dict[str, Any]] = field(default_factory=list)  # {value, at}
     proposals: dict[str, int] = field(default_factory=dict)  # "domain" -> count
+    # What the OWNER said about the case (the case verbs, `CaseStore.act`).
+    # Code never writes these from mail: a title from his rename, a closure
+    # from his close, and so on. Files written before them read as an open,
+    # untitled, visible case.
+    title: str = ""
+    status: str = "open"  # OPEN | CLOSED
+    closed_at: float | None = None  # wall time of his close
+    dismissed: bool = False  # "not a case": hidden from the list, kept, undoable
+    merged_into: str = ""  # he merged this case into another; kept, never observed
+    notes: list[dict[str, Any]] = field(default_factory=list)  # {at, text}
+    reminders: list[dict[str, Any]] = field(default_factory=list)  # {at, due, text}
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -234,6 +276,13 @@ class Case:
             "amounts": [{**a, "at": list(a["at"])} for a in self.amounts],
             "coordinates": [{**c, "at": list(c["at"])} for c in self.coordinates],
             "proposals": dict(self.proposals),
+            "title": self.title,
+            "status": self.status,
+            "closed_at": self.closed_at,
+            "dismissed": self.dismissed,
+            "merged_into": self.merged_into,
+            "notes": [dict(n) for n in self.notes],
+            "reminders": [dict(r) for r in self.reminders],
         }
 
     @classmethod
@@ -254,7 +303,24 @@ class Case:
             amounts=[{**a, "at": _pos(a["at"])} for a in raw.get("amounts") or ()],
             coordinates=[{**c, "at": _pos(c["at"])} for c in raw.get("coordinates") or ()],
             proposals={str(k): int(v) for k, v in (raw.get("proposals") or {}).items()},
+            title=str(raw.get("title") or ""),
+            status=CLOSED if raw.get("status") == CLOSED else OPEN,
+            closed_at=float(raw["closed_at"]) if raw.get("closed_at") is not None else None,
+            dismissed=raw.get("dismissed") is True,
+            merged_into=str(raw.get("merged_into") or ""),
+            notes=[dict(n) for n in raw.get("notes") or () if isinstance(n, dict)],
+            reminders=[dict(r) for r in raw.get("reminders") or () if isinstance(r, dict)],
         )
+
+    def display_title(self) -> str:
+        """His title, else one code derives from the case's first key — its
+        kind and the key itself, both regex output, never mail prose."""
+        if self.title:
+            return self.title
+        if self.keys:
+            key = min(self.keys, key=lambda k: (self.keys[k]["at"], k))
+            return f"{self.keys[key].get('kind') or 'reference'} {key}"
+        return f"untitled case {self.id}"
 
     # -- as-of views: strictly before the reviewed mail
 
@@ -300,6 +366,108 @@ class StoreHealth:
 
 
 @dataclass(frozen=True)
+class Closure:
+    """What the owner's closures release, read once from the store.
+
+    `closed_at`: case id -> when he closed it. `members`: mail digest -> the
+    cases it is on NOW (a mail he moved is on its new case)."""
+
+    closed_at: dict[str, float] = field(default_factory=dict)
+    members: dict[str, frozenset[str]] = field(default_factory=dict)
+
+    def releases(self, digest: str, read_at: float, recorded_cases: Iterable[str]) -> bool:
+        """Is a keeper clamp on this mail released? Only when the mail is on
+        at least one case — the cases its record names AND the ones it is on
+        now, so a move can only add a case that must close — and EVERY one of
+        them was closed at or after aish first read the mail (`read_at`, aish's
+        own clock). A mail that arrives on a case after he closed it stays
+        held: his close was about the mail he had seen."""
+        cases = set(recorded_cases) | set(self.members.get(digest, ()))
+        return bool(cases) and all(
+            c in self.closed_at and read_at <= self.closed_at[c] for c in cases)
+
+
+def _absorb(into: Case, other: Case) -> None:
+    """`other`'s facts become `into`'s. The earliest creation wins; an owner
+    creation that does not win stays his act on the merged case."""
+    if other.created < into.created:
+        if into.created_by == "owner":
+            into.owner_acts.append(into.created)
+        into.created, into.created_by = other.created, other.created_by
+    elif other.created_by == "owner":
+        into.owner_acts.append(other.created)
+    for key, info in other.keys.items():
+        if key not in into.keys or info["at"] < into.keys[key]["at"]:
+            into.keys[key] = info
+    into.mails = sorted(set(into.mails) | set(other.mails))
+    for addr, info in other.parties.items():
+        if addr not in into.parties or info["at"] < into.parties[addr]["at"]:
+            into.parties[addr] = info
+    for domain, seen in other.domains.items():
+        into.domains[domain] = min(seen, into.domains.get(domain, seen))
+    for domain, info in other.admitted.items():
+        if domain not in into.admitted or info["at"] < into.admitted[domain]["at"]:
+            into.admitted[domain] = info
+    into.owner_acts = sorted(set(into.owner_acts) | set(other.owner_acts))
+    into.amounts += other.amounts
+    into.coordinates += other.coordinates
+    for domain, count in other.proposals.items():
+        into.proposals[domain] = into.proposals.get(domain, 0) + count
+    into.notes += other.notes
+    into.reminders += other.reminders
+
+
+@contextlib.contextmanager
+def store_lock(
+    state_dir: os.PathLike | str,
+    wait_s: float = STORE_LOCK_WAIT_S,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Iterator[bool]:
+    """Yield True while this process holds the mail store's one lock — the
+    SAME `watch.lock` a watcher pass and the backfill hold
+    (`mailwatch.pass_lock`) — or False after `wait_s` without it. A case verb
+    takes it so a pass that loaded the store earlier cannot overwrite his act
+    when it saves a case."""
+    path = mailindex.mail_dir(state_dir) / "watch.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as handle:
+        waited = 0.0
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if waited >= wait_s:
+                    yield False
+                    return
+                sleep(0.5)
+                waited += 0.5
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def read_acts(state_dir: os.PathLike | str) -> list[dict[str, Any]]:
+    """The owner's case acts, oldest first. An unreadable line costs that line."""
+    path = mailindex.mail_dir(state_dir) / ACTS_NAME
+    try:
+        text = path.read_text()
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            out.append(entry)
+    return out
+
+
+@dataclass(frozen=True)
 class Observation:
     """What `observe` did with one mail — for the verdict record, so nothing
     downstream re-derives it."""
@@ -319,6 +487,10 @@ class CaseStore:
         self.directory = root / CASES_DIRNAME if root is not None else None
         self.tombstones = root / TOMBSTONES_DIRNAME if root is not None else None
         self.cases: dict[str, Case] = {}
+        # Cases he merged into another: kept whole, read by the case verbs and
+        # the closure, and by NOTHING that observes or correlates mail — those
+        # read `cases`, where the merged-into case now holds everything.
+        self.merged: dict[str, Case] = {}
         self.health = StoreHealth()
         if self.directory is not None and self.directory.is_dir():
             for path in sorted(self.directory.glob("*.json")):
@@ -327,8 +499,8 @@ class CaseStore:
                 except (OSError, ValueError, TypeError, KeyError):
                     self.health.unreadable.append(path.name)
                     continue
-                self.cases[case.id] = case
-            self.health.loaded = len(self.cases)
+                (self.merged if case.merged_into else self.cases)[case.id] = case
+            self.health.loaded = len(self.cases) + len(self.merged)
 
     def _save(self, case: Case) -> None:
         if self.directory is not None:
@@ -357,6 +529,15 @@ class CaseStore:
         touched: dict[str, Case] = {}
         for key in keys:
             for case in self.by_key(key):
+                touched[case.id] = case
+        # A key HE gave a case (`create`) is matched as itself, wherever the
+        # mail says it: no introducing word is needed, because he named the
+        # string. It joins mail to his case the way an extracted key does, and
+        # opens nothing.
+        upper = text.upper()
+        for case in self.cases.values():
+            if any(info.get("kind") == OWNER_KEY and _says_key(upper, key)
+                   for key, info in case.keys.items()):
                 touched[case.id] = case
         if header.direction == "out" and header.in_reply_to and index is not None:
             for parent_id in header.in_reply_to:
@@ -452,6 +633,143 @@ class CaseStore:
                             "mails": len(case.mails)}),
             )
         return True
+
+    # -- the owner's verbs: one writer, every act checked again when applied
+
+    def find(self, case_id: str) -> Case | None:
+        return self.cases.get(case_id) or self.merged.get(case_id)
+
+    def check(self, verb: str, fields: dict[str, Any]) -> str:
+        """Why this act cannot be applied to the store as it stands, or "".
+        Asked when the card is composed AND again under the lock just before
+        the act is applied, so a watcher pass between the two cannot make the
+        card describe a state that is gone."""
+        if verb not in VERBS:
+            return f"unknown case verb {verb!r}"
+        if verb == CREATE:
+            if not str(fields.get("title") or "").strip():
+                return "a new case needs a title"
+            taken = [k for k in fields.get("keys") or () if self.by_key(k)]
+            if taken:
+                return f"key {taken[0]} is already on case {self.by_key(taken[0])[0].id}"
+            return ""
+        case = self.cases.get(str(fields.get("case") or ""))
+        if case is None:
+            merged = self.merged.get(str(fields.get("case") or ""))
+            if merged is not None:
+                return f"case {merged.id} was merged into {merged.merged_into}"
+            return f"there is no case {fields.get('case')!r}"
+        if verb == CLOSE and case.status == CLOSED:
+            return f"case {case.id} is already closed"
+        if verb == REOPEN and case.status != CLOSED:
+            return f"case {case.id} is not closed"
+        if verb == DISMISS and case.dismissed:
+            return f"case {case.id} is already dismissed"
+        if verb == RESTORE and not case.dismissed:
+            return f"case {case.id} is not dismissed"
+        if verb == RENAME and not str(fields.get("title") or "").strip():
+            return "a rename needs a title"
+        if verb in (NOTE, REMIND) and not str(fields.get("text") or "").strip():
+            return f"a {verb} needs text"
+        if verb == REMIND and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(fields.get("due") or "")):
+            return "a reminder needs a due date as YYYY-MM-DD"
+        if verb in (MERGE, MOVE):
+            into = self.cases.get(str(fields.get("into") or ""))
+            if into is None:
+                return f"there is no case {fields.get('into')!r} to {verb} into"
+            if into.id == case.id:
+                return f"a case cannot be {verb}d into itself"
+        if verb == MOVE:
+            digest = str(fields.get("mail") or "")
+            if not any(p[1] == digest for p in case.mails):
+                return f"that mail is not on case {case.id}"
+        return ""
+
+    def act(self, verb: str, fields: dict[str, Any], *, by: str, now: float) -> dict[str, Any]:
+        """Apply one owner act and record it. Raises ValueError (the `check`
+        words) when it cannot apply. Returns the act's record, which is also
+        appended to the acts ledger."""
+        problem = self.check(verb, fields)
+        if problem:
+            raise ValueError(problem)
+        changed: list[Case] = []
+        record: dict[str, Any] = {"at": now, "verb": verb, "by": by}
+        if verb == CREATE:
+            title = str(fields["title"]).strip()[:CASE_TITLE_CHARS]
+            salt = 0
+            while True:
+                digest = hashlib.sha256(f"owner-act|{title}|{now}|{salt}".encode()).hexdigest()
+                if self.find(f"case-{digest[:12]}") is None:
+                    break
+                salt += 1
+            case = Case(id=f"case-{digest[:12]}", created=(now, ""), created_by="owner",
+                        title=title)
+            for key in fields.get("keys") or ():
+                case.keys[str(key)] = {"kind": OWNER_KEY, "at": (now, "")}
+            self.cases[case.id] = case
+            changed.append(case)
+            record.update(case=case.id, title=title, keys=sorted(case.keys))
+        else:
+            case = self.cases[str(fields["case"])]
+            record["case"] = case.id
+            if verb == CLOSE:
+                case.status, case.closed_at = CLOSED, now
+            elif verb == REOPEN:
+                case.status, case.closed_at = OPEN, None
+            elif verb == DISMISS:
+                case.dismissed = True
+            elif verb == RESTORE:
+                case.dismissed = False
+            elif verb == RENAME:
+                record["from"] = case.title
+                case.title = str(fields["title"]).strip()[:CASE_TITLE_CHARS]
+                record["title"] = case.title
+            elif verb == NOTE:
+                case.notes.append({"at": now, "text": str(fields["text"])[:CASE_NOTE_CHARS]})
+            elif verb == REMIND:
+                case.reminders.append({"at": now, "due": str(fields["due"]),
+                                       "text": str(fields["text"])[:CASE_NOTE_CHARS]})
+                record["due"] = str(fields["due"])
+            elif verb == MOVE:
+                into = self.cases[str(fields["into"])]
+                digest = str(fields["mail"])
+                moved = [p for p in case.mails if p[1] == digest]
+                case.mails = [p for p in case.mails if p[1] != digest]
+                into.mails = sorted(set(into.mails) | set(moved))
+                changed.append(into)
+                record.update(into=into.id, mail=digest)
+            elif verb == MERGE:
+                into = self.cases[str(fields["into"])]
+                _absorb(into, case)
+                case.merged_into = into.id
+                self.cases.pop(case.id)
+                self.merged[case.id] = case
+                changed.append(into)
+                record["into"] = into.id
+            changed.insert(0, case)
+        for touched in changed:
+            self._save(touched)
+        if self.directory is not None:
+            path = self.directory.parent / ACTS_NAME
+            with path.open("a") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        return record
+
+    def closure(self) -> Closure:
+        """What his closures release: each closed case's closure time (a case
+        merged into a closed one closes with it), and each mail's cases now."""
+        closed = {c.id: c.closed_at for c in self.cases.values()
+                  if c.status == CLOSED and c.closed_at is not None}
+        for case in self.merged.values():
+            target = self.cases.get(case.merged_into)
+            if target is not None and target.id in closed:
+                closed[case.id] = closed[target.id]
+        members: dict[str, set[str]] = {}
+        for case in self.cases.values():
+            for _at, digest in case.mails:
+                members.setdefault(digest, set()).add(case.id)
+        return Closure({k: float(v) for k, v in closed.items() if v is not None},
+                       {d: frozenset(ids) for d, ids in members.items()})
 
     # -- as-of reads
 

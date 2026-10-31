@@ -1009,6 +1009,16 @@ Written once by `Agent.present` (and `ClaudeMaxAgent.present`) through `_emit_re
 
 **What it does NOT establish:** who sent the text over `/trigger` — the server knows only that a token holder did (`server.REPORT_NOTE_HEADING` says so); or that the owner read it.
 
+### 3.23 · `case_act` — an owner case verb proposed through the `cases` tool (#142 W5)
+
+```json
+{"kind": "case_act", "turn": 2, "verb": "close", "outcome": "applied", "cases": ["case-0123456789ab"]}
+```
+
+Written by `Agent._cases` through `_emit_record` for every CHANGE or CREATE the model proposed, whatever became of it, and **renderless** (`RENDERLESS_STEPS`). `outcome`: `blocked` (the task was not sent by a person — `why` says so; no card was shown), `denied`, `held` (approved with a comment: nothing ran), `applied`, or `not_applied` (approved, then refused at apply time — the store changed since the card, or a watcher pass held the store's lock). `cases`: the case ids the applied act touched (`case`, and `into` for a merge or move); empty otherwise. LOOK calls (`list`, `show`) write none. The act itself — who, what, when, and the typed fields — is ALSO appended by the case store's one writer to `<state>/mail/case-acts.jsonl` (`mailcases.read_acts`), which is the case history `show` prints; this record is the session's side of it. No mail text and no note text is recorded here (§8.6).
+
+**What it does NOT establish:** that the person who tapped the card read it; a chip tap and a typed message are the same `task` to the server, so `task_from_owner` true means *a person sent this task*, not *he typed these words*.
+
 ### 3.20 · `mail_verdict` — the inbox assistant's verdict on one mail (#142 W5)
 
 **BUILT 2026-10-24 (slice S1, shadow).** Rationale and fences: `docs/mail-assistant.md`. One record per (mail, Reader model), written by `mailverdicts.build_record` for every inbound mail a shadow pass or a backtest arm assessed — gated, unadmitted and failed readings included (§0 corollary 2: a mail that was not read says so).

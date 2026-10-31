@@ -775,6 +775,7 @@ RENDERLESS_STEPS = frozenset(
         # assistant message; this record renders nowhere live and is skipped
         # on replay — and, being a trace, keeps the turn reconstructable.
         "presented",  # #142 W5
+        "case_act",  # #142 W5: an owner case verb, applied or not
         # #142 W5. The inbox assistant's verdict on one mail. In S1 it is
         # written ONLY to the verdict store (`mailverdicts`), never to a chat
         # log; it is registered here so the first slice that does carry one

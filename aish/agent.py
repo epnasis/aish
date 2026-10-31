@@ -47,6 +47,8 @@ from . import (
     evidence,
     export,
     files,
+    mailcases,
+    mailcasetool,
     media,
     ocr,
     owner_ua,
@@ -1258,6 +1260,19 @@ AUTOMATION_CHANGED_WHILE_OPEN = (
 )
 
 # A triggered session must never author the thing that triggers sessions.
+# The case verbs (#142 W5): a change to the owner's cases is his act, so it is
+# offered only in a task HE sent. Refused before any card, because the request
+# can only have come from somewhere else — a trigger's prompt, a restart's
+# replay — and a card would ask him to ratify what a mail may have asked for.
+CASES_CHANGE_NOT_FROM_OWNER = (
+    "NOT EXECUTED: changing a case is the user's own act, and this task was not a message "
+    "he sent (it was started by a trigger, an automation or a restart). There is nothing "
+    "to approve here. You may read cases (action list or show); say in your answer what "
+    "you would change, so he can ask for it."
+)
+CASES_NO_APPROVER = "NOT EXECUTED: no approval channel exists in this session to show the card."
+CASES_DENIED = "NOT EXECUTED: the user declined this case change. Nothing changed."
+
 SCHEDULE_ONLY_FROM_OWNER = (
     "NOT EXECUTED: schedule_task works only in the user's own chat. This session "
     "was started by an automation, and a run may not create or change the "
@@ -2504,6 +2519,7 @@ ASKED_BY_BATCH = "batch"
 ASKED_BY_KNOWLEDGE = "knowledge"
 ASKED_BY_RULE = "rule"
 ASKED_BY_PLUGIN = "plugin"
+ASKED_BY_CASES = "cases"
 
 # The client-side approvers label their own cards, since no gate in this
 # file raises them. They are here so the whole vocabulary is one list a
@@ -2516,7 +2532,7 @@ ASKED_BY_IMPORT = "import"
 ASKED_BY = (
     ASKED_BY_EGRESS, ASKED_BY_MAIL_LINK, ASKED_BY_PRESS, ASKED_BY_BATCH,
     ASKED_BY_KNOWLEDGE, ASKED_BY_RULE, ASKED_BY_PLUGIN, ASKED_BY_SHELL,
-    ASKED_BY_READ, ASKED_BY_WRITE, ASKED_BY_IMPORT,
+    ASKED_BY_READ, ASKED_BY_WRITE, ASKED_BY_IMPORT, ASKED_BY_CASES,
 )
 
 # Tools whose results carry bytes from OUTSIDE this machine. Once one has run,
@@ -3891,6 +3907,13 @@ class Agent:
         # never mentioned — see _egress_gate), gates knowledge writes (see
         # _knowledge_gate, #196), and scopes recall to knowledge entries only.
         self.origin = origin
+        # Did a PERSON send the task now running — typed it, tapped a chip,
+        # pressed Retry? Per task, not per session: the server sets it before
+        # every task (`server._run_task`'s `owner_sent`), so the owner typing
+        # in a report chat (origin "schedule") is his, and a trigger's prompt
+        # or a restart's replay is not. The default covers the CLI, where every
+        # task is typed. Only the case verbs read it (#142 W5).
+        self.task_from_owner = origin == "user"
         # Which caption language read_media reads. EMPTY BY DEFAULT, and that
         # is the setting: empty means "the language the recording is spoken
         # in". A model reads meaning out of the original far better than out of
@@ -5447,6 +5470,8 @@ class Agent:
         tool = self._plugin_tools.get(name)
         if tool is not None:
             return tool.content_from == provenance.MAIL
+        if name == "cases":
+            return True  # the one native tool whose result quotes mail (#142 W5)
         return name not in NATIVE_TOOL_NAMES
 
     def run_task(
@@ -7778,6 +7803,10 @@ class Agent:
         required = rules.needed_tools(self._bindings)
         if self._pending_skill_reads:
             required.append("read_skill")
+        if self.holds_kept_outside_note():
+            # The daily inbox report's chat (#142 W5): what the owner says
+            # there is about his mail and its cases, worded however he likes.
+            required.append("cases")
         continuity = self._previous_task_tools()
         if mode == tool_menu.MODE_CATALOG:
             # Arm C: nothing is ranked; the rest is a catalog the model loads
@@ -8542,6 +8571,8 @@ class Agent:
         tool = self._plugin_tools.get(name)
         if tool is not None and tool.content_from == provenance.MAIL:
             return READ_MAIL
+        if name == "cases":
+            return READ_MAIL  # case files quote mail subjects, senders, Reader meanings
         if name in UNTRUSTED_SOURCE_TOOLS and (
             name not in DUAL_SOURCE_TOOLS
             or (
@@ -8586,6 +8617,10 @@ class Agent:
                 return self._reads_outside_content(source)
             return True
         if name in self._plugin_tools:
+            return True
+        if name == "cases":
+            # The case store quotes mail (#142 W5): every result, read or
+            # change, carries text a stranger wrote or a model read from one.
             return True
         # Asked LAST, so this can only ever add. A local read used to raise
         # nothing, which is exactly how a caption track or a fetched PDF crossed
@@ -15003,6 +15038,9 @@ class Agent:
         if name == "automations":
             return self._automations(args)
 
+        if name == "cases":
+            return self._cases(args)
+
         if name == "run_command":
             # Expand any aish alias on the first word BEFORE the gate, so the
             # denylist/approval/cd-check all classify the real command.
@@ -16222,6 +16260,65 @@ class Agent:
                 )
         known = ", ".join(t.id for t in listing.tasks) or "none"
         return f"ERROR: there is no automation {task_id!r}. The user's automations: {known}."
+
+    def _cases(self, args: dict) -> str | tools.ToolOutcome:
+        """The owner's mail cases (#142 W5, `docs/mail-assistant.md` §The case
+        verbs). LOOK is free and returns outside content under the banner
+        (`_brings_outside_content` taints on it). Every other action is HIS act:
+        refused with no card unless a person sent this task
+        (`task_from_owner`), then carded with the one sentence code composed
+        from the typed fields (`mailcasetool.plan`), then applied under the
+        mail store's lock and recorded."""
+        state_dir = Path(self.state_dir) if self.state_dir else paths.state_home()
+        action = str(args.get("action") or "list").strip()
+        if action in mailcasetool.LOOK_ACTIONS:
+            try:
+                body = mailcasetool.look(state_dir, {**args, "action": action})
+            except mailcasetool.CaseError as exc:
+                return f"ERROR: {exc}"
+            return mailcasetool.LOOK_NOTE + web.UNTRUSTED_NOTE + provenance.disarm_markers(body)
+        if action not in mailcases.VERBS:
+            return f"ERROR: action must be one of {', '.join(mailcasetool.ACTIONS)}."
+        if not self.task_from_owner:
+            self._emit_record(kind="case_act", verb=action, outcome="blocked",
+                              why="task not sent by the owner")
+            return _gate_outcome(CASES_CHANGE_NOT_FROM_OWNER, decision="blocked")
+        if self.approve_tool is None:
+            return _gate_outcome(CASES_NO_APPROVER, decision="blocked")
+        try:
+            planned = mailcasetool.plan(state_dir, {**args, "action": action})
+        except mailcasetool.CaseError as exc:
+            return f"ERROR: {exc}"
+        preview = planned.sentence
+        # The card carries the TYPED fields only: a card shows its arguments
+        # beneath the sentence, and any other argument the model wrote is prose.
+        decision = self._ask_owner(
+            ASKED_BY_CASES, "cases", {"action": action, **planned.fields}, preview
+        )
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            self._emit_record(kind="case_act", verb=action, outcome="denied")
+            return _gate_outcome(
+                _with_feedback(CASES_DENIED, decision.comment, card_said=preview),
+                decision="denied", comment=decision.comment,
+            )
+        if isinstance(decision, Approved):
+            self._emit_record(kind="case_act", verb=action, outcome="held")
+            return _gate_outcome(
+                _tool_held("cases", decision.comment, card_said=preview),
+                decision="held", comment=decision.comment,
+            )
+        if decision is None or decision is False:
+            self._emit_record(kind="case_act", verb=action, outcome="denied")
+            return _gate_outcome(CASES_DENIED, decision="denied")
+        applied = mailcasetool.apply(state_dir, planned, by="owner", now=time.time())
+        self._emit_record(
+            kind="case_act", verb=action, outcome="applied" if applied.ok else "not_applied",
+            cases=sorted({str(v) for k, v in applied.record.items() if k in ("case", "into")}),
+        )
+        self._note(f"→ cases: {action}" + ("" if applied.ok else " (not applied)"))
+        return (mailcasetool.DONE_NOTE + web.UNTRUSTED_NOTE
+                + provenance.disarm_markers(applied.text))
 
     @staticmethod
     def _automation_deny_prefixes() -> list[str]:

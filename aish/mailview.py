@@ -36,7 +36,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import mailindex, mailverdicts, mailwatch
+from . import mailcases, mailindex, mailverdicts, mailwatch
 
 #: How many results `/mail` shows by default, and the most `/mail <n>` shows.
 MAIL_SHOWN = 20
@@ -72,6 +72,9 @@ class Row:
     record: dict[str, Any]
     header: mailindex.Header | None
     sort_at: float = 0.0
+    # The live store's closures (`mailcases.CaseStore.closure`): what releases
+    # a keeper clamp. None reads as "no case closed".
+    closure: mailcases.Closure | None = None
 
 
 @dataclass
@@ -117,8 +120,10 @@ def collect(state_dir: os.PathLike | str, limit: int = MAIL_SHOWN) -> View:
     view.total = len(rows)
     rows.sort(key=lambda r: (r.sort_at, _float(r.record.get("recorded_at"))), reverse=True)
     view.rows = rows[: max(0, limit)]
+    closure = mailcases.CaseStore(state_dir).closure()
     for row in view.rows:
         row.header = mailindex.load_header(state_dir, str(row.record.get("mail") or ""))
+        row.closure = closure
     return view
 
 
@@ -268,7 +273,8 @@ def row_lines(row: Row, clean: Clean) -> list[tuple[str, str]]:
         kind = _capped(clean, verdict.get("kind") or "?", KIND_CHARS)
         meaning = _capped(clean, verdict.get("meaning") or "", MEANING_CHARS)
         out.append(("body", f"  reading: {kind} — {meaning}"))
-        would = f"  would: {_capped(clean, mailverdicts.effective_disposition(record), WORD_CHARS)}"
+        effective = mailverdicts.effective_disposition(record, closure=row.closure)
+        would = f"  would: {_capped(clean, effective, WORD_CHARS)}"
         clamped = mailverdicts.clamp_of(record)
         if clamped:
             source = _capped(clean, clamped.get("from"), WORD_CHARS)
@@ -283,8 +289,12 @@ def row_lines(row: Row, clean: Clean) -> list[tuple[str, str]]:
                 _capped(clean, s, WORD_CHARS).replace("_", " ")
                 for s in _list(keeper.get("signals")) if isinstance(s, str)
             ) or "?"
-            would += (f" [KEEPER-CLAMPED from {source}: {signals} — kept visible until its "
-                      "case closes]")
+            if mailverdicts.keeper_released(record, closure=row.closure):
+                would += (f" [keeper clamp from {source} RELEASED: {signals} — you closed "
+                          "its case]")
+            else:
+                would += (f" [KEEPER-CLAMPED from {source}: {signals} — kept visible until "
+                          "its case closes]")
         would += f"; wants of you: {_capped(clean, verdict.get('wanted'), WORD_CHARS)}"
         deadline = _capped(clean, verdict.get("deadline") or "", WORD_CHARS)
         if deadline and deadline != "none":

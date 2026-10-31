@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import mailindex, mailreader, mailverdicts, mailview, paths, recipients, vocab
+from . import mailcases, mailindex, mailreader, mailverdicts, mailview, paths, recipients, vocab
 
 Clean = Callable[[str], str]
 
@@ -545,6 +545,8 @@ def build(
         1 for h in index.by_digest.values()
         if h.direction == "out" and h.at >= now - FOLLOWUP_WINDOW_DAYS * 86400
     )
+    # His case closures release keeper-clamped mail (`mailcases.Closure`).
+    closure = mailcases.CaseStore(state_dir).closure()
     needs: list[Item] = []
     interest: list[Item] = []
     for reading in readings.values():
@@ -564,7 +566,8 @@ def build(
         if wanted in WANTS_ACTION:
             needs.append(Item(reading, header))
         elif (wanted == "nothing"
-              and mailverdicts.effective_disposition(reading.record or {}) == "surface"):
+              and mailverdicts.effective_disposition(reading.record or {}, closure=closure)
+              == "surface"):
             interest.append(Item(reading, header))
         else:
             # In no section, and COUNTED: the Reader could not tell what it
@@ -600,7 +603,7 @@ def _days(seconds: float) -> int:
     return max(0, int(seconds // 86400))
 
 
-def _caution_marks(record: dict[str, Any] | None) -> list[str]:
+def caution_marks(record: dict[str, Any] | None) -> list[str]:
     """What was RECORDED that he should weigh — each named as what it is."""
     if not record:
         return []
@@ -620,7 +623,7 @@ def _caution_marks(record: dict[str, Any] | None) -> list[str]:
 
 def _cautions(record: dict[str, Any] | None) -> str:
     """Visible, never hidden — he decides. Code's words only."""
-    marks = _caution_marks(record)
+    marks = caution_marks(record)
     return ("**CAUTION: " + "; ".join(marks) + ".** ") if marks else ""
 
 
@@ -628,7 +631,7 @@ def _summary(reading: Reading, clean: Clean) -> str:
     """The Reader's one line — attributed, and WITHHELD on a cautioned mail:
     a summary of a suspicious mail is where an attacker's account number or
     "pay X to Y" would ride in aish's report."""
-    if _caution_marks(reading.record):
+    if caution_marks(reading.record):
         return "the Reader's summary is withheld on a cautioned mail — open the mail itself"
     meaning = safe(clean, reading.verdict.get("meaning") or "(no summary)", MEANING_CHARS)
     return f"the Reader: {meaning}"

@@ -248,21 +248,53 @@ def live_disposition(record: dict[str, Any]) -> str | None:
     return str(clamped["to"]) if clamped else str(verdict.get("disposition") or "")
 
 
+def keeper_released(
+    record: dict[str, Any],
+    closed_cases: Container[str] = frozenset(),
+    closure: mailcases.Closure | None = None,
+) -> bool:
+    """Has the owner's closure released this record's keeper clamp?
+
+    With `closure` (the live store's, `CaseStore.closure`): every case the
+    mail is on — as recorded and as it stands now — closed at or after aish
+    first read the mail (`recorded_at`, aish's clock; a sender-written Date
+    never decides it). Without it, the bare `closed_cases` rule
+    (`mailreader.keeper_released`)."""
+    keeper = keeper_clamp_of(record)
+    if keeper is None:
+        return False
+    if closure is None:
+        return mailreader.keeper_released(keeper, closed_cases)
+    raw = keeper.get("cases")
+    recorded = [c for c in raw if isinstance(c, str)] if isinstance(raw, list) else []
+    # aish's own clock only: no `recorded_at` (corrupt bytes) holds the clamp;
+    # `at` is a sender-written Date on Tuta and never stands in for it.
+    try:
+        read_at = float(record["recorded_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return closure.releases(str(record.get("mail") or ""), read_at, recorded)
+
+
 def effective_disposition(
-    record: dict[str, Any], closed_cases: Container[str] = frozenset()
+    record: dict[str, Any],
+    closed_cases: Container[str] = frozenset(),
+    closure: mailcases.Closure | None = None,
 ) -> str | None:
     """What the pipeline WOULD do with the mail: a clamp's disposition when
     code overrode the Reader, else the Reader's own; None with no verdict. The
-    one reader of this, for `/mail`, the CSV export and the backtest alike.
+    one reader of this, for `/mail`, the CSV export, the daily report and the
+    backtest alike.
 
-    `closed_cases` releases a keeper clamp whose cases have all closed. The
-    case store has no closure yet, so every caller passes none and the keeper
-    clamp holds."""
+    A keeper clamp holds until the owner closes the mail's cases
+    (`keeper_released`): `/mail`, the CSV and the report pass the live store's
+    `closure`; the backtest's scratch store has no owner acts, so it holds
+    there."""
     live = live_disposition(record)
     if live is None or clamp_of(record):
         return live
     keeper = keeper_clamp_of(record)
-    if keeper and not mailreader.keeper_released(keeper, closed_cases):
+    if keeper and not keeper_released(record, closed_cases, closure):
         return str(keeper["to"])
     return live
 
