@@ -418,7 +418,7 @@ authenticated Gmail; an unauthenticated one still mints nothing on its own behal
 Pinned forgeries: the header not first, two copies (one genuine), two copies in different case, a
 `status-source` other than `tuta-server` or absent, two `status` values, the header inside the
 body, a perfect Gmail Authentication-Results, the line on a gateway that did not declare it.
-`tests/test_mailtuta_auth.py`; the forged perfect-Gmail-header case is pinned end to end in
+`tests/test_mailtuta_auth.py` (`TestTheBridgeHeader`, `TestForgeries`, `TestEndToEnd`); the forged perfect-Gmail-header case is pinned end to end in
 `TestAuthenticationIsDeclaredByTheGateway`. **A mail
 in his Tuta Sent folder is his own act and legitimately counts** — acts toward its recipients,
 an owner case from a key in it, admission of the domains he wrote to — as his Gmail sent mail
@@ -1026,8 +1026,8 @@ meta, unread, the kept note outside the task string, no model call, live == cold
 
 ## The live backfill (2026-10-31) — `aish-mailwatch --backfill DAYS`
 
-**Why.** On 2026-10-28 the live index held 0 of his sent messages: the watcher lists a 2-day
-window (`DEFAULT_DAYS`) and only began on 2026-10-25, so the report's Follow-ups had nothing to
+**Why.** On 2026-10-28 the live index held 0 of his sent messages: the watcher lists a window of
+`DEFAULT_DAYS` (2) days and only began on 2026-10-25, so the report's Follow-ups had nothing to
 work from (*For the driver* 3e). The backfill reaches back once, deterministically.
 
 **What it does** (`mailwatch.backfill`): every source's INBOX and Sent for DAYS — the same
