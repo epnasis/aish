@@ -60,13 +60,16 @@ def add_verdict(
     deadline: str = "none", suspicion: str = "none", sender_case: str = "consistent",
     kind: str = "notice", meaning: str = "A notice.", ending: str = "ok", gated: bool = False,
     recorded_at: float | None = None, case_flags: dict | None = None,
-    keeper: bool = False, model: str = "gemini:test",
+    keeper: bool = False, model: str = "gemini:test", auth: bool | None = None,
 ) -> None:
+    gate: dict = {"newsletter": {"gated": gated, "by": ["List-Id"] if gated else []}}
+    if auth is not None:
+        gate["auth"] = {"authenticated": auth}
     record = {
         "kind": "mail_verdict", "mail": header.digest, "provider_id": header.provider_id,
         "at": header.at, "at_source": header.at_source, "model": model,
         "ending": "gated" if gated else ending,
-        "gate": {"newsletter": {"gated": gated, "by": ["List-Id"] if gated else []}},
+        "gate": gate,
         "case_flags": case_flags or {},
         "verdict": None if gated or ending != "ok" else {
             "disposition": disposition, "wanted": wanted, "deadline": deadline,

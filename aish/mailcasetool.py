@@ -217,8 +217,8 @@ def show_text(state_dir: os.PathLike | str, store: mailcases.CaseStore, case_id:
         lines.append(f"Note {_day(note.get('at'))}: {_q(note.get('text'), NOTE_SHOWN)}")
     for reminder in case.reminders:
         lines.append(f"Reminder due {_safe(reminder.get('due'), 12)}: "
-                     f"{_q(reminder.get('text'), NOTE_SHOWN)} (stored; nothing delivers "
-                     "reminders yet)")
+                     f"{_q(reminder.get('text'), NOTE_SHOWN)} (shown in the daily inbox "
+                     "report from its due date while the case is open)")
     acts = [a for a in mailcases.read_acts(state_dir)
             if case.id in (a.get("case"), a.get("into"))]
     if acts:
@@ -347,8 +347,8 @@ def _sentence(state_dir: os.PathLike | str, store: mailcases.CaseStore, verb: st
         return f"Add a note to case {name}: {_q(fields['text'], NOTE_SHOWN)}."
     if verb == mailcases.REMIND:
         return (f"Add a reminder to case {name} for {fields['due']}: "
-                f"{_q(fields['text'], NOTE_SHOWN)} — stored on the case; nothing delivers "
-                "reminders yet.")
+                f"{_q(fields['text'], NOTE_SHOWN)} — shown in your daily inbox report from "
+                "that date while the case is open; nothing else notifies you.")
     into = store.cases[fields["into"]]
     into_name = _q(into.display_title())
     if verb == mailcases.MERGE:

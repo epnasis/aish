@@ -49,6 +49,7 @@ from . import (
     files,
     mailcases,
     mailcasetool,
+    mailprefs,
     media,
     ocr,
     owner_ua,
@@ -1272,6 +1273,23 @@ CASES_CHANGE_NOT_FROM_OWNER = (
 )
 CASES_NO_APPROVER = "NOT EXECUTED: no approval channel exists in this session to show the card."
 CASES_DENIED = "NOT EXECUTED: the user declined this case change. Nothing changed."
+# The inbox preferences (#142 W5): the same law as the case verbs — standing
+# feedback is his, so it is offered only in a task he sent, and a refusal says
+# that NOTHING will be remembered (the false promise of 2026-10-31).
+PREFS_CHANGE_NOT_FROM_OWNER = (
+    "NOT SAVED: an inbox preference is the user's own act, and this task was not a message "
+    "he sent (it was started by a trigger, an automation or a restart). Nothing will be "
+    "remembered; do not say it will. You may list preferences; say in your answer what you "
+    "would save, so he can ask for it."
+)
+PREFS_NO_APPROVER = (
+    "NOT SAVED: no approval channel exists in this session to show the card. Nothing will be "
+    "remembered; do not say it will."
+)
+PREFS_DENIED = (
+    "NOT SAVED: the user declined this preference. Nothing will be remembered; do not say "
+    "it will."
+)
 
 SCHEDULE_ONLY_FROM_OWNER = (
     "NOT EXECUTED: schedule_task works only in the user's own chat. This session "
@@ -2520,6 +2538,7 @@ ASKED_BY_KNOWLEDGE = "knowledge"
 ASKED_BY_RULE = "rule"
 ASKED_BY_PLUGIN = "plugin"
 ASKED_BY_CASES = "cases"
+ASKED_BY_PREFERENCES = "inbox_preferences"
 
 # The client-side approvers label their own cards, since no gate in this
 # file raises them. They are here so the whole vocabulary is one list a
@@ -2533,6 +2552,7 @@ ASKED_BY = (
     ASKED_BY_EGRESS, ASKED_BY_MAIL_LINK, ASKED_BY_PRESS, ASKED_BY_BATCH,
     ASKED_BY_KNOWLEDGE, ASKED_BY_RULE, ASKED_BY_PLUGIN, ASKED_BY_SHELL,
     ASKED_BY_READ, ASKED_BY_WRITE, ASKED_BY_IMPORT, ASKED_BY_CASES,
+    ASKED_BY_PREFERENCES,
 )
 
 # Tools whose results carry bytes from OUTSIDE this machine. Once one has run,
@@ -5470,8 +5490,8 @@ class Agent:
         tool = self._plugin_tools.get(name)
         if tool is not None:
             return tool.content_from == provenance.MAIL
-        if name == "cases":
-            return True  # the one native tool whose result quotes mail (#142 W5)
+        if name in ("cases", "inbox_preferences"):
+            return True  # the native tools whose results quote mail (#142 W5)
         return name not in NATIVE_TOOL_NAMES
 
     def run_task(
@@ -7805,8 +7825,9 @@ class Agent:
             required.append("read_skill")
         if self.holds_kept_outside_note():
             # The daily inbox report's chat (#142 W5): what the owner says
-            # there is about his mail and its cases, worded however he likes.
-            required.append("cases")
+            # there is about his mail, its cases and his standing preferences,
+            # worded however he likes.
+            required += ["cases", "inbox_preferences"]
         continuity = self._previous_task_tools()
         if mode == tool_menu.MODE_CATALOG:
             # Arm C: nothing is ranked; the rest is a catalog the model loads
@@ -8571,8 +8592,10 @@ class Agent:
         tool = self._plugin_tools.get(name)
         if tool is not None and tool.content_from == provenance.MAIL:
             return READ_MAIL
-        if name == "cases":
-            return READ_MAIL  # case files quote mail subjects, senders, Reader meanings
+        if name in ("cases", "inbox_preferences"):
+            # Case files quote mail subjects, senders, Reader meanings; a
+            # preference's address or phrase may have been read off a mail.
+            return READ_MAIL
         if name in UNTRUSTED_SOURCE_TOOLS and (
             name not in DUAL_SOURCE_TOOLS
             or (
@@ -8618,9 +8641,10 @@ class Agent:
             return True
         if name in self._plugin_tools:
             return True
-        if name == "cases":
+        if name in ("cases", "inbox_preferences"):
             # The case store quotes mail (#142 W5): every result, read or
-            # change, carries text a stranger wrote or a model read from one.
+            # change, carries text a stranger wrote or a model read from one;
+            # a preference's card quotes the mail it names.
             return True
         # Asked LAST, so this can only ever add. A local read used to raise
         # nothing, which is exactly how a caption track or a fetched PDF crossed
@@ -15041,6 +15065,9 @@ class Agent:
         if name == "cases":
             return self._cases(args)
 
+        if name == "inbox_preferences":
+            return self._inbox_preferences(args)
+
         if name == "run_command":
             # Expand any aish alias on the first word BEFORE the gate, so the
             # denylist/approval/cd-check all classify the real command.
@@ -16318,6 +16345,74 @@ class Agent:
         )
         self._note(f"→ cases: {action}" + ("" if applied.ok else " (not applied)"))
         return (mailcasetool.DONE_NOTE + web.UNTRUSTED_NOTE
+                + provenance.disarm_markers(applied.text))
+
+    def _inbox_preferences(self, args: dict) -> str | tools.ToolOutcome:
+        """The owner's standing inbox-report preferences (#142 W5,
+        `docs/mail-assistant.md` §Inbox preferences) — the case verbs' law:
+        list is free outside content; add / edit / remove are refused with no
+        card unless a person sent this task, carded with the one sentence code
+        composed from the typed fields (`mailprefs.plan`), and saved under the
+        store's lock. Only a save answers SAVED — the one result that may
+        confirm memory."""
+        state_dir = Path(self.state_dir) if self.state_dir else paths.state_home()
+        action = str(args.get("action") or "list").strip()
+        if action in mailprefs.LOOK_ACTIONS:
+            body = mailprefs.list_text(state_dir)
+            return mailprefs.LOOK_NOTE + web.UNTRUSTED_NOTE + provenance.disarm_markers(body)
+        if action not in mailprefs.CHANGE_ACTIONS:
+            return f"ERROR: action must be one of {', '.join(mailprefs.ACTIONS)}."
+        kind = str(args.get("kind") or "")[:40]  # model-supplied: capped before it is recorded
+        if not self.task_from_owner:
+            self._emit_record(kind="preference_act", action=action, pref_kind=kind,
+                              outcome="blocked", why="task not sent by the owner")
+            return _gate_outcome(PREFS_CHANGE_NOT_FROM_OWNER, decision="blocked")
+        if self.approve_tool is None:
+            return _gate_outcome(PREFS_NO_APPROVER, decision="blocked")
+        try:
+            planned = mailprefs.plan(state_dir, {**args, "action": action})
+        except mailprefs.PrefError as exc:
+            return f"ERROR: {exc}. NOT SAVED: nothing will be remembered."
+        preview = planned.card
+        # The card carries the TYPED fields only, as the case verbs' does.
+        card_args = {"action": action, "kind": planned.kind, **planned.fields,
+                     **({"id": planned.target} if planned.target else {})}
+        decision = self._ask_owner(ASKED_BY_PREFERENCES, "inbox_preferences", card_args, preview)
+        pref_act = {"kind": "preference_act", "action": action, "pref_kind": planned.kind}
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            self._emit_record(**pref_act, outcome="denied")
+            return _gate_outcome(
+                _with_feedback(PREFS_DENIED, decision.comment, card_said=preview),
+                decision="denied", comment=decision.comment,
+            )
+        if isinstance(decision, Approved):
+            self._emit_record(**pref_act, outcome="held")
+            return _gate_outcome(
+                "NOT SAVED yet: nothing will be remembered until a card is approved. "
+                + _tool_held("inbox_preferences", decision.comment, card_said=preview),
+                decision="held", comment=decision.comment,
+            )
+        if decision is None or decision is False:
+            self._emit_record(**pref_act, outcome="denied")
+            return _gate_outcome(PREFS_DENIED, decision="denied")
+        chat = ""
+        if self.current_session is not None:
+            try:
+                chat = Path(self.current_session()).stem
+            except Exception:  # noqa: BLE001 — a name is a label, never worth a call
+                chat = ""
+        applied = mailprefs.apply(state_dir, planned,
+                                  source={"session": chat, "turn": self._turn},
+                                  now=time.time())
+        self._emit_record(**pref_act, outcome="applied" if applied.ok else "not_applied",
+                          id=applied.pref_id)
+        self._note(f"→ inbox_preferences: {action}" + ("" if applied.ok else " (not saved)"))
+        if not applied.ok:
+            # Never under DONE_NOTE: a failed save in aish's "saved" voice is
+            # the false promise this tool exists to close.
+            return _gate_outcome(applied.text, decision="blocked")
+        return (mailprefs.DONE_NOTE + web.UNTRUSTED_NOTE
                 + provenance.disarm_markers(applied.text))
 
     @staticmethod

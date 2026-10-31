@@ -22,6 +22,7 @@ from . import (
     browser,
     learning,
     mailexport,
+    mailprefs,
     mailview,
     objective,
     owner_ua,
@@ -262,6 +263,9 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
   {CYAN}/mail export [path]{RESET} every recorded reading as one CSV row per (mail,
                  model), to sort and filter in a spreadsheet — into your
                  Downloads folder unless a path is given; prints the file's path
+  {CYAN}/mail preferences{RESET} your saved inbox preferences — what the daily report
+                 hides, shows first, stops listing or reminds you of; you add
+                 and change them by asking in a report chat, on a card
   {CYAN}/new, /clear{RESET}   fresh conversation in a new chat (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
@@ -1976,6 +1980,11 @@ def show_mail(task: str, state_dir: Path, now: float | None = None) -> None:
     Reads only; every mail- or model-originated string is rendered through
     `_plain` — `mailview.lines` cannot be called without a sanitiser."""
     args = task.split()[1:]
+    if args == ["preferences"]:
+        # The owner's saved inbox preferences (#142 W5): what the daily report obeys.
+        for line in mailprefs.list_text(state_dir).splitlines():
+            print(f"{DIM}{_mail_cell(line)}{RESET}")
+        return
     if args[:1] == ["export"] and len(args) <= 2:
         written = mailexport.export(
             state_dir, clean=_mail_cell, run=mailexport.LIVE_RUN,
@@ -1994,7 +2003,7 @@ def show_mail(task: str, state_dir: Path, now: float | None = None) -> None:
         print(f"{DIM}usage: /mail [n] — the newest n shadow results (default "
               f"{mailview.MAIL_SHOWN}, at most {mailview.MAIL_LIMIT_MAX}); /mail export "
               f"[path] — every recorded reading as a CSV file (default: your Downloads "
-              f"folder){RESET}")
+              f"folder); /mail preferences — your saved inbox preferences{RESET}")
         return
     styles = {"warn": YELLOW + BOLD, "head": BOLD}
     for style, text in mailview.lines(state_dir, clean=_mail_cell, limit=limit, now=now):

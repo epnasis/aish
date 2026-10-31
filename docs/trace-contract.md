@@ -1019,6 +1019,14 @@ Written by `Agent._cases` through `_emit_record` for every CHANGE or CREATE the 
 
 **What it does NOT establish:** that the person who tapped the card read it; a chip tap and a typed message are the same `task` to the server, so `task_from_owner` true means *a person sent this task*, not *he typed these words*.
 
+### 3.24 · `preference_act` — an owner inbox preference proposed through `inbox_preferences` (#142 W5)
+
+```json
+{"kind": "preference_act", "turn": 2, "action": "add", "pref_kind": "hide", "outcome": "applied", "id": "pref-0123456789"}
+```
+
+Written by `Agent._inbox_preferences` through `_emit_record` for every add, edit or remove the model proposed, whatever became of it, and **renderless** (`RENDERLESS_STEPS`). `outcome` has `case_act`'s vocabulary: `blocked` (not a task a person sent — `why` says so; no card), `denied`, `held`, `applied`, `not_applied` (approved, then refused at save time: the store changed since the card, or its lock was held). `pref_kind` is the typed kind; `id` the saved or removed preference (empty unless applied). A `list` writes none. The act with its typed fields and the session + turn it came from is ALSO appended by the store's one writer to `<state>/mail/preference-acts.jsonl` (`mailprefs.read_acts`). **What it does NOT establish:** what `task_from_owner` does not (§3.23).
+
 ### 3.20 · `mail_verdict` — the inbox assistant's verdict on one mail (#142 W5)
 
 **BUILT 2026-10-24 (slice S1, shadow).** Rationale and fences: `docs/mail-assistant.md`. One record per (mail, Reader model), written by `mailverdicts.build_record` for every inbound mail a shadow pass or a backtest arm assessed — gated, unadmitted and failed readings included (§0 corollary 2: a mail that was not read says so).

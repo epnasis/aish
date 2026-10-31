@@ -2,7 +2,7 @@
 
 `mailindex.py`, `mailgate.py`, `mailcases.py`, `mailreader.py`, `mailverdicts.py`,
 `mailwatch.py`, `mailsource.py`, `mailtuta.py`, `mailview.py`, `mailexport.py`,
-`mailbacktest.py`, `mailreport.py`, `mailcasetool.py`,
+`mailbacktest.py`, `mailreport.py`, `mailcasetool.py`, `mailprefs.py`,
 `aish/charters/mail-reader.md`, `scripts/install-mailwatch-service.sh`,
 `scripts/install-mailreport-service.sh`.
 The binding design is the comment *"W5 REWRITTEN — the inbox assistant"* on epic #142
@@ -1054,8 +1054,9 @@ the first key's kind and the key — regex output, never a subject.
 another's keys, mails, parties, senders, admitted senders and account history; the absorbed case's
 file is KEPT with `merged_into` and no longer observed; no undo verb), `move` (one mail from a case
 to another), `rename`, `dismiss` ("not a case": hidden from `list`, nothing deleted, correlation
-unchanged) and `restore`, `note`, `remind` (a due date and text, stored and shown — **nothing
-delivers reminders yet**), and `create` (a title and optional keys he gives; mail carrying such a
+unchanged) and `restore`, `note`, `remind` (a due date and text, stored, shown by `show`, and —
+since the preferences slice — listed in the daily report's Follow-ups from its due date for 7 days
+while the case is open; nothing else notifies him), and `create` (a title and optional keys he gives; mail carrying such a
 key joins the case wherever it says it — `OWNER_KEY`, `_says_key` — and opens nothing). There is
 no delete verb.
 
@@ -1107,6 +1108,126 @@ deletes mail, and nothing in this slice can.
 
 `tests/test_mailcase_verbs.py` — `TestTheStoreVerbs`, `TestClosureReleasesTheKeeperClamp`,
 `TestTheTool`, `TestTheServerSetsWhoSentIt`.
+
+## Inbox preferences (2026-10-31) — the `inbox_preferences` tool, `mailprefs.py`
+
+**Why.** The owner's directive (epic #142, 2026-10-28): feedback in the report chat that aish
+remembers for future inbox reviews, "just like feedback I would give a real assistant". The evidence
+that made it urgent, session-20261031-191100-732487: he told the report chat that
+familysafety@microsoft.com was to be ignored, and the model answered *"Understood … should be
+ignored in inbox reviews"* — a promise nothing enforced; the next report listed them again. The
+same report's Follow-ups listed a *your turn* item that was the other party's closing payment
+confirmation.
+
+**The store.** `<state>/mail/preferences/<id>.json`, one file per preference, in the STATE tree —
+they name his correspondents, and the config tree is auto-pushed to a backup. Written only by
+`mailprefs.apply` and `mailprefs.seed`, through `atomic_write`, under the store's OWN lock
+(`preferences.lock`, `PREFS_LOCK_WAIT_S` 10 s) — not the watcher's `watch.lock`, because no watcher
+pass writes preferences and a long backfill must not block a save. Every act is a line in
+`<state>/mail/preference-acts.jsonl`. Each entry: the kind, its TYPED fields, the plain-language
+`text`, `created_at`, and `source` — the chat (session) and turn the owner's message came from, or
+`seed`. **Per-file containment**: an unreadable file costs that preference, is NOT applied, and is
+counted in the report's footer and the listing. A file is re-validated on read, so a hand edit or
+corrupt bytes cannot widen a hide (an empty subject phrase would match every mail). `TestTheStore`.
+
+**Five kinds, closed typed fields, exactly one target each** (`MATCHERS`, `_shape_problem`):
+
+| kind | about | the report |
+|---|---|---|
+| `hide` | `sender` · `domain` (and its subdomains) · `recipient` (To or Cc — the kids' forwards) · `mail_kind` (a phrase in the Reader's `kind`) · `subject` (a phrase, 3+ characters, word-bounded, folded) | left out of every section; their-turn follow-ups are matched by sender/domain against the person he wrote to |
+| `show_first` | `sender` · `domain` · `mail_kind` | first in its section, marked `[first: your preference …]` |
+| `not_a_follow_up` | `counterparty` (standing) · `conversation` (a report `ref`) | left out of Follow-ups; a conversation only **until a new message arrives in it** after the preference was saved — the Catherine case, which revives if she writes again |
+| `remind` | `case` or `counterparty`, with `due` (a date, shown for `DUE_SHOWN_DAYS` 7 days from it), `every` (a weekday) or `no_answer_days` (counterparty only: his last message to them unanswered N days), and his `note` | `Reminders due` at the top of Follow-ups; a case reminder ends when the case closes |
+| `correction` | one `mail` (a report `ref`) and `label` `needed_action` / `junk` | **not applied**: counted in the footer, and the review CSV's `owner_correction` column |
+
+**Delivery of reminders is the report only.** Nothing is pushed for a reminder; the daily report's
+own done-push is the only notification, and it carries counts. The report also delivers the
+reminders on his open cases (`cases` action=remind), which before this slice were stored and shown
+by `show` only; the case card's sentence now says so.
+
+**Corrections are ground truth, not teaching.** A correction is the strongest truth tier there is —
+his own label on one mail — and it reaches the review file (`mailexport` column
+`owner_correction`, read from the live state tree; a backtest run directory holds none, so its file
+says `none`). Nothing adopts them into the Reader: a later charter round may, measured, the way his
+v2/v3 rulings were adopted. The backtest's `report.json` does not read them.
+
+**Refs.** Every report line ends `— ref <12 hex>`, the mail's digest prefix (the their-turn line:
+HIS message's). The tool resolves a ref to exactly one index entry (`_resolve_mail`) or refuses; a
+card that names a mail quotes its subject, sender and date through the case store's sanitiser.
+
+### The tool — the case verbs' law, reused
+
+`inbox_preferences` `list` is free and outside content (`LOOK_NOTE` above the untrusted banner;
+taints as e-mail, never folded into owner hosts — a phrase in one may have come off a mail). `add`,
+`edit`, `remove`:
+
+- **Refused, no card, unless a person sent the task** — `Agent.task_from_owner`, the same flag and
+  the same server plumbing as the case verbs (`PREFS_CHANGE_NOT_FROM_OWNER`, decision `blocked`).
+- **The card's sentence is code's**, composed by `mailprefs.sentence` from the typed fields alone:
+  *From now on: hide mail from familysafety@microsoft.com in your inbox reports (mail flagged as a
+  risk is shown anyway). Save?* That sentence, minus the frame, IS the stored `text`; the model never
+  writes it. The card's arguments are the typed fields only — every other argument is dropped
+  (`FIELDS`, then only the kind's own). Edit: *Change your preference “…” to: from now on, …*;
+  remove: *Delete your preference: “…”*. No cardless licence covers it in any origin (pinned).
+- **SAVED is the only confirmation.** The tool's answer after a save starts `SAVED as pref-…`
+  (a delete: `SAVED: deleted`), under `DONE_NOTE`; every refusal, denial, held card, error or
+  failed save starts `NOT SAVED` and is returned as a gate outcome, never under `DONE_NOTE`
+  (pinned with a held lock through the agent). An edit or delete whose target changed after the
+  card was composed is refused at save time.
+- **The false-promise rule** (`mailprefs.MEMORY_RULE`): appended to the server's
+  `REPORT_NOTE_HEADING`, aish's own voice on the KEPT report note, so it is in front of the model in
+  every turn of a report chat: *never tell the owner you will remember, ignore, hide or stop listing
+  something unless inbox_preferences answered SAVED; otherwise say it is not saved.* The tool's
+  description says the same. This is an instruction to a model, not a gate: nothing in code stops a
+  model from writing the sentence anyway (*Residuals*).
+- **On the report chat's menu** as a `required` tool beside `cases` (`docs/tool-menu.md`).
+
+`TestTheTool`, `TestTheFalsePromise`.
+
+### What the report does with them — and the floor
+
+`mailreport._Preferences` applies them after the sections are built: hide and not-a-follow-up
+exclude, show-first reorders (stable: pinned first, each part in the section's own order),
+reminders are added. **Hidden mail is not recorded as shown**, so deleting a preference brings it
+back while it is still news. `TestEachKindsEffect`.
+
+**The safety floor — the suppression attack.** A hide or not-a-follow-up is the dangerous direction
+in a chat whose words a mail may have steered (showing is free). So before a preference hides
+anything, `mailprefs.floor` asks the record: the Reader judged it suspicious, its sender does not
+match its case, a payment account differs from its case's history (the three `caution_marks`), or
+it **failed authentication from a sender whose mail passed it before** (by aish's clock, across the
+verdict store, compared on aish's own clock — when it first read each mail — so a backdated Date
+cannot put a failing mail before the sender's first pass). It reads EVERY model's record of the
+mail, not only the newest the report shows; the records of a copy delivered to his other inbox
+(dropped from the list by `_one_copy`); and, for a *your turn* row, every answer the counterparty
+sent after his last message, not only the newest asking one. Any of those and the item stays, marked *shown despite your preference pref-… because
+…* in code's words. Structural red flags and `sender_not_admitted` are not on the floor; a mail with
+no reading is in no section anyway. `TestTheSafetyFloor`.
+
+**The footer, always.** *Using N of your preferences (hide H, show first S, …) — hid M item(s); K
+shown despite a preference (marked on the item).* — or *Using 0 of your preferences — none saved.*
+Then one line naming each preference that hid something, its count and up to three senders; then the
+corrections count; then any unreadable preference files. **The report's size cap
+(`REPORT_MAX_CHARS`) cuts the sections, never the footer**: the footer is composed first, with its
+own `FOOTER_MAX_CHARS` (5,000), and the sections get what room is left. `TestTheFooter`.
+
+### The seed — `aish-mailreport --seed-preferences`
+
+The owner's four from the epic comment (2026-10-29): three written as typed entries with source
+`seed`, two printed as not preferences. A re-run writes nothing already saved, and never
+re-creates one he deleted on a card (it reads `preference-acts.jsonl`). What the comment's words
+fixed, and what they did not:
+
+- (a) **familysafety@microsoft.com** → `hide sender`. The comment also says *delete*: nothing deletes
+  mail (the cleanup lane is not built).
+- (b) **Super Duo** → `hide subject "super duo"`. The comment names no address, so it is a SUBJECT
+  phrase: mail carrying it only in the sender's display name is not hidden.
+- (c) **adam@wenda.eu** → `hide recipient`. **kuba@wenda…** is truncated in the comment and is NOT
+  seeded — no domain is guessed; the command prints how to add it.
+- (d) **the InPost and DPD sport-food parcels** are a case close, not a preference: nothing is
+  written; the command prints the `cases` hint.
+
+`TestTheSeed`, `TestTheSurface` (`/mail preferences` in the terminal; `list` in the chat).
 
 ## The live backfill (2026-10-31) — `aish-mailwatch --backfill DAYS`
 
@@ -1221,9 +1342,22 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **Case verbs wait for the watcher.** A verb applied while a watcher pass or the backfill holds the
   store's lock waits up to 20 s and is then refused with nothing changed; during a long backfill no
   case can be changed.
-- **Reminders and notes are stored, not delivered.** `remind` writes a due date onto the case and
-  `show` prints it; nothing reads it to tell him anything yet (the follow-up queue is the
-  preferences slice's).
+- **Reminders reach him only inside the daily report.** A case reminder and a `remind` preference
+  are listed in Follow-ups when due; no push, no other surface. A report that is not delivered
+  delivers no reminder; a dated one stays listed for 7 days to cover a missed morning.
+- **The false-promise rule is an instruction, not a gate.** `MEMORY_RULE` rides the report note's
+  heading and the tool's description; nothing in code checks the model's answer for a promise to
+  remember. A report chat delivered before this slice carries the old heading and not the rule.
+- **A hide keys on strings a sender writes.** Sender address, display-free subject phrase, kind
+  word (the Reader's, steered by the mail): a lookalike can match a hide he meant for someone else,
+  and a sender can change subject to escape one. The floor covers the four recorded risk facts
+  only; a hidden mail with none of them is hidden. Every hide is counted and named in the footer.
+- **Super Duo is seeded as a subject phrase** (no address in the comment); mail naming it only in
+  the From name is not hidden. **kuba@wenda…** is not seeded at all.
+- **Corrections are recorded, not adopted**, and the backtest's report does not read them.
+- **"Until a new message arrives" orders by the report's clock**, which for a Tuta mail is the
+  sender-written Date (bounded by when aish first read it, when it has a reading). A reply
+  backdated to before the preference does not revive a not-a-follow-up conversation.
 - **A moved mail keeps its keys on the case it came from**, so a later mail carrying the same key
   still joins the old case; and a merge has no undo verb (the absorbed file is kept, so it is
   recoverable by hand).
@@ -1377,6 +1511,16 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    command after an interruption or a quota stop — it fetches only what the index lacks. Then
    `aish-mailreport --dry-run --account pawel@wenda.eu` shows whether Follow-ups now has sent mail
    to work from.
+3g. **Inbox preferences** (2026-10-31). Needs aish-web restarted on this build (the tool, the
+   report note's new heading). Seed his preferences once, then read them back and preview:
+   ```sh
+   aish-mailreport --seed-preferences
+   aish   # then: /mail preferences
+   aish-mailreport --dry-run --account pawel@wenda.eu
+   ```
+   The seed prints what it saved, that kuba@wenda… was NOT seeded (truncated address), and the
+   `cases` hint for (d). The dry run's footer must read *Using 3 of your preferences (hide 3)*. A
+   report chat delivered before the restart keeps the old heading, without the memory rule.
 4. **The mined replay scenario** — a real courier/store pair from his inbox — goes in the private
    tree (`~/.config/aish/evals/<name>/`, `docs/replay.md`), never here: find the pair in the
    backtest run's verdict store (`case_choice` on the courier mail), and replay it end to end
