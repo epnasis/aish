@@ -772,6 +772,26 @@ class MailIndex:
         self._admit(header)
         return True
 
+    def record_gateway_auth(self, digest: str, value: str, observed: str) -> bool:
+        """Record a gateway-header observation onto a message ALREADY held, in
+        place: same digest, same file, every other field untouched. Only a
+        message with no observation yet takes one — an observation is never
+        overwritten. False when there is no such message or it already has
+        one. The one writer is the Tuta recheck (`mailwatch.recheck_tuta_auth`),
+        for mail indexed before aish read the bridge's header."""
+        held = self.by_digest.get(digest)
+        if held is None or held.gateway_auth_observed or not observed:
+            return False
+        header = _replace(held, gateway_auth=value, gateway_auth_observed=observed)
+        if self.directory is not None:
+            atomic_write.publish(
+                self._path(digest),
+                json.dumps(header.as_json(), ensure_ascii=False, sort_keys=True),
+            )
+        self.by_digest[digest] = header
+        self._cache.clear()
+        return True
+
     def _admit(self, header: Header, count: bool = True) -> None:
         self.by_digest[header.digest] = header
         self._cache.clear()

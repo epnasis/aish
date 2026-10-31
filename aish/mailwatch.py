@@ -56,6 +56,7 @@ from . import (
     mailgate,
     mailindex,
     mailreader,
+    mailtuta,
     mailverdicts,
     paths,
     roles,
@@ -658,18 +659,241 @@ def backfill(
     return result
 
 
-def flush_backfill(state_dir: os.PathLike | str, result: Backfill, now: float) -> None:
-    """The run and its vocabulary tallies, in the dated run log."""
+@dataclass
+class Recheck:
+    """What one `--recheck-tuta-auth` run did — counted and printed, never health."""
+
+    needing: int = 0  # Tuta index mail with no bridge-header observation, at the start
+    listing_ok: bool = True
+    failure: str = ""
+    listed: int = 0
+    fetched: int = 0
+    rechecked: int = 0  # matched by digest; observation recorded onto the stored entry
+    now_authenticated: int = 0
+    still_not: int = 0
+    still_not_why: dict[str, int] = field(default_factory=dict)
+    failed: int = 0  # fetch failed; the entry is untouched and a re-run tries it again
+    failed_kinds: dict[str, int] = field(default_factory=dict)
+    unmatched: int = 0  # no fetched message had its digest; the entry is untouched
+    deferred: int = 0  # matched, but a fetch failed this run: nothing applied, nothing recorded
+    fetched_not_matching: int = 0  # envelope matched, the fetched digest named no entry
+    unparseable: int = 0
+    gained_facts: int = 0  # (mail, case) pairs given the authenticated sighting it lacked
+    observed: int = 0  # mail folded through `CaseStore.observe` by this run
+    admitted: int = 0
+    cases_before: int = 0
+    cases_after: int = 0
+    depth: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def as_json(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
+def recheck_tuta_auth(
+    *,
+    mailbox: Any,
+    state_dir: os.PathLike | str,
+    owner_addresses: frozenset[str],
+    limit: int = BACKFILL_LIMIT,
+    now: Callable[[], float] = time.time,
+) -> Recheck:
+    """The one-time recheck of Tuta mail indexed before aish read the bridge's
+    header: re-fetch each such mail through the fenced read path (never
+    `--seen`), record the header observation onto the EXISTING entry, and let
+    the deterministic consequences of the now-known authentication follow, in
+    arrival order. **No Reader**: no model and no chat seam are taken, and no
+    verdict is recorded or recomputed.
+
+    **Identity is the digest, unchanged.** The bridge's line is in the header
+    block, and none of a Tuta digest's inputs (`mailindex.digest_for`) is, so
+    the re-fetched message re-parses to the digest it was indexed under. That
+    equality is the match — the envelope's Message-ID, sender and subject only
+    choose what to fetch — and an entry no fetched message re-parses to is
+    counted `unmatched` and left untouched. Nothing is ever added to the index.
+
+    **The consequences, as of each mail** (index order, oldest first):
+    - a newly authenticated INBOUND mail on no case is observed as the
+      watcher would have (`CaseStore.observe`): it may open a case or join one;
+    - on every case it is on, it gains the facts observation records only for
+      authenticated mail, at its own position (`record_authenticated`);
+    - a LATER owner mail on a case a newly authenticated mail is on re-asks
+      admission as of itself (`admit_toward`) — his reply toward that sender
+      now admits it;
+    - a LATER mail on no case that carries a key of an earlier newly
+      authenticated mail now on a case is observed, and joins it.
+    Grades and the report read the stores and the header at read time, so
+    nothing else is written. Header observations are recorded LAST and the
+    later steps are derived from where each target mail IS, so a run
+    interrupted before then is redone whole by the next. A failed fetch
+    defers the whole run (`deferred`). A mail already rechecked is never a
+    target again; once every target is, a second run lists nothing."""
+    result = Recheck()
+    index = mailindex.MailIndex(state_dir)
+    targets = {d: h for d, h in index.by_digest.items()
+               if h.mailbox == mailtuta.NAME and not h.gateway_auth_observed}
+    result.needing = len(targets)
+    store = mailcases.CaseStore(state_dir)
+    result.cases_before = result.cases_after = len(store.cases)
+    if not targets:
+        return result
+    # Back to the oldest target, a day of slack for the envelope's own date.
+    floor = min(h.at for h in targets.values())
+    days = max(1, int((now() - floor) // 86400) + 2)
+    listing = mailbox.listing(days, limit)
+    result.depth = dict(getattr(mailbox, "depth", {}) or {})
+    if listing is None:
+        result.listing_ok = False
+        failure = getattr(mailbox, "last_failure", None)
+        result.failure = failure.describe() if isinstance(failure, Failure) else "listing failed"
+        result.unmatched = len(targets)
+        return result
+    wanted: dict[tuple[str, str, str], list[str]] = {}
+    for digest, header in targets.items():
+        wanted.setdefault(mailtuta.identity_of(header), []).append(digest)
+    found: dict[str, mailindex.Parsed] = {}
+    failed: set[str] = set()
+    refs = [(r, "in") for r in listing.inbox] + [(r, "out") for r in listing.sent]
+    result.listed = len(refs)
+    for ref, direction in refs:
+        candidates = [d for d in wanted.get(mailbox.envelope_identity(ref), ())
+                      if d not in found and targets[d].direction == direction]
+        if not candidates:
+            continue
+        parsed, fetch_failure = mailbox.fetch(ref, owner_addresses)
+        if fetch_failure is not None:
+            result.failed_kinds[fetch_failure.kind] = (
+                result.failed_kinds.get(fetch_failure.kind, 0) + 1)
+            failed.update(candidates)
+            continue
+        result.fetched += 1
+        if parsed is None:
+            result.unparseable += 1
+            continue
+        digest = parsed.header.digest
+        if digest not in targets or digest in found or targets[digest].direction != direction:
+            result.fetched_not_matching += 1
+            continue
+        found[digest] = parsed
+    result.failed = len(failed - set(found))
+    result.unmatched = len(set(targets) - set(found) - failed)
+    if result.failed:
+        # Consequences follow in ARRIVAL order across runs too: applying a
+        # later mail's now while an earlier one's fetch failed would let the
+        # earlier one, next run, meet cases the later one opened. Nothing is
+        # applied and nothing recorded; the next run redoes the whole set.
+        result.deferred = len(found)
+        return result
+    _follow_authentication(index, store, found, result, state_dir)
+    for digest, parsed in found.items():
+        if index.record_gateway_auth(digest, parsed.header.gateway_auth,
+                                     parsed.header.gateway_auth_observed):
+            result.rechecked += 1
+    result.cases_after = len(store.cases)
+    return result
+
+
+def _follow_authentication(
+    index: mailindex.MailIndex,
+    store: mailcases.CaseStore,
+    found: dict[str, mailindex.Parsed],
+    result: Recheck,
+    state_dir: os.PathLike | str,
+) -> None:
+    """`recheck_tuta_auth`'s consequences, one mail at a time in position
+    order, every fact this run writes stamped with the mail's own position.
+    `CaseStore.observe` matches keys against the whole store, so an older mail
+    can join a case a later mail opened (the backfill's stated limit); every
+    other step here asks only about positions before the mail."""
+    authenticated: dict[str, mailindex.Header] = {}
+    for digest, parsed in found.items():
+        held = index.get(digest)
+        assert held is not None  # found keys are index digests
+        header = dataclasses.replace(
+            held, gateway_auth=parsed.header.gateway_auth,
+            gateway_auth_observed=parsed.header.gateway_auth_observed)
+        auth = mailgate.authenticate_header(header)
+        if auth.authenticated:
+            result.now_authenticated += 1
+            if header.direction == "in":
+                authenticated[digest] = header
+        else:
+            result.still_not += 1
+            result.still_not_why[auth.why] = result.still_not_why.get(auth.why, 0) + 1
+    if not authenticated:
+        return
+    earliest = min(h.position for h in authenticated.values())
+    moved = {str(a.get("mail")) for a in mailcases.read_acts(state_dir)
+             if a.get("verb") == mailcases.MOVE}
+    changed: set[str] = set()  # cases a newly authenticated mail is on
+    run_keys: set[str] = set()  # keys of newly authenticated mail on a case, earlier
+
+    def cases_on(position: tuple[float, str]) -> list[mailcases.Case]:
+        return [c for c in store.cases.values() if position in c.mails]
+
+    for header in sorted(index.by_digest.values(), key=lambda h: h.position):
+        if header.position < earliest:
+            continue
+        on = cases_on(header.position)
+        if header.digest in authenticated:
+            header = authenticated[header.digest]
+            body = found[header.digest].body
+            if not on and header.digest not in moved:
+                observation = store.observe(header, body, True, index)
+                result.observed += 1
+                result.admitted += len(observation.admitted)
+                changed.update(observation.cases)
+                on = cases_on(header.position)
+            # Derived from where the mail IS, never from what this run changed:
+            # a target stays a target until its header is recorded (last), so a
+            # run interrupted after its case writes rebuilds both on the redo.
+            for case in on:
+                if store.record_authenticated(case, header, body):
+                    result.gained_facts += 1
+                changed.add(case.id)
+            if on:
+                # Later mail on no case carrying one of its keys would have
+                # joined, had this mail arrived authenticated.
+                run_keys.update(mailcases.extract_keys(f"{header.subject}\n{body}"))
+            continue
+        if on:
+            if header.direction == "out":
+                for case in on:
+                    if case.id in changed:
+                        result.admitted += len(store.admit_toward(case, header, index))
+            continue
+        if header.digest in moved or not run_keys:
+            continue
+        body = index.body(header.digest) or ""
+        keys = mailcases.extract_keys(f"{header.subject}\n{body}")
+        # Every `run_keys` entry was put there by a mail EARLIER in this
+        # position-ordered loop, so a key in it is a key on a case before this mail.
+        if any(k in run_keys for k in keys):
+            auth = mailgate.authenticate_header(header)
+            observation = store.observe(header, body, auth.authenticated, index)
+            result.observed += 1
+            result.admitted += len(observation.admitted)
+            changed.update(observation.cases)
+
+
+def flush_run(
+    state_dir: os.PathLike | str, kind: str, record: dict[str, Any], now: float
+) -> None:
+    """One run and its vocabulary tallies, in the dated run log."""
     lists = vocab.drain()
     day = datetime.datetime.fromtimestamp(now).strftime("%Y%m%d")
     path = mailindex.mail_dir(state_dir) / f"runs-{day}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [{"at": now, "step": {"kind": "mail_backfill", **result.as_json()}}]
+    lines = [{"at": now, "step": {"kind": kind, **record}}]
     if lists:
         lines.append({"at": now, "step": {"kind": "vocab", "lists": lists}})
     with path.open("a") as handle:
         for line in lines:
             handle.write(json.dumps(line, sort_keys=True) + "\n")
+
+
+def flush_backfill(state_dir: os.PathLike | str, result: Backfill, now: float) -> None:
+    """The run and its vocabulary tallies, in the dated run log."""
+    flush_run(state_dir, "mail_backfill", result.as_json(), now)
 
 
 @contextlib.contextmanager
@@ -701,7 +925,7 @@ def tuta_env() -> tuple[dict[str, str], str]:
     """The environment for himalaya: this one plus the bridge secret from
     aish's own store when it is not already set. The bridge's own address is
     returned too — it is his, so it joins the owner addresses."""
-    from . import mailtuta, secrets
+    from . import secrets
 
     env = dict(os.environ)
     if not env.get(mailtuta.SECRET_ENV):
@@ -720,6 +944,24 @@ def tuta_env() -> tuple[dict[str, str], str]:
     return env, address
 
 
+def _main_recheck(state_dir: Path, owners: set[str], limit: int) -> int:
+    """`--recheck-tuta-auth`: Tuta only (no Gmail account is needed), no
+    charter, no model, under the one pass lock."""
+    env, address = tuta_env()
+    if address:
+        owners = owners | {address}
+    with pass_lock(state_dir) as held:
+        if not held:
+            log("another pass holds the lock — the recheck does nothing")
+            return 3
+        started = time.time()
+        result = recheck_tuta_auth(mailbox=mailtuta.TutaMailbox(env), state_dir=state_dir,
+                                   owner_addresses=frozenset(owners), limit=limit)
+        flush_run(state_dir, "mail_tuta_recheck", result.as_json(), started)
+    print(json.dumps(result.as_json(), sort_keys=True))
+    return 0 if result.listing_ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="the inbox assistant, shadow mode (#142 W5)")
     parser.add_argument("--once", action="store_true", help="run one shadow pass")
@@ -728,6 +970,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backfill", type=int, metavar="DAYS", default=0,
                         help="one-time deterministic pass over INBOX and Sent for DAYS: "
                         "index and case observation only, no Reader, no verdict")
+    parser.add_argument("--recheck-tuta-auth", action="store_true",
+                        help="one-time: re-fetch Tuta mail indexed before aish read the "
+                        "bridge's authentication header, record what the header says onto "
+                        "the existing entry, and follow it through the case store; no "
+                        "Reader, no verdict, never --seen")
     parser.add_argument("--account", default=os.environ.get("AISH_MAIL_ACCOUNT", ""),
                         help="the Gmail account (needs ~/.config/gws-accounts/<email>/)")
     parser.add_argument("--owner", action="append", default=[],
@@ -747,6 +994,9 @@ def main(argv: list[str] | None = None) -> int:
         print(mailverdicts.render_counters(
             mailverdicts.scan_records(mailverdicts.iter_store(state_dir))))
         return 0
+    if args.recheck_tuta_auth:
+        return _main_recheck(state_dir, {a.lower() for a in args.owner},
+                             args.max or BACKFILL_LIMIT)
     if not args.once and args.backfill <= 0:
         parser.print_help()
         return 2
@@ -761,8 +1011,6 @@ def main(argv: list[str] | None = None) -> int:
         owners.add(args.account.lower())
         mailboxes.append(GmailSource(GwsMailbox(env)))
     if "tuta" in wanted:
-        from . import mailtuta
-
         env, address = tuta_env()
         if address:
             owners.add(address)
