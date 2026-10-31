@@ -1024,6 +1024,46 @@ meta, unread, the kept note outside the task string, no model call, live == cold
 `TestTheChatFindings` (each delivery-review finding pinned);
 `tests/test_mailreport_service.py` (the plist).
 
+## The live backfill (2026-10-31) — `aish-mailwatch --backfill DAYS`
+
+**Why.** On 2026-10-28 the live index held 0 of his sent messages: the watcher lists a 2-day
+window (`DEFAULT_DAYS`) and only began on 2026-10-25, so the report's Follow-ups had nothing to
+work from (*For the driver* 3e). The backfill reaches back once, deterministically.
+
+**What it does** (`mailwatch.backfill`): every source's INBOX and Sent for DAYS — the same
+listing and fetch as a pass (`_collect`), up to `BACKFILL_LIMIT` (5000) per listing unless
+`--max` says otherwise — each fetched mail added to the index as soon as it is fetched; then,
+from a fresh load of the index, every index mail inside the window folded through the case store
+in position order (`CaseStore.observe`). That is all: the ledger's grades and the report's
+Follow-ups are computed from those two stores at read time, so nothing else is written.
+
+- **No Reader, structurally.** `backfill` takes no model spec and no chat seam, `--backfill`
+  loads no charter, and no verdict is recorded — so no backfilled mail is ever news to the daily
+  report, which reads verdicts. Pinned with `mailreader.read` replaced by a function that fails
+  the test.
+- **The watcher's unfetched ledger is neither read nor written** (`_collect(ledger=None)`): a mail
+  the ledger names is ASSESSED when the watcher next fetches it, so a backfill failure recorded
+  there would buy a Reader call on old mail.
+- **Paced by the adapters**: Gmail through `GwsMailbox._call`'s token bucket and retry policy (a
+  quota exhaustion stops that source asking for the rest of the run); Tuta one bridge connection
+  per call, no `--seen`.
+- **Idempotent and resumable.** A held mail is never fetched again (Gmail by provider id, Tuta by
+  Message-ID AND sender AND subject); observation is idempotent per mail and covers every index
+  mail in the window, so a run interrupted after fetching is finished by the next one.
+- **One pass at a time**: it takes `pass_lock`, so a launchd watcher pass during it skips (exit 3).
+- **Recorded**: a `mail_backfill` line (and the vocabulary tallies) in `runs-YYYYMMDD.jsonl`, and
+  the summary printed as JSON — `indexed`, `observed`, `cases_before`/`cases_after`, `admitted`, per
+  source the listing, held, fetched, failures. It does not write `watch_health.json`: it is not a
+  watcher pass.
+- **Stated limits.** Late observation is as-of-correct (every case query is positional) but not
+  identical to having watched live: a case opened by a later mail that was observed first keeps
+  that later creation position, and an older mail joins it as a member. Tuta mail already in the
+  index from before 2026-10-31 is held, so it is not re-fetched and gains no bridge observation
+  (§Both inboxes). Gmail's listing is `in:inbox` / `in:sent`: mail he archived out of the inbox
+  is not listed.
+
+`tests/test_mailwatch_backfill.py` — `TestTheBackfill`, `TestTheCommand`.
+
 ## The backtest — `aish-mailbacktest`
 
 **Frozen clocks.** Index and case store are built in arrival order inside a SCRATCH run
@@ -1226,6 +1266,15 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    (130 messages since 2026-10-23, Gmail 28, Tuta 102), so Follow-ups currently says it cannot be
    computed. Why the watcher indexes no sent mail is not established here — the next thing to
    look at before Follow-ups can mean anything.
+3f. **The live backfill** (2026-10-31), once, with the bridge running and aish-web's env:
+   ```sh
+   aish-mailwatch --backfill 60 --account pawel@wenda.eu --owner pawel@wenda.email \
+     --source gmail --source tuta
+   ```
+   No model, no Reader call; the printed JSON says what was indexed and observed. Re-run the same
+   command after an interruption or a quota stop — it fetches only what the index lacks. Then
+   `aish-mailreport --dry-run --account pawel@wenda.eu` shows whether Follow-ups now has sent mail
+   to work from.
 4. **The mined replay scenario** — a real courier/store pair from his inbox — goes in the private
    tree (`~/.config/aish/evals/<name>/`, `docs/replay.md`), never here: find the pair in the
    backtest run's verdict store (`case_choice` on the courier mail), and replay it end to end

@@ -437,14 +437,21 @@ def _collect(
     *,
     index: mailindex.MailIndex,
     by_pid: dict[str, str],
-    ledger: UnfetchedLedger,
+    ledger: UnfetchedLedger | None,
     owners: frozenset[str],
     days: int,
     limit: int,
     now: float,
+    keep: Callable[[mailindex.Parsed], None] | None = None,
 ) -> tuple[list[mailindex.Parsed], list[str]]:
     """List one source, fetch what the index does not already hold, and say
-    which digests are INBOX mail. Returns (parsed, inbox digests)."""
+    which digests are INBOX mail. Returns (parsed, inbox digests).
+
+    `ledger` None (the backfill) neither tops up from nor records into the
+    watcher's unfetched ledger: a mail the ledger names is assessed when the
+    watcher next fetches it, and the backfill must buy no Reader call.
+    `keep` sees each parsed mail as soon as it is fetched (the backfill adds
+    it to the index there, so an interrupted run keeps what it fetched)."""
     parsed: list[mailindex.Parsed] = []
     inbox_digests: list[str] = []
     listing = source.listing(days, limit)
@@ -459,7 +466,7 @@ def _collect(
     for ref in listing.inbox:
         roles_by_ref[ref] = "inbox"
     sp.listed = len(roles_by_ref)
-    if source.stable_ids:
+    if source.stable_ids and ledger is not None:
         # The top-up: listed earlier, never fetched. Gmail only — on Tuta a
         # remembered UID names a different message after a bridge restart.
         for ref, role in ledger.pending(source.name)[:limit]:
@@ -472,16 +479,16 @@ def _collect(
             sp.held += 1
             if role == "inbox":
                 inbox_digests.append(held)
-            if source.stable_ids:
+            if source.stable_ids and ledger is not None:
                 ledger.done(source.name, ref)
             continue
         item, failure = source.fetch(ref, owners)
         if failure is not None:
             sp.fetch_failed[failure.kind] = sp.fetch_failed.get(failure.kind, 0) + 1
-            if source.stable_ids:
+            if source.stable_ids and ledger is not None:
                 ledger.missed(source.name, ref, role, failure, now)
             continue
-        if source.stable_ids:
+        if source.stable_ids and ledger is not None:
             ledger.done(source.name, ref)
         sp.fetched += 1
         if item is None:
@@ -490,10 +497,13 @@ def _collect(
         if item.header.at_source != "provider":
             sp.at_from_sender += 1
         parsed.append(item)
+        if keep is not None:
+            keep(item)
         if role == "inbox":
             inbox_digests.append(item.header.digest)
-    sp.unfetched = ledger.count(source.name)
-    sp.abandoned = ledger.abandoned.get(source.name, 0)
+    if ledger is not None:
+        sp.unfetched = ledger.count(source.name)
+        sp.abandoned = ledger.abandoned.get(source.name, 0)
     sp.counts = dict(getattr(source, "counts", {}) or {})
     return parsed, inbox_digests
 
@@ -561,6 +571,101 @@ def run_once(
     return result
 
 
+# ---------------------------------------------------------------- the backfill
+
+# Per folder and listing: the backfill reaches further than a pass's `--max`.
+BACKFILL_LIMIT = 5000
+
+
+@dataclass
+class Backfill:
+    """What one `--backfill` run did — counted and printed, never health."""
+
+    days: int = 0
+    listing_ok: bool = True
+    sources: dict[str, SourcePass] = field(default_factory=dict)
+    indexed: int = 0  # new to the index this run
+    observed: int = 0  # index mail in the window folded through the case store
+    cases_before: int = 0
+    cases_after: int = 0
+    admitted: int = 0
+
+    def as_json(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
+def backfill(
+    *,
+    mailboxes: list[Any],
+    state_dir: os.PathLike | str,
+    owner_addresses: frozenset[str],
+    days: int,
+    limit: int = BACKFILL_LIMIT,
+    now: Callable[[], float] = time.time,
+) -> Backfill:
+    """A one-time deterministic pass over INBOX and Sent of every source for
+    `days`: the thread index, case observation, and through them the facts
+    the ledger and the report's Follow-ups read. **No Reader**: this takes no
+    model and no chat seam, so it cannot call one, and it records no verdict.
+
+    Paced by each adapter (Gmail's token bucket and retry policy live in
+    `GwsMailbox._call`; one bridge connection per Tuta call). Idempotent and
+    resumable: a mail the index holds is never fetched again (Gmail by
+    provider id, Tuta by Message-ID AND sender AND subject), each fetched mail
+    is in the index as soon as it is fetched, and the case observation then
+    runs over EVERY index mail in the window in position order — idempotent
+    per mail (`CaseStore.observe`), so a run interrupted before it is simply
+    finished by the next. A Gmail quota exhaustion stops that source asking
+    (the adapter's flag); a re-run fetches the rest. The watcher's unfetched
+    ledger is neither read nor written."""
+    sources = [as_source(m) for m in mailboxes]
+    result = Backfill(days=days)
+    index = mailindex.MailIndex(state_dir)
+    by_pid = {h.provider_id: d for d, h in index.by_digest.items()
+              if h.mailbox == "gmail" and h.provider_id}
+
+    def keep(item: mailindex.Parsed) -> None:
+        if index.add(item.header, item.body):
+            result.indexed += 1
+
+    for source in sources:
+        sp = result.sources.setdefault(source.name, SourcePass())
+        _collect(source, sp, index=index, by_pid=by_pid, ledger=None, owners=owner_addresses,
+                 days=days, limit=limit, now=now(), keep=keep)
+        sp.note = source.note()
+        result.listing_ok = result.listing_ok and sp.listing_ok
+    # Observed from a fresh load, so the index's links are the ones every
+    # later reader rebuilds (`MailIndex._load`), oldest first.
+    index = mailindex.MailIndex(state_dir)
+    store = mailcases.CaseStore(state_dir)
+    result.cases_before = len(store.cases)
+    floor = now() - days * 86400
+    for header in sorted(index.by_digest.values(), key=lambda h: h.position):
+        if header.at < floor:
+            continue
+        body = index.body(header.digest) or ""
+        auth = mailgate.authenticate_header(header)
+        observation = store.observe(header, body, auth.authenticated, index)
+        result.observed += 1
+        result.admitted += len(observation.admitted)
+    result.cases_after = len(store.cases)
+    return result
+
+
+def flush_backfill(state_dir: os.PathLike | str, result: Backfill, now: float) -> None:
+    """The run and its vocabulary tallies, in the dated run log."""
+    lists = vocab.drain()
+    day = datetime.datetime.fromtimestamp(now).strftime("%Y%m%d")
+    path = mailindex.mail_dir(state_dir) / f"runs-{day}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [{"at": now, "step": {"kind": "mail_backfill", **result.as_json()}}]
+    if lists:
+        lines.append({"at": now, "step": {"kind": "vocab", "lists": lists}})
+    with path.open("a") as handle:
+        for line in lines:
+            handle.write(json.dumps(line, sort_keys=True) + "\n")
+
+
 @contextlib.contextmanager
 def pass_lock(state_dir: os.PathLike | str) -> Iterator[bool]:
     """Yield True while this process holds the one pass lock, False when
@@ -614,6 +719,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true", help="run one shadow pass")
     parser.add_argument("--counters", action="store_true",
                         help="print what the verdict store holds; no mail, no model")
+    parser.add_argument("--backfill", type=int, metavar="DAYS", default=0,
+                        help="one-time deterministic pass over INBOX and Sent for DAYS: "
+                        "index and case observation only, no Reader, no verdict")
     parser.add_argument("--account", default=os.environ.get("AISH_MAIL_ACCOUNT", ""),
                         help="the Gmail account (needs ~/.config/gws-accounts/<email>/)")
     parser.add_argument("--owner", action="append", default=[],
@@ -624,14 +732,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="an inbox to read (repeatable; default: gmail)")
     parser.add_argument("--model", default=os.environ.get("AISH_MAIL_READER_MODEL", ""))
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
-    parser.add_argument("--max", type=int, default=DEFAULT_MAX)
+    parser.add_argument("--max", type=int, default=None,
+                        help=f"per listing (default {DEFAULT_MAX}; {BACKFILL_LIMIT} with "
+                        "--backfill)")
     args = parser.parse_args(argv)
     state_dir = paths.state_home()
     if args.counters:
         print(mailverdicts.render_counters(
             mailverdicts.scan_records(mailverdicts.iter_store(state_dir))))
         return 0
-    if not args.once:
+    if not args.once and args.backfill <= 0:
         parser.print_help()
         return 2
     wanted = list(dict.fromkeys(args.source or ["gmail"]))
@@ -651,6 +761,19 @@ def main(argv: list[str] | None = None) -> int:
         if address:
             owners.add(address)
         mailboxes.append(mailtuta.TutaMailbox(env))
+    if args.backfill > 0:
+        # No charter, no model: the backfill has no Reader to load.
+        with pass_lock(state_dir) as held:
+            if not held:
+                log("another pass holds the lock — the backfill does nothing")
+                return 3
+            started = time.time()
+            filled = backfill(mailboxes=mailboxes, state_dir=state_dir,
+                              owner_addresses=frozenset(owners), days=args.backfill,
+                              limit=args.max or BACKFILL_LIMIT)
+            flush_backfill(state_dir, filled, started)
+        print(json.dumps(filled.as_json(), sort_keys=True))
+        return 0 if filled.listing_ok else 1
     try:
         charter = load_reader()
     except roles.CharterError as exc:
@@ -668,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
             model_spec=args.model,
             charter=charter,
             days=args.days,
-            limit=args.max,
+            limit=args.max or DEFAULT_MAX,
         )
         record_health(state_dir, result, started)
         flush_counters(state_dir, result, started)
